@@ -49,13 +49,15 @@ When invoked, determine whether the user wants to:
 
 3. **Read the problem-statement pattern** from `patterns/problem-statement.md` — this is the methodology for stage 1. Also read the template from `templates/problem-statement.template.md` for the artifact skeleton. The template defines artifact structure (which sections, what order). The pattern defines methodology (how to think, what quality looks like). When they diverge, structure comes from the template, quality guidance comes from the pattern.
 
+   After reading the pattern, write a `workshop_stage` entered event to the ledger (stage: `problem-statement`). See **Ledger Timing Events** below.
+
 4. **Work through the problem statement collaboratively.** Don't just fill in a template — use the pattern's guidance to draw out the real problem. Key prompts from the pattern:
    - The self-containment test: could a stranger begin solving this from what's written?
    - Ground it before writing: explore actual code paths if this is a code problem
    - The rewrite exercise: turn vague descriptions into concrete ones
    - For code problems, spin up explore agents or read actual files before writing — grounded statements prevent specs built on wrong assumptions
 
-5. **Write `problem-statement.md`** when the content is solid. Update `meta.json` status to `"problem-statement"`.
+5. **Write `problem-statement.md`** when the content is solid. Update `meta.json` status to `"problem-statement"`. Then write a `workshop_stage` completed event to the ledger (stage: `problem-statement`). See **Ledger Timing Events** below.
 
 6. **Offer to continue to stage 2** or pause here. Workshops are non-terminal — pausing is fine.
 
@@ -82,6 +84,8 @@ For each stage transition:
 
 1. **Read the pattern file** for the target stage from `/workspace\projects\heathdev-patterns\patterns\{pattern-name}.md`. This is the methodology — it tells you what the stage produces, what quality looks like, and what the common failure modes are. Extract the relevant guidance and apply it conversationally — don't dump the raw pattern into the conversation. The pattern is your reference, not content to recite.
 
+   After reading the pattern, write a `workshop_stage` entered event to the ledger (see **Ledger Timing Events** below).
+
 2. **Read the previous stage's artifact** to carry forward context. Each stage has a specific relationship to the one before it:
    - **decisions** reads the problem statement and **scans it for ambiguity flags** ("or", "possibly", "could", "might", "TBD", "should consider"). Each flag is a potential unresolved decision. This scan is the primary input to the decisions artifact.
    - **verification** reads decisions and asks: for each decision (D1, D2...), can an independent observer verify it was implemented correctly? If not, the decision needs refinement — push it back.
@@ -96,9 +100,31 @@ For each stage transition:
    - **decomposition**: Apply the appropriate break pattern from the pattern file (API/Backend, UI, Refactor, Infrastructure). Run the decomposition test: each unit < 2hrs, clear boundaries, independently verifiable, disjoint files.
    - **work-package**: The atomic dispatchable unit. Six fields minimum. Use the template from `templates/_orchestrator.template.md` for the campaign orchestrator.
 
-4. **Write the artifact** when content is solid. Update `meta.json` status.
+4. **Write the artifact** when content is solid. Update `meta.json` status. Then write a `workshop_stage` completed event to the ledger (see **Ledger Timing Events** below).
 
 5. **Offer to continue or pause.**
+
+### Ledger Timing Events
+
+Write ledger events at the beginning and end of each pipeline stage to capture timing data.
+
+**At stage entry** — after reading the pattern file, before beginning the guided conversation:
+
+```json
+{ "type": "workshop_stage", "workshop_slug": "{slug}", "stage": "{stage-name}", "event_type": "entered", "actor": "agent" }
+```
+
+**At stage completion** — after writing the artifact and updating `meta.json`:
+
+```json
+{ "type": "workshop_stage", "workshop_slug": "{slug}", "stage": "{stage-name}", "event_type": "completed", "actor": "agent" }
+```
+
+Valid stage names: `problem-statement`, `decisions`, `verification`, `constraints`, `decomposition`, `work-packages`
+
+**Tool:** Call `mcp__context-ledger__ledger_write` with the payload above. The ledger adds timestamps automatically.
+
+**Non-blocking:** Wrap calls in try/catch or use fire-and-forget semantics. If the call fails, log and continue — timing capture must not block workshop progress.
 
 ### Stage 6: Work Packages + Orchestrator
 
