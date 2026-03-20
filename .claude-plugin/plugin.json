@@ -1,5 +1,6 @@
 {
   "name": "heathdev-workshop",
+  "version": "1.0.0",
   "description": "Workshop pipeline skills — scaffold, execute, validate, score, and close out specification workshops using the heathdev-patterns methodology.",
   "author": {
     "name": "Justin Heath"

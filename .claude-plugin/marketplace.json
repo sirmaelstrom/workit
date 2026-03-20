@@ -1,0 +1,20 @@
+{
+  "name": "heathdev-workshop",
+  "owner": {
+    "name": "Justin Heath",
+    "contact": "github.com/sirmaelstrom"
+  },
+  "description": "Workshop pipeline skills for the heathdev-patterns specification methodology",
+  "plugins": [
+    {
+      "name": "heathdev-workshop",
+      "source": "./",
+      "description": "Workshop pipeline skills — scaffold, execute, validate, score, and close out specification workshops using the heathdev-patterns methodology.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Justin Heath"
+      },
+      "tags": ["workshop", "spec-pipeline", "specification", "dispatch", "patterns"]
+    }
+  ]
+}
