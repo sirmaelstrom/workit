@@ -103,12 +103,17 @@ done
 
 ## Known Limitations
 
-The script uses regex matching, not semantic understanding. This means:
-- **False positives on quoted examples** — if a verification artifact uses "should work" as an example of what NOT to write, the scanner will flag it
-- **"or" in normal English** — not every "or" is an unresolved decision
-- **Context-dependent ambiguity** — "possibly" in an Open Questions section is expected; in a Decision section it's a problem. The scanner doesn't distinguish.
+The script uses regex matching, not semantic understanding. Mitigations are in place but edge cases remain:
+- **Quoted phrases are stripped** — `"should work correctly"` in quotes won't trigger, but unquoted references still will
+- **Code blocks and blockquotes are skipped** — fenced code (```) and `>` quoted lines are excluded from scans
+- **Open Questions sections are skipped** — ambiguity flags like "possibly" and "might" are expected there
+- **Template placeholder detection** — only matches single-identifier placeholders (`{slug}`), not code patterns (`{ provider, model }`)
 
-When presenting results, note false positives and help the user focus on real issues.
+Remaining edge cases:
+- **Context-dependent ambiguity** — "might" in a rationale paragraph explaining alternatives vs. "might" as an unresolved decision. The scanner can't distinguish prose tone.
+- **Inline code references** — `\`should work\`` in backtick-inline-code isn't stripped (only fenced blocks are)
+
+When presenting results, note any false positives you spot and help the user focus on real issues.
 
 ## Relationship to Other Skills
 

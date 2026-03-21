@@ -68,10 +68,40 @@ const VAGUE_VERIFICATION = [
   { pattern: /\blooks good\b/gi, phrase: 'looks good' },
   { pattern: /\bfunctions? properly\b/gi, phrase: 'functions properly' },
   { pattern: /\bworks as expected\b/gi, phrase: 'works as expected' },
-  { pattern: /\bis correct\b/gi, phrase: 'is correct' },
   { pattern: /\bshould be fine\b/gi, phrase: 'should be fine' },
   { pattern: /\bseems right\b/gi, phrase: 'seems right' },
 ];
+
+// ---------------------------------------------------------------------------
+// Line-level skip helpers — reduce false positives from code blocks, quotes, etc.
+// ---------------------------------------------------------------------------
+
+/**
+ * Track whether we're inside a fenced code block across lines.
+ * Returns a function that, given a line, returns true if the line should be skipped.
+ */
+function createLineSkipper() {
+  let inCodeBlock = false;
+  return (line) => {
+    if (/^```/.test(line.trim())) {
+      inCodeBlock = !inCodeBlock;
+      return true;
+    }
+    if (inCodeBlock) return true;
+    // Skip blockquotes (quoted text, examples)
+    if (/^\s*>/.test(line)) return true;
+    return false;
+  };
+}
+
+/**
+ * Strip quoted phrases from a line before scanning for flag words.
+ * Prevents false positives when a line *references* a bad phrase rather than *using* it.
+ * e.g., A spec with "should work correctly" → the quoted portion is stripped before scanning.
+ */
+function stripQuotedPhrases(line) {
+  return line.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
+}
 
 // ---------------------------------------------------------------------------
 // Pipeline stage definitions
@@ -139,9 +169,12 @@ function validateProblemStatement() {
     warn('problem-statement.md', `Only ~${wordCount} words. Problem statements under 100 words rarely pass the self-containment test — could a stranger begin solving this from what's written?`);
   }
 
-  // Check for unfilled template placeholders
-  if (/\{[^}]+\}/.test(content)) {
-    const placeholders = content.match(/\{[^}]+\}/g) || [];
+  // Check for unfilled template placeholders (single identifiers like {slug}, not code like { provider, model })
+  const placeholderRegex = /\{[a-zA-Z][a-zA-Z0-9_-]*\}/g;
+  // Filter out matches inside code blocks or inline code
+  const nonCodeContent = content.replace(/```[\s\S]*?```/g, '').replace(/`[^`]+`/g, '');
+  const placeholders = nonCodeContent.match(placeholderRegex) || [];
+  if (placeholders.length > 0) {
     warn('problem-statement.md', `Found ${placeholders.length} unfilled template placeholder(s): ${placeholders.slice(0, 3).join(', ')}${placeholders.length > 3 ? '...' : ''}. These suggest the template was copied but not fully populated.`);
   }
 
@@ -161,20 +194,23 @@ function validateDecisions() {
   }
 
   // Ambiguity scan — flag words that suggest unresolved decisions
-  // Skip scanning inside "Rejected alternatives" sections (those are supposed to have alternatives)
+  // Skip: rejected alternatives sections, open questions, code blocks, blockquotes
   const lines = content.split('\n');
-  let inRejected = false;
+  let inSkipSection = false;
+  const skipLine = createLineSkipper();
   const flaggedLines = [];
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (/rejected alternative/i.test(line)) { inRejected = true; continue; }
-    if (/^##/.test(line)) { inRejected = false; }
-    if (inRejected) continue;
+    if (skipLine(line)) continue;
+    if (/rejected alternative/i.test(line) || /open questions/i.test(line)) { inSkipSection = true; continue; }
+    if (/^##/.test(line)) { inSkipSection = false; }
+    if (inSkipSection) continue;
 
+    const cleanLine = stripQuotedPhrases(line);
     for (const { pattern, word } of AMBIGUITY_FLAGS) {
       pattern.lastIndex = 0;
-      if (pattern.test(line)) {
+      if (pattern.test(cleanLine)) {
         flaggedLines.push({ line: i + 1, word, text: line.trim().substring(0, 80) });
       }
     }
@@ -220,14 +256,17 @@ function validateVerification() {
     warn('verification.md', 'No "Verification type" fields found. The verification hierarchy (automated test > build check > CLI command > Playwright > manual observation) helps prioritize — prefer stronger forms.');
   }
 
-  // Vague verification scan
-  const lines = content.split('\n');
+  // Vague verification scan (skip code blocks and blockquotes)
+  const vLines = content.split('\n');
+  const skipVLine = createLineSkipper();
   const vagueHits = [];
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = 0; i < vLines.length; i++) {
+    if (skipVLine(vLines[i])) continue;
+    const cleanVLine = stripQuotedPhrases(vLines[i]);
     for (const { pattern, phrase } of VAGUE_VERIFICATION) {
       pattern.lastIndex = 0;
-      if (pattern.test(lines[i])) {
-        vagueHits.push({ line: i + 1, phrase, text: lines[i].trim().substring(0, 80) });
+      if (pattern.test(cleanVLine)) {
+        vagueHits.push({ line: i + 1, phrase, text: vLines[i].trim().substring(0, 80) });
       }
     }
   }
@@ -361,12 +400,17 @@ function validateWorkPackages() {
       ok(`${wpFile}: all 6 required fields present`);
     }
 
-    // Vague verification in WP
-    for (const { pattern, phrase } of VAGUE_VERIFICATION) {
-      pattern.lastIndex = 0;
-      if (pattern.test(content)) {
-        error(wpFile, `Vague verification phrase "${phrase}" found. Work package verification must be a specific command or observable behavior — not a judgment call. "npm test" is verification. "Should work correctly" is not.`);
-        break;
+    // Vague verification in WP (skip code blocks and blockquotes)
+    const wpLines = content.split('\n');
+    const skipWpLine = createLineSkipper();
+    for (let li = 0; li < wpLines.length; li++) {
+      if (skipWpLine(wpLines[li])) continue;
+      const cleanWpLine = stripQuotedPhrases(wpLines[li]);
+      for (const { pattern, phrase } of VAGUE_VERIFICATION) {
+        pattern.lastIndex = 0;
+        if (pattern.test(cleanWpLine)) {
+          error(wpFile, `Vague verification phrase "${phrase}" at line ${li + 1}. Work package verification must be a specific command or observable behavior — not a judgment call. "npm test" is verification. "Should work correctly" is not.`);
+        }
       }
     }
   }

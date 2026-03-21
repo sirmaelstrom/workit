@@ -25,7 +25,7 @@ Everything after "complete" was historically ad-hoc. This skill makes closeout s
 
 ## The Three Phases
 
-The campaign-closeout pattern defines three phases. This skill guides all three.
+The campaign-closeout pattern (`/workspace\projects\heathdev-patterns\patterns\campaign-closeout.md`) defines three phases. This skill guides all three.
 
 ### Phase 1: Data Collection
 

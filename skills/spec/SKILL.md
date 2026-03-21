@@ -197,6 +197,10 @@ After approval, run stages 5-6:
 - Tag each WP: `execution: autonomous` or `execution: review-needed` (HITL flag)
 - Wave plan with gate commands
 - Spec-level constraints in orchestrator (from constraints.md)
+- **Model assignment in Package Inventory table.** The 5th column (`Model`) is parsed by `campaign-parser.ts` and wired to dispatch. For each WP, evaluate complexity and assign `opus` or `sonnet` (use `-` for system default). Heuristics:
+  - `opus` — test WPs covering >3 functions or requiring mock chains >3 deep; integration packages with protocol design or direction reversal; packages touching auth/data-loss boundaries
+  - `sonnet` — clear specs with mechanical wiring, single-file changes, straightforward ports, CRUD operations, cleanup/deletion
+  - When uncertain, default to `sonnet` — the review council and human gate catch mismatches
 
 Update `meta.json` status to `"ready"`.
 
