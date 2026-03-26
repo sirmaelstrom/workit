@@ -1,28 +1,11 @@
 ---
 name: spec
-description: "Autonomously generate a complete workshop specification from a short intent description. Use when the user says '/spec', 'spec this', 'write a spec for', 'auto-spec', or describes a feature and wants a full specification without co-authoring each stage. This skill runs all 6 pipeline stages, pauses for human review after constraints, then completes decomposition and work packages."
+description: "Autonomously generate a complete workshop specification from a short intent description. Use when the user says '/spec', 'spec this', 'write a spec for', 'auto-spec', or describes a feature and wants a full specification without co-authoring each stage. This skill runs all 6 pipeline stages, pauses for human review after constraints, completes decomposition and work packages, then runs an iterative refinement loop (fresh-eyes waves + council review) to convergence."
 ---
 
 # Spec — Autonomous Specification Pipeline
 
-Generate a complete, dispatch-ready workshop specification from a short intent description. You run all 6 pipeline stages autonomously, pause once for human review, then finish.
-
-## Workshop System Context
-
-Workshops are the specification mechanism. Each workshop lives at `/workspace\data\outputs\workshops\{slug}\` and progresses through a 6-stage pipeline defined in the pattern library at `/workspace\projects\heathdev-patterns\`.
-
-| Stage | Pattern File | Template | Output Artifact | meta.json status |
-|-------|-------------|----------|-----------------|------------------|
-| 1 | `patterns/problem-statement.md` | `templates/problem-statement.template.md` | `problem-statement.md` | `problem-statement` |
-| 2 | `patterns/decision-resolution.md` | — | `decisions.md` | `decisions` |
-| 3 | `patterns/verification-criteria.md` | — | `verification.md` | `verification` |
-| 4 | `patterns/constraint-architecture.md` | — | `constraints.md` | `constraints` |
-| 5 | `patterns/decomposition.md` | — | `decomposition.md` | `decomposition` |
-| 6 | `patterns/work-package.md` | `templates/_orchestrator.template.md` | `work-packages/*.md` + `work-packages/_orchestrator.md` | `ready` |
-
-**Templates define structure** (which sections, what order). **Patterns define methodology** (how to think, what quality looks like). Both live at `/workspace\projects\heathdev-patterns\`. When they diverge, structure comes from the template, quality guidance comes from the pattern.
-
-The canonical pipeline reference is `/workspace\projects\heathdev-patterns\patterns\INDEX.md`.
+Generate a complete, dispatch-ready workshop specification from a short intent description. You run all 6 pipeline stages autonomously, pause once for human review, then finish with an iterative refinement loop that produces a review-council-validated spec.
 
 ## Inputs
 
@@ -31,6 +14,18 @@ The user provides intent — one sentence to a short paragraph:
 - `/spec` then describes the problem when prompted
 
 If no intent is provided, ask for it. One question only: "What are we building?"
+
+### Review Level
+
+Parse the `--review` flag from arguments. If not specified, auto-select based on complexity:
+
+| Flag | Behavior | Auto-select when |
+|------|----------|-----------------|
+| `--review=full` | Fresh-eyes loop → council → final wave (default) | ≥3 WPs or multi-project |
+| `--review=light` | Self-review only, skip refinement loop | ≤2 WPs, single project, additive-only |
+| `--review=none` | Decompose and stop | User explicitly wants manual review later |
+
+When auto-selecting, state the choice: *"Auto-selecting `--review=full` — 4 WPs across 2 waves warrants iterative review."*
 
 ## Phase 1: Setup & Exploration
 
@@ -45,9 +40,7 @@ If the project is ambiguous, ask. If the scope is ambiguous, make your best gues
 
 ### 1b. Scaffold Workshop
 
-Check if `/workspace\data\outputs\workshops\{slug}\` already exists.
-
-**If the directory does not exist:** Create it with `meta.json`:
+Create `/workspace\data\outputs\workshops\{slug}\` with `meta.json`:
 ```json
 {
   "title": "{title}",
@@ -55,20 +48,10 @@ Check if `/workspace\data\outputs\workshops\{slug}\` already exists.
   "status": "captured",
   "projects": ["{project}"],
   "tags": [],
-  "startedAt": "{ISO timestamp}",
-  "createdAt": "{ISO timestamp}"
+  "createdAt": "{ISO timestamp}",
+  "updatedAt": "{ISO timestamp}"
 }
 ```
-
-Use `"projects"` (plural, array) — NOT `"project"` (singular). The workshop handler reads `Array.isArray(meta.projects)`. A singular string silently resolves to empty array.
-
-**If the directory already exists:** This workshop has prior work. Handle it cleanly:
-1. Read `meta.json` for context (title, status, projects) — note the current status
-2. Archive existing pipeline artifacts into a `_prior/` subdirectory (problem-statement.md, decisions.md, verification.md, constraints.md, decomposition.md, specification.md, work-packages/). Do NOT archive meta.json.
-3. Reset `meta.json` status to `"captured"` and update timestamps
-4. Note in your output: "Found existing workshop at status '{status}'. Archived prior artifacts to `_prior/` and starting fresh from patterns."
-
-**Critical: existing artifacts are context, not drivers.** You may glance at a prior problem statement for domain context, but the patterns + codebase exploration drive your process. Do not read existing artifacts to determine your approach, restructure them into pipeline format, or let their decisions constrain yours. You are generating fresh from patterns and the current state of the code.
 
 ### 1c. Explore Codebase
 
@@ -92,16 +75,14 @@ Surface any prior workshops, research, corrections, or lessons that inform this 
 ## Phase 2: Autonomous Pipeline (Stages 1-4)
 
 Run stages 1-4 sequentially. For each stage:
-1. Read the **pattern file** from `/workspace\projects\heathdev-patterns\patterns\` — this is the methodology
-2. If a **template** exists for this stage (see table above), read it too — this is the artifact skeleton
-3. Write the artifact to the workshop directory
-4. Update `meta.json` status (use the status values from the table above)
+1. Read the pattern file from `/workspace\projects\heathdev-patterns\patterns\`
+2. Write the artifact to the workshop directory
+3. Update `meta.json` status
 
 **Do not dump pattern contents into your output.** Read them, internalize the methodology, apply it. The patterns are your reference, not content to recite.
 
 ### Stage 1: Problem Statement
 - Pattern: `patterns/problem-statement.md`
-- Template: `templates/problem-statement.template.md`
 - Output: `problem-statement.md`
 - Key discipline: Self-containment test. Could a stranger begin solving this from what's written?
 - Ground every claim in code you actually read in Phase 1.
@@ -157,6 +138,9 @@ Present a consolidated review artifact. Format:
 - **Verification approach:** {strongest verification type used}
 - **Constraint highlights:** {most important must-nots and escalation triggers}
 
+### Review level
+{full|light|none} — {reason for selection}
+
 ### Your Call
 Review the flagged items. For each:
 - ✅ Approve
@@ -164,6 +148,7 @@ Review the flagged items. For each:
 - ❌ Reject: {why}
 
 Or: "looks good" to proceed, "start over" to restart, or specific feedback.
+You can also override the review level: "looks good, but skip review" or "looks good, full review please"
 ```
 
 **STOP HERE.** Wait for human input. Do not proceed to decomposition without explicit approval.
@@ -191,43 +176,175 @@ After approval, run stages 5-6:
 
 ### Stage 6: Work Packages
 - Pattern: `patterns/work-package.md`
-- Template: `templates/_orchestrator.template.md`
 - Output: `work-packages/wp-{NN}-{slug}.md` for each package + `work-packages/_orchestrator.md`
+- Use the template from `/workspace\projects\heathdev-patterns\templates\_orchestrator.template.md`
 - All 7 required fields per WP (precondition, goal, files, verification, failure criteria, boundary, commit)
 - Tag each WP: `execution: autonomous` or `execution: review-needed` (HITL flag)
 - Wave plan with gate commands
 - Spec-level constraints in orchestrator (from constraints.md)
-- **Model assignment in Package Inventory table.** The 5th column (`Model`) is parsed by `campaign-parser.ts` and wired to dispatch. For each WP, evaluate complexity and assign `opus` or `sonnet` (use `-` for system default). Heuristics:
-  - `opus` — test WPs covering >3 functions or requiring mock chains >3 deep; integration packages with protocol design or direction reversal; packages touching auth/data-loss boundaries
+- **Model assignment in Package Inventory table.** The 5th column (`Model`) is parsed by `campaign-parser.ts` and wired to dispatch. For each WP, assign `opus` or `sonnet` (use `-` for system default):
+  - `opus` — WPs involving review, fix, or judgment work; integration packages with protocol design or direction reversal; packages touching auth/data-loss boundaries
   - `sonnet` — clear specs with mechanical wiring, single-file changes, straightforward ports, CRUD operations, cleanup/deletion
-  - When uncertain, default to `sonnet` — the review council and human gate catch mismatches
+  - When uncertain, default to `opus` — correctness on fix work outweighs token cost
 
 Update `meta.json` status to `"ready"`.
 
-## Phase 7: Final Output
+**If `--review=none`:** Skip to Phase 9 (Final Output).
+**If `--review=light`:** Skip to Phase 9 (Final Output). The self-review in Phase 3 is the only quality pass.
+**If `--review=full`:** Continue to Phase 7.
+
+## Phase 7: Refinement Loop (--review=full only)
+
+Iteratively review the work packages using fresh-eyes Sonnet sub-agents until convergence.
+
+### 7a. Fresh-Eyes Wave
+
+Launch a Sonnet sub-agent using the Agent tool with this prompt structure:
+
+```
+You are a fresh-eyes spec reviewer. You have NO prior context about this workshop.
+Your job: find problems that would cause dispatch failures, incorrect implementations,
+or ambiguity that an autonomous agent would resolve incorrectly.
+
+Review these work package specs against the actual source code they reference.
+For each WP, verify:
+1. File paths and line numbers cited in the spec actually exist and match described content
+2. Function signatures, type names, and API shapes match the real code
+3. The described change is implementable as written (no missing steps, no impossible states)
+4. Boundary constraints are enforceable (no overlap with other WPs' file lists)
+5. Test descriptions are specific enough to write without guessing
+6. Failure criteria are actionable (not just "if it doesn't work")
+
+Rate each finding:
+- **P1 (blocker):** Would cause dispatch failure, incorrect code, or constraint violation
+- **P2 (significant):** Ambiguity an agent would likely resolve incorrectly
+- **P3 (minor):** Style, clarity, or edge case unlikely to affect dispatch
+
+Workshop directory: {workshop_path}
+Project directory: {project_path}
+
+Read ALL work package files in work-packages/ and the _orchestrator.md.
+Read the constraints.md for constraint cross-reference.
+Read the actual source files referenced in each WP to verify claims.
+
+Output format:
+## Wave {N} Review
+
+### Findings
+- **P1:** {description} — {which WP, which section, what's wrong}
+- **P2:** {description}
+...
+
+### Files Checked
+{list of source files you actually read}
+
+### Verdict
+{CLEAN | HAS_BLOCKERS | HAS_ISSUES}
+- P1 count: {N}
+- P2 count: {N}
+- P3 count: {N}
+```
+
+### 7b. Fix Findings
+
+After each wave:
+- **P1s:** Fix immediately. These are blockers — update the WP spec files directly.
+- **P2s:** Fix unless the fix would introduce more complexity than the ambiguity costs. Document skipped P2s.
+- **P3s:** Note but do not fix unless trivial. Accumulate across waves.
+- **False positives:** The agent uses regex-like heuristics. If a finding is wrong (e.g., "or" in normal English flagged as ambiguity), discard it and note it as a false positive.
+
+### 7c. Convergence Check
+
+After fixing, decide whether to run another wave:
+
+| Condition | Action |
+|-----------|--------|
+| Wave returned P1s | Fix and run another wave (mandatory) |
+| Wave returned P2s only, fixes applied | Run one more wave to verify fixes |
+| Wave returned P3s only or was clean | **Converged** — proceed to council |
+| 8 waves completed | **Force converge** — proceed to council regardless |
+
+Track across waves: if wave N finds the same P2 that wave N-1 found and it was already evaluated and kept, that's not a new finding — it's convergence noise. Suppress it.
+
+### 7d. Report Progress
+
+After each wave, briefly report to the user:
+```
+Wave {N}: {P1_count} P1, {P2_count} P2, {P3_count} P3. {Fixed X issues. | Clean.} {Converged — moving to council. | Running wave {N+1}.}
+```
+
+Keep it to one line. The user doesn't need to see every finding — they'll see the final result.
+
+## Phase 8: Council Review (--review=full only)
+
+After the fresh-eyes loop converges:
+
+### 8a. Deploy Council
+
+Use the `mcp__review-council__council_review` tool to run a multi-model review:
+
+```
+council_review({
+  artifact_path: "{workshop_path}",
+  review_type: "spec",
+  thinking_level: "medium",
+  models: ["claude", "gemini", "gpt"]
+})
+```
+
+If any model times out, retry that model once with `thinking_level: "low"`. If it times out again, proceed with the models that completed.
+
+### 8b. Apply Council Findings
+
+Process the council synthesis:
+- **Critical findings:** Fix immediately in the spec files.
+- **Major findings:** Fix unless they conflict with a deliberate decision (reference the D# and explain why it stands).
+- **Minor findings:** Note but don't fix.
+
+Count amendments applied. If 5+ amendments were needed, the spec had significant gaps — note this for post-mortem calibration.
+
+### 8c. Final Validation Wave
+
+Run one more Sonnet fresh-eyes wave (same prompt as 7a) to verify the council amendments didn't introduce new issues. This is the final quality gate.
+
+Then run the spec-validate script (locate `validate.mjs` in the plugin's `skills/spec-validate/scripts/` directory):
+```bash
+node "$(find ~/.claude/plugins -path '*/spec-validate/scripts/validate.mjs' 2>/dev/null | head -1)" {workshop_path}
+```
+
+Report: validation result (errors/warnings/passes) + final wave verdict.
+
+## Phase 9: Final Output
 
 Present the completed spec summary:
 
 ```markdown
-## Spec Complete: {title}
+## ✅ Spec Complete: {title}
 
 **Workshop:** `workshops/{slug}/`
 **Packages:** {N} WPs across {N} waves
 **Estimated execution:** {autonomous WPs} autonomous, {review WPs} need review
 **Gate commands:** {summary}
+**Review:** {review_level} — {N} fresh-eyes waves, {N} council models, {N} amendments applied
+**Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 
-Ready for `/spec-validate` then dispatch.
+Ready for dispatch.
+```
+
+If `--review=light` or `--review=none`, the Review and Validation lines reflect what was actually done:
+```
+**Review:** light — self-review only
+**Review:** none — no review performed, manual review recommended before dispatch
 ```
 
 ## Principles
 
-- **Patterns are the methodology, existing artifacts are not.** Drive from patterns + codebase exploration. If a workshop directory already exists with prior artifacts, those are context — not the starting point. Never restructure old artifacts into pipeline format or let prior decisions constrain fresh analysis.
-- **Templates define structure, patterns define methodology.** Read both when available. The template gives you the artifact skeleton; the pattern tells you how to fill it well.
-- **Speed over perfection.** A 90% spec in 15 minutes beats a 98% spec in 60 minutes. The review gate and review council catch the delta.
+- **Speed over perfection, but not over correctness.** The refinement loop exists because speed without review produces specs that fail at dispatch. The loop is fast (Sonnet agents, ~2 min/wave) and the ROI is proven (C33: 7 waves caught 3 P1s that would have caused runtime failures).
 - **Ground everything.** No architectural claims without file references. No "the system probably does X."
 - **Flag, don't hide.** Uncertainty is fine — hiding it isn't. Use [DECISION] and [ASSUMPTION] callouts liberally.
 - **Patterns are runtime reads, not memorized content.** Read each pattern file fresh before writing its artifact. Patterns evolve.
 - **The output is a real workshop.** Not a separate format. Everything downstream (validate, dispatch, review council, post-mortem) works on these artifacts unchanged.
+- **Convergence, not perfection.** The refinement loop stops when P1s are gone, not when findings are zero. P3s are noise — chasing them degrades momentum.
 
 ## Ledger Events
 
@@ -237,11 +354,12 @@ Write timing events at each stage transition (fire-and-forget, non-blocking):
 { "type": "workshop_stage", "workshop_slug": "{slug}", "stage": "{stage}", "event_type": "completed", "actor": "agent" }
 ```
 
-Valid stage names: `problem-statement`, `decisions`, `verification`, `constraints`, `decomposition`, `work-packages`
-
-**Tool:** Call `mcp__context-ledger__ledger_write` with the payload above. The ledger adds timestamps automatically. Non-blocking: if the call fails, log and continue — timing capture must not block workshop progress.
+For the refinement loop, write one event per wave:
+```json
+{ "type": "workshop_stage", "workshop_slug": "{slug}", "stage": "refinement_wave_{N}", "event_type": "completed", "actor": "agent", "findings": { "p1": N, "p2": N, "p3": N } }
+```
 
 ---
-*Implements Approach A from the Autonomous Spec Pipeline workshop.*
+*Implements Approach A from the Autonomous Spec Pipeline workshop, extended with iterative refinement from C33 learnings.*
 *Pattern library: /workspace\projects\heathdev-patterns\*
 *Related skills: /workshop (interactive co-authoring), /spec-validate (quality check), /grill-me (stress-test before speccing)*
