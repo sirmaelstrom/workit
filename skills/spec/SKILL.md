@@ -64,13 +64,19 @@ Before writing anything, ground yourself in the actual code. Use the Agent tool 
 
 Store findings mentally — you'll reference them throughout. Every architectural claim in the spec must cite a real file path.
 
-### 1d. Search Knowledge Base
+### 1d. Read Institutional Memory
 
-Search the KB for prior work on this topic:
+**Read CORRECTIONS.md first** — this is non-negotiable:
+```
+Read /workspace\data\memory\CORRECTIONS.md
+```
+This file contains cross-project corrections from past campaign failures. Every constraint in it was learned the hard way. Internalize the relevant entries — especially the Campaign/Dispatch section — and inject them as constraints or must-nots in Stage 4.
+
+Then search the KB for prior work on this topic:
 ```
 kb_search("relevant terms from the intent")
 ```
-Surface any prior workshops, research, corrections, or lessons that inform this spec. Don't re-derive what's already been decided.
+Surface any prior workshops, research, or lessons that inform this spec. Don't re-derive what's already been decided.
 
 ## Phase 2: Autonomous Pipeline (Stages 1-4)
 
@@ -108,6 +114,11 @@ Run stages 1-4 sequentially. For each stage:
 - Output: `constraints.md`
 - Key discipline: Four categories — Musts (M1...), Must-Nots (MN1...), Preferences (P1...), Escalation Triggers (E1...).
 - Use the "smart well-intentioned person" exercise: what could they do that satisfies every requirement but produces the wrong outcome?
+- **Cross-reference CORRECTIONS.md** (read in Phase 1d) against this spec's WP file lists and wave assignments. Specifically:
+  - File-level exclusivity within waves (no two WPs creating/modifying the same file in the same wave)
+  - Gate commands use relative paths (no `cd /absolute/path`)
+  - Cross-repo WPs share a wire format contract
+  - Any correction relevant to this spec's domain becomes an explicit Must-Not
 - Check KB for failure modes from similar past campaigns. Inject relevant constraints.
 
 ## Phase 3: Self-Review
