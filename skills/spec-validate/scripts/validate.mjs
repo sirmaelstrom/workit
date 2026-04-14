@@ -250,8 +250,8 @@ function validateVerification() {
     ok(`verification.md: ${vHeaders.length} verification criteria found`);
   }
 
-  // Check for verification type
-  const hasVerificationType = /\*\*Verification type\*\*/i.test(content);
+  // Check for verification type (match both **Verification type:** and **Verification type**)
+  const hasVerificationType = /\*\*Verification type/i.test(content);
   if (!hasVerificationType && vHeaders.length > 0) {
     warn('verification.md', 'No "Verification type" fields found. The verification hierarchy (automated test > build check > CLI command > Playwright > manual observation) helps prioritize — prefer stronger forms.');
   }
@@ -278,9 +278,39 @@ function validateVerification() {
   }
 
   // Check for "How to verify" sections
-  const howToVerify = (content.match(/\*\*How to verify\*\*/gi) || []).length;
+  const howToVerify = (content.match(/\*\*How to verify/gi) || []).length;
   if (howToVerify === 0 && vHeaders.length > 0) {
     warn('verification.md', 'No "How to verify" sections found. Each V-criterion should include the exact command, URL, or procedure. Without it, verification is aspirational — you wrote what success looks like but not how to check.');
+  }
+
+  // Check for verification layers (new layered model)
+  const hasLayers = /\*\*(?:Layers|Unit|Fixture|Seam|Deployment)/i.test(content);
+  const hasOldType = /\*\*Verification type/i.test(content);
+  if (!hasLayers && hasOldType && vHeaders.length > 0) {
+    warn('verification.md', 'Uses flat "Verification type" instead of layered model. Each V-criterion should specify which layers apply: Unit, Fixture-contract, Seam-integration, Deployment. A single "Automated test" label hides whether seams are actually covered.');
+  }
+
+  // Check for excessive manual observation
+  const manualCount = (content.match(/manual observation/gi) || []).length;
+  const verificationTypeCount = (content.match(/\*\*Verification type\*\*[^\n]*/gi) || []);
+  const manualAsType = verificationTypeCount.filter(l => /manual observation/i.test(l)).length;
+  if (manualAsType > 0 && vHeaders.length > 0) {
+    const ratio = manualAsType / vHeaders.length;
+    if (ratio > 0.3) {
+      warn('verification.md', `${manualAsType} of ${vHeaders.length} criteria use "Manual observation" as primary verification type (${Math.round(ratio * 100)}%). Manual verification doesn't scale to automated dispatch. For each, ask: is this genuinely subjective, or just hard to automate?`);
+    }
+  }
+
+  // Check for Verification Gaps section
+  const hasGaps = /##\s+Verification Gaps/i.test(content);
+  if (!hasGaps && vHeaders.length > 0) {
+    warn('verification.md', 'No "Verification Gaps" section found. Every verification.md should end with an explicit list of uncovered seams and rationale for why each gap is acceptable. Unlisted gaps are invisible gaps.');
+  }
+
+  // Check for seam identification
+  const hasSeamMention = /seam|handoff|integration|fixture/i.test(content);
+  if (!hasSeamMention && vHeaders.length >= 3) {
+    warn('verification.md', 'No mention of seams, handoffs, integration tests, or fixtures in a spec with 3+ criteria. Specs of this size almost always have service boundaries that need seam-level verification. Check whether data crosses any service boundary between V-criteria.');
   }
 }
 

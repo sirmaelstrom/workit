@@ -106,7 +106,15 @@ Run stages 1-4 sequentially. For each stage:
 - Pattern: `patterns/verification-criteria.md`
 - Output: `verification.md`
 - Key discipline: For each decision, write the three-sentence independent observer test. If you can't verify it, the decision needs refinement — flag it.
-- Specify verification type (automated test > build check > CLI command > Playwright > manual observation).
+- **Identify verification layers per criterion** — unit tests alone are insufficient. For each V-criterion, explicitly state which layers apply:
+  - **Unit:** isolated logic (mocks OK here)
+  - **Fixture-contract:** capture real external output as test fixtures, parse with real code. Required for any decision that consumes external service output (APIs, CLI tools, file formats).
+  - **Seam-integration:** wire internal services together with real code, fixtures only at external boundaries. Required when data flows through 2+ services. This catches "both pass independently but the handoff breaks."
+  - **Deployment:** Docker smoke tests, build checks, CI validation. Required when decisions change the deployment artifact.
+  - **Manual observation:** ONLY for genuinely subjective quality judgment. If you default to "manual" because automation is hard, flag it as a gap.
+- A V-criterion with only "run dotnet test --filter Foo" is almost certainly underspecified. Ask: what breaks between the units?
+- **Identify seams explicitly** — list every point where data crosses a service boundary. Each uncovered seam is a verification gap that must be documented with rationale.
+- End with a `## Verification Gaps` section listing uncovered seams and why they're acceptable.
 - Capture baselines where applicable.
 
 ### Stage 4: Constraints
