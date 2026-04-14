@@ -1,6 +1,6 @@
 ---
 name: design-alternatives
-description: "Generate multiple radically different design alternatives for a module, interface, or architectural decision using parallel sub-agents. Use when the user says 'design it twice', 'explore alternatives', 'what are my options', wants to compare approaches, or needs to make an architectural decision between competing designs."
+description: "Use when the user says 'design it twice', 'explore alternatives', 'what are my options', wants to compare approaches, or needs to make an architectural decision between competing designs."
 ---
 
 # Design Alternatives — Parallel Exploration

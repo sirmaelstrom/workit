@@ -1,6 +1,6 @@
 ---
 name: ubiquitous-language
-description: "Extract and formalize domain terminology into a consistent glossary that other skills and agents use. Use when working with a new codebase, onboarding into a domain, the user mentions 'domain language', 'glossary', 'terminology', when ambiguous terms are causing confusion in a project, or when starting a workshop on an unfamiliar domain. Also trigger when spec reviews or post-mortems flag terminology confusion as a root cause."
+description: "Use when working with a new codebase, onboarding into a domain, the user mentions 'domain language', 'glossary', 'terminology', when ambiguous terms are causing confusion, or when spec reviews or post-mortems flag terminology confusion as a root cause."
 ---
 
 # Ubiquitous Language — Domain Glossary Extraction

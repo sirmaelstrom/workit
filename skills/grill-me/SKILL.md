@@ -1,6 +1,6 @@
 ---
 name: grill-me
-description: "Interview the user relentlessly about a plan, design, or idea until reaching shared understanding. Use when the user wants to stress-test a plan, says 'grill me', 'poke holes', 'what am I missing', or wants to pressure-test an idea before committing to a workshop."
+description: "Use when the user wants to stress-test a plan, says 'grill me', 'poke holes', 'what am I missing', or wants to pressure-test an idea before committing to a workshop."
 ---
 
 # Grill Me — Stress-Test an Idea

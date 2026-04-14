@@ -1,6 +1,6 @@
 ---
 name: post-mortem
-description: "Run a structured campaign post-mortem after a dispatch campaign completes, fails, or is cancelled. Use this skill when the user asks to write a post-mortem, close out a campaign, do campaign closeout, review what happened in a campaign, or says 'post-mortem'. Also trigger when a campaign has just finished and the user asks 'what happened?' or wants to analyze the results. This is non-optional after every campaign — skipping it is how institutional knowledge evaporates."
+description: "Use when the user asks to write a post-mortem, close out a campaign, do campaign closeout, review what happened in a campaign, or says 'post-mortem'. Also trigger when a campaign has just finished and the user asks 'what happened?' or wants to analyze the results."
 ---
 
 # Post-Mortem — Campaign Closeout

@@ -1,6 +1,6 @@
 ---
 name: execute-wp
-description: "Execute a work package from a campaign with automatic progress log lifecycle. Use this skill when the user asks to execute a work package, run a WP, dispatch a WP manually, work on WP-01 (or any WP-NN), or says 'execute wp'. Also trigger when the user references running a specific work package from a workshop, even if they don't use the exact term 'execute-wp'. This skill ensures the progress log is read before work and appended after — making cross-dispatch context automatic rather than optional."
+description: "Use when the user asks to execute a work package, run a WP, dispatch a WP manually, work on WP-01 (or any WP-NN), or says 'execute wp'. Also trigger when the user references running a specific work package from a workshop."
 ---
 
 # Execute WP — Work Package Execution with Progress Log

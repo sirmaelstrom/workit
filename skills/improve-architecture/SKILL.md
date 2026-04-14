@@ -1,6 +1,6 @@
 ---
 name: improve-architecture
-description: "Explore a codebase for architectural friction, surface module-deepening opportunities, and propose refactors. Use when the user says 'review architecture', 'find code smells', 'what should I refactor', 'improve structure', or wants to make a codebase more agent-friendly and testable."
+description: "Use when the user says 'review architecture', 'find code smells', 'what should I refactor', 'improve structure', or wants to make a codebase more agent-friendly and testable."
 ---
 
 # Improve Architecture — Codebase Friction Analysis

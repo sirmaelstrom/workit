@@ -1,6 +1,6 @@
 ---
 name: spec
-description: "Autonomously generate a complete workshop specification from a short intent description. Use when the user says '/spec', 'spec this', 'write a spec for', 'auto-spec', or describes a feature and wants a full specification without co-authoring each stage. This skill runs all 6 pipeline stages, pauses for human review after constraints, completes decomposition and work packages, then runs an iterative refinement loop (fresh-eyes waves + council review) to convergence."
+description: "Use when the user says '/spec', 'spec this', 'write a spec for', 'auto-spec', or describes a feature and wants a full specification without co-authoring each stage."
 ---
 
 # Spec — Autonomous Specification Pipeline

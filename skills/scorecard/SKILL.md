@@ -1,6 +1,6 @@
 ---
 name: scorecard
-description: "Run a post-dispatch spec quality evaluation against a completed workshop/campaign. Use this skill when the user asks to score a spec, evaluate spec quality, run a scorecard, grade a campaign, review how well a spec predicted execution, or says 'scorecard'. Also trigger when the user mentions post-dispatch evaluation, spec grading, or wants to understand why a campaign needed rework. This is the feedback mechanism that makes specs get better over time — skip it and the same mistakes repeat."
+description: "Use when the user asks to score a spec, evaluate spec quality, run a scorecard, grade a campaign, review how well a spec predicted execution, or says 'scorecard'. Also trigger when the user mentions post-dispatch evaluation, spec grading, or wants to understand why a campaign needed rework."
 ---
 
 # Scorecard — Post-Dispatch Spec Quality Evaluation
