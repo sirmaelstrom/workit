@@ -1,23 +1,56 @@
 ---
 name: spec
-description: "Use when the user says '/spec', 'spec this', 'write a spec for', 'auto-spec', or describes a feature and wants a full specification without co-authoring each stage."
+description: "Generate a specification. Trigger: '/spec', 'spec this', 'write a spec for', 'auto-spec'. READ THE FULL SKILL before executing — depth selection, pipeline stages, and review gates are defined below."
 ---
 
 # Spec — Autonomous Specification Pipeline
 
-Generate a complete, dispatch-ready workshop specification from a short intent description. You run all 6 pipeline stages autonomously, pause once for human review, then finish with an iterative refinement loop that produces a review-council-validated spec.
+Generate a complete, execution-ready specification from a short intent description. The spec is **a tool you reach for, not a gate you pass through.** Three depths are available — choose based on the problem, not habit.
 
-## Inputs
+## Spec Depth
 
-The user provides intent — one sentence to a short paragraph:
-- `/spec "add OAuth login to service"`
-- `/spec` then describes the problem when prompted
+Parse the `--depth` flag from arguments. If not specified, **auto-select using the heuristics below.** State the choice and why.
 
-If no intent is provided, ask for it. One question only: "What are we building?"
+### `--depth=deep` — Full 6-stage pipeline with refinement loop
 
-### Review Level
+**Auto-select when ANY of these are true:**
+- Change touches 2+ projects/repos
+- You cannot list all affected files with confidence before starting
+- The domain is new to the codebase (no existing patterns to follow)
+- There are 3+ real design decisions where the wrong choice wastes significant work
+- The change has integration seams (data flows across service boundaries)
+- The operator has never built something like this in this codebase before
 
-Parse the `--review` flag from arguments. If not specified, auto-select based on complexity:
+**Produces:** Separate artifacts per stage (problem-statement.md, decisions.md, verification.md, constraints.md, decomposition.md, work-packages/), full refinement loop + council review.
+
+### `--depth=lite` — Single compressed spec document
+
+**Auto-select when ALL of these are true:**
+- Single project
+- You can list all affected files before starting (or close to it)
+- The codebase already has patterns for this kind of change
+- 1-2 design decisions, and the right answers are fairly obvious
+- No integration seams — changes are contained within one service/module
+
+**Produces:** Single `spec.md` with Problem/Decisions/Verification/Constraints sections. Self-review only. ~10-20 minutes.
+
+### `--depth=none` — No spec, just execute
+
+**Auto-select when ALL of these are true:**
+- Single file or handful of files
+- Zero design decisions — the what and how are both clear
+- The operator described the change specifically enough to implement directly
+- Change is additive or mechanical (rename, port, delete, config change)
+
+**Produces:** Nothing. Respond with *"No spec needed. Go build."* and stop.
+
+### When in doubt
+
+Default to one level deeper than you think is needed. A lite spec that turns out to be unnecessary cost 15 minutes. A missing deep spec that was needed costs hours of rework.
+
+### Review Level (deep specs only)
+
+For deep specs, parse the `--review` flag. If not specified, auto-select:
 
 | Flag | Behavior | Auto-select when |
 |------|----------|-----------------|
@@ -25,7 +58,67 @@ Parse the `--review` flag from arguments. If not specified, auto-select based on
 | `--review=light` | Self-review only, skip refinement loop | ≤2 WPs, single project, additive-only |
 | `--review=none` | Decompose and stop | User explicitly wants manual review later |
 
-When auto-selecting, state the choice: *"Auto-selecting `--review=full` — 4 WPs across 2 waves warrants iterative review."*
+---
+
+## Spec Lite (`--depth=lite`)
+
+A compressed specification for well-understood changes. Produces a single `spec.md` in the workshop directory.
+
+### Setup
+
+1. **Parse intent** — extract what, which project, slug (same as deep spec Phase 1a)
+2. **Scaffold workshop** — create directory + `meta.json` with status `"captured"`
+3. **Quick explore** — read key files likely affected. No full codebase survey — this is targeted.
+4. **Read CORRECTIONS.md** — non-negotiable regardless of depth
+5. **KB search** — one query for prior work on this topic
+
+### Write spec.md
+
+A single document with four concise sections:
+
+```markdown
+# {Title}
+
+## Problem
+{2-4 paragraphs. What we're solving, why, and the current state. Ground in real file paths.}
+
+## Decisions
+{Numbered D1, D2... Only real ambiguities — not exhaustive. For each: options considered, choice made, one-line reasoning.}
+
+## Verification
+{For each decision: how an observer confirms it was implemented correctly. Concrete commands or observable behavior.}
+
+## Constraints
+{M1, MN1, P1, E1... Compressed. Focus on must-nots that prevent the most likely agent mistakes.}
+```
+
+Run a quick self-review: ambiguity scan, grounding check, constraint coverage. Fix issues.
+
+### Present for Review
+
+Show a brief summary with flagged items. Wait for approval. Apply revisions if needed.
+
+### Final Output
+
+Update `meta.json` status to `"ready"`.
+
+```markdown
+## ✅ Spec Complete: {title}
+
+**Workshop:** `workshops/{slug}/`
+**Depth:** lite — single document
+**Review:** self-review only
+
+Ready for execution.
+```
+
+Write a ledger event: `{ "type": "workshop_stage", "workshop_slug": "{slug}", "stage": "spec-lite", "event_type": "completed", "actor": "agent" }`
+
+---
+
+## Spec Deep (`--depth=deep`)
+
+Full methodology. Same pipeline as always — grounded, adversarial, iterative.
 
 ## Phase 1: Setup & Exploration
 
@@ -70,7 +163,7 @@ Store findings mentally — you'll reference them throughout. Every architectura
 ```
 Read /workspace\data\memory\CORRECTIONS.md
 ```
-This file contains cross-project corrections from past campaign failures. Every constraint in it was learned the hard way. Internalize the relevant entries — especially the Campaign/Dispatch section — and inject them as constraints or must-nots in Stage 4.
+This file contains cross-project corrections from past failures. Every constraint in it was learned the hard way. Internalize the relevant entries and inject them as constraints or must-nots in Stage 4.
 
 Then search the KB for prior work on this topic:
 ```
@@ -122,12 +215,10 @@ Run stages 1-4 sequentially. For each stage:
 - Output: `constraints.md`
 - Key discipline: Four categories — Musts (M1...), Must-Nots (MN1...), Preferences (P1...), Escalation Triggers (E1...).
 - Use the "smart well-intentioned person" exercise: what could they do that satisfies every requirement but produces the wrong outcome?
-- **Cross-reference CORRECTIONS.md** (read in Phase 1d) against this spec's WP file lists and wave assignments. Specifically:
-  - File-level exclusivity within waves (no two WPs creating/modifying the same file in the same wave)
-  - Gate commands use relative paths (no `cd /absolute/path`)
-  - Cross-repo WPs share a wire format contract
+- **Cross-reference CORRECTIONS.md** (read in Phase 1d) against this spec's scope. Specifically:
   - Any correction relevant to this spec's domain becomes an explicit Must-Not
-- Check KB for failure modes from similar past campaigns. Inject relevant constraints.
+  - Cross-repo changes share a wire format contract
+- Check KB for failure modes from similar past work. Inject relevant constraints.
 
 ## Phase 3: Self-Review
 
@@ -197,14 +288,10 @@ After approval, run stages 5-6:
 - Pattern: `patterns/work-package.md`
 - Output: `work-packages/wp-{NN}-{slug}.md` for each package + `work-packages/_orchestrator.md`
 - Use the template from `/workspace\projects\heathdev-patterns\templates\_orchestrator.template.md`
-- All 7 required fields per WP (precondition, goal, files, verification, failure criteria, boundary, commit)
+- All 6 required fields per WP (precondition, goal, files, verification, failure criteria, boundary)
 - Tag each WP: `execution: autonomous` or `execution: review-needed` (HITL flag)
-- Wave plan with gate commands
+- Dependency order (which WPs must complete before others can start)
 - Spec-level constraints in orchestrator (from constraints.md)
-- **Model assignment in Package Inventory table.** The 5th column (`Model`) is parsed by `campaign-parser.ts` and wired to dispatch. For each WP, assign `opus` or `sonnet` (use `-` for system default):
-  - `opus` — WPs involving review, fix, or judgment work; integration packages with protocol design or direction reversal; packages touching auth/data-loss boundaries
-  - `sonnet` — clear specs with mechanical wiring, single-file changes, straightforward ports, CRUD operations, cleanup/deletion
-  - When uncertain, default to `opus` — correctness on fix work outweighs token cost
 
 Update `meta.json` status to `"ready"`.
 
@@ -222,7 +309,7 @@ Launch a Sonnet sub-agent using the Agent tool with this prompt structure:
 
 ```
 You are a fresh-eyes spec reviewer. You have NO prior context about this workshop.
-Your job: find problems that would cause dispatch failures, incorrect implementations,
+Your job: find problems that would cause execution failures, incorrect implementations,
 or ambiguity that an autonomous agent would resolve incorrectly.
 
 Review these work package specs against the actual source code they reference.
@@ -235,9 +322,9 @@ For each WP, verify:
 6. Failure criteria are actionable (not just "if it doesn't work")
 
 Rate each finding:
-- **P1 (blocker):** Would cause dispatch failure, incorrect code, or constraint violation
+- **P1 (blocker):** Would cause execution failure, incorrect code, or constraint violation
 - **P2 (significant):** Ambiguity an agent would likely resolve incorrectly
-- **P3 (minor):** Style, clarity, or edge case unlikely to affect dispatch
+- **P3 (minor):** Style, clarity, or edge case unlikely to affect execution
 
 Workshop directory: {workshop_path}
 Project directory: {project_path}
@@ -247,7 +334,7 @@ Read the constraints.md for constraint cross-reference.
 Read the actual source files referenced in each WP to verify claims.
 
 Output format:
-## Wave {N} Review
+## Review Wave {N}
 
 ### Findings
 - **P1:** {description} — {which WP, which section, what's wrong}
@@ -320,7 +407,7 @@ Process the council synthesis:
 - **Major findings:** Fix unless they conflict with a deliberate decision (reference the D# and explain why it stands).
 - **Minor findings:** Note but don't fix.
 
-Count amendments applied. If 5+ amendments were needed, the spec had significant gaps — note this for post-mortem calibration.
+Count amendments applied.
 
 ### 8c. Final Validation Wave
 
@@ -341,29 +428,30 @@ Present the completed spec summary:
 ## ✅ Spec Complete: {title}
 
 **Workshop:** `workshops/{slug}/`
-**Packages:** {N} WPs across {N} waves
+**Packages:** {N} WPs
 **Estimated execution:** {autonomous WPs} autonomous, {review WPs} need review
-**Gate commands:** {summary}
+**Dependency order:** {summary}
 **Review:** {review_level} — {N} fresh-eyes waves, {N} council models, {N} amendments applied
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 
-Ready for dispatch.
+Ready for execution.
 ```
 
 If `--review=light` or `--review=none`, the Review and Validation lines reflect what was actually done:
 ```
 **Review:** light — self-review only
-**Review:** none — no review performed, manual review recommended before dispatch
+**Review:** none — no review performed, manual review recommended before execution
 ```
 
 ## Principles
 
-- **Speed over perfection, but not over correctness.** The refinement loop exists because speed without review produces specs that fail at dispatch. The loop is fast (Sonnet agents, ~2 min/wave) and the ROI is proven (C33: 7 waves caught 3 P1s that would have caused runtime failures).
+- **Speed over perfection, but not over correctness.** The refinement loop exists because speed without review produces specs that fail at execution. The loop is fast (Sonnet agents, ~2 min/wave) and the ROI is proven.
 - **Ground everything.** No architectural claims without file references. No "the system probably does X."
 - **Flag, don't hide.** Uncertainty is fine — hiding it isn't. Use [DECISION] and [ASSUMPTION] callouts liberally.
 - **Patterns are runtime reads, not memorized content.** Read each pattern file fresh before writing its artifact. Patterns evolve.
-- **The output is a real workshop.** Not a separate format. Everything downstream (validate, dispatch, review council, post-mortem) works on these artifacts unchanged.
+- **The output is a real workshop.** Not a separate format. Everything downstream (validate, review council) works on these artifacts unchanged.
 - **Convergence, not perfection.** The refinement loop stops when P1s are gone, not when findings are zero. P3s are noise — chasing them degrades momentum.
+- **The spec is a tool, not a gate.** Deep when it helps, lite when it's enough, none when it's overhead. The operator chooses.
 
 ## Ledger Events
 
@@ -379,6 +467,5 @@ For the refinement loop, write one event per wave:
 ```
 
 ---
-*Implements Approach A from the Autonomous Spec Pipeline workshop, extended with iterative refinement from C33 learnings.*
 *Pattern library: /workspace\projects\heathdev-patterns\*
-*Related skills: /workshop (interactive co-authoring), /spec-validate (quality check), /grill-me (stress-test before speccing)*
+*Related skills: /spec-validate (quality check), /grill-me (stress-test before speccing), /design-alternatives (compare approaches)*

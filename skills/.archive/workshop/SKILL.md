@@ -5,7 +5,7 @@ description: "Scaffold, resume, and guide workshops through the spec pipeline. U
 
 # Workshop — Spec Pipeline Orchestration
 
-Guide workshops through the heathdev-patterns spec pipeline, from initial problem capture through dispatchable work packages.
+Guide workshops through the heathdev-patterns spec pipeline, from initial problem capture through executable work packages.
 
 ## Context
 
@@ -91,14 +91,14 @@ For each stage transition:
    - **verification** reads decisions and asks: for each decision (D1, D2...), can an independent observer verify it was implemented correctly? If not, the decision needs refinement — push it back.
    - **constraints** reads all prior artifacts and extracts the boundaries: what must be true (musts), what's forbidden (must-nots), what's preferred when ambiguous (preferences), and what should stop work and escalate (triggers).
    - **decomposition** reads constraints and the problem statement to find the natural seams — where does the work break into independent, testable, parallelizable units?
-   - **work-packages** takes each decomposition unit and writes a full dispatchable spec with precondition, goal, files, verification, failure criteria, and boundary.
+   - **work-packages** takes each decomposition unit and writes a full executable spec with precondition, goal, files, verification, failure criteria, and boundary.
 
 3. **Guide the conversation** using the pattern's methodology. Each pattern has specific techniques:
    - **decision-resolution**: Scan the problem statement for ambiguity flags. For each real ambiguity: list options, state tradeoffs (one line each), decide, document reasoning. Use D1, D2, D3... naming convention.
    - **verification-criteria**: For each decision (D1→V1, D2→V2...), write the three-sentence independent observer test. Specify **verification layers** per criterion: unit (isolated logic), fixture-contract (real external output captured as fixtures), seam-integration (internal services wired together, fixtures only at boundaries), deployment (build/infra checks). A criterion with only "run tests" is underspecified — ask what breaks between the units. Identify seams explicitly. End with a Verification Gaps section. Manual observation is only for genuinely subjective judgment.
    - **constraint-architecture**: Four categories — musts, must-nots, preferences, escalation triggers. Number them (M1, MN1, P1, E1). Each must-not should reference what failure mode it prevents.
    - **decomposition**: Apply the appropriate break pattern from the pattern file (API/Backend, UI, Refactor, Infrastructure). Run the decomposition test: each unit < 2hrs, clear boundaries, independently verifiable, disjoint files.
-   - **work-package**: The atomic dispatchable unit. Six fields minimum. Use the template from `templates/_orchestrator.template.md` for the campaign orchestrator.
+   - **work-package**: The atomic executable unit. Six fields minimum. Use the template from `templates/_orchestrator.template.md` for the orchestrator.
 
 4. **Write the artifact** when content is solid. Update `meta.json` status. Then write a `workshop_stage` completed event to the ledger (see **Ledger Timing Events** below).
 
@@ -132,11 +132,11 @@ Stage 6 is structurally different — it produces multiple files:
 
 - Individual work package specs in `work-packages/` subdirectory
 - The orchestrator at `work-packages/_orchestrator.md` (from the template)
-- Wave plan, package inventory, gate commands, spec-level constraints
+- Dependency order, package inventory, verification commands, spec-level constraints
 
 Read both `patterns/work-package.md` and `templates/_orchestrator.template.md` before starting this stage.
 
-When work packages are complete and the orchestrator is written, update meta.json status to `"ready"`. The workshop is now dispatchable.
+When work packages are complete and the orchestrator is written, update meta.json status to `"ready"`. The workshop is now executable.
 
 ## Environment Adaptation
 
@@ -160,6 +160,6 @@ When work packages are complete and the orchestrator is written, update meta.jso
 
 **Decisions must be decisions, not options.** The decision-resolution pattern exists because "we could do A or B" is not a spec — it's a brainstorm. Force the choice.
 
-**Constraints prevent the most expensive class of agent failure.** Must-nots especially — they prevent scope violations that waste entire dispatches. Don't skip or rush the constraint stage.
+**Constraints prevent the most expensive class of agent failure.** Must-nots especially — they prevent scope violations that waste entire executions. Don't skip or rush the constraint stage.
 
 **meta.json must be valid JSON.** The template file has comments for documentation, but production meta.json files must strip all comments. service's workshop handler parses these files.

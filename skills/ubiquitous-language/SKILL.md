@@ -1,6 +1,6 @@
 ---
 name: ubiquitous-language
-description: "Use when working with a new codebase, onboarding into a domain, the user mentions 'domain language', 'glossary', 'terminology', when ambiguous terms are causing confusion, or when spec reviews or post-mortems flag terminology confusion as a root cause."
+description: "Extract domain terminology into a glossary. Trigger: 'domain language', 'glossary', 'terminology', or when ambiguous terms cause confusion in a project."
 ---
 
 # Ubiquitous Language — Domain Glossary Extraction

@@ -1,6 +1,6 @@
 ---
 name: spec-validate
-description: "Validate workshop artifacts against the heathdev-patterns methodology. Use this skill when the user asks to validate a workshop, check spec quality, audit a workshop's artifacts, run the validation checklist, or asks 'is this workshop ready?' Also trigger when the user says 'spec-validate', 'validate spec', 'check workshop', or references spec quality before dispatch."
+description: "Validate a workshop spec's quality. Trigger: 'spec-validate', 'validate spec', 'check workshop', 'is this ready?'. READ THE FULL SKILL — validation checks and script usage are defined below."
 ---
 
 # Spec Validate — Workshop Artifact Validation

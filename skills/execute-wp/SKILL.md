@@ -1,15 +1,15 @@
 ---
 name: execute-wp
-description: "Use when the user asks to execute a work package, run a WP, dispatch a WP manually, work on WP-01 (or any WP-NN), or says 'execute wp'. Also trigger when the user references running a specific work package from a workshop."
+description: "Execute a work package from a spec. Trigger: 'execute WP-01', 'run wp', 'execute wp', or referencing a specific work package. READ THE FULL SKILL — the execution lifecycle (read orchestrator → execute → append progress log) is defined below."
 ---
 
 # Execute WP — Work Package Execution with Progress Log
 
-Execute a single work package from a workshop campaign. Handles the full lifecycle: read orchestrator context, read progress log, execute the work, append a progress entry. The progress log is what makes later packages smarter than earlier ones — this skill makes that lifecycle automatic.
+Execute a single work package from a workshop specification. Handles the full lifecycle: read orchestrator context, read progress log, execute the work, append a progress entry. The progress log is what makes later packages smarter than earlier ones — this skill makes that lifecycle automatic.
 
 ## Why This Skill Exists
 
-The progress log pattern (in `_orchestrator.md`) gives campaigns institutional memory. Each dispatch agent reads what came before and records what it did. But relying on agents to remember this lifecycle is fragile — they skip the read, forget the append, or write entries that don't follow the format. This skill makes the lifecycle structural.
+The progress log pattern (in `_orchestrator.md`) gives multi-package execution institutional memory. Each execution agent reads what came before and records what it did. But relying on agents to remember this lifecycle is fragile — they skip the read, forget the append, or write entries that don't follow the format. This skill makes the lifecycle structural.
 
 ## Prerequisites
 
@@ -37,9 +37,9 @@ Read `work-packages/_orchestrator.md` in full. Extract:
 
 1. **Spec-level constraints** — Musts, Must-Nots, Preferences, Escalation Triggers. These apply to ALL packages. Internalize them before touching code.
 
-2. **Wave context** — Which wave is this package in? What other packages are in the same wave (parallel work — avoid file conflicts)? What waves came before (dependencies should be met)?
+2. **Dependency context** — What other packages exist? Which ones must complete before this one? Which are independent (could run in parallel — avoid file conflicts)?
 
-3. **Progress Log entries** — Read every existing entry. This is context from prior dispatches:
+3. **Progress Log entries** — Read every existing entry. This is context from prior executions:
    - What did earlier packages change?
    - What surprises did they encounter?
    - What notes did they leave for downstream packages?
@@ -47,7 +47,7 @@ Read `work-packages/_orchestrator.md` in full. Extract:
 
    If the progress log is empty (this is the first package), note that — no prior context to absorb.
 
-4. **Gate commands** — What verification will run after this wave completes? Make sure your work will pass it.
+4. **Verification commands** — What verification will run after execution? Make sure your work will pass it.
 
 ### Step 3: Read the Work Package
 
@@ -69,7 +69,7 @@ Do the work specified in the package. Key principles:
 
 - **Stay within the Files list.** If you discover you need to modify a file not listed, check if it falls under an escalation trigger. If so, stop and report. If the file is clearly adjacent and the change is trivial (e.g., an import), use judgment but document it in the progress entry.
 
-- **Respect Must-Nots.** These are the most common source of wasted dispatches. Re-read them before committing anything.
+- **Respect Must-Nots.** These are the most common source of wasted executions. Re-read them before committing anything.
 
 - **Follow Preferences.** When you have a choice between approaches, check if the orchestrator's preferences section has guidance.
 
@@ -81,7 +81,7 @@ Do the work specified in the package. Key principles:
 
 ### Step 5: Run Final Verification
 
-Run the verification command(s) specified in the work package. Then run the wave's gate command from the orchestrator. Both must pass.
+Run the verification command(s) specified in the work package. Then run any orchestrator-level verification commands. Both must pass.
 
 If verification fails:
 1. Check the failure criteria for diagnostic guidance
@@ -125,22 +125,15 @@ If execution partially fails:
 
 ## Multi-Package Execution
 
-If the user asks to execute multiple packages in the same wave (parallel-safe):
+If the user asks to execute multiple independent packages:
 - Read the orchestrator once, absorb all shared context
 - Execute each package independently
 - Each gets its own progress entry
-- Verify the wave gate command passes after ALL packages in the wave complete
+- Run orchestrator-level verification after ALL packages complete
 
-For packages across waves — execute Wave N fully, verify the gate, then proceed to Wave N+1.
-
-## Relationship to Automated Dispatch
-
-This skill is for **manual WP execution** — when a human is in the loop running packages through Claude Code CLI or frontend. Automated campaign dispatch (via service's dispatch pipeline) has its own execution path that doesn't use skills.
-
-The progress log format is shared between both paths. An entry written by this skill is indistinguishable from one written by an automated dispatch agent — and that's intentional. The log is the campaign's memory regardless of how packages get executed.
+For packages with dependencies — execute prerequisite packages first, verify, then proceed to dependent packages.
 
 ## Relationship to Other Skills
 
-- **`/workshop`** creates the spec artifacts that this skill executes against
+- **`/workshop`** and **`/spec`** create the spec artifacts that this skill executes against
 - **`/spec-validate`** checks artifact quality before execution — run it first if you're unsure about spec quality
-- The progress log entries this skill produces feed directly into `campaign-closeout` post-mortems

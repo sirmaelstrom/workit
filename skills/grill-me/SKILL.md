@@ -1,6 +1,6 @@
 ---
 name: grill-me
-description: "Use when the user wants to stress-test a plan, says 'grill me', 'poke holes', 'what am I missing', or wants to pressure-test an idea before committing to a workshop."
+description: "Stress-test a plan or idea. Trigger: 'grill me', 'poke holes', 'what am I missing', or wanting to pressure-test before committing to a spec."
 ---
 
 # Grill Me — Stress-Test an Idea
