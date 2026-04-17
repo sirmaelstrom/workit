@@ -137,7 +137,7 @@ Run stages 1-4 sequentially. For each stage:
 - Key discipline: Scan your own problem statement for ambiguity flags ("or", "possibly", "might", "TBD", "should consider"). Each real ambiguity becomes a numbered decision (D1, D2...).
 - For each decision: list options, state tradeoffs (one line each), **choose one**, document reasoning.
 - Mark decisions where you're uncertain as `[DECISION: D3 — low confidence, alternatives close]`.
-- Use the `design-alternatives` pattern mentally — consider at least 2 approaches before choosing.
+- Use the `parallel-explore` pattern mentally — consider at least 2 approaches before choosing.
 
 #### Stage 3: Verification
 - Pattern: `patterns/verification-criteria.md`
@@ -426,4 +426,4 @@ For the refinement loop, write one event per wave:
 
 ---
 *Pattern library: /workspace\projects\heathdev-patterns\*
-*Related skills: /spec-validate (quality check), /grill-me (stress-test before speccing), /design-alternatives (compare approaches)*
+*Related skills: /spec-validate (quality check), /grill-me (stress-test before speccing), /parallel-explore (compare approaches)*

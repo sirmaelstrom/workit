@@ -40,7 +40,7 @@ Write a user-facing explanation:
 
 ### 5. Design alternatives
 
-Spawn 3+ sub-agents in parallel (or invoke `/design-alternatives`). Each produces a radically different interface for the deepened module, with different design constraints.
+Spawn 3+ sub-agents in parallel (or invoke `/parallel-explore`). Each produces a radically different interface for the deepened module, with different design constraints.
 
 Present designs sequentially, compare in prose, give an opinionated recommendation.
 
@@ -62,5 +62,5 @@ A good deepening refactor:
 - Makes the codebase more navigable for both humans and agents
 
 ---
-*Inspired by Matt Pocock's improve-codebase-architecture skill. Adapted with workshop pipeline integration and design-alternatives skill connection.*
+*Inspired by Matt Pocock's improve-codebase-architecture skill. Adapted with workshop pipeline integration and parallel-explore skill connection.*
 *Source: github.com/mattpocock/skills/tree/main/improve-codebase-architecture*
