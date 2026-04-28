@@ -2,3 +2,4 @@ node_modules/
 .claude/*.local.md
 .orphaned_at
 .serena/
+skills.db

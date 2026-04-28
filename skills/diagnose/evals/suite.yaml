@@ -1,0 +1,226 @@
+# Eval Suite: diagnose
+# Tests whether the diagnose skill produces structured, disciplined investigation output.
+# Binary assertions scored by LLM-as-judge unless marked [deterministic].
+#
+# Tiers:
+#   smoke  — run every iteration for fast mutation signal (3 cases)
+#   verify — run only when smoke shows improvement, to catch regressions (5 cases)
+
+skill: diagnose
+created_at: "2026-04-27T01:30:00Z"
+model: sonnet
+iterations: 10
+timeout_per_iteration_minutes: 10
+
+test_cases:
+  # --- SMOKE TIER: run every iteration ---
+
+  # Scenario 1: Classic environment/process issue — tests the core diagnosis flow
+  - id: tc-01
+    tier: smoke
+    description: "Stale process — symptom looks like a code bug but root cause is environmental"
+    input: |
+      /diagnose "service briefings stopped delivering. Last successful delivery was 6 hours ago.
+      No code changes since yesterday. pm2 shows service as 'online' with 0 restarts."
+    context:
+      project: heathdev-service
+      constraints: []
+    assertions:
+      format:
+        - "[deterministic] Output contains '## 1. Symptom Confirmation' section"
+        - "[deterministic] Output contains '## 2. Hypothesis Matrix' section"
+        - "Hypothesis matrix is formatted as a markdown table with columns for ID, Class, Hypothesis, and Test/Cost"
+        - "[deterministic] Output contains '## 3. Evidence Collected' section"
+        - "[deterministic] Output contains '## 4. Narrowed Cause' section"
+        - "[deterministic] Output contains '## 5. Fix Applied' section"
+        - "[deterministic] Output contains '## 6. Verification' section"
+        - "[deterministic] Output contains '## 7. Remaining Uncertainty' section"
+        - "[deterministic] Output contains '## 8. Prevention / Memory Capture' section"
+      quality:
+        - "Hypothesis matrix includes at least 5 rows covering all 5 classes: Environment, Toolchain, Config/State, Observability, Code"
+        - "At least one Environment/Process hypothesis is listed (stale process, wrong running binary, port collision)"
+        - "The investigation does NOT jump to code edits before testing at least one non-code hypothesis"
+        - "Hypotheses are ordered cheapest-test-first (low cost tests appear before medium/high)"
+        - "Narrowed Cause section states a confidence level (high/medium/low)"
+      instruction_adherence:
+        - "The edit gate is respected — no code modifications are proposed before symptom confirmation and non-code hypothesis testing"
+        - "Scope is inferred from the symptom (should be 'backend' or 'deployment'), not asked of the user"
+        - "Intake normalization rewrites the report into the structured form (Symptom/Expected/Observed/Scope/etc.)"
+      composability:
+        - "Prevention section proposes at least one of: CLAUDE.md correction, hook idea, test addition, CORRECTIONS.md entry, or LESSONS.md entry — OR explicitly states none is warranted"
+
+  # Scenario 5: Ambiguous/multi-scope — tests scope inference under uncertainty
+  - id: tc-05
+    tier: smoke
+    description: "Ambiguous symptom — could be frontend, backend, or config"
+    input: |
+      /diagnose "Discord notifications aren't being delivered. The briefing runs
+      (I can see the briefing in the frontend) but nothing shows up in Discord."
+    context:
+      project: heathdev-service
+      constraints: ["Discord bot via discord.js", "Briefings delivered by synthesis-worker"]
+    assertions:
+      format:
+        - "[deterministic] Output contains '## 1. Symptom Confirmation'"
+        - "[deterministic] Output contains '## 2. Hypothesis Matrix'"
+        - "[deterministic] Output contains '## 4. Narrowed Cause'"
+        - "Hypothesis matrix has at least 5 rows covering different hypothesis classes"
+      quality:
+        - "Multiple scope-relevant hypotheses are generated (backend service, Discord bot connection, config/token, network)"
+        - "Investigation checks the simplest thing first (is the bot online? is the token valid?) before complex hypotheses"
+        - "The word 'unknown' or multiple scopes are considered — symptom spans backend + deployment"
+      instruction_adherence:
+        - "Does NOT ask the user to specify scope — infers or marks as unknown"
+        - "Symptom confirmation step attempts to verify the gap (check Discord bot status, check recent delivery logs)"
+
+  # Scenario 8: Adversarial — tests discipline under user pressure
+  - id: tc-08
+    tier: smoke
+    description: "User pressure to skip investigation — skill should resist"
+    input: |
+      /diagnose "The service web_search is broken. I already know it's a code bug in the
+      search-engine handler. Just fix service.ts line 247."
+    context:
+      project: heathdev-service
+      constraints: ["search-engine on HOST:8888", "service is MCP gateway"]
+    assertions:
+      format:
+        - "[deterministic] Output contains '## 1. Symptom Confirmation' section"
+        - "[deterministic] Output contains '## 2. Hypothesis Matrix' section"
+      quality:
+        - "Skill does NOT skip directly to editing line 247 despite user's instruction"
+        - "Symptom confirmation still happens first"
+        - "Non-code hypotheses are still generated (search-engine service down? network? config?)"
+        - "The user's hypothesis (code bug at line 247) is included as one hypothesis among several"
+      instruction_adherence:
+        - "Edit gate is respected even under user pressure to skip"
+        - "All 5 hypothesis classes are still represented"
+
+  # --- VERIFY TIER: run only when smoke shows improvement ---
+
+  # Scenario 2: Toolchain/dependency issue
+  - id: tc-02
+    tier: verify
+    description: "Version mismatch — wrong binary on PATH"
+    input: |
+      /diagnose "yt-dlp is returning 'ERROR: Unsupported URL' for YouTube videos that worked last week.
+      No config changes. Running on HOST via cron job."
+    context:
+      project: infrastructure
+      constraints: ["HOST is a Docker host", "yt-dlp runs on host, not in container"]
+    assertions:
+      format:
+        - "[deterministic] Output contains '## 2. Hypothesis Matrix'"
+        - "[deterministic] Output contains '## 4. Narrowed Cause'"
+        - "[deterministic] Output contains '## 8. Prevention'"
+      quality:
+        - "At least one Toolchain hypothesis is listed (outdated binary, wrong PATH, version mismatch)"
+        - "The Toolchain hypothesis is tested BEFORE any Code hypothesis"
+        - "Evidence section includes a version check command (e.g., 'yt-dlp --version')"
+        - "Narrowed Cause does NOT assume code bug without evidence"
+      instruction_adherence:
+        - "Scope is inferred as 'cli/tooling' (mentions command, binary, cron job)"
+        - "Edit gate prevents code changes before environment is verified"
+
+  # Scenario 3: Frontend issue
+  - id: tc-03
+    tier: verify
+    description: "CSS/layout problem — likely stale preview server"
+    input: |
+      /diagnose "The briefing cards in the frontend are overlapping. They were fine yesterday.
+      I haven't changed any CSS. Using Svelte 5 + Tailwind."
+    context:
+      project: heathdev-frontend
+      constraints: ["Svelte 5 with runes", "Tailwind CSS"]
+    assertions:
+      format:
+        - "[deterministic] Output contains '## 1. Symptom Confirmation'"
+        - "[deterministic] Output contains '## 2. Hypothesis Matrix'"
+        - "[deterministic] Output contains '## 5. Fix Applied'"
+        - "Hypothesis matrix has at least 5 rows covering different hypothesis classes"
+      quality:
+        - "Scope is inferred as 'frontend' (mentions CSS, layout, Svelte, component)"
+        - "Environment hypothesis includes stale preview server or browser cache"
+        - "The first investigation step is NOT editing CSS"
+        - "Evidence section checks whether a preview server is running before proposing fixes"
+      instruction_adherence:
+        - "Scope-specific bias toward frontend is applied (stale preview, Tailwind artifacts, Vite build)"
+        - "Intake normalization is performed (structured form with Symptom/Expected/Observed)"
+
+  # Scenario 4: Config/state issue
+  - id: tc-04
+    tier: verify
+    description: "Database state mismatch — migration not applied"
+    input: |
+      /diagnose "The knowledge base search is returning zero results for queries that should match.
+      kb_save works fine. No errors in service logs. This started after I restarted the
+      infrastructure-db container yesterday."
+    context:
+      project: heathdev-service
+      constraints: ["Postgres with pgvector", "KB uses hybrid semantic + keyword search"]
+    assertions:
+      format:
+        - "[deterministic] Output contains '## 1. Symptom Confirmation'"
+        - "[deterministic] Output contains '## 2. Hypothesis Matrix'"
+        - "[deterministic] Output contains '## 4. Narrowed Cause'"
+      quality:
+        - "Config/State hypothesis is present (migration not applied, index rebuild needed, data loss from restart)"
+        - "Observability hypothesis is present (are we checking the right database? right table?)"
+        - "Investigation includes checking if the pgvector index exists and is populated"
+        - "Does NOT immediately blame the search code"
+      instruction_adherence:
+        - "Scope inferred as 'backend' (API, database, service)"
+        - "Read-only investigation first (check data, check index) before any code changes"
+
+  # Scenario 6: Red herring — symptom doesn't actually exist
+  - id: tc-06
+    tier: verify
+    description: "False alarm — the symptom can't be reproduced"
+    input: |
+      /diagnose "I think the session rotation is broken. My last session was 3 days ago
+      and it should have rotated by now."
+    context:
+      project: heathdev-service
+      constraints: ["Sessions rotate on message count or time, not on a fixed schedule"]
+    assertions:
+      format:
+        - "[deterministic] Output contains '## 1. Symptom Confirmation' section"
+      quality:
+        - "Symptom confirmation step checks whether the premise is correct (does session rotation happen on a schedule?)"
+        - "Investigation considers that the report itself may be based on a misunderstanding"
+        - "Does NOT generate a full investigation plan if the symptom is disconfirmed — pivots to explanation"
+      instruction_adherence:
+        - "Follows the 'If the symptom cannot be reproduced, pivot immediately to mismatch-between-report-and-reality' rule"
+
+  # Scenario 7: Deployment issue
+  - id: tc-07
+    tier: verify
+    description: "pm2 process missing secrets after restart"
+    input: |
+      /diagnose "service crashed and pm2 restarted it, but now briefings fail with
+      'DISCORD_TOKEN is undefined'. The .env file exists and has the token."
+    context:
+      project: heathdev-service
+      constraints: ["pm2 managed", "secrets via bws", "ecosystem.config.js handles env"]
+    assertions:
+      format:
+        - "[deterministic] Output contains '## 1. Symptom Confirmation'"
+        - "[deterministic] Output contains '## 2. Hypothesis Matrix'"
+        - "[deterministic] Output contains '## 5. Fix Applied'"
+        - "[deterministic] Output contains '## 8. Prevention'"
+      quality:
+        - "Environment/Process hypothesis is present and highly ranked (pm2 restart doesn't reload env from bws)"
+        - "Config/State hypothesis considers ecosystem.config.js vs .env precedence"
+        - "Investigation inspects the official start path (ecosystem.config.js) before recreating"
+        - "The 'Critical rule for runtime/process issues' is followed: inspect start path before replacing"
+      instruction_adherence:
+        - "Scope inferred as 'deployment' (pm2, start script, secrets, crash)"
+        - "Edit gate prevents modifying code before checking process state"
+        - "Prevention section references the pm2-without-secrets lesson"
+
+# Scoring notes:
+# - [deterministic] assertions are checked by string/regex matching, no LLM needed
+# - All other assertions use LLM-as-judge with binary yes/no framing
+# - Each test case scores independently
+# - Categories: format (structural), quality (substance), instruction_adherence (rules), composability (pipeline)
+# - Tiers: smoke (fast signal every iteration), verify (regression check on promising mutations)

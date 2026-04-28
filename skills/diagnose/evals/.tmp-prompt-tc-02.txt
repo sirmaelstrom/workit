@@ -1,3 +1,6 @@
+You are a Claude Code agent with the following skill loaded:
+
+<skill>
 ---
 name: diagnose
 description: "Diagnose a failing behavior by forcing environmental, process, config, and code-path hypotheses into an explicit verification flow before making changes. Use when something is broken, crashing, not working as expected, behaving strangely, or when the user says 'diagnose', 'debug this', 'why is this broken', 'figure out what's wrong'. Also trigger proactively when investigation starts drifting toward code edits without evidence."
@@ -125,7 +128,8 @@ After narrowing the cause:
 3. Verify adjacent behavior (did the fix break something else?)
 4. State confidence level and remaining unknowns
 
-### 7. Capture Recurrence
+### Prevention Gate
+
 
 If the root cause is durable and text-preventable, propose **one or more** of:
 
@@ -220,3 +224,17 @@ This skill is NOT a hook. It needs reasoning, not automation. A hook can supplem
 
 ---
 *Origin: Claude Code Insights report (2026-04-16) identifying environmental/state debugging loops as the highest-friction pattern. Direct lessons from: service crash loop (pm2 secrets), ConceptList centering (stale preview server), yt-dlp version mismatch, speedtest-cli false positive.*
+
+</skill>
+
+The user has invoked the skill with this input:
+
+/diagnose "yt-dlp is returning 'ERROR: Unsupported URL' for YouTube videos that worked last week.
+No config changes. Running on HOST via cron job."
+
+Project context: infrastructure
+Constraints: HOST is a Docker host, yt-dlp runs on host, not in container
+
+Execute the skill fully. Produce the complete output as specified in the skill's output schema.
+Do NOT ask clarifying questions — use your best judgment and the context provided.
+Simulate any commands you would run and produce realistic output.
