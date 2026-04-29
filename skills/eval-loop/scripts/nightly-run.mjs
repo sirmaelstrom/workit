@@ -26,6 +26,9 @@ const { values: args } = parseArgs({
     iterations: { type: 'string', default: '5' },
     timeout: { type: 'string', default: '10' },
     webhook: { type: 'string', default: '' },
+    'skill-file': { type: 'string', default: '' },   // cross-plugin: path to skill definition
+    'suite-file': { type: 'string', default: '' },   // cross-plugin: path to suite.yaml
+    'project-root': { type: 'string', default: '' }, // cross-plugin: target project root
   },
 });
 
@@ -39,7 +42,23 @@ if (!skillId) {
 async function getWebhookUrl() {
   if (args.webhook) return args.webhook;
 
-  // Try bws
+  // Check cached webhook files (same paths as claude-notify.js)
+  const { existsSync, readFileSync: readFs } = await import('node:fs');
+  const { join: joinPath } = await import('node:path');
+  const { homedir } = await import('node:os');
+  const home = homedir();
+
+  for (const filename of ['claude-discord-claudehook', 'claude-discord-webhook']) {
+    try {
+      const filePath = joinPath(home, '.cache', filename);
+      if (existsSync(filePath)) {
+        const url = readFs(filePath, 'utf8').trim();
+        if (url.startsWith('https://')) return url;
+      }
+    } catch {}
+  }
+
+  // Fallback: try bws
   try {
     const result = spawnSync('bws', ['secret', 'get', 'DISCORD_WEBHOOK_assistant', '--output', 'json'], {
       encoding: 'utf-8',
@@ -49,19 +68,6 @@ async function getWebhookUrl() {
     if (result.stdout) {
       const parsed = JSON.parse(result.stdout);
       if (parsed.value) return parsed.value;
-    }
-  } catch {}
-
-  // Try bws list fallback
-  try {
-    const result = spawnSync('bws', ['secret', 'list'], {
-      encoding: 'utf-8',
-      timeout: 15000,
-      windowsHide: true,
-    });
-    if (result.stdout) {
-      const match = result.stdout.match(/"key":\s*"DISCORD_WEBHOOK_assistant"[\s\S]*?"value":\s*"([^"]+)"/);
-      if (match) return match[1];
     }
   } catch {}
 
@@ -107,15 +113,26 @@ async function main() {
 
   const runScript = join(__dirname, 'run-eval.mjs');
 
-  const result = spawnSync('node', [
+  // Support cross-plugin runs via env vars or CLI args
+  const effectiveProjectRoot = args['project-root']
+    || process.env.EVAL_PROJECT_ROOT
+    || projectRoot;
+  const skillFileOverride = args['skill-file'] || process.env.EVAL_SKILL_FILE || '';
+  const suiteFileOverride = args['suite-file'] || process.env.EVAL_SUITE_FILE || '';
+
+  const runArgs = [
     runScript,
     '--skill', skillId,
     '--mode', 'loop',
     '--model', args.model,
     '--iterations', args.iterations,
     '--timeout', args.timeout,
-    '--project-root', projectRoot,
-  ], {
+    '--project-root', effectiveProjectRoot,
+    ...(skillFileOverride ? ['--skill-file', skillFileOverride] : []),
+    ...(suiteFileOverride ? ['--suite-file', suiteFileOverride] : []),
+  ];
+
+  const result = spawnSync('node', runArgs, {
     encoding: 'utf-8',
     timeout: 6 * 60 * 60 * 1000, // 6 hour max
     maxBuffer: 1024 * 1024 * 20,
@@ -127,10 +144,14 @@ async function main() {
   const output = result.stdout || '';
   const stderr = result.stderr || '';
 
-  // Write full log
-  const logPath = join(projectRoot, 'skills', skillId, 'evals', `nightly-${new Date().toISOString().slice(0, 10)}.log`);
-  const { writeFileSync } = await import('node:fs');
-  writeFileSync(logPath, `STDOUT:\n${output}\n\nSTDERR:\n${stderr}`);
+  // Write full log — use evals dir (works for both native and cross-plugin runs)
+  const evalsLogDir = suiteFileOverride
+    ? dirname(suiteFileOverride)
+    : join(effectiveProjectRoot, 'evals', skillId);
+  const { writeFileSync: writeLog, mkdirSync: mkLog } = await import('node:fs');
+  mkLog(evalsLogDir, { recursive: true });
+  const logPath = join(evalsLogDir, `nightly-${new Date().toISOString().slice(0, 10)}.log`);
+  writeLog(logPath, `STDOUT:\n${output}\n\nSTDERR:\n${stderr}`);
 
   if (result.status !== 0) {
     console.error(`Exit code: ${result.status}`);
