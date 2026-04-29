@@ -63,6 +63,27 @@ for (const [name, path] of [['SKILL.md', skillFile], ['suite.yaml', suiteFile], 
   }
 }
 
+// --- Resolve DB skill ID ---
+// The --skill arg may be a short name (e.g. "commit-push-pr") but the skills table
+// uses namespaced IDs (e.g. "cmd:git:commit-push-pr"). Look up by name first,
+// fall back to using the raw arg as the ID if no match found.
+let dbSkillId = skillId;
+{
+  const db = new DatabaseSync(dbFile);
+  try {
+    const row = db.prepare('SELECT id FROM skills WHERE name = ?').get(skillId);
+    if (row) {
+      dbSkillId = row.id;
+      if (dbSkillId !== skillId) {
+        console.log(`Resolved skill "${skillId}" -> DB id "${dbSkillId}"`);
+      }
+    }
+  } catch {
+    // skills table may not exist yet — that's fine, DB writes will just use the raw arg
+  }
+  db.close();
+}
+
 // --- Simple YAML parser (enough for our suite format) ---
 function parseYamlSuite(content) {
   // This is deliberately simple — handles our specific suite.yaml format.
@@ -611,7 +632,7 @@ async function main() {
         delta, iterations, duration_seconds, model, notes)
       VALUES (?, ?, 'baseline', NULL, ?, NULL, 0, ?, ?, ?)
     `).run(
-      skillId,
+      dbSkillId,
       new Date().toISOString(),
       parseFloat(scores.overallRate.toFixed(1)),
       scores.totalDuration,
@@ -625,7 +646,7 @@ async function main() {
       })
     );
     db.close();
-    console.log(`\nBaseline written to skills.db eval_runs table.`);
+    console.log(`\nBaseline written to skills.db eval_runs table (skill_id: ${dbSkillId}).`);
 
     // Write markdown report
     const reportPath = join(evalsOutputDir, `baseline-${new Date().toISOString().slice(0, 10)}.md`);
@@ -845,7 +866,7 @@ async function main() {
         delta, iterations, duration_seconds, model, notes)
       VALUES (?, ?, 'eval-loop', ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      skillId,
+      dbSkillId,
       new Date().toISOString(),
       parseFloat(baselineOverall.toFixed(1)),
       parseFloat(finalOverall.toFixed(1)),
@@ -863,7 +884,7 @@ async function main() {
       })
     );
     db.close();
-    console.log(`\nResults written to skills.db eval_runs table.`);
+    console.log(`\nResults written to skills.db eval_runs table (skill_id: ${dbSkillId}).`);
 
     // Write debrief report
     const reportDate = new Date().toISOString().slice(0, 10);
