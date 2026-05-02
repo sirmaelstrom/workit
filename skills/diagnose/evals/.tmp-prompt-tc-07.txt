@@ -128,8 +128,7 @@ After narrowing the cause:
 3. Verify adjacent behavior (did the fix break something else?)
 4. State confidence level and remaining unknowns
 
-### Prevention Gate
-
+### 7. Capture Recurrence
 
 If the root cause is durable and text-preventable, propose **one or more** of:
 
@@ -139,7 +138,7 @@ If the root cause is durable and text-preventable, propose **one or more** of:
 - **CORRECTIONS.md entry** — if it applies cross-project
 - **LESSONS.md entry** — if it's a new insight worth preserving
 
-Only propose what's warranted. Not every bug needs a correction entry.
+**This section is mandatory.** Either propose one or more items above, or write exactly: "None warranted — one-off issue unlikely to recur." Leaving the section blank or omitting it is not permitted.
 
 ## Output Schema
 

@@ -1,38 +1,4 @@
 {
   "description": "Eval loop queue — skills to process in priority order (ROI from audit)",
-  "queue": [
-    {
-      "skill": "code-cleanup",
-      "plugin": "sirmaelstroms-claude-code",
-      "skill_file": "commands/general/code-cleanup.md",
-      "db_id": "cmd:general:code-cleanup",
-      "iterations": 10,
-      "model": "sonnet"
-    },
-    {
-      "skill": "code-explain",
-      "plugin": "sirmaelstroms-claude-code",
-      "skill_file": "commands/general/code-explain.md",
-      "db_id": "cmd:general:code-explain",
-      "iterations": 10,
-      "model": "sonnet"
-    },
-    {
-      "skill": "lint",
-      "plugin": "sirmaelstroms-claude-code",
-      "skill_file": "commands/general/lint.md",
-      "db_id": "cmd:general:lint",
-      "iterations": 10,
-      "model": "sonnet"
-    },
-    {
-      "skill": "diagnose",
-      "plugin": "heathdev-workshop-plugin",
-      "skill_file": "skills/diagnose/SKILL.md",
-      "suite_file": "skills/diagnose/evals/suite.yaml",
-      "db_id": "diagnose",
-      "iterations": 10,
-      "model": "sonnet"
-    }
-  ]
+  "queue": []
 }

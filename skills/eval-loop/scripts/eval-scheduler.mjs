@@ -24,6 +24,7 @@ const QUEUE_FILE = join(__dirname, 'eval-queue.json');
 // scripts -> eval-loop -> skills -> heathdev-workshop-plugin -> projects
 const PROJECTS_ROOT = resolve(__dirname, '..', '..', '..', '..');
 const LAST_NOTIFY_FILE = join(__dirname, '.last-notify-timestamp');
+const service_URL = process.env.service_URL || 'http://localhost:PORT';
 
 // --- Webhook ---
 function getWebhookUrl(cliWebhook) {
@@ -66,6 +67,26 @@ async function notifyEmbed(webhookUrl, embed) {
     if (!resp.ok) console.warn(`Webhook returned ${resp.status}`);
   } catch (e) {
     console.warn(`Webhook error: ${e.message}`);
+  }
+}
+
+// --- service ledger ---
+async function writeLedger(content) {
+  try {
+    const resp = await fetch(`${service_URL}/api/ledger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event_type: 'note',
+        source: 'system',
+        user_id: 'justin',
+        payload: { content },
+      }),
+    });
+    if (!resp.ok) console.warn(`Ledger POST returned ${resp.status}`);
+    else console.log('Ledger note written to service');
+  } catch (e) {
+    console.warn(`Ledger POST failed: ${e.message}`);
   }
 }
 
@@ -296,6 +317,24 @@ async function checkAndNotify(webhookUrl) {
       });
     }
   }
+
+  // Write summary to service ledger
+  const lines = newRuns.map(run => {
+    const dur = run.duration_seconds ? `${(run.duration_seconds / 60).toFixed(0)}m` : '?';
+    let notes = {};
+    try { notes = JSON.parse(run.notes || '{}'); } catch {}
+    if (run.metric_name === 'eval-loop') {
+      const arrow = `${run.metric_before}% → ${run.metric_after}%`;
+      const delta = `${run.delta >= 0 ? '+' : ''}${run.delta}%`;
+      const kept = notes.kept ?? 0;
+      const reverted = notes.reverted ?? 0;
+      return `• ${run.skill_id}: ${arrow} (${delta}) — ${kept} kept, ${reverted} reverted, ${dur}`;
+    } else if (run.metric_name === 'baseline') {
+      return `• ${run.skill_id}: baseline ${run.metric_after}% — ${dur}`;
+    }
+    return `• ${run.skill_id}: ${run.metric_name} — ${run.metric_after}%`;
+  });
+  await writeLedger(`Eval loop results:\n${lines.join('\n')}`);
 
   // Update last notify timestamp
   const latestRun = newRuns[newRuns.length - 1];
