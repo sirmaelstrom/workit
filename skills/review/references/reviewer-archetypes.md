@@ -81,6 +81,29 @@ Each archetype defines: what the reviewer focuses on, when to deploy it (with di
 
 ---
 
+## Domain Modeling
+
+**Focus:** Value type encapsulation, state representation, type-driven impossibility of invalid states. Distinct from Service Architecture (shape of services) and TypeScript Patterns (idiomatic type usage) — Domain Modeling is about whether the *shape of the data itself* prevents bugs.
+
+**Deploy when:** New entity/model classes, DTOs with 4+ fields, enums or string-literal unions accompanied by nullable/optional properties, methods with 3+ primitive parameters of the same type, or factory/constructor functions for domain concepts. **Diff signals:** new class/record/struct definitions for domain entities, enum or union definitions paired with companion optional fields, constructors or factory functions taking multiple `string`/`number`/`decimal` parameters for domain concepts (currency, amount, email, userId, etc.), methods with `if (status === ...)` branches, `throw` inside public methods guarded by state checks, validation logic appearing at multiple call sites for the same concept.
+
+**Looks for:**
+- **Primitive obsession:** Domain concepts (money, currency, email, ID types, percentages, dates-with-meaning) passed as raw `string`/`number`/`decimal` instead of value objects or branded types. Forces validation duplication at every call site and allows accidental mixing (e.g., passing a `userId` where an `orgId` was expected).
+- **Data clumps:** 3+ values that always travel together (amount + currency + precision; lat + lng; street + city + zip; start + end + timezone) passed as separate parameters instead of a composed type. Each call site re-couples them; one missed update breaks the contract silently.
+- **Enum-as-state with optional companions:** An enum or union representing lifecycle state accompanied by nullable properties that are only valid in certain states (`status: 'pending' | 'completed'` + `completedAt?: Date` + `failureReason?: string`). Symptom: you can construct an object in a state that shouldn't exist (`status: 'pending'` with `completedAt` set). Fix: discriminated union of state-specific types (TS), sealed hierarchy (C# records / abstract class), enum with data (Rust).
+- **One class implementing several classes:** Methods with `if`/`switch` chains checking "which state am I in?" — each branch is a hidden type. The class exposes public methods that throw on invalid states instead of making invalid calls impossible by construction. Splitting into state-specific types eliminates the branches and the throws.
+- **Public methods that throw on state:** `execute()` exists on the type but throws if the object isn't in the right state. Prefer making the method only available on the type that represents the valid state — the call becomes unrepresentable in the wrong state, not just rejected at runtime.
+- **Validation scattered outside the type:** Validation logic for a domain concept (email format, amount > 0, currency code in allowlist) lives in callers, controllers, or service methods rather than in the type itself. The type should be impossible to construct in an invalid state — push validation into the constructor/factory and return a parsed result, not a raw value.
+- **Stringly-typed identifiers:** All ID types are `string`, allowing a `userId` to be passed where an `orderId` was expected without compiler complaint. Use branded/nominal types (`UserId & { __brand: 'UserId' }` in TS, newtypes in Rust, strongly-typed IDs in C#).
+
+**Key question:** "Could someone construct an instance of this type that represents an impossible business state, or call a method on it that's invalid for the current state? If yes, can the type itself prevent that?"
+
+**Severity guidance:** Enum-as-state with nullable companions is **high** (extensibility killer — every new state multiplies the validity matrix). Public methods that throw on state are **high** when the throw is reachable from a valid construction path. One-class-many-states with throwing methods is **high**. Primitive obsession on a domain concept used in 3+ places is **medium-high**. Data clumps in 2+ signatures are **medium**. Scattered validation is **medium**. Stringly-typed identifiers in a domain with multiple ID types is **medium-high**.
+
+**Context needed:** Diff + domain model / related types (Tier 1), or diff + call sites showing duplication or state-checking patterns (Tier 2+).
+
+---
+
 ## Spec Fidelity
 
 **Focus:** Does the code deliver what the spec or acceptance criteria specified?
@@ -317,12 +340,13 @@ Each archetype defines: what the reviewer focuses on, when to deploy it (with di
 3. **Code Quality** is the default broad reviewer — include unless 2+ narrow archetypes (Service Architecture, Data Integrity, TypeScript Patterns, etc.) cover the same surface, in which case skip to avoid duplication.
 4. **TypeScript Patterns** is mandatory when any `.ts`, `.tsx`, or `.svelte` file is in the diff. Even one changed TypeScript file → include.
 5. **Service Architecture** is mandatory for service decompositions or new service/application-layer files.
-6. **Data Integrity** is mandatory when migration files, schema definitions, or raw query changes are in the diff.
-7. **Dependency Management** is mandatory when any package manifest or lockfile is in the diff.
-8. **Integration** fires when the diff touches files in 2+ package or service trees simultaneously.
-9. **Async & Concurrency** is mandatory when async patterns are prominent in the diff — `async`/`await`, Promise chains, event emitters, worker threads, or Rust async runtime usage. Even a few async changes in error-sensitive paths warrant inclusion.
-10. **Pragmatist** is skipped on privacy, security hardening, or correctness work (those are inherently surface-area-heavy).
-11. **Fresh Eyes** is opt-in — usually deployed as a final-pass sanity check, not as part of the initial wave.
+6. **Domain Modeling** fires when the diff introduces or modifies domain entity/model types: new class/record/struct definitions for business concepts, DTOs with 4+ fields, enums or unions paired with nullable companion properties, factory/constructor functions taking multiple primitive parameters for the same concept, or methods that branch on state via `if`/`switch`. Strong overlap with TypeScript Patterns on TS code — when both fire, Domain Modeling owns the structural-shape concerns (impossibility of invalid states, value objects, discriminated unions for state) and TypeScript Patterns owns the idiomatic-usage concerns (`any`/`as`/generic discipline). Drop Code Quality when both Domain Modeling and TypeScript Patterns are selected on the same surface.
+7. **Data Integrity** is mandatory when migration files, schema definitions, or raw query changes are in the diff.
+8. **Dependency Management** is mandatory when any package manifest or lockfile is in the diff.
+9. **Integration** fires when the diff touches files in 2+ package or service trees simultaneously.
+10. **Async & Concurrency** is mandatory when async patterns are prominent in the diff — `async`/`await`, Promise chains, event emitters, worker threads, or Rust async runtime usage. Even a few async changes in error-sensitive paths warrant inclusion.
+11. **Pragmatist** is skipped on privacy, security hardening, or correctness work (those are inherently surface-area-heavy).
+12. **Fresh Eyes** is opt-in — usually deployed as a final-pass sanity check, not as part of the initial wave.
 
 **Anti-patterns:**
 - **Don't over-compose.** A 2-reviewer composition on a simple fix is correct (Security + Spec Fidelity is the smallest legal composition). Deploying 7 reviewers on a config change wastes tokens.
