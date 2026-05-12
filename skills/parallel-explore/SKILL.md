@@ -193,9 +193,13 @@ synthesis_mode: pick-one
 - Front-loading multiple LLM reasoning passes before any exploration launches
 - Skipping the cost check on Opus runs
 
+<supporting_info>
+
 ## Lineage
 
 Evolved from `design-alternatives` (Ousterhout's "Design It Twice" + Pocock's design-an-interface skill). Broadened from interface/module scope to any problem domain. Added mechanical dispatch separation, forced-divergence axes, normalized output schema, and synthesis discipline learned from the campaign era.
 
 ---
 *Source: design-alternatives skill, beam-search pattern from spec pipeline research, campaign-era lessons on merge-vs-pick and orchestration overhead.*
+
+</supporting_info>

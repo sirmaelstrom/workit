@@ -182,6 +182,8 @@ The report above IS the output. It goes to stdout (conversation) AND gets saved 
 - Auditing without writing to the database — the whole point is queryable, versioned data
 - Re-deriving the rubric instead of reading it from the reference file
 
+<supporting_info>
+
 ## Relationship to Other Skills
 
 - **eval-loop** — primary consumer; reads `karpathy_eligible` flag and assessment scores to select improvement targets
@@ -191,3 +193,5 @@ The report above IS the output. It goes to stdout (conversation) AND gets saved 
 
 ---
 *Origin: Karpathy Loop research briefing (2026-04-26), skills audit March 2026, rubric v1 synthesized from AI Maker, MindStudio, Galileo, and Murat Can Koylan frameworks.*
+
+</supporting_info>

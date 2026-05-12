@@ -214,9 +214,13 @@ environment_hints:
 - Proposing corrections for one-off issues that won't recur
 - Treating the matrix as a formality — if you're not updating it with results, you're not using it
 
+<supporting_info>
+
 ## Hook Interplay
 
 This skill is NOT a hook. It needs reasoning, not automation. A hook can supplement it — for example, a session-start hook that dumps process state, versions, and recent git changes as ambient context. But the diagnosis flow belongs in the skill.
 
 ---
 *Origin: Claude Code Insights report (2026-04-16) identifying environmental/state debugging loops as the highest-friction pattern. Direct lessons from: service crash loop (pm2 secrets), ConceptList centering (stale preview server), yt-dlp version mismatch, speedtest-cli false positive.*
+
+</supporting_info>

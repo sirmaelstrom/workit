@@ -133,7 +133,11 @@ If the user asks to execute multiple independent packages:
 
 For packages with dependencies — execute prerequisite packages first, verify, then proceed to dependent packages.
 
+<supporting_info>
+
 ## Relationship to Other Skills
 
 - **`/workshop`** and **`/spec`** create the spec artifacts that this skill executes against
 - **`/spec-validate`** checks artifact quality before execution — run it first if you're unsure about spec quality
+
+</supporting_info>
