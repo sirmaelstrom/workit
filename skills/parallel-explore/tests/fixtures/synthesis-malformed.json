@@ -1,0 +1,129 @@
+{
+  "schema_version": "1.0",
+  "run_slug": "design-the-authentication-boundary-20260513-145032",
+  "created_at": "2026-05-13T14:50:32Z",
+  "goal": "Design the authentication boundary for the new admin console",
+  "non_goals": [
+    "Redesigning the end-user authentication flow (separate product surface)",
+    "Implementing fine-grained RBAC beyond the initial admin/super-admin split"
+  ],
+  "hard_constraints": [
+    "Must integrate with the company's existing Okta tenant (no replacing the IdP)",
+    "Admin console must be inaccessible without authentication — no anonymous read paths"
+  ],
+  "evaluation_criteria": [
+    {
+      "id": "ec1",
+      "name": "Operational simplicity",
+      "weight": "high"
+    },
+    {
+      "id": "ec2",
+      "name": "Security surface area",
+      "weight": "high"
+    }
+  ],
+  "branches": [
+    {
+      "id": "branch-1",
+      "title": "Ingress-Layer Sidecar (OAuth2 Proxy)",
+      "thesis": "Enforce authentication at the ingress layer using an OAuth2 Proxy sidecar, so the admin console backend never sees unauthenticated requests.",
+      "proposed_design": "Deploy `oauth2-proxy` as a sidecar on the ingress controller.\n\n- oauth2-proxy container in the ingress pod\n- Kubernetes Ingress resource with auth-url annotation\n- A Kubernetes Secret holding the Okta client credentials",
+      "why_this_wins": "The authentication concern is fully pushed to infrastructure.",
+      "tradeoffs": "The sidecar adds latency per request for the auth check.",
+      "failure_modes": "If the Okta JWKS endpoint is unreachable and the proxy's cache is cold, authentication may fail.",
+      "operational_complexity": {
+        "score": 2,
+        "justification": "Well-understood pattern; oauth2-proxy is battle-tested."
+      },
+      "verification_plan": "Deploy the sidecar in a staging namespace and confirm unauthenticated requests return 302.",
+      "first_implementation_slice": "Stand up oauth2-proxy in the staging namespace with Okta OIDC config.",
+      "rejects_from_others": "Branch 2 argues a dedicated gateway is more future-proof. Rejected for a single-service app."
+    },
+    {
+      "id": "branch-2",
+      "title": "Dedicated API Gateway with JWT Verification",
+      "thesis": "Route all admin console traffic through a dedicated API Gateway that verifies Okta-issued JWTs.",
+      "proposed_design": "Deploy Kong in front of the admin console.\n\n- Gateway instance with a JWT plugin configured against Okta's JWKS endpoint\n- A Consumer in Kong representing the admin console\n- A gateway-level rate limiter and IP allowlist",
+      "why_this_wins": "The gateway becomes the single auth enforcement point for all internal tools.",
+      "tradeoffs": "The gateway is a new piece of infrastructure that the team must operate and monitor.",
+      "failure_modes": "Gateway misconfiguration silently blocks all admin access with no fallback path.",
+      "operational_complexity": {
+        "score": 4,
+        "justification": "Kong adds a stateful, high-availability infrastructure component."
+      },
+      "verification_plan": "Issue a valid Okta JWT and confirm the gateway proxies the request to the admin console.",
+      "first_implementation_slice": "Deploy Kong in DB-less mode in the staging cluster with a single JWT plugin.",
+      "rejects_from_others": "Branch 1 is simpler for a single service but does not generalize to future internal tools."
+    },
+    {
+      "id": "branch-3",
+      "title": "Application-Layer Middleware with Okta SDK",
+      "thesis": "Implement authentication directly in the SvelteKit application layer using the Okta Node.js SDK and server hooks.",
+      "proposed_design": "Add the @okta/okta-auth-js library to the admin console's dependencies.\n\n- src/hooks.server.ts with the handle function\n- An Okta OIDC callback route at /auth/callback\n- A src/lib/server/auth.ts module with requireAuth and requireSuperAdmin helpers",
+      "why_this_wins": "Developers have full visibility into and control over the auth flow.",
+      "tradeoffs": "Authentication is now a first-class application concern that must be maintained and audited.",
+      "failure_modes": "A developer adds a new route group and forgets the auth layout guard — the route is publicly accessible.",
+      "operational_complexity": {
+        "score": 3,
+        "justification": "Auth logic lives in application code; no additional infra beyond the existing Postgres instance."
+      },
+      "verification_plan": "Run the SvelteKit dev server with a real Okta OIDC flow and confirm login redirects.",
+      "first_implementation_slice": "Implement the handle hook in hooks.server.ts with a mock user injection for dev mode.",
+      "rejects_from_others": "Branches 1 and 2 push auth to infrastructure, which this branch rejects in favor of developer control."
+    }
+  ],
+  "comparison_matrix": [
+    {
+      "criterion_id": "ec1",
+      "criterion_label": "Operational simplicity",
+      "cells": [
+        {
+          "branch_id": "branch-1",
+          "score": 4,
+          "characterization": "Single well-understood sidecar; Redis adds minor overhead"
+        },
+        {
+          "branch_id": "branch-2",
+          "score": 2,
+          "characterization": "Gateway is powerful but adds significant ops surface area"
+        },
+        {
+          "branch_id": "branch-3",
+          "score": 3,
+          "characterization": "Auth in app code is familiar but requires ongoing discipline"
+        }
+      ]
+    },
+    {
+      "criterion_id": "ec2",
+      "criterion_label": "Security surface area",
+      "cells": [
+        {
+          "branch_id": "branch-1",
+          "score": 5,
+          "characterization": "App never sees unauthenticated traffic; smallest custom surface"
+        },
+        {
+          "branch_id": "branch-2",
+          "score": 1,
+          "characterization": "Gateway is well-audited but adds configuration risk"
+        },
+        {
+          "branch_id": "branch-3",
+          "score": 2,
+          "characterization": "Custom auth code is highest-risk; one missed guard exposes a route"
+        }
+      ]
+    }
+  ],
+  "branches_agree": "All three branches agree that Okta is the identity provider and that OIDC is the correct protocol.",
+  "branches_disagree": "The core disagreement is about where authentication responsibility should live: at the infrastructure boundary or inside the application.",
+  "hidden_assumptions": "All branches assume the Okta tenant is reliably available during authentication flows. Branch 2 assumes **future internal tools** will be built and benefit from the gateway investment. Branch 3 assumes `@okta/okta-auth-js` is stable and long-term-supported.",
+  "recommendation": {
+    "branch_id": "branch-99",
+    "rationale": "Branch 1 (Ingress-Layer Sidecar) is the right choice for the current context. The sidecar approach achieves the required security guarantee with the smallest infrastructure change."
+  },
+  "uncertainty": "The primary uncertainty is whether the current Kubernetes ingress controller supports the nginx auth-url annotation pattern.",
+  "next_action": "Confirm the Kubernetes ingress controller type and version with the platform team."
+}
