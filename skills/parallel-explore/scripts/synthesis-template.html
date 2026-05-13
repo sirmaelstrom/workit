@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Parallel-Explore Synthesis: {{goal}}</title>
+  <style>
+    /* System fonts only (MN4). No external assets (M2). */
+    :root {
+      --fg: #1a1a1a;
+      --muted: #555;
+      --border: #d0d0d0;
+      --bg: #fafafa;
+      --tile-bg: #ffffff;
+      --rec: #4ade80;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg);
+      background: var(--bg);
+      margin: 0;
+      padding: 2rem;
+      line-height: 1.55;
+      max-width: 1400px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 1rem; margin-bottom: 1.5rem; }
+    h1 { margin: 0 0 .25rem; font-size: 1.75rem; }
+    h2 { margin-top: 2rem; font-size: 1.25rem; border-bottom: 1px solid var(--border); padding-bottom: .25rem; }
+    h3 { margin: 0 0 .5rem; font-size: 1.05rem; }
+    .meta { color: var(--muted); font-size: .9rem; margin: 0; }
+    code { background: #eee; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
+    pre code { display: block; padding: .5rem; overflow-x: auto; }
+    section { margin-bottom: 1.5rem; }
+    ul { margin: .25rem 0 .75rem 1.25rem; padding: 0; }
+    li { margin: .15rem 0; }
+
+    .branch-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+      gap: 1rem;
+    }
+    .branch-tile {
+      background: var(--tile-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem;
+    }
+    .branch-tile.recommended { border: 3px solid #4ade80; }
+    .branch-tile header { border-bottom: none; padding: 0; margin-bottom: .5rem; }
+    .branch-tile .thesis { color: var(--muted); font-style: italic; margin: .25rem 0 .75rem; }
+    .rec-label {
+      display: inline-block;
+      background: #4ade80;
+      color: #0a3a17;
+      padding: .15rem .5rem;
+      border-radius: 3px;
+      font-size: .8rem;
+      font-weight: 600;
+      margin-bottom: .5rem;
+    }
+    .pick-branch-btn {
+      display: block;
+      width: 100%;
+      padding: .5rem .75rem;
+      margin: .5rem 0;
+      background: #1a1a1a;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: .9rem;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .pick-branch-btn:hover { background: #333; }
+    details.branch-detail { margin: .35rem 0; border-top: 1px solid #eee; padding-top: .35rem; }
+    details.branch-detail summary { cursor: pointer; font-weight: 600; font-size: .9rem; }
+    details.branch-detail[open] summary { margin-bottom: .35rem; }
+    .op-complexity { margin: .75rem 0 0; font-size: .9rem; color: var(--muted); }
+
+    .matrix-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: .5rem 0;
+    }
+    .matrix-table th, .matrix-table td {
+      border: 1px solid var(--border);
+      padding: .5rem;
+      text-align: left;
+      vertical-align: top;
+      font-size: .9rem;
+    }
+    .matrix-table th { background: #eee; }
+    .matrix-table th.recommended-col { background: rgba(74, 222, 128, 0.25); }
+    .matrix-col.recommended-col { background: rgba(74, 222, 128, 0.10); }
+    .matrix-cell.score-1 { background: #fca5a5; }
+    .matrix-cell.score-2 { background: #fdba74; }
+    .matrix-cell.score-3 { background: #fde68a; }
+    .matrix-cell.score-4 { background: #86efac; }
+    .matrix-cell.score-5 { background: #4ade80; }
+
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: #1a1a1a;
+      color: #fff;
+      padding: .5rem 1rem;
+      border-radius: 4px;
+      font-size: .9rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,.2);
+    }
+    .toast[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{{goal}}</h1>
+    <p class="meta">Run: <code>{{run_slug}}</code> &middot; {{created_at}}</p>
+  </header>
+
+  <section class="setup">
+    <h2>Non-goals</h2>
+    {{non_goals_list}}
+    <h2>Hard constraints</h2>
+    {{hard_constraints_list}}
+    <h2>Evaluation criteria</h2>
+    {{evaluation_criteria_list}}
+  </section>
+
+  <section class="branches">
+    <h2>Branches</h2>
+    <div class="branch-grid">
+      {{branch_tiles}}
+    </div>
+  </section>
+
+  <section class="matrix">
+    <h2>Comparison matrix</h2>
+    {{comparison_matrix_table}}
+  </section>
+
+  <section class="synthesis-prose">
+    <h2>Where branches agree</h2>
+    {{branches_agree_html}}
+    <h2>Where branches disagree</h2>
+    {{branches_disagree_html}}
+    <h2>Hidden assumptions</h2>
+    {{hidden_assumptions_html}}
+  </section>
+
+  <section class="recommendation">
+    <h2>Recommendation: &#9733; {{recommended_branch_title}}</h2>
+    {{recommendation_rationale_html}}
+  </section>
+
+  <section class="closing">
+    <h2>Uncertainty</h2>
+    {{uncertainty_html}}
+    <h2>Next action</h2>
+    {{next_action_html}}
+  </section>
+
+  <div id="toast" class="toast" hidden>Copied</div>
+
+  <script>
+    document.querySelectorAll('.pick-branch-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var prompt = btn.getAttribute('data-pick-prompt');
+        try {
+          await navigator.clipboard.writeText(prompt);
+          var toast = document.getElementById('toast');
+          toast.hidden = false;
+          setTimeout(function () { toast.hidden = true; }, 1500);
+        } catch (e) {
+          alert('Clipboard write failed: ' + e.message);
+        }
+      });
+    });
+  </script>
+</body>
+</html>
