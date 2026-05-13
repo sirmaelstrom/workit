@@ -1,0 +1,210 @@
+{
+  "schema_version": "1.0",
+  "run_slug": "design-the-authentication-boundary-20260513-145032",
+  "created_at": "2026-05-13T14:50:32Z",
+  "goal": "Design the authentication boundary for the new admin console",
+  "non_goals": [
+    "Redesigning the end-user authentication flow (separate product surface)",
+    "Implementing fine-grained RBAC beyond the initial admin/super-admin split",
+    "Building a self-service identity provider — we consume an existing IdP"
+  ],
+  "hard_constraints": [
+    "Must integrate with the company's existing Okta tenant (no replacing the IdP)",
+    "Admin console must be inaccessible without authentication — no anonymous read paths",
+    "Session tokens must be rotatable without a forced logout (rolling sessions)",
+    "Deployment target is a Kubernetes cluster with an ingress controller that terminates TLS"
+  ],
+  "evaluation_criteria": [
+    {
+      "id": "ec1",
+      "name": "Operational simplicity",
+      "weight": "high"
+    },
+    {
+      "id": "ec2",
+      "name": "Security surface area",
+      "weight": "high"
+    },
+    {
+      "id": "ec3",
+      "name": "Developer onboarding friction",
+      "weight": "medium"
+    },
+    {
+      "id": "ec4",
+      "name": "Rollback safety",
+      "weight": "medium"
+    },
+    {
+      "id": "ec5",
+      "name": "Audit log completeness",
+      "weight": "low"
+    }
+  ],
+  "branches": [
+    {
+      "id": "branch-1",
+      "title": "Ingress-Layer Sidecar (OAuth2 Proxy)",
+      "thesis": "Enforce authentication at the ingress layer using an OAuth2 Proxy sidecar, so the admin console backend never sees unauthenticated requests.",
+      "proposed_design": "Deploy `oauth2-proxy` as a sidecar on the ingress controller, configured against the Okta OIDC endpoint. The ingress forwards only validated requests downstream; the admin console receives a trusted `X-Auth-User` header injected by the proxy.\n\nKey components:\n\n- `oauth2-proxy` container in the ingress pod, sharing the network namespace\n- Kubernetes `Ingress` resource with `nginx.ingress.kubernetes.io/auth-url` annotation pointing to the proxy\n- A Kubernetes `Secret` holding the Okta client credentials, mounted into the sidecar\n- A `ConfigMap` defining the allowed email domains and group membership claims\n- Rolling session support via Redis-backed cookie store (one Redis instance, no cluster needed at this scale)\n\nThe admin console backend is a thin SvelteKit SSR app. It trusts the `X-Auth-User` header from the proxy and reads `X-Auth-Groups` to gate super-admin routes. No session management code lives in the application layer.",
+      "why_this_wins": "The authentication concern is fully pushed to infrastructure. The admin console codebase contains zero authentication logic — no JWT libraries, no session stores, no middleware chains to audit. A new developer joining the team sees a normal SvelteKit app; the auth boundary is a sysadmin concern documented in the cluster config, not in the application repo.\n\nSecurity posture is strong: unauthenticated traffic never reaches the application process. The attack surface is confined to the well-audited `oauth2-proxy` codebase, not a bespoke auth stack.",
+      "tradeoffs": "The sidecar adds latency (~2–5ms per request for the auth check against Okta's JWKS endpoint, cached). The admin console loses the ability to inspect raw session data — it only sees headers. If a developer runs the app locally without the proxy, the `X-Auth-User` header is absent, which means local development requires either a fake-auth middleware or running `oauth2-proxy` locally as well.\n\nThe Redis dependency for rolling sessions is real operational overhead, though a single non-clustered Redis instance is low-stakes.",
+      "failure_modes": "If the Okta JWKS endpoint is unreachable and the proxy's cache is cold, authentication fails open or closed depending on the `--skip-provider-button` setting — operators must test this explicitly. Redis failure causes all sessions to be invalidated (users re-authenticate), which is acceptable but disruptive during a maintenance window.",
+      "operational_complexity": {
+        "score": 2,
+        "justification": "Well-understood pattern; oauth2-proxy is battle-tested. Redis adds one stateful component to manage."
+      },
+      "verification_plan": "1. Deploy the sidecar in a staging namespace and confirm unauthenticated requests return 302 to Okta.\n2. Confirm authenticated requests reach the admin console with correct `X-Auth-User` and `X-Auth-Groups` headers.\n3. Simulate Redis failure: confirm sessions are invalidated gracefully, no 500 errors.\n4. Simulate Okta JWKS endpoint timeout: confirm proxy behavior matches documented fail-closed policy.",
+      "first_implementation_slice": "Stand up `oauth2-proxy` in the staging namespace with Okta OIDC config pointing to a test Okta application. Wire up a single route (`/admin/health`) and confirm a curl to that route without a cookie gets a 302. This proves the proxy-ingress integration works before touching the admin console code at all.",
+      "rejects_from_others": "Branch 2 (API Gateway) argues that a dedicated gateway is more future-proof for multi-service auth. Rejected here because the admin console is a single-tenant, single-service app — introducing a gateway for one service is over-engineering. The ingress sidecar achieves the same guarantee with less operational surface. Branch 3 (App-Layer middleware) argues that header-based trust is fragile if the header can be spoofed. Mitigated: the ingress controller drops any `X-Auth-User` header in incoming requests before forwarding, so only the proxy can inject them."
+    },
+    {
+      "id": "branch-2",
+      "title": "Dedicated API Gateway with JWT Verification",
+      "thesis": "Route all admin console traffic through a dedicated API Gateway that verifies Okta-issued JWTs, providing a single reusable auth enforcement point for current and future internal tools.",
+      "proposed_design": "Deploy Kong (or AWS API Gateway, depending on cloud provider) in front of the admin console. The gateway is configured with the Okta JWKS URI and enforces JWT verification on every request before proxying to the upstream service.\n\nKey components:\n\n- Gateway instance (Kong Ingress Controller or managed API Gateway service) with a JWT plugin configured against Okta's JWKS endpoint\n- A `Consumer` in Kong representing the admin console, with allowed JWT issuers restricted to the Okta tenant\n- A gateway-level rate limiter and IP allowlist for the corporate VPN CIDR\n- The admin console SvelteKit app receives the decoded JWT payload in an `X-Jwt-Payload` header (base64-encoded JSON)\n- A thin parsing utility in the admin console reads role claims from the header for super-admin gating\n\nRolling sessions are handled by Okta's OIDC refresh token flow; the gateway validates the access token on each request and the browser handles token refresh via the OIDC client library. No server-side session store required.",
+      "why_this_wins": "The gateway becomes the single auth enforcement point for all internal tools. When the team builds the next internal service (analytics dashboard, ops runbook viewer), auth is already solved — add a Kong Consumer and route, no new auth work. This amortizes the gateway operational cost across future services.\n\nEliminating the server-side session store (no Redis) reduces stateful components. Okta's refresh token flow is well-understood and library-supported.",
+      "tradeoffs": "The gateway is a new piece of infrastructure that the team must operate, monitor, and upgrade. If the gateway goes down, all internal tools go down simultaneously — it is a single point of failure for the entire internal tooling surface. Kong has more operational complexity than oauth2-proxy; it requires its own database (Postgres) in DB-mode, or careful configuration in DB-less mode.\n\nThe JWT payload header approach means the admin console must trust and parse the header, reintroducing a small slice of auth logic at the app layer (claim extraction). Developers must understand JWT claim structure to add new permission checks.",
+      "failure_modes": "Gateway misconfiguration (wrong JWKS URI, expired certificates) silently blocks all admin access — there is no fallback path. Because the gateway is shared infrastructure, a botched Kong upgrade affects all services behind it simultaneously. The DB-less Kong config can drift from the desired state if applied via GitOps pipelines that have merge conflicts.",
+      "operational_complexity": {
+        "score": 4,
+        "justification": "Kong (or equivalent) adds a stateful, high-availability infrastructure component with its own upgrade and config management lifecycle."
+      },
+      "verification_plan": "1. Issue a valid Okta JWT and confirm the gateway proxies the request to the admin console.\n2. Issue an expired JWT: confirm 401 with a `WWW-Authenticate` header.\n3. Issue a JWT from a different Okta tenant: confirm 401.\n4. Simulate gateway downtime: confirm the blast radius is documented and a runbook exists for failover.\n5. Confirm the decoded JWT payload reaches the admin console in the `X-Jwt-Payload` header with correct claims.",
+      "first_implementation_slice": "Deploy Kong in DB-less mode in the staging cluster. Configure a single JWT plugin against the Okta JWKS endpoint. Route `/admin/health` through the gateway. Verify with `curl -H 'Authorization: Bearer <valid_jwt>'` returns 200, and without the header returns 401. Do not touch the admin console code.",
+      "rejects_from_others": "Branch 1 (Ingress Sidecar) is simpler for a single service, but it does not generalize. Rejected as the primary choice because the incremental cost of a gateway pays dividends when the internal tooling surface grows. Branch 3 (App-Layer middleware) puts auth logic in application code, which means every new internal tool needs its own auth implementation. Rejected as inconsistent with a \"solve auth once\" organizational goal."
+    },
+    {
+      "id": "branch-3",
+      "title": "Application-Layer Middleware with Okta SDK",
+      "thesis": "Implement authentication directly in the SvelteKit application layer using the Okta Node.js SDK and server hooks, giving developers full control over the session lifecycle and permission model.",
+      "proposed_design": "Add the `@okta/okta-auth-js` library to the admin console's dependencies. Implement a SvelteKit `handle` hook that intercepts every server-side request, validates the session cookie (or Authorization header for API routes), and redirects to Okta OIDC if unauthenticated.\n\nKey components:\n\n- `src/hooks.server.ts` — the `handle` function validates sessions and populates `event.locals.user`\n- An Okta OIDC callback route (`/auth/callback`) that exchanges the authorization code for tokens and sets a signed, HttpOnly session cookie\n- A `src/lib/server/auth.ts` module with `requireAuth`, `requireSuperAdmin`, and `invalidateSession` helpers\n- Session storage: encrypted cookie with a 1-hour expiry; a refresh token stored server-side in a Postgres table (`admin_sessions`) for rolling renewal\n- A `src/routes/(authed)/+layout.server.ts` that guards all admin routes by calling `requireAuth`\n\nThe ingress layer is unmodified — it does not participate in authentication. TLS termination continues to happen at the ingress, but auth is purely an application concern.",
+      "why_this_wins": "Developers have full visibility into and control over the auth flow. Permission checks are co-located with the feature code, making it straightforward to add nuanced access rules (e.g., \"only super-admins can delete users, but all admins can view audit logs\"). The SvelteKit `locals` pattern is idiomatic — any SvelteKit developer immediately understands how it works.\n\nLocal development is frictionless: mock the `handle` hook in `dev` mode to inject a test user, and the entire auth flow is bypassable without running any external services.",
+      "tradeoffs": "Authentication is now a first-class application concern — it must be maintained, tested, and audited as part of the codebase. Library upgrades (`@okta/okta-auth-js`) introduce dependency risk. The Postgres `admin_sessions` table adds a migration dependency; rolling it back requires coordinated DB and app changes.\n\nThe authentication code is custom and less battle-tested than a dedicated proxy. A subtle bug in `hooks.server.ts` (e.g., forgetting to call `requireAuth` on a new route group) could silently expose a route. This requires discipline and mandatory code review for any change to the auth module.",
+      "failure_modes": "A developer adds a new route group and forgets to add the auth layout guard — the route is publicly accessible until caught in review. The Okta SDK has historically had breaking changes between major versions; upgrading is a non-trivial effort. If the `admin_sessions` table becomes unavailable (Postgres restart), all admin users are logged out simultaneously.",
+      "operational_complexity": {
+        "score": 3,
+        "justification": "Auth logic lives in application code; requires developer discipline and careful testing, but no additional infra components beyond the existing Postgres instance."
+      },
+      "verification_plan": "1. Run the SvelteKit dev server with a real Okta OIDC flow and confirm login redirects, token exchange, and session cookie are all correct.\n2. Access a protected route without a session cookie: confirm 302 to Okta.\n3. Access a super-admin route with an admin (non-super-admin) session: confirm 403.\n4. Expire the session cookie manually in browser devtools: confirm the user is redirected to re-authenticate.\n5. Run the test suite with the mock `handle` hook: confirm all route tests pass without a real Okta connection.",
+      "first_implementation_slice": "Implement the `handle` hook in `hooks.server.ts` with a mock user injection for dev mode. Add the auth callback route. Do not add any Postgres session storage yet — use an in-memory map for the first slice to prove the OIDC flow works end-to-end before adding the persistence layer.",
+      "rejects_from_others": "Branch 1 (Ingress Sidecar) and Branch 2 (API Gateway) both push auth to infrastructure, which this branch explicitly rejects. The argument: infrastructure auth solutions are opaque to developers — when a permission check fails, the developer cannot easily add a breakpoint or log statement. Application-layer auth trades infrastructure simplicity for developer control and debuggability. For a team that will frequently iterate on permission models, that trade is worth it."
+    }
+  ],
+  "comparison_matrix": [
+    {
+      "criterion_id": "ec1",
+      "criterion_label": "Operational simplicity",
+      "cells": [
+        {
+          "branch_id": "branch-1",
+          "score": 4,
+          "characterization": "Single well-understood sidecar; Redis adds minor overhead"
+        },
+        {
+          "branch_id": "branch-2",
+          "score": 2,
+          "characterization": "Gateway is powerful but adds significant ops surface area"
+        },
+        {
+          "branch_id": "branch-3",
+          "score": 3,
+          "characterization": "Auth in app code is familiar but requires ongoing discipline"
+        }
+      ]
+    },
+    {
+      "criterion_id": "ec2",
+      "criterion_label": "Security surface area",
+      "cells": [
+        {
+          "branch_id": "branch-1",
+          "score": 5,
+          "characterization": "App never sees unauthenticated traffic; smallest custom surface"
+        },
+        {
+          "branch_id": "branch-2",
+          "score": 4,
+          "characterization": "Gateway is well-audited; small JWT parsing concern at app layer"
+        },
+        {
+          "branch_id": "branch-3",
+          "score": 2,
+          "characterization": "Custom auth code is highest-risk; one missed guard exposes a route"
+        }
+      ]
+    },
+    {
+      "criterion_id": "ec3",
+      "criterion_label": "Developer onboarding friction",
+      "cells": [
+        {
+          "branch_id": "branch-1",
+          "score": 3,
+          "characterization": "Local dev requires proxy or fake-header middleware"
+        },
+        {
+          "branch_id": "branch-2",
+          "score": 2,
+          "characterization": "Gateway unfamiliar to most app devs; JWT claim parsing adds complexity"
+        },
+        {
+          "branch_id": "branch-3",
+          "score": 5,
+          "characterization": "Idiomatic SvelteKit pattern; mockable in dev mode with one env flag"
+        }
+      ]
+    },
+    {
+      "criterion_id": "ec4",
+      "criterion_label": "Rollback safety",
+      "cells": [
+        {
+          "branch_id": "branch-1",
+          "score": 4,
+          "characterization": "Proxy config rollback is a sidecar redeploy; no app changes"
+        },
+        {
+          "branch_id": "branch-2",
+          "score": 3,
+          "characterization": "Gateway config rollback possible but may affect other consumers"
+        },
+        {
+          "branch_id": "branch-3",
+          "score": 1,
+          "characterization": "Auth code rollback requires coordinated DB migration revert"
+        }
+      ]
+    },
+    {
+      "criterion_id": "ec5",
+      "criterion_label": "Audit log completeness",
+      "cells": [
+        {
+          "branch_id": "branch-1",
+          "score": 3,
+          "characterization": "Proxy logs auth events; app-level actions need separate instrumentation"
+        },
+        {
+          "branch_id": "branch-2",
+          "score": 4,
+          "characterization": "Gateway provides centralized auth audit across all services"
+        },
+        {
+          "branch_id": "branch-3",
+          "score": 3,
+          "characterization": "App has full control over logging but must instrument everything manually"
+        }
+      ]
+    }
+  ],
+  "branches_agree": "All three branches agree that Okta is the identity provider and that OIDC is the correct protocol — there is no controversy about the IdP choice. All branches also agree that the admin console must be fully inauthenticated-traffic-free: the disagreement is about *where* that enforcement happens (infra vs. app), not *whether* it should happen.\n\nAll branches agree that rolling sessions are a requirement and that some form of token refresh must be supported, though they differ on where refresh logic lives.",
+  "branches_disagree": "The core disagreement is about **where authentication responsibility should live**: at the infrastructure boundary (Branches 1 and 2) or inside the application (Branch 3).\n\nA secondary disagreement is about the appropriate scope of the auth enforcement point: Branch 1 scopes it narrowly to the admin console; Branch 2 argues for a shared gateway that serves multiple internal tools; Branch 3 argues that application-layer control is worth the added developer responsibility.\n\nBranches 1 and 2 both push auth to infrastructure but disagree on how much infrastructure: a single-purpose sidecar vs. a general-purpose gateway.",
+  "hidden_assumptions": "All branches assume the Okta tenant is reliably available during authentication flows. If Okta has an outage, Branches 1 and 2 will fail loudly (all admin access blocked) while Branch 3 could theoretically serve cached sessions — but none of the branches explicitly design for `offline_access` or session survival during IdP outages.\n\nBranch 2 assumes that **future internal tools will be built** and will benefit from the gateway investment. If the admin console remains the only internal tool for 18+ months, the gateway's operational overhead is never amortized. This is an organizational assumption, not a technical one, and should be validated against the product roadmap before choosing Branch 2.\n\nBranch 3 assumes that `@okta/okta-auth-js` is a `stable, long-term-supported` library. The Okta SDK has had significant breaking changes between v2 and v3. Anyone choosing Branch 3 should pin the SDK version and budget time for library upgrade work.\n\nAll branches implicitly assume the Kubernetes ingress controller supports the required annotation or plugin model. If the cluster uses a non-standard ingress (e.g., Traefik without the OAuth2 plugin), Branch 1's implementation changes materially. Verify ingress controller capabilities before committing.\n\nThe `comparison_matrix` scores treat all `evaluation_criteria` as independent, but **security surface area** and **rollback safety** are correlated: a simpler security model (Branch 1) also tends to have safer rollback characteristics. The matrix doesn't capture this correlation.",
+  "recommendation": {
+    "branch_id": "branch-1",
+    "rationale": "Branch 1 (Ingress-Layer Sidecar) is the right choice for the current context: a single admin console, a team that primarily writes application code, and an existing Okta deployment. The sidecar approach is the smallest possible change to the infrastructure that achieves the required security guarantee — unauthenticated traffic never reaches the application process.\n\nThe developer onboarding friction (local dev requires a fake-auth mechanism) is real but solvable with a well-documented `LOCAL_AUTH_BYPASS=1` environment variable that injects a test user in development mode — approximately one day of implementation work.\n\nBranch 2 would be the right choice if the team were simultaneously building two or more internal tools. Re-evaluate when the second internal service is scoped. Branch 3 is appropriate for teams that need fine-grained, frequently-changing permission models — but for the initial admin/super-admin split described in the constraints, it introduces more risk (custom auth code) than the problem warrants.\n\nRecommend proceeding with Branch 1. First implementation slice: deploy `oauth2-proxy` in staging with Okta OIDC, wire up the `/admin/health` route, and validate the sidecar integration before writing any application code."
+  },
+  "uncertainty": "The primary uncertainty is whether the current Kubernetes ingress controller (version and type not confirmed) supports the `nginx.ingress.kubernetes.io/auth-url` annotation pattern that Branch 1 relies on. If the cluster uses Traefik or a cloud-native ingress without middleware plugin support, Branch 1's implementation will need to use a different sidecar injection mechanism (e.g., an Envoy filter or a dedicated auth service).\n\nSecondary uncertainty: the scale of the Redis instance needed for Branch 1's rolling sessions. If admin console usage is low (fewer than 50 concurrent sessions), a single-instance Redis is trivially adequate. If usage is higher than expected, a Redis Sentinel setup may be required. This should be validated against the expected user count before going to production.",
+  "next_action": "1. Confirm the Kubernetes ingress controller type and version with the platform team — verify `nginx.ingress.kubernetes.io/auth-url` annotation support or identify the equivalent mechanism.\n2. If confirmed: stand up Branch 1's first implementation slice in staging (oauth2-proxy + Okta test app + single protected route). Target: one week.\n3. Document the local development `X-Auth-User` header bypass mechanism so developers can run the admin console without the sidecar.\n4. Schedule a re-evaluation of Branch 2 when the next internal tool is scoped — add a card to the product backlog."
+}
