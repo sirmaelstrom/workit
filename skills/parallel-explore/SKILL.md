@@ -104,11 +104,41 @@ If the user hasn't specified, default to Sonnet.
 
 ### 5. Mechanical Dispatch
 
-Write branch prompts to temp files, then call the launcher:
+#### Run slug
+
+Derive a run slug from the goal and the current UTC time (per D1):
+- Lowercase the goal; replace runs of non-alphanumeric characters with a single `-`; strip leading/trailing `-`; truncate to ≤ 40 characters, backing up to the nearest `-` only if truncation lands mid-word AND the result would exceed 40 chars (an exactly-40-char kebab is kept as-is).
+- Append `-YYYYMMDD-HHMMSS` using UTC components.
+- If no goal is provided, the kebab portion is `explore`.
+
+Example: goal `"Design the authentication boundary"` at `2026-05-13T14:50:32Z` → slug `design-the-authentication-boundary-20260513-145032`.
+
+#### Run directory
+
+Create the central run directory **before invoking the launcher**:
+
+```
+/workspace\data\outputs\parallel-explore\{run-slug}\
+  prompts\           # the skill writes branch prompts here
+  results\           # launch.mjs writes here (created on first write)
+  synthesis.json     # the skill writes here in section 6
+  synthesis.md       # the renderer writes here
+  synthesis.html     # the renderer writes here
+```
+
+The skill is responsible for `mkdir`-ing the run directory and the `prompts/` subdirectory before any branch prompt is written. Directory creation uses recursive (`-p`) semantics — the parent `/workspace\data\outputs\parallel-explore\` is created if it does not yet exist.
+
+#### Prompt filenames (load-bearing convention)
+
+Each branch prompt file MUST be named `{branch.id}.md` — i.e., `branch-1.md`, `branch-2.md`, `branch-3.md`, etc. The `branch.id` here is the same identifier the skill uses in section 6's `synthesis.json` `branches[].id` field. `launch.mjs` derives result filenames from prompt filenames via `basename(promptFile, '.md')`, so `branch-1.md` produces `results/branch-1.md`. The renderer's pick-branch prompt template assumes this — deviating produces HTML that points users at non-existent result files.
+
+#### Dispatch
+
+Invoke the launcher against the run directory:
 
 ```bash
 node "[plugin-path]/skills/parallel-explore/scripts/launch.mjs" \
-  --prompts /tmp/explore-branches/ \
+  --prompts "/workspace\data\outputs\parallel-explore\{run-slug}\prompts" \
   --workdir [current project] \
   --model sonnet
 ```
@@ -116,45 +146,87 @@ node "[plugin-path]/skills/parallel-explore/scripts/launch.mjs" \
 The script:
 - Creates isolated directories (or worktrees if `--worktree` flag)
 - Launches `claude -p` for each branch prompt
-- Collects stdout to result files
-- Reports exit status and timing
-- Returns path to results directory
+- Collects stdout to result files (one per branch) inside the run directory's `results/` subdirectory (derived as `dirname(--prompts)/results` — a sibling of `prompts/`)
+- Logs progress and final results-directory path to stdout
+- Exits with non-zero status if any branch failed (no programmatic return value — `launch.mjs` is a CLI process, not a library)
 
-**The skill waits for all branches.** No early termination in v1 — keep it simple.
+**The skill waits for all branches.** No early termination in v1. After `launch.mjs` exits, result files are at `{run-dir}/results/{branch.id}.md` — derived from the same `--prompts` argument the skill passed in, not from any value returned by the launcher.
 
 ### 6. Synthesis
 
-Read all branch results and produce:
+Read all branch results from `{run-dir}/results/` and emit structured synthesis data.
 
-```markdown
-## Branch Summaries
-[2-3 sentence summary of each branch's approach]
+#### Output contract
 
-## Where Branches Agree
-[Consensus points — these are likely correct regardless of direction]
+The synthesis step produces **three artifacts**, all written to the run directory:
+- `synthesis.json` — structured data, the skill's emit target (canonical data source)
+- `synthesis.md` — markdown rendering, canonical human-readable artifact
+- `synthesis.html` — viewing surface for the human comparison and pick-branch step
 
-## Where Branches Genuinely Disagree
-[Real tradeoffs, not cosmetic differences. Name the tension.]
+The skill emits `synthesis.json`. The renderer (`scripts/render-synthesis.mjs`) derives `synthesis.md` and `synthesis.html` from it. JSON is the renderer's source of truth; markdown is the canonical human-readable artifact (git-tracked when applicable); HTML is the disposable viewing surface.
 
-## Hidden Assumptions
-[What did branches assume without stating? Where might all branches be wrong?]
+#### JSON schema reference
 
-## Comparison Matrix
-| Criterion | Branch 1 | Branch 2 | Branch 3 |
-|-----------|----------|----------|----------|
-[Evaluation criteria from the brief, scored or characterized per branch]
+The skill must emit a valid `synthesis.json` conforming to v1.0 schema. An LLM reading only this section should be able to produce a valid emit (M5).
 
-## Recommendation
-[Pick one. Be opinionated. Say why. If merge-best-parts was requested, propose the specific merge with justification for each borrowed element.]
+Required top-level fields:
 
-## Uncertainty
-[What remains unclear even after exploration? What would you need to resolve before committing?]
+| Field | Type | Notes |
+|---|---|---|
+| `schema_version` | string | Must be `"1.0"` |
+| `run_slug` | string | Matches the run directory name derived in section 5 |
+| `created_at` | string | ISO-8601 UTC timestamp; `YYYYMMDD-HHMMSS` components must match the timestamp suffix of `run_slug` |
+| `goal` | string | The single design question being explored |
+| `non_goals` | string[] | At least 1 entry |
+| `hard_constraints` | string[] | At least 1 entry |
+| `evaluation_criteria` | object[] | Each: `{ "id": "ec1", "name": "...", "weight": "high\|medium\|low" }` |
+| `branches` | object[] | See subfields below; typically 2–4 entries |
+| `comparison_matrix` | object[] | One row per criterion; see below |
+| `branches_agree` | string | Markdown: what all branches converge on |
+| `branches_disagree` | string | Markdown: core axes of disagreement |
+| `hidden_assumptions` | string | Markdown: unstated assumptions across branches |
+| `recommendation` | object | `{ "branch_id": "branch-1", "rationale": "markdown string" }` |
+| `uncertainty` | string | Markdown: remaining unknowns that could change the recommendation |
+| `next_action` | string | Markdown: concrete next steps |
 
-## Next Action
-[Concrete next step — spec it, build it, explore further, or decide.]
+Each `branches[]` entry: `id` (e.g. `"branch-1"`), `title`, `thesis` (one sentence), plus markdown-string prose subfields `proposed_design`, `why_this_wins`, `tradeoffs`, `failure_modes`, `verification_plan`, `first_implementation_slice`, `rejects_from_others`, and a structured `operational_complexity: { "score": 1–5, "justification": "..." }`.
+
+Each `comparison_matrix[]` entry: `{ "criterion_id": "ec1", "criterion_label": "...", "cells": [ { "branch_id": "branch-1", "score": 1–5, "characterization": "≤80 chars" } ] }`. Cell scores are integers 1–5; the renderer maps them to a red→green color ramp in the HTML.
+
+Prose fields (`branches_agree`, `branches_disagree`, `hidden_assumptions`, `uncertainty`, `next_action`, `recommendation.rationale`, and branch prose subfields) accept a bounded markdown subset: headings, paragraphs, ul/ol, bold, italic, inline code, fenced code, links. Unsupported syntax (tables in prose, nested lists deeper than 1, raw HTML) falls back to escaped plain text.
+
+Full field-by-field documentation: `skills/parallel-explore/tests/fixtures/synthesis-schema.md`
+Working reference: `skills/parallel-explore/tests/fixtures/synthesis-example.json`
+
+#### Renderer invocation
+
+After writing `synthesis.json` to the run directory, invoke (from any working directory):
+
+```bash
+node "[plugin-path]/skills/parallel-explore/scripts/render-synthesis.mjs" \
+  --input "/workspace\data\outputs\parallel-explore\{run-slug}\synthesis.json" \
+  --output-dir "/workspace\data\outputs\parallel-explore\{run-slug}"
 ```
 
-**Synthesis rules:**
+The renderer:
+- Validates the JSON against the v1.0 schema (fails loudly on invalid input — non-zero exit + stderr)
+- Writes `synthesis.md` and `synthesis.html` into `--output-dir`
+- Output is deterministic given fixed JSON input AND fixed `--output-dir` (two runs on the same input produce byte-identical files)
+
+If the renderer exits non-zero, the JSON is malformed or missing required fields. Read stderr, fix the JSON, re-run.
+
+#### The pick-branch round-trip
+
+The rendered HTML contains per-branch "Pick this branch" buttons. Clicking a button copies a prompt to the user's clipboard. The user pastes that prompt into the next agent invocation, which begins execution from the chosen branch's Proposed Design and First Implementation Slice — referencing the corresponding `results/{branch.id}.md` file for the branch's full output.
+
+This is the manual decision-and-handoff step. The canonical artifact is the persisted HTML, not the chat.
+
+#### Chat output
+
+Produce only a short chat-side summary: the recommendation, the run directory path, and a pointer to `synthesis.html`. Do not paste the full synthesis content into chat — point at the file.
+
+#### Synthesis rules (preserved)
+
 - Preserve disagreement. "Everyone is right" summaries are forbidden.
 - `pick-one` (default): Recommend one branch. The others are evidence for the recommendation, not runners-up to blend.
 - `merge-best-parts`: Only when explicitly requested. Name exactly which element comes from which branch and why. A merge that can't trace every element to a source branch is a Frankenstein.
