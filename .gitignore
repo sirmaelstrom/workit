@@ -3,3 +3,5 @@ node_modules/
 .orphaned_at
 .serena/
 skills.db
+skills.db-shm
+skills.db-wal

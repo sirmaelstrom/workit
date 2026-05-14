@@ -1,0 +1,56 @@
+{
+  "schema_version": "1.0",
+  "run_slug": "audit-20260513-150000",
+  "created_at": "2026-05-13T15:00:00Z",
+  "plugins": ["heathdev-workshop"],
+  "summary": {
+    "skills_assessed": 1,
+    "average_score": 3.0,
+    "karpathy_eligible_count": 1,
+    "highest_roi_skill_id": "parallel-explore"
+  },
+  "dimensions": [
+    { "id": "description_quality", "label": "Description", "kind": "likert5" },
+    { "id": "karpathy_eligible", "label": "Karpathy", "kind": "karpathy" }
+  ],
+  "skills": [
+    {
+      "id": "parallel-explore",
+      "name": "parallel-explore",
+      "plugin": "heathdev-workshop",
+      "kind": "skill",
+      "rank": 1,
+      "roi": 3.0,
+      "karpathy_eligible": 1,
+      "scores": {
+        "description_quality": {
+          "score": 4,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Single-line description", "passed": true }
+          ],
+          "evidence": "Six trigger phrases."
+        },
+        "karpathy_eligible": {
+          "score": 1,
+          "confidence": "high",
+          "binary_checks": [],
+          "evidence": "Three binary tests definable."
+        }
+      },
+      "notes": "Strong forced-divergence pattern.",
+      "gaps": ["No eval suite"],
+      "next_actions": ["Add eval suite"]
+    }
+  ],
+  "top_actions": [
+    {
+      "rank": 1,
+      "skill_id": "nonexistent-skill",
+      "action_text": "This action references a skill_id that does not exist in skills[].",
+      "addresses": "eval_coverage=0",
+      "est_roi_delta": 1.5,
+      "send_prompt_template": "Improve {skill_name}: {action_text}."
+    }
+  ]
+}

@@ -151,6 +151,65 @@ Output a summary table sorted by ROI descending:
 [Compare to last assessment: improved, degraded, stable per skill]
 ```
 
+### 7. Emit `scorecard.json` and Render HTML
+
+After the markdown report is written, also emit a structured `scorecard.json` next to it and invoke the renderer to produce the HTML view. The HTML is the human viewing surface; the markdown remains canonical and git-trackable.
+
+#### Output layout
+
+For an audit run with timestamp `{YYYYMMDD-HHMMSS}` written to `data/outputs/projects/skills/`:
+
+```
+data/outputs/projects/skills/
+  audit-{YYYYMMDD-HHMMSS}.md     # markdown report (existing, canonical)
+  audit-{YYYYMMDD-HHMMSS}.json   # scorecard.json (renderer input)
+  audit-{YYYYMMDD-HHMMSS}.html   # rendered HTML (renderer output)
+```
+
+The renderer derives the `.html` (and a normalized `.md`) from the `.json`. To avoid filename collision with the existing canonical markdown, prefer this convention: write the structured JSON adjacent to the existing markdown report, and direct the renderer at a dedicated `audit-{stamp}/` sub-directory whose `scorecard.md` is the renderer's normalized view (a one-line `[Full report](../audit-{stamp}.md)` link is fine in the canonical .md to point at the renderer output if needed).
+
+The simpler alternative — used here — is to write everything into a fresh sub-directory:
+
+```
+data/outputs/projects/skills/audit-{YYYYMMDD-HHMMSS}/
+  scorecard.json         # the skill writes here in step 7
+  scorecard.md           # the renderer writes here
+  scorecard.html         # the renderer writes here
+```
+
+#### JSON schema reference
+
+The skill must emit a valid `scorecard.json` conforming to v1.0. Full schema: `skills/audit-skills/tests/fixtures/scorecard-schema.md`. The minimum the skill needs to know to produce a valid emit:
+
+- Top-level: `schema_version: "1.0"`, `run_slug: "audit-{YYYYMMDD}-{HHMMSS}"`, `created_at` (ISO-8601), `plugins[]`, `summary {skills_assessed, average_score, karpathy_eligible_count, highest_roi_skill_id}`, `dimensions[]`, `skills[]`, `top_actions[]`.
+- `dimensions[]` entries: `{id, label, kind}` where `kind` is `"likert5"` | `"eval_coverage"` | `"karpathy"`. Order is the column order in the HTML grid.
+- `skills[]` entries: `{id, name, plugin, kind, rank, roi, karpathy_eligible, scores, notes, gaps, next_actions}`.
+- `skills[].scores` is keyed by `dimensions[].id`. Every dimension must have an entry. Each entry: `{score, confidence: "high"|"medium"|"low", binary_checks: [{label, passed}], evidence}`.
+- `top_actions[]` entries: `{rank, skill_id, action_text, addresses?, est_roi_delta?, send_prompt_template}`. The template supports tokens `{rank}`, `{skill_id}`, `{skill_name}`, `{action_text}`, `{scorecard_md_path}`.
+- Cross-field rules the renderer enforces: every `dimensions[].id` appears in every `skills[].scores`; every `top_actions[].skill_id` and `summary.highest_roi_skill_id` matches a `skills[].id`; every `skills[].plugin` appears in `plugins[]`.
+
+A working example fixture lives at `skills/audit-skills/tests/fixtures/scorecard-example.json`.
+
+#### Renderer invocation
+
+After writing `scorecard.json`, invoke (from any working directory):
+
+```bash
+node "[plugin-path]/skills/audit-skills/scripts/render-scorecard.mjs" \
+  --input "/workspace\data\outputs\projects\skills\audit-{stamp}\scorecard.json" \
+  --output-dir "/workspace\data\outputs\projects\skills\audit-{stamp}"
+```
+
+The renderer:
+- Validates the JSON against the v1.0 schema (three-layer validation; fails loudly on invalid input — non-zero exit + stderr).
+- Writes `scorecard.md` and `scorecard.html` into `--output-dir`.
+- Output is deterministic given fixed JSON input AND fixed `--output-dir` (two runs on the same input produce byte-identical files).
+- Single-file HTML — no external assets, system fonts only.
+
+#### Chat output
+
+After the renderer succeeds, point the operator at `scorecard.html` (one line — do not paste audit content into chat that the HTML already shows). The HTML's "Send to agent" buttons let the operator copy a follow-up prompt for any of the top improvement actions; that prompt expects to be pasted into a new chat, not consumed in this one.
+
 ## Invocation
 
 **Quick:**
@@ -170,9 +229,13 @@ Output a summary table sorted by ROI descending:
 
 ## Output Schema
 
-The report above IS the output. It goes to stdout (conversation) AND gets saved to:
-- `skills.db` → `assessments` table (structured, queryable)
-- `data/outputs/projects/skills/audit-[date].md` (human-readable snapshot)
+The audit produces four artifacts per run:
+- `skills.db` → `assessments` table (structured, queryable, append-only across runs).
+- `data/outputs/projects/skills/audit-{stamp}/scorecard.json` (structured renderer input; v1.0 schema documented at `skills/audit-skills/tests/fixtures/scorecard-schema.md`).
+- `data/outputs/projects/skills/audit-{stamp}/scorecard.md` (canonical human-readable snapshot, rendered from the JSON — replaces the old `audit-[date].md` location).
+- `data/outputs/projects/skills/audit-{stamp}/scorecard.html` (single-file viewing surface with collapsible per-dimension evidence and "Send to agent" buttons for top improvement actions).
+
+The chat-side output is short: the rank-1 skill, the top improvement action, and pointers to the JSON and HTML paths. The full report lives in the files, not in chat scrollback.
 
 ## Anti-patterns
 

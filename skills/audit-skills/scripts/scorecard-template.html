@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Skill Audit Scorecard — {{run_slug}}</title>
+  <style>
+    /* System fonts only. No external assets. */
+    :root {
+      --fg: #1a1a1a;
+      --muted: #555;
+      --border: #d0d0d0;
+      --bg: #fafafa;
+      --tile-bg: #ffffff;
+      --accent: #2563eb;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg);
+      background: var(--bg);
+      margin: 0 auto;
+      padding: 1.5rem;
+      line-height: 1.5;
+      max-width: 1400px;
+    }
+    header.page-header {
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    header.page-header h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
+    .meta { color: var(--muted); font-size: .9rem; margin: 0; }
+    .summary-tile {
+      display: flex;
+      gap: 1.25rem;
+      flex-wrap: wrap;
+      background: var(--tile-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .75rem 1rem;
+    }
+    .summary-tile dl { display: flex; gap: .25rem; align-items: baseline; margin: 0; }
+    .summary-tile dt { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
+    .summary-tile dd { margin: 0; font-weight: 600; font-size: .95rem; }
+    h2 { margin: 1.5rem 0 .5rem; font-size: 1.15rem; border-bottom: 1px solid var(--border); padding-bottom: .25rem; }
+    code { background: #eee; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
+    pre code { display: block; padding: .5rem; overflow-x: auto; }
+    ul { margin: .25rem 0 .5rem 1.25rem; padding: 0; }
+    li { margin: .1rem 0; }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin: .5rem 0;
+    }
+    .filter-toggle {
+      padding: .35rem .75rem;
+      background: #1a1a1a;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: .85rem;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .filter-toggle:hover { background: #333; }
+    body.show-only-eligible tr.skill-row:not(.is-eligible),
+    body.show-only-eligible tr.skill-detail:not(.is-eligible) { display: none; }
+
+    .scorecard-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: .5rem 0 1rem;
+      font-size: .85rem;
+    }
+    .scorecard-table th, .scorecard-table td {
+      border: 1px solid var(--border);
+      padding: .35rem .5rem;
+      text-align: left;
+      vertical-align: middle;
+    }
+    .scorecard-table thead th {
+      background: #eee;
+      font-weight: 600;
+      position: sticky;
+      top: 0;
+    }
+    .scorecard-table td.rank-cell {
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+      color: var(--muted);
+      width: 2.5rem;
+    }
+    .scorecard-table td.skill-cell { min-width: 16rem; }
+    .scorecard-table td.skill-cell .skill-name { font-weight: 600; }
+    .scorecard-table td.skill-cell .badges { display: inline-flex; gap: .25rem; margin-left: .35rem; }
+    .badge {
+      display: inline-block;
+      padding: .05rem .35rem;
+      font-size: .7rem;
+      border-radius: 3px;
+      background: #e5e7eb;
+      color: #374151;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+    }
+    .badge.kind-skill { background: #dbeafe; color: #1e40af; }
+    .badge.kind-command { background: #fef3c7; color: #92400e; }
+    .badge.kind-agent { background: #ede9fe; color: #5b21b6; }
+    .badge.plugin { background: #f3f4f6; color: #374151; }
+
+    td.score-cell {
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      min-width: 3rem;
+    }
+    td.score-cell.score-0 { background: #e5e7eb; color: #4b5563; }
+    td.score-cell.score-1 { background: #fca5a5; color: #7f1d1d; }
+    td.score-cell.score-2 { background: #fdba74; color: #7c2d12; }
+    td.score-cell.score-3 { background: #fde68a; color: #78350f; }
+    td.score-cell.score-4 { background: #86efac; color: #14532d; }
+    td.score-cell.score-5 { background: #4ade80; color: #064e3b; }
+
+    td.elig-cell { text-align: center; min-width: 4rem; }
+    td.elig-cell .elig-yes { background: #4ade80; color: #064e3b; padding: .1rem .4rem; border-radius: 3px; font-weight: 600; font-size: .75rem; }
+    td.elig-cell .elig-no { background: #e5e7eb; color: #6b7280; padding: .1rem .4rem; border-radius: 3px; font-size: .75rem; }
+
+    td.roi-cell { text-align: right; font-variant-numeric: tabular-nums; min-width: 4rem; }
+
+    .expand-toggle {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: .1rem .4rem;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: .8rem;
+      color: var(--muted);
+    }
+    .expand-toggle:hover { background: #eee; }
+
+    tr.skill-detail > td {
+      background: var(--tile-bg);
+      padding: .75rem 1rem;
+    }
+    tr.skill-detail[hidden] { display: none; }
+    .skill-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: .5rem .75rem;
+    }
+    .skill-detail-grid details {
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: .35rem .5rem;
+      background: #fff;
+    }
+    .skill-detail-grid details summary {
+      cursor: pointer;
+      font-size: .85rem;
+      font-weight: 600;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: .5rem;
+    }
+    .skill-detail-grid details summary .dim-score-badge {
+      padding: .05rem .4rem;
+      border-radius: 3px;
+      font-size: .75rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .skill-detail-grid details summary .dim-score-badge.score-0 { background: #e5e7eb; color: #4b5563; }
+    .skill-detail-grid details summary .dim-score-badge.score-1 { background: #fca5a5; color: #7f1d1d; }
+    .skill-detail-grid details summary .dim-score-badge.score-2 { background: #fdba74; color: #7c2d12; }
+    .skill-detail-grid details summary .dim-score-badge.score-3 { background: #fde68a; color: #78350f; }
+    .skill-detail-grid details summary .dim-score-badge.score-4 { background: #86efac; color: #14532d; }
+    .skill-detail-grid details summary .dim-score-badge.score-5 { background: #4ade80; color: #064e3b; }
+    .skill-detail-grid details summary .dim-score-badge.elig-yes { background: #4ade80; color: #064e3b; }
+    .skill-detail-grid details summary .dim-score-badge.elig-no { background: #e5e7eb; color: #6b7280; }
+
+    .binary-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .25rem;
+      margin: .35rem 0;
+    }
+    .binary-check {
+      display: inline-flex;
+      align-items: center;
+      gap: .25rem;
+      padding: .05rem .35rem;
+      border-radius: 3px;
+      font-size: .75rem;
+      background: #f3f4f6;
+      color: #374151;
+    }
+    .binary-check::before {
+      content: "";
+      width: .5rem;
+      height: .5rem;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    .binary-check.passed { background: #d1fae5; color: #065f46; }
+    .binary-check.passed::before { background: #10b981; }
+    .binary-check.failed { background: #fee2e2; color: #991b1b; }
+    .binary-check.failed::before { background: #ef4444; }
+    .confidence-pill {
+      display: inline-block;
+      padding: .05rem .35rem;
+      font-size: .7rem;
+      border-radius: 3px;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+    }
+    .confidence-pill.high { background: #d1fae5; color: #065f46; }
+    .confidence-pill.medium { background: #fef3c7; color: #92400e; }
+    .confidence-pill.low { background: #fee2e2; color: #991b1b; }
+    .evidence { color: var(--fg); margin: .35rem 0 0; font-size: .85rem; }
+    .evidence p { margin: .25rem 0; }
+
+    .skill-meta-block { margin-top: .75rem; padding-top: .5rem; border-top: 1px solid var(--border); }
+    .skill-meta-block h4 { margin: .5rem 0 .25rem; font-size: .9rem; }
+
+    .actions-list { list-style: none; padding: 0; margin: 0; }
+    .actions-list li {
+      display: grid;
+      grid-template-columns: 2rem 1fr auto;
+      gap: .5rem;
+      align-items: center;
+      padding: .5rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--tile-bg);
+      margin-bottom: .35rem;
+    }
+    .actions-list li .action-rank { font-weight: 700; color: var(--muted); text-align: center; }
+    .actions-list li .action-text { font-size: .9rem; }
+    .actions-list li .action-text .target { font-weight: 600; }
+    .actions-list li .action-text .roi-delta { color: var(--muted); font-size: .8rem; }
+    .send-prompt-btn {
+      padding: .3rem .65rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: .8rem;
+    }
+    .send-prompt-btn:hover { background: #1d4ed8; }
+
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: #1a1a1a;
+      color: #fff;
+      padding: .5rem 1rem;
+      border-radius: 4px;
+      font-size: .9rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,.2);
+    }
+    .toast[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <header class="page-header">
+    <div>
+      <h1>Skill Audit Scorecard</h1>
+      <p class="meta">Run: <code>{{run_slug}}</code> &middot; {{created_at}}</p>
+      <p class="meta">Plugins: {{plugins_inline}}</p>
+    </div>
+    <div class="summary-tile">
+      <dl><dt>Skills</dt><dd>{{summary_skills_assessed}}</dd></dl>
+      <dl><dt>Avg score</dt><dd>{{summary_average_score}}</dd></dl>
+      <dl><dt>Karpathy-elig.</dt><dd>{{summary_karpathy_count}}</dd></dl>
+      <dl><dt>Top ROI</dt><dd><code>{{summary_top_roi_id}}</code></dd></dl>
+    </div>
+  </header>
+
+  <section class="grid-section">
+    <div class="toolbar">
+      <button class="filter-toggle" id="elig-toggle" type="button" aria-pressed="false">Show karpathy-eligible only</button>
+    </div>
+    <table class="scorecard-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Skill</th>
+          {{dimension_headers}}
+          <th>ROI</th>
+          <th>K-elig</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {{skill_rows}}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="actions-section">
+    <h2>Top improvement actions</h2>
+    <ol class="actions-list">
+      {{top_actions_list}}
+    </ol>
+  </section>
+
+  <div id="toast" class="toast" hidden>Copied</div>
+
+  <script>
+    document.querySelectorAll('.expand-toggle').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var id = btn.getAttribute('data-target');
+        var row = document.getElementById(id);
+        if (!row) return;
+        var nowHidden = !row.hasAttribute('hidden') ? true : false;
+        if (nowHidden) { row.setAttribute('hidden', ''); btn.textContent = '+'; }
+        else { row.removeAttribute('hidden'); btn.textContent = '−'; }
+      });
+    });
+    document.querySelectorAll('.send-prompt-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var prompt = btn.getAttribute('data-send-prompt');
+        try {
+          await navigator.clipboard.writeText(prompt);
+          var toast = document.getElementById('toast');
+          toast.hidden = false;
+          setTimeout(function () { toast.hidden = true; }, 1500);
+        } catch (e) {
+          alert('Clipboard write failed: ' + e.message);
+        }
+      });
+    });
+    var eligToggle = document.getElementById('elig-toggle');
+    if (eligToggle) {
+      eligToggle.addEventListener('click', function () {
+        var on = document.body.classList.toggle('show-only-eligible');
+        eligToggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+        eligToggle.textContent = on ? 'Show all skills' : 'Show karpathy-eligible only';
+      });
+    }
+  </script>
+</body>
+</html>

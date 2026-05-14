@@ -1,0 +1,318 @@
+{
+  "schema_version": "1.0",
+  "run_slug": "audit-20260513-150000",
+  "created_at": "2026-05-13T15:00:00Z",
+  "plugins": ["heathdev-workshop", "sirmaelstroms-claude-code"],
+  "summary": {
+    "skills_assessed": 3,
+    "average_score": 3.4,
+    "karpathy_eligible_count": 2,
+    "highest_roi_skill_id": "cmd:git:commit-push-pr"
+  },
+  "dimensions": [
+    { "id": "description_quality", "label": "Description", "kind": "likert5", "description": "Trigger routing fidelity." },
+    { "id": "output_quality", "label": "Output", "kind": "likert5", "description": "How well-defined the output contract is." },
+    { "id": "composability", "label": "Composability", "kind": "likert5", "description": "Pipeline fit for upstream/downstream skills." },
+    { "id": "agent_readiness", "label": "Agent-ready", "kind": "likert5", "description": "Can an orchestrating agent invoke this autonomously?" },
+    { "id": "eval_coverage", "label": "Evals", "kind": "eval_coverage", "description": "Quantity and depth of evaluation coverage." },
+    { "id": "usage_frequency", "label": "Use freq", "kind": "likert5", "description": "How often the skill is actually invoked." },
+    { "id": "karpathy_eligible", "label": "Karpathy", "kind": "karpathy", "description": "Eligible for autonomous eval-loop improvement." }
+  ],
+  "skills": [
+    {
+      "id": "cmd:git:commit-push-pr",
+      "name": "commit-push-pr",
+      "plugin": "sirmaelstroms-claude-code",
+      "kind": "command",
+      "rank": 1,
+      "roi": 6.0,
+      "karpathy_eligible": 1,
+      "scores": {
+        "description_quality": {
+          "score": 4,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Single-line description", "passed": true },
+            { "label": "3+ trigger phrases", "passed": true },
+            { "label": "Explains when NOT to trigger", "passed": false },
+            { "label": "References related skills", "passed": true }
+          ],
+          "evidence": "Clear trigger description; well-disambiguated from `commit` and `pr`. Missing an explicit negative-trigger clause."
+        },
+        "output_quality": {
+          "score": 3,
+          "confidence": "medium",
+          "binary_checks": [
+            { "label": "Explicit output schema", "passed": false },
+            { "label": "Agent-parseable", "passed": true },
+            { "label": "Examples of good/bad output", "passed": false }
+          ],
+          "evidence": "Output is the commit message + PR URL. **No structured contract** for downstream consumers."
+        },
+        "composability": {
+          "score": 2,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Names upstream inputs", "passed": false },
+            { "label": "Names downstream consumers", "passed": false },
+            { "label": "Documented handoff format", "passed": false }
+          ],
+          "evidence": "Terminal — creates a PR; no documented pipeline successor."
+        },
+        "agent_readiness": {
+          "score": 4,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Runs from structured input only", "passed": true },
+            { "label": "Defaults for ambiguity", "passed": true },
+            { "label": "Reports confidence/uncertainty", "passed": false }
+          ],
+          "evidence": "Safety protocol is strong: pre-commit gates, no `--no-verify` without consent."
+        },
+        "eval_coverage": {
+          "score": 0,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Test cases exist", "passed": false },
+            { "label": "Automated eval", "passed": false },
+            { "label": "Pass rate tracked", "passed": false }
+          ],
+          "evidence": "No eval suite. Highest-frequency command, highest ROI to add evals."
+        },
+        "usage_frequency": {
+          "score": 4,
+          "confidence": "high",
+          "binary_checks": [],
+          "evidence": "Weekly use — core to the development workflow."
+        },
+        "karpathy_eligible": {
+          "score": 1,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "3+ binary tests definable", "passed": true },
+            { "label": "20+ test inputs available", "passed": true },
+            { "label": "Single editable file", "passed": true },
+            { "label": "Current quality 60-80%", "passed": true }
+          ],
+          "evidence": "Strong loop candidate: safety-protocol adherence is binary-testable across many commit/PR scenarios."
+        }
+      },
+      "notes": "Highest-frequency command in the portfolio. Safety protocol is good. Output varies per step and lacks a structured contract.",
+      "gaps": [
+        "No structured output contract",
+        "Composability is terminal (creates PR)",
+        "No eval suite"
+      ],
+      "next_actions": [
+        "Add structured commit/PR metadata output",
+        "Add eval testing safety protocol adherence",
+        "Highest ROI target for the next eval-loop pass"
+      ]
+    },
+    {
+      "id": "parallel-explore",
+      "name": "parallel-explore",
+      "plugin": "heathdev-workshop",
+      "kind": "skill",
+      "rank": 2,
+      "roi": 3.0,
+      "karpathy_eligible": 1,
+      "scores": {
+        "description_quality": {
+          "score": 4,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Single-line description", "passed": true },
+            { "label": "3+ trigger phrases", "passed": true },
+            { "label": "Explains when NOT to trigger", "passed": false },
+            { "label": "References related skills", "passed": true }
+          ],
+          "evidence": "Six trigger phrases, references `design-alternatives` as replacement target. Missing explicit negative trigger."
+        },
+        "output_quality": {
+          "score": 4,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Explicit output schema", "passed": true },
+            { "label": "Agent-parseable", "passed": true },
+            { "label": "Examples of good/bad output", "passed": false }
+          ],
+          "evidence": "`synthesis.json` schema v1.0 documented. Renderer produces md + html views."
+        },
+        "composability": {
+          "score": 3,
+          "confidence": "medium",
+          "binary_checks": [
+            { "label": "Names upstream inputs", "passed": false },
+            { "label": "Names downstream consumers", "passed": false },
+            { "label": "Documented handoff format", "passed": true }
+          ],
+          "evidence": "Output schema well-defined but no explicit upstream/downstream pipeline link."
+        },
+        "agent_readiness": {
+          "score": 3,
+          "confidence": "medium",
+          "binary_checks": [
+            { "label": "Runs from structured input only", "passed": true },
+            { "label": "Defaults for ambiguity", "passed": true },
+            { "label": "Reports confidence/uncertainty", "passed": false }
+          ],
+          "evidence": "Handles vague input via the 3-variant default; cost-check gate still requires a human."
+        },
+        "eval_coverage": {
+          "score": 0,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Test cases exist", "passed": false },
+            { "label": "Automated eval", "passed": false },
+            { "label": "Pass rate tracked", "passed": false }
+          ],
+          "evidence": "No eval suite for branch quality / anti-convergence yet."
+        },
+        "usage_frequency": {
+          "score": 2,
+          "confidence": "medium",
+          "binary_checks": [],
+          "evidence": "Used twice since creation; not yet part of regular workflow."
+        },
+        "karpathy_eligible": {
+          "score": 1,
+          "confidence": "medium",
+          "binary_checks": [
+            { "label": "3+ binary tests definable", "passed": true },
+            { "label": "20+ test inputs available", "passed": true },
+            { "label": "Single editable file", "passed": true },
+            { "label": "Current quality 60-80%", "passed": true }
+          ],
+          "evidence": "Anti-convergence and matrix-coverage are both binary-testable across a synthetic problem set."
+        }
+      },
+      "notes": "Strong forced-divergence pattern. Anti-convergence instruction is the key innovation worth preserving in any eval-loop mutations.",
+      "gaps": [
+        "No eval suite",
+        "No explicit upstream/downstream naming",
+        "Cost check requires human"
+      ],
+      "next_actions": [
+        "Add eval suite with diverse problem domains",
+        "Name pipeline connections in SKILL.md",
+        "Consider auto-proceed for Sonnet runs"
+      ]
+    },
+    {
+      "id": "grill-me",
+      "name": "grill-me",
+      "plugin": "heathdev-workshop",
+      "kind": "skill",
+      "rank": 3,
+      "roi": 1.6,
+      "karpathy_eligible": 0,
+      "scores": {
+        "description_quality": {
+          "score": 3,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Single-line description", "passed": true },
+            { "label": "3+ trigger phrases", "passed": true },
+            { "label": "Explains when NOT to trigger", "passed": false },
+            { "label": "References related skills", "passed": false }
+          ],
+          "evidence": "Clear triggers (`grill me`, `poke holes`). No disambiguation against general critique."
+        },
+        "output_quality": {
+          "score": 2,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Explicit output schema", "passed": false },
+            { "label": "Agent-parseable", "passed": false },
+            { "label": "Examples of good/bad output", "passed": false }
+          ],
+          "evidence": "Conversational output by design. No schema."
+        },
+        "composability": {
+          "score": 3,
+          "confidence": "medium",
+          "binary_checks": [
+            { "label": "Names upstream inputs", "passed": true },
+            { "label": "Names downstream consumers", "passed": false },
+            { "label": "Documented handoff format", "passed": false }
+          ],
+          "evidence": "Pairs with `/spec` upstream; no documented downstream consumer."
+        },
+        "agent_readiness": {
+          "score": 2,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Runs from structured input only", "passed": false },
+            { "label": "Defaults for ambiguity", "passed": false },
+            { "label": "Reports confidence/uncertainty", "passed": false }
+          ],
+          "evidence": "Conversational nature inherently requires a human counterpart."
+        },
+        "eval_coverage": {
+          "score": 0,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "Test cases exist", "passed": false },
+            { "label": "Automated eval", "passed": false },
+            { "label": "Pass rate tracked", "passed": false }
+          ],
+          "evidence": "Not testable without simulating a human discussion partner."
+        },
+        "usage_frequency": {
+          "score": 3,
+          "confidence": "low",
+          "binary_checks": [],
+          "evidence": "Used during spec sessions; not weekly."
+        },
+        "karpathy_eligible": {
+          "score": 0,
+          "confidence": "high",
+          "binary_checks": [
+            { "label": "3+ binary tests definable", "passed": false },
+            { "label": "20+ test inputs available", "passed": false },
+            { "label": "Single editable file", "passed": true },
+            { "label": "Current quality 60-80%", "passed": true }
+          ],
+          "evidence": "Conversational and human-only — too interactive for the autonomous loop."
+        }
+      },
+      "notes": "Intentionally minimal. Accept that it's a human-only skill and design accordingly.",
+      "gaps": [
+        "No output schema",
+        "Not agent-invocable",
+        "No karpathy eligibility — too interactive"
+      ],
+      "next_actions": [
+        "Add lightweight output structure for resolved/deferred/risk items",
+        "Accept that this is human-only"
+      ]
+    }
+  ],
+  "top_actions": [
+    {
+      "rank": 1,
+      "skill_id": "cmd:git:commit-push-pr",
+      "action_text": "Add eval testing safety protocol adherence (no --no-verify without consent, no commit on red CI).",
+      "addresses": "eval_coverage=0",
+      "est_roi_delta": 1.5,
+      "send_prompt_template": "Audit scorecard rank {rank}: improve {skill_name} (`{skill_id}`) — action: {action_text}. Read the scorecard at {scorecard_md_path} for full context before editing."
+    },
+    {
+      "rank": 2,
+      "skill_id": "parallel-explore",
+      "action_text": "Add eval suite with diverse problem domains; assert anti-convergence and matrix-coverage invariants.",
+      "addresses": "eval_coverage=0",
+      "est_roi_delta": 1.0,
+      "send_prompt_template": "Audit scorecard rank {rank}: improve {skill_name} (`{skill_id}`) — action: {action_text}. Read the scorecard at {scorecard_md_path} for full context before editing."
+    },
+    {
+      "rank": 3,
+      "skill_id": "grill-me",
+      "action_text": "Add a lightweight output structure (resolved / deferred / risk) so downstream skills can read the result without a human.",
+      "addresses": "output_quality=2, composability=3",
+      "est_roi_delta": 0.5,
+      "send_prompt_template": "Audit scorecard rank {rank}: improve {skill_name} (`{skill_id}`) — action: {action_text}. Read the scorecard at {scorecard_md_path} for full context before editing."
+    }
+  ]
+}
