@@ -1,0 +1,85 @@
+{
+  "schema_version": "1.0",
+  "run_slug": "parallel-explore-html-synthesis-20260513-141500",
+  "created_at": "2026-05-13T14:15:00Z",
+  "spec": {
+    "title": "Parallel-Explore HTML Synthesis Output",
+    "slug": "parallel-explore-html-synthesis",
+    "dir": "/workspace/data/outputs/workshops/parallel-explore-html-synthesis"
+  },
+  "review_level": "full",
+  "review_level_reason": "Auto-selected: 4 work packages plus multi-stage refinement loop crosses the full-review threshold.",
+  "summary": {
+    "problem": "The parallel-explore skill emits a synthesis only to chat scrollback. The matrix and per-branch findings have no persistent **structured artifact**, and there's no round-trip from synthesis to next action.",
+    "key_decisions": [
+      "D1: Emit synthesis.json as the canonical structured output; derive synthesis.md and synthesis.html from it.",
+      "D2: HTML is a single inline file with system fonts; no external assets.",
+      "D3: Renderer is a separate sync CLI invoked by the skill after JSON is written."
+    ],
+    "verification_approach": "Three-layer JSON validation (structural → per-field → cross-field) with fail-loud stderr, plus integration tests on byte-identical determinism and attribute escaping.",
+    "constraint_highlights": [
+      "Must not introduce npm dependencies — Node built-ins plus bounded markdown-mini only.",
+      "Must not break existing parallel-explore tests when the skill is reorganized.",
+      "Renderer output must be byte-identical for the same input + same --output-dir."
+    ]
+  },
+  "flagged_items": [
+    {
+      "id": "D1",
+      "kind": "DECISION",
+      "stage": "decisions",
+      "title": "JSON is the renderer's source of truth; markdown is canonical-human; HTML is disposable",
+      "context": "Per the framing decision, the **structured JSON** is authoritative. The renderer derives both `synthesis.md` and `synthesis.html` from it.\n\n- `synthesis.json` — emitted by the skill, validated by the renderer\n- `synthesis.md` — git-trackable, ingestion-friendly\n- `synthesis.html` — viewing surface, disposable\n\nConfirm this layering before we commit to the renderer's contract.",
+      "default_action": "approve"
+    },
+    {
+      "id": "A1",
+      "kind": "ASSUMPTION",
+      "stage": "problem-statement",
+      "title": "Operators want a clipboard round-trip, not in-place editing",
+      "context": "I'm assuming the operator pattern is *open HTML → pick → click → paste*, not *open HTML → edit fields → save*. The 'pick this branch' button writes a follow-up prompt to clipboard. Local-edit-and-save is out of scope.\n\nIf the operator actually wants to *edit* the synthesis before sharing, this assumption changes the JS budget and the form model significantly.",
+      "default_action": null
+    },
+    {
+      "id": "D2",
+      "kind": "DECISION",
+      "stage": "decisions",
+      "title": "Three-layer validation, fail-loud on stderr with grep-friendly tokens",
+      "context": "Renderer validation is **strict**:\n\n1. Structural (top-level fields present, schema_version matches)\n2. Per-field shape (types, ranges, enums)\n3. Cross-field consistency (refs resolve, coverage complete)\n\nAll violations exit non-zero with stderr containing a unique token an operator can grep.",
+      "default_action": "approve"
+    },
+    {
+      "id": "A2",
+      "kind": "ASSUMPTION",
+      "stage": "constraints",
+      "title": "System fonts are good enough for visual fidelity",
+      "context": "No web font links. Relying on `system-ui, -apple-system, \"Segoe UI\", Roboto, sans-serif` across the artifact.\n\nIf operators routinely view the artifact on devices where these fonts don't render acceptably (older Linux, specific browsers), we'd need to revisit. Decision driver: zero external assets.",
+      "default_action": null
+    },
+    {
+      "id": "D3",
+      "kind": "DECISION",
+      "stage": "decisions",
+      "title": "Each renderer is per-skill, not a shared `/html` skill",
+      "context": "Parallel-explore grid ≠ scorecard ≠ review gate. Targeted per-skill renderers produce high-fidelity HTML; a generic skill produces generic HTML. Restate: we will NOT build a shared `/html` skill in this experiment or the next.",
+      "default_action": "approve"
+    },
+    {
+      "id": "A3",
+      "kind": "ASSUMPTION",
+      "stage": "verification",
+      "title": "Determinism is byte-identical, not whitespace-tolerant",
+      "context": "Two runs of the renderer on the same input + same `--output-dir` must produce **byte-identical** files (verified via SHA-256). This rules out timestamp comments, randomized DOM ids, and any clock reads.\n\nIf future template iterations make byte-identity hard to maintain, we'd weaken to canonical-form equality. Not in v1.",
+      "default_action": null
+    },
+    {
+      "id": "D4",
+      "kind": "DECISION",
+      "stage": "decisions",
+      "title": "Synthesis HTML carries one round-trip action per branch",
+      "context": "Each branch tile has a 'Pick this branch' button. Click → copy a substituted prompt to clipboard. No multi-action menu, no per-section actions — one button per tile.\n\nThe prompt format is templated in the JSON (the skill's responsibility), not the renderer's. The renderer only substitutes & escapes.",
+      "default_action": "approve"
+    }
+  ],
+  "compile_template": "Spec review decisions for {spec_title} (slug: `{spec_slug}`, review_level: {review_level}):\n\n{decisions_blob}\n\nGeneral feedback: {general_feedback}\nCounts: {approved_count} approved, {revised_count} revised, {rejected_count} rejected.\n\nProceed to Phase 5 (Revision if any items were revised or rejected) then Phase 6 (Decomposition and Work Packages). Spec dir: {spec_dir}."
+}

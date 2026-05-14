@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "run_slug": "duplicate-id-fixture",
+  "created_at": "2026-05-13T15:00:00Z",
+  "spec": {
+    "title": "Duplicate ID Fixture",
+    "slug": "duplicate-id-fixture",
+    "dir": "/workspace/data/outputs/workshops/duplicate-id-fixture"
+  },
+  "review_level": "light",
+  "review_level_reason": "Fixture intended to fail validation.",
+  "summary": {
+    "problem": "This fixture intentionally duplicates a flagged_items id.",
+    "key_decisions": ["D1: be intentionally broken"],
+    "verification_approach": "The test suite catches this in Layer 3.",
+    "constraint_highlights": ["Must not validate cleanly."]
+  },
+  "flagged_items": [
+    {
+      "id": "D1",
+      "kind": "DECISION",
+      "title": "First D1",
+      "context": "Original entry."
+    },
+    {
+      "id": "D1",
+      "kind": "ASSUMPTION",
+      "title": "Second D1 — duplicate id",
+      "context": "This duplicate should fail Layer 3 validation."
+    }
+  ],
+  "compile_template": "Decisions: {decisions_blob}"
+}

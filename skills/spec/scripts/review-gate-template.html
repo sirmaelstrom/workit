@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Spec Review Gate — {{spec_title}}</title>
+  <style>
+    :root {
+      --fg: #1a1a1a;
+      --muted: #555;
+      --border: #d0d0d0;
+      --bg: #fafafa;
+      --tile-bg: #ffffff;
+      --accent: #2563eb;
+      --decision: #2563eb;
+      --assumption: #b45309;
+      --approve: #16a34a;
+      --revise: #d97706;
+      --reject: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: var(--fg);
+      background: var(--bg);
+      margin: 0 auto;
+      padding: 1.5rem;
+      line-height: 1.55;
+      max-width: 1100px;
+    }
+    header.page-header {
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1rem;
+      margin-bottom: 1rem;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 1rem;
+      align-items: start;
+    }
+    header.page-header h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
+    .meta { color: var(--muted); font-size: .9rem; margin: 0; }
+    .meta code { background: #eee; padding: .1rem .3rem; border-radius: 3px; font-size: .85em; }
+    .stage-chip {
+      display: inline-block;
+      padding: .1rem .4rem;
+      background: #f3f4f6;
+      color: #374151;
+      border-radius: 3px;
+      font-size: .7rem;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+    }
+    .level-chip {
+      display: inline-block;
+      padding: .15rem .5rem;
+      border-radius: 3px;
+      font-size: .75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .level-chip.full { background: #dbeafe; color: #1e40af; }
+    .level-chip.light { background: #fef3c7; color: #92400e; }
+    .level-chip.none { background: #e5e7eb; color: #374151; }
+    .summary-tile {
+      background: var(--tile-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .75rem 1rem;
+      min-width: 240px;
+    }
+    .summary-tile h3 { margin: 0 0 .35rem; font-size: .85rem; text-transform: uppercase; color: var(--muted); letter-spacing: .03em; }
+    .summary-tile .counters {
+      display: flex;
+      gap: 1rem;
+      margin-top: .25rem;
+    }
+    .summary-tile .counters dt { color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .03em; }
+    .summary-tile .counters dd { margin: 0; font-weight: 600; font-size: 1.1rem; }
+    .summary-block {
+      background: var(--tile-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem 1.25rem;
+      margin: .5rem 0 1.5rem;
+    }
+    .summary-block h2 { margin: 0 0 .5rem; font-size: 1.1rem; }
+    .summary-block dl { display: grid; grid-template-columns: max-content 1fr; gap: .5rem 1rem; margin: 0; }
+    .summary-block dt { color: var(--muted); font-weight: 600; }
+    .summary-block dd { margin: 0; }
+    .summary-block ul { margin: .15rem 0; padding-left: 1.25rem; }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      margin: .5rem 0 1rem;
+      flex-wrap: wrap;
+    }
+    .toolbar a.jump-link {
+      color: var(--accent);
+      font-size: .85rem;
+    }
+    .approve-all-btn {
+      padding: .35rem .75rem;
+      background: var(--approve);
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: .85rem;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .approve-all-btn:hover { background: #15803d; }
+
+    h2.items-heading { margin: 0 0 .5rem; font-size: 1.15rem; border-bottom: 1px solid var(--border); padding-bottom: .25rem; }
+
+    .item-list { display: flex; flex-direction: column; gap: .85rem; margin-bottom: 1.5rem; }
+    .item-card {
+      background: var(--tile-bg);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--border);
+      border-radius: 5px;
+      padding: .75rem 1rem;
+    }
+    .item-card.item-decision { border-left-color: var(--decision); }
+    .item-card.item-assumption { border-left-color: var(--assumption); }
+    .item-card.state-approve { background: #f0fdf4; border-color: var(--approve); }
+    .item-card.state-revise { background: #fffbeb; border-color: var(--revise); }
+    .item-card.state-reject { background: #fef2f2; border-color: var(--reject); }
+    .item-card.needs-attention { box-shadow: 0 0 0 2px var(--reject); }
+
+    .item-head {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      flex-wrap: wrap;
+      margin-bottom: .35rem;
+    }
+    .item-head .id-chip {
+      background: #1f2937;
+      color: #fff;
+      padding: .1rem .45rem;
+      border-radius: 3px;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: .8rem;
+    }
+    .item-head .kind-badge {
+      padding: .1rem .5rem;
+      border-radius: 3px;
+      font-size: .7rem;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      font-weight: 700;
+    }
+    .item-head .kind-badge.kind-DECISION { background: #dbeafe; color: #1e40af; }
+    .item-head .kind-badge.kind-ASSUMPTION { background: #fef3c7; color: #92400e; }
+    .item-head .title { font-weight: 600; font-size: 1rem; }
+
+    .item-context {
+      margin: .35rem 0 .5rem;
+      font-size: .9rem;
+      color: var(--fg);
+    }
+    .item-context p { margin: .25rem 0; }
+    .item-context code { background: #eef2ff; padding: .05rem .3rem; border-radius: 3px; font-size: .85em; }
+
+    .triage-row {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin: .35rem 0 .5rem;
+    }
+    .triage-row label {
+      display: inline-flex;
+      align-items: center;
+      gap: .35rem;
+      font-size: .9rem;
+      cursor: pointer;
+    }
+    .triage-row label.approve input:checked ~ span { color: var(--approve); font-weight: 600; }
+    .triage-row label.revise input:checked ~ span { color: var(--revise); font-weight: 600; }
+    .triage-row label.reject input:checked ~ span { color: var(--reject); font-weight: 600; }
+
+    textarea.item-note {
+      width: 100%;
+      min-height: 2.25rem;
+      padding: .35rem .5rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: .9rem;
+      resize: vertical;
+    }
+    textarea.item-note:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+    .feedback-block {
+      background: var(--tile-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    .feedback-block h3 { margin: 0 0 .35rem; font-size: 1rem; }
+    .feedback-block textarea {
+      width: 100%;
+      min-height: 4rem;
+      padding: .5rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: .9rem;
+      resize: vertical;
+    }
+
+    .compile-bar {
+      display: flex;
+      gap: .5rem;
+      align-items: center;
+      flex-wrap: wrap;
+      padding: .75rem 1rem;
+      background: var(--tile-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      position: sticky;
+      bottom: 1rem;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    }
+    .compile-bar .compile-btn {
+      padding: .5rem 1rem;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: .95rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .compile-bar .compile-btn:hover { background: #1d4ed8; }
+    .compile-bar .live-counts {
+      color: var(--muted);
+      font-size: .85rem;
+      margin-left: auto;
+    }
+    .compile-bar .live-counts strong { color: var(--fg); }
+
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      background: #1a1a1a;
+      color: #fff;
+      padding: .55rem 1rem;
+      border-radius: 4px;
+      font-size: .9rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,.2);
+      max-width: 22rem;
+    }
+    .toast.toast-error { background: var(--reject); }
+    .toast[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <header class="page-header">
+    <div>
+      <h1>Spec review gate: {{spec_title}}</h1>
+      <p class="meta">Slug: <code>{{spec_slug}}</code> &middot; {{created_at}}</p>
+      <p class="meta">Spec dir: <code>{{spec_dir}}</code></p>
+      <p class="meta">Review level: <span class="level-chip {{review_level}}">{{review_level}}</span> <span class="meta">— {{review_level_reason}}</span></p>
+    </div>
+    <div class="summary-tile">
+      <h3>Items</h3>
+      <dl class="counters">
+        <div><dt>Total</dt><dd>{{total_count}}</dd></div>
+        <div><dt>Decision</dt><dd>{{decision_count}}</dd></div>
+        <div><dt>Assumption</dt><dd>{{assumption_count}}</dd></div>
+      </dl>
+    </div>
+  </header>
+
+  <section class="summary-block">
+    <h2>Summary</h2>
+    <dl>
+      <dt>Problem</dt><dd>{{summary_problem_html}}</dd>
+      <dt>Key decisions</dt><dd>{{summary_key_decisions_list}}</dd>
+      <dt>Verification</dt><dd>{{summary_verification_html}}</dd>
+      <dt>Constraints</dt><dd>{{summary_constraints_list}}</dd>
+    </dl>
+  </section>
+
+  <div class="toolbar">
+    <button type="button" class="approve-all-btn" id="approve-all">Approve all + copy</button>
+    <a href="#" class="jump-link" id="jump-first">Jump to first unanswered</a>
+  </div>
+
+  <h2 class="items-heading">Flagged items</h2>
+  <div class="item-list">
+    {{item_cards}}
+  </div>
+
+  <section class="feedback-block">
+    <h3>General feedback (optional)</h3>
+    <textarea id="general-feedback" placeholder="Anything else for the agent — tone, missing concerns, scope changes…"></textarea>
+  </section>
+
+  <div class="compile-bar">
+    <button type="button" class="compile-btn" id="compile-btn"
+      data-compile-template="{{compile_template_attr}}">Compile decisions and copy</button>
+    <span class="live-counts" id="live-counts">
+      <strong id="lc-approve">0</strong> approve · <strong id="lc-revise">0</strong> revise · <strong id="lc-reject">0</strong> reject · <strong id="lc-pending">0</strong> pending
+    </span>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script>
+    var ITEMS = {{items_for_js}};
+    var META = {{meta_for_js}};
+
+    function showToast(msg, kind) {
+      var t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.toggle('toast-error', kind === 'error');
+      t.hidden = false;
+      setTimeout(function () { t.hidden = true; }, 2200);
+    }
+
+    function cardEl(id) { return document.getElementById('card-' + id); }
+    function selectedAction(id) {
+      var card = cardEl(id);
+      if (!card) return null;
+      var sel = card.querySelector('input[name="decision-' + id + '"]:checked');
+      return sel ? sel.value : null;
+    }
+    function noteText(id) {
+      var ta = document.getElementById('note-' + id);
+      return ta ? ta.value.trim() : '';
+    }
+    function setState(card, state) {
+      card.classList.remove('state-approve', 'state-revise', 'state-reject');
+      if (state) card.classList.add('state-' + state);
+    }
+
+    function refreshCounts() {
+      var counts = { approve: 0, revise: 0, reject: 0, pending: 0 };
+      ITEMS.forEach(function (it) {
+        var a = selectedAction(it.id);
+        if (a) counts[a]++; else counts.pending++;
+      });
+      document.getElementById('lc-approve').textContent = counts.approve;
+      document.getElementById('lc-revise').textContent = counts.revise;
+      document.getElementById('lc-reject').textContent = counts.reject;
+      document.getElementById('lc-pending').textContent = counts.pending;
+      return counts;
+    }
+
+    function compileDecisions() {
+      var lines = [];
+      var firstIncomplete = null;
+      var counts = { approve: 0, revise: 0, reject: 0 };
+      for (var i = 0; i < ITEMS.length; i++) {
+        var it = ITEMS[i];
+        var action = selectedAction(it.id);
+        var note = noteText(it.id);
+        var card = cardEl(it.id);
+        card.classList.remove('needs-attention');
+        if (!action) {
+          if (!firstIncomplete) firstIncomplete = it.id;
+          continue;
+        }
+        if ((action === 'revise' || action === 'reject') && !note) {
+          if (!firstIncomplete) firstIncomplete = it.id;
+          card.classList.add('needs-attention');
+          continue;
+        }
+        counts[action]++;
+        var suffix = note ? ' — ' + note : '';
+        lines.push(it.id + ' (' + it.kind + '): ' + action + suffix);
+      }
+      if (firstIncomplete) {
+        var card = cardEl(firstIncomplete);
+        if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+        showToast('Item ' + firstIncomplete + ' is incomplete (no decision, or revise/reject without a note).', 'error');
+        return null;
+      }
+      return { lines: lines, counts: counts };
+    }
+
+    function buildResponse(compiled, template) {
+      var fb = (document.getElementById('general-feedback').value || '').trim();
+      var subs = {
+        '{spec_slug}': META.spec_slug,
+        '{spec_title}': META.spec_title,
+        '{spec_dir}': META.spec_dir,
+        '{review_level}': META.review_level,
+        '{review_gate_path}': META.review_gate_path,
+        '{decisions_blob}': compiled.lines.join('\n'),
+        '{general_feedback}': fb || 'none',
+        '{approved_count}': String(compiled.counts.approve),
+        '{revised_count}': String(compiled.counts.revise),
+        '{rejected_count}': String(compiled.counts.reject),
+      };
+      var out = template;
+      Object.keys(subs).forEach(function (tok) {
+        out = out.split(tok).join(subs[tok]);
+      });
+      return out;
+    }
+
+    async function copyAndToast(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast('Copied compiled response — paste into chat.');
+      } catch (e) {
+        showToast('Clipboard write failed: ' + e.message, 'error');
+      }
+    }
+
+    document.addEventListener('change', function (e) {
+      if (e.target.matches('input[type="radio"][name^="decision-"]')) {
+        var id = e.target.name.replace(/^decision-/, '');
+        var card = cardEl(id);
+        if (card) {
+          setState(card, e.target.value);
+          card.classList.remove('needs-attention');
+        }
+        refreshCounts();
+      }
+    });
+
+    document.getElementById('compile-btn').addEventListener('click', function () {
+      var template = this.getAttribute('data-compile-template') || '';
+      var compiled = compileDecisions();
+      if (!compiled) return;
+      var text = buildResponse(compiled, template);
+      copyAndToast(text);
+    });
+
+    document.getElementById('approve-all').addEventListener('click', function () {
+      ITEMS.forEach(function (it) {
+        var radio = document.querySelector('input[name="decision-' + it.id + '"][value="approve"]');
+        if (radio) { radio.checked = true; }
+        var card = cardEl(it.id);
+        if (card) { setState(card, 'approve'); card.classList.remove('needs-attention'); }
+      });
+      refreshCounts();
+      var template = document.getElementById('compile-btn').getAttribute('data-compile-template') || '';
+      var compiled = compileDecisions();
+      if (compiled) copyAndToast(buildResponse(compiled, template));
+    });
+
+    document.getElementById('jump-first').addEventListener('click', function (e) {
+      e.preventDefault();
+      for (var i = 0; i < ITEMS.length; i++) {
+        var it = ITEMS[i];
+        if (!selectedAction(it.id)) {
+          var card = cardEl(it.id);
+          if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          return;
+        }
+      }
+      showToast('All items have a decision.');
+    });
+
+    // Initial state: apply default_action to any pre-checked radio (already set in HTML)
+    // and compute counts.
+    ITEMS.forEach(function (it) {
+      var a = selectedAction(it.id);
+      var card = cardEl(it.id);
+      if (a && card) setState(card, a);
+    });
+    refreshCounts();
+  </script>
+</body>
+</html>

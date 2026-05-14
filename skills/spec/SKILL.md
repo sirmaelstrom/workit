@@ -205,6 +205,53 @@ Or: "looks good" to proceed, "start over" to restart, or specific feedback.
 You can also override the review level: "looks good, but skip review" or "looks good, full review please"
 ```
 
+After presenting the chat-side artifact, **also emit** a structured `review-gate.json` to the spec bundle and invoke the renderer so the operator has an interactive triage surface. Skip this entirely when `--review=none`.
+
+#### JSON schema reference
+
+The skill writes `review-gate.json` next to the spec's other stage outputs. Full schema: `skills/spec/tests/fixtures/review-gate-schema.md`. Minimum the skill needs to know to produce a valid emit:
+
+- Top-level: `schema_version: "1.0"`, `run_slug`, `created_at` (ISO-8601), `spec {title, slug, dir}`, `review_level`, `review_level_reason`, `summary`, `flagged_items[]`, `compile_template` (string).
+- `summary`: `{problem, key_decisions[], verification_approach, constraint_highlights[]}` — `problem` and `verification_approach` are markdown strings; the lists are arrays of strings.
+- `flagged_items[]`: `{id, kind: "DECISION"|"ASSUMPTION", title, context, stage?, default_action?}`. `id` values must be **unique within the array**. `context` is markdown. `default_action` is optional `"approve"|"revise"|"reject"` that pre-checks the corresponding radio.
+- `compile_template` is the template the HTML uses when the operator clicks "Compile decisions and copy". It **must contain `{decisions_blob}`** (renderer fails Layer 3 without it). Should also contain `{spec_slug}` and `{general_feedback}` (renderer warns to stderr without them). Other supported tokens: `{spec_title}`, `{spec_dir}`, `{review_level}`, `{review_gate_path}`, `{approved_count}`, `{revised_count}`, `{rejected_count}`.
+
+Default `compile_template` to write into the JSON unless the operator has reason to override:
+
+```
+Spec review decisions for {spec_title} (slug: `{spec_slug}`, review_level: {review_level}):
+
+{decisions_blob}
+
+General feedback: {general_feedback}
+Counts: {approved_count} approved, {revised_count} revised, {rejected_count} rejected.
+
+Proceed to Phase 5 (Revision if any items were revised or rejected) then Phase 6 (Decomposition and Work Packages). Spec dir: {spec_dir}.
+```
+
+A working example fixture lives at `skills/spec/tests/fixtures/review-gate-example.json`.
+
+#### Renderer invocation
+
+After writing `review-gate.json`, invoke (from any working directory):
+
+```bash
+node "[plugin-path]/skills/spec/scripts/render-review-gate.mjs" \
+  --input "{spec-dir}/review-gate.json" \
+  --output-dir "{spec-dir}"
+```
+
+The renderer:
+- Validates the JSON against the v1.0 schema (three-layer; fails loudly on invalid input — non-zero exit + stderr).
+- Writes `review-gate.md` and `review-gate.html` into `--output-dir`.
+- Output is deterministic given fixed JSON input AND fixed `--output-dir`.
+- Single-file HTML — no external assets, system fonts only.
+- The HTML's "Compile decisions and copy" button compiles per-item state into a structured response and writes it to clipboard. The operator pastes the compiled response back into chat; Phase 5 reads it.
+
+#### Chat output
+
+After the renderer succeeds, point the operator at `review-gate.html` (one line — do not paste the chat-side markdown summary into the response that already shows it). The HTML and the chat-side markdown are redundant; the HTML is the recommended triage surface, the chat-side markdown is the fallback for environments without an open browser.
+
 **STOP HERE.** Wait for human input. Do not proceed to decomposition without explicit approval.
 
 ### Phase 5: Revision (if needed)
