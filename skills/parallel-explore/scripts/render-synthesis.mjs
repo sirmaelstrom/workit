@@ -11,7 +11,7 @@
  * No markdown library (MN3): uses markdown-mini.mjs only.
  */
 
-import { mdToHtml, escapeHtml } from './markdown-mini.mjs';
+import { mdToHtml, escapeHtml } from '../../_shared/markdown-mini.mjs';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';

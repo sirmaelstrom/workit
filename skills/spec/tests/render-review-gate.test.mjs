@@ -13,7 +13,7 @@ import {
   ensureDir, validateReviewGate, sanitizeDomId, buildAttrPath,
   renderMarkdown, renderHtml, main,
 } from '../scripts/render-review-gate.mjs';
-import { mdToHtml, escapeHtml } from '../scripts/markdown-mini.mjs';
+import { mdToHtml, escapeHtml } from '../../_shared/markdown-mini.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(__dirname, 'fixtures');
@@ -409,7 +409,7 @@ test('render-review-gate.mjs imports only node: built-ins and the local markdown
   const src = readFileSync(RENDERER, 'utf8');
   const imports = src.match(/^import .+ from ['"](.+)['"];?\s*$/gm) || [];
   for (const imp of imports) {
-    const ok = /from ['"]node:/.test(imp) || /from ['"]\.\/markdown-mini\.mjs['"]/.test(imp);
+    const ok = /from ['"]node:/.test(imp) || /from ['"]\.\.\/\.\.\/_shared\/markdown-mini\.mjs['"]/.test(imp);
     assert.ok(ok, `disallowed import: ${imp}`);
   }
 });

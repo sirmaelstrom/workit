@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mdToHtml, escapeHtml } from '../scripts/markdown-mini.mjs';
+import { mdToHtml, escapeHtml } from './markdown-mini.mjs';
 
 // ─── Supported features ────────────────────────────────────────────────────
 
@@ -159,7 +159,7 @@ test('horizontal rule falls through as paragraph', () => {
 // ─── No external dependencies ───────────────────────────────────────────────
 
 test('no external deps', () => {
-  const src = readFileSync(new URL('../scripts/markdown-mini.mjs', import.meta.url), 'utf8');
+  const src = readFileSync(new URL('./markdown-mini.mjs', import.meta.url), 'utf8');
   const imports = src.match(/^import .+ from ['"](.+)['"];?\s*$/gm) || [];
   for (const imp of imports) {
     assert.match(imp, /from ['"]node:/, `all imports must be from node: built-ins, got: ${imp}`);

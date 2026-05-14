@@ -10,7 +10,7 @@
  * Node built-ins only. Bounded markdown-mini converter, no markdown library.
  */
 
-import { mdToHtml, escapeHtml } from './markdown-mini.mjs';
+import { mdToHtml, escapeHtml } from '../../_shared/markdown-mini.mjs';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
