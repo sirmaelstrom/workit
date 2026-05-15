@@ -4,13 +4,15 @@
   <meta charset="utf-8">
   <title>Skill Audit Scorecard — {{run_slug}}</title>
   <style>
-    /* System fonts only. No external assets. */
+    /* System fonts only. No external assets. Dark theme. */
     :root {
-      --fg: #1a1a1a;
-      --muted: #555;
-      --border: #d0d0d0;
-      --bg: #fafafa;
-      --tile-bg: #ffffff;
+      --fg: #e6edf3;
+      --muted: #8b949e;
+      --border: #30363d;
+      --bg: #0d1117;
+      --tile-bg: #161b22;
+      --tile-bg-2: #1c2128;
+      --code-bg: #1f2933;
       --accent: #2563eb;
     }
     * { box-sizing: border-box; }
@@ -48,7 +50,7 @@
     .summary-tile dt { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; }
     .summary-tile dd { margin: 0; font-weight: 600; font-size: .95rem; }
     h2 { margin: 1.5rem 0 .5rem; font-size: 1.15rem; border-bottom: 1px solid var(--border); padding-bottom: .25rem; }
-    code { background: #eee; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
+    code { background: var(--code-bg); color: var(--fg); padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
     pre code { display: block; padding: .5rem; overflow-x: auto; }
     ul { margin: .25rem 0 .5rem 1.25rem; padding: 0; }
     li { margin: .1rem 0; }
@@ -61,15 +63,15 @@
     }
     .filter-toggle {
       padding: .35rem .75rem;
-      background: #1a1a1a;
-      color: #fff;
-      border: none;
+      background: #21262d;
+      color: var(--fg);
+      border: 1px solid var(--border);
       border-radius: 4px;
       font-size: .85rem;
       cursor: pointer;
       font-family: inherit;
     }
-    .filter-toggle:hover { background: #333; }
+    .filter-toggle:hover { background: #30363d; }
     body.show-only-eligible tr.skill-row:not(.is-eligible),
     body.show-only-eligible tr.skill-detail:not(.is-eligible) { display: none; }
 
@@ -86,7 +88,7 @@
       vertical-align: middle;
     }
     .scorecard-table thead th {
-      background: #eee;
+      background: #21262d;
       font-weight: 600;
       position: sticky;
       top: 0;
@@ -110,10 +112,10 @@
       text-transform: uppercase;
       letter-spacing: .03em;
     }
-    .badge.kind-skill { background: #dbeafe; color: #1e40af; }
-    .badge.kind-command { background: #fef3c7; color: #92400e; }
-    .badge.kind-agent { background: #ede9fe; color: #5b21b6; }
-    .badge.plugin { background: #f3f4f6; color: #374151; }
+    .badge.kind-skill { background: #1e3a8a; color: #bfdbfe; }
+    .badge.kind-command { background: #78350f; color: #fde68a; }
+    .badge.kind-agent { background: #4c1d95; color: #ddd6fe; }
+    .badge.plugin { background: #21262d; color: var(--muted); }
 
     td.score-cell {
       text-align: center;
@@ -130,7 +132,7 @@
 
     td.elig-cell { text-align: center; min-width: 4rem; }
     td.elig-cell .elig-yes { background: #4ade80; color: #064e3b; padding: .1rem .4rem; border-radius: 3px; font-weight: 600; font-size: .75rem; }
-    td.elig-cell .elig-no { background: #e5e7eb; color: #6b7280; padding: .1rem .4rem; border-radius: 3px; font-size: .75rem; }
+    td.elig-cell .elig-no { background: #21262d; color: var(--muted); padding: .1rem .4rem; border-radius: 3px; font-size: .75rem; }
 
     td.roi-cell { text-align: right; font-variant-numeric: tabular-nums; min-width: 4rem; }
 
@@ -144,7 +146,7 @@
       font-size: .8rem;
       color: var(--muted);
     }
-    .expand-toggle:hover { background: #eee; }
+    .expand-toggle:hover { background: #30363d; color: var(--fg); }
 
     tr.skill-detail > td {
       background: var(--tile-bg);
@@ -160,7 +162,7 @@
       border: 1px solid var(--border);
       border-radius: 4px;
       padding: .35rem .5rem;
-      background: #fff;
+      background: var(--tile-bg-2);
     }
     .skill-detail-grid details summary {
       cursor: pointer;
@@ -184,7 +186,7 @@
     .skill-detail-grid details summary .dim-score-badge.score-4 { background: #86efac; color: #14532d; }
     .skill-detail-grid details summary .dim-score-badge.score-5 { background: #4ade80; color: #064e3b; }
     .skill-detail-grid details summary .dim-score-badge.elig-yes { background: #4ade80; color: #064e3b; }
-    .skill-detail-grid details summary .dim-score-badge.elig-no { background: #e5e7eb; color: #6b7280; }
+    .skill-detail-grid details summary .dim-score-badge.elig-no { background: #21262d; color: var(--muted); }
 
     .binary-strip {
       display: flex;
@@ -199,8 +201,8 @@
       padding: .05rem .35rem;
       border-radius: 3px;
       font-size: .75rem;
-      background: #f3f4f6;
-      color: #374151;
+      background: #21262d;
+      color: var(--muted);
     }
     .binary-check::before {
       content: "";
@@ -258,16 +260,40 @@
     }
     .send-prompt-btn:hover { background: #1d4ed8; }
 
+    .feedback-block {
+      background: var(--tile-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem;
+      margin: 1rem 0 1.5rem;
+    }
+    .feedback-block h2 { margin: 0 0 .35rem; font-size: 1.05rem; border: none; padding: 0; }
+    .feedback-block p.meta { margin-bottom: .5rem; }
+    .feedback-block textarea {
+      width: 100%;
+      min-height: 4rem;
+      padding: .5rem;
+      background: var(--tile-bg-2);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: .9rem;
+      resize: vertical;
+    }
+    .feedback-block textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
     .toast {
       position: fixed;
       bottom: 1.5rem;
       right: 1.5rem;
-      background: #1a1a1a;
-      color: #fff;
+      background: #21262d;
+      color: var(--fg);
+      border: 1px solid var(--border);
       padding: .5rem 1rem;
       border-radius: 4px;
       font-size: .9rem;
-      box-shadow: 0 2px 8px rgba(0,0,0,.2);
+      box-shadow: 0 2px 8px rgba(0,0,0,.4);
     }
     .toast[hidden] { display: none; }
   </style>
@@ -315,9 +341,23 @@
     </ol>
   </section>
 
+  <section class="feedback-block">
+    <h2>Additional feedback (optional)</h2>
+    <p class="meta">Anything to tell the agent — scope changes, deviations, follow-ups. Appended to the copied prompt when you click "Send to agent".</p>
+    <textarea id="additional-feedback" placeholder="e.g. 'Do action #2 but skip the eval-loop step.' or 'Defer #1 until after the migration ships.'"></textarea>
+  </section>
+
   <div id="toast" class="toast" hidden>Copied</div>
 
   <script>
+    function getAdditionalFeedback() {
+      var ta = document.getElementById('additional-feedback');
+      return ta ? ta.value.trim() : '';
+    }
+    function withFeedback(text) {
+      var fb = getAdditionalFeedback();
+      return fb ? text + '\n\nAdditional feedback: ' + fb : text;
+    }
     document.querySelectorAll('.expand-toggle').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var id = btn.getAttribute('data-target');
@@ -330,7 +370,7 @@
     });
     document.querySelectorAll('.send-prompt-btn').forEach(function (btn) {
       btn.addEventListener('click', async function () {
-        var prompt = btn.getAttribute('data-send-prompt');
+        var prompt = withFeedback(btn.getAttribute('data-send-prompt'));
         try {
           await navigator.clipboard.writeText(prompt);
           var toast = document.getElementById('toast');

@@ -4,13 +4,16 @@
   <meta charset="utf-8">
   <title>Parallel-Explore Synthesis: {{goal}}</title>
   <style>
-    /* System fonts only (MN4). No external assets (M2). */
+    /* System fonts only (MN4). No external assets (M2). Dark theme. */
     :root {
-      --fg: #1a1a1a;
-      --muted: #555;
-      --border: #d0d0d0;
-      --bg: #fafafa;
-      --tile-bg: #ffffff;
+      --fg: #e6edf3;
+      --muted: #8b949e;
+      --border: #30363d;
+      --bg: #0d1117;
+      --tile-bg: #161b22;
+      --tile-bg-2: #1c2128;
+      --code-bg: #1f2933;
+      --accent: #2563eb;
       --rec: #4ade80;
     }
     * { box-sizing: border-box; }
@@ -30,7 +33,7 @@
     h2 { margin-top: 2rem; font-size: 1.25rem; border-bottom: 1px solid var(--border); padding-bottom: .25rem; }
     h3 { margin: 0 0 .5rem; font-size: 1.05rem; }
     .meta { color: var(--muted); font-size: .9rem; margin: 0; }
-    code { background: #eee; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
+    code { background: var(--code-bg); color: var(--fg); padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
     pre code { display: block; padding: .5rem; overflow-x: auto; }
     section { margin-bottom: 1.5rem; }
     ul { margin: .25rem 0 .75rem 1.25rem; padding: 0; }
@@ -65,7 +68,7 @@
       width: 100%;
       padding: .5rem .75rem;
       margin: .5rem 0;
-      background: #1a1a1a;
+      background: var(--accent);
       color: #fff;
       border: none;
       border-radius: 4px;
@@ -73,8 +76,8 @@
       cursor: pointer;
       font-family: inherit;
     }
-    .pick-branch-btn:hover { background: #333; }
-    details.branch-detail { margin: .35rem 0; border-top: 1px solid #eee; padding-top: .35rem; }
+    .pick-branch-btn:hover { background: #1d4ed8; }
+    details.branch-detail { margin: .35rem 0; border-top: 1px solid var(--border); padding-top: .35rem; }
     details.branch-detail summary { cursor: pointer; font-weight: 600; font-size: .9rem; }
     details.branch-detail[open] summary { margin-bottom: .35rem; }
     .op-complexity { margin: .75rem 0 0; font-size: .9rem; color: var(--muted); }
@@ -91,25 +94,50 @@
       vertical-align: top;
       font-size: .9rem;
     }
-    .matrix-table th { background: #eee; }
+    .matrix-table th { background: #21262d; }
     .matrix-table th.recommended-col { background: rgba(74, 222, 128, 0.25); }
     .matrix-col.recommended-col { background: rgba(74, 222, 128, 0.10); }
-    .matrix-cell.score-1 { background: #fca5a5; }
-    .matrix-cell.score-2 { background: #fdba74; }
-    .matrix-cell.score-3 { background: #fde68a; }
-    .matrix-cell.score-4 { background: #86efac; }
-    .matrix-cell.score-5 { background: #4ade80; }
+    /* Score cells: light backgrounds with dark text — readable on dark page. */
+    .matrix-cell.score-1 { background: #fca5a5; color: #7f1d1d; }
+    .matrix-cell.score-2 { background: #fdba74; color: #7c2d12; }
+    .matrix-cell.score-3 { background: #fde68a; color: #78350f; }
+    .matrix-cell.score-4 { background: #86efac; color: #14532d; }
+    .matrix-cell.score-5 { background: #4ade80; color: #064e3b; }
+
+    .feedback-block {
+      background: var(--tile-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1rem;
+      margin: 1rem 0 1.5rem;
+    }
+    .feedback-block h2 { margin: 0 0 .35rem; font-size: 1.05rem; border: none; padding: 0; }
+    .feedback-block p.meta { margin-bottom: .5rem; }
+    .feedback-block textarea {
+      width: 100%;
+      min-height: 4rem;
+      padding: .5rem;
+      background: var(--tile-bg-2);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: .9rem;
+      resize: vertical;
+    }
+    .feedback-block textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
     .toast {
       position: fixed;
       bottom: 1.5rem;
       right: 1.5rem;
-      background: #1a1a1a;
-      color: #fff;
+      background: #21262d;
+      color: var(--fg);
+      border: 1px solid var(--border);
       padding: .5rem 1rem;
       border-radius: 4px;
       font-size: .9rem;
-      box-shadow: 0 2px 8px rgba(0,0,0,.2);
+      box-shadow: 0 2px 8px rgba(0,0,0,.4);
     }
     .toast[hidden] { display: none; }
   </style>
@@ -162,12 +190,26 @@
     {{next_action_html}}
   </section>
 
+  <section class="feedback-block">
+    <h2>Additional feedback (optional)</h2>
+    <p class="meta">Anything you want to tell the agent — concerns, scope changes, deviations from the recommendation, etc. Appended to the copied prompt when you pick a branch.</p>
+    <textarea id="additional-feedback" placeholder="e.g. 'Pick branch 2 but use the verification plan from branch 1' or 'Proceed, but defer the auth piece to a follow-up.'"></textarea>
+  </section>
+
   <div id="toast" class="toast" hidden>Copied</div>
 
   <script>
+    function getAdditionalFeedback() {
+      var ta = document.getElementById('additional-feedback');
+      return ta ? ta.value.trim() : '';
+    }
+    function withFeedback(text) {
+      var fb = getAdditionalFeedback();
+      return fb ? text + '\n\nAdditional feedback: ' + fb : text;
+    }
     document.querySelectorAll('.pick-branch-btn').forEach(function (btn) {
       btn.addEventListener('click', async function () {
-        var prompt = btn.getAttribute('data-pick-prompt');
+        var prompt = withFeedback(btn.getAttribute('data-pick-prompt'));
         try {
           await navigator.clipboard.writeText(prompt);
           var toast = document.getElementById('toast');
