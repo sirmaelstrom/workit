@@ -341,9 +341,11 @@ council_review({
   artifact_path: "{workshop_path}",
   review_type: "spec",
   thinking_level: "medium",
-  models: ["claude", "gemini", "gpt"]
+  models: ["claude-opus", "gemini", "gpt"]
 })
 ```
+
+Use **`claude-opus`** here (not the default `claude`/sonnet lens): a Phase-8 spec review is a coherence audit at a decision gate, and a 2026-05-25 A/B showed sonnet accepts a self-contradictory spec as coherent while opus catches the cross-artifact contradictions (stale constraints after a mid-flight decision revision). Sonnet remains the default lens for code/conformance reviews; spec-coherence is the escalation case.
 
 If any model times out, retry that model once with `thinking_level: "low"`. If it times out again, proceed with the models that completed.
 
