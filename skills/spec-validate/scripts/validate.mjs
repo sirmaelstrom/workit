@@ -130,10 +130,10 @@ function validateMeta() {
   }
 
   if (!meta.title) error('meta.json', 'Missing "title" — service uses this to display the workshop. Without it, the workshop shows up unnamed.');
-  if (!meta.slug) error('meta.json', 'Missing "slug" — must match the directory name. Used by campaign-parser for campaign identification.');
+  if (!meta.slug) error('meta.json', 'Missing "slug" — must match the directory name. Required for orchestrator path derivation and workshop tracking.');
   if (!meta.status) error('meta.json', 'Missing "status" — tracks pipeline progress. Without it, resume flow cannot determine where you left off.');
   if (meta.slug && meta.slug !== basename(workshopPath)) {
-    warn('meta.json', `Slug "${meta.slug}" doesn't match directory name "${basename(workshopPath)}". This will confuse campaign-parser which derives paths from the slug.`);
+    warn('meta.json', `Slug "${meta.slug}" doesn't match directory name "${basename(workshopPath)}". Workshop paths are derived from the slug — a mismatch causes confusing path errors.`);
   }
   if (!meta.projects || !Array.isArray(meta.projects)) {
     warn('meta.json', 'Missing or non-array "projects" field. Use "projects" (plural, array) — the workshop handler reads Array.isArray(meta.projects). A singular "project" string silently resolves to empty.');
@@ -393,18 +393,18 @@ function validateWorkPackages() {
   const wpFiles = files.filter(f => f !== '_orchestrator.md');
 
   if (!orchestrator) {
-    error('work-packages/', 'Missing _orchestrator.md — the coordination layer for wave plan, package inventory, and gate commands. Without it, campaign-parser cannot create a campaign.');
+    error('work-packages/', 'Missing _orchestrator.md — the coordination layer for wave plan, package inventory, and gate commands. Without it, execution agents have no shared context or dependency ordering.');
   } else {
     const orch = readFileSync(join(wpDir, '_orchestrator.md'), 'utf-8');
 
-    // Check machine-readable sections
-    if (!/^## Wave Plan/m.test(orch)) error('_orchestrator.md', 'Missing "## Wave Plan" section — campaign-parser requires this to determine execution order.');
-    if (!/^## Package Inventory/m.test(orch)) error('_orchestrator.md', 'Missing "## Package Inventory" section — campaign-parser requires this table to map packages to projects and spec files.');
+    // Check coordination sections
+    if (!/^## Wave Plan/m.test(orch)) error('_orchestrator.md', 'Missing "## Wave Plan" section — required to determine execution order across work packages.');
+    if (!/^## Package Inventory/m.test(orch)) error('_orchestrator.md', 'Missing "## Package Inventory" section — required to map packages to projects and spec files.');
     if (!/^## Gate Commands/m.test(orch)) warn('_orchestrator.md', 'Missing "## Gate Commands" section — without explicit gates, defaults to `npx tsc --noEmit` per project.');
 
     // Check for spec-level constraints
     if (!/constraint/i.test(orch) && !/must/i.test(orch)) {
-      warn('_orchestrator.md', 'No spec-level constraints found in orchestrator. Constraints from constraints.md should be summarized here — dispatch agents read the orchestrator, not the full workshop artifacts.');
+      warn('_orchestrator.md', 'No spec-level constraints found in orchestrator. Constraints from constraints.md should be summarized here — execution agents read the orchestrator, not the full workshop artifacts.');
     }
 
     ok('_orchestrator.md present');
