@@ -334,27 +334,28 @@ After the fresh-eyes loop converges:
 
 #### 8a. Deploy Council
 
-Use the `mcp__review-council__council_review` tool to run a multi-model review:
+The council runs **specialized lenses in parallel as Task subagents inside this interactive session** — plan-covered (your subscription), not the metered programmatic API. Each lens reviews the converged spec cold.
 
-```
-council_review({
-  artifact_path: "{workshop_path}",
-  review_type: "spec",
-  thinking_level: "medium",
-  models: ["claude-opus", "gemini", "gpt"]
-})
-```
+Dispatch these lenses **in a single response** (multiple Agent tool calls at once, for parallel execution), each with `model: opus`:
 
-Use **`claude-opus`** here (not the default `claude`/sonnet lens): a Phase-8 spec review is a coherence audit at a decision gate, and a 2026-05-25 A/B showed sonnet accepts a self-contradictory spec as coherent while opus catches the cross-artifact contradictions (stale constraints after a mid-flight decision revision). Sonnet remains the default lens for code/conformance reviews; spec-coherence is the escalation case.
+1. **Reasoning & Coherence** — read `references/council-lens-reasoning.md`, substitute `{workshop_path}` and `{project_path}`, spawn the prompt verbatim. The logic / contradiction auditor.
+2. **Cartography & Codebase Grounding** — read `references/council-lens-cartography.md`, substitute the same placeholders, spawn verbatim. Verifies the spec against real source (has Read/Grep/Glob).
 
-If any model times out, retry that model once with `thinking_level: "low"`. If it times out again, proceed with the models that completed.
+Use **opus** for both: a Phase-8 spec review is a coherence audit at a decision gate, and a 2026-05-25 A/B showed sonnet accepts a self-contradictory spec as coherent while opus catches the cross-artifact contradictions (stale constraints after a mid-flight decision revision).
 
-#### 8b. Apply Council Findings
+> **Why subagents now, and what's still missing.** The council's real value is the **synthesis across diverse models** — different models surface different blind spots. The Claude lens is the anchor (most important), but the external lenses are where new insight comes from: **Codex first** (the strongest adversarial / general code reviewer), then GPT, then Gemini (so-so). Two constraints shape this interim: (1) the in-process MCP council routed the pivotal opus lens through the metered *programmatic* path (post-2026-06-15 $X credit) — run as interactive subagents, the Claude lenses stay plan-covered; (2) the external models need their own auth/secrets and can't authenticate from a CLI-spawned MCP. Until the external lenses are wired back (via the service gateway / their own CLIs, with attribution), this is a **Claude-lens interim** — not the full council. The opus cartography subagent grounds against real source via Read/Grep/Glob. Restoring multi-model synthesis (Codex first) is the priority follow-up.
 
-Process the council synthesis:
-- **Critical findings:** Fix immediately in the spec files.
-- **Major findings:** Fix unless they conflict with a deliberate decision (reference the D# and explain why it stands).
-- **Minor findings:** Note but don't fix.
+If a lens subagent fails, retry it once. If it fails again, proceed with the lenses that completed and note the gap.
+
+#### 8b. Synthesize & Apply Council Findings
+
+You (the orchestrator, running as opus) are the council's synthesizer — read both lens outputs and reconcile them before applying:
+- **Convergence is signal:** a finding both lenses raise independently is high-confidence — fix it.
+- **Dedupe:** collapse the same issue reported by both lenses into one.
+- **Then apply by severity:**
+  - **Critical findings:** Fix immediately in the spec files.
+  - **Major findings:** Fix unless they conflict with a deliberate decision (reference the D# and explain why it stands).
+  - **Minor findings:** Note but don't fix.
 
 Count amendments applied.
 
@@ -380,7 +381,7 @@ Present the completed spec summary:
 **Packages:** {N} WPs
 **Estimated execution:** {autonomous WPs} autonomous, {review WPs} need review
 **Dependency order:** {summary}
-**Review:** {review_level} — {N} fresh-eyes waves, {N} council models, {N} amendments applied
+**Review:** {review_level} — {N} fresh-eyes waves, {N} council lenses, {N} amendments applied
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 
 Ready for execution.
