@@ -118,5 +118,5 @@ When presenting results, note any false positives you spot and help the user foc
 ## Relationship to Other Skills
 
 - **`/workshop`** creates and advances workshops through the pipeline. `/spec-validate` checks the quality of what was produced.
-- Use `/spec-validate` before dispatch to catch issues early — a workshop that passes validation has a much higher chance of producing a successful campaign.
+- Use `/spec-validate` before execution to catch issues early — a workshop that passes validation has a much higher chance of successful work-package execution.
 - After a campaign post-mortem reveals spec quality issues, run validation on the workshop to see if the checks would have caught them. If not, that's a signal to add a new check to the script.
