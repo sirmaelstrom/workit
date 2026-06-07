@@ -334,24 +334,45 @@ After the fresh-eyes loop converges:
 
 #### 8a. Deploy Council
 
-The council runs **specialized lenses in parallel as Task subagents inside this interactive session** — plan-covered (your subscription), not the metered programmatic API. Each lens reviews the converged spec cold.
+The council is a **hybrid of two composed halves** — a local Anthropic lens (plan-covered) and an external multi-model council (codex/gpt/gemini). Its real value is the **synthesis across diverse models**: different model families surface different blind spots. Dispatch **both halves in a single response** for maximum parallelism — the two Agent subagent calls and the one MCP call go out together.
 
-Dispatch these lenses **in a single response** (multiple Agent tool calls at once, for parallel execution), each with `model: opus`:
+**Half 1 — Local Anthropic lenses (plan-covered anchor).** Two specialized lenses run as `model: opus` Task subagents *inside this interactive session* — plan-covered (your subscription), not the metered programmatic API. Each reviews the converged spec cold:
 
 1. **Reasoning & Coherence** — read `references/council-lens-reasoning.md`, substitute `{workshop_path}` and `{project_path}`, spawn the prompt verbatim. The logic / contradiction auditor.
 2. **Cartography & Codebase Grounding** — read `references/council-lens-cartography.md`, substitute the same placeholders, spawn verbatim. Verifies the spec against real source (has Read/Grep/Glob).
 
 Use **opus** for both: a Phase-8 spec review is a coherence audit at a decision gate, and a 2026-05-25 A/B showed sonnet accepts a self-contradictory spec as coherent while opus catches the cross-artifact contradictions (stale constraints after a mid-flight decision revision).
 
-> **Why subagents now, and what's still missing.** The council's real value is the **synthesis across diverse models** — different models surface different blind spots. The Claude lens is the anchor (most important), but the external lenses are where new insight comes from: **Codex first** (the strongest adversarial / general code reviewer), then GPT, then Gemini (so-so). Two constraints shape this interim: (1) the in-process MCP council routed the pivotal opus lens through the metered *programmatic* path (post-2026-06-15 $X credit) — run as interactive subagents, the Claude lenses stay plan-covered; (2) the external models need their own auth/secrets and can't authenticate from a CLI-spawned MCP. Until the external lenses are wired back (via the service gateway / their own CLIs, with attribution), this is a **Claude-lens interim** — not the full council. The opus cartography subagent grounds against real source via Read/Grep/Glob. Restoring multi-model synthesis (Codex first) is the priority follow-up.
+**Half 2 — External council (diverse-model lenses).** In the *same response*, make ONE call to the `review-council` MCP, which fans out three external lenses in parallel and writes a lens file per model:
 
-If a lens subagent fails, retry it once. If it fails again, proceed with the lenses that completed and note the gap.
+```
+mcp__review-council__council_review({
+  workshop_path: "{workshop_path}",
+  surface: "spec",
+  round: 1,
+  models: ["codex", "gpt", "gemini"],
+  thinking: "medium"
+})
+```
+
+- **codex** (lead) — the strongest adversarial / general code reviewer; an agentic coding model that explores `{project_path}` itself. Runs on the operator's own ChatGPT login → **plan-covered ($0), visible burn**, NOT the Anthropic bucket.
+- **gpt** + **gemini** — metered external APIs, attributed as `review.council` api_usage rows.
+
+The tool returns a JSON summary with each model's status and lens filename; the files land in `{workshop_path}/reviews/review-1/` (`review-lens-codex.md`, `review-lens-gpt.md`, `review-lens-gemini.md`). Read those in 8b.
+
+> **If the external council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): proceed with the two local opus lenses alone and note the gap in the Phase-9 summary. The local anchor is sufficient to ship; the external lenses are additive depth. (Provisioning: the MCP needs `data/secrets/service.env` — run service's `scripts/refresh-review-council-secrets.ps1` once.)
+
+> **Why this split.** The Claude lenses run as interactive subagents so the pivotal opus review stays **plan-covered** (the in-process MCP council used to route it through the metered *programmatic* path — the post-2026-06-15 $X credit). The external lenses run via the MCP because they authenticate with their *own* credentials: codex via the operator's ChatGPT login (plan-covered, $0), gpt/gemini via metered API keys loaded from `data/secrets/service.env`. Composing both halves is the whole point — the diverse external models are where new blind spots surface, with codex as the lead adversarial reviewer.
+
+If a **local lens subagent** fails, retry it once, then proceed with what completed. If the **external council** call fails, see the unavailability note above — proceed with the local anchor and record the gap.
 
 #### 8b. Synthesize & Apply Council Findings
 
-You (the orchestrator, running as opus) are the council's synthesizer — read both lens outputs and reconcile them before applying:
-- **Convergence is signal:** a finding both lenses raise independently is high-confidence — fix it.
-- **Dedupe:** collapse the same issue reported by both lenses into one.
+You (the orchestrator, running as opus) are the council's synthesizer — read **all** lens outputs and reconcile them before applying:
+- **Inputs:** the two local opus subagent returns (reasoning + cartography) **and** the external lens files in `{workshop_path}/reviews/review-1/` (`review-lens-codex.md`, `review-lens-gpt.md`, `review-lens-gemini.md`). Read each external file that the `council_review` summary marked `success`; skip ones marked `failed`/`timeout`.
+- **Convergence is signal:** a finding two or more lenses raise independently — *especially across the local/external boundary* — is high-confidence. Fix it.
+- **Weight the lead:** codex is the strongest adversarial/grounding reviewer and explores the real code; give its concrete, file-cited findings (e.g. EF/migration traps, integration gaps) extra weight even when raised alone.
+- **Dedupe:** collapse the same issue reported by multiple lenses into one.
 - **Then apply by severity:**
   - **Critical findings:** Fix immediately in the spec files.
   - **Major findings:** Fix unless they conflict with a deliberate decision (reference the D# and explain why it stands).
