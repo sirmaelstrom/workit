@@ -6,10 +6,9 @@ It's published openly so it can be referenced, forked, or installed directly. It
 
 ## What's inside
 
-Three layers:
+Two layers:
 
 - **`skills/`** — the active, triggerable tools (thirteen of them, below).
-- **`agents/`** — specialized subagents (e.g. .NET architecture / performance review lenses).
 - **`reference/`** — the methodology library the skills draw on: patterns, templates, operational prompts, and heuristics. Start at [`reference/patterns/INDEX.md`](./reference/patterns/INDEX.md), or see [`reference/README.md`](./reference/README.md).
 
 ### Skills
