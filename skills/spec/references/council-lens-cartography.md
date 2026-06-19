@@ -2,7 +2,7 @@
 
 Opus subagent. The council's **cartographer**: if the spec's map doesn't match the territory, this lens finds the discrepancy. Use the prompt below verbatim with `{workshop_path}` and `{project_path}` substituted. The structured findings block (Critical/Major/Minor) is what Phase 8b's synthesis reads — don't reformat it.
 
-This lens runs as a Task subagent inside the interactive `/spec` session (plan-covered), with native `Read`/`Grep`/`Glob` file access. Dispatch with `model: opus`. (Stage 2 will move this lens to the Gemini provider via the service gateway for model diversity + attributed metered cost; the prompt body transfers unchanged.)
+This lens runs as a Task subagent inside the interactive `/spec` session (plan-covered), with native `Read`/`Grep`/`Glob` file access. Dispatch with `model: opus`.
 
 ```
 You are the Cartography & Codebase Grounding lens of a multi-lens spec review council. You

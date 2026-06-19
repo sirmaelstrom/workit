@@ -5,7 +5,7 @@
   "spec": {
     "title": "Duplicate ID Fixture",
     "slug": "duplicate-id-fixture",
-    "dir": "/workspace/data/outputs/workshops/duplicate-id-fixture"
+    "dir": "./outputs/workshops/duplicate-id-fixture"
   },
   "review_level": "light",
   "review_level_reason": "Fixture intended to fail validation.",

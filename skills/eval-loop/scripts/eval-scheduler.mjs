@@ -25,7 +25,7 @@ const QUEUE_FILE = join(__dirname, 'eval-queue.json');
 const PROJECTS_ROOT = resolve(__dirname, '..', '..', '..', '..');
 const LAST_NOTIFY_FILE = join(__dirname, '.last-notify-timestamp');
 // Optional: a ledger endpoint to mirror results to. Unset = ledger writes are skipped.
-const service_URL = process.env.service_URL || '';
+const LEDGER_URL = process.env.LEDGER_URL || '';
 const LEDGER_USER_ID = process.env.LEDGER_USER_ID || 'user';
 // Plugin repos (siblings under PROJECTS_ROOT) to scan for skills.db. Comma-separated.
 const EVAL_PLUGINS = (process.env.EVAL_PLUGINS || 'heathdev-workshop-plugin')
@@ -78,9 +78,9 @@ async function notifyEmbed(webhookUrl, embed) {
 
 // --- Optional ledger mirror ---
 async function writeLedger(content) {
-  if (!service_URL) return; // no endpoint configured — skip silently
+  if (!LEDGER_URL) return; // no endpoint configured — skip silently
   try {
-    const resp = await fetch(`${service_URL}/api/ledger`, {
+    const resp = await fetch(`${LEDGER_URL}/api/ledger`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -91,7 +91,7 @@ async function writeLedger(content) {
       }),
     });
     if (!resp.ok) console.warn(`Ledger POST returned ${resp.status}`);
-    else console.log('Ledger note written to service');
+    else console.log('Ledger note written to the ledger endpoint');
   } catch (e) {
     console.warn(`Ledger POST failed: ${e.message}`);
   }
@@ -148,7 +148,7 @@ test_cases:
       /<skill-command>
       <realistic simulated input>
     context:
-      project: heathdev-service
+      project: your-project
       constraints: []
     assertions:
       format:
@@ -325,7 +325,7 @@ async function checkAndNotify(webhookUrl) {
     }
   }
 
-  // Write summary to service ledger
+  // Write summary to the ledger endpoint
   const lines = newRuns.map(run => {
     const dur = run.duration_seconds ? `${(run.duration_seconds / 60).toFixed(0)}m` : '?';
     let notes = {};

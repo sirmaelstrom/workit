@@ -98,7 +98,7 @@ Test hypotheses in this priority:
 4. **Read-only first pass** — check process state, logs, versions, config before touching anything
 5. **Restart only after inspecting current state** — understand what's running before replacing it
 
-**Critical rule for runtime/process issues:** Inspect the official start path (start scripts, ecosystem config, systemd units) before recreating or replacing process entries. This is how the pm2-without-secrets disaster happened.
+**Critical rule for runtime/process issues:** Inspect the official start path (start scripts, ecosystem config, systemd units) before recreating or replacing process entries. A classic failure mode: a process-manager restart silently drops secrets because the env was never reloaded from the vault.
 
 Update the hypothesis matrix as evidence arrives. Mark each result: **Confirmed**, **Ruled out**, **Inconclusive**, **Pending**.
 
@@ -187,19 +187,19 @@ Bias toward: start script mismatch, missing secrets, process manager drift, cont
 
 **Quick:**
 ```
-/diagnose "service crash loop after restart"
+/diagnose "API service crash loop after restart"
 ```
 
 **Structured:**
 ```
 /diagnose
-symptom: ConceptList broke prose centering
-expected: essay content remains centered with new component
+symptom: new SidebarNav component broke page centering
+expected: main content stays centered after adding the component
 observed: content appears offset / layout wrong
 recent_changes:
-  - added ConceptList component
+  - added SidebarNav component
   - adjusted wrapper classes
-reproduction: start preview and open target essay page
+reproduction: start preview and open the affected page
 environment_hints:
   - preview server may already be running
 ```
@@ -221,6 +221,6 @@ environment_hints:
 This skill is NOT a hook. It needs reasoning, not automation. A hook can supplement it — for example, a session-start hook that dumps process state, versions, and recent git changes as ambient context. But the diagnosis flow belongs in the skill.
 
 ---
-*Origin: Claude Code Insights report (2026-04-16) identifying environmental/state debugging loops as the highest-friction pattern. Direct lessons from: service crash loop (pm2 secrets), ConceptList centering (stale preview server), yt-dlp version mismatch, speedtest-cli false positive.*
+*Origin: a Claude Code insights report (2026-04-16) identifying environmental/state debugging loops as the highest-friction pattern. Direct lessons from real debugging sessions: a service crash loop (process manager dropped secrets), a component change that appeared to break layout (stale preview server), a CLI-tool version mismatch, and a false-positive symptom that couldn't be reproduced.*
 
 </supporting_info>

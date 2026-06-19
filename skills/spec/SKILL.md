@@ -70,14 +70,14 @@ Full methodology. Grounded, adversarial, iterative.
 
 Extract from the intent:
 - **What** is being built or changed
-- **Which project(s)** this touches — check `/workspace\projects\` for matching repos
+- **Which project(s)** this touches — check your projects directory for matching repos
 - **Slug** — kebab-case, ≤40 chars
 
 If the project is ambiguous, ask. If the scope is ambiguous, make your best guess and flag it as `[ASSUMPTION: A1]` — the human will correct at the review gate.
 
 #### 1b. Scaffold Workshop
 
-Create `/workspace\data\outputs\workshops\{slug}\` with `meta.json`:
+Create `./outputs/workshops/{slug}/` with `meta.json`:
 ```json
 {
   "title": "{title}",
@@ -103,11 +103,11 @@ Store findings mentally — you'll reference them throughout. Every architectura
 
 #### 1d. Read Institutional Memory
 
-**Read CORRECTIONS.md first** — this is non-negotiable:
+**Read your project's corrections memory first** (if you keep one) — non-negotiable when it exists:
 ```
-Read /workspace\data\memory\CORRECTIONS.md
+Read CORRECTIONS.md
 ```
-This file contains cross-project corrections from past failures. Every constraint in it was learned the hard way. Internalize the relevant entries and inject them as constraints or must-nots in Stage 4.
+A corrections file captures cross-project lessons from past failures — every entry was learned the hard way. Internalize the relevant entries and inject them as constraints or must-nots in Stage 4. Skip this step if your project has no such file.
 
 Then search the KB for prior work on this topic:
 ```
@@ -118,7 +118,7 @@ Surface any prior workshops, research, or lessons that inform this spec. Don't r
 ### Phase 2: Autonomous Pipeline (Stages 1-4)
 
 Run stages 1-4 sequentially. For each stage:
-1. Read the pattern file from `/workspace\projects\heathdev-patterns\patterns\`
+1. Read the pattern file from the heathdev-patterns pattern library (`patterns/`)
 2. Write the artifact to the workshop directory
 3. Update `meta.json` status
 
@@ -278,7 +278,7 @@ After approval, run stages 5-6:
 #### Stage 6: Work Packages
 - Pattern: `patterns/work-package.md`
 - Output: `work-packages/wp-{NN}-{slug}.md` for each package + `work-packages/_orchestrator.md`
-- Use the template from `/workspace\projects\heathdev-patterns\templates\_orchestrator.template.md`
+- Use the `_orchestrator.template.md` template from the heathdev-patterns pattern library
 - All 6 required fields per WP (precondition, goal, files, verification, failure criteria, boundary)
 - Tag each WP: `execution: autonomous` or `execution: review-needed` (HITL flag)
 - Dependency order (which WPs must complete before others can start)
@@ -355,14 +355,14 @@ mcp__review-council__council_review({
 })
 ```
 
-- **codex** (lead) — the strongest adversarial / general code reviewer; an agentic coding model that explores `{project_path}` itself. Runs on the operator's own ChatGPT login → **plan-covered ($0), visible burn**, NOT the Anthropic bucket.
+- **codex** (lead) — the strongest adversarial / general code reviewer; an agentic coding model that explores `{project_path}` itself. Runs on your own ChatGPT login → **plan-covered**, separate from the Anthropic usage bucket.
 - **gpt** + **gemini** — metered external APIs, attributed as `review.council` api_usage rows.
 
 The tool returns a JSON summary with each model's status and lens filename; the files land in `{workshop_path}/reviews/review-1/` (`review-lens-codex.md`, `review-lens-gpt.md`, `review-lens-gemini.md`). Read those in 8b.
 
-> **If the external council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): proceed with the two local opus lenses alone and note the gap in the Phase-9 summary. The local anchor is sufficient to ship; the external lenses are additive depth. (Provisioning: the MCP needs `data/secrets/service.env` — run service's `scripts/refresh-review-council-secrets.ps1` once.)
+> **If the external council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): proceed with the two local opus lenses alone and note the gap in the Phase-9 summary. The local anchor is sufficient to ship; the external lenses are additive depth. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, the local lenses suffice.)
 
-> **Why this split.** The Claude lenses run as interactive subagents so the pivotal opus review stays **plan-covered** (the in-process MCP council used to route it through the metered *programmatic* path — the post-2026-06-15 $X credit). The external lenses run via the MCP because they authenticate with their *own* credentials: codex via the operator's ChatGPT login (plan-covered, $0), gpt/gemini via metered API keys loaded from `data/secrets/service.env`. Composing both halves is the whole point — the diverse external models are where new blind spots surface, with codex as the lead adversarial reviewer.
+> **Why this split.** The Claude lenses run as interactive subagents so the pivotal opus review stays **plan-covered** — running it through the in-process MCP council would route it through the metered *programmatic* path instead. The external lenses run via the MCP because they authenticate with their *own* credentials: codex via your ChatGPT login (plan-covered), gpt/gemini via metered API keys. Composing both halves is the whole point — the diverse external models are where new blind spots surface, with codex as the lead adversarial reviewer.
 
 If a **local lens subagent** fails, retry it once, then proceed with what completed. If the **external council** call fails, see the unavailability note above — proceed with the local anchor and record the gap.
 
@@ -496,5 +496,5 @@ For the refinement loop, write one event per wave:
 ```
 
 ---
-*Pattern library: /workspace\projects\heathdev-patterns\*
+*Pattern library: heathdev-patterns*
 *Related skills: /spec-validate (quality check), /grill-me (stress-test before speccing), /parallel-explore (compare approaches)*

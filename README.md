@@ -57,9 +57,10 @@ Once installed, the skills trigger by description (e.g. "write a spec for…", "
 
 This is a personal plugin, so a few skills assume my environment:
 
-- **Output location.** Several skills write artifacts to `/workspace/data/outputs/{category}/` (my canonical "data brain" on Windows). That's a documented convention, not a hard dependency — adjust the paths if you adopt these skills.
+- **Output location.** Several skills write artifacts to `./outputs/{category}/` (relative to your working directory) by default. That's a documented convention, not a hard dependency — I personally redirect it to a canonical "data brain" via my own global config; adjust to taste if you adopt these skills.
+- **Pattern library.** `spec`, `spec-validate`, and `execute-wp` read methodology templates from a companion `heathdev-patterns` repo. Those references are by name, not absolute path; if you don't have that library, the skills still run but skip the template-grounding step.
 - **`skills.db`.** `audit-skills` and `eval-loop` read/write a local SQLite inventory seeded by `scripts/init-skills-db.mjs` (uses Node's native `node:sqlite`, so Node 24+). The DB is git-ignored.
-- **Optional integrations.** `eval-loop`'s automation scripts can post to a Discord webhook (`DISCORD_WEBHOOK_URL`) and mirror results to a ledger endpoint (`service_URL`). Both are off unless you set those env vars.
+- **Optional integrations.** `eval-loop`'s automation scripts can post to a Discord webhook (`DISCORD_WEBHOOK_URL`) and mirror results to a ledger endpoint (`LEDGER_URL`). Both are off unless you set those env vars.
 
 ## License
 

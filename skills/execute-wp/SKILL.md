@@ -14,11 +14,11 @@ The progress log pattern (in `_orchestrator.md`) gives multi-package execution i
 ## Prerequisites
 
 Before executing a work package, you need:
-1. A workshop at `/workspace\data\outputs\workshops\{slug}\` (or `.archive\{slug}\`) with status `ready`
+1. A workshop at `./outputs/workshops/{slug}/` (or `.archive/{slug}/`) with status `ready`
 2. An orchestrator at `work-packages/_orchestrator.md`
 3. The specific work package file (e.g., `work-packages/wp-01-types.md`)
 
-If the orchestrator doesn't have a `## Progress Log` section (older workshops), add one before the first entry — append it after the last existing section (typically Risk Assessment or Dispatch Notes). Use the format from `/workspace\projects\heathdev-patterns\templates\_orchestrator.template.md`.
+If the orchestrator doesn't have a `## Progress Log` section (older workshops), add one before the first entry — append it after the last existing section (typically Risk Assessment or Dispatch Notes). Use the format from `_orchestrator.template.md` in the heathdev-patterns pattern library.
 
 ## The Execution Lifecycle
 

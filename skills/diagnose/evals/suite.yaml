@@ -20,10 +20,10 @@ test_cases:
     tier: smoke
     description: "Stale process — symptom looks like a code bug but root cause is environmental"
     input: |
-      /diagnose "service briefings stopped delivering. Last successful delivery was 6 hours ago.
-      No code changes since yesterday. pm2 shows service as 'online' with 0 restarts."
+      /diagnose "Scheduled email digests stopped sending. Last successful send was 6 hours ago.
+      No code changes since yesterday. The process manager shows the worker as 'online' with 0 restarts."
     context:
-      project: heathdev-service
+      project: digest-service
       constraints: []
     assertions:
       format:
@@ -54,11 +54,11 @@ test_cases:
     tier: smoke
     description: "Ambiguous symptom — could be frontend, backend, or config"
     input: |
-      /diagnose "Discord notifications aren't being delivered. The briefing runs
-      (I can see the briefing in the frontend) but nothing shows up in Discord."
+      /diagnose "Chat notifications aren't being delivered. The job runs
+      (I can see the digest in the web dashboard) but nothing shows up in the chat channel."
     context:
-      project: heathdev-service
-      constraints: ["Discord bot via discord.js", "Briefings delivered by synthesis-worker"]
+      project: digest-service
+      constraints: ["Chat bot via a webhook integration", "Digests delivered by a background worker"]
     assertions:
       format:
         - "[deterministic] Output contains '## 1. Symptom Confirmation'"
@@ -66,23 +66,23 @@ test_cases:
         - "[deterministic] Output contains '## 4. Narrowed Cause'"
         - "Hypothesis matrix has at least 5 rows covering different hypothesis classes"
       quality:
-        - "Multiple scope-relevant hypotheses are generated (backend service, Discord bot connection, config/token, network)"
+        - "Multiple scope-relevant hypotheses are generated (backend service, chat bot connection, config/token, network)"
         - "Investigation checks the simplest thing first (is the bot online? is the token valid?) before complex hypotheses"
         - "The word 'unknown' or multiple scopes are considered — symptom spans backend + deployment"
       instruction_adherence:
         - "Does NOT ask the user to specify scope — infers or marks as unknown"
-        - "Symptom confirmation step attempts to verify the gap (check Discord bot status, check recent delivery logs)"
+        - "Symptom confirmation step attempts to verify the gap (check chat bot status, check recent delivery logs)"
 
   # Scenario 8: Adversarial — tests discipline under user pressure
   - id: tc-08
     tier: smoke
     description: "User pressure to skip investigation — skill should resist"
     input: |
-      /diagnose "The service web_search is broken. I already know it's a code bug in the
-      search-engine handler. Just fix service.ts line 247."
+      /diagnose "The search gateway's web_search is broken. I already know it's a code bug in the
+      upstream search handler. Just fix gateway.ts line 247."
     context:
-      project: heathdev-service
-      constraints: ["search-engine on HOST:8888", "service is MCP gateway"]
+      project: search-gateway
+      constraints: ["Upstream search engine on an internal host:8888", "The gateway proxies search requests"]
     assertions:
       format:
         - "[deterministic] Output contains '## 1. Symptom Confirmation' section"
@@ -90,7 +90,7 @@ test_cases:
       quality:
         - "Skill does NOT skip directly to editing line 247 despite user's instruction"
         - "Symptom confirmation still happens first"
-        - "Non-code hypotheses are still generated (search-engine service down? network? config?)"
+        - "Non-code hypotheses are still generated (upstream search engine down? network? config?)"
         - "The user's hypothesis (code bug at line 247) is included as one hypothesis among several"
       instruction_adherence:
         - "Edit gate is respected even under user pressure to skip"
@@ -103,11 +103,11 @@ test_cases:
     tier: verify
     description: "Version mismatch — wrong binary on PATH"
     input: |
-      /diagnose "yt-dlp is returning 'ERROR: Unsupported URL' for YouTube videos that worked last week.
-      No config changes. Running on HOST via cron job."
+      /diagnose "yt-dlp is returning 'ERROR: Unsupported URL' for videos that worked last week.
+      No config changes. Running on a Linux host via cron job."
     context:
       project: infrastructure
-      constraints: ["HOST is a Docker host", "yt-dlp runs on host, not in container"]
+      constraints: ["the host is a Docker host", "yt-dlp runs on the host, not in a container"]
     assertions:
       format:
         - "[deterministic] Output contains '## 2. Hypothesis Matrix'"
@@ -127,10 +127,10 @@ test_cases:
     tier: verify
     description: "CSS/layout problem — likely stale preview server"
     input: |
-      /diagnose "The briefing cards in the frontend are overlapping. They were fine yesterday.
+      /diagnose "The cards in the web dashboard are overlapping. They were fine yesterday.
       I haven't changed any CSS. Using Svelte 5 + Tailwind."
     context:
-      project: heathdev-frontend
+      project: web-dashboard
       constraints: ["Svelte 5 with runes", "Tailwind CSS"]
     assertions:
       format:
@@ -152,12 +152,12 @@ test_cases:
     tier: verify
     description: "Database state mismatch — migration not applied"
     input: |
-      /diagnose "The knowledge base search is returning zero results for queries that should match.
-      kb_save works fine. No errors in service logs. This started after I restarted the
-      infrastructure-db container yesterday."
+      /diagnose "The full-text search is returning zero results for queries that should match.
+      Writes succeed. No errors in the application logs. This started after I restarted the
+      database container yesterday."
     context:
-      project: heathdev-service
-      constraints: ["Postgres with pgvector", "KB uses hybrid semantic + keyword search"]
+      project: backend-service
+      constraints: ["Postgres with pgvector", "Search uses hybrid semantic + keyword matching"]
     assertions:
       format:
         - "[deterministic] Output contains '## 1. Symptom Confirmation'"
@@ -180,7 +180,7 @@ test_cases:
       /diagnose "I think the session rotation is broken. My last session was 3 days ago
       and it should have rotated by now."
     context:
-      project: heathdev-service
+      project: backend-service
       constraints: ["Sessions rotate on message count or time, not on a fixed schedule"]
     assertions:
       format:
@@ -195,13 +195,13 @@ test_cases:
   # Scenario 7: Deployment issue
   - id: tc-07
     tier: verify
-    description: "pm2 process missing secrets after restart"
+    description: "Process manager missing secrets after restart"
     input: |
-      /diagnose "service crashed and pm2 restarted it, but now briefings fail with
-      'DISCORD_TOKEN is undefined'. The .env file exists and has the token."
+      /diagnose "The service crashed and the process manager restarted it, but now jobs fail with
+      'API_TOKEN is undefined'. The .env file exists and has the token."
     context:
-      project: heathdev-service
-      constraints: ["pm2 managed", "secrets via bws", "ecosystem.config.js handles env"]
+      project: backend-service
+      constraints: ["process-manager managed", "secrets via a secrets vault", "the process-manager config handles env"]
     assertions:
       format:
         - "[deterministic] Output contains '## 1. Symptom Confirmation'"
@@ -209,14 +209,14 @@ test_cases:
         - "[deterministic] Output contains '## 5. Fix Applied'"
         - "[deterministic] Output contains '## 8. Prevention'"
       quality:
-        - "Environment/Process hypothesis is present and highly ranked (pm2 restart doesn't reload env from bws)"
-        - "Config/State hypothesis considers ecosystem.config.js vs .env precedence"
-        - "Investigation inspects the official start path (ecosystem.config.js) before recreating"
+        - "Environment/Process hypothesis is present and highly ranked (a process-manager restart doesn't reload env from the vault)"
+        - "Config/State hypothesis considers the process-manager config vs .env precedence"
+        - "Investigation inspects the official start path (the process-manager config) before recreating"
         - "The 'Critical rule for runtime/process issues' is followed: inspect start path before replacing"
       instruction_adherence:
-        - "Scope inferred as 'deployment' (pm2, start script, secrets, crash)"
+        - "Scope inferred as 'deployment' (process manager, start script, secrets, crash)"
         - "Edit gate prevents modifying code before checking process state"
-        - "Prevention section references the pm2-without-secrets lesson"
+        - "Prevention section references the process-manager-without-secrets lesson"
 
 # Scoring notes:
 # - [deterministic] assertions are checked by string/regex matching, no LLM needed

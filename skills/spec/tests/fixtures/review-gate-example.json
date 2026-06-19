@@ -5,7 +5,7 @@
   "spec": {
     "title": "Parallel-Explore HTML Synthesis Output",
     "slug": "parallel-explore-html-synthesis",
-    "dir": "/workspace/data/outputs/workshops/parallel-explore-html-synthesis"
+    "dir": "./outputs/workshops/parallel-explore-html-synthesis"
   },
   "review_level": "full",
   "review_level_reason": "Auto-selected: 4 work packages plus multi-stage refinement loop crosses the full-review threshold.",
