@@ -2,7 +2,7 @@
 /**
  * spec-validate — Workshop artifact validator
  *
- * Validates workshop artifacts against the heathdev-patterns methodology.
+ * Validates workshop artifacts against the bundled pattern-library methodology.
  * Produces a terminal-style report with errors (must fix) and warnings (should fix),
  * where every message explains WHY the issue matters — not just what's wrong.
  *
