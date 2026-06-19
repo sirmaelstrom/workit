@@ -7,6 +7,18 @@ description: "This skill should be used when composing a git commit message that
 
 The HEREDOC pattern `git commit -m "$(cat <<'EOF' ... EOF)"` works for plain text but breaks on shell-active content in the body: backticks trigger command substitution under the outer `$(...)`, embedded quotes can break the wrapping, and escape sequences get re-interpreted. File-based commits via `git commit -F <file>` bypass shell parsing of the message entirely.
 
+## Repository context (injected at load time)
+
+The two read-only git reads below run automatically when this skill loads, so the staged changes and recent history are already in front of you before you compose — no separate status/log round-trip needed. (This uses Claude Code's load-time shell injection. If you would rather not run shell when a skill loads, set `disableSkillShellExecution` to true in settings.json; the skill still works without it via the fallback note below.)
+
+**Staged / working-tree status:**
+!`git status --short 2>/dev/null || echo "(no staged changes, or not a git repo - run git status yourself)"`
+
+**Recent commits (prefix + style reference):**
+!`git log --oneline -10 2>/dev/null || echo "(no commit history - run git log yourself)"`
+
+If either block shows the parenthetical placeholder instead of real output (kill switch on, or not a git repo), just run the command yourself at the step below. The injection is an accelerant, not a dependency.
+
 ## When to invoke
 
 Invoke when **any** of these hold:
@@ -24,13 +36,13 @@ For plain prose with no shell-active characters, the standard HEREDOC pattern is
 
 ### 1. Verify there is something to commit
 
-Run `git status --short`. If nothing is staged and the user did not explicitly request `git commit -a`, stop and report. Do not create empty commits.
+The staged status is injected above under "Repository context" — use it. If that block shows the placeholder (or you need a fresh read), run `git status --short` yourself. If nothing is staged and the user did not explicitly request `git commit -a`, stop and report. Do not create empty commits.
 
 ### 2. Compose the message
 
 Draft based on the staged diff plus user intent. Conventions:
 
-- Match the repository's prefix style. Run `git log --oneline -10` to learn it (e.g. `feat:`, `fix:`, `docs(readme):`, `chore(ci):`).
+- Match the repository's prefix style — the recent commits are injected above under "Repository context." If that block is placeholder or absent, run `git log --oneline -10` yourself (e.g. `feat:`, `fix:`, `docs(readme):`, `chore(ci):`).
 - Subject line under 70 chars.
 - Body explains WHY, not WHAT. Skip mechanics the diff already shows.
 - Exclude internal review scaffolding from the message body (iteration/wave markers, reviewer names, PR thread IDs, "addressed feedback from…"). Write the message as the squashed, durable record of the change.
