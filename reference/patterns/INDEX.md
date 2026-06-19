@@ -59,6 +59,7 @@ Drop-in work templates with YAML frontmatter for parameterized use. Located in `
 | `Reflection Audit` | Structured self-audit and reflection | Reflection Audit.md |
 | `post-build-verification` | Post-build punch list — interaction, palette, semantics, data, a11y, errors | post-build-verification.md |
 | `spec-scorecard` | Post-dispatch spec quality evaluation (100-point scale) — feeds `evaluation-loop` | spec-scorecard.md |
+| `decision-record` | Lightweight ADR that couples each decision to the conditions that would reverse it (the "What Would Change This" discipline) | decision-record.md |
 
 ## Workshop Artifact Templates
 
@@ -78,5 +79,5 @@ Copyable skeletons for the key workshop files. Located in `templates/`.
 | `scope-fence` | `constraint-architecture` | scope-fence covered must-nots only (~40% of constraint space) |
 
 ---
-*19 active patterns, 1 superseded, 10 operational templates, 4 artifact templates. To add: create the .md, add a row.*
+*19 active patterns, 1 superseded, 11 operational templates, 4 artifact templates. To add: create the .md, add a row.*
 *Patterns evolve — append execution feedback directly to pattern files.*

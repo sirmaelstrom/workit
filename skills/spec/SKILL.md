@@ -118,21 +118,21 @@ Surface any prior workshops, research, or lessons that inform this spec. Don't r
 ### Phase 2: Autonomous Pipeline (Stages 1-4)
 
 Run stages 1-4 sequentially. For each stage:
-1. Read the pattern file from this plugin's bundled library (`[plugin-path]/reference/patterns/`)
+1. Read the pattern file from this plugin's bundled library. The stage `Pattern:` refs below are written as `[plugin-path]/reference/patterns/…` — resolve `[plugin-path]` to this plugin's install directory (NOT the user's cwd; `/spec` runs from the user's project). If unsure of the path, resolve it once with `find ~/.claude/plugins -path '*/spec/SKILL.md'` and take its directory.
 2. Write the artifact to the workshop directory
 3. Update `meta.json` status
 
 **Do not dump pattern contents into your output.** Read them, internalize the methodology, apply it. The patterns are your reference, not content to recite.
 
 #### Stage 1: Problem Statement
-- Pattern: `reference/patterns/problem-statement.md`
+- Pattern: `[plugin-path]/reference/patterns/problem-statement.md`
 - Output: `problem-statement.md`
 - Key discipline: Self-containment test. Could a stranger begin solving this from what's written?
 - Ground every claim in code you actually read in Phase 1.
 - Surface hidden assumptions as `[ASSUMPTION: A1]`, `[ASSUMPTION: A2]`, etc.
 
 #### Stage 2: Decisions
-- Pattern: `reference/patterns/decision-resolution.md`
+- Pattern: `[plugin-path]/reference/patterns/decision-resolution.md`
 - Output: `decisions.md`
 - Key discipline: Scan your own problem statement for ambiguity flags ("or", "possibly", "might", "TBD", "should consider"). Each real ambiguity becomes a numbered decision (D1, D2...).
 - For each decision: list options, state tradeoffs (one line each), **choose one**, document reasoning.
@@ -140,7 +140,7 @@ Run stages 1-4 sequentially. For each stage:
 - Use the `parallel-explore` pattern mentally — consider at least 2 approaches before choosing.
 
 #### Stage 3: Verification
-- Pattern: `reference/patterns/verification-criteria.md`
+- Pattern: `[plugin-path]/reference/patterns/verification-criteria.md`
 - Output: `verification.md`
 - Key discipline: For each decision, write the three-sentence independent observer test. If you can't verify it, the decision needs refinement — flag it.
 - **Identify verification layers per criterion** — unit tests alone are insufficient. For each V-criterion, explicitly state which layers apply:
@@ -155,7 +155,7 @@ Run stages 1-4 sequentially. For each stage:
 - Capture baselines where applicable.
 
 #### Stage 4: Constraints
-- Pattern: `reference/patterns/constraint-architecture.md`
+- Pattern: `[plugin-path]/reference/patterns/constraint-architecture.md`
 - Output: `constraints.md`
 - Key discipline: Four categories — Musts (M1...), Must-Nots (MN1...), Preferences (P1...), Escalation Triggers (E1...).
 - Use the "smart well-intentioned person" exercise: what could they do that satisfies every requirement but produces the wrong outcome?
@@ -269,14 +269,14 @@ One revision loop is normal. If the third revision still has major issues, sugge
 After approval, run stages 5-6:
 
 #### Stage 5: Decomposition
-- Pattern: `reference/patterns/decomposition.md`
+- Pattern: `[plugin-path]/reference/patterns/decomposition.md`
 - Output: `decomposition.md`
 - Apply the appropriate break pattern (API/Backend, UI, Refactor, Infrastructure) from the pattern.
 - Run the decomposition test: each unit <2hrs, clear boundaries, independently verifiable, disjoint files.
 - Include a Mermaid dependency graph for 4+ packages.
 
 #### Stage 6: Work Packages
-- Pattern: `reference/patterns/work-package.md`
+- Pattern: `[plugin-path]/reference/patterns/work-package.md`
 - Output: `work-packages/wp-{NN}-{slug}.md` for each package + `work-packages/_orchestrator.md`
 - Use the `_orchestrator.template.md` template from `[plugin-path]/reference/templates/`
 - All 6 required fields per WP (precondition, goal, files, verification, failure criteria, boundary)
