@@ -8,12 +8,12 @@ It's published openly so it can be referenced, forked, or installed directly. It
 
 Two layers:
 
-- **`skills/`** — the active, triggerable tools (thirteen of them, below).
+- **`skills/`** — the active, triggerable tools (fourteen of them, below).
 - **`reference/`** — the methodology library the skills draw on: patterns, checklists/conventions, templates, and heuristics. Start at [`reference/patterns/INDEX.md`](./reference/patterns/INDEX.md), or see [`reference/README.md`](./reference/README.md).
 
 ### Skills
 
-Thirteen skills, grouped by what they're for:
+Fourteen skills, grouped by what they're for:
 
 ### Specify & plan
 | Skill | What it does |
@@ -23,6 +23,7 @@ Thirteen skills, grouped by what they're for:
 | `ubiquitous-language` | Extract domain terminology into a shared glossary (DDD). |
 | `grill-me` | Stress-test a plan or idea — poke holes before you commit. |
 | `parallel-explore` | Fan a design problem out into intentionally different agent runs, then synthesize a ranked decision. |
+| `prototype` | Spike throwaway code — logic or UI — to answer a specific design question before you commit. |
 
 ### Execute
 | Skill | What it does |
