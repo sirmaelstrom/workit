@@ -42,6 +42,11 @@ if (!skillId) {
 async function getWebhookUrl() {
   if (args.webhook) return args.webhook;
 
+  // Env var override — preferred for CI / scheduled runs
+  if (process.env.DISCORD_WEBHOOK_URL?.startsWith('https://')) {
+    return process.env.DISCORD_WEBHOOK_URL;
+  }
+
   // Check cached webhook files (same paths as claude-notify.js)
   const { existsSync, readFileSync: readFs } = await import('node:fs');
   const { join: joinPath } = await import('node:path');
@@ -58,18 +63,22 @@ async function getWebhookUrl() {
     } catch {}
   }
 
-  // Fallback: try bws
-  try {
-    const result = spawnSync('bws', ['secret', 'get', 'DISCORD_WEBHOOK_assistant', '--output', 'json'], {
-      encoding: 'utf-8',
-      timeout: 10000,
-      windowsHide: true,
-    });
-    if (result.stdout) {
-      const parsed = JSON.parse(result.stdout);
-      if (parsed.value) return parsed.value;
-    }
-  } catch {}
+  // Fallback: resolve from a secrets manager (Bitwarden Secrets CLI).
+  // Set DISCORD_WEBHOOK_SECRET to the secret key name in your vault.
+  const secretName = process.env.DISCORD_WEBHOOK_SECRET;
+  if (secretName) {
+    try {
+      const result = spawnSync('bws', ['secret', 'get', secretName, '--output', 'json'], {
+        encoding: 'utf-8',
+        timeout: 10000,
+        windowsHide: true,
+      });
+      if (result.stdout) {
+        const parsed = JSON.parse(result.stdout);
+        if (parsed.value) return parsed.value;
+      }
+    } catch {}
+  }
 
   console.warn('No Discord webhook found — notifications will be skipped');
   return null;
@@ -99,7 +108,9 @@ async function notify(webhookUrl, message) {
 async function main() {
   const webhookUrl = await getWebhookUrl();
   const startTime = Date.now();
-  const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' });
+  // Timezone defaults to the system locale; override with EVAL_TZ (e.g. "America/Chicago").
+  const timestamp = new Date().toLocaleString('en-US',
+    process.env.EVAL_TZ ? { timeZone: process.env.EVAL_TZ } : undefined);
 
   await notify(webhookUrl,
     `🔄 **Eval Loop Starting** — \`${skillId}\`\n` +

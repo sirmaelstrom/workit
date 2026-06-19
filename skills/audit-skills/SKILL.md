@@ -15,7 +15,7 @@ Without periodic structured assessment, skill quality drifts invisibly. The Marc
 
 **Upstream (required inputs):**
 - `skills.db` at the target project root — seeded by `scripts/init-skills-db.mjs`
-- Rubric definition: `/workspace/data/outputs/projects/skills/skill-evaluation-rubric.md` — read this, don't re-derive it
+- Rubric definition: `skills/audit-skills/references/skill-evaluation-rubric.md` (bundled with this skill) — read this, don't re-derive it
 
 **Downstream (consumers of this skill's output):**
 - **eval-loop** — reads `karpathy_eligible` flag and assessment scores to select improvement targets
@@ -29,7 +29,7 @@ Determine scope in a single pass:
 
 - **Default:** Audit ALL active skills in the current project's `skills.db`
 - **Specific:** If user names skills, audit only those
-- **Cross-plugin:** If user says "audit everything" or "all plugins", iterate both `heathdev-workshop-plugin/skills.db` and `sirmaelstroms-claude-code/skills.db`
+- **Cross-plugin:** If user says "audit everything" or "all plugins", iterate the `skills.db` of each plugin repo under the projects root
 
 Read the skill inventory from the database:
 ```sql
@@ -39,9 +39,8 @@ SELECT id, name, kind, plugin FROM skills WHERE status = 'active' ORDER BY kind,
 ### 2. Read Each Skill Definition
 
 For each skill in scope:
-- **heathdev-workshop skills:** Read `skills/<id>/SKILL.md`
-- **sirmaelstroms-claude-code commands:** Read `commands/<category>/<name>.md` (parse category from id prefix `cmd:<category>:<name>`)
-- **sirmaelstroms-claude-code agents:** Read `agents/<category>/<name>.md` (parse category from id prefix `agent:<category>:<name>`)
+- **Skills:** Read `skills/<id>/SKILL.md`
+- **Flat-file agents (if present):** Read `agents/<category>/<name>.md` (parse category from id prefix `agent:<category>:<name>`)
 
 ### 3. Score Against Rubric
 

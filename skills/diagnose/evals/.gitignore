@@ -1,3 +1,4 @@
 .output-tc-*.md
 .tmp-prompt-*.txt
 .backup-*.md
+nightly-*.log

@@ -21,14 +21,20 @@ import { homedir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QUEUE_FILE = join(__dirname, 'eval-queue.json');
-// scripts -> eval-loop -> skills -> heathdev-workshop-plugin -> projects
+// scripts -> eval-loop -> skills -> <plugin-repo> -> projects
 const PROJECTS_ROOT = resolve(__dirname, '..', '..', '..', '..');
 const LAST_NOTIFY_FILE = join(__dirname, '.last-notify-timestamp');
-const service_URL = process.env.service_URL || 'http://localhost:PORT';
+// Optional: a ledger endpoint to mirror results to. Unset = ledger writes are skipped.
+const service_URL = process.env.service_URL || '';
+const LEDGER_USER_ID = process.env.LEDGER_USER_ID || 'user';
+// Plugin repos (siblings under PROJECTS_ROOT) to scan for skills.db. Comma-separated.
+const EVAL_PLUGINS = (process.env.EVAL_PLUGINS || 'heathdev-workshop-plugin')
+  .split(',').map(s => s.trim()).filter(Boolean);
 
 // --- Webhook ---
 function getWebhookUrl(cliWebhook) {
   if (cliWebhook) return cliWebhook;
+  if (process.env.DISCORD_WEBHOOK_URL?.startsWith('https://')) return process.env.DISCORD_WEBHOOK_URL;
   const home = homedir();
   for (const f of ['claude-discord-claudehook', 'claude-discord-webhook']) {
     try {
@@ -70,8 +76,9 @@ async function notifyEmbed(webhookUrl, embed) {
   }
 }
 
-// --- service ledger ---
+// --- Optional ledger mirror ---
 async function writeLedger(content) {
+  if (!service_URL) return; // no endpoint configured — skip silently
   try {
     const resp = await fetch(`${service_URL}/api/ledger`, {
       method: 'POST',
@@ -79,7 +86,7 @@ async function writeLedger(content) {
       body: JSON.stringify({
         event_type: 'note',
         source: 'system',
-        user_id: 'justin',
+        user_id: LEDGER_USER_ID,
         payload: { content },
       }),
     });
@@ -214,7 +221,7 @@ async function showStatus() {
 
   // Show recent runs from DB
   console.log('\nRecent eval runs:');
-  for (const plugin of ['sirmaelstroms-claude-code', 'heathdev-workshop-plugin']) {
+  for (const plugin of EVAL_PLUGINS) {
     const dbFile = join(PROJECTS_ROOT, plugin, 'skills.db');
     if (!existsSync(dbFile)) continue;
     try {
@@ -246,7 +253,7 @@ async function checkAndNotify(webhookUrl) {
 
   const newRuns = [];
 
-  for (const plugin of ['sirmaelstroms-claude-code', 'heathdev-workshop-plugin']) {
+  for (const plugin of EVAL_PLUGINS) {
     const dbFile = join(PROJECTS_ROOT, plugin, 'skills.db');
     if (!existsSync(dbFile)) continue;
     try {
