@@ -296,7 +296,7 @@ Iteratively review the work packages using fresh-eyes Sonnet sub-agents until co
 
 #### 7a. Fresh-Eyes Wave
 
-Launch a Sonnet sub-agent using the Agent tool. The full prompt template lives in `${CLAUDE_SKILL_DIR}/references/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads.
+Launch a Sonnet sub-agent using the Agent tool. The full prompt template lives in `${CLAUDE_SKILL_DIR}/reference/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads.
 
 #### 7b. Fix Findings
 
@@ -338,8 +338,8 @@ The council is a **hybrid of two composed halves** — a local Anthropic lens (p
 
 **Half 1 — Local Anthropic lenses (plan-covered anchor).** Two specialized lenses run as `model: opus` Task subagents *inside this interactive session* — plan-covered (your subscription), not the metered programmatic API. Each reviews the converged spec cold:
 
-1. **Reasoning & Coherence** — read `${CLAUDE_SKILL_DIR}/references/council-lens-reasoning.md`, substitute `{workshop_path}` and `{project_path}`, spawn the prompt verbatim. The logic / contradiction auditor.
-2. **Cartography & Codebase Grounding** — read `${CLAUDE_SKILL_DIR}/references/council-lens-cartography.md`, substitute the same placeholders, spawn verbatim. Verifies the spec against real source (has Read/Grep/Glob).
+1. **Reasoning & Coherence** — read `${CLAUDE_SKILL_DIR}/reference/council-lens-reasoning.md`, substitute `{workshop_path}` and `{project_path}`, spawn the prompt verbatim. The logic / contradiction auditor.
+2. **Cartography & Codebase Grounding** — read `${CLAUDE_SKILL_DIR}/reference/council-lens-cartography.md`, substitute the same placeholders, spawn verbatim. Verifies the spec against real source (has Read/Grep/Glob).
 
 Use **opus** for both: a Phase-8 spec review is a coherence audit at a decision gate, and a 2026-05-25 A/B showed sonnet accepts a self-contradictory spec as coherent while opus catches the cross-artifact contradictions (stale constraints after a mid-flight decision revision).
 

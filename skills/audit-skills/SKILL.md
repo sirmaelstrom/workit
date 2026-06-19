@@ -15,7 +15,7 @@ Without periodic structured assessment, skill quality drifts invisibly. The Marc
 
 **Upstream (required inputs):**
 - `skills.db` at the target project root — seeded by `scripts/init-skills-db.mjs`
-- Rubric definition: `${CLAUDE_SKILL_DIR}/references/skill-evaluation-rubric.md` (bundled with this skill) — read this, don't re-derive it
+- Rubric definition: `${CLAUDE_SKILL_DIR}/reference/skill-evaluation-rubric.md` (bundled with this skill) — read this, don't re-derive it
 
 **Downstream (consumers of this skill's output):**
 - **eval-loop** — reads `karpathy_eligible` flag and assessment scores to select improvement targets
