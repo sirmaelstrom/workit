@@ -9,7 +9,7 @@ Mode-aware variables (substituted by orchestrator from `entry_mode`):
 - `{TARGET_VERB}` -- review verb: "diff" for code modes, "plan" for plan mode
 
 Per-reviewer slicing variables (Focused Reviewer Prompt only; assigned in SKILL.md Phase 4.1a):
-- `{SLICING_STRATEGY}` -- strategy name (`raw_diff`, `function_context`, or `full_flow`) plus strategy-specific guidance from `references/slicing-strategies.md`.
+- `{SLICING_STRATEGY}` -- strategy name (`raw_diff`, `function_context`, or `full_flow`) plus strategy-specific guidance from `reference/slicing-strategies.md`.
 - `{CONTEXT_BLOCK}` -- strategy-aware. The orchestrator constructs a different context block per reviewer based on assigned strategy and tier; see SKILL.md Phase 4.1 for the construction matrix.
 
 Synthesis variables (Synthesis Prompt only):

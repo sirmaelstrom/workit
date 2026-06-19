@@ -137,7 +137,7 @@ Each branch prompt file MUST be named `{branch.id}.md` — i.e., `branch-1.md`, 
 Invoke the launcher against the run directory:
 
 ```bash
-node "[plugin-path]/skills/parallel-explore/scripts/launch.mjs" \
+node "${CLAUDE_SKILL_DIR}/scripts/launch.mjs" \
   --prompts "./outputs/parallel-explore/{run-slug}/prompts" \
   --workdir [current project] \
   --model sonnet
@@ -203,7 +203,7 @@ Working reference: `skills/parallel-explore/tests/fixtures/synthesis-example.jso
 After writing `synthesis.json` to the run directory, invoke (from any working directory):
 
 ```bash
-node "[plugin-path]/skills/parallel-explore/scripts/render-synthesis.mjs" \
+node "${CLAUDE_SKILL_DIR}/scripts/render-synthesis.mjs" \
   --input "./outputs/parallel-explore/{run-slug}/synthesis.json" \
   --output-dir "./outputs/parallel-explore/{run-slug}"
 ```

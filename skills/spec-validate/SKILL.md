@@ -32,7 +32,7 @@ Workshops live at `./outputs/workshops/{slug}/`.
 ### Step 2: Run the script
 
 ```bash
-node <skill-path>/scripts/validate.mjs <workshop-path>
+node "${CLAUDE_SKILL_DIR}/scripts/validate.mjs" <workshop-path>
 ```
 
 The script exits 0 if no errors (warnings are OK), exits 1 if any errors found.
@@ -53,7 +53,7 @@ To validate all workshops at once:
 
 ```bash
 for dir in ./outputs/workshops/*/; do
-  node <skill-path>/scripts/validate.mjs "$dir" 2>&1
+  node "${CLAUDE_SKILL_DIR}/scripts/validate.mjs" "$dir" 2>&1
   echo ""
 done
 ```
