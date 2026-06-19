@@ -5,7 +5,7 @@ description: "Validate a workshop spec's quality. Trigger: 'spec-validate', 'val
 
 # Spec Validate — Workshop Artifact Validation
 
-Run the heathdev-patterns validation checklist against a workshop directory. Produces a report with errors and warnings where every message teaches — not just reports.
+Run the bundled pattern-library validation checklist against a workshop directory. Produces a report with errors and warnings where every message teaches — not just reports.
 
 ## How It Works
 

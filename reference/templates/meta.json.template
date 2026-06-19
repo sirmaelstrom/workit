@@ -1,0 +1,59 @@
+{
+  "title": "{Workshop Title}",
+  "slug": "{workshop-slug}",
+  "status": "captured",
+  "projects": ["{project-name}"],
+  "tags": [],
+  "startedAt": "{ISO-8601 timestamp}",
+  "createdAt": "{ISO-8601 timestamp}"
+}
+
+// ─── FIELD REFERENCE ─────────────────────────────────────────────
+//
+// REQUIRED FIELDS:
+//   title    — Human-readable workshop name. Displayed in workshop listings
+//              and used as the campaign title.
+//   slug     — Kebab-case identifier. Must match the directory name.
+//              Used to derive orchestrator and artifact paths.
+//   status   — Freeform string, no DB constraint. Convention:
+//                captured          — initial capture, no artifacts yet
+//                problem-statement — problem statement written
+//                drafting          — work packages in progress
+//                review            — spec review in progress
+//                ready             — reviewed, approved, awaiting dispatch
+//                paused            — parked intentionally
+//                archived          — completed and archived (set by system)
+//              Default for new workshops: "captured"
+//   projects — Array of project names.
+//              Examples: "backend-service", "web-frontend"
+//
+//              ⚠️ Use "projects" (plural, array) — NOT "project" (singular).
+//              The workshop handler reads: Array.isArray(meta.projects)
+//              A singular "project" string silently resolves to empty array.
+//
+// LIFECYCLE FIELDS:
+//   startedAt  — ISO-8601 timestamp. When the workshop was initiated (conversation
+//                started, intent declared). Set by the agent at workshop creation.
+//                Distinct from createdAt — captures when the human said "let's do this,"
+//                not when the directory was written. Used for lifecycle cost tracking
+//                in post-mortems (the gap between startedAt and campaign dispatch is
+//                the workshop phase duration).
+//   createdAt  — ISO-8601 timestamp. When the meta.json file was written to disk.
+//
+// OPTIONAL FIELDS:
+//   tags       — String array for categorization. No enforced vocabulary.
+//   updatedAt  — ISO-8601 timestamp. Auto-updated by your workshop tracker on file saves.
+//   gateMode   — "auto" | "review". Informational — not consumed by parser
+//                (gate mode is per-wave via Gate Commands in orchestrator).
+//   description — One-line summary. Used in a real campaign's meta.json, not consumed by code.
+//   workPackages — Integer count. Informational only.
+//   waves      — Integer count. Informational only.
+//   completedAt — ISO-8601 timestamp. Set manually at campaign completion.
+//   archivedAt — ISO-8601 timestamp. Set by archive handler.
+//
+// NOTES:
+//   - workshop handler reads: meta.title, meta.slug, meta.status,
+//     meta.projects, meta.tags, meta.createdAt, meta.updatedAt
+//   - File must be valid JSON (no comments in production).
+//     Remove this reference block before use.
+// ─────────────────────────────────────────────────────────────────
