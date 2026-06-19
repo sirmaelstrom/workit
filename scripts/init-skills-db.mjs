@@ -156,23 +156,15 @@ const insert = db.prepare(`
 const now = new Date().toISOString();
 let seeded = 0;
 
-// For heathdev-workshop: skills are in skills/<name>/SKILL.md
+// Skills live in skills/<name>/SKILL.md
 const skills = discoverSkills(join(projectRoot, 'skills'));
 for (const s of skills) {
   insert.run(s.id, s.name, pluginName, s.kind, s.description, now, now);
   seeded++;
 }
 
-// For sirmaelstroms-claude-code style: commands/<category>/<name>.md and agents/<category>/<name>.md
-for (const category of ['dotnet', 'general', 'git']) {
-  const cmds = discoverFlatMdFiles(join(projectRoot, 'commands', category), 'command');
-  for (const s of cmds) {
-    s.id = `cmd:${category}:${s.id}`;
-    insert.run(s.id, s.name, pluginName, s.kind, s.description, now, now);
-    seeded++;
-  }
-}
-for (const category of ['dotnet', 'general', 'quality']) {
+// Optional: flat-file agents in agents/<category>/<name>.md (none by default).
+for (const category of ['general', 'dotnet', 'quality']) {
   const agents = discoverFlatMdFiles(join(projectRoot, 'agents', category), 'agent');
   for (const s of agents) {
     s.id = `agent:${category}:${s.id}`;

@@ -4,17 +4,18 @@
     "name": "Justin Heath",
     "contact": "github.com/sirmaelstrom"
   },
-  "description": "Workshop pipeline skills for the heathdev-patterns specification methodology",
+  "description": "Justin Heath's personal Claude Code toolkit — specification, execution, review, diagnosis, and skill self-improvement.",
   "plugins": [
     {
       "name": "heathdev-workshop",
       "source": "./",
-      "description": "Workshop pipeline skills — scaffold, execute, validate, score, and close out specification workshops using the heathdev-patterns methodology.",
+      "description": "Justin Heath's personal Claude Code toolkit — skills for specification, execution, review, diagnosis, and skill self-improvement.",
       "version": "1.0.0",
       "author": {
         "name": "Justin Heath"
       },
-      "tags": ["workshop", "spec-pipeline", "specification", "dispatch", "patterns"]
+      "license": "MIT",
+      "tags": ["claude-code", "skills", "specification", "code-review", "diagnosis", "agent-workflows", "personal-toolkit"]
     }
   ]
 }

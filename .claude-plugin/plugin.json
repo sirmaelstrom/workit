@@ -1,8 +1,10 @@
 {
   "name": "heathdev-workshop",
   "version": "1.0.0",
-  "description": "Workshop pipeline skills — scaffold, execute, validate, score, and close out specification workshops using the heathdev-patterns methodology.",
+  "description": "Justin Heath's personal Claude Code toolkit — skills for specification, execution, review, diagnosis, and skill self-improvement.",
   "author": {
     "name": "Justin Heath"
-  }
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/sirmaelstrom/heathdev-workshop-plugin"
 }
