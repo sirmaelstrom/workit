@@ -8,13 +8,13 @@ It's published openly so it can be referenced, forked, or installed directly. It
 
 Three layers:
 
-- **`skills/`** — the active, triggerable tools (twelve of them, below).
+- **`skills/`** — the active, triggerable tools (thirteen of them, below).
 - **`agents/`** — specialized subagents (e.g. .NET architecture / performance review lenses).
 - **`reference/`** — the methodology library the skills draw on: patterns, templates, operational prompts, and heuristics. Start at [`reference/patterns/INDEX.md`](./reference/patterns/INDEX.md), or see [`reference/README.md`](./reference/README.md).
 
 ### Skills
 
-Twelve skills, grouped by what they're for:
+Thirteen skills, grouped by what they're for:
 
 ### Specify & plan
 | Skill | What it does |
@@ -30,6 +30,7 @@ Twelve skills, grouped by what they're for:
 |-------|--------------|
 | `execute-wp` | Execute a work package from a spec, appending to a progress log as it goes. |
 | `handoff` | Compact a conversation into a handoff doc so a fresh agent can pick up the work. |
+| `commit-msg` | Commit via a file (`git commit -F`) so shell-active content — backticks, links, quotes — lands verbatim instead of breaking under HEREDOC parsing. |
 
 ### Review & repair
 | Skill | What it does |
