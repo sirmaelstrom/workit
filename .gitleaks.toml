@@ -1,0 +1,14 @@
+# gitleaks config for heathdev-workshop
+# Extends the built-in ruleset; adds an allowlist for known synthetic values.
+title = "heathdev-workshop gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic placeholder values used in eval fixtures and recorded eval outputs — not real secrets."
+# 987654321098765432 is the canonical fake Discord snowflake used in example
+# scenarios (appears in skills/diagnose/evals/* outputs, current and historical).
+regexes = [
+  '''987654321098765432''',
+]
