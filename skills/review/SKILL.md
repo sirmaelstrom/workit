@@ -19,8 +19,8 @@ Review a target with complexity-driven depth and dynamic reviewer composition. T
 
 If the argument is missing AND auto-detection is ambiguous, ask the user which target to review before proceeding.
 
-**Prompt templates:** Read from `references/prompt-templates.md` (relative to this skill)
-**Archetype library:** Read from `references/reviewer-archetypes.md` (relative to this skill)
+**Prompt templates:** Read from `${CLAUDE_SKILL_DIR}/references/prompt-templates.md`
+**Archetype library:** Read from `${CLAUDE_SKILL_DIR}/references/reviewer-archetypes.md`
 
 ### Subagent Dispatch Rules
 
@@ -234,10 +234,10 @@ Record `complexity_completed_at` timestamp. Wait for user response. Accept overr
 ## Phase 3: Cartographer (Wave 1)
 
 Read:
-- `references/reviewer-archetypes.md`
+- `${CLAUDE_SKILL_DIR}/references/reviewer-archetypes.md`
 - Project CLAUDE.md if available (for Tier 1 convention embedding)
 
-Construct the cartographer prompt using the template from `references/prompt-templates.md`, substituting:
+Construct the cartographer prompt using the template from `${CLAUDE_SKILL_DIR}/references/prompt-templates.md`, substituting:
 - Target metadata, issue context (if present), diff/target text, commit log (if present)
 - `{ENTRY_MODE}` -- passed through so the cartographer knows the review type
 - Archetype names and descriptions from `reviewer-archetypes.md`
@@ -288,7 +288,7 @@ Record `iteration_started_at` timestamp.
 
 **4.1a Assign Slicing Strategies**
 
-Before dispatch, assign each archetype a diff-slicing strategy. Strategies: `raw_diff`, `function_context`, `full_flow`. See `references/slicing-strategies.md` for construction details.
+Before dispatch, assign each archetype a diff-slicing strategy. Strategies: `raw_diff`, `function_context`, `full_flow`. See `${CLAUDE_SKILL_DIR}/references/slicing-strategies.md` for construction details.
 
 Assignment is deterministic (same composition -> same assignment), index-ordered:
 

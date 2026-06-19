@@ -118,21 +118,21 @@ Surface any prior workshops, research, or lessons that inform this spec. Don't r
 ### Phase 2: Autonomous Pipeline (Stages 1-4)
 
 Run stages 1-4 sequentially. For each stage:
-1. Read the pattern file from this plugin's bundled library. The stage `Pattern:` refs below are written as `[plugin-path]/reference/patterns/…` — resolve `[plugin-path]` to this plugin's install directory (NOT the user's cwd; `/spec` runs from the user's project). If unsure of the path, resolve it once with `find ~/.claude/plugins -path '*/spec/SKILL.md'` and take its directory.
+1. Read the pattern file from this plugin's bundled library. The stage `Pattern:` refs below are absolute paths that resolve to this plugin's install directory automatically at skill load (NOT the user's cwd; `/spec` runs from the user's project).
 2. Write the artifact to the workshop directory
 3. Update `meta.json` status
 
 **Do not dump pattern contents into your output.** Read them, internalize the methodology, apply it. The patterns are your reference, not content to recite.
 
 #### Stage 1: Problem Statement
-- Pattern: `[plugin-path]/reference/patterns/problem-statement.md`
+- Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/problem-statement.md`
 - Output: `problem-statement.md`
 - Key discipline: Self-containment test. Could a stranger begin solving this from what's written?
 - Ground every claim in code you actually read in Phase 1.
 - Surface hidden assumptions as `[ASSUMPTION: A1]`, `[ASSUMPTION: A2]`, etc.
 
 #### Stage 2: Decisions
-- Pattern: `[plugin-path]/reference/patterns/decision-resolution.md`
+- Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/decision-resolution.md`
 - Output: `decisions.md`
 - Key discipline: Scan your own problem statement for ambiguity flags ("or", "possibly", "might", "TBD", "should consider"). Each real ambiguity becomes a numbered decision (D1, D2...).
 - For each decision: list options, state tradeoffs (one line each), **choose one**, document reasoning.
@@ -140,7 +140,7 @@ Run stages 1-4 sequentially. For each stage:
 - Use the `parallel-explore` pattern mentally — consider at least 2 approaches before choosing.
 
 #### Stage 3: Verification
-- Pattern: `[plugin-path]/reference/patterns/verification-criteria.md`
+- Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/verification-criteria.md`
 - Output: `verification.md`
 - Key discipline: For each decision, write the three-sentence independent observer test. If you can't verify it, the decision needs refinement — flag it.
 - **Identify verification layers per criterion** — unit tests alone are insufficient. For each V-criterion, explicitly state which layers apply:
@@ -155,7 +155,7 @@ Run stages 1-4 sequentially. For each stage:
 - Capture baselines where applicable.
 
 #### Stage 4: Constraints
-- Pattern: `[plugin-path]/reference/patterns/constraint-architecture.md`
+- Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/constraint-architecture.md`
 - Output: `constraints.md`
 - Key discipline: Four categories — Musts (M1...), Must-Nots (MN1...), Preferences (P1...), Escalation Triggers (E1...).
 - Use the "smart well-intentioned person" exercise: what could they do that satisfies every requirement but produces the wrong outcome?
@@ -236,7 +236,7 @@ A working example fixture lives at `skills/spec/tests/fixtures/review-gate-examp
 After writing `review-gate.json`, invoke (from any working directory):
 
 ```bash
-node "[plugin-path]/skills/spec/scripts/render-review-gate.mjs" \
+node "${CLAUDE_SKILL_DIR}/scripts/render-review-gate.mjs" \
   --input "{spec-dir}/review-gate.json" \
   --output-dir "{spec-dir}"
 ```
@@ -269,16 +269,16 @@ One revision loop is normal. If the third revision still has major issues, sugge
 After approval, run stages 5-6:
 
 #### Stage 5: Decomposition
-- Pattern: `[plugin-path]/reference/patterns/decomposition.md`
+- Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/decomposition.md`
 - Output: `decomposition.md`
 - Apply the appropriate break pattern (API/Backend, UI, Refactor, Infrastructure) from the pattern.
 - Run the decomposition test: each unit <2hrs, clear boundaries, independently verifiable, disjoint files.
 - Include a Mermaid dependency graph for 4+ packages.
 
 #### Stage 6: Work Packages
-- Pattern: `[plugin-path]/reference/patterns/work-package.md`
+- Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/work-package.md`
 - Output: `work-packages/wp-{NN}-{slug}.md` for each package + `work-packages/_orchestrator.md`
-- Use the `_orchestrator.template.md` template from `[plugin-path]/reference/templates/`
+- Use the `_orchestrator.template.md` template from `${CLAUDE_PLUGIN_ROOT}/reference/templates/`
 - All 6 required fields per WP (precondition, goal, files, verification, failure criteria, boundary)
 - Tag each WP: `execution: autonomous` or `execution: review-needed` (HITL flag)
 - Dependency order (which WPs must complete before others can start)
@@ -296,7 +296,7 @@ Iteratively review the work packages using fresh-eyes Sonnet sub-agents until co
 
 #### 7a. Fresh-Eyes Wave
 
-Launch a Sonnet sub-agent using the Agent tool. The full prompt template lives in `references/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads.
+Launch a Sonnet sub-agent using the Agent tool. The full prompt template lives in `${CLAUDE_SKILL_DIR}/references/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads.
 
 #### 7b. Fix Findings
 
@@ -338,8 +338,8 @@ The council is a **hybrid of two composed halves** — a local Anthropic lens (p
 
 **Half 1 — Local Anthropic lenses (plan-covered anchor).** Two specialized lenses run as `model: opus` Task subagents *inside this interactive session* — plan-covered (your subscription), not the metered programmatic API. Each reviews the converged spec cold:
 
-1. **Reasoning & Coherence** — read `references/council-lens-reasoning.md`, substitute `{workshop_path}` and `{project_path}`, spawn the prompt verbatim. The logic / contradiction auditor.
-2. **Cartography & Codebase Grounding** — read `references/council-lens-cartography.md`, substitute the same placeholders, spawn verbatim. Verifies the spec against real source (has Read/Grep/Glob).
+1. **Reasoning & Coherence** — read `${CLAUDE_SKILL_DIR}/references/council-lens-reasoning.md`, substitute `{workshop_path}` and `{project_path}`, spawn the prompt verbatim. The logic / contradiction auditor.
+2. **Cartography & Codebase Grounding** — read `${CLAUDE_SKILL_DIR}/references/council-lens-cartography.md`, substitute the same placeholders, spawn verbatim. Verifies the spec against real source (has Read/Grep/Glob).
 
 Use **opus** for both: a Phase-8 spec review is a coherence audit at a decision gate, and a 2026-05-25 A/B showed sonnet accepts a self-contradictory spec as coherent while opus catches the cross-artifact contradictions (stale constraints after a mid-flight decision revision).
 
@@ -384,9 +384,9 @@ Count amendments applied.
 
 Run one more Sonnet fresh-eyes wave (same prompt as 7a) to verify the council amendments didn't introduce new issues. This is the final quality gate.
 
-Then run the spec-validate script (locate `validate.mjs` in the plugin's `skills/spec-validate/scripts/` directory):
+Then run the spec-validate script (bundled in this plugin):
 ```bash
-node "$(find ~/.claude/plugins -path '*/spec-validate/scripts/validate.mjs' 2>/dev/null | head -1)" {workshop_path}
+node "${CLAUDE_PLUGIN_ROOT}/skills/spec-validate/scripts/validate.mjs" {workshop_path}
 ```
 
 Report: validation result (errors/warnings/passes) + final wave verdict.

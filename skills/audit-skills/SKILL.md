@@ -15,7 +15,7 @@ Without periodic structured assessment, skill quality drifts invisibly. The Marc
 
 **Upstream (required inputs):**
 - `skills.db` at the target project root — seeded by `scripts/init-skills-db.mjs`
-- Rubric definition: `skills/audit-skills/references/skill-evaluation-rubric.md` (bundled with this skill) — read this, don't re-derive it
+- Rubric definition: `${CLAUDE_SKILL_DIR}/references/skill-evaluation-rubric.md` (bundled with this skill) — read this, don't re-derive it
 
 **Downstream (consumers of this skill's output):**
 - **eval-loop** — reads `karpathy_eligible` flag and assessment scores to select improvement targets
@@ -194,7 +194,7 @@ A working example fixture lives at `skills/audit-skills/tests/fixtures/scorecard
 After writing `scorecard.json`, invoke (from any working directory):
 
 ```bash
-node "[plugin-path]/skills/audit-skills/scripts/render-scorecard.mjs" \
+node "${CLAUDE_SKILL_DIR}/scripts/render-scorecard.mjs" \
   --input "./outputs/projects/skills/audit-{stamp}/scorecard.json" \
   --output-dir "./outputs/projects/skills/audit-{stamp}"
 ```
