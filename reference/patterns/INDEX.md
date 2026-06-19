@@ -43,22 +43,15 @@ How to run work once it's specified:
 | `cross-repo-contract` | Wire format contracts for multi-repo campaigns — exact types, payload shapes, schema registration | cross-repo-contract.md |
 | `meta-prompt` | 3-part architecture for complex multi-agent work — orchestrator, parallelization plan, spec | meta-prompt.md |
 
-## Operational Templates
+## Checklists & Conventions
 
-Drop-in work templates with YAML frontmatter for parameterized use. Located in `operational/`.
+Concrete instruments — checklists and conventions the skills and patterns draw on. Each does something no skill covers. (Folded in when the former `operational/` templating layer was retired; the parameterized drop-in prompts that overlapped existing skills were dropped.)
 
-| Template | Purpose | File |
+| Name | Purpose | File |
 |---|---|---|
-| `Audit codebase` | Parallel 4-agent codebase health audit (security, quality, DX, testing) | Audit codebase.md |
-| `code-review` | Focused review of specific changes or PRs | code-review.md |
-| `bug-report` | Structured bug report capture | bug-report.md |
-| `research-brief` | Structured research request | research-brief.md |
-| `General Work Template` | Parameterized autonomous work dispatch | General Work Template.md |
-| `cross-project-catchup` | Cross-project status summary | cross-project-catchup.md |
-| `session-handoff` | Context transfer between sessions | session-handoff.md |
-| `Reflection Audit` | Structured self-audit and reflection | Reflection Audit.md |
+| `audit-codebase` | Parallel 4-agent codebase health audit (security, quality, DX, testing) | audit-codebase.md |
+| `spec-scorecard` | Post-dispatch spec quality evaluation (100-point scale) — instruments `evaluation-loop` Layer 1 | spec-scorecard.md |
 | `post-build-verification` | Post-build punch list — interaction, palette, semantics, data, a11y, errors | post-build-verification.md |
-| `spec-scorecard` | Post-dispatch spec quality evaluation (100-point scale) — feeds `evaluation-loop` | spec-scorecard.md |
 | `decision-record` | Lightweight ADR that couples each decision to the conditions that would reverse it (the "What Would Change This" discipline) | decision-record.md |
 
 ## Workshop Artifact Templates
@@ -79,5 +72,5 @@ Copyable skeletons for the key workshop files. Located in `templates/`.
 | `scope-fence` | `constraint-architecture` | scope-fence covered must-nots only (~40% of constraint space) |
 
 ---
-*19 active patterns, 1 superseded, 11 operational templates, 4 artifact templates. To add: create the .md, add a row.*
+*19 active patterns, 4 checklists/conventions, 1 superseded, 4 artifact templates. To add: create the .md, add a row.*
 *Patterns evolve — append execution feedback directly to pattern files.*
