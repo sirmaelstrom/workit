@@ -195,8 +195,8 @@ After writing `scorecard.json`, invoke (from any working directory):
 
 ```bash
 node "[plugin-path]/skills/audit-skills/scripts/render-scorecard.mjs" \
-  --input "/workspace\data\outputs\projects\skills\audit-{stamp}\scorecard.json" \
-  --output-dir "/workspace\data\outputs\projects\skills\audit-{stamp}"
+  --input "./outputs/projects/skills/audit-{stamp}/scorecard.json" \
+  --output-dir "./outputs/projects/skills/audit-{stamp}"
 ```
 
 The renderer:

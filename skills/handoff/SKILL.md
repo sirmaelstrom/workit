@@ -25,7 +25,7 @@ If no arguments, infer from the current session state. Ask the user briefly if t
 
 ### 2. Write the Document
 
-Save to: `/workspace/data/outputs/handoffs/handoff-{YYYY-MM-DD-HHmmss}-{short-slug}.md`
+Save to: `./outputs/handoffs/handoff-{YYYY-MM-DD-HHmmss}-{short-slug}.md`
 
 The slug should reflect the handoff target (e.g., `prototype-state-machine`, `fix-pm2-config`, `grill-resume`).
 
@@ -80,7 +80,7 @@ Print the absolute path of the handoff document. The user copies that into a new
 
 ```
 claude --resume false
-> Read /workspace/data/outputs/handoffs/handoff-2026-05-12-093045-prototype-state-machine.md and continue from there.
+> Read ./outputs/handoffs/handoff-2026-05-12-093045-prototype-state-machine.md and continue from there.
 ```
 
 ## Critical Rules
@@ -108,7 +108,7 @@ claude --resume false
 - Duplicating workshop content, spec content, or KB content inline. Reference by path.
 - Handing off without specifying the return path when the DIY sub-agent pattern is in play. The originating session needs to know what to expect back.
 - Vague targets ("explore the architecture"). Make it actionable.
-- Using `mktemp` paths. Handoffs in `/workspace/data/outputs/handoffs/` are greppable, browsable in frontend, and persist long enough to be findable — temp files vanish.
+- Using `mktemp` paths. Handoffs in `./outputs/handoffs/` are greppable, browsable, and persist long enough to be findable — temp files vanish.
 
 ---
 *Adopted from Matt Pocock's `handoff` skill (github.com/mattpocock/skills/tree/main/skills/productivity/handoff). Adapted: persistent workspace path instead of mktemp, explicit DIY-sub-agent pattern guidance, connection to grill-me/prototype/diagnose/execute-wp pipeline.*

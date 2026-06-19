@@ -7,7 +7,7 @@
  * where every message explains WHY the issue matters — not just what's wrong.
  *
  * Usage: node validate.js <workshop-path>
- * Example: node validate.js /workspace/data/outputs/workshops/portable-spec-cli
+ * Example: node validate.js ./outputs/workshops/portable-spec-cli
  */
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
@@ -125,11 +125,11 @@ const STATUS_ORDER = ['captured', 'problem-statement', 'decisions', 'verificatio
 function validateMeta() {
   const meta = readJson('meta.json');
   if (!meta) {
-    error('meta.json', 'Missing meta.json — every workshop needs metadata (title, slug, status, projects). Without it, service cannot track or display this workshop.');
+    error('meta.json', 'Missing meta.json — every workshop needs metadata (title, slug, status, projects). Without it, a workshop tracker cannot track or display this workshop.');
     return null;
   }
 
-  if (!meta.title) error('meta.json', 'Missing "title" — service uses this to display the workshop. Without it, the workshop shows up unnamed.');
+  if (!meta.title) error('meta.json', 'Missing "title" — a workshop tracker uses this to display the workshop. Without it, the workshop shows up unnamed.');
   if (!meta.slug) error('meta.json', 'Missing "slug" — must match the directory name. Required for orchestrator path derivation and workshop tracking.');
   if (!meta.status) error('meta.json', 'Missing "status" — tracks pipeline progress. Without it, resume flow cannot determine where you left off.');
   if (meta.slug && meta.slug !== basename(workshopPath)) {

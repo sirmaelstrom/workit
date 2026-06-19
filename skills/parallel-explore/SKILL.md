@@ -118,15 +118,15 @@ Example: goal `"Design the authentication boundary"` at `2026-05-13T14:50:32Z` �
 Create the central run directory **before invoking the launcher**:
 
 ```
-/workspace\data\outputs\parallel-explore\{run-slug}\
-  prompts\           # the skill writes branch prompts here
-  results\           # launch.mjs writes here (created on first write)
+./outputs/parallel-explore/{run-slug}/
+  prompts/           # the skill writes branch prompts here
+  results/           # launch.mjs writes here (created on first write)
   synthesis.json     # the skill writes here in section 6
   synthesis.md       # the renderer writes here
   synthesis.html     # the renderer writes here
 ```
 
-The skill is responsible for `mkdir`-ing the run directory and the `prompts/` subdirectory before any branch prompt is written. Directory creation uses recursive (`-p`) semantics — the parent `/workspace\data\outputs\parallel-explore\` is created if it does not yet exist.
+The skill is responsible for `mkdir`-ing the run directory and the `prompts/` subdirectory before any branch prompt is written. Directory creation uses recursive (`-p`) semantics — the parent `./outputs/parallel-explore/` is created if it does not yet exist.
 
 #### Prompt filenames (load-bearing convention)
 
@@ -138,7 +138,7 @@ Invoke the launcher against the run directory:
 
 ```bash
 node "[plugin-path]/skills/parallel-explore/scripts/launch.mjs" \
-  --prompts "/workspace\data\outputs\parallel-explore\{run-slug}\prompts" \
+  --prompts "./outputs/parallel-explore/{run-slug}/prompts" \
   --workdir [current project] \
   --model sonnet
 ```
@@ -204,8 +204,8 @@ After writing `synthesis.json` to the run directory, invoke (from any working di
 
 ```bash
 node "[plugin-path]/skills/parallel-explore/scripts/render-synthesis.mjs" \
-  --input "/workspace\data\outputs\parallel-explore\{run-slug}\synthesis.json" \
-  --output-dir "/workspace\data\outputs\parallel-explore\{run-slug}"
+  --input "./outputs/parallel-explore/{run-slug}/synthesis.json" \
+  --output-dir "./outputs/parallel-explore/{run-slug}"
 ```
 
 The renderer:

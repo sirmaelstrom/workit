@@ -167,9 +167,9 @@ For skills marked `karpathy_eligible = 1`, define eval suites using this structu
 skill: parallel-explore
 test_cases:
   - id: tc-01
-    input: "Design a caching layer for service KB search"
+    input: "Design a caching layer for a knowledge-base search service"
     context:
-      project: heathdev-service
+      project: your-project
       constraints: ["must use existing Postgres", "no Redis"]
     assertions:
       format:

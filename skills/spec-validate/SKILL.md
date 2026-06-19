@@ -27,7 +27,7 @@ Determine which workshop to validate. The user might:
 - Reference the current focus from viewport context
 - Ask to validate all workshops
 
-Workshops live at `/workspace\data\outputs\workshops\{slug}\`.
+Workshops live at `./outputs/workshops/{slug}/`.
 
 ### Step 2: Run the script
 
@@ -52,7 +52,7 @@ The script produces a terminal-style report. Present it to the user, then add yo
 To validate all workshops at once:
 
 ```bash
-for dir in /workspace/data/outputs/workshops/*/; do
+for dir in ./outputs/workshops/*/; do
   node <skill-path>/scripts/validate.mjs "$dir" 2>&1
   echo ""
 done
