@@ -8,9 +8,8 @@ Several skills read these files at runtime (e.g. `spec` reads `patterns/*` as it
 
 | Directory | What's in it |
 |-----------|--------------|
-| `patterns/` | The methodology itself — pipeline stages (problem-statement → decomposition → work-package), cross-cutting disciplines (test-first-spec, constraint-architecture, trust-ramp…), and execution patterns (wave-execution, campaign-closeout…). **Start at [`patterns/INDEX.md`](patterns/INDEX.md).** |
+| `patterns/` | The methodology itself — pipeline stages (problem-statement → decomposition → work-package), cross-cutting disciplines (test-first-spec, constraint-architecture, trust-ramp…), execution patterns (wave-execution, campaign-closeout…), and concrete checklists/conventions (audit-codebase, spec-scorecard, post-build-verification, decision-record). **Start at [`patterns/INDEX.md`](patterns/INDEX.md).** |
 | `templates/` | Copyable skeletons for workshop artifacts — `_orchestrator.template.md`, `meta.json.template`, problem-statement / post-mortem templates, and the `review-council/` prompt set. |
-| `operational/` | Drop-in operational prompt templates with YAML frontmatter (`{{variable}}` interpolation) — codebase audit, code review, research brief, session handoff, spec scorecard, and more. |
 | `heuristics/` | Sizing and decomposition guidelines (`wp-sizing.md`). |
 | `examples/` | Worked examples — e.g. a spec-scorecard evaluation showing what the feedback loop looks like in practice. |
 

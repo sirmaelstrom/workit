@@ -25,7 +25,7 @@ variables:
 
 **This template is NOT for:**
 - Evaluating spec quality (use `spec-scorecard` template)
-- Reviewing code quality or architecture (use `code-review` or `Audit codebase` template)
+- Reviewing code quality or architecture (use the `review` skill or `audit-codebase`)
 - Running the review council on specs pre-dispatch (use `review-council` pattern)
 - Post-mortem analysis of a campaign (use `campaign-closeout` pattern)
 
@@ -202,5 +202,5 @@ Issues that should have been caught by the *build spec* rather than this verific
 
 ---
 *Operational template — post-execution verification, not spec review*
-*Applies: `test-first-spec` (verification hierarchy), `scope-fence` (scope declaration), `corrections-loop` (feedback to spec)*
+*Applies: `test-first-spec` (verification hierarchy), `constraint-architecture` (scope declaration), `corrections-loop` (feedback to spec)*
 *See also: `spec-scorecard` (evaluates spec quality), `campaign-closeout` (post-campaign lifecycle)*

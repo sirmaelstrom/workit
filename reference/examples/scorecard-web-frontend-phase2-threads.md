@@ -75,9 +75,9 @@ The spec used Svelte 4 event modifier syntax. The agent self-corrected, but the 
 
 | Artifact | What It Is | Current Location |
 |----------|-----------|-----------------|
-| Post-Build Verification Checklist | 7-category inspection framework | `operational/post-build-verification.md` |
+| Post-Build Verification Checklist | 7-category inspection framework | `patterns/post-build-verification.md` |
 | Persistence Specification section | Added to work-package pattern | `patterns/work-package.md` |
-| Semantic Accuracy category | Added to verification checklist | `operational/post-build-verification.md` |
+| Semantic Accuracy category | Added to verification checklist | `patterns/post-build-verification.md` |
 
 This single evaluation created more process improvement than the execution itself — which is exactly what `evaluation-loop` predicts: "the feedback mechanism that makes every other pattern get better over time."
 

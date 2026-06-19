@@ -106,10 +106,10 @@ Worked example: `examples/scorecard-web-frontend-phase2-threads.md`
 
 **2026-03-04 — Tooling materialized:**
 
-Layer 1 now has a concrete template: `operational/spec-scorecard.md` (100-point scale, 5 dimensions, deviation log with root-cause categories, feed-back routing table). Each scoring dimension explicitly maps to the pattern it evaluates — making Layer 2 analysis possible once enough scorecards accumulate. The running log format is demonstrated in `examples/`.
+Layer 1 now has a concrete template: `spec-scorecard.md` (100-point scale, 5 dimensions, deviation log with root-cause categories, feed-back routing table). Each scoring dimension explicitly maps to the pattern it evaluates — making Layer 2 analysis possible once enough scorecards accumulate. The running log format is demonstrated in `examples/`.
 
 ---
 *Influenced by: Nate B. Jones specification primitives (evaluation design)*
 *Cross-cutting discipline — post-execution quality feedback, governs pattern evolution*
-*Concrete tooling: `operational/spec-scorecard.md` (Layer 1), `operational/post-build-verification.md` (build quality)*
+*Concrete tooling: `spec-scorecard.md` (Layer 1), `post-build-verification.md` (build quality)*
 *See also: `corrections-loop`, `trust-ramp`, `test-first-spec`, `spec-engineering`*

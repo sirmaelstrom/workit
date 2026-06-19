@@ -26,7 +26,7 @@ Read this template fully before starting. Decompose the work into four parallel 
 
 **This template is NOT for:**
 - Fixing the issues found (that's a workshop)
-- Reviewing a specific PR or changeset (use `code-review` template)
+- Reviewing a specific PR or changeset (use the `review` skill)
 - Evaluating spec quality after dispatch (use `spec-scorecard` template)
 - Verifying a build matches its spec (use `post-build-verification` template)
 
@@ -218,4 +218,4 @@ An audit is complete when:
 
 ---
 *Operational template — standalone codebase health assessment*
-*See also: `code-review` (for focused PR review), `post-build-verification` (for spec-vs-build checks)*
+*See also: the `review` skill (for focused PR review), `post-build-verification` (for spec-vs-build checks)*

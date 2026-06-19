@@ -26,7 +26,7 @@ This is a concrete instantiation of `evaluation-loop` Layer 1 (Dispatch Outcome 
 
 **This template is NOT for:**
 - Verifying the build matches visual/behavioral intent (use `post-build-verification`)
-- Reviewing code quality (use `code-review` or `Audit codebase`)
+- Reviewing code quality (use the `review` skill or `audit-codebase`)
 - Post-mortem of a full campaign (use `campaign-closeout` pattern)
 - Reviewing specs before dispatch (use `review-council` pattern)
 
@@ -55,7 +55,7 @@ Rate each dimension 1-5. **3 = acceptable.** Evidence is required for scores of 
 
 **Structural total:** /20
 
-*Maps to patterns: `decomposition` (ordering), `scope-fence` / `constraint-architecture` (boundaries), `decision-resolution` (ambiguity)*
+*Maps to patterns: `decomposition` (ordering), `constraint-architecture` (boundaries), `decision-resolution` (ambiguity)*
 
 ### 2. Specification Precision (Was the right thing built?)
 
@@ -186,5 +186,5 @@ Things learned about specifying work in general (not specific to this spec). The
 ---
 *Operational template — post-dispatch spec quality evaluation*
 *Instantiates: `evaluation-loop` Layer 1 (Dispatch Outcome Tracking)*
-*Applies: `scope-fence`, `corrections-loop` (feed-back routing), `test-first-spec` (verification scoring)*
+*Applies: `constraint-architecture`, `corrections-loop` (feed-back routing), `test-first-spec` (verification scoring)*
 *See also: `post-build-verification` (verifies build output), `campaign-closeout` (full campaign lifecycle)*
