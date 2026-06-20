@@ -52,8 +52,11 @@ model: sonnet  # default eval model
 iterations: 10  # default loop budget
 timeout_per_iteration_minutes: 10
 
+# Tiers control loop cost: smoke cases run every iteration for fast signal;
+# verify cases run only when smoke improves (the full-suite regression check).
 test_cases:
   - id: tc-01
+    tier: smoke  # smoke | verify — defaults to smoke if omitted
     description: "<what this tests>"
     input: "<structured input that would invoke the skill>"
     context:
@@ -61,7 +64,10 @@ test_cases:
       constraints: []
     assertions:
       format:
-        - "<binary check on output structure>"
+        # Prefix string-checkable assertions with [deterministic] — they're scored
+        # by exact string match, not an LLM judge (cheaper, exact).
+        - "[deterministic] Output contains '<expected string>'"
+        - "<binary check on output structure — LLM-as-judge>"
       quality:
         - "<binary check on output substance — LLM-as-judge>"
       instruction_adherence:
@@ -72,8 +78,11 @@ test_cases:
 
 **Suite generation rules:**
 - Minimum 5 test cases, aim for 10-20
+- Tag each case `tier: smoke` (most critical/common, ~3) or `tier: verify` (edge cases) — smoke runs every loop iteration, verify only when smoke improves. Omitted tier defaults to smoke.
 - Each test case needs 3-6 assertions across categories
+- Cover all four assertion categories: format, quality, instruction_adherence, composability
 - Format assertions should be mechanically verifiable (section exists, schema valid)
+- Prefix string-checkable assertions with `[deterministic]` so they're scored by exact match instead of an LLM judge
 - Quality assertions use LLM-as-judge with binary framing ("Does X? Yes/No")
 - Draw test inputs from real project contexts where possible
 - Include at least one adversarial case (ambiguous input, edge case, conflicting constraints)

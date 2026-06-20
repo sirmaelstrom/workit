@@ -158,6 +158,8 @@ test_cases:
         - "<LLM-judged quality assertion>"
       instruction_adherence:
         - "<LLM-judged adherence assertion>"
+      composability:
+        - "<LLM-judged assertion on output usability by downstream skills>"
 
   # ... tc-02, tc-03 (smoke), tc-04 through tc-06/07 (verify)
 
@@ -173,7 +175,7 @@ Rules:
 5. Make inputs realistic — simulate actual file contents, git status, etc.
 6. Each assertion should be independently verifiable (one claim per assertion)
 7. Test for both what the skill SHOULD do and what it should NOT do
-8. Include assertions across all 3 categories: format, quality, instruction_adherence
+8. Include assertions across all 4 categories: format, quality, instruction_adherence, composability
 
 Output ONLY the YAML content inside the code fence. No explanation before or after.`;
 

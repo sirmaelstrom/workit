@@ -183,6 +183,8 @@ test_cases:
       instruction_adherence:
         - "Anti-convergence instruction was followed"
         - "Normalized output schema was used by all branches"
+      composability:
+        - "Comparison Matrix is structured enough for /spec to consume as decision input"
 ```
 
 ### Assertion Categories
