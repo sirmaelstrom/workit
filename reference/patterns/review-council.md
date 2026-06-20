@@ -123,7 +123,9 @@ If amendments are substantial, run a second review round:
 
 ## Automated Workflow (MCP Server)
 
-As of 2026-03-07, the review council is automated via a standalone MCP server (`src/mcp/review-council.ts`). Three tools:
+> The author runs the review council as a private, standalone MCP server that is **not shipped with this plugin** — the manual workflow above is the portable path. The section below is documented as a reference design; the `src/mcp/...` and `config/...` paths refer to that private backend, not this repo.
+
+The server exposes three tools:
 
 ```
 council_review(workshop_path, surface, round, models[])
@@ -137,7 +139,7 @@ council_challenge(review_dir)
 ```
 
 **Config:** `./config/review-council/models.json` — model registry (command, args, timeout).
-**Templates:** `patterns/templates/review-council/` — single source of truth. The backend service reads these at runtime.
+**Templates:** `reference/templates/review-council/` — single source of truth (bundled with this plugin). The backend service reads these at runtime.
 
 The manual workflow above still works and is the fallback when the MCP server is unavailable.
 

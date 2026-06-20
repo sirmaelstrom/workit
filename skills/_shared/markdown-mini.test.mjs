@@ -165,3 +165,22 @@ test('no external deps', () => {
     assert.match(imp, /from ['"]node:/, `all imports must be from node: built-ins, got: ${imp}`);
   }
 });
+
+// ─── URL scheme safety ───────────────────────────────────────────────────────
+
+test('javascript: URL scheme is neutralized to a safe href', () => {
+  const html = mdToHtml('[x](javascript:alert(document.cookie))');
+  assert.doesNotMatch(html, /href="javascript:/i, 'javascript: scheme must not survive in href');
+  assert.match(html, /<a href="#">x<\/a>/);
+});
+
+test('data: URL scheme is neutralized', () => {
+  const html = mdToHtml('[x](data:text/html,<script>alert(1)</script>)');
+  assert.doesNotMatch(html, /href="data:/i);
+});
+
+test('relative, http(s) and mailto URLs are preserved', () => {
+  assert.match(mdToHtml('[a](./local/path.md)'), /<a href="\.\/local\/path\.md">a<\/a>/);
+  assert.match(mdToHtml('[b](https://example.com)'), /href="https:\/\/example\.com"/);
+  assert.match(mdToHtml('[c](mailto:x@y.com)'), /href="mailto:x@y\.com"/);
+});

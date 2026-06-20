@@ -28,7 +28,7 @@ const LAST_NOTIFY_FILE = join(__dirname, '.last-notify-timestamp');
 const LEDGER_URL = process.env.LEDGER_URL || '';
 const LEDGER_USER_ID = process.env.LEDGER_USER_ID || 'user';
 // Plugin repos (siblings under PROJECTS_ROOT) to scan for skills.db. Comma-separated.
-const EVAL_PLUGINS = (process.env.EVAL_PLUGINS || 'heathdev-workshop-plugin')
+const EVAL_PLUGINS = (process.env.EVAL_PLUGINS || 'workit')
   .split(',').map(s => s.trim()).filter(Boolean);
 
 // --- Webhook ---

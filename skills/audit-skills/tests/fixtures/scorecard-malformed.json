@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "run_slug": "audit-20260513-150000",
   "created_at": "2026-05-13T15:00:00Z",
-  "plugins": ["heathdev-workshop"],
+  "plugins": ["workit"],
   "summary": {
     "skills_assessed": 1,
     "average_score": 3.0,
@@ -17,7 +17,7 @@
     {
       "id": "parallel-explore",
       "name": "parallel-explore",
-      "plugin": "heathdev-workshop",
+      "plugin": "workit",
       "kind": "skill",
       "rank": 1,
       "roi": 3.0,

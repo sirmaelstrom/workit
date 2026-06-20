@@ -16,6 +16,16 @@ function escapeAttr(text) {
   return text.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
 
+/** Allow only http(s)/mailto and scheme-less (relative/anchor) URLs; neutralize
+ *  dangerous schemes (javascript:, data:, vbscript:) to a safe '#'. */
+function safeUrl(url) {
+  const scheme = url.trim().match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/);
+  if (scheme && !['http', 'https', 'mailto'].includes(scheme[1].toLowerCase())) {
+    return '#';
+  }
+  return url;
+}
+
 /** Process inline markdown (code→links→bold→italic) via sentinel placeholders. */
 function processInline(text) {
   const slots = [];
@@ -28,7 +38,7 @@ function processInline(text) {
 
   // Step 2: extract links → replace with sentinel
   text = text.replace(/\[([^\]]*)\]\(([^)]*)\)/g, (_, linkText, url) => {
-    slots.push(`<a href="${escapeAttr(url)}">${escapeHtml(linkText)}</a>`);
+    slots.push(`<a href="${escapeAttr(safeUrl(url))}">${escapeHtml(linkText)}</a>`);
     return `\x00${slots.length - 1}\x00`;
   });
 

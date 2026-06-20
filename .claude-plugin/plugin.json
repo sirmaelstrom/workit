@@ -1,10 +1,10 @@
 {
-  "name": "heathdev-workshop",
+  "name": "workit",
   "version": "1.0.0",
-  "description": "Justin Heath's personal Claude Code toolkit — skills for specification, execution, review, diagnosis, and skill self-improvement.",
+  "description": "A Claude Code plugin — skills for specification, execution, review, diagnosis, and skill self-improvement.",
   "author": {
     "name": "Justin Heath"
   },
   "license": "MIT",
-  "homepage": "https://github.com/sirmaelstrom/heathdev-workshop-plugin"
+  "homepage": "https://github.com/sirmaelstrom/workit"
 }

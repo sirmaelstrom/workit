@@ -13,7 +13,7 @@ This contract is intentionally narrow: it carries only what the renderer needs t
 | `schema_version` | string | yes | Must equal `"1.0"`. The renderer rejects any other value. |
 | `run_slug` | string | yes | Identifier for this audit run. Format: `audit-{YYYYMMDD}-{HHMMSS}` (UTC). The audit skill assigns this. |
 | `created_at` | string | yes | ISO-8601 timestamp of when the audit was produced. The renderer uses this string verbatim and never reads the runtime clock. |
-| `plugins` | string[] | yes | The plugins covered by this audit (e.g. `["heathdev-workshop","sirmaelstroms-claude-code"]`). At least 1 entry. Every `skills[].plugin` value must appear here. |
+| `plugins` | string[] | yes | The plugins covered by this audit (e.g. `["workit","sirmaelstroms-claude-code"]`). At least 1 entry. Every `skills[].plugin` value must appear here. |
 | `summary` | object | yes | Aggregate summary. See `summary` below. |
 | `dimensions` | object[] | yes | The rubric dimensions used for scoring. At least 1 entry. Order is the column order in the rendered grid. |
 | `skills` | object[] | yes | One row per assessed skill. At least 1 entry. |

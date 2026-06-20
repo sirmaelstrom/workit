@@ -1,6 +1,6 @@
-# gitleaks config for heathdev-workshop
+# gitleaks config for workit
 # Extends the built-in ruleset; adds an allowlist for known synthetic values.
-title = "heathdev-workshop gitleaks config"
+title = "workit gitleaks config"
 
 [extend]
 useDefault = true

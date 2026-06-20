@@ -3,7 +3,7 @@
  * Initialize the skills.db for a plugin repository.
  * Creates schema and seeds skill inventory from the filesystem.
  *
- * Usage: node scripts/init-skills-db.mjs [--plugin-name heathdev-workshop]
+ * Usage: node scripts/init-skills-db.mjs [--plugin-name workit]
  *
  * Uses Node 24 native SQLite (experimental but zero-dependency).
  */
@@ -19,7 +19,7 @@ const projectRoot = resolve(__dirname, '..');
 // Parse args
 const args = process.argv.slice(2);
 const pluginNameIdx = args.indexOf('--plugin-name');
-const pluginName = pluginNameIdx >= 0 ? args[pluginNameIdx + 1] : 'heathdev-workshop';
+const pluginName = pluginNameIdx >= 0 ? args[pluginNameIdx + 1] : 'workit';
 
 const dbPath = join(projectRoot, 'skills.db');
 const db = new DatabaseSync(dbPath);

@@ -1,4 +1,8 @@
-# heathdev-workshop
+<p align="center">
+  <img src="./assets/workit-icon.png" alt="workit icon" width="128">
+</p>
+
+# workit
 
 A personal [Claude Code](https://docs.claude.com/en/docs/claude-code) plugin — the canonical toolkit I use day to day for **specification, execution, review, and skill self-improvement**. It started as a spec-pipeline and grew into a general-purpose set of skills for doing engineering work with an agent in the loop.
 
@@ -50,14 +54,14 @@ Fourteen skills, grouped by what they're for:
 This is a Claude Code plugin distributed via its own marketplace manifest.
 
 ```
-/plugin marketplace add sirmaelstrom/heathdev-workshop-plugin
-/plugin install heathdev-workshop
+/plugin marketplace add sirmaelstrom/workit
+/plugin install workit
 ```
 
 Or point Claude Code at a local clone during development:
 
 ```
-/plugin marketplace add /path/to/heathdev-workshop-plugin
+/plugin marketplace add /path/to/workit
 ```
 
 Once installed, the skills trigger by description (e.g. "write a spec for…", "review my branch", "diagnose this") or by slash command (`/spec`, `/review`, `/diagnose`, …).
@@ -70,6 +74,8 @@ This is a personal plugin, so a few skills assume my environment:
 - **Pattern library.** The methodology these skills draw on is bundled in [`reference/`](./reference/) — patterns, checklists/conventions, templates, and heuristics. `spec`, `spec-validate`, and `execute-wp` read from it at runtime (`reference/patterns/`, `reference/templates/`). No external repo needed.
 - **`skills.db`.** `audit-skills` and `eval-loop` read/write a local SQLite inventory seeded by `scripts/init-skills-db.mjs` (uses Node's native `node:sqlite`, so Node 24+). The DB is git-ignored.
 - **Optional integrations.** `eval-loop`'s automation scripts can post to a Discord webhook (`DISCORD_WEBHOOK_URL`) and mirror results to a ledger endpoint (`LEDGER_URL`). Both are off unless you set those env vars.
+- **External CLIs on `PATH`.** The automation skills shell out to other tools: `parallel-explore`, `eval-loop`, and `audit-skills` invoke the [`claude`](https://docs.claude.com/en/docs/claude-code) CLI, and `eval-loop`'s nightly automation optionally calls `bws` (the Bitwarden Secrets CLI) to resolve `DISCORD_WEBHOOK_SECRET`. The specification, review, and markdown skills work without either.
+- **Other env knobs (all optional).** Beyond the two above, the `eval-loop` scripts read `DISCORD_WEBHOOK_SECRET`, `LEDGER_USER_ID`, `EVAL_PLUGINS`, `EVAL_TZ`, `EVAL_PROJECT_ROOT`, `EVAL_SKILL_FILE`, and `EVAL_SUITE_FILE` — knobs for the nightly automation, none required for interactive use.
 
 ## License
 

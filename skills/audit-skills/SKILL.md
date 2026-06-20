@@ -56,7 +56,7 @@ For each skill, evaluate all 7 dimensions. Use the rubric's Likert scales AND bi
 
 ```
 Skill: parallel-explore
-Plugin: heathdev-workshop
+Plugin: workit
 Kind: skill
 
 description_quality: 4

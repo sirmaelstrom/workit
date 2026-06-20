@@ -101,9 +101,9 @@ function cleanupWorktrees() {
 // Launch branches
 // ---------------------------------------------------------------------------
 
-const modelFlag = model === 'opus' ? '--model opus'
-  : model === 'haiku' ? '--model haiku'
-  : '--model sonnet';
+const modelArg = model === 'opus' ? 'opus'
+  : model === 'haiku' ? 'haiku'
+  : 'sonnet';
 
 function launchBranch(promptFile, index) {
   const branchName = basename(promptFile, '.md');
@@ -117,12 +117,17 @@ function launchBranch(promptFile, index) {
     const startTime = Date.now();
     console.log(`[${branchName}] launching...`);
 
-    const child = spawn('claude', ['-p', '--output-format', 'text', modelFlag, prompt], {
+    // shell:true keeps `claude` resolvable as a Windows .cmd shim, but the
+    // untrusted prompt is passed via stdin (never the shell) to avoid injection;
+    // only fixed, safe flags are in argv.
+    const child = spawn('claude', ['-p', '--output-format', 'text', '--model', modelArg], {
       cwd: branchWorkdir,
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: timeoutSec * 1000,
     });
+    child.stdin.write(prompt);
+    child.stdin.end();
 
     let stdout = '';
     let stderr = '';
