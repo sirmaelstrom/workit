@@ -1,0 +1,10 @@
+{
+  "title": "Broken Spec (negative-control fixture)",
+  "slug": "broken-spec",
+  "status": "captured",
+  "projects": ["example-service"],
+  "tags": ["fixture"],
+  "startedAt": "2026-06-19T00:00:00Z",
+  "createdAt": "2026-06-19T00:00:00Z",
+  "updatedAt": "2026-06-19T00:00:00Z"
+}

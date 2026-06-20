@@ -149,17 +149,26 @@ function validateProblemStatement() {
   const content = readArtifact('problem-statement.md');
   if (!content) return;
 
+  // Accept BOTH problem-statement vocabularies: the fuller template
+  // (problem-statement.template.md: "What We're Solving" / "Current State" /
+  // "What's Actually Broken") and the pattern's lightweight capture structure
+  // (problem-statement.md: "The Problem" / "Open Questions" / "Hidden
+  // Assumptions"). A faithful author may follow either, so a missing-section
+  // warning should only fire when neither form's heading is present.
   const sections = {
-    'What We\'re Solving': /^##\s+What We.re Solving/mi,
-    'Current State': /^##\s+Current State/mi,
-    'What "Solved" Looks Like': /^##\s+What .Solved. Looks Like/mi,
-    'What\'s Actually Broken': /^##\s+What.s Actually Broken/mi,
+    'a problem description (e.g. "What We\'re Solving" or "The Problem")':
+      /^##\s+(?:What We.re Solving|The Problem|Problem|Context)\b/mi,
+    'current state / grounding (e.g. "Current State")':
+      /^##\s+(?:Current State|Background|Context)\b/mi,
+    'what "Solved" looks like':
+      /^##\s+What .Solved. Looks Like/mi,
+    'specific failures or open questions (e.g. "What\'s Actually Broken" or "Open Questions")':
+      /^##\s+(?:What.s Actually Broken|Open Questions|Hidden Assumptions)\b/mi,
   };
 
-  // Check from template structure
   for (const [name, regex] of Object.entries(sections)) {
     if (!regex.test(content)) {
-      warn('problem-statement.md', `Missing section: "${name}". The template expects this section — it forces grounding. Without it, the problem may not pass the self-containment test.`);
+      warn('problem-statement.md', `Missing ${name}. A grounded problem statement needs this (the template and the lightweight pattern form both count) — without it, the problem may not pass the self-containment test.`);
     }
   }
 
@@ -250,10 +259,15 @@ function validateVerification() {
     ok(`verification.md: ${vHeaders.length} verification criteria found`);
   }
 
-  // Check for verification type (match both **Verification type:** and **Verification type**)
+  // Verification strength: either the layered model (**Layers:** / **Unit:** /
+  // **Fixture:** / **Seam:** / **Deployment:**) OR the legacy flat
+  // "**Verification type**" label satisfies this. The SKILL and the
+  // verification-criteria pattern now prescribe the layered model, so its
+  // presence must count — warn only when NEITHER is present.
+  const hasLayers = /\*\*(?:Layers|Unit|Fixture|Seam|Deployment)/i.test(content);
   const hasVerificationType = /\*\*Verification type/i.test(content);
-  if (!hasVerificationType && vHeaders.length > 0) {
-    warn('verification.md', 'No "Verification type" fields found. The verification hierarchy (automated test > build check > CLI command > Playwright > manual observation) helps prioritize — prefer stronger forms.');
+  if (!hasVerificationType && !hasLayers && vHeaders.length > 0) {
+    warn('verification.md', 'No verification strength indicated. Each V-criterion should specify either layered coverage (**Layers:** — Unit / Fixture / Seam / Deployment, the model the spec pipeline prescribes) or at minimum a **Verification type**. Without it, you can\'t tell whether seams are actually covered.');
   }
 
   // Vague verification scan (skip code blocks and blockquotes)
@@ -283,10 +297,9 @@ function validateVerification() {
     warn('verification.md', 'No "How to verify" sections found. Each V-criterion should include the exact command, URL, or procedure. Without it, verification is aspirational — you wrote what success looks like but not how to check.');
   }
 
-  // Check for verification layers (new layered model)
-  const hasLayers = /\*\*(?:Layers|Unit|Fixture|Seam|Deployment)/i.test(content);
-  const hasOldType = /\*\*Verification type/i.test(content);
-  if (!hasLayers && hasOldType && vHeaders.length > 0) {
+  // Flat-vs-layered: a spec that uses ONLY the legacy "Verification type" label
+  // without any layered coverage is underspecified — nudge it toward the layers.
+  if (!hasLayers && hasVerificationType && vHeaders.length > 0) {
     warn('verification.md', 'Uses flat "Verification type" instead of layered model. Each V-criterion should specify which layers apply: Unit, Fixture-contract, Seam-integration, Deployment. A single "Automated test" label hides whether seams are actually covered.');
   }
 
@@ -318,23 +331,23 @@ function validateConstraints() {
   const content = readArtifact('constraints.md');
   if (!content) return;
 
-  const categories = {
-    'Musts': /\bMusts?\b.*(?:Non-Negotiable|Requirements?)/i,
-    'Must-Nots': /\bMust.Nots?\b.*(?:Explicit|Prohibitions?)/i,
-    'Preferences': /\bPreferences?\b.*(?:Guidance|Ambiguous)/i,
-    'Escalation Triggers': /\bEscalation\s+Triggers?\b/i,
-  };
-
-  const present = [];
-  const missing = [];
-
-  for (const [name, regex] of Object.entries(categories)) {
-    if (regex.test(content)) {
-      present.push(name);
-    } else {
-      missing.push(name);
-    }
+  // Classify each header line into at most one constraint category by its CORE
+  // keyword. Category headers appear in many forms — "## Musts (M)",
+  // "### 1. Musts — Non-Negotiable Requirements", "## Must-Nots (MN)" — so the
+  // descriptive suffix ("Non-Negotiable", "Prohibitions") must NOT be required.
+  // Must-Nots is checked first so a "Must-Nots" header isn't miscounted as Musts.
+  const headerLines = content.split('\n').filter(l => /^#{1,6}\s/.test(l));
+  const presentSet = new Set();
+  for (const h of headerLines) {
+    if (/must[-\s]?nots?/i.test(h)) presentSet.add('Must-Nots');
+    else if (/\bmusts?\b/i.test(h)) presentSet.add('Musts');
+    if (/\bpreferences?\b/i.test(h)) presentSet.add('Preferences');
+    if (/\bescalation\b/i.test(h)) presentSet.add('Escalation Triggers');
   }
+
+  const ALL_CATEGORIES = ['Musts', 'Must-Nots', 'Preferences', 'Escalation Triggers'];
+  const present = ALL_CATEGORIES.filter(c => presentSet.has(c));
+  const missing = ALL_CATEGORIES.filter(c => !presentSet.has(c));
 
   if (missing.length > 0) {
     for (const m of missing) {
@@ -354,8 +367,11 @@ function validateConstraints() {
     ok(`constraints.md: ${present.length}/4 categories present (${present.join(', ')})`);
   }
 
-  // Check for numbered constraints (M1, MN1, P1, E1)
-  const numbered = content.match(/^###\s+(?:M\d+|MN\d+|P\d+|E\d+)/gm) || [];
+  // Check for numbered constraints (M1, MN1, P1, E1). Accept the ID in any of
+  // the forms authors actually use: a heading (`### M1`), a bullet
+  // (`- **M1 — …**`, the form the pattern's examples and templates use), or
+  // inline bold (`**M1**`). MN is matched before M so "MN1" isn't read as "M".
+  const numbered = content.match(/(?:^\s{0,3}(?:#{2,6}\s+|[-*]\s+)\**|\*\*)(?:MN|M|P|E)\d+\b/gm) || [];
   if (numbered.length === 0 && present.length > 0) {
     warn('constraints.md', 'No numbered constraints found (M1, MN1, P1, E1 convention). Numbering enables cross-referencing from work packages and post-mortems.');
   }
@@ -370,8 +386,11 @@ function validateDecomposition() {
     warn('decomposition.md', 'No break pattern identified. The decomposition pattern defines break patterns by work type (API/Backend, UI, Refactor, Infrastructure). Naming the pattern makes the decomposition rationale explicit and reusable.');
   }
 
-  // Check for work units
-  const wpHeaders = content.match(/^###\s+WP-?\d+/gmi) || [];
+  // Check for work units (WP-1, WP-2...). The decomposition pattern doesn't
+  // mandate `### WP-N` headers — units are commonly listed in a table
+  // (`| WP-01 | … |`) or as bullets. Accept WP-NN at the start of a heading,
+  // a table row, or a bullet.
+  const wpHeaders = content.match(/^\s{0,3}(?:#{2,6}\s+|[-*]\s+|\|\s*)\**WP-?\d+\b/gmi) || [];
   if (wpHeaders.length === 0) {
     warn('decomposition.md', 'No work units found (expected WP-1, WP-2... headers). Decomposition should produce numbered work units that become work packages.');
   } else {
@@ -418,7 +437,11 @@ function validateWorkPackages() {
     const missingFields = [];
 
     for (const field of REQUIRED_WP_FIELDS) {
-      const regex = new RegExp(`\\*\\*${field}\\*\\*|^##\\s+${field}`, 'mi');
+      // Accept all natural field forms: `**Field:**` (colon inside the bold —
+      // the most natural markdown), `**Field**` (colon outside or none), and
+      // `## Field` (heading). The colon-inside form is what a faithful author
+      // writes; rejecting it would make otherwise-valid WPs look undispatchable.
+      const regex = new RegExp(`\\*\\*${field}:?\\*\\*|^##\\s+${field}`, 'mi');
       if (!regex.test(content)) {
         missingFields.push(field);
       }

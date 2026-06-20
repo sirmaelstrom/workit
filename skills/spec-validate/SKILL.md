@@ -45,7 +45,7 @@ The script produces a terminal-style report. Present it to the user, then add yo
 
 - **Severity context:** Not all warnings are equal. A missing "Escalation Triggers" section in a 2-WP workshop is less concerning than missing "Must-Nots" in a 10-WP campaign. Use judgment about what matters given the workshop's scope and stage.
 
-- **Actionable next steps:** For each error or significant warning, suggest the specific fix. Don't just say "add verification type" — say "each V-criterion needs a **Verification type:** line. For V3, which is about API response format, an automated test is the strongest choice."
+- **Actionable next steps:** For each error or significant warning, suggest the specific fix. Don't just say "indicate verification strength" — say "each V-criterion needs a **Layers:** block (Unit / Fixture / Seam / Deployment). For V3, which is about API response format, a Fixture-contract layer against a captured real response is the strongest choice."
 
 ### Batch validation
 
@@ -67,7 +67,7 @@ done
 - Lifecycle timestamps present (startedAt, createdAt)
 
 ### problem-statement.md
-- Template sections present (What We're Solving, Current State, What "Solved" Looks Like, What's Actually Broken)
+- Grounding sections present. Both vocabularies count: the fuller template (`What We're Solving` / `Current State` / `What "Solved" Looks Like` / `What's Actually Broken`) and the lightweight pattern form (`The Problem` / `Open Questions` / `Hidden Assumptions`).
 - Minimum word count (< 100 words triggers a warning — unlikely to pass self-containment test)
 - Unfilled template placeholders (`{...}`)
 
@@ -78,17 +78,17 @@ done
 
 ### verification.md
 - Numbered criteria (V1, V2...) mapping to decisions
-- Verification type field present
+- Verification strength present — the layered model (`**Layers:**` — Unit / Fixture / Seam / Deployment, the form the pipeline prescribes) OR a legacy flat `**Verification type**`. The warning fires only when neither is present.
 - Vague verification phrase scan (errors, not warnings — these are showstoppers)
 - "How to verify" sections present
 
 ### constraints.md
-- All four categories present: Musts, Must-Nots, Preferences, Escalation Triggers
-- Numbered constraints (M1, MN1, P1, E1)
+- All four categories present: Musts, Must-Nots, Preferences, Escalation Triggers. Detected by the category keyword in any header (`## Musts (M)` and `### 1. Musts — Non-Negotiable Requirements` both count) — no descriptive suffix required.
+- Numbered constraints (M1, MN1, P1, E1) in any form: a heading (`### M1`), a bullet (`- **M1 — …**`), or inline bold (`**M1**`).
 
 ### decomposition.md
 - Break pattern identified
-- Numbered work units (WP-1, WP-2...)
+- Numbered work units (WP-1, WP-2...) in any form: a heading (`### WP-1`), a table row (`| WP-01 | … |`), or a bullet.
 - Decomposition test evidence (< 2hrs, independently verifiable, disjoint files)
 
 ### work-packages/

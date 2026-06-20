@@ -1,0 +1,10 @@
+{
+  "title": "Canonical Spec (spec-validate regression fixture)",
+  "slug": "canonical-spec",
+  "status": "ready",
+  "projects": ["example-service"],
+  "tags": ["fixture"],
+  "startedAt": "2026-06-19T00:00:00Z",
+  "createdAt": "2026-06-19T00:00:00Z",
+  "updatedAt": "2026-06-19T00:00:00Z"
+}

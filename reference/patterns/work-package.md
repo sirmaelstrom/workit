@@ -14,6 +14,11 @@
 6. **Boundary** — What is explicitly OUT OF SCOPE for this package. Prevents drift.
 7. **Commit** — Conventional commit message. Forces you to name what changed.
 
+Write each field as a bold label — `**Precondition:**`, `**Goal:**`, … — or as a
+heading (`## Precondition`). `spec-validate` and `execute-wp` both look for the
+field name; the colon-inside (`**Field:**`) and colon-outside (`**Field**:`)
+forms are equivalent. The first six are required; **Commit** is recommended.
+
 ## File-Per-Package Structure
 
 Work packages live as **individual files** in a `work-packages/` directory within the workshop, not as sections of a monolith document.
