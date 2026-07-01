@@ -18,15 +18,7 @@ Each work package has: Precondition, Goal, Files, Verification, Failure Criteria
 
 Agents receive ONLY the orchestrator + their own work package file. They do NOT see other work packages. This means each WP must be self-contained — if it references something from another WP, that's a gap.
 
-## Codebase Access
-
-You have full read access to the filesystem. The target project codebase is at:
-
-{{project_paths}}
-
-When the specification references source files (e.g., `src/pg.ts`, `src/dispatch/queue.ts`), **cross-reference against the actual code**. Verify that referenced functions, exports, types, and signatures actually exist and match what the spec claims. Do not ask for permission to read files — you already have it. Use your tools to read files directly.
-
-If project paths are not listed above, review based on the spec artifacts alone.
+{{codebase_access}}
 
 ## Review Criteria
 
