@@ -63,7 +63,7 @@ After writing the glossary, make it discoverable:
 See `UBIQUITOUS_LANGUAGE.md` for canonical terminology. When writing specs, code, or documentation for this project, use the terms defined there. Flag any new terms or conflicts.
 ```
 
-**Workshop integration** — If a `/workshop` is active or about to start for this project, note which glossary terms are most relevant to the workshop's problem space. The problem-statement and decisions stages benefit most from consistent terminology.
+**Workshop integration** — If a `/spec` is active or about to start for this project, note which glossary terms are most relevant to the workshop's problem space. The problem-statement and decisions stages benefit most from consistent terminology.
 
 **KB persistence** — Save the glossary to the knowledge base so it surfaces in future KB searches for this project:
 ```
@@ -99,7 +99,7 @@ After writing, state: "I've written/updated `UBIQUITOUS_LANGUAGE.md`. I'll use t
 
 ## Relationship to Other Skills
 
-- **`/workshop`** — Stage 1 (problem statement) should check for a glossary; Stage 2 (decisions) should use canonical terms
+- **`/spec`** — Stage 1 (problem statement) should check for a glossary; Stage 2 (decisions) should use canonical terms
 - **`/spec-validate`** — could check spec artifacts against the glossary for terminology consistency (future enhancement)
 - **`/project-onboard`** — surfaces the glossary as part of project context loading
 - **`/improve-architecture`** — terminology scattered across modules is a code smell this skill can diagnose

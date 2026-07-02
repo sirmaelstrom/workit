@@ -50,7 +50,7 @@ Present designs sequentially, compare in prose, give an opinionated recommendati
 
 Either:
 - Create a GitHub issue as a refactor RFC
-- Feed into `/workshop` if the refactor is complex enough to warrant a full spec
+- Feed into `/spec --depth=deep` if the refactor is complex enough to warrant a full spec
 - Add to the project's TODO or backlog
 
 ## Deep Module Criteria

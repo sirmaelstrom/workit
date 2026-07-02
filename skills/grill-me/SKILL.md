@@ -24,7 +24,7 @@ Summarize what was resolved, what was deferred, and what risks remain.
 
 ## Connection to workshops
 
-If the grilling reveals enough structure and the user wants to proceed, suggest transitioning to `/workshop` to formalize it. The grilling output becomes input to the problem statement.
+If the grilling reveals enough structure and the user wants to proceed, suggest transitioning to `/spec` (depth auto-selects) to formalize it. The grilling output becomes input to the problem statement.
 
 ---
 *Inspired by Matt Pocock's grill-me skill. Adapted with KB integration and workshop pipeline connection.*

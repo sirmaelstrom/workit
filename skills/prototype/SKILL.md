@@ -56,7 +56,7 @@ If the user is around, this capture is a quick conversation. If not, leave a pla
 
 - **`grill-me` / `spec`** — common upstream triggers. Grilling or spec'ing hits a question that can only be answered by running code → prototype.
 - **`handoff`** — natural pairing. Prototype work usually happens in a *separate* context window from the grilling/spec session that triggered it. Use the DIY sub-agent pattern: handoff out → prototype → handoff back with the verdict.
-- **`design-alternatives` / `parallel-explore`** — adjacent but different. `parallel-explore` explores design *space* via parallel sub-agents writing competing proposals. `prototype` explores design *reality* by running code. Use parallel-explore first if you don't know which directions to try; use prototype to validate the direction you've narrowed to.
+- **`parallel-explore`** — adjacent but different. `parallel-explore` explores design *space* via parallel sub-agents writing competing proposals (it superseded the old `design-alternatives` skill). `prototype` explores design *reality* by running code. Use parallel-explore first if you don't know which directions to try; use prototype to validate the direction you've narrowed to.
 - **`execute-wp`** — distinct. WP execution builds production code against a spec. Prototypes are throwaway. Don't confuse the two.
 
 ## Anti-patterns
