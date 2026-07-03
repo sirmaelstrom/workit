@@ -137,7 +137,7 @@ For packages with dependencies — execute prerequisite packages first, verify, 
 
 ## Relationship to Other Skills
 
-- **`/workshop`** and **`/spec`** create the spec artifacts that this skill executes against
+- **`/spec`** creates the spec artifacts that this skill executes against
 - **`/spec-validate`** checks artifact quality before execution — run it first if you're unsure about spec quality
 
 </supporting_info>

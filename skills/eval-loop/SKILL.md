@@ -231,7 +231,7 @@ INSERT INTO eval_runs (
 
 - **audit-skills** — upstream: provides `karpathy_eligible` flag and assessment scores that determine targeting
 - **parallel-explore** — could be used to explore SKILL.md mutations in parallel (future enhancement, not v1)
-- **scorecard** — similar evaluation pattern but targets specs, not skills; could share assertion infrastructure
+- **spec-validate** (+ the `spec-scorecard` pattern) — similar rubric-evaluation pattern but targets specs, not skills; could share assertion infrastructure
 
 ## Future Extensions (not v1)
 

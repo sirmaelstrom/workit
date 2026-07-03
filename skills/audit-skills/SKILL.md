@@ -1,6 +1,6 @@
 ---
 name: audit-skills
-description: "Score skills against the evaluation rubric and write results to skills.db. Use when the user says 'audit skills', 'score my skills', 'skill health check', 'rate skills', 'how are my skills', or wants to assess skill quality across plugins. Also trigger when a significant skill change just shipped and needs reassessment. NOT for running skills against test cases to improve them (that's eval-loop) or grading workshop specs (that's scorecard)."
+description: "Score skills against the evaluation rubric and write results to skills.db. Use when the user says 'audit skills', 'score my skills', 'skill health check', 'rate skills', 'how are my skills', or wants to assess skill quality across plugins. Also trigger when a significant skill change just shipped and needs reassessment. NOT for running skills against test cases to improve them (that's eval-loop) or grading spec quality (that's spec-validate)."
 ---
 
 # Audit Skills — Structural Assessment Against Rubric
@@ -250,7 +250,7 @@ The chat-side output is short: the rank-1 skill, the top improvement action, and
 
 - **eval-loop** — primary consumer; reads `karpathy_eligible` flag and assessment scores to select improvement targets
 - **improve-architecture** — adjacent but different scope; targets codebases, not skill definitions
-- **scorecard** — sibling pattern (structured evaluation against rubric) but targets workshop specs, not skills
+- **spec-validate** (+ the `spec-scorecard` pattern, `reference/patterns/spec-scorecard.md`) — structured evaluation against a rubric, but targets specs, not skills
 - **diagnose** — no direct relationship, but shares the "structured assessment before action" philosophy
 
 ---
