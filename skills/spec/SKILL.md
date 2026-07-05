@@ -404,6 +404,7 @@ Present the completed spec summary:
 **Dependency order:** {summary}
 **Review:** {review_level} — {N} fresh-eyes waves, {N} council lenses, {N} amendments applied
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
+**Cost:** {total $ and tokens, from cost-report}
 
 Ready for execution.
 ```
@@ -423,7 +424,7 @@ A compressed specification for well-understood changes. Produces a single `spec.
 ### Setup
 
 1. **Parse intent** — extract what, which project, slug (same as deep spec Phase 1a)
-2. **Scaffold workshop** — create directory + `meta.json` with status `"captured"`
+2. **Scaffold workshop** — create directory + `meta.json` with status `"captured"`. Mark cost tracking: `node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase lite --event start`
 3. **Quick explore** — read key files likely affected. ≤5 files, no Explore agent. If you're reaching for a wider survey, the depth was wrong — upgrade to deep.
 4. **Read CORRECTIONS.md** — non-negotiable regardless of depth
 5. **KB search** — one `kb_search` query for prior work on this topic
@@ -456,7 +457,11 @@ Show a brief summary with flagged items. Wait for approval. Apply revisions if n
 
 ### Final Output
 
-Update `meta.json` status to `"ready"`.
+Update `meta.json` status to `"ready"`. Close cost tracking and generate the report:
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase lite --event end
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-log.json
+```
 
 ```markdown
 ## ✅ Spec Complete: {title}
@@ -464,6 +469,7 @@ Update `meta.json` status to `"ready"`.
 **Workshop:** `workshops/{slug}/`
 **Depth:** lite — single document
 **Review:** self-review only
+**Cost:** {total $ and tokens, from cost-report}
 
 Ready for execution.
 ```
@@ -481,6 +487,23 @@ Write a ledger event: `{ "type": "workshop_stage", "workshop_slug": "{slug}", "s
 - **The output is a real workshop.** Not a separate format. Everything downstream (validate, review council) works on these artifacts unchanged.
 - **Convergence, not perfection.** The refinement loop stops when P1s are gone, not when findings are zero. P3s are noise — chasing them degrades momentum.
 - **The spec is a tool, not a gate.** Deep when it helps, lite when it's enough, none when it's overhead. The operator chooses.
+
+## Cost Instrumentation (per-phase)
+
+State file: `{workshop}/cost-log.json`. Collection reads subagent transcripts post-hoc — zero runtime instrumentation; orchestrator-session tokens are NOT counted (known limitation, matches the `/review` cost-pattern precedent).
+
+At the START of each deep-pipeline phase, run:
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase phase-N-<slug> --event start
+```
+Phase names: `phase-1-setup` … `phase-9-final` (matching this document's Phase 1-9 headings). At Phase 9, close the final phase and generate the report:
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase phase-9-final --event end
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-log.json
+```
+Include the printed markdown table in the Phase 9 final output.
+
+Non-blocking: if the script errors, note it and continue — instrumentation never gates the spec.
 
 ## Ledger Events
 
