@@ -27,9 +27,11 @@ Focus your review on:
 Workshop directory: {workshop_path}
 Project directory: {project_path}
 
-Read ALL work package files in work-packages/ and the _orchestrator.md to learn what the spec
-CLAIMS, then use Read/Grep/Glob against the project directory to verify each claim against the
-real code. Prefer reading the actual referenced files over assuming.
+Read every spec artifact present in the workshop directory to learn what the spec CLAIMS — do
+not assume a layout. In a full (deep) workshop that's all work package files in work-packages/
+plus the _orchestrator.md; in a lite workshop it's the single spec.md at the workshop root.
+Read whatever is there, then use Read/Grep/Glob against the project directory to verify each
+claim against the real code. Prefer reading the actual referenced files over assuming.
 
 Rate each finding:
 - **Critical:** The spec references code that doesn't exist / has a different shape, in a way

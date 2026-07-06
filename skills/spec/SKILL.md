@@ -48,7 +48,7 @@ Parse the `--depth` flag from arguments. If not specified, **auto-select using t
 
 If you're oscillating between two depths, pick the deeper one only when rework risk clearly outweighs ~15 min of spec overhead. Otherwise trust the lighter depth — forced depth erodes momentum without improving correctness. The spec exists to serve execution, not the other way around.
 
-### Review Level (deep specs only)
+### Review Level
 
 For deep specs, parse the `--review` flag. If not specified, auto-select:
 
@@ -57,6 +57,8 @@ For deep specs, parse the `--review` flag. If not specified, auto-select:
 | `--review=full` | Fresh-eyes loop → council → final wave (default) | ≥3 WPs or multi-project |
 | `--review=light` | Self-review only, skip refinement loop | ≤2 WPs, single project, additive-only |
 | `--review=none` | Decompose and stop (no review waves) | User explicitly wants manual review later |
+
+**Lite specs** default to self-review only. Pass `--review=full` to *additionally* run the Phase 8 hybrid council against the single `spec.md` (see *Council Review* in the Spec Lite section) — worth it when the change is well-understood but you still want a diverse-model pass on a decision gate. `--review=light`/`none` are no-ops on lite; self-review is already its floor.
 
 ---
 
@@ -362,7 +364,7 @@ The tool returns a JSON summary with each model's status and lens filename; the 
 
 > **If the external council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): proceed with the two local opus lenses alone and note the gap in the Phase-9 summary. The local anchor is sufficient to ship; the external lenses are additive depth. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, the local lenses suffice.)
 
-> **Why this split.** The Claude lenses run as interactive subagents so the pivotal opus review stays **plan-covered** — running it through the in-process MCP council would route it through the metered *programmatic* path instead. The external lenses run via the MCP because they authenticate with their *own* credentials: codex via your ChatGPT login (plan-covered), gpt/gemini via metered API keys. Composing both halves is the whole point — the diverse external models are where new blind spots surface, with codex as the lead adversarial reviewer.
+> **Why this split.** The Claude lenses run as interactive subagents because interactive Claude Code was **removed from scope for the June-15 metering change** — that path is bulletproof plan-covered regardless of what happens to programmatic billing. The MCP council *can* run Anthropic lenses natively too (via `claude -p`), and today that is *also* plan-covered — but only because the June-15 metering of `claude -p` was **deferred, not permanently killed** (that deferral is exactly why the MCP was reworked to run Anthropic natively again). So keeping the pivotal opus review in-session is defense-in-depth: the day the `-p` hold lifts, the in-session anchor is unaffected while the MCP's Anthropic path flips to metered. The external lenses run via the MCP because they authenticate with their *own* credentials: codex via your ChatGPT login (plan-covered), gpt/gemini via metered API keys. Composing both halves is the whole point — the diverse external models are where new blind spots surface, with codex as the lead adversarial reviewer.
 
 If a **local lens subagent** fails, retry it once, then proceed with what completed. If the **external council** call fails, see the unavailability note above — proceed with the local anchor and record the gap.
 
@@ -451,6 +453,15 @@ A single document with four concise sections:
 
 Run a quick self-review: ambiguity scan, grounding check, constraint coverage. Fix issues.
 
+### Council Review (opt-in — `--review=full`)
+
+By default lite stops at self-review. If the operator passed `--review=full`, run the **Phase 8 hybrid council** against the single `spec.md` before presenting — both halves handle a lite spec:
+
+- **Local opus lenses** (reasoning + cartography) — the same two Task subagents as Phase 8a, spawned verbatim from the reference prompts. Those prompts read whatever spec artifacts are present in the workshop directory, so on a lite workshop they read `spec.md` (no deep-layout assumption).
+- **External council** — one `council_review` MCP call with `surface: "spec"`, `models: ["codex", "gpt", "gemini"]`. The collector inlines the root `spec.md` as the artifacts block (`collectSpecFiles` fallback, verified 2026-07-06), so the external lenses review the real content instead of an empty block that makes gemini hallucinate.
+
+Synthesize as in Phase 8b — convergence across the local/external boundary is high-confidence, weight codex, dedupe, apply Critical/Major — then re-run the self-review scan to confirm the amendments introduced nothing new. If the council MCP is unavailable, note the gap and proceed on the local anchor.
+
 ### Present for Review
 
 Show a brief summary with flagged items. Wait for approval. Apply revisions if needed.
@@ -468,7 +479,7 @@ node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-
 
 **Workshop:** `workshops/{slug}/`
 **Depth:** lite — single document
-**Review:** self-review only
+**Review:** {self-review only | self-review + council: N lenses, N amendments applied}
 **Cost:** {total $ and tokens, from cost-report}
 
 Ready for execution.
