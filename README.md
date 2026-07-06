@@ -12,12 +12,12 @@ It's published openly so it can be referenced, forked, or installed directly. It
 
 Two layers:
 
-- **`skills/`** — the active, triggerable tools (fourteen of them, below).
+- **`skills/`** — the active, triggerable tools (fifteen of them, below).
 - **`reference/`** — the methodology library the skills draw on: patterns, checklists/conventions, templates, and heuristics. Start at [`reference/patterns/INDEX.md`](./reference/patterns/INDEX.md), or see [`reference/README.md`](./reference/README.md).
 
 ### Skills
 
-Fourteen skills, grouped by what they're for:
+Fifteen skills, grouped by what they're for:
 
 ### Specify & plan
 | Skill | What it does |
@@ -34,6 +34,7 @@ Fourteen skills, grouped by what they're for:
 |-------|--------------|
 | `execute-wp` | Execute a work package from a spec, appending to a progress log as it goes. |
 | `handoff` | Compact a conversation into a handoff doc so a fresh agent can pick up the work. |
+| `pickup` | Resume the current project's top roadmap quest from the Spine — resume note + cartridge artifacts, then continue. |
 | `commit-msg` | Commit via a file (`git commit -F`) so shell-active content — backticks, links, quotes — lands verbatim instead of breaking under HEREDOC parsing. |
 
 ### Review & repair
