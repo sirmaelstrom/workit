@@ -26,9 +26,12 @@ Focus your review on:
 Workshop directory: {workshop_path}
 Project directory: {project_path}
 
-Read ALL work package files in work-packages/, the _orchestrator.md, constraints.md, and any
-decisions file. You do NOT need to read source code for this lens (the cartography lens covers
-codebase grounding) — focus on whether the spec reasons correctly with itself.
+Read every spec artifact present in the workshop directory — do not assume a layout. In a full
+(deep) workshop that's all work package files in work-packages/, the _orchestrator.md,
+constraints.md, and any decisions file. In a lite workshop it's the single spec.md at the
+workshop root. Read whatever is there. You do NOT need to read source code for this lens (the
+cartography lens covers codebase grounding) — focus on whether the spec reasons correctly with
+itself.
 
 Rate each finding:
 - **Critical:** A contradiction or gap that would cause execution failure or incorrect code.
