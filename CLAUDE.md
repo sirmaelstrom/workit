@@ -4,7 +4,7 @@
 
 ## What This Is
 
-**workit** is a spec-and-skill toolkit for Claude Code: a plugin bundling **15 skills** (spec/plan → execute → review/repair → skill meta-tooling) plus a `reference/` library of patterns, heuristics, templates, and examples. It's the live successor to the retired `heathdev-workshop-plugin` (methodology/skills) and `heathdev-patterns` (pattern library) — both were deleted from disk and GitHub-archived **2026-07-01**; their content was bundled here (see `reference/README.md` § Origin).
+**workit** is a spec-and-skill toolkit for Claude Code: a plugin bundling **16 skills** (spec/plan → execute → review/repair → skill meta-tooling) plus a `reference/` library of patterns, heuristics, templates, and examples. It's the live successor to the retired `heathdev-workshop-plugin` (methodology/skills) and `heathdev-patterns` (pattern library) — both were deleted from disk and GitHub-archived **2026-07-01**; their content was bundled here (see `reference/README.md` § Origin).
 
 ## Load-bearing consumer (don't break this)
 
@@ -14,7 +14,7 @@ workit is **not** a purely personal toolkit anymore — it's a multi-consumer de
 
 ## Structure
 
-- `skills/<id>/SKILL.md` — the 15 skills. **Auto-discovered by directory scan** — Claude Code plugins do not need a `skills[]` list in `.claude-plugin/plugin.json`, so there's nothing to keep in sync there (`_shared/` is shared test/lint utilities, not a user-facing skill). Slash-command pipeline is **`/spec`** (the old `/workshop` command was renamed; `workshop` survives only as the artifact-directory noun, `./outputs/workshops/{slug}/`).
+- `skills/<id>/SKILL.md` — the 16 skills. **Auto-discovered by directory scan** — Claude Code plugins do not need a `skills[]` list in `.claude-plugin/plugin.json`, so there's nothing to keep in sync there (`_shared/` is shared test/lint utilities, not a user-facing skill). Slash-command pipeline is **`/spec`** (the old `/workshop` command was renamed; `workshop` survives only as the artifact-directory noun, `./outputs/workshops/{slug}/`).
 - `reference/patterns/INDEX.md` — the pattern library index. `reference/{heuristics,templates,examples}/` — supporting material.
 - `README.md` — the skill catalog + install/conventions. `CONTRIBUTING.md` — dev workflow (tests, commit style, how skills are structured). `reference/README.md` — provenance/origin.
 
