@@ -15,9 +15,15 @@ Each archetype defines: what the reviewer focuses on, when to deploy it (with di
 **Deploy when:** Almost always. Skip only for pure config/text changes, or when narrower archetypes (Service Architecture, Data Integrity) cover the same surface more sharply.
 
 **Looks for:**
-- Naming that doesn't match codebase conventions
+- Naming that doesn't match codebase conventions, or names that don't reveal intent (**mysterious name** — a reader must open the body to learn what the thing does)
 - Duplicated logic that should be extracted
 - Overly complex functions (deep nesting, long parameter lists)
+- **Coupling & change-preventer smells** (Fowler — name them explicitly; the model pattern-matches strongly from its prior and will surface the fix):
+  - **Feature envy:** a method that reaches into another object's data/methods more than its own — move the behavior next to the data it operates on.
+  - **Message chains / Law of Demeter:** `a.getB().getC().getD()` train-wrecks — the caller is coupled to the whole navigation path; hide it behind one method on the first object.
+  - **Middle man:** a class/module that delegates almost everything to another — remove the indirection or inline it.
+  - **Divergent change:** one module edited for several unrelated reasons (an SRP smell) — a module should have one reason to change; split along the change axes.
+  - *(Seam with Domain Modeling: repeated `switch`/`if` on a type/state code is Domain Modeling's territory when the fix is "make invalid states unrepresentable." Flag it here only as **shotgun surgery** — the same branch duplicated across many call sites — where the fix is "replace with polymorphism / consolidate the dispatch.")*
 - Dead code, unused variables, commented-out blocks
 - Language-specific idiom violations (e.g., string concatenation instead of template literals in JS/TS; format strings vs concatenation in Rust)
 - Svelte 5 runes misuse: `$state` on derived values (use `$derived`), `$effect` for synchronous derivations (use `$derived`), `$effect` writing to `$state` creating reactive loops
