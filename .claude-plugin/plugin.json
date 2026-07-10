@@ -1,6 +1,6 @@
 {
   "name": "workit",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "A Claude Code plugin — skills for specification, execution, review, diagnosis, and skill self-improvement.",
   "author": {
     "name": "Justin Heath"
