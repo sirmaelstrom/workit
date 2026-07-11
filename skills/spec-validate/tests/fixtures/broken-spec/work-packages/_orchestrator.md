@@ -1,7 +1,9 @@
 # Orchestrator — broken negative-control fixture
 
-Minimal but valid coordination layer, so the ONLY work-package error in this
-fixture is the deliberately missing required field in wp-missing-field.md.
+Minimal but valid coordination layer. Deliberate errors in this fixture: the
+missing required field in wp-missing-field.md, the empty `projects` array in
+meta.json, and (as a consequence of the empty declaration) the inventory row
+below targeting a project that is not declared in meta.projects.
 
 ## Wave Plan
 

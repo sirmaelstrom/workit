@@ -63,7 +63,21 @@ Parse the 6 required fields:
 
 Also read any Implementation section for detailed guidance (code snippets, API shapes, component structure).
 
-### Step 4: Execute the Work
+### Step 4: Root the Target
+
+Resolve WHERE the work happens — from the work package, **never from the session's cwd**. Canonical pattern (read it for the worktree-creation recipe and multi-repo rules): `${CLAUDE_PLUGIN_ROOT}/reference/patterns/worktree-rooting.md`.
+
+The execute-wp resolution order (summary — the pattern file is canonical):
+
+1. If the WP's **Files** list contains absolute paths under a repo, that repo is the target.
+2. Otherwise, the workshop's `meta.projects` + this WP's Package Inventory `Project` value name the target: `<workspace-root>/projects/<name>`.
+3. **Never** fall back to the session's cwd. If neither source resolves, the WP is under-specified — STOP and report.
+
+(Quest-place resolution is a roadmap/loop-orchestrator concern, not execute-wp's — a spec-driven run has no quest.)
+
+Before the first edit, run the STEP-0 identity assertion in the target: `git rev-parse --show-toplevel` and `git remote get-url origin` must match the intended repo. On mismatch, don't proceed — create the worktree per the pattern and work there.
+
+### Step 5: Execute the Work
 
 Do the work specified in the package. Key principles:
 
@@ -79,7 +93,7 @@ Do the work specified in the package. Key principles:
 
 - **If you hit an Escalation Trigger,** STOP. Report what you found, why it triggers the escalation, and what decision you need from the user. Do not proceed past the trigger.
 
-### Step 5: Run Final Verification
+### Step 6: Run Final Verification
 
 Run the verification command(s) specified in the work package. Then run any orchestrator-level verification commands. Both must pass.
 
@@ -89,7 +103,7 @@ If verification fails:
 3. Re-run verification
 4. If you can't fix it, document the failure in the progress entry (outcome: `partial` or `failed`)
 
-### Step 6: Append Progress Entry
+### Step 7: Append Progress Entry
 
 **This step is mandatory.** Before finishing, append a progress entry to the `## Progress Log` section of `_orchestrator.md`.
 
@@ -109,11 +123,11 @@ Guidelines for the entry:
 - **Surprises** is the most valuable field for later packages. If something was different than expected, say so. If everything went smoothly, say "None — implementation matched the spec."
 - **Notes for downstream** should be specific. Not "be careful with X" but "the `UserStore` interface now has a `lastSync` field that WP-04 should use for its cache invalidation check."
 
-### Step 7: Create the Commit
+### Step 8: Create the Commit
 
 If the work package includes a Commit field, use that message. Otherwise, compose a conventional commit message that summarizes the package's contribution.
 
-Stage only the files listed in the work package (plus any documented additions from Step 4). Do NOT stage unrelated changes.
+Stage only the files listed in the work package (plus any documented additions from Step 5). Do NOT stage unrelated changes.
 
 ## Error Recovery
 

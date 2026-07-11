@@ -42,6 +42,7 @@ How to run work once it's specified:
 | `campaign-closeout` | Post-campaign lifecycle — review wave, post-mortem, feed-back to patterns | campaign-closeout.md |
 | `cross-repo-contract` | Wire format contracts for multi-repo campaigns — exact types, payload shapes, schema registration | cross-repo-contract.md |
 | `meta-prompt` | 3-part architecture for complex multi-agent work — orchestrator, parallelization plan, spec | meta-prompt.md |
+| `worktree-rooting` | Deterministic target rooting — declared targets (spec/quest/explicit path, never cwd), the canonical worktree-creation recipe, STEP-0 identity assertion, joint-merge minimum | worktree-rooting.md |
 
 ## Checklists & Conventions
 
@@ -72,5 +73,5 @@ Copyable skeletons for the key workshop files. Located in `templates/`.
 | `scope-fence` | `constraint-architecture` | scope-fence covered must-nots only (~40% of constraint space) |
 
 ---
-*19 active patterns, 4 checklists/conventions, 1 superseded, 4 artifact templates. To add: create the .md, add a row.*
+*20 active patterns, 4 checklists/conventions, 1 superseded, 4 artifact templates. To add: create the .md, add a row.*
 *Patterns evolve — append execution feedback directly to pattern files.*
