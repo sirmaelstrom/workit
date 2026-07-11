@@ -128,17 +128,25 @@ If amendments are substantial, run a second review round:
 The server exposes three tools:
 
 ```
-council_review(workshop_path, surface, round, models[])
-  → Fan out to N models in parallel, write review-lens-{model}.md
+council_review(workshop_path, surface, round, profile | models[])
+  → Fan out to the profile's lenses in parallel, write review-lens-{model}.md
+  → Prefer a config-owned profile over an explicit models[] list (roster v2,
+    2026-07-11): pass profile:"spec" for spec/plan surfaces, profile:"code"
+    for PR/branch/code surfaces, profile:"deep" to escalate (adds the
+    sol@xhigh seat), profile:"spec-external" from /spec Phase 8 (external-
+    only; the pivotal Anthropic lenses run as in-session subagents there).
+    Explicit models[] still wins verbatim when passed; omitting both uses
+    the config defaultProfile ("spec").
 
 council_synthesize(review_dir)
-  → Read all lenses, invoke synthesis model (default: Claude), write synthesis.md
+  → Read all lenses, invoke synthesis model (default: codex), write synthesis.md
 
 council_challenge(review_dir)
-  → Adversarial pass against synthesis (default: Gemini), write challenge.md
+  → Adversarial pass against synthesis (default: grok — cross-vendor
+    attack on the codex-authored synthesis), write challenge.md
 ```
 
-**Config:** `./config/review-council/models.json` — model registry (command, args, timeout).
+**Config:** `<DATA_DIR>/config/review-council/models.json` — lens registry + profiles + defaults (config-owned so the roster rotates without skill/pattern edits; hot-reloaded per call).
 **Templates:** `reference/templates/review-council/` — single source of truth (bundled with this plugin). The backend service reads these at runtime.
 
 The manual workflow above still works and is the fallback when the MCP server is unavailable.
