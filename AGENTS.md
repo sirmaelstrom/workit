@@ -1,10 +1,10 @@
-# CLAUDE.md — workit
+# AGENTS.md — workit
 
-*Guidance for any Claude Code session working in this repo.*
+*Guidance for any Codex session working in this repo.*
 
 ## What This Is
 
-**workit** is a spec-and-skill toolkit for Claude Code: a plugin bundling **16 skills** (spec/plan → execute → review/repair → skill meta-tooling) plus a `reference/` library of patterns, heuristics, templates, and examples. It's the live successor to the retired `heathdev-workshop-plugin` (methodology/skills) and `heathdev-patterns` (pattern library) — both were deleted from disk and GitHub-archived **2026-07-01**; their content was bundled here (see `reference/README.md` § Origin).
+**workit** is a spec-and-skill toolkit for Codex: a plugin bundling **16 skills** (spec/plan → execute → review/repair → skill meta-tooling) plus a `reference/` library of patterns, heuristics, templates, and examples. It's the live successor to the retired `heathdev-workshop-plugin` (methodology/skills) and `heathdev-patterns` (pattern library) — both were deleted from disk and GitHub-archived **2026-07-01**; their content was bundled here (see `reference/README.md` § Origin).
 
 ## Load-bearing consumer (don't break this)
 
