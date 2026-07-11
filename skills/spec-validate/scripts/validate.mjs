@@ -6,16 +6,40 @@
  * Produces a terminal-style report with errors (must fix) and warnings (should fix),
  * where every message explains WHY the issue matters — not just what's wrong.
  *
- * Usage: node validate.js <workshop-path>
- * Example: node validate.js ./outputs/workshops/portable-spec-cli
+ * Usage: node validate.mjs <workshop-path> [--workspace-root <abs-path>]
+ * Example: node validate.mjs ./outputs/workshops/portable-spec-cli
+ *
+ * Target enforcement: meta.projects (non-empty array) is required — it declares
+ * the workshop's target repo(s) so worktree rooting never falls back to session
+ * cwd. When a workspace root is provided (--workspace-root flag, or the
+ * WORKIT_WORKSPACE_ROOT env var; CLI wins), each declared project must resolve
+ * to <workspace-root>/projects/<name> on disk. Without a root, the disk check
+ * is skipped silently — no warning — so root-less invocations stay clean.
  */
 
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { join, basename, isAbsolute } from 'node:path';
 
-const workshopPath = process.argv[2];
+let workshopPath = null;
+let cliWorkspaceRoot = null;
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === '--workspace-root') {
+    if (argv[i + 1] === undefined) {
+      console.error('--workspace-root requires a value');
+      process.exit(1);
+    }
+    cliWorkspaceRoot = argv[++i];
+  } else if (a.startsWith('--workspace-root=')) {
+    cliWorkspaceRoot = a.slice('--workspace-root='.length);
+  } else if (workshopPath === null) {
+    workshopPath = a;
+  }
+}
+
 if (!workshopPath) {
-  console.error('Usage: node validate.js <workshop-path>');
+  console.error('Usage: node validate.mjs <workshop-path> [--workspace-root <abs-path>]');
   process.exit(1);
 }
 
@@ -46,6 +70,37 @@ function readJson(name) {
   const content = readArtifact(name);
   if (!content) return null;
   try { return JSON.parse(content); } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace root resolution — opt-in, and NEVER via cwd (M1)
+// ---------------------------------------------------------------------------
+// Precedence: --workspace-root CLI flag > WORKIT_WORKSPACE_ROOT env var >
+// unresolved. Unresolved means the disk-resolution check is skipped entirely
+// and silently — the validator cannot guess a workspace root, and resolving a
+// relative root against process.cwd() would reintroduce the exact cwd
+// dependency target declaration exists to remove.
+
+let workspaceRoot = null;
+{
+  let rawRoot = null;
+  let rootSource = null;
+  if (cliWorkspaceRoot !== null) {
+    rawRoot = cliWorkspaceRoot;
+    rootSource = '--workspace-root';
+  } else if (process.env.WORKIT_WORKSPACE_ROOT) {
+    rawRoot = process.env.WORKIT_WORKSPACE_ROOT;
+    rootSource = 'WORKIT_WORKSPACE_ROOT';
+  }
+  if (rawRoot !== null) {
+    if (!isAbsolute(rawRoot)) {
+      error('workspace-root', `${rootSource} must be an absolute path (got "${rawRoot}"). A relative root would have to be resolved against the session cwd — the exact dependency declared targets exist to remove. Pass the workspace root as an absolute path.`);
+    } else if (!existsSync(rawRoot) || !statSync(rawRoot).isDirectory()) {
+      error('workspace-root', `${rootSource} "${rawRoot}" does not exist or is not a directory. The workspace root itself is invalid — fix the flag/env value; this is not a per-project resolution failure.`);
+    } else {
+      workspaceRoot = rawRoot;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,8 +190,8 @@ function validateMeta() {
   if (meta.slug && meta.slug !== basename(workshopPath)) {
     warn('meta.json', `Slug "${meta.slug}" doesn't match directory name "${basename(workshopPath)}". Workshop paths are derived from the slug — a mismatch causes confusing path errors.`);
   }
-  if (!meta.projects || !Array.isArray(meta.projects)) {
-    warn('meta.json', 'Missing or non-array "projects" field. Use "projects" (plural, array) — the workshop handler reads Array.isArray(meta.projects). A singular "project" string silently resolves to empty.');
+  if (!meta.projects || !Array.isArray(meta.projects) || meta.projects.length === 0) {
+    error('meta.json', 'Missing or empty "projects" — the declared target repo(s). Worktree rooting resolves a work item\'s target from this declaration, never from session cwd; without it the workshop is undispatchable. Use "projects" (plural, non-empty array of repo names) — a singular "project" string silently resolves to empty.');
   }
   if (!meta.startedAt) warn('meta.json', 'Missing "startedAt" — captures when the workshop was initiated. Used for lifecycle cost tracking in post-mortems.');
   if (!meta.createdAt) warn('meta.json', 'Missing "createdAt" — when meta.json was written to disk.');
@@ -403,6 +458,104 @@ function validateDecomposition() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Target enforcement — declared projects must be valid, resolvable, and match
+// the orchestrator's per-WP Project declarations.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the markdown table under "## Package Inventory" in the orchestrator.
+ * Returns an array of { package, project } rows, or null when no table with a
+ * "Project" column exists under the heading.
+ */
+function parseInventoryRows(orch) {
+  const lines = orch.split('\n');
+  const headIdx = lines.findIndex(l => /^##\s+Package Inventory\b/.test(l));
+  if (headIdx === -1) return null;
+
+  const tableLines = [];
+  for (let i = headIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^##\s/.test(line)) break;
+    if (/^\s*\|/.test(line.trimEnd())) tableLines.push(line);
+    else if (tableLines.length > 0 && line.trim() !== '') break;
+  }
+  if (tableLines.length < 2) return null;
+
+  const splitRow = (l) => l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+  const header = splitRow(tableLines[0]);
+  const projectCol = header.indexOf('Project'); // case-sensitive: matches the template header
+  if (projectCol === -1) return null;
+
+  const rows = [];
+  for (const l of tableLines.slice(1)) {
+    const cells = splitRow(l);
+    if (cells.every(c => c === '' || /^:?-+:?$/.test(c))) continue; // separator row
+    rows.push({ package: cells[0] ?? '', project: cells[projectCol] ?? '' });
+  }
+  return rows.length > 0 ? rows : null;
+}
+
+function validateTargets(meta) {
+  if (!meta) return;
+  const projects = Array.isArray(meta.projects) ? meta.projects : [];
+
+  // Project-name validation — before any disk resolution, so junk names never
+  // reach a filesystem path join. Names must be bare repo directory names.
+  const validProjects = [];
+  for (const name of projects) {
+    const bad =
+      typeof name !== 'string' ||
+      name.length === 0 ||
+      name !== name.trim() ||
+      /[/\\]/.test(name) ||
+      name.includes('..') ||
+      isAbsolute(name) ||
+      /^[A-Za-z]:/.test(name);
+    if (bad) {
+      error('meta.json', `Invalid project name ${JSON.stringify(name)} — project names must be bare repo directory names: no path separators, "..", absolute paths, drive letters, or leading/trailing whitespace. They are joined to <workspace-root>/projects/<name> for disk resolution; a junk name would escape the workspace.`);
+    } else {
+      validProjects.push(name);
+    }
+  }
+
+  // Disk resolution — ONLY when a workspace root resolved. No root → skip
+  // silently (not even a warning), so root-less invocations stay clean.
+  if (workspaceRoot) {
+    for (const name of validProjects) {
+      const projectPath = join(workspaceRoot, 'projects', name);
+      if (!existsSync(projectPath) || !statSync(projectPath).isDirectory()) {
+        error('meta.json', `Project "${name}" does not resolve to a directory at ${projectPath}. The declared target must exist under the workspace root — a typo here would root worktrees in the wrong place, or nowhere.`);
+      }
+    }
+  }
+
+  // Inventory ↔ meta cross-check (deep specs) / multi-project nudge (lite specs).
+  const wpDir = join(workshopPath, 'work-packages');
+  if (!existsSync(wpDir)) {
+    if (projects.length > 1) {
+      warn('meta.json', `Lite spec (no work-packages/) declares ${projects.length} projects — multi-repo usually wants a deep spec: per-WP single-repo targets come from the orchestrator inventory, which lite specs don't have.`);
+    }
+    return;
+  }
+
+  const orchPath = join(wpDir, '_orchestrator.md');
+  if (!existsSync(orchPath)) return; // missing orchestrator is reported elsewhere; nothing to cross-check
+
+  const rows = parseInventoryRows(readFileSync(orchPath, 'utf-8'));
+  if (rows === null) {
+    error('_orchestrator.md', 'Missing inventory table — work-packages/ exists but no table with a "Project" column was found under "## Package Inventory". The inventory is how each WP declares its single target repo; without it, per-WP targets cannot be cross-checked against meta.projects.');
+    return;
+  }
+
+  for (const row of rows) {
+    if (row.project === '' || row.project === '-') continue; // no target declared for this row
+    if (!projects.includes(row.project)) {
+      error('_orchestrator.md', `Package "${row.package}" targets project "${row.project}" which is not declared in meta.projects (${JSON.stringify(projects)}). Every inventory target must be declared up front so multi-repo dispatch knows the full repo set before any worktree is created.`);
+    }
+  }
+}
+
 function validateWorkPackages() {
   const wpDir = join(workshopPath, 'work-packages');
   if (!existsSync(wpDir)) return;
@@ -508,6 +661,7 @@ console.log(`  ${'─'.repeat(50)}\n`);
 
 const meta = validateMeta();
 validatePipelineCompleteness(meta);
+validateTargets(meta);
 validateProblemStatement();
 validateDecisions();
 validateVerification();
