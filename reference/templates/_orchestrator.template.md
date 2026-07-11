@@ -50,6 +50,9 @@ graph TD
 <!-- One line per wave. Format: Wave N: {shell command}
      - Commands run with cwd set to the project's worktree automatically.
      - Do NOT use absolute cd paths — they escape the worktree.
+     - Worktree rooting: the target repo comes from the spec (inventory Project
+       + meta.projects), never the session cwd — canonical recipe + STEP-0
+       assertion: reference/patterns/worktree-rooting.md
      - If omitted entirely, defaults to `npx tsc --noEmit` per project.
      - "human review" is valid for review-only waves. -->
 
