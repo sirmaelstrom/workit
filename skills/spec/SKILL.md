@@ -58,7 +58,7 @@ For deep specs, parse the `--review` flag. If not specified, auto-select:
 | `--review=light` | Self-review only, skip refinement loop | ≤2 WPs, single project, additive-only |
 | `--review=none` | Decompose and stop (no review waves) | User explicitly wants manual review later |
 
-**Lite specs** default to self-review only. Pass `--review=full` to *additionally* run the Phase 8 hybrid council against the single `spec.md` (see *Council Review* in the Spec Lite section) — worth it when the change is well-understood but you still want a diverse-model pass on a decision gate. `--review=light`/`none` are no-ops on lite; self-review is already its floor.
+**Lite specs** default to self-review only. Pass `--review=full` to *additionally* run the Phase 8 council against the single `spec.md` (see *Council Review* in the Spec Lite section) — worth it when the change is well-understood but you still want a diverse-model pass on a decision gate. `--review=light`/`none` are no-ops on lite; self-review is already its floor.
 
 ---
 
@@ -336,45 +336,34 @@ After the fresh-eyes loop converges:
 
 #### 8a. Deploy Council
 
-The council is a **hybrid of two composed halves** — a local Anthropic lens (plan-covered) and an external multi-model council (the config-owned `spec-external` profile). Its real value is the **synthesis across diverse models**: different model families surface different blind spots. Dispatch **both halves in a single response** for maximum parallelism — the two Agent subagent calls and the one MCP call go out together.
-
-**Half 1 — Local Anthropic lenses (plan-covered anchor).** Two specialized lenses run as `model: opus` Task subagents *inside this interactive session* — plan-covered (your subscription), not the metered programmatic API. Each reviews the converged spec cold:
-
-1. **Reasoning & Coherence** — read `${CLAUDE_SKILL_DIR}/reference/council-lens-reasoning.md`, substitute `{workshop_path}` and `{project_path}`, spawn the prompt verbatim. The logic / contradiction auditor.
-2. **Cartography & Codebase Grounding** — read `${CLAUDE_SKILL_DIR}/reference/council-lens-cartography.md`, substitute the same placeholders, spawn verbatim. Verifies the spec against real source (has Read/Grep/Glob).
-
-Use **opus** for both: a Phase-8 spec review is a coherence audit at a decision gate, and a 2026-05-25 A/B showed sonnet accepts a self-contradictory spec as coherent while opus catches the cross-artifact contradictions (stale constraints after a mid-flight decision revision).
-
-**Half 2 — External council (diverse-model lenses).** In the *same response*, make ONE call to the `review-council` MCP, which fans out the profile's external lenses in parallel and writes a lens file per model:
+The council is a **single call to the `review-council` MCP**, which fans out every lens in the config-owned `spec` profile in parallel — Anthropic lenses (via `claude -p`) and external lenses alike — and writes one lens file per model. Its real value is the **synthesis across diverse models**: different model families surface different blind spots. Make ONE call:
 
 ```
 mcp__review-council__council_review({
   workshop_path: "{workshop_path}",
   surface: "spec",
   round: 1,
-  profile: "spec-external",
+  profile: "spec",
   thinking: "medium"
 })
 ```
 
-The `spec-external` profile is **config-owned** — its membership lives in `models.json` (`profiles.spec-external`), so the roster can rotate without editing this skill. Two properties are load-bearing:
+The `spec` profile is **config-owned** — its membership lives in `models.json` (`profiles.spec`), so the roster can rotate without editing this skill. Roster-v2 (2026-07-11) it is `codex` (LEAD — agentic, explores `{project_path}` itself, runs on your ChatGPT login → plan-covered) + `grok` (adversarial, the one metered seat) + `opus` (the pivotal contradiction-catcher, `claude -p` → plan-covered) + `sonnet-5-carto` (agentic codebase grounding, `claude -p` → plan-covered). Two properties are load-bearing:
 
-- It is **external-only by design**: it must never include the `claude -p` Anthropic lenses — the local half above already runs the pivotal opus review in-session, and adding an MCP Anthropic lens would double-run it on the revert-risk path. The profile currently leads with **codex** (agentic, explores `{project_path}` itself, runs on your own ChatGPT login → plan-covered); its other members are metered external APIs, attributed as `review.council` api_usage rows.
+- **Anthropic runs natively via `claude -p` inside the MCP** — no separate in-session subagent anchor. This is plan-covered *today* only because the June-15 metering of `claude -p` was **deferred, not killed**. ⚠️ **Revert trigger:** the day `api_usage` anthropic rows flip `cost_basis` `notional`→`metered`, the opus + carto lenses start billing at API rates — at that point drop the Anthropic lenses from the `spec` profile (or point `/spec` back at `spec-external` + a local opus anchor). Watch: `SELECT cost_basis,count(*) FROM api_usage WHERE provider_id='anthropic' AND created_at>now()-interval '2 days' GROUP BY 1;`
 - Do **not** pass `models:` here — naming an explicit list re-inlines the roster this profile exists to own (explicit `models` overrides `profile` when both are present).
 
 The tool returns a JSON summary with each model's status and lens filename; the files land in `{workshop_path}/reviews/review-1/` (one `review-lens-{model}.md` per lens). Read those in 8b.
 
-> **If the external council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): proceed with the two local opus lenses alone and note the gap in the Phase-9 summary. The local anchor is sufficient to ship; the external lenses are additive depth. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, the local lenses suffice.)
+> **If the council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): the self-review floor from Phase 7 is your ship gate — note the gap explicitly in the Phase-9 summary and let the operator decide whether to proceed or defer. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, self-review is the floor.)
 
-> **Why this split.** The Claude lenses run as interactive subagents because interactive Claude Code was **removed from scope for the June-15 metering change** — that path is bulletproof plan-covered regardless of what happens to programmatic billing. The MCP council *can* run Anthropic lenses natively too (via `claude -p`), and today that is *also* plan-covered — but only because the June-15 metering of `claude -p` was **deferred, not permanently killed** (that deferral is exactly why the MCP was reworked to run Anthropic natively again). So keeping the pivotal opus review in-session is defense-in-depth: the day the `-p` hold lifts, the in-session anchor is unaffected while the MCP's Anthropic path flips to metered. The external lenses run via the MCP because they authenticate with their *own* credentials: codex via your ChatGPT login (plan-covered), gpt/gemini via metered API keys. Composing both halves is the whole point — the diverse external models are where new blind spots surface, with codex as the lead adversarial reviewer.
-
-If a **local lens subagent** fails, retry it once, then proceed with what completed. If the **external council** call fails, see the unavailability note above — proceed with the local anchor and record the gap.
+If the **council** call fails, retry it once; if it still fails, see the unavailability note above — fall back to the self-review floor and record the gap.
 
 #### 8b. Synthesize & Apply Council Findings
 
 You (the orchestrator, running as opus) are the council's synthesizer — read **all** lens outputs and reconcile them before applying:
-- **Inputs:** the two local opus subagent returns (reasoning + cartography) **and** the external lens files in `{workshop_path}/reviews/review-1/`. Read each external lens file the `council_review` summary marked `success`; skip ones marked `failed`/`timeout`.
-- **Convergence is signal:** a finding two or more lenses raise independently — *especially across the local/external boundary* — is high-confidence. Fix it.
+- **Inputs:** the lens files in `{workshop_path}/reviews/review-1/`. Read each lens file the `council_review` summary marked `success`; skip ones marked `failed`/`timeout`.
+- **Convergence is signal:** a finding two or more lenses raise independently — *especially across vendor families (codex/grok/opus/sonnet)* — is high-confidence. Fix it.
 - **Weight the lead:** codex is the strongest adversarial/grounding reviewer and explores the real code; give its concrete, file-cited findings (e.g. EF/migration traps, integration gaps) extra weight even when raised alone.
 - **Dedupe:** collapse the same issue reported by multiple lenses into one.
 - **Then apply by severity:**
@@ -457,12 +446,11 @@ Run a quick self-review: ambiguity scan, grounding check, constraint coverage. F
 
 ### Council Review (opt-in — `--review=full`)
 
-By default lite stops at self-review. If the operator passed `--review=full`, run the **Phase 8 hybrid council** against the single `spec.md` before presenting — both halves handle a lite spec:
+By default lite stops at self-review. If the operator passed `--review=full`, run the **Phase 8 council** against the single `spec.md` before presenting — the pure-MCP path handles a lite spec unchanged:
 
-- **Local opus lenses** (reasoning + cartography) — the same two Task subagents as Phase 8a, spawned verbatim from the reference prompts. Those prompts read whatever spec artifacts are present in the workshop directory, so on a lite workshop they read `spec.md` (no deep-layout assumption).
-- **External council** — one `council_review` MCP call with `surface: "spec"`, `profile: "spec-external"` (the same config-owned external-only profile as Phase 8a — never pass an explicit `models:` list). The collector inlines the root `spec.md` as the artifacts block (`collectSpecFiles` fallback, verified 2026-07-06), so the external lenses review the real content instead of an empty block that makes gemini hallucinate.
+- One `council_review` MCP call with `surface: "spec"`, `profile: "spec"` (the same config-owned roster as Phase 8a — Anthropic lenses via `claude -p` + external lenses; never pass an explicit `models:` list). The collector inlines the root `spec.md` as the artifacts block (`collectSpecFiles` fallback, verified 2026-07-06), so every lens reviews the real content instead of an empty block that makes gemini hallucinate.
 
-Synthesize as in Phase 8b — convergence across the local/external boundary is high-confidence, weight codex, dedupe, apply Critical/Major — then re-run the self-review scan to confirm the amendments introduced nothing new. If the council MCP is unavailable, note the gap and proceed on the local anchor.
+Synthesize as in Phase 8b — convergence across vendor families is high-confidence, weight codex, dedupe, apply Critical/Major — then re-run the self-review scan to confirm the amendments introduced nothing new. If the council MCP is unavailable, note the gap and fall back to the self-review floor.
 
 ### Present for Review
 
