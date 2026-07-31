@@ -521,4 +521,4 @@ For the refinement loop, write one event per wave:
 
 ---
 *Pattern library: bundled under `reference/`*
-*Related skills: /spec-validate (quality check), /grill-me (stress-test before speccing), /parallel-explore (compare approaches)*
+*Related skills: /spec-validate (quality check), /grill-me (stress-test before speccing), /parallel-explore (compare approaches), /chart (map a foggy multi-session effort before speccing)*
