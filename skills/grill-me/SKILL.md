@@ -26,6 +26,8 @@ Summarize what was resolved, what was deferred, and what risks remain.
 
 If the grilling reveals enough structure and the user wants to proceed, suggest transitioning to `/spec` (depth auto-selects) to formalize it. The grilling output becomes input to the problem statement.
 
+When the effort is too foggy and too large for one interview, run `/chart` first — it schedules `grill-me` sessions rather than replacing them.
+
 ---
 *Inspired by Matt Pocock's grill-me skill. Adapted with KB integration and workshop pipeline connection.*
 *Source: github.com/mattpocock/skills/tree/main/grill-me*

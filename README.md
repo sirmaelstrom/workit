@@ -12,16 +12,17 @@ It's published openly so it can be referenced, forked, or installed directly. It
 
 Two layers:
 
-- **`skills/`** — the active, triggerable tools (sixteen of them, below).
+- **`skills/`** — the active, triggerable tools (seventeen of them, below).
 - **`reference/`** — the methodology library the skills draw on: patterns, checklists/conventions, templates, and heuristics. Start at [`reference/patterns/INDEX.md`](./reference/patterns/INDEX.md), or see [`reference/README.md`](./reference/README.md).
 
 ### Skills
 
-Sixteen skills, grouped by what they're for:
+Seventeen skills, grouped by what they're for:
 
 ### Specify & plan
 | Skill | What it does |
 |-------|--------------|
+| `chart` | Map a foggy, multi-session effort as a decision tree on disk, then resolve one question per session — scheduling `grill-me` / `prototype` / `parallel-explore` to do the answering. Halts rather than charting when the route is already clear. |
 | `spec` | Generate a specification through a staged pipeline with review gates and depth auto-selection. |
 | `spec-validate` | Validate a spec's quality against structural checks before you build. |
 | `ubiquitous-language` | Extract domain terminology into a shared glossary (DDD). |
