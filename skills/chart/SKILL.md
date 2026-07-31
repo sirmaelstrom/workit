@@ -80,6 +80,10 @@ The listing is the **List** verb. It is not a glob and not a path this file know
 3. `advance` with `<effort>` omitted: exactly one map → use it; two or more → the
    one with the newest `Last advanced:`; none ever advanced → **list the candidates
    and ask.** Announce which map you selected and why, in all three cases.
+4. `new` takes the effort **title** from the destination's leading clause — up to
+   the first comma, period, or subordinating conjunction — trimmed of trailing
+   punctuation. The remainder is not discarded: evaluate it for fog. **State the
+   title you derived**, since the effort slug follows from it.
 
 ## Session sequence — `advance`
 
@@ -146,6 +150,53 @@ a ticket later is a normal, recorded event, not a failure.
 This is the skill's thesis. An implementation that eagerly decomposes a vague
 destination into a comprehensive ticket set satisfies every mechanical check while
 defeating the reason the skill exists.
+
+## Escalations
+
+**These are halts, not suggestions.** State the trigger, stop, and do not talk
+yourself past it. An escalation implemented as advisory prose is not implemented.
+
+1. **No fog → do not chart.** If charting surfaces **no** fog — the route is
+   already clear and the effort fits in one session — **stop, create no map**, and
+   recommend `grill-me` or `/spec` instead. An implementation that always charts
+   fails this one silently, which is the only way it can fail.
+2. **Existing content, or a git-tracked root.** If the resolved root already holds
+   unrelated content, stop and ask. On the **first** map created under any root,
+   report whether that location is **git-tracked**, and stop for confirmation when
+   writing would commit planning content into a repo.
+3. **A second tracker adapter.** Stop and confirm — do not implement one. Deferred
+   until at least three real maps exist under the bundled adapter.
+4. **Map too large.** Past roughly **20 open tickets**, or once the map no longer
+   loads comfortably in one session, stop and propose **splitting the destination**.
+   Never resolve this by adding one more ticket.
+5. **Ticket ceiling.** At `NN = 99`, refuse to create a 100th ticket and say why.
+   **Do not widen `NN` to three digits.** This is a backstop; rule 4 fires long
+   before it.
+6. **Bad blocking edge.** A `Blocked by:` edge that creates a cycle or a self-block
+   is refused **at creation**, naming the cycle. Do not write the ticket and leave
+   the graph to be repaired later.
+
+## Never
+
+1. **Never write to Observatory, the Spine, the knowledge base, or the context
+   ledger.** Not optionally, not behind a capability check, and not because those
+   tools happen to be connected in the session you are running in. **This is the
+   constraint that makes `/chart` portable** — it is the reason the skill has this
+   shape, and the first such call ends the property.
+2. **Never resolve a ticket in the charting session.** Charting is one session's
+   work and hand-resolves nothing.
+3. **Never write a spec.** `/chart`'s output is a resolved map; `/spec` consumes it.
+   Crossing that line rebuilds the single-session monolith one layer up.
+4. **Never auto-suffix a colliding effort slug** — on explicit `/chart new
+   <destination>` exactly as much as on the bare-argument path. Stop and ask. An
+   auto-suffixed `auth-redesign-2` is precisely the invisible-duplicate-map failure
+   the staleness listing exists to catch.
+
+## Fail closed
+
+A dangling `Blocked by:` reference leaves the ticket **blocked** and reports it as
+a defect in the listing. A typo must never silently promote a ticket onto the
+frontier.
 
 ---
 
