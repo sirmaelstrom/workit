@@ -132,8 +132,7 @@ If the root cause is durable and text-preventable, propose **one or more** of:
 - **CLAUDE.md correction** — if this class of mistake is likely to recur in this project
 - **Hook idea** — if a mechanical check would catch it (version check, process check)
 - **Test/verification addition** — if a test would prevent regression
-- **CORRECTIONS.md entry** — if it applies cross-project
-- **LESSONS.md entry** — if it's a new insight worth preserving
+- **Auto-memory entry** — if it applies cross-project or is a new insight worth preserving (the workspace's persistent memory store: one-fact file + index line). Legacy global LESSONS.md/CORRECTIONS.md are closed curated archives (2026-08-05) — do not add entries there.
 
 Only propose what's warranted. Not every bug needs a correction entry.
 
@@ -164,7 +163,7 @@ Only propose what's warranted. Not every bug needs a correction entry.
 [What's still unknown, what to watch for]
 
 ## 8. Prevention / Memory Capture
-[Required. Propose one or more of: CLAUDE.md correction, hook idea, test/verification addition, CORRECTIONS.md entry, LESSONS.md entry. If none apply, write exactly: "None warranted — one-off issue unlikely to recur."]
+[Required. Propose one or more of: CLAUDE.md correction, hook idea, test/verification addition, auto-memory entry. If none apply, write exactly: "None warranted — one-off issue unlikely to recur."]
 ```
 
 ## Scope-Specific Bias

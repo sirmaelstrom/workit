@@ -103,7 +103,7 @@ Route findings from the post-mortem into the appropriate places:
 | Infrastructure bugs | Fix before next campaign (CLI prompt or workshop) |
 | Pattern insights | Append to relevant pattern's "Execution Feedback" section |
 | Process gaps | Update this pattern (`campaign-closeout`) |
-| Recurring agent mistakes | Add to project's `CLAUDE.md` or `CORRECTIONS.md` |
+| Recurring agent mistakes | Add to project's `CLAUDE.md` or the workspace auto-memory store |
 | Cross-campaign metrics | Append to comparison table (maintained across post-mortems) |
 
 This is the step that actually closes the loop. Without it, post-mortems are documentation. With it, they're evolution.

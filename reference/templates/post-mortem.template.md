@@ -6,7 +6,7 @@
 
      Three phases: Review Wave → Post-Mortem (this doc) → Feed-Back
      Feed-back routes findings to: pattern Execution Feedback sections,
-     CORRECTIONS.md, LESSONS.md, and the cross-campaign comparison matrix
+     the workspace auto-memory store, and the cross-campaign comparison matrix
      at outputs/architecture/campaign-run-post-mortem-analysis.md -->
 
 ## Campaign Summary
@@ -262,7 +262,7 @@
      - Infrastructure fix → immediate (before next campaign)
      - Pattern insight → append to pattern's Execution Feedback section
      - Process gap → update campaign-closeout or relevant pattern
-     - Agent mistake → CLAUDE.md or CORRECTIONS.md
+     - Agent mistake → CLAUDE.md or auto-memory
      - Cross-campaign metric → update campaign-run-post-mortem-analysis.md -->
 
 1. **{Item}** — {destination: fix / pattern update / workshop / process change}
@@ -279,8 +279,7 @@
 - [ ] Cross-campaign comparison matrix updated (`campaign-run-post-mortem-analysis.md`)
 - [ ] Pattern Execution Feedback sections updated (list which patterns)
 - [ ] Constraint Assessment completed — missed/discovered constraints encoded to destinations
-- [ ] CORRECTIONS.md updated (if agent mistakes found)
-- [ ] LESSONS.md updated (if new insights)
+- [ ] Auto-memory updated (agent mistakes / new insights — the legacy global LESSONS.md + CORRECTIONS.md are closed archives, 2026-08-05)
 - [ ] Infrastructure fixes applied (if any)
 - [ ] Follow-up workshops created (if needed)
 - [ ] Workshop archived

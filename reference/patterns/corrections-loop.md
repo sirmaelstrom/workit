@@ -9,7 +9,7 @@
 1. **Mistake happens** — Agent uses wrong API, deprecated pattern, incorrect assumption
 2. **Log it** — Add to the project's CLAUDE.md with date and correct approach
 3. **Verify it works** — Next dispatch in that project should not repeat the mistake
-4. **Graduate cross-project** — When the same correction appears in 2+ project CLAUDE.md files, move it to `CORRECTIONS.md` (global)
+4. **Graduate cross-project** — When the same correction appears in 2+ project CLAUDE.md files, move it to the workspace's auto-memory store (one-fact file + index line). *(Routing updated 2026-08-05: the legacy global `CORRECTIONS.md` is now a closed, curated rule index — additions to it are a deliberate curation step, not the graduation default.)*
 5. **Prune** — Monthly review. Remove corrections that haven't recurred in 60+ days. They've either been internalized or are no longer relevant.
 
 ## Format
@@ -30,7 +30,7 @@ The compounding effect: 20 corrections over 2 months means every new agent start
 
 ## The Graduation Rule
 
-Same mistake in 2+ projects → it's not project-specific, it's a general pattern. Move to global CORRECTIONS.md so all projects benefit.
+Same mistake in 2+ projects → it's not project-specific, it's a general pattern. Move to the workspace's auto-memory store so all projects benefit.
 
 ## Execution Feedback
 
