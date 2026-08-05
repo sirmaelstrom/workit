@@ -101,7 +101,7 @@ After writing, state: "I've written/updated `UBIQUITOUS_LANGUAGE.md`. I'll use t
 
 - **`/spec`** — Stage 1 (problem statement) should check for a glossary; Stage 2 (decisions) should use canonical terms
 - **`/spec-validate`** — could check spec artifacts against the glossary for terminology consistency (future enhancement)
-- **`/project-onboard`** — surfaces the glossary as part of project context loading
+- **Project onboarding** — *not built; no such skill exists.* The idea: surface the glossary as part of project context loading. (`/pickup` re-enters quests but does not load glossaries.)
 - **`/improve-architecture`** — terminology scattered across modules is a code smell this skill can diagnose
 
 ---
