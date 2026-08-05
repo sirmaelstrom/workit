@@ -230,7 +230,7 @@ Borrowed from MindStudio's framework, adapted for our skill types:
 1. For each of 26 skills, score all 7 Layer 1 dimensions
 2. Record as assessment rows with `assessed_at = now`
 3. Flag `karpathy_eligible` skills
-4. Rank by improvement ROI: `(potential_impact × usage_frequency) / estimated_effort`
+4. Rank by improvement ROI (single source of truth: the ROI Ranking Formula section below)
 5. Produce a prioritized improvement schedule
 
 ### Ongoing

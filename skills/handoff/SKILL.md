@@ -13,7 +13,7 @@ Long sessions accumulate context that's expensive to throw away. Two patterns th
 
 1. **Fire-and-forget.** Mid-task you notice an unrelated bug or need to do a side quest. Hand off to a fresh agent in a new window, let it fix the thing, done. No context contamination in the current session.
 
-2. **DIY sub-agent.** You're deep in `grill-me` or `spec` and hit a question that can only be answered by running code. Hand off to a fresh window for a `prototype` or implementation spike. When that's done, hand *back* to the original session with what was learned. You get sub-agent benefits (clean context, focused work, can spawn its own sub-agents) without the limitations of the built-in Task tool (small context, no tool access for some patterns).
+2. **DIY sub-agent.** You're deep in `grill-me` or `spec` and hit a question that can only be answered by running code. Hand off to a fresh window for a `prototype` or implementation spike. When that's done, hand *back* to the original session with what was learned. You get sub-agent benefits (clean context, focused work, can spawn its own sub-agents) plus what the built-in Agent tool doesn't give you: a human in the loop and a session that persists across windows.
 
 ## Process
 
@@ -25,7 +25,7 @@ If no arguments, infer from the current session state. Ask the user briefly if t
 
 ### 2. Write the Document
 
-Save to: `./outputs/handoffs/handoff-{YYYY-MM-DD-HHmmss}-{short-slug}.md`
+Save to: `{workspace}/data/outputs/handoffs/handoff-{YYYY-MM-DD-HHmmss}-{short-slug}.md` — under the **workspace root's** data-outputs tree, never a cwd-relative `./outputs/` (matches the Observatory CLAUDE.md correction that names this skill).
 
 The slug should reflect the handoff target (e.g., `prototype-state-machine`, `fix-pm2-config`, `grill-resume`).
 
@@ -80,7 +80,7 @@ Print the absolute path of the handoff document. The user copies that into a new
 
 ```
 claude --resume false
-> Read ./outputs/handoffs/handoff-2026-05-12-093045-prototype-state-machine.md and continue from there.
+> Read {workspace}/data/outputs/handoffs/handoff-2026-05-12-093045-prototype-state-machine.md and continue from there.
 ```
 
 ## Critical Rules
@@ -108,7 +108,7 @@ claude --resume false
 - Duplicating workshop content, spec content, or KB content inline. Reference by path.
 - Handing off without specifying the return path when the DIY sub-agent pattern is in play. The originating session needs to know what to expect back.
 - Vague targets ("explore the architecture"). Make it actionable.
-- Using `mktemp` paths. Handoffs in `./outputs/handoffs/` are greppable, browsable, and persist long enough to be findable — temp files vanish.
+- Using `mktemp` paths. Handoffs in `data/outputs/handoffs/` are greppable, browsable, and persist long enough to be findable — temp files vanish.
 
 ---
 *Adopted from Matt Pocock's `handoff` skill (github.com/mattpocock/skills/tree/main/skills/productivity/handoff). Adapted: persistent workspace path instead of mktemp, explicit DIY-sub-agent pattern guidance, connection to grill-me/prototype/diagnose/execute-wp pipeline.*

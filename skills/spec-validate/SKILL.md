@@ -27,7 +27,9 @@ Determine which workshop to validate. The user might:
 - Reference the current focus from viewport context
 - Ask to validate all workshops
 
-Workshops live at `./outputs/workshops/{slug}/`.
+Workshops live at `{workspace}/data/outputs/workshops/{slug}/` — under the workspace root's data-outputs tree, not a cwd-relative `./outputs/`.
+
+**Deep specs only.** The validator has no lite mode — `validate.mjs` hard-errors on a lite spec's single-file shape (5 spurious "missing artifact" errors on a valid lite spec; auto-memory `workit-spec-validate-files-header-strict`). Don't run it on lite specs.
 
 ### Step 2: Run the script
 
@@ -49,10 +51,10 @@ The script produces a terminal-style report. Present it to the user, then add yo
 
 ### Batch validation
 
-To validate all workshops at once:
+To validate all workshops at once (skip lite specs — the validator hard-errors on them, see Step 1):
 
 ```bash
-for dir in ./outputs/workshops/*/; do
+for dir in "{workspace}/data/outputs/workshops"/*/; do
   node "${CLAUDE_SKILL_DIR}/scripts/validate.mjs" "$dir" 2>&1
   echo ""
 done

@@ -191,12 +191,12 @@ A working example fixture lives at `skills/audit-skills/tests/fixtures/scorecard
 
 #### Renderer invocation
 
-After writing `scorecard.json`, invoke (from any working directory):
+After writing `scorecard.json`, invoke with workspace-rooted paths (`data/outputs/...` lives under the workspace root, not the cwd — pass absolute paths if invoking from elsewhere):
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/render-scorecard.mjs" \
-  --input "./outputs/projects/skills/audit-{stamp}/scorecard.json" \
-  --output-dir "./outputs/projects/skills/audit-{stamp}"
+  --input "{workspace}/data/outputs/projects/skills/audit-{stamp}/scorecard.json" \
+  --output-dir "{workspace}/data/outputs/projects/skills/audit-{stamp}"
 ```
 
 The renderer:
