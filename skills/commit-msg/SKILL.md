@@ -1,6 +1,6 @@
 ---
 name: commit-msg
-description: "This skill should be used when composing a git commit message that contains shell-active characters — backticks (code refs), markdown links, quotes, or any content that breaks under HEREDOC shell parsing. Invoked by '/commit-msg', or whenever the drafted commit message has any of: backticks, markdown links, embedded quotes, multi-line code blocks, or other characters the outer shell could re-parse. Writes the message to .git/COMMIT_EDITMSG and commits via 'git commit -F' so the shell never sees the message body."
+description: "This skill should be used when composing a git commit message that contains shell-active characters — backticks (code refs), markdown links, quotes, or any content that breaks under HEREDOC shell parsing. Invoked by '/commit-msg', or whenever the drafted commit message has any of: backticks, markdown links, embedded quotes, multi-line code blocks, or other characters the outer shell could re-parse. Writes the message to a file (.git/COMMIT_EDITMSG — or a scratchpad path in linked worktrees, where .git is a file) and commits via 'git commit -F' so the shell never sees the message body."
 ---
 
 # commit-msg — File-based git commit
@@ -48,9 +48,11 @@ Draft based on the staged diff plus user intent. Conventions:
 - Exclude internal review scaffolding from the message body (iteration/wave markers, reviewer names, PR thread IDs, "addressed feedback from…"). Write the message as the squashed, durable record of the change.
 - If the repo has an AI-attribution convention (a trailer or marker), follow it; otherwise don't invent one.
 
-### 3. Write to `.git/COMMIT_EDITMSG`
+### 3. Write the message file
 
-Use the Write tool to put the full message into `<repo_root>/.git/COMMIT_EDITMSG`. This is git's own scratchpad — it gets overwritten on the next commit anyway, so no cleanup is required.
+Default: use the Write tool to put the full message into `<repo_root>/.git/COMMIT_EDITMSG`. This is git's own scratchpad — it gets overwritten on the next commit anyway, so no cleanup is required.
+
+⚠️ **In a linked worktree, `.git` is a FILE** (a gitdir pointer), so any path under `.git/` fails with `Not a directory` (auto-memory `worktree-git-is-a-file-commit-msg-path`). If `git rev-parse --git-dir` doesn't return `.git`, you're in a worktree: write the message to the session scratchpad (or any temp path) instead and pass that **absolute** path to `git commit -F`.
 
 If the working directory is not the repo root, run `git rev-parse --show-toplevel` first to find the right path.
 
@@ -59,6 +61,8 @@ If the working directory is not the repo root, run `git rev-parse --show-topleve
 ```
 git commit -F .git/COMMIT_EDITMSG
 ```
+
+(In a worktree: `git commit -F <absolute scratchpad path>` — see step 3.)
 
 If a pre-commit hook fails, fix the underlying issue and create a NEW commit. Do not amend, do not bypass with `--no-verify`.
 
@@ -74,7 +78,7 @@ Confirm the message rendered exactly as drafted. Look for literal backslashes, b
 
 - Plain ASCII prose with no shell-active characters — HEREDOC is fine, no need to spin up a file.
 - `git tag -m` / `git notes add` — those have their own `-F` mechanisms; the principle is the same but the commands differ.
-- Amending an existing commit at the user's explicit request — use `git commit --amend -F .git/COMMIT_EDITMSG` with the same file-write step.
+- Amending an existing commit at the user's explicit request — use `git commit --amend -F <the same message file>` with the same file-write step (worktree caveat from step 3 applies).
 
 ## Why this exists
 

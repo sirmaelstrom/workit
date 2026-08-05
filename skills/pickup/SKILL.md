@@ -19,7 +19,9 @@ continue", walk the Spine from quest → resume note → artifacts and start mov
    quest is the default target — you already have its resume note and artifact
    locators; skip to reading the artifacts.
 3. **Spine lookup.** Otherwise derive the project from the cwd basename and run
-   `spine_map` (no filter, or the campaign you know owns this project). Pick the
+   `spine_map` scoped to that project's `place` (or the campaign you know owns
+   it) — scoped reads are complete; an unfiltered map can blow the MCP
+   tool-result ceiling on a big board. Pick the
    quest that: is open + surfaced, sits on horizon `now` (fall back to `next`),
    and carries the `projects-{project}` place or an obviously matching title.
    Highest salience wins. If the context-ledger MCP tools are unavailable, GET

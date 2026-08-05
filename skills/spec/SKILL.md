@@ -79,7 +79,7 @@ If the project is ambiguous, ask. If the scope is ambiguous, make your best gues
 
 #### 1b. Scaffold Workshop
 
-Create `./outputs/workshops/{slug}/` with `meta.json`:
+Create `{workspace}/data/outputs/workshops/{slug}/` (under the workspace root's data-outputs tree, never a cwd-relative `./outputs/`) with `meta.json`:
 ```json
 {
   "title": "{title}",
@@ -87,6 +87,7 @@ Create `./outputs/workshops/{slug}/` with `meta.json`:
   "status": "captured",
   "projects": ["{project}"],
   "tags": [],
+  "startedAt": "{ISO timestamp}",
   "createdAt": "{ISO timestamp}",
   "updatedAt": "{ISO timestamp}"
 }
@@ -475,7 +476,7 @@ node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-
 Ready for execution.
 ```
 
-Write a ledger event: `{ "type": "workshop_stage", "workshop_slug": "{slug}", "stage": "spec-lite", "event_type": "completed", "actor": "agent" }`
+Write a ledger event — as `event_type: "note"` with the stage record in the payload (see Ledger Events below for why): `{ "event_type": "note", "payload": { "content": "workshop_stage {slug}: spec-lite completed", "workshop_stage": { "workshop_slug": "{slug}", "stage": "spec-lite", "actor": "agent" } } }`
 
 ---
 
@@ -485,13 +486,13 @@ Write a ledger event: `{ "type": "workshop_stage", "workshop_slug": "{slug}", "s
 - **Ground everything.** No architectural claims without file references. No "the system probably does X."
 - **Flag, don't hide.** Uncertainty is fine — hiding it isn't. Use [DECISION] and [ASSUMPTION] callouts liberally.
 - **Patterns are runtime reads, not memorized content.** Read each pattern file fresh before writing its artifact. Patterns evolve.
-- **The output is a real workshop.** Not a separate format. Everything downstream (validate, review council) works on these artifacts unchanged.
+- **The output is a real workshop.** Not a separate format. The review council works on these artifacts unchanged; `spec-validate` applies to **deep** specs only — its checker hard-errors on a lite spec's single-file shape (auto-memory `workit-spec-validate-files-header-strict`).
 - **Convergence, not perfection.** The refinement loop stops when P1s are gone, not when findings are zero. P3s are noise — chasing them degrades momentum.
 - **The spec is a tool, not a gate.** Deep when it helps, lite when it's enough, none when it's overhead. The operator chooses.
 
 ## Cost Instrumentation (per-phase)
 
-State file: `{workshop}/cost-log.json`. Collection reads subagent transcripts post-hoc — zero runtime instrumentation; orchestrator-session tokens are NOT counted (known limitation, matches the `/review` cost-pattern precedent).
+State file: `{workshop}/cost-log.json`. Collection reads subagent transcripts post-hoc — zero runtime instrumentation; orchestrator-session tokens are NOT counted (known limitation).
 
 At the START of each deep-pipeline phase, run:
 ```bash
@@ -508,15 +509,15 @@ Non-blocking: if the script errors, note it and continue — instrumentation nev
 
 ## Ledger Events
 
-Write timing events at each stage transition (fire-and-forget, non-blocking):
+Write timing events at each stage transition (fire-and-forget, non-blocking). The context ledger's `event_type` column CHECK-constrains to `handoff`/`thread`/`note` — a literal `workshop_stage` event type 23514s. Send stage events via `ledger_write` as `event_type: "note"` with the stage record in the payload:
 ```json
-{ "type": "workshop_stage", "workshop_slug": "{slug}", "stage": "{stage}", "event_type": "entered", "actor": "agent" }
-{ "type": "workshop_stage", "workshop_slug": "{slug}", "stage": "{stage}", "event_type": "completed", "actor": "agent" }
+{ "event_type": "note", "payload": { "content": "workshop_stage {slug}: {stage} entered", "workshop_stage": { "workshop_slug": "{slug}", "stage": "{stage}", "actor": "agent" } } }
+{ "event_type": "note", "payload": { "content": "workshop_stage {slug}: {stage} completed", "workshop_stage": { "workshop_slug": "{slug}", "stage": "{stage}", "actor": "agent" } } }
 ```
 
 For the refinement loop, write one event per wave:
 ```json
-{ "type": "workshop_stage", "workshop_slug": "{slug}", "stage": "refinement_wave_{N}", "event_type": "completed", "actor": "agent", "findings": { "p1": N, "p2": N, "p3": N } }
+{ "event_type": "note", "payload": { "content": "workshop_stage {slug}: refinement_wave_{N} completed (p1 {N} / p2 {N} / p3 {N})", "workshop_stage": { "workshop_slug": "{slug}", "stage": "refinement_wave_{N}", "actor": "agent", "findings": { "p1": N, "p2": N, "p3": N } } } }
 ```
 
 ---

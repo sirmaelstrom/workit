@@ -14,7 +14,7 @@ The progress log pattern (in `_orchestrator.md`) gives multi-package execution i
 ## Prerequisites
 
 Before executing a work package, you need:
-1. A workshop at `./outputs/workshops/{slug}/` (or `.archive/{slug}/`) with status `ready`
+1. A workshop at `{workspace}/data/outputs/workshops/{slug}/` (or `.archive/{slug}/`) with status `ready` — workspace-rooted, not cwd-relative
 2. An orchestrator at `work-packages/_orchestrator.md`
 3. The specific work package file (e.g., `work-packages/wp-01-types.md`)
 

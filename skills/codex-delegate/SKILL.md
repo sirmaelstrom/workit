@@ -71,17 +71,17 @@ If the task needs the conductor's working memory, the conductor does it.
 ## Codex-Harness Invocation
 
 ```bash
-codex exec --model gpt-5.6-terra -c model_reasoning_effort=high --sandbox read-only --skip-git-repo-check -C "<absolute target dir>" - <<'EOF'
+codex exec --model gpt-5.6-terra -c model_reasoning_effort=high --sandbox danger-full-access --skip-git-repo-check -C "<absolute target dir>" - <<'EOF'
 <self-contained prompt, ending with the bounded-return contract>
 EOF
 ```
 
 (`-` reads the prompt from stdin — safest for multi-line prompts. On Windows/PowerShell, pipe the prompt file: `Get-Content prompt.txt -Raw | codex exec ... -`.)
 
-- **Default model:** use `gpt-5.6-terra` at high effort (the Observatory `codex` posture).
+- **Default model:** use `gpt-5.6-terra` at high effort (the Observatory `codex` posture). Slugs rot — before a large fan-out, or on a 400, verify the live slug against `~/.codex/models_cache.json` / Observatory `src/models.ts`.
 - **High-volume grunt:** use `--model gpt-5.6-luna -c model_reasoning_effort=medium` (the Observatory `codex-luna` posture). Set it explicitly: the Codex CLI's configured default may otherwise raise Luna to high.
 - Use model slugs, not Observatory aliases, on the raw `codex exec --model` flag. The aliases describe the roster posture; the CLI accepts the underlying slug.
-- **Sandbox:** `--sandbox read-only` for audits/scans/extraction (most delegations). Use `workspace-write` only when the delegated task must produce files, and point it at a scratch dir or worktree — never let a delegated task write into a repo the conductor is mid-edit on.
+- **Sandbox:** `--sandbox danger-full-access` for audits/scans/extraction (most delegations), with an explicit "do not modify any files" clause in the prompt — Terra honors it (verified). ⚠️ Do NOT use `--sandbox read-only` on this Windows box: the sandbox runner fails at the first child spawn (`CreateProcessAsUserW failed: 5`) and the model returns a plausible **ungrounded** answer with no surfaced error (auto-memory `codex-exec-readonly-sandbox-broken-windows`). Use `workspace-write` only when the delegated task must produce files, and point it at a scratch dir or worktree — never let a delegated task write into a repo the conductor is mid-edit on.
 - **MCP: assume none.** `codex exec` **silently skips HTTP-transport MCP servers** — a delegated task that "uses the gateway" will no-op without error. Keep delegated tasks fully self-contained (filesystem + shell only). If a task genuinely needs an MCP tool, inject a *stdio* server explicitly via `-c mcp_servers.<name>.command=...` flags; never assume anything from the interactive session is reachable.
 - **Verify against `codex exec`,** the non-interactive form — never against the interactive `codex` UI. They differ in config handling and MCP behavior; a pattern proven interactively can fail under `exec`.
 

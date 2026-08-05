@@ -24,7 +24,7 @@ If the argument is missing AND auto-detection is ambiguous, ask the user which t
 
 ### Subagent Dispatch Rules
 
-All subagents in this skill are dispatched using the **Agent tool** with `model: opus`. This applies to the cartographer, all focused reviewers, and the synthesizer -- no exceptions.
+All subagents in this skill are dispatched using the **Agent tool** with `model: opus`. This applies to the cartographer, all focused reviewers, and the synthesizer -- no exceptions. (Deliberate override of the workspace "mid-tier for mechanical sub-agent work" default: review quality beats token cost here — a 2026-05-25 A/B showed sonnet accepting a self-contradictory spec as coherent while opus caught the cross-artifact contradictions.)
 
 **Parallel dispatch:** To run multiple reviewers simultaneously, emit multiple Agent tool calls in a single response message. Example: if the cartographer selects 4 archetypes, make 4 Agent tool calls in one message, each with its own prompt.
 
@@ -411,9 +411,9 @@ Capture `output_completed_at`. Compute durations.
 
 ### 5.3 Cleanup
 
-If a worktree was created, remove it:
+If a worktree was created, remove it using the path recorded in orchestrator state at 1.4 (`review_codebase_path` — creation used `mktemp -d`, so there is no fixed literal path):
 ```bash
-git worktree remove /tmp/review-pr-<number> --force
+git worktree remove "<review_codebase_path>" --force
 ```
 
 ---

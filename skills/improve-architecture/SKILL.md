@@ -48,10 +48,9 @@ Present designs sequentially, compare in prose, give an opinionated recommendati
 
 ### 7. Create actionable output
 
-Either:
-- Create a GitHub issue as a refactor RFC
+Default: capture it on the Spine — `spine_author` (confident if the operator voiced it, `provisional: true` if harvested mid-task) with the findings attached as artifacts, per workspace CLAUDE.md § Roadmap Capture. Optionally also:
+- Create a GitHub issue as a refactor RFC (attach it to the quest)
 - Feed into `/spec --depth=deep` if the refactor is complex enough to warrant a full spec
-- Add to the project's TODO or backlog
 
 ## Deep Module Criteria
 
