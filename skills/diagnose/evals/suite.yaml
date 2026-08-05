@@ -47,7 +47,7 @@ test_cases:
         - "Scope is inferred from the symptom (should be 'backend' or 'deployment'), not asked of the user"
         - "Intake normalization rewrites the report into the structured form (Symptom/Expected/Observed/Scope/etc.)"
       composability:
-        - "Prevention section proposes at least one of: CLAUDE.md correction, hook idea, test addition, CORRECTIONS.md entry, or LESSONS.md entry — OR explicitly states none is warranted"
+        - "Prevention section proposes at least one of: CLAUDE.md correction, hook idea, test addition, or auto-memory entry — OR explicitly states none is warranted"
 
   # Scenario 5: Ambiguous/multi-scope — tests scope inference under uncertainty
   - id: tc-05
