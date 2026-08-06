@@ -5,9 +5,19 @@ description: "Stress-test a plan or idea. Trigger: 'grill me', 'poke holes', 'wh
 
 # Grill Me — Stress-Test an Idea
 
-Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the decision tree, resolving dependencies between decisions one-by-one.
+Interview me relentlessly about every aspect of this plan until we reach a shared understanding.
 
-For each question, provide your recommended answer — don't just ask, bring an opinion.
+## Rounds
+
+Model the open questions as a dependency graph: a question is **blocked** when its best framing depends on an answer we don't have yet, **unblocked** otherwise. Then, each round:
+
+1. Ask **only the questions unblocked right now** — never one whose framing depends on an unanswered question.
+2. Batch them into a numbered round (Q1, Q2, …). For each question, provide your recommended answer — don't just ask, bring an opinion.
+3. When the answers land, push the frontier: newly unblocked questions form the next round.
+
+I can answer by number — "Q1 agree, Q2 agree, Q3 change to X" — so a round of easy questions costs one turn, not five.
+
+The graph rule is what makes batching safe: batching without it asks dependent questions out of order, which is the problem asking one-at-a-time was avoiding.
 
 If a question can be answered by exploring the codebase, explore the codebase instead of asking.
 
@@ -29,5 +39,5 @@ If the grilling reveals enough structure and the user wants to proceed, suggest 
 When the effort is too foggy and too large for one interview, run `/chart` first — it schedules `grill-me` sessions rather than replacing them.
 
 ---
-*Inspired by Matt Pocock's grill-me skill. Adapted with KB integration and workshop pipeline connection.*
+*Inspired by Matt Pocock's grill-me skill; dependency-graph rounds from his v1.2. Adapted with KB integration and workshop pipeline connection.*
 *Source: github.com/mattpocock/skills/tree/main/grill-me*
