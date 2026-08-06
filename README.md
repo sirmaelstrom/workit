@@ -17,7 +17,7 @@ Two layers:
 
 ### Skills
 
-Eighteen skills, grouped by what they're for:
+Nineteen skills, grouped by what they're for:
 
 ### Specify & plan
 | Skill | What it does |
@@ -36,6 +36,7 @@ Eighteen skills, grouped by what they're for:
 |-------|--------------|
 | `execute-wp` | Execute a work package from a spec, appending to a progress log as it goes. |
 | `handoff` | Compact a conversation into a handoff doc so a fresh agent can pick up the work. |
+| `burn-down` | Run an ordered queue of roadmap quests to landed, holding the disciplines that keep the board honest — scheduling `pickup` per item and `handoff` only for mid-item exits. |
 | `pickup` | Resume the current project's top roadmap quest from the Spine — resume note + cartridge artifacts, claim the quest on the board, then continue. |
 | `commit-msg` | Commit via a file (`git commit -F`) so shell-active content — backticks, links, quotes — lands verbatim instead of breaking under HEREDOC parsing. |
 | `codex-delegate` | Route token-hungry grunt work (repo audits, large-doc extraction, broad scans) to `codex exec` with a self-contained prompt and a distilled-only handback, keeping bulk tokens out of the conductor's context. |
