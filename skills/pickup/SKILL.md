@@ -33,6 +33,26 @@ on the board, and start moving.
    options. Do not invent a quest and do not author one — pickup resumes work
    that already exists on the board.
 
+## Derive the environment (do not accept it second-hand)
+
+Before reading any note that describes the world, measure it:
+
+```
+node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-preamble.mjs
+```
+
+It reports occupied checkouts (branch, dirty tree, extra worktrees, ahead/behind),
+whether the installed plugin cache is behind the repo, and service state — the
+things a handoff used to write down and get wrong. Pass `--workspace-root <abs>`
+if `WORKIT_WORKSPACE_ROOT` is unset; it announces which rule resolved the root
+either way, and exits 2 rather than printing a reassuring empty board if it
+scanned no repositories.
+
+Run it **per pickup**, not once per session: a run that works several items over
+several hours has a different environment by the third one. If a resume note or
+handoff states environment state, the script's answer wins — the note is evidence
+about the past.
+
 ## Load the re-entry payload
 
 - Read the quest's **resume note** in full.

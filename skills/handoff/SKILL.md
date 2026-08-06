@@ -15,7 +15,65 @@ Long sessions accumulate context that's expensive to throw away. Two patterns th
 
 2. **DIY sub-agent.** You're deep in `grill-me` or `spec` and hit a question that can only be answered by running code. Hand off to a fresh window for a `prototype` or implementation spike. When that's done, hand *back* to the original session with what was learned. You get sub-agent benefits (clean context, focused work, can spawn its own sub-agents) plus what the built-in Agent tool doesn't give you: a human in the loop and a session that persists across windows.
 
-## Process
+## Pick the mode first
+
+Two different jobs wear the same name. Choosing wrong is what produces the
+bloated handoff nobody reads.
+
+| | **Mid-item (slim)** | **Full transfer** |
+|---|---|---|
+| When | Stopping partway through a claimed quest — a burn-down item, a WP, any work already on the board | Fire-and-forget side quest, or the DIY sub-agent pattern |
+| The next session has | The board (resume note, receipts, artifacts) + a session-start focus block | Nothing — you are its only context |
+| Cargo | Mid-item nuance **only** | The full document below |
+
+**At a PR boundary, write no handoff at all.** The board plus the run doc plus
+the session-start focus block already carry it. A handoff there is duplicate
+state that will go stale — refresh the quest's resume note instead.
+
+### Mid-item mode: carry nuance, nothing else
+
+Four classes of cargo used to ride along in handoffs, and each has a better home
+than a document that rots the moment it is written:
+
+| Cargo | Where it actually belongs |
+|---|---|
+| **Environment state** — branch, worktree, dirty tree, services, plugin version | **Derived at pickup, never transferred.** Run `node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-preamble.mjs` |
+| **Pending externals** — a reload, a restart, a merge someone else owes | A receipt at the moment it is owed (`spine_receipt`, or `needs_input` for a decision) |
+| **Cross-item bindings** — a ruling that constrains a later item | That item's quest resume note, written at ruling time |
+| **Conventions/stance** — branch naming, stop-at-PR-boundary | Protocol text (`burn-down`), written once |
+
+What is left is the irreducible part, and it is short:
+
+```markdown
+# Handoff: {item} — mid-item
+
+**Quest:** {title} ({short-id})
+**Created:** {ISO timestamp}
+
+## Where I stopped
+{The precise point — not "working on X" but "X's parser handles the nested case;
+the flat case still returns undefined"}
+
+## What I tried, and what it ruled out
+{Failed approaches are the expensive part to rediscover. Say what each one
+eliminated, not just that it failed.}
+
+## Next concrete move
+{One actionable step.}
+
+## Design questions settled so far
+{Decisions made this session that are not yet written anywhere else. Anything
+that binds another quest goes on THAT quest's resume note instead — now, not here.}
+
+---
+Environment state deliberately omitted — derive it at pickup:
+`node ${CLAUDE_PLUGIN_ROOT}/scripts/workspace-preamble.mjs`
+```
+
+If a mid-item handoff is growing past roughly a screen, that is the signal
+something in it belongs on the board instead. Move it there.
+
+## Process (full transfer)
 
 ### 1. Decide the Handoff Target
 
@@ -95,6 +153,8 @@ claude --resume false
 
 5. **Read the file before writing.** Claude Code Write errors if a path hasn't been Read first when overwriting. For new files this is fine, but if the user is re-handing-off the same slug, Read first.
 
+6. **Never write down environment state.** Branch, worktree, dirty tree, running services, installed plugin version — all of it is stale the moment the file is saved, and the next session will read it as fact. Point at the preamble script instead. The tell that this rule was earned: an earlier handoff carried a checkout inventory *and* the sentence "re-check both repos at pickup — the situation may have changed," which is a written admission that the writing was the wrong mechanism.
+
 ## Connection to Other Skills
 
 - **`grill-me` / `spec`** — common upstream. These are long-context sessions where the DIY sub-agent pattern shines.
@@ -109,6 +169,8 @@ claude --resume false
 - Handing off without specifying the return path when the DIY sub-agent pattern is in play. The originating session needs to know what to expect back.
 - Vague targets ("explore the architecture"). Make it actionable.
 - Using `mktemp` paths. Handoffs in `data/outputs/handoffs/` are greppable, browsable, and persist long enough to be findable — temp files vanish.
+- Writing a full transfer for a mid-item stop. The board already carries the quest; duplicating it into a document guarantees one of the two goes stale.
+- Writing any handoff at a PR boundary. There is nothing left to transfer that the board does not hold.
 
 ---
 *Adopted from Matt Pocock's `handoff` skill (github.com/mattpocock/skills/tree/main/skills/productivity/handoff). Adapted: persistent workspace path instead of mktemp, explicit DIY-sub-agent pattern guidance, connection to grill-me/prototype/diagnose/execute-wp pipeline.*
