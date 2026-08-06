@@ -84,16 +84,16 @@ ruling that binds a later item.
 ## Stopping
 
 **At a PR boundary:** no handoff. The board plus the run doc plus the
-session-start hook already carry it. Refresh the anchor's resume note, write a
-run-level receipt, stop.
+session-start focus block already carry it. Refresh the anchor's resume note,
+write a run-level receipt, stop.
 
-**Mid-item:** a handoff, and a slim one. Environment state is **derived at
-pickup, never transferred** — branch, worktree, and service state are re-checked
-by the next session because a written snapshot is stale the moment it is written.
-The only irreducible cargo is mid-item nuance: where in the item you stopped,
-what you have tried, the next concrete move, and design questions settled so far.
-Everything else has a better home — pending externals are receipts (rule 3),
-cross-item bindings are resume notes (rule 4), conventions are *this file*.
+**Mid-item:** invoke `handoff` in its **mid-item mode**, which carries the one
+irreducible class — where in the item you stopped, what you tried and what it
+ruled out, the next concrete move, design questions settled so far. Everything
+else has a better home: environment state is **derived at pickup** by
+`pickup`'s preamble step (never transferred — a written snapshot is stale the
+moment it is saved), pending externals are receipts (rule 3), cross-item
+bindings are resume notes (rule 4), conventions are *this file*.
 
 ## Summon the operator for
 
