@@ -15,6 +15,7 @@ This skill bundles a validation script at `scripts/validate.mjs` that performs d
 - **Decision ambiguity scanning** — flag words ("or", "possibly", "TBD", "might", "should consider") in non-constraint contexts
 - **Vague verification detection** — phrases like "should work", "looks good", "functions properly" that aren't actually verifiable
 - **Constraint completeness** — all four categories present (musts, must-nots, preferences, escalation triggers)
+- **Constraint coverage** — every declared D/M/MN/E tag reaches a V-criterion or a work package; the ones that reach neither are named
 - **Work package field coverage** — all 6 required fields (precondition, goal, files, verification, failure criteria, boundary)
 - **Pipeline consistency** — meta.json status matches which artifacts actually exist
 
@@ -87,6 +88,7 @@ done
 ### constraints.md
 - All four categories present: Musts, Must-Nots, Preferences, Escalation Triggers. Detected by the category keyword in any header (`## Musts (M)` and `### 1. Musts — Non-Negotiable Requirements` both count) — no descriptive suffix required.
 - Numbered constraints (M1, MN1, P1, E1) in any form: a heading (`### M1`), a bullet (`- **M1 — …**`), or inline bold (`**M1**`).
+- **Coverage cross-check:** every declared `D<n>`/`M<n>`/`MN<n>`/`E<n>` must be referenced at least once in `verification.md` or a `work-packages/*.md`. A constraint the spec states but tasks to nobody ships unverified while reading as covered — and severity does not predict which ones get missed. Warns (never errors), and names the uncovered set. Two deliberate carve-outs: a **work-package Boundary counts as coverage**, because rules governing the executing agent's hygiene (a `sed -i` ban, a branch→PR rule) belong there rather than in a ceremonial V-criterion; and **preferences (P) are excluded**, being guidance rather than obligations.
 
 ### decomposition.md
 - Break pattern identified

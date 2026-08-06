@@ -465,6 +465,16 @@ node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-lo
 node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-log.json
 ```
 
+> **The report reads the SESSION's transcripts, not the workshop's.** The
+> default projects-dir is derived from the state file's recorded cwd — the
+> *workshop* path — and workshops live outside the repo the session was launched
+> in, so that slug usually names a directory which has never existed. The report
+> then labels itself `NOT MEASURED` and lists candidate directories: pass
+> `--projects-dir <one of them>`, or set `WORKIT_CLAUDE_PROJECTS_DIR`. A `$0`
+> total *without* that label means zero; *with* it, it means not collected.
+> Always `--event end` a phase before trusting a total — an open phase's window
+> runs to now and keeps absorbing later transcripts on every re-run.
+
 ```markdown
 ## ✅ Spec Complete: {title}
 

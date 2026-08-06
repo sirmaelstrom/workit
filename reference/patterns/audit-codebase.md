@@ -11,7 +11,7 @@ variables:
     placeholder: "e.g., security posture, test coverage, onboarding friction"
   output_path:
     label: Output path
-    placeholder: "e.g., ./outputs/audits/your-project-2026-03.md"
+    placeholder: "e.g., {workspace}/data/outputs/audits/your-project-2026-03.md"
 ---
 
 # Codebase Audit

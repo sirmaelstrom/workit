@@ -42,6 +42,43 @@ The workspace root itself is declared, not ambient: an explicit operator argumen
 
 A quest carries **at most one** `projects-*` place. Multi-repo work is modeled as separate single-repo quests linked by `decomposition` seams — not one quest with N places.
 
+## Output Rooting: what `{workspace}` means
+
+Targets are declared on the way **in**; artifacts need the same treatment on the
+way **out**. Skills write to `{workspace}/data/outputs/{category}/…` — that token
+is not decoration, and it is not `.`:
+
+**`{workspace}` is the workspace root** — the directory that contains
+`projects/` and `data/`. It resolves exactly like the input side:
+
+1. An explicit argument — `--workspace-root <abs>` where a script takes one.
+2. The **`WORKIT_WORKSPACE_ROOT`** env var.
+3. Failing both: the current working directory, **and the skill says so** (see
+   below).
+
+The bare form `./outputs/…` is the anti-pattern this replaces. It reads as a
+convention but is really "wherever the agent happened to be standing" — the same
+ambient-cwd failure the input side kills, one direction later. On the author's
+box an ambient workspace instruction quietly redirected it to
+`<workspace>/data/outputs/`, so it *looked* like a convention; a marketplace
+installer with no such instruction got an `outputs/` directory created inside
+whatever repo they were in. Same skill, different behavior, nothing documented.
+
+**Announce the resolution.** Any skill that writes an artifact states the
+resolved root and the rule that produced it, once, before writing — the practice
+`/chart` already follows for its charts root. A wrong root that is stated is a
+five-second correction; a wrong root that is silent is a lost artifact and a
+polluted repo.
+
+**Categories** under `{workspace}/data/outputs/`: `workshops/`, `handoffs/`,
+`parallel-explore/`, `projects/`, `reviews/`, `research/`. A skill inventing a
+new top-level category should say why.
+
+Note the asymmetry with input rooting, and that it is deliberate: an
+unresolvable *target* stops the work (the wrong repo is a real hazard), while an
+unresolvable *output root* falls back to cwd and reports it. Refusing to write a
+handoff because an env var is unset would cost more than it protects.
+
 ## Worktree Creation (the recipe)
 
 The **orchestrator creates worktrees** — never rely on harness worktree isolation for a sibling-repo target (see the Windows failure above). The exact command:
@@ -94,6 +131,10 @@ Exit 0 = rooting is cwd-independent. If the recipe in this file ever changes, th
 
 - `skills/execute-wp/SKILL.md` — "Root the Target" step (summary + pointer here).
 - `reference/templates/_orchestrator.template.md` — one-line pointer beside Gate Commands.
+- Output rooting (`{workspace}/data/outputs/…`): `skills/handoff`, `skills/spec`,
+  `skills/execute-wp`, `skills/spec-validate`, `skills/parallel-explore`,
+  `skills/audit-skills`. `skills/_shared/output-rooting.test.mjs` keeps them from
+  drifting back to a bare `./outputs/`.
 - Workspace-root `CLAUDE.md` §Cross-Repo Agent Work — one-line pointer (operator-maintained; outside this repo).
 - Walk-away pipeline doc §6b — one-line pointer (operator-maintained; outside this repo).
 

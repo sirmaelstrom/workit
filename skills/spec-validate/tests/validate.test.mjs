@@ -310,3 +310,105 @@ test('lite spec with multiple projects warns (not errors)', () => {
   assert.equal(status, 0, `multi-project lite spec must remain exit 0, got:\n${out}`);
   assert.match(out, /multi-repo usually wants a deep spec/, 'the lite-spec nudge must be a warning');
 });
+
+// --- constraint-coverage cross-check ---------------------------------------
+//
+// Origin: five consecutive fresh-eyes review waves on one real spec each found a
+// DIFFERENT constraint that was fully specified but tasked to nothing. Severity
+// did not predict coverage. Reviewers cannot reliably see this; a set difference
+// can. These tests pin that the difference is actually computed — and that the
+// WP-Boundary carve-out is honored, so the check can't be "fixed" into demanding
+// a ceremonial V-criterion for every execution-hygiene rule.
+
+/** Workshop carrying just the declaration + coverage surfaces the check reads. */
+function makeCoverageWorkshop({ decisions, constraints, verification, wp }) {
+  const dir = makeTemp('spec-validate-cov-');
+  writeFileSync(join(dir, 'meta.json'), JSON.stringify({
+    title: 'Coverage fixture', slug: basename(dir), status: 'captured',
+    projects: ['svc-a'], startedAt: '2026-08-05T00:00:00Z', createdAt: '2026-08-05T00:00:00Z',
+  }, null, 2));
+  if (decisions !== undefined) writeFileSync(join(dir, 'decisions.md'), decisions);
+  if (constraints !== undefined) writeFileSync(join(dir, 'constraints.md'), constraints);
+  if (verification !== undefined) writeFileSync(join(dir, 'verification.md'), verification);
+  if (wp !== undefined) {
+    mkdirSync(join(dir, 'work-packages'));
+    // An orchestrator with an inventory is required whenever work-packages/
+    // exists — without it the run errors out before coverage is interesting.
+    writeFileSync(
+      join(dir, 'work-packages', '_orchestrator.md'),
+      orchestratorWithInventory([{ package: 'WP-01', project: 'svc-a' }]),
+    );
+    writeFileSync(join(dir, 'work-packages', 'wp-01.md'), wp);
+  }
+  return dir;
+}
+
+const COV_DECISIONS = '# Decisions\n\n## D1 — first\n\n**Why:** because.\n\n## D2 — second\n\n**Why:** because.\n';
+const COV_CONSTRAINTS = [
+  '# Constraints', '', '## Musts (M)', '',
+  '- **M1 — governs the shipped behavior.**', '',
+  '## Must-Nots (MN)', '',
+  '- **MN1 — governs the executing agent.**', '',
+  '## Preferences (P)', '',
+  '- **P1 — a preference, not an obligation.**', '',
+  '## Escalation Triggers (E)', '',
+  '- **E1 — stop and ask.**', '',
+].join('\n');
+
+// A complete WP — all six required fields — so the coverage assertion is not
+// masked by an unrelated work-package error. The tags under test live in the
+// Boundary, which is the point: execution-hygiene rules belong there.
+const COV_WP = [
+  '# WP-01: the only package', '',
+  '**Precondition:** None — first package.', '',
+  '**Goal:** Do the thing.', '',
+  '**Files:**', '- Modify `src/thing.ts`.', '',
+  '**Verification:** `npm test` exits 0.', '',
+  '**Failure Criteria:** If the test hangs, the loop has no exit path.', '',
+  '**Boundary:** Do not do the other thing (MN1). Escalate per E1.', '',
+].join('\n');
+
+test('constraint coverage: a declared tag referenced nowhere is named in the warning', () => {
+  const workshop = makeCoverageWorkshop({
+    decisions: COV_DECISIONS,
+    constraints: COV_CONSTRAINTS,
+    verification: '# Verification\n\n## V1: covers one thing (maps to D1)\n\nChecks M1.\n',
+  });
+  const { status, out } = runValidator(workshop, { env: NO_ROOT });
+  assert.equal(status, 0, 'coverage gaps warn, never error');
+  assert.match(out, /referenced nowhere in verification\.md/, 'the coverage warning must fire');
+  // Assert the EXACT uncovered set, not just presence: D1 and M1 are cited by
+  // V1, so a check that over-reports would pass a presence-only assertion.
+  const listed = out.match(/referenced nowhere in [^:]+: ([^.]+)\./);
+  assert.ok(listed, 'the warning must enumerate the uncovered tags');
+  assert.deepEqual(
+    listed[1].split(',').map((s) => s.trim()).sort(),
+    ['D2', 'E1', 'MN1'],
+    'exactly the untasked tags are reported — P1 is excluded, D1/M1 are covered',
+  );
+});
+
+test('constraint coverage: a work-package Boundary counts as coverage', () => {
+  const workshop = makeCoverageWorkshop({
+    decisions: COV_DECISIONS,
+    constraints: COV_CONSTRAINTS,
+    verification: '# Verification\n\n## V1: covers things (maps to D1)\n\nChecks D2 and M1.\n',
+    wp: COV_WP,
+  });
+  const { status, out } = runValidator(workshop, { env: NO_ROOT });
+  assert.equal(status, 0);
+  assert.doesNotMatch(out, /referenced nowhere/,
+    'MN1/E1 cited only in a WP Boundary must count — execution-hygiene rules do not need a V-criterion');
+  assert.match(out, /constraint coverage: all 5 declared/, 'the all-covered pass line must report the tag count');
+});
+
+test('constraint coverage: preferences are excluded from the obligation set', () => {
+  const workshop = makeCoverageWorkshop({
+    decisions: '# Decisions\n\n## D1 — only\n\n**Why:** because.\n',
+    constraints: '# Constraints\n\n## Preferences (P)\n\n- **P1 — never tasked anywhere.**\n',
+    verification: '# Verification\n\n## V1: covers it (maps to D1)\n\nChecks D1.\n',
+  });
+  const { status, out } = runValidator(workshop, { env: NO_ROOT });
+  assert.equal(status, 0);
+  assert.doesNotMatch(out, /referenced nowhere/, 'P-tags are guidance; they must not demand coverage');
+});
