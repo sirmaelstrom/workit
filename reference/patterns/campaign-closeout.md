@@ -74,7 +74,7 @@ Structured document produced after every campaign. Two parts: automated data col
 9. **Cross-Campaign Comparison** — table comparing this campaign to previous ones (now includes both dispatch cost and lifecycle cost estimate)
 10. **Dispatch Timeline** — appendix with timestamped event log
 
-**Output location:** `./outputs/workshops/{campaign-slug}/post-mortem.md`
+**Output location:** `{workspace}/data/outputs/workshops/{campaign-slug}/post-mortem.md`
 
 ### Cost Blind Spot: Lifecycle Cost vs. Dispatch Cost
 

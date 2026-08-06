@@ -45,7 +45,7 @@ Good: "Run `npm test -- --grep 'DispatchForm'`. All tests pass. The form renders
 ## Visual Verification
 
 For UI work, Playwright screenshots are mandatory:
-- Organized in `./outputs/verification/{project}/{date}/`
+- Organized in `{workspace}/data/outputs/verification/{project}/{date}/`
 - Taken at key states (empty, loaded, error, interaction result)
 - Named descriptively: `dispatch-form-empty.png`, `dispatch-form-with-spec.png`
 

@@ -90,6 +90,66 @@ export function slugifyCwd(cwd) {
   return String(cwd).replace(/[^a-zA-Z0-9]/g, '-');
 }
 
+/**
+ * Resolve the Claude Code projects directory holding this run's transcripts,
+ * and report WHICH rule produced it.
+ *
+ * The cwd-slug default is wrong whenever `mark` ran from somewhere other than
+ * the directory the session was launched in — which, for the /spec pipeline, is
+ * the normal case rather than the edge case: workshops live under
+ * `data/outputs/workshops/` while the session is launched in a repo under
+ * `projects/`. The derived slug then names a directory that has never existed,
+ * every phase collects zero transcripts, and the report prints a clean $0 that
+ * reads as "free" instead of "not measured".
+ *
+ * Precedence: explicit flag > env var > cwd slug (if it exists) > evidence-based
+ * recovery. Recovery scans the projects root for the ONE directory holding
+ * subagent transcripts inside a recorded phase window; ambiguity resolves to
+ * nothing rather than to a guess.
+ *
+ * Returns `{ dir, rule, candidates }`. `dir` is null when nothing resolved.
+ */
+export function resolveProjectsDir(state, { projectsDir = null, env = process.env } = {}) {
+  const explicit = (dir, rule) => ({ dir, rule, exists: existsSync(dir), candidates: [] });
+
+  if (projectsDir) return explicit(resolve(projectsDir), 'flag');
+
+  const fromEnv = env.WORKIT_CLAUDE_PROJECTS_DIR;
+  if (fromEnv) return explicit(resolve(fromEnv), 'env');
+
+  const root = join(homedir(), '.claude', 'projects');
+  const bySlug = join(root, slugifyCwd(state.cwd));
+  if (existsSync(bySlug)) return { dir: bySlug, rule: 'cwd-slug', exists: true, candidates: [] };
+
+  // Recovery: which projects dir actually has transcripts in a phase window?
+  let entries;
+  try {
+    entries = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory());
+  } catch {
+    return { dir: null, rule: 'none', exists: false, candidates: [] };
+  }
+
+  const nowMs = Date.now();
+  const matches = [];
+  for (const entry of entries) {
+    const dir = join(root, entry.name);
+    let hits = 0;
+    for (const file of findAgentJsonlFiles(dir)) {
+      let mtimeMs;
+      try {
+        mtimeMs = statSync(file).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (attributePhase(state.phases, mtimeMs, nowMs) !== null) hits++;
+    }
+    if (hits > 0) matches.push({ dir, hits });
+  }
+
+  if (matches.length === 1) return { dir: matches[0].dir, rule: 'recovered', exists: true, candidates: [] };
+  return { dir: null, rule: 'none', exists: false, candidates: matches.map((m) => m.dir) };
+}
+
 // ---------------------------------------------------------------------------
 // Transcript collection
 // ---------------------------------------------------------------------------
@@ -250,7 +310,7 @@ function round6(n) {
 }
 
 /** Build the cost-report.json structure from state + collected usage. */
-export function buildReport(state, collected, generatedAt) {
+export function buildReport(state, collected, generatedAt, source = { dir: null, rule: 'unknown', candidates: [] }) {
   const { perPhase, unknownModels } = collected;
 
   let grandTotals = { ...emptyTokenCounts(), costUsd: 0 };
@@ -280,9 +340,28 @@ export function buildReport(state, collected, generatedAt) {
     model, ...counts, costUsd: null,
   }));
 
+  // "Nothing was measured" and "the measured cost was zero" are different facts
+  // that render identically as $0.0000. Carry the difference explicitly so a
+  // consumer of cost-report.json can never read an unmeasured run as free.
+  const sawUsage =
+    phases.some((p) => Object.keys(p.models).length > 0) || unknownModelsArr.length > 0;
+
   return {
-    schema_version: '1.0',
+    schema_version: '1.1',
     generatedAt,
+    measurement: {
+      measured: Boolean(source.dir) && sawUsage,
+      projectsDir: source.dir,
+      resolution: source.rule,
+      exists: source.exists ?? null,
+      candidates: source.candidates ?? [],
+      // A phase never closed keeps its window open to `now`, so every later
+      // transcript in that projects dir lands in it — including work from
+      // unrelated sessions days afterwards. The total then grows every time the
+      // report is re-run, and reads as "this phase was expensive" rather than
+      // "this phase never ended". Name them so the number is interpretable.
+      openPhases: state.phases.filter((p) => p.endedAt === null).map((p) => p.phase),
+    },
     phases,
     totals: grandTotals,
     unknownModels: unknownModelsArr,
@@ -305,7 +384,42 @@ export function renderMarkdownTable(report) {
   const tt = report.totals;
   const totalCacheW = tt.cacheCreation5mTokens + tt.cacheCreation1hTokens;
   const totalsRow = `| **Total** | ${tt.inputTokens} | ${tt.outputTokens} | ${tt.cacheReadTokens} | ${totalCacheW} | ${fmtCost(tt.costUsd)} |`;
-  return [header, sep, ...rows, totalsRow].join('\n');
+
+  const table = [header, sep, ...rows, totalsRow].join('\n');
+  const m = report.measurement;
+
+  if (m?.openPhases?.length) {
+    const banner = `> **OPEN PHASE — ${m.openPhases.join(', ')} never ended, so the window runs to now and absorbs every later transcript. Re-running grows the total. Close the phase (\`mark --event end\`) before trusting this number.**`;
+    return m.measured ? [banner, '', table].join('\n') : [banner, '', renderUnmeasured(m, table)].join('\n');
+  }
+
+  if (!m || m.measured) return table;
+  return renderUnmeasured(m, table);
+}
+
+/** Prepend the NOT-MEASURED banner to a rendered table. */
+function renderUnmeasured(m, table) {
+
+  // An unmeasured run must not be readable as a cheap one. The banner goes
+  // ABOVE the table so it cannot be missed by someone skimming to the total.
+  let why;
+  if (m.resolution === 'none') {
+    why = `No Claude Code projects directory could be resolved for this run.${
+      m.candidates?.length
+        ? ` Candidates with transcripts in a phase window: ${m.candidates.join(', ')} — re-run with --projects-dir <one of these>.`
+        : ' Re-run with --projects-dir <dir>, or set WORKIT_CLAUDE_PROJECTS_DIR.'
+    }`;
+  } else if (m.exists === false) {
+    why = `Projects dir not found: ${m.projectsDir} (rule: ${m.resolution}).`;
+  } else {
+    why = `Resolved ${m.projectsDir} (rule: ${m.resolution}) but no subagent transcript fell inside a phase window.`;
+  }
+  return [
+    '> **NOT MEASURED — the totals below are zero because nothing was collected, not because the run was free.**',
+    `> ${why}`,
+    '',
+    table,
+  ].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +435,19 @@ mark    Record a phase start/end timestamp in the state file (created on
 report  Scan this machine's Claude Code subagent transcripts, attribute them
         to phase windows by mtime, aggregate token usage + cost per phase,
         write cost-report.json next to --state, and print a markdown table.
-        Default --projects-dir: ~/.claude/projects/<slug of state.cwd>.
+
+Projects-dir resolution (report), in precedence order — the rule used is
+printed to stderr and recorded in cost-report.json:
+  1. --projects-dir <dir>
+  2. WORKIT_CLAUDE_PROJECTS_DIR
+  3. ~/.claude/projects/<slug of state.cwd>, if it exists
+  4. Recovery: the ONE projects dir holding transcripts inside a phase window
+     (ambiguity resolves to nothing, listing the candidates — never a guess)
+
+The cwd slug is only correct when mark ran from the directory the session was
+launched in. For /spec that is usually false — workshops live under
+data/outputs/ while the session runs in a repo — so pass --projects-dir or set
+the env var when the two differ.
 
 Options:
   --state <path>          Path to the cost-log.json state file (required)
@@ -330,8 +456,11 @@ Options:
   --projects-dir <dir>    Override the Claude Code projects directory (report only)
   --help                  Print this message and exit 0
 
-Instrumentation never hard-fails the /spec pipeline: missing or empty
-transcript data produces a valid zero-row report (stderr note, exit 0).
+Instrumentation never hard-fails the /spec pipeline: exit 0 even when nothing
+is collected. But an uncollected run is labelled NOT MEASURED in both the table
+and cost-report.json — a $0 total must never be readable as "free". A phase
+left open is labelled too: its window runs to now, so the total grows on every
+re-run until the phase is ended.
 `;
 
 function parseArgs(argv) {
@@ -410,19 +539,27 @@ function runReport(opts) {
     return 1;
   }
 
-  const projectsDir = opts.projectsDir
-    ? resolve(opts.projectsDir)
-    : join(homedir(), '.claude', 'projects', slugifyCwd(state.cwd));
+  const source = resolveProjectsDir(state, { projectsDir: opts.projectsDir });
 
-  if (!existsSync(projectsDir)) {
-    process.stderr.write(`Note: projects dir not found (${projectsDir}) — writing zero-row report\n`);
+  // Announce the resolved directory AND the rule that produced it — a silent
+  // default is exactly how this reported $0 for every workshop ever run.
+  if (source.dir) {
+    process.stderr.write(`Projects dir: ${source.dir} (rule: ${source.rule})\n`);
+  } else {
+    process.stderr.write(
+      `Note: no projects dir resolved (cwd-slug of ${state.cwd} does not exist, nothing recovered)` +
+      `${source.candidates.length ? `; candidates: ${source.candidates.join(', ')}` : ''}` +
+      ' — writing an UNMEASURED report\n',
+    );
   }
 
-  const collected = collectPhaseUsage(state.phases, projectsDir);
-  const report = buildReport(state, collected, new Date().toISOString());
+  const collected = source.dir
+    ? collectPhaseUsage(state.phases, source.dir)
+    : { perPhase: new Map(), unknownModels: new Map() };
+  const report = buildReport(state, collected, new Date().toISOString(), source);
 
-  if (report.phases.every((p) => Object.keys(p.models).length === 0)) {
-    process.stderr.write('Note: no subagent transcripts matched any phase window\n');
+  if (!report.measurement.measured) {
+    process.stderr.write('Note: report is NOT MEASURED — a $0 total here means "not collected", not "free"\n');
   }
 
   const outPath = join(dirname(statePath), 'cost-report.json');

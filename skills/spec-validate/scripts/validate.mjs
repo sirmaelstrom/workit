@@ -7,7 +7,7 @@
  * where every message explains WHY the issue matters — not just what's wrong.
  *
  * Usage: node validate.mjs <workshop-path> [--workspace-root <abs-path>]
- * Example: node validate.mjs ./outputs/workshops/portable-spec-cli
+ * Example: node validate.mjs <workspace>/data/outputs/workshops/portable-spec-cli
  *
  * Target enforcement: meta.projects (non-empty array) is required — it declares
  * the workshop's target repo(s) so worktree rooting never falls back to session
@@ -432,6 +432,85 @@ function validateConstraints() {
   }
 }
 
+// Every constraint the spec DECLARES should be tasked to something that will
+// actually check it. A constraint fully specified in decisions.md/constraints.md
+// but referenced by no V-criterion and no work package is a rule nobody was
+// asked to enforce — it ships unverified and reads as covered.
+//
+// Measured origin: five consecutive fresh-eyes review waves on one spec each
+// found a DIFFERENT untasked constraint (eleven total), including that spec's own
+// stated thesis. Severity did not predict coverage — one minor constraint drew
+// three checks while two load-bearing ones drew zero. Reviewers cannot see this;
+// a set difference can.
+//
+// Coverage means "referenced in verification.md OR in any work package". The
+// second half is deliberate: some constraints govern the executing agent's
+// hygiene rather than the shipped artifact's behavior (a `sed -i` ban, a
+// branch->PR rule), and a WP Boundary is the right home for those. Requiring a
+// V-criterion for them would push spec authors to write ceremonial criteria.
+// Preferences (P) are excluded — they are guidance, not obligations.
+//
+// Warn, never error: the mapping is heuristic (a tag can be discussed in prose
+// without being tasked), and this check is meant to aim a review pass, not to
+// gate a spec.
+function validateConstraintCoverage() {
+  const decisions = readArtifact('decisions.md');
+  const constraints = readArtifact('constraints.md');
+  if (!decisions && !constraints) return;
+
+  // DECLARED side — strict forms only (heading / bullet / bold lead), mirroring
+  // the numbered-constraint matcher above, so prose mentions don't self-declare.
+  const declared = new Set();
+  for (const m of (decisions || '').matchAll(/^#{2,6}\s+(D\d+)\b/gm)) declared.add(m[1]);
+  for (const m of (constraints || '').matchAll(
+    /(?:^\s{0,3}(?:#{2,6}\s+|[-*]\s+)\**|\*\*)((?:MN|M|E)\d+)\b/gm,
+  )) {
+    declared.add(m[1]);
+  }
+  if (declared.size === 0) return; // nothing numbered; validateConstraints already warns
+
+  // REFERENCED side — a loose scan, because a criterion may cite a tag anywhere
+  // in its body ("Verifies: D9, MN6") rather than in a header.
+  const referenced = new Set();
+  const scan = (text) => {
+    if (!text) return;
+    for (const m of text.matchAll(/\b((?:D|MN|M|E)\d+)\b/g)) referenced.add(m[1]);
+  };
+  scan(readArtifact('verification.md'));
+
+  const wpDir = join(workshopPath, 'work-packages');
+  let wpFiles = [];
+  if (existsSync(wpDir)) {
+    wpFiles = readdirSync(wpDir).filter((f) => f.endsWith('.md'));
+    for (const f of wpFiles) scan(readFileSync(join(wpDir, f), 'utf-8'));
+  }
+
+  const uncovered = [...declared].filter((tag) => !referenced.has(tag)).sort(sortTags);
+
+  if (uncovered.length === 0) {
+    ok(`constraint coverage: all ${declared.size} declared D/M/MN/E tag(s) reach a V-criterion or work package`);
+    return;
+  }
+
+  const where = wpFiles.length > 0 ? 'verification.md or any work package' : 'verification.md';
+  warn(
+    'constraints.md',
+    `${uncovered.length} of ${declared.size} declared constraint(s) are referenced nowhere in ${where}: ` +
+      `${uncovered.join(', ')}. Each is a rule the spec states but tasks to nobody — it will ship unverified ` +
+      `while reading as covered. For each, decide: does it govern the shipped thing's behavior (give it a ` +
+      `V-criterion) or the executing agent's hygiene (name it in a work package Boundary)?`,
+  );
+}
+
+/** D1 < D2 < D10; groups ordered D, M, MN, E. */
+function sortTags(a, b) {
+  const ORDER = { D: 0, M: 1, MN: 2, E: 3 };
+  const pa = a.match(/^(D|MN|M|E)(\d+)$/);
+  const pb = b.match(/^(D|MN|M|E)(\d+)$/);
+  if (!pa || !pb) return a.localeCompare(b);
+  return ORDER[pa[1]] - ORDER[pb[1]] || Number(pa[2]) - Number(pb[2]);
+}
+
 function validateDecomposition() {
   const content = readArtifact('decomposition.md');
   if (!content) return;
@@ -666,6 +745,7 @@ validateProblemStatement();
 validateDecisions();
 validateVerification();
 validateConstraints();
+validateConstraintCoverage();
 validateDecomposition();
 validateWorkPackages();
 

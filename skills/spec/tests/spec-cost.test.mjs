@@ -218,11 +218,82 @@ test('buildReport: zero-file / zero-usage phases still produce a valid zero-row 
 
 test('buildReport: with zero phases at all, table still has header + totals row', () => {
   const state = { schema_version: '1.0', cwd: '/fake/cwd', phases: [] };
-  const report = buildReport(state, { perPhase: new Map(), unknownModels: new Map() }, isoAt(0));
-  const table = renderMarkdownTable(report);
-  const lines = table.split('\n');
-  assert.equal(lines.length, 3); // header, separator, totals row
-  assert.match(lines[2], /\*\*Total\*\*/);
+  const source = { dir: '/fake/projects', rule: 'flag', exists: true, candidates: [] };
+  const report = buildReport(state, { perPhase: new Map(), unknownModels: new Map() }, isoAt(0), source);
+  // Nothing was collected, so the table carries the NOT MEASURED banner; the
+  // table itself must still be structurally intact underneath it.
+  const lines = renderMarkdownTable(report).split('\n');
+  const tableLines = lines.slice(lines.findIndex((l) => l.startsWith('| Phase')));
+  assert.equal(tableLines.length, 3); // header, separator, totals row
+  assert.match(tableLines[2], /\*\*Total\*\*/);
+});
+
+// A zero total and an uncollected run render identically ($0.0000). The whole
+// point of the measurement block is that they must never be confusable again.
+test('buildReport: an uncollected run is marked NOT MEASURED, not $0', () => {
+  const state = { schema_version: '1.0', cwd: '/fake/cwd', phases: [] };
+  const source = { dir: null, rule: 'none', exists: false, candidates: ['/a', '/b'] };
+  const report = buildReport(state, { perPhase: new Map(), unknownModels: new Map() }, isoAt(0), source);
+  assert.equal(report.measurement.measured, false);
+  assert.equal(report.measurement.resolution, 'none');
+  assert.deepEqual(report.measurement.candidates, ['/a', '/b']);
+  const out = renderMarkdownTable(report);
+  assert.match(out, /NOT MEASURED/, 'the banner must state that nothing was collected');
+  assert.match(out, /\/a, \/b/, 'candidate dirs must be named so the fix is one flag away');
+  assert.ok(out.indexOf('NOT MEASURED') < out.indexOf('| Phase'),
+    'the banner must sit ABOVE the table — someone skimming to the total must hit it first');
+});
+
+// Measured against the real chart-skill cost log: phase-1-setup was never
+// closed, so its window ran to `now` and the same log reported $16.62 on
+// 2026-07-31 and $25.51 on 2026-08-05 — five days of unrelated transcripts from
+// the same projects dir. A growing number that looks like a measurement is
+// worse than an obvious zero.
+test('buildReport: an unclosed phase is named, and the banner survives a measured run', () => {
+  const state = {
+    schema_version: '1.0', cwd: '/fake/cwd',
+    phases: [
+      { phase: 'lite', startedAt: isoAt(0), endedAt: isoAt(5) },
+      { phase: 'phase-1-setup', startedAt: isoAt(10), endedAt: null },
+    ],
+  };
+  const perPhase = new Map([['phase-1-setup', new Map([['claude-sonnet-4-5', {
+    inputTokens: 1, outputTokens: 1, cacheReadTokens: 0,
+    cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
+  }]])]]);
+  const source = { dir: '/fake/projects', rule: 'flag', exists: true, candidates: [] };
+  const report = buildReport(state, { perPhase, unknownModels: new Map() }, isoAt(20), source);
+  assert.deepEqual(report.measurement.openPhases, ['phase-1-setup']);
+  assert.equal(report.measurement.measured, true);
+  const out = renderMarkdownTable(report);
+  assert.match(out, /OPEN PHASE — phase-1-setup never ended/,
+    'a measured-but-unbounded run must still warn — this is the case that silently inflates');
+});
+
+test('buildReport: a run with every phase closed carries no open-phase banner', () => {
+  const state = {
+    schema_version: '1.0', cwd: '/fake/cwd',
+    phases: [{ phase: 'lite', startedAt: isoAt(0), endedAt: isoAt(5) }],
+  };
+  const source = { dir: '/fake/projects', rule: 'flag', exists: true, candidates: [] };
+  const report = buildReport(state, { perPhase: new Map(), unknownModels: new Map() }, isoAt(20), source);
+  assert.deepEqual(report.measurement.openPhases, []);
+  assert.doesNotMatch(renderMarkdownTable(report), /OPEN PHASE/);
+});
+
+test('buildReport: a run that actually collected usage is marked measured', () => {
+  const state = {
+    schema_version: '1.0', cwd: '/fake/cwd',
+    phases: [{ phase: 'lite', startedAt: isoAt(0), endedAt: isoAt(10) }],
+  };
+  const perPhase = new Map([['lite', new Map([['claude-sonnet-4-5', {
+    inputTokens: 10, outputTokens: 20, cacheReadTokens: 0,
+    cacheCreation5mTokens: 0, cacheCreation1hTokens: 0,
+  }]])]]);
+  const source = { dir: '/fake/projects', rule: 'cwd-slug', exists: true, candidates: [] };
+  const report = buildReport(state, { perPhase, unknownModels: new Map() }, isoAt(20), source);
+  assert.equal(report.measurement.measured, true);
+  assert.doesNotMatch(renderMarkdownTable(report), /NOT MEASURED/);
 });
 
 // ---------------------------------------------------------------------------
@@ -357,7 +428,11 @@ test('CLI: report against a missing projects dir writes a zero-row report and ex
       CLI, 'report', '--state', statePath, '--projects-dir', missingProjectsDir,
     ], { encoding: 'utf8' });
     assert.equal(rr.status, 0, `stderr: ${rr.stderr}`);
-    assert.match(rr.stderr, /projects dir not found/);
+    // Exit 0 stands — instrumentation must never gate the pipeline — but the
+    // run must announce itself as unmeasured rather than reporting a clean $0.
+    assert.match(rr.stderr, /NOT MEASURED/);
+    assert.match(rr.stdout, /NOT MEASURED/);
+    assert.match(rr.stdout, /Projects dir not found/);
     assert.match(rr.stdout, /\*\*Total\*\* \| 0 \| 0 \| 0 \| 0 \| \$0\.0000/);
 
     const report = JSON.parse(readFileSync(join(dir, 'cost-report.json'), 'utf8'));

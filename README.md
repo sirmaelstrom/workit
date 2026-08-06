@@ -75,7 +75,7 @@ Once installed, the skills trigger by description (e.g. "write a spec for…", "
 
 This is a personal plugin, so a few skills assume my environment:
 
-- **Output location.** Several skills write artifacts to `./outputs/{category}/` (relative to your working directory) by default. That's a documented convention, not a hard dependency — I personally redirect it to a canonical "data brain" via my own global config; adjust to taste if you adopt these skills.
+- **Output location.** Several skills write artifacts to `{workspace}/data/outputs/{category}/`, where `{workspace}` is the workspace root — the directory containing `projects/` and `data/`. It resolves from `--workspace-root` where a script takes one, else `WORKIT_WORKSPACE_ROOT`, else your current working directory; the skill states which rule it used before writing. Set the env var if you keep your artifacts somewhere other than the cwd. Full rule: [`reference/patterns/worktree-rooting.md`](reference/patterns/worktree-rooting.md) § Output Rooting.
 - **Pattern library.** The methodology these skills draw on is bundled in [`reference/`](./reference/) — patterns, checklists/conventions, templates, and heuristics. `spec`, `spec-validate`, and `execute-wp` read from it at runtime (`reference/patterns/`, `reference/templates/`). No external repo needed.
 - **`skills.db`.** `audit-skills` and `eval-loop` read/write a local SQLite inventory seeded by `scripts/init-skills-db.mjs` (uses Node's native `node:sqlite`, so Node 24+). The DB is git-ignored.
 - **Optional integrations.** `eval-loop`'s automation scripts can post to a Discord webhook (`DISCORD_WEBHOOK_URL`) and mirror results to a ledger endpoint (`LEDGER_URL`). Both are off unless you set those env vars.

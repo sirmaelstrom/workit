@@ -5,7 +5,7 @@ tags: [verification, quality, ui, accessibility]
 variables:
   spec_path:
     label: Spec prompt path
-    placeholder: "e.g., ./outputs/workshops/dispatch-form/work-packages/wp-03-ui.md"
+    placeholder: "e.g., {workspace}/data/outputs/workshops/dispatch-form/work-packages/wp-03-ui.md"
   project:
     label: Project path
     placeholder: "e.g., ~/projects/your-project"
