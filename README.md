@@ -17,7 +17,7 @@ Two layers:
 
 ### Skills
 
-Seventeen skills, grouped by what they're for:
+Eighteen skills, grouped by what they're for:
 
 ### Specify & plan
 | Skill | What it does |
@@ -29,13 +29,14 @@ Seventeen skills, grouped by what they're for:
 | `grill-me` | Stress-test a plan or idea — poke holes before you commit. |
 | `parallel-explore` | Fan a design problem out into intentionally different agent runs, then synthesize a ranked decision. |
 | `prototype` | Spike throwaway code — logic or UI — to answer a specific design question before you commit. |
+| `wait-what` | Restate the last explanation in short declarative sentences grounded in the project's own vocabulary. |
 
 ### Execute
 | Skill | What it does |
 |-------|--------------|
 | `execute-wp` | Execute a work package from a spec, appending to a progress log as it goes. |
 | `handoff` | Compact a conversation into a handoff doc so a fresh agent can pick up the work. |
-| `pickup` | Resume the current project's top roadmap quest from the Spine — resume note + cartridge artifacts, then continue. |
+| `pickup` | Resume the current project's top roadmap quest from the Spine — resume note + cartridge artifacts, claim the quest on the board, then continue. |
 | `commit-msg` | Commit via a file (`git commit -F`) so shell-active content — backticks, links, quotes — lands verbatim instead of breaking under HEREDOC parsing. |
 | `codex-delegate` | Route token-hungry grunt work (repo audits, large-doc extraction, broad scans) to `codex exec` with a self-contained prompt and a distilled-only handback, keeping bulk tokens out of the conductor's context. |
 
