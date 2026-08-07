@@ -19,6 +19,8 @@ Review a target with complexity-driven depth and dynamic reviewer composition. T
 
 If the argument is missing AND auto-detection is ambiguous, ask the user which target to review before proceeding.
 
+**Lighter option for a routine PR:** this skill is the in-session multi-reviewer pipeline — several Opus subagents, waves, convergence tracking. When the target is a single-surface PR you were about to merge on your own say-so, `slim-review` runs one external reviewer, posts its findings to the PR as line-anchored comments, and adjudicates them thread by thread at $0. Prefer it at routine PR boundaries and keep this skill for when several perspectives are genuinely worth the run.
+
 **Prompt templates:** Read from `${CLAUDE_SKILL_DIR}/reference/prompt-templates.md`
 **Archetype library:** Read from `${CLAUDE_SKILL_DIR}/reference/reviewer-archetypes.md`
 

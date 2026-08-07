@@ -45,6 +45,7 @@ Nineteen skills, grouped by what they're for:
 | Skill | What it does |
 |-------|--------------|
 | `review` | Adaptive multi-reviewer pipeline over a PR, branch, working tree, file, or plan. |
+| `slim-review` | The light tier: one external reviewer at a PR boundary, posted as line-anchored GitHub review comments, then confirmed or refuted thread by thread. Cheap enough to run on every PR. |
 | `improve-architecture` | Find code smells and make a codebase more agent-friendly and testable. |
 | `diagnose` | Force environmental / process / config / code-path hypotheses into an explicit verification flow before editing. |
 
