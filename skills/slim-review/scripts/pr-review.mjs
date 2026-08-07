@@ -36,9 +36,11 @@ import { pathToFileURL } from 'node:url';
 // ---------------------------------------------------------------------------
 
 /**
- * `gh` is a shim on Windows (gh.cmd/gh.exe) and execFileSync cannot launch a
- * .cmd directly, so go through the shell — but pass arguments as an array so
- * nothing user-supplied is ever concatenated into a command string.
+ * Never pass `shell: true` here. `gh` ships as a real executable on every
+ * platform (`gh.exe` on Windows, not a .cmd shim), so execFileSync launches it
+ * directly — and with a shell in the way, Node concatenates the argv instead of
+ * escaping it, which silently mangles any argument containing newlines or
+ * quotes. The GraphQL query in `threads` is exactly such an argument.
  */
 export function gh(args, { input, cwd } = {}) {
   return execFileSync('gh', args, {
@@ -46,7 +48,6 @@ export function gh(args, { input, cwd } = {}) {
     cwd,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-    shell: process.platform === 'win32',
     windowsHide: true,
   });
 }
@@ -118,6 +119,26 @@ export function parseDiff(diffText) {
     }
   }
   return files;
+}
+
+/**
+ * Count the files this PR changes — every one, not just the ones a comment can
+ * anchor to.
+ *
+ * This is deliberately NOT `parseDiff(...).size`. A deleted file has no
+ * post-change side, and a binary or pure-rename change has no hunk at all, so
+ * none of them appear in the commentable map — but all of them are changed
+ * files, and the reviewer's `examined N of M` claim counts them. Conflating the
+ * two made a truthful reviewer fail the coverage check on any PR that deleted a
+ * file. Every changed file gets exactly one `diff --git` header, so that is the
+ * count.
+ */
+export function countChangedFiles(diffText) {
+  let n = 0;
+  for (const raw of String(diffText).split(/\r?\n/)) {
+    if (raw.startsWith('diff --git ')) n++;
+  }
+  return n;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,9 +321,11 @@ function cmdPost(opts) {
   const doc = loadFindings(opts.findings);
   const repo = resolveRepo(opts.repo, opts.cwd);
 
-  const diffFiles = parseDiff(ghOrDie(['pr', 'diff', String(opts.pr), '--repo', repo], { cwd: opts.cwd }));
+  const diffText = ghOrDie(['pr', 'diff', String(opts.pr), '--repo', repo], { cwd: opts.cwd });
+  const diffFiles = parseDiff(diffText);
+  const changedFileCount = countChangedFiles(diffText);
   const { anchored, offDiff, offLine } = partitionFindings(doc.findings, diffFiles);
-  const coverageCheck = checkCoverage(doc.coverage, diffFiles.size);
+  const coverageCheck = checkCoverage(doc.coverage, changedFileCount);
 
   const payload = buildReviewPayload({
     summary: doc.summary,
@@ -315,7 +338,7 @@ function cmdPost(opts) {
 
   console.log(`repo           ${repo}`);
   console.log(`pr             #${opts.pr}`);
-  console.log(`changed files  ${diffFiles.size}`);
+  console.log(`changed files  ${changedFileCount} (${diffFiles.size} with commentable lines)`);
   console.log(`findings       ${doc.findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiff.length} off-diff`);
   console.log(`coverage       ${coverageCheck.ok ? 'OK' : `FAILED — ${coverageCheck.reason}`}`);
   for (const f of offDiff) {

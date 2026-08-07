@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   parseDiff,
+  countChangedFiles,
+  gh,
   partitionFindings,
   checkCoverage,
   validateFindingsShape,
@@ -76,6 +78,43 @@ test('parseDiff handles several hunks in one file', () => {
 test('parseDiff tolerates CRLF input', () => {
   const files = parseDiff(DIFF.replace(/\n/g, '\r\n'));
   assert.deepEqual([...files.get('src/a.ts')].sort((x, y) => x - y), [10, 11, 12, 13]);
+});
+
+// ---------------------------------------------------------------------------
+// countChangedFiles — must NOT be parseDiff().size
+// ---------------------------------------------------------------------------
+
+test('countChangedFiles counts every changed file', () => {
+  assert.equal(countChangedFiles(DIFF), 2);
+});
+
+test('countChangedFiles counts a deleted file, which has no commentable side', () => {
+  const del = ['diff --git a/gone.ts b/gone.ts', '--- a/gone.ts', '+++ /dev/null', '@@ -1,2 +0,0 @@', '-a', '-b'].join('\n');
+  assert.equal(parseDiff(del).size, 0, 'nothing is commentable on a deletion');
+  assert.equal(countChangedFiles(del), 1, 'but it is still a changed file');
+  // The bug this pins: a truthful reviewer must not fail coverage on a deletion.
+  assert.equal(checkCoverage('examined 1 of 1 changed files', countChangedFiles(del)).ok, true);
+  assert.equal(checkCoverage('examined 1 of 1 changed files', parseDiff(del).size).ok, false);
+});
+
+test('countChangedFiles counts a binary file, which produces no hunk', () => {
+  const bin = [
+    'diff --git a/img.png b/img.png',
+    'index 111..222 100644',
+    'Binary files a/img.png and b/img.png differ',
+  ].join('\n');
+  assert.equal(parseDiff(bin).size, 0);
+  assert.equal(countChangedFiles(bin), 1);
+});
+
+test('countChangedFiles counts a pure rename, which produces no hunk', () => {
+  const ren = [
+    'diff --git a/old.ts b/new.ts',
+    'similarity index 100%',
+    'rename from old.ts',
+    'rename to new.ts',
+  ].join('\n');
+  assert.equal(countChangedFiles(ren), 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -232,6 +271,19 @@ test('parseArgs reads the post form', () => {
 // ---------------------------------------------------------------------------
 // Exit codes — the distinction the whole loop rests on
 // ---------------------------------------------------------------------------
+
+test('gh() never spawns through a shell — a shell concatenates argv instead of escaping it', () => {
+  // Pinning the exact regression this file was born from: with `shell: true`,
+  // Node joins the argv into one command string, so the multi-line GraphQL query
+  // in `threads` arrived at gh as fragments and it reported "A query attribute
+  // must be specified". gh is a real executable everywhere (gh.exe on Windows),
+  // so no shell is needed. Source-level assertion — the behavioral proof is that
+  // `threads` returns real data, which needs a live PR.
+  const src = readFileSync(SCRIPT, 'utf8');
+  const body = src.slice(src.indexOf('export function gh('), src.indexOf('function ghOrDie('));
+  assert.doesNotMatch(body, /shell\s*:/, 'gh() must not pass a shell option to execFileSync');
+  assert.equal(typeof gh, 'function');
+});
 
 function runCli(args) {
   try {

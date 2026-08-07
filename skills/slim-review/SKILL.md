@@ -160,6 +160,11 @@ run by hand, and it is the half no script can do.
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" threads --pr <n> --unresolved
 ```
 
+This lists **every** unresolved review thread on the PR, not only the ones this
+loop just posted — a human's or a bot's open comment deserves the same verdict,
+and a PR whose threads are all answered is the actual merge-ready condition. If
+you need to tell them apart, `post` printed the URL of the review it created.
+
 For **each** thread, in order:
 
 1. **Verify against the code, not the claim.** Open the cited file and the paths
