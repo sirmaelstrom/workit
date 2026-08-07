@@ -26,10 +26,30 @@ Apply the self-containment gate first, then select the least expensive surface t
 | Target | Choose it when | Cost / effort posture | Do not choose it for |
 |---|---|---|---|
 | **Codex** (`codex`, currently Terra at high) | Default for codebase audits, difficult bounded implementation, repair, or verification where stronger leaf reasoning lowers retry risk | **$0 marginal**, ChatGPT-plan covered; high reasoning; proven 88x conductor-token saving | Fan-out that may exhaust plan throughput; work requiring conductor context |
-| **Luna** (`codex-luna` in the Codex harness; `luna` where an API agent runner exists) | High-volume, repetitive, well-specified leaf grunt: mechanical edits, test generation, extraction, classification, or many independent small checks | Lowest-cost GPT-5.6 tier; medium reasoning by default; agents-only posture | Architecture, ambiguous diagnosis, synthesis across leaf results, direct conversational work |
+| **Luna** (`codex-luna` in the Codex harness; `luna` where an API agent runner exists) | High-volume, repetitive, well-specified leaf grunt: mechanical edits, test generation, extraction, classification, or many independent small checks | **Also $0** through the Codex harness — 43% faster, ~15% fewer plan tokens; medium reasoning by default | Architecture, ambiguous diagnosis, synthesis across leaf results, direct conversational work — **and any verdict about safety or correctness** (see threshold) |
 | **Grok** (`grok`) | Bounded code-centric leaf work where concise/token-efficient execution matters and metered spend is acceptable | Metered xAI; low/medium/high effort, native default high | Orchestration, planning, broad synthesis, or any task whose runner lacks filesystem/tool access |
 
-**Default to Codex** when two targets fit: $0 marginal cost dominates. Prefer Luna when volume and task simplicity matter more than maximum leaf reasoning. Prefer Grok only for a deliberate metered comparison or when Codex capacity/availability is the constraint.
+Prefer Grok only for a deliberate metered comparison or when Codex capacity/availability is the constraint.
+
+### The Terra-vs-Luna threshold (measured)
+
+**Do not pick between Terra and Luna on cost — they are the same $0 plan-covered channel.** Luna buys wall-clock and plan capacity, and pays in silent incompleteness. Measured 2026-08-07, both tiers on a byte-identical whole-repo audit (`outputs/workshops/codex-delegation-pattern/luna-arm-measurement.md`):
+
+| Choose | For | Evidence |
+|---|---|---|
+| **Terra @ high** | Any output that is a **verdict about safety or correctness** — audits, "is X guarded", pre-merge verification, anything where a miss ships a bug | Luna returned a **confident wrong PASS on 2 of 9 examined stores (22%)**, citing real code at real line numbers. Terra found 3 genuine defects that both Luna and the July baseline called clean |
+| **Luna @ medium** | **Enumeration and extraction** whose output is mechanically checkable — inventories, find-all-X, classification, bulk mechanical edits | 141 s vs 249 s (**−43%**), 79k vs 93k leaf tokens (**−15%**), full recall of the known defect set |
+
+**A wrong verdict and a wrong locator both arrive in the register of a verified finding.** Luna's three failure modes — 25% silent store-coverage shortfall, 22% false PASS, one hallucinated directory — were *all invisible in a handback that read as complete*.
+
+### Assert the handback (both tiers, non-negotiable)
+
+The conductor never reads the files, so the handback's coverage and locators **are** the deliverable. Two checks, each ~one line, catch every mechanical failure observed:
+
+1. **Demand a coverage statement** and compare it to ground truth: end every prompt with *"Close with: examined N of M files matching `<glob>`."* Then `find` the glob and check N against M. Luna silently skipped 3 async-bearing stores; Terra silently skipped every leaf component under `lib/components/` by reading "island/store" literally. **The same assertion catches both** — neither is a tier-specific flaw.
+2. **Grep every cited path against the filesystem** before acting on a finding or passing it upward. A hallucinated directory turns a correct finding into one you must re-derive — spending exactly the tokens the delegation saved.
+
+*(This is the delegation-side instance of the closed-output lesson from the leaf-task inventory: the closed frame makes failure **detectable**, not output **trustworthy**. Nothing detects it unless you run the check.)*
 
 ### Availability gate
 
@@ -95,9 +115,14 @@ pattern/term, because you have no other context>.
 
 Return DISTILLED findings only:
 - <exact output structure: e.g. "file path — pattern # — one-line evidence — line ref">
-- End with a one-line coverage statement (what you examined).
+- Close with EXACTLY: "examined N of M files matching <glob>" — the real counts.
 - Maximum <N> lines total. Do NOT include file contents or raw data.
 ```
+
+The coverage line is load-bearing, not politeness: it is the only thing that makes an
+incomplete audit distinguishable from a clean one. Check its N against your own `find`,
+and grep every returned path against the filesystem — both tiers have been measured
+silently skipping files and citing at least one directory that does not exist.
 
 ### Reading the result
 
@@ -108,6 +133,7 @@ Codex prints a header, the transcript, and a `tokens used` line. The final assis
 - Conductor→Codex/Terra or Codex/Luna delegation is **pure arbitrage** when the CLI is plan-covered: expensive-channel tokens saved, $0 marginal spend on the sub.
 - API Luna and Grok are metered. Their lower token prices do not beat $0; use them for throughput, availability, or deliberate comparative evidence—not by default.
 - The ChatGPT Plus tier has real (unpublished) throughput limits. Treat this as a **spillover valve, not a workhorse** — one heavy delegation at a time, not a fan-out of dozens.
+- **The scarce resource is plan capacity, not dollars.** Between two $0 channels there is no dollar axis to optimize; budget in leaf tokens and wall-clock instead. Measured on one whole-repo audit: Terra 93,353 tok / 249 s vs Luna 79,431 tok / 141 s — and both roughly half the 197,290 the same task cost on gpt-5.5 in July, a model-generation gain rather than a tier effect.
 
 ## Anti-patterns
 
@@ -121,5 +147,7 @@ Codex prints a header, the transcript, and a `tokens used` line. The final assis
 <supporting_info>
 
 *Origin: codex-delegation-pattern workshop (spec-LITE, 2026-07-04), quest `cb3ce3e7`; roster expansion quest `93d32058` (2026-07-10). Mechanism proven in Observatory's `CodexCliProvider` and the review council's lead lens. Measurement gate (D5) run 2026-07-06: `outputs/workshops/codex-delegation-pattern/measurement.md` — 177,307 → ~2,020 conductor tokens (98.9%, ~88x) with the same 4/4 defect set.*
+
+*Terra-vs-Luna threshold measured 2026-08-07, quest `a170a58d`: `outputs/workshops/codex-delegation-pattern/luna-arm-measurement.md` — both tiers re-run same-day on a byte-identical prompt (the D5 baseline's `gpt-5.5` + `--sandbox read-only` invocation is no longer reproducible). Directional, n=1 run per arm.*
 
 </supporting_info>
