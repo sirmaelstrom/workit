@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "coverage", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "One-paragraph verdict on the change as a whole. Becomes the PR review body."
+    },
+    "coverage": {
+      "type": "string",
+      "description": "Exactly: examined N of M changed files. Real counts — this is checked against the PR diff."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Correctness defects only. Empty array is a valid, meaningful answer.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "path", "line", "body"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["P1", "P2", "P3"],
+            "description": "P1 blocks merge, P2 should be resolved, P3 is advisory."
+          },
+          "title": {
+            "type": "string",
+            "description": "One line, imperative — what to change."
+          },
+          "path": {
+            "type": "string",
+            "description": "Repository-relative path, forward slashes. Must be a file this PR changes."
+          },
+          "line": {
+            "type": "integer",
+            "description": "Line number in the post-change file, inside this PR's diff."
+          },
+          "body": {
+            "type": "string",
+            "description": "The evidence: what breaks, on what input, and why the change causes it."
+          }
+        }
+      }
+    }
+  }
+}
