@@ -22,9 +22,15 @@ ruling that binds a later item.
    *subsequent* item cheaper first — tooling and protocol fixes before the work
    that will use them. Cross-campaign selection is the point; grouping by
    campaign is what makes a queue slow.
-3. **Mint a run anchor quest.** Run-level receipts and observations land there;
+3. **Read each note's own verb before queueing.** A note that says *decide* is a
+   decision item — route it to an operator sitting, not the queue. No amount of
+   throughput or lane parallelism converts a decision into a build item; run 4
+   composed three of them as its pilot and the pilot had no payload. Phase does
+   not discriminate here (pickup flips it) — the note text does.
+4. **Mint a run anchor quest.** Run-level receipts and observations land there;
    per-item receipts land on each item's own quest.
-4. **Write the run doc.** Its cargo is *only* what the board cannot hold:
+5. **Write the run doc** — instantiate `reference/templates/run-log.md` (this
+   plugin). Its cargo is *only* what the board cannot hold:
 
    | Keep | Leave to the board |
    |---|---|
@@ -47,11 +53,30 @@ ruling that binds a later item.
    workspace-relative locators, verbatim needles. Blocked? `outcome:
    "needs_input"` with the **exact** blocking question, never smuggled into
    `stoppedAt`. That is what summons the operator; a quest sitting silently is
-   not a question.
-3. **Land it.** Stop at the **PR boundary** — merge is the operator's go unless
+   not a question. **Refutation is a valid outcome:** an item whose note does
+   not survive re-derivation is handed back *refuted* with the evidence
+   receipted, not built — across runs 3–4 the note was wrong or stale more
+   often than it was right.
+3. **Review at the tier the change raises — never the diff size.**
+   - **T0 — no review.** Docs, config, comments, mechanical renames, with a
+     green build.
+   - **T1 — `slim-review`.** The default for any code diff (one external lens
+     at the PR boundary).
+   - **T2 — full council.** Fired when the change **touches a contract or an
+     invariant**, or **adds tests that claim to prove something**. T1 asks
+     whether the diff is correct; T2 asks whether it was *permitted* — the
+     class T1 structurally cannot see.
+
+   Two rules with receipts: **never downgrade a fired T2 trigger** (the one
+   measured downgrade would have cost 10 confirmed defects — run-4 ruling 8,
+   held three times), and **a round that produced nontrivial amendments has
+   not converged until something checks the amendments** — cheapest forms: run
+   the suite in the mode the feature adds, or a challenge grounded against the
+   *amended* tree (ruling 9, held twice).
+4. **Land it.** Stop at the **PR boundary** — merge is the operator's go unless
    they have said otherwise. Then close out via `pickup`'s closeout: `done` +
    `landed` + artifacts, with `ripple` in the response as the read-back.
-4. **Log one observation** to the run doc. Append-only, never rewrite.
+5. **Log one observation** to the run doc. Append-only, never rewrite.
 
 ## Standing rules (write these once; do not re-transmit per handoff)
 
@@ -107,3 +132,15 @@ Count **every instance where the operator had to supply state the board or the
 run doc should have held.** That number is the run's real score; items landed is
 just throughput. Zero means the substrate carried the run. A non-zero is not a
 scolding — it names precisely which surface to fix before the next one.
+
+Second count: **catches by watcher position.** For every defect found after its
+author believed the work done, record which position caught it (external lens,
+contract-reading council, challenge grounded on the amended tree, runtime probe,
+fleet-idle conductor, operator) and which positions it had already escaped. A
+landing checked only from the author's own vantage is *unmeasured*, not clean —
+and repeat passes from the same position do not accumulate independence: run 4's
+twin lanes reached the same wrong verdict by the same sound method. Expect a
+nonzero post-landing escape rate (run 4's obs#457: a wrong remedy survived five
+watcher classes *because it works*); the response to an escape is another
+watcher position, not a resolution to be more careful. No percentages — the
+misses never seen can't be counted, and positions are the actionable unit.
