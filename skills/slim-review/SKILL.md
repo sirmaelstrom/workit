@@ -17,7 +17,7 @@ end up attached to the line they are about, where review and merge already happe
 
 | Reach for | When | Cost |
 |---|---|---|
-| **this skill** | Every PR boundary. Single-surface changes, burn-down items, anything you were about to merge on your own say-so | $0 plan-covered, one spawn, ~2–5 min |
+| **this skill** | Every code-diff PR boundary. Single-surface changes, burn-down items, anything you were about to merge on your own say-so. (Burn-down's T0 — docs/config/mechanical with a green build — is the one named exception) | $0 plan-covered, one spawn, ~2–5 min |
 | `/review` | You want several perspectives in-session and a convergence read before opening a PR | in-session Opus subagents |
 | `council_review` (review-council MCP) | Complex multi-component PRs and spec surfaces — fan-out, synthesis, adversarial challenge | 4–6 lenses |
 

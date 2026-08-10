@@ -56,16 +56,23 @@ ruling that binds a later item.
    not a question. **Refutation is a valid outcome:** an item whose note does
    not survive re-derivation is handed back *refuted* with the evidence
    receipted, not built — across runs 3–4 the note was wrong or stale more
-   often than it was right.
+   often than it was right. A refuted item still gets its board closeout
+   (`done` + `landed`, the refuting receipt as the evidence) — refuted is an
+   *outcome recorded in the receipt*, not a lingering open state.
 3. **Review at the tier the change raises — never the diff size.**
    - **T0 — no review.** Docs, config, comments, mechanical renames, with a
-     green build.
+     green build. This tier exists so the policy is credible — it is the
+     deliberate, named exception to `slim-review`'s every-PR-boundary default.
    - **T1 — `slim-review`.** The default for any code diff (one external lens
      at the PR boundary).
    - **T2 — full council.** Fired when the change **touches a contract or an
      invariant**, or **adds tests that claim to prove something**. T1 asks
      whether the diff is correct; T2 asks whether it was *permitted* — the
-     class T1 structurally cannot see.
+     class T1 structurally cannot see. Where the review-council MCP is not
+     available (it is a private backend, not shipped with this plugin), the
+     manual multi-model workflow in `reference/patterns/review-council.md` is
+     the portable T2 path — T2's requirement is independent lenses plus an
+     adversarial pass, not that specific server.
 
    Two rules with receipts: **never downgrade a fired T2 trigger** (the one
    measured downgrade would have cost 10 confirmed defects — run-4 ruling 8,
@@ -76,7 +83,10 @@ ruling that binds a later item.
 4. **Land it.** Stop at the **PR boundary** — merge is the operator's go unless
    they have said otherwise. Then close out via `pickup`'s closeout: `done` +
    `landed` + artifacts, with `ripple` in the response as the read-back.
-5. **Log one observation** to the run doc. Append-only, never rewrite.
+5. **Log one row to the run doc per stop — on every exit, not only landings.**
+   Landed, refuted, blocked, and dropped all get their row (the template's
+   event vocabulary names them); a blocked item exits at step 2 and still owes
+   its row before you move on. Append-only, never rewrite.
 
 ## Standing rules (write these once; do not re-transmit per handoff)
 
