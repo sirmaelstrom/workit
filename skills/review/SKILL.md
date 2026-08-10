@@ -1,6 +1,6 @@
 ---
 name: review
-description: "Review a target with adaptive multi-reviewer pipeline. Targets: GitHub PR, local branch (pre-PR), working tree, file/directory, plan/spec. Triggered by '/review', '/review <PR-URL>', '/review #<num>', '/review branch[:<name>]', '/review wt', '/review file <path>', '/review plan <path>', or 'review my branch / plan / changes'. Runs complexity-driven tiering, dynamic reviewer composition, convergence tracking, and optional persistence."
+description: "Review a target with an adaptive multi-reviewer pipeline: GitHub PR, local branch (pre-PR), working tree, file/directory, or plan/spec. Triggered by '/review', '/review <PR-URL>', '/review #<num>', '/review branch[:<name>]', '/review wt', '/review file <path>', '/review plan <path>', or 'review my branch / plan / changes'. Not for a single-lens pass at a PR boundary — use slim-review for that."
 model: opus
 ---
 

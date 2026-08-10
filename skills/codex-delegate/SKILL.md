@@ -1,6 +1,6 @@
 ---
 name: codex-delegate
-description: "Delegate self-contained, token-hungry leaf work to the cheapest fitting agent (Codex/Terra, Luna, or Grok) instead of absorbing it into the conductor's context. Use for whole-repo or large-directory audits, large-document extraction, broad searches, repetitive implementation, test repair, or other bounded leaf tasks whose bulk tokens do not need the conductor's accumulated context. Also trigger when the user says 'delegate', 'offload this', 'use codex/luna/grok', or 'don't burn your context on this'."
+description: "Offload a bounded whole-repo audit, broad search, bulk extraction, or repetitive mechanical edit to a plan-covered CLI agent (codex exec — Terra or Luna) instead of reading every file yourself. Use BEFORE you open ~10 files to produce one short answer, even if nobody says 'delegate' or 'offload'. Not for PR review (use slim-review), work needing this session's decisions, or edits to a repo you are mid-edit on."
 ---
 
 # Model-Aware Delegate — Route Leaf Work Off the Expensive Channel
@@ -27,9 +27,13 @@ Apply the self-containment gate first, then select the least expensive surface t
 |---|---|---|---|
 | **Codex** (`codex`, currently Terra at high) | Default for codebase audits, difficult bounded implementation, repair, or verification where stronger leaf reasoning lowers retry risk | **$0 marginal**, ChatGPT-plan covered; high reasoning; proven 88x conductor-token saving | Fan-out that may exhaust plan throughput; work requiring conductor context |
 | **Luna** (`codex-luna` in the Codex harness; `luna` where an API agent runner exists) | High-volume, repetitive, well-specified leaf grunt: mechanical edits, test generation, extraction, classification, or many independent small checks | **Also $0** through the Codex harness — 43% faster, ~15% fewer plan tokens; medium reasoning by default | Architecture, ambiguous diagnosis, synthesis across leaf results, direct conversational work — **and any verdict about safety or correctness** (see threshold) |
-| **Grok** (`grok`) | Bounded code-centric leaf work where concise/token-efficient execution matters and metered spend is acceptable | Metered xAI; low/medium/high effort, native default high | Orchestration, planning, broad synthesis, or any task whose runner lacks filesystem/tool access |
 
-Prefer Grok only for a deliberate metered comparison or when Codex capacity/availability is the constraint.
+**Grok is off the delegation roster (operator decision, 2026-08-10).** It is metered
+xAI spend, and liberal delegation was trending toward **$25–50/month** for work two
+plan-covered channels already do. Both tiers above are $0 marginal — there is no
+delegation case that justifies paying for a third. Do not reach for Grok here even
+if a `grok` alias is registered and looks available; if Codex capacity is the
+constraint, wait or narrow the task rather than spending.
 
 ### The Terra-vs-Luna threshold (measured)
 
@@ -56,7 +60,7 @@ The conductor never reads the files, so the handback's coverage and locators **a
 Do not confuse a registered Observatory/Dogan alias with a subprocess the current host can spawn.
 
 - `codex` and `codex-luna` are actionable from an interactive coding session through `codex exec`.
-- `grok` is actionable only when the host exposes an xAI-backed agent runner with the filesystem/tools the task needs. A plain Chat Completions call cannot inspect a repository. If that runner is absent, fall back to Codex; do not inline the repository into an API prompt and erase the token saving.
+- A registered `grok` alias is **not** a delegation target — see the roster note above. Neither is any other metered runner: if the only reachable surface is metered, do the work in the conductor or narrow it, and do not inline the repository into an API prompt (that erases the token saving *and* bills for it).
 
 ## When to Delegate — Task Shapes
 
@@ -131,7 +135,7 @@ Codex prints a header, the transcript, and a `tokens used` line. The final assis
 ## Cost posture
 
 - Conductor→Codex/Terra or Codex/Luna delegation is **pure arbitrage** when the CLI is plan-covered: expensive-channel tokens saved, $0 marginal spend on the sub.
-- API Luna and Grok are metered. Their lower token prices do not beat $0; use them for throughput, availability, or deliberate comparative evidence—not by default.
+- API Luna is metered; its lower token price does not beat $0. Prefer the Codex harness, where both tiers are plan-covered. Metered runners are not a delegation target here at all — a cheaper-per-token bill is still a bill against $0.
 - The ChatGPT Plus tier has real (unpublished) throughput limits. Treat this as a **spillover valve, not a workhorse** — one heavy delegation at a time, not a fan-out of dozens.
 - **The scarce resource is plan capacity, not dollars.** Between two $0 channels there is no dollar axis to optimize; budget in leaf tokens and wall-clock instead. Measured on one whole-repo audit: Terra 93,353 tok / 249 s vs Luna 79,431 tok / 141 s — and both roughly half the 197,290 the same task cost on gpt-5.5 in July, a model-generation gain rather than a tier effect.
 
@@ -140,7 +144,7 @@ Codex prints a header, the transcript, and a `tokens used` line. The final assis
 - Delegating a task that needs mid-session context (fails the self-containment gate) — you'll serialize the context into the prompt and spend the tokens anyway, or get a wrong answer.
 - Accepting an unbounded handback ("here's everything I found, plus the files") — the contract must cap it *before* the run.
 - Delegating planning, orchestration, or judgment — leaf agents execute well-specified work; they do not carry your session's intent.
-- Selecting Grok because its alias exists while no tool-capable Grok runner exists in the current host.
+- Reaching for a metered runner (Grok, API Luna) because its alias is registered — the roster is two plan-covered tiers, and "it was available" is not a spend rationale.
 - Piping codex's full session log or scratch files back into the conductor "for reference".
 - Using this as a parallelism engine on the $20 tier — it's a cost valve, not a compute farm.
 
