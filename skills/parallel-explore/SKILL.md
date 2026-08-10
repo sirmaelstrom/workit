@@ -1,6 +1,6 @@
 ---
 name: parallel-explore
-description: "Fan out a design or problem space into multiple intentionally different agent runs, then synthesize into a ranked decision. Use when the user says 'explore alternatives', 'parallel explore', 'design it twice', 'what are my options', wants to compare approaches, or needs to make an architectural decision between competing designs. Replaces design-alternatives with broader scope and mechanical dispatch."
+description: "Fan out a design or problem space into multiple intentionally different agent runs, then synthesize into a ranked decision. Use when the user says 'explore alternatives', 'parallel explore', 'design it twice', 'what are my options', wants to compare approaches, or needs to make an architectural decision between competing designs. Do not use for reviewing an existing implementation, or when the open question can only be settled by running code."
 ---
 
 # Parallel Explore — Forced-Divergence Design Exploration
