@@ -28,7 +28,7 @@ const bump = (obj, key, n = 1) => { obj[key] = (obj[key] || 0) + n; };
  */
 export function aggregateResults(results, manifestDigests) {
   const agg = {
-    counts: { sessions: 0, duplicateSessionsSkipped: 0, invalidEntriesSkipped: 0, failureRecords: 0, frictionEventTotal: 0 },
+    counts: { sessions: 0, duplicateSessionsSkipped: 0, invalidEntriesSkipped: 0, nonManifestEntriesSkipped: 0, failureRecords: 0, frictionEventTotal: 0 },
     verdicts: {},
     byClass: {},
     byModel: {},
@@ -36,12 +36,17 @@ export function aggregateResults(results, manifestDigests) {
     byCaught: {},
     taxonomyNotes: [],
   };
+  const manifestSet = new Set(manifestDigests ?? []);
   const seen = new Set();
   for (const r of results) {
     if (typeof r?.taxonomy_notes === 'string' && r.taxonomy_notes.trim()) agg.taxonomyNotes.push(`${r.agent ?? '?'}: ${r.taxonomy_notes.trim()}`);
     for (const s of r?.sessions ?? []) {
       // A valid contribution needs a digest AND a verdict — count those, not raw entries.
       if (!s?.digest || !s?.verdict) { agg.counts.invalidEntriesSkipped++; continue; }
+      // Calibration-leakage guard (run-1 learning): a digest outside this run's
+      // manifest — e.g. a calibration hand's re-read — must not pollute the
+      // aggregate. Skipped LOUDLY via the count, never silently.
+      if (manifestSet.size > 0 && !manifestSet.has(s.digest)) { agg.counts.nonManifestEntriesSkipped++; continue; }
       if (seen.has(s.digest)) { agg.counts.duplicateSessionsSkipped++; continue; }
       seen.add(s.digest);
       agg.counts.sessions++;
@@ -83,6 +88,7 @@ function main(argv) {
   fs.writeFileSync(path.join(runDir, 'aggregate.json'), JSON.stringify(agg, null, 2));
   console.log(`aggregate.json written: ${agg.counts.sessions} sessions, ${agg.counts.failureRecords} failure records, verdicts ${JSON.stringify(agg.verdicts)}`);
   if (agg.counts.invalidEntriesSkipped) console.log(`⚠ invalid entries skipped: ${agg.counts.invalidEntriesSkipped}`);
+  if (agg.counts.nonManifestEntriesSkipped) console.log(`⚠ non-manifest entries skipped (calibration leakage?): ${agg.counts.nonManifestEntriesSkipped}`);
   if (missing.length > 0) {
     console.error(`COVERAGE GAP — ${missing.length} manifest digest(s) with no valid audit entry:`);
     for (const d of missing) console.error(`  ${d}`);
