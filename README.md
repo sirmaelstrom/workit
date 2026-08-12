@@ -48,6 +48,7 @@ Nineteen skills, grouped by what they're for:
 | `slim-review` | The light tier: one external reviewer at a PR boundary, posted as line-anchored GitHub review comments, then confirmed or refuted thread by thread. Cheap enough to run on every PR. |
 | `improve-architecture` | Find code smells and make a codebase more agent-friendly and testable. |
 | `diagnose` | Force environmental / process / config / code-path hypotheses into an explicit verification flow before editing. |
+| `failure-audit` | Delta failure-mode audit over archived agent-session transcripts: slice new sessions into digests, fan out calibrated auditor waves, then run the standing comparisons (guard treatment check, model drift, new-label emergence). Operator-pulled, never scheduled. |
 
 ### Skill meta-tooling
 | Skill | What it does |
