@@ -71,10 +71,17 @@ auditors, hands of ~5 digests, ~5 auditors per wave, results to
 its exact output path.
 
 - **Wave 1 is calibration:** include one hand that re-audits 2 digests from the
-  *prior* run with known findings. Gate the remaining waves on recall of the
-  known findings with matching labels and verbatim quotes (baseline precedent:
-  W1E recalled 5/5). Calibration digests are re-reads — they don't join the new
-  manifest.
+  *prior* run with known findings. Prior runs may not have preserved `digests/`
+  (the baseline didn't — measured on run 1): regenerate them from the archive
+  with `slicer.mjs` into a scratch dir **outside**
+  `{workspace}/data/outputs/reviews/`, where a stray `*failure-audit*` manifest
+  would double-count them. Route the calibration hand's output to
+  `<run-dir>/calibration/`, **never** `fleet-results/` — the aggregator counts
+  what it finds there (and since run 1 skips non-manifest digests loudly).
+  Gate the remaining waves on recall of the known findings with matching labels
+  and verbatim quotes (baseline precedent: W1E 5/5; run 1: 5/6 with the miss on
+  the count-3+-instances label). Calibration digests are re-reads — they don't
+  join the new manifest.
 - **Per-wave validation before the next wave:** (a) coverage — every assigned
   digest has a session entry (count *valid* entries, not entries); (b) verbatim
   spot-check — grep one `evidence_quote` against its digest; (c) record wave

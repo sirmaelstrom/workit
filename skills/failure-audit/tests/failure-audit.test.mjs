@@ -79,11 +79,14 @@ test('aggregate: counts valid contributions, dedups digests, reports coverage ga
       ],
     },
     { agent: 'W1B', sessions: [{ digest: 'd1.md', verdict: 'clean' }] }, // duplicate digest
+    { agent: 'W1C', sessions: [{ digest: 'calib.md', verdict: 'failures_found', failures: [{ label: 'unverified-claim-or-premise' }] }] }, // calibration leakage: not in manifest
   ];
   const { agg, missing } = aggregateResults(results, ['d1.md', 'd2.md', 'd3.md']);
   assert.equal(agg.counts.sessions, 2);
   assert.equal(agg.counts.duplicateSessionsSkipped, 1);
   assert.equal(agg.counts.invalidEntriesSkipped, 1);
+  assert.equal(agg.counts.nonManifestEntriesSkipped, 1); // skipped loudly, byClass untouched
+  assert.equal(agg.byClass['unverified-claim-or-premise'], undefined);
   assert.equal(agg.counts.failureRecords, 2);
   assert.equal(agg.byClass['shell-string-code-write'], 2); // occurrences summed
   assert.equal(agg.byModel['opus-5']['shell-string-code-write'], 2); // model normalized
