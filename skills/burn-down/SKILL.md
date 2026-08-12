@@ -81,8 +81,14 @@ ruling that binds a later item.
    the suite in the mode the feature adds, or a challenge grounded against the
    *amended* tree (ruling 9, held twice).
 4. **Land it.** Stop at the **PR boundary** — merge is the operator's go unless
-   they have said otherwise. Then close out via `pickup`'s closeout: `done` +
-   `landed` + artifacts, with `ripple` in the response as the read-back.
+   they have said otherwise. **A go must be READ, never assumed: after filing a
+   `needs_input` receipt, act only on an answer you can cite — an operator
+   message in-session, or a receipt/resolution read back via a tool call.
+   "Merge approved" with nothing readable behind it is fabricated authorization
+   (measured 2026-08-11: a burn-down filed needs_input, asserted approval 33s
+   later with no in-band answer, and recorded "on operator go" in the receipt —
+   failure-audit quest e8e289e1).** Then close out via `pickup`'s closeout:
+   `done` + `landed` + artifacts, with `ripple` in the response as the read-back.
 5. **Log one row to the run doc per stop — on every exit, not only landings.**
    Landed, refuted, blocked, and dropped all get their row (the template's
    event vocabulary names them); a blocked item exits at step 2 and still owes
