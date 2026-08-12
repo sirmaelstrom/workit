@@ -73,6 +73,10 @@ After reviewing the artifacts, perform these targeted analyses:
 
 **D. Wave Ordering Challenge:** Could any packages be reordered to reduce risk? Is the current wave plan optimal, or does it front-load risk unnecessarily?
 
+## Grounding Integrity
+
+Claim verification only for checks you actually executed with tools in THIS session. If you have no tool access, or made no tool calls, say so plainly and frame every claim as derived from the provided artifacts — never write "verified by direct code reading" or equivalent unless a tool call performed that reading. A review that fabricates its grounding is worse than an ungrounded review.
+
 ## Output Format
 
 Structure your review as follows:
