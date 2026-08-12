@@ -36,8 +36,11 @@ jobs:
       - name: Install gitleaks
         env:
           GITLEAKS_VERSION: 8.30.0
+        # -f fails on HTTP errors instead of piping an error page into tar
+        # ("not in gzip format", 2026-08-12); --retry rides out CDN blips.
         run: |
-          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+          curl -fsSL --retry 3 --retry-all-errors \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin gitleaks
           gitleaks version
       - name: Scan full history
