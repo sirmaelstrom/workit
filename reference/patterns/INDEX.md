@@ -25,6 +25,9 @@ Not sequential steps — principles that govern how artifacts are written throug
 | `spec-engineering` | Umbrella philosophy — the spec is the product, code is a side effect. Quality measurement (100-point scale). | spec-engineering.md |
 | `evaluation-loop` | Post-execution quality feedback — dispatch outcomes, pattern effectiveness, regression detection. Least mature pattern; manual process today. | evaluation-loop.md |
 | `corrections-loop` | Post-failure learning — log mistakes in CLAUDE.md, graduate cross-project, prune stale corrections. | corrections-loop.md |
+| `correct-the-carrier` | Stale-claim repair — grep all carriers, fix auto-loaded surfaces first, receipt in place of warning. Distinct from corrections-loop (claims, not behavior). | correct-the-carrier.md |
+| `transition-sweep` | Retirement is a documentation event — grep outgoing vocabulary + serving config, disposition every hit at transition time. | transition-sweep.md |
+| `canonical-doc-contract` | Canonical docs point at sources of truth, never copy volatile values — ownership header, snapshot demotion. | canonical-doc-contract.md |
 | `constraint-discovery` | Domain knowledge lifecycle — discover, articulate, encode, search, validate constraints across triage, implementation, and review. | constraint-discovery.md |
 | `trust-ramp` | Autonomy graduation — systems earn trust through empirical success, demote on failure. | trust-ramp.md |
 | `review-council` | Pre-dispatch multi-model review — 3+ independent reviewers, synthesis, amendment cycle. | review-council.md |
@@ -73,5 +76,5 @@ Copyable skeletons for the key workshop files. Located in `templates/`.
 | `scope-fence` | `constraint-architecture` | scope-fence covered must-nots only (~40% of constraint space) |
 
 ---
-*20 active patterns, 4 checklists/conventions, 1 superseded, 4 artifact templates. To add: create the .md, add a row.*
+*23 active patterns, 4 checklists/conventions, 1 superseded, 4 artifact templates. To add: create the .md, add a row.*
 *Patterns evolve — append execution feedback directly to pattern files.*
