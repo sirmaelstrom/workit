@@ -30,7 +30,7 @@ Invoke when **any** of these hold:
 - The message contains a code fence or multi-line code block.
 - The message is multi-paragraph with formatting you want to land verbatim.
 
-For plain prose with no shell-active characters, the standard HEREDOC pattern is fine — don't spin up a file for those.
+For plain prose with no shell-active characters, an inline message is fine — don't spin up a file for those. (Shell-scoped note: HEREDOC is the Bash tool's inline form; in a PowerShell tool call the equivalent is a single-quoted here-string `@'…'@` with the closing `'@` at column 0. The `-F` file path below is identical under both shells — when in doubt, use the file.)
 
 ## Workflow
 
@@ -76,7 +76,7 @@ Confirm the message rendered exactly as drafted. Look for literal backslashes, b
 
 ## When NOT to use
 
-- Plain ASCII prose with no shell-active characters — HEREDOC is fine, no need to spin up a file.
+- Plain ASCII prose with no shell-active characters — an inline message (Bash HEREDOC / PowerShell single-quoted here-string) is fine, no need to spin up a file.
 - `git tag -m` / `git notes add` — those have their own `-F` mechanisms; the principle is the same but the commands differ.
 - Amending an existing commit at the user's explicit request — use `git commit --amend -F <the same message file>` with the same file-write step (worktree caveat from step 3 applies).
 
