@@ -12,12 +12,12 @@ It's published openly so it can be referenced, forked, or installed directly. It
 
 Two layers:
 
-- **`skills/`** — the active, triggerable tools (seventeen of them, below).
+- **`skills/`** — the active, triggerable tools (below).
 - **`reference/`** — the methodology library the skills draw on: patterns, checklists/conventions, templates, and heuristics. Start at [`reference/patterns/INDEX.md`](./reference/patterns/INDEX.md), or see [`reference/README.md`](./reference/README.md).
 
 ### Skills
 
-Nineteen skills, grouped by what they're for:
+Grouped by what they're for:
 
 ### Specify & plan
 | Skill | What it does |
@@ -77,6 +77,7 @@ Once installed, the skills trigger by description (e.g. "write a spec for…", "
 
 This is a personal plugin, so a few skills assume my environment:
 
+- **The Spine (roadmap board).** `pickup` and `burn-down` are built around a persistent roadmap served by a `context-ledger` MCP server (Campaign → Quest → Seam) that is part of my personal infrastructure, **not** part of this plugin — without a board they have nothing to resume or burn down. Treat those two as worked examples unless you bring your own equivalent. A few others (`handoff`, `spec`, `improve-architecture`) reference the same tools where present and work fine without them.
 - **Output location.** Several skills write artifacts to `{workspace}/data/outputs/{category}/`, where `{workspace}` is the workspace root — the directory containing `projects/` and `data/`. It resolves from `--workspace-root` where a script takes one, else `WORKIT_WORKSPACE_ROOT`, else your current working directory; the skill states which rule it used before writing. Set the env var if you keep your artifacts somewhere other than the cwd. Full rule: [`reference/patterns/worktree-rooting.md`](reference/patterns/worktree-rooting.md) § Output Rooting.
 - **Pattern library.** The methodology these skills draw on is bundled in [`reference/`](./reference/) — patterns, checklists/conventions, templates, and heuristics. `spec`, `spec-validate`, and `execute-wp` read from it at runtime (`reference/patterns/`, `reference/templates/`). No external repo needed.
 - **`skills.db`.** `audit-skills` and `eval-loop` read/write a local SQLite inventory seeded by `scripts/init-skills-db.mjs` (uses Node's native `node:sqlite`, so Node 24+). The DB is git-ignored.
