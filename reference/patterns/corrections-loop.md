@@ -39,4 +39,4 @@ Same mistake in 2+ projects → it's not project-specific, it's a general patter
 ---
 *Source: spec-driven-engineering-guide.md, CORRECTIONS.md*
 *Cross-cutting discipline — applies after any dispatch or AI-assisted work*
-*See also: `spec-engineering`, `constraint-architecture`, `evaluation-loop`, `trust-ramp`*
+*See also: `spec-engineering`, `constraint-architecture`, `evaluation-loop`, `trust-ramp`, `correct-the-carrier` (claim repair across carriers — a different failure class; bodies deliberately not merged)*
