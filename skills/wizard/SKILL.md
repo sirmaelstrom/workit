@@ -56,6 +56,6 @@ Verified 2026-08-19 under **Git Bash (MSYS2) on Windows** — 8/8 library probes
 
 ## Origin
 
-Ported from Matt Pocock's `wizard` skill — `skills/engineering/wizard/` in github.com/mattpocock/skills. MIT-licensed; `template.sh` is reproduced verbatim, so the upstream copyright and permission notice is preserved at `UPSTREAM-LICENSE` in this directory. Upstream's `agents/openai.yaml` (a 96-byte OpenAI-agents interface stub: display name + short description) was inspected 2026-08-19 and not ported — workit is a Claude Code plugin and carries that metadata in front matter. SKILL.md body kept verbatim apart from the trigger-based description line and this fenced supporting section.
+Ported from Matt Pocock's `wizard` skill — `skills/engineering/wizard/` in github.com/mattpocock/skills. MIT-licensed; `template.sh` is reproduced verbatim apart from one marked house delta (the `open_url` no-launcher branch now fails so the visible fallback warning fires — upstream's own warn was swallowed by the block's redirect; found by review on workit#35), so the upstream copyright and permission notice is preserved at `UPSTREAM-LICENSE` in this directory. Upstream's `agents/openai.yaml` (a 96-byte OpenAI-agents interface stub: display name + short description) was inspected 2026-08-19 and not ported — workit is a Claude Code plugin and carries that metadata in front matter. SKILL.md body kept verbatim apart from the trigger-based description line and this fenced supporting section.
 
 </supporting_info>
