@@ -40,6 +40,7 @@ Grouped by what they're for:
 | `pickup` | Resume the current project's top roadmap quest from the Spine — resume note + cartridge artifacts, claim the quest on the board, then continue. |
 | `commit-msg` | Commit via a file (`git commit -F`) so shell-active content — backticks, links, quotes — lands verbatim instead of breaking under HEREDOC parsing. |
 | `codex-delegate` | Route token-hungry grunt work (repo audits, large-doc extraction, broad scans) to `codex exec` with a self-contained prompt and a distilled-only handback, keeping bulk tokens out of the conductor's context. |
+| `wizard` | Generate an interactive bash wizard that walks a human through steps only they can perform — opens each URL, captures values, writes `.env`/GitHub secrets, confirms every stage. Ported from [Matt Pocock's wizard](https://github.com/mattpocock/skills/tree/main/skills/engineering/wizard); library Windows-verified under Git Bash. |
 
 ### Review & repair
 | Skill | What it does |
