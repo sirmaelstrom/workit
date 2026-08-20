@@ -27,6 +27,15 @@ ruling that binds a later item.
    throughput or lane parallelism converts a decision into a build item; run 4
    composed three of them as its pilot and the pilot had no payload. Phase does
    not discriminate here (pickup flips it) — the note text does.
+
+   The same read prices **planning depth**. An item whose note carries open
+   design forks that no measurement the session can take will settle is
+   *underdetermined* — name the proposed depth in its queue row at composition
+   (`prototype` for a logic question only running code answers, `grill-me` for
+   hole-finding, `spec` / spec-lite for real structure). A depth named in the
+   row is **pre-authorized**: the item's session invokes that skill directly
+   instead of stopping to ask. Composition is where this is cheap — the operator
+   is present and rules in seconds (run 5 took two such rulings at planning).
 4. **Mint a run anchor quest.** Run-level receipts and observations land there;
    per-item receipts land on each item's own quest.
 5. **Write the run doc** — instantiate `reference/templates/run-log.md` (this
@@ -59,6 +68,21 @@ ruling that binds a later item.
    often than it was right. A refuted item still gets its board closeout
    (`done` + `landed`, the refuting receipt as the evidence) — refuted is an
    *outcome recorded in the receipt*, not a lingering open state.
+
+   **Underdetermination found at pickup is the third exit** (alongside build and
+   refute): the note's premise fails re-derivation *beyond* an inline re-scope,
+   or a design fork surfaces that no measurement the session can take will
+   settle. Do not build on thin ground, and do not silently invoke a planning
+   skill an unattended queue never authorized — stop with `outcome:
+   "needs_input"` proposing the specific depth: *"this item needs a prototype to
+   answer X / a grilling / a spec before code — proceed at that depth?"* (Run 2
+   items 7–8 already exited this way; this names the pattern rather than adding
+   machinery.) If the queue row pre-authorized a depth at composition, invoke it
+   directly — the ruling already happened. **This is the exception path, and the
+   measured base rate says so:** run 2 had five items whose notes failed
+   re-derivation and every one re-scoped inline successfully. Escalate only when
+   the inline re-scope would itself be a guess — a burn-down that specs every
+   item is not a burn-down.
 3. **Review at the tier the change raises — never the diff size.**
    - **T0 — no review.** Docs, config, comments, mechanical renames, with a
      green build. This tier exists so the policy is credible — it is the
