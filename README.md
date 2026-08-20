@@ -48,6 +48,7 @@ Grouped by what they're for:
 | `slim-review` | The light tier: one external reviewer at a PR boundary, posted as line-anchored GitHub review comments, then confirmed or refuted thread by thread. Cheap enough to run on every PR. |
 | `improve-architecture` | Find code smells and make a codebase more agent-friendly and testable. |
 | `diagnose` | Force environmental / process / config / code-path hypotheses into an explicit verification flow before editing. |
+| `blast-radius` | Pre-ship impact analysis: find what a change breaks beyond the diff, then prove the one fact it's safe because of by running real code — anything below that rung is marked unproven. Ported from [pstack's blast-radius](https://github.com/cursor/plugins/tree/main/pstack/skills/blast-radius). |
 | `failure-audit` | Delta failure-mode audit over archived agent-session transcripts: slice new sessions into digests, fan out calibrated auditor waves, then run the standing comparisons (guard treatment check, model drift, new-label emergence). Operator-pulled, never scheduled. |
 | `unslop` | Cut AI tells from prose (puffery, filler, hedging, chatbot phrases, metaphor jargon) and put a human voice back in. Ported from [pstack's unslop](https://github.com/cursor/plugins/tree/main/pstack/skills/unslop); rule 26's jargon cut is gated on the project's `UBIQUITOUS_LANGUAGE.md`. |
 

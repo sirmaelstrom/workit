@@ -104,7 +104,11 @@ ruling that binds a later item.
    not converged until something checks the amendments** — cheapest forms: run
    the suite in the mode the feature adds, or a challenge grounded against the
    *amended* tree (ruling 9, held twice).
-4. **Land it.** Stop at the **PR boundary** — merge is the operator's go unless
+4. **Land it.** Before the PR boundary, an item whose change touches a
+   contract, wire format, or shared surface can take a `blast-radius` pass —
+   pre-ship impact analysis that hands review its proven safety fact instead of
+   a plausible writeup. Optional, and cheapest exactly when T2 is about to
+   fire. Stop at the **PR boundary** — merge is the operator's go unless
    they have said otherwise. **A go must be READ, never assumed: after filing a
    `needs_input` receipt, act only on an answer you can cite — an operator
    message in-session, or a receipt/resolution read back via a tool call.
