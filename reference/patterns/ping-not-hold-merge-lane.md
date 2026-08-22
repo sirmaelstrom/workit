@@ -19,11 +19,15 @@ Any doubt at classification time → held lane. The classification and its ratio
 
 ## Behavior at an eligible boundary
 
-1. Merge.
-2. **Ping, immediately, on two channels:** a Discord message (what merged, which criteria it passed, the exact one-command revert) and a receipt on the run anchor so the board carries it durably.
-3. Log the run-doc row with the criteria checklist.
+1. **Preflight the ping path before merging.** From a CLI session the Discord ping is the Observatory broadcast helper (`projects/heathdev-observatory/scripts/merge-ping.ps1`); run its `-Check` mode first. A broken ping path discovered before the merge is a held-lane classification, not an incident.
+2. Merge.
+3. **Ping, immediately:**
+   - **Discord** — the authorizing channel: what merged, which criteria it passed, the exact one-command revert. The helper is fail-closed: a non-zero exit means the ping did not happen.
+   - **Push notification** — additive attention layer (adopted 2026-08-22, deliberately exploratory): the merged item + short-form revert via the session's PushNotification tool. Best-effort; a skipped or failed push never blocks and never substitutes for the Discord ping.
+   - **Anchor receipt** — on the run anchor, so the board carries the merge durably.
+4. Log the run-doc row with the criteria checklist.
 
-The ping always carries the undo. A ping without a working revert command is not a ping-not-hold merge; it is an unauthorized merge.
+The Discord ping always carries the undo. A merge whose Discord ping did not deliver is not a ping-not-hold merge; it is an unauthorized one — fall back to the held lane and notify the operator directly. (Channel decision 2026-08-22, quest `799302fb`, after run 12 measured the lane inoperable from CLI sessions: Discord = authorizing + durable, push = additive; operator answers in the quest trail.)
 
 ## Explicitly out of the lane
 
