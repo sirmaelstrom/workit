@@ -1,8 +1,13 @@
 // Delta computation for the failure-audit cadence (quest 690bb912).
 //
-// COUNT CONTRACT — mirrored by Observatory's briefing detector
-// (heathdev-observatory/src/briefings/audit-backlog.ts). The two must agree;
-// run-dir manifest.json files are the shared interface. Clauses:
+// COUNT CONTRACT — the session-eligibility clauses below are the single
+// definition of "auditable session"; treatment-scan.mjs imports this module's
+// constants for the same reason. (Historical: Observatory's briefing detector
+// audit-backlog.ts mirrored this count until 2026-08-21, when scanner-first
+// retired the backlog line — quest c9c1c459; the briefing collector now calls
+// treatment-scan.mjs runScan() directly, so there is no mirror to keep in
+// agreement anymore.) Run-dir manifest.json files remain the coverage
+// interface between fleet runs. Clauses:
 //   - corpus: depth-2 `<project>/<session>.jsonl` under the transcript archive
 //     (`subagents/` subtrees are sidechains, never sessions)
 //   - minus files <= 1 KB (empty stubs)

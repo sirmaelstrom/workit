@@ -67,7 +67,7 @@ const SEARCH_CONTEXT = /(^|[|;&]\s*)(grep|rg|Select-String)\b/;
 function newWindowTally() {
   return {
     sessions: 0,
-    shellString: { instances: 0, sessions: 0, byLabel: {}, searchContextSkipped: 0 },
+    shellString: { instances: 0, sessions: 0, nonScratchInstances: 0, nonScratchSessions: 0, byLabel: {}, searchContextSkipped: 0 },
     context: { byLabel: {} },
     editBeforeRead: { events: 0, sessions: 0, sessionsAt3Plus: 0 },
   };
@@ -118,16 +118,14 @@ function poissonPAtMost(k, lambda) {
   return sum;
 }
 
-function main(argv) {
-  const args = argv.slice(2);
-  const flagAll = (n) => args.flatMap((a, i) => (a === `--${n}` && args[i + 1] ? [args[i + 1]] : []));
-  const flag = (n) => flagAll(n)[0];
-  const workspaceRoot = flag('workspace-root') || process.env.WORKIT_WORKSPACE_ROOT;
-  if (!workspaceRoot) { console.error('treatment-scan: pass --workspace-root <abs> or set WORKIT_WORKSPACE_ROOT'); process.exit(2); }
-  const epochMs = Date.parse(flag('epoch') || DEFAULT_EPOCH);
-  const excluded = new Set(flagAll('exclude-session').map((s) => `${s}.jsonl`));
+/**
+ * The scan engine — pure of process concerns (no console, no exit). Returns the
+ * report object. Callers: main() below, and Observatory's treatment-rates
+ * briefing collector (single instrument — never re-implement these patterns).
+ */
+export function runScan({ workspaceRoot, epochMs = Date.parse(DEFAULT_EPOCH), excludeSessions = [], evidencePath = null }) {
+  const excluded = new Set(excludeSessions.map((s) => (s.endsWith('.jsonl') ? s : `${s}.jsonl`)));
   const archiveDir = path.join(workspaceRoot, 'data', 'outputs', 'transcripts', 'cli-projects');
-  const evidencePath = flag('evidence');
   const evidence = evidencePath ? fs.createWriteStream(evidencePath) : null;
 
   const windows = { pre: newWindowTally(), post: newWindowTally() };
@@ -155,10 +153,10 @@ function main(argv) {
       if (s.shellHits.length) {
         w.shellString.sessions++;
         w.shellString.instances += s.shellHits.length;
-        for (const h of s.shellHits) {
-          w.shellString.byLabel[h.label] = (w.shellString.byLabel[h.label] ?? 0) + 1;
-          if (h.scratch) w.shellString.scratchTargets = (w.shellString.scratchTargets ?? 0) + 1;
-        }
+        const nonScratch = s.shellHits.filter((h) => !h.scratch);
+        if (nonScratch.length) w.shellString.nonScratchSessions++;
+        w.shellString.nonScratchInstances += nonScratch.length;
+        for (const h of s.shellHits) w.shellString.byLabel[h.label] = (w.shellString.byLabel[h.label] ?? 0) + 1;
       }
       w.shellString.searchContextSkipped += s.searchSkips;
       for (const h of s.contextHits) w.context.byLabel[h.label] = (w.context.byLabel[h.label] ?? 0) + 1;
@@ -181,16 +179,36 @@ function main(argv) {
       contextOnly: w.context.byLabel,
     };
   }
-  // Treatment verdicts: observed post SESSIONS vs pre session-rate scaled to post n.
+  // Treatment verdicts: observed post SESSIONS vs pre session-rate scaled to
+  // post n. The headline metric is PROJECT-FILE sessions (scratch excluded).
   const verdict = {};
-  for (const [metric, get] of [['shellString', (w) => w.shellString.sessions], ['editBeforeRead', (w) => w.editBeforeRead.sessions]]) {
+  for (const [metric, get] of [
+    ['shellStringProjectFiles', (w) => w.shellString.nonScratchSessions],
+    ['shellStringAll', (w) => w.shellString.sessions],
+    ['editBeforeRead', (w) => w.editBeforeRead.sessions],
+  ]) {
     const lambda = (get(windows.pre) / (windows.pre.sessions || 1)) * windows.post.sessions;
     const k = get(windows.post);
     verdict[metric] = { expectedIfNoEffect: +lambda.toFixed(2), observed: k, pAtMostObserved: +poissonPAtMost(k, lambda).toFixed(4) };
   }
   report.treatmentVerdict = verdict;
+  return report;
+}
+
+function main(argv) {
+  const args = argv.slice(2);
+  const flagAll = (n) => args.flatMap((a, i) => (a === `--${n}` && args[i + 1] ? [args[i + 1]] : []));
+  const flag = (n) => flagAll(n)[0];
+  const workspaceRoot = flag('workspace-root') || process.env.WORKIT_WORKSPACE_ROOT;
+  if (!workspaceRoot) { console.error('treatment-scan: pass --workspace-root <abs> or set WORKIT_WORKSPACE_ROOT'); process.exit(2); }
+  const report = runScan({
+    workspaceRoot,
+    epochMs: Date.parse(flag('epoch') || DEFAULT_EPOCH),
+    excludeSessions: flagAll('exclude-session'),
+    evidencePath: flag('evidence') || null,
+  });
   console.log(JSON.stringify(report, null, 2));
-  if (!windows.pre.sessions || !windows.post.sessions) {
+  if (!report.windows.pre.sessions || !report.windows.post.sessions) {
     console.error('treatment-scan: a window has ZERO sessions — this is exit 2, not a clean result.');
     process.exit(2);
   }

@@ -1,6 +1,6 @@
 ---
 name: failure-audit
-description: "Run a delta failure-mode audit over agent-session transcripts archived since the last run — slice new sessions into digests, fan out calibrated auditor waves, aggregate, and run the standing comparisons (treatment check on applied guards, model drift, new-label emergence). Trigger on '/failure-audit', 'failure audit', 'run the failure audit', 'audit the new transcripts', 'delta audit', or when a maintenance briefing reports the failure-audit backlog has reached the run band (~75-100). Operator-pulled only — never schedule this; the briefing detector nudges, the operator pulls."
+description: "Run a delta failure-mode audit over agent-session transcripts archived since the last run — slice new sessions into digests, fan out calibrated auditor waves, aggregate, and run the standing comparisons (treatment check on applied guards, model drift, new-label emergence). Trigger on '/failure-audit', 'failure audit', 'run the failure audit', 'audit the new transcripts', 'delta audit'. Operator-pulled SPOT-CHECK only (scanner-first cadence, 2026-08-21 value review): deterministic treatment scanners cover the watched-class rates continuously; pull the fleet only when scanners or operations surface something semantic worth auditing. Never schedule this."
 ---
 
 # Failure audit — delta-run cadence over archived transcripts
@@ -11,10 +11,15 @@ only sessions **new since the last run** (a delta, never a re-run), then compare
 against the frozen baseline so guards can be judged as treatments: a guard whose
 failure-class rate doesn't drop is a failed treatment.
 
-**Cadence doctrine:** scheduled beat = detector, not generator. A deterministic
-collector reports the unaudited-backlog count in the maintenance briefing; the
-LLM auditor fleet runs only when the operator pulls this skill. Never wire any
-part of this to cron.
+**Cadence doctrine:** scheduled beat = detector, not generator. Scanner-first
+since the 2026-08-21 value review (`data/outputs/reviews/2026-08-21-failure-audit-value-review.md`):
+`scripts/treatment-scan.mjs` measures the grep-shaped watched classes
+deterministically (Observatory's maintenance briefing reports its rates), and
+the LLM auditor fleet is an operator-pulled spot-check — not a backlog-band
+routine. Rare-serious classes are statistically unauditable at practical
+windows (~395 sessions for the needs_input class); they get mechanical guards
+and same-session incident capture, not fleet measurement. Never wire any part
+of this to cron.
 
 ## Substrate and layout
 
@@ -122,8 +127,10 @@ union grew.
 
 ## Cost and scale
 
-~25k sonnet tokens per audited session ≈ 2.5M per ~100-session backlog —
-monthly-ish at current usage. The detector suggests a run at backlog ≥ 75.
+~25k sonnet tokens per audited session ≈ 2.5M per ~100-session sweep. No
+standing cadence: the treatment scanner is free and continuous; a fleet pull is
+justified by a semantic question (new-label emergence, a scanner anomaly, a
+model-family change), not by an unaudited-session count.
 
 ## Out of scope (separate owed work — don't fold in)
 
