@@ -109,7 +109,12 @@ ruling that binds a later item.
    pre-ship impact analysis that hands review its proven safety fact instead of
    a plausible writeup. Optional, and cheapest exactly when T2 is about to
    fire. Stop at the **PR boundary** — merge is the operator's go unless
-   they have said otherwise. **A go must be READ, never assumed: after filing a
+   they have said otherwise. One standing "said otherwise" exists: the
+   **ping-not-hold merge lane** (`reference/patterns/ping-not-hold-merge-lane.md`)
+   — a PR meeting ALL of that pattern's criteria (gate-green, easily undone,
+   uncoupled, unstacked) merges at its boundary with an immediate Discord ping +
+   anchor receipt carrying the exact revert command; merge-only, never deploy.
+   Any doubt → held. **A go must be READ, never assumed: after filing a
    `needs_input` receipt, act only on an answer you can cite — an operator
    message in-session, or a receipt/resolution read back via a tool call.
    "Merge approved" with nothing readable behind it is fabricated authorization
