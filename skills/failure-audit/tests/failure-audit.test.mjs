@@ -1,9 +1,9 @@
 // Tests for the failure-audit skill scripts (node --test, no third-party deps).
 //
-// delta.mjs carries the COUNT CONTRACT mirrored by Observatory's
-// audit-backlog.ts — each clause is pinned here (depth-2 only, stub floor,
-// Temp-lane exclusion, manifest subtraction, epoch bound) so the two
-// implementations cannot silently diverge on this side.
+// delta.mjs carries the COUNT CONTRACT — sole definition since the
+// audit-backlog.ts mirror retired 2026-08-21 (scanner-first, quest c9c1c459).
+// Each clause is pinned here (depth-2 only, stub floor, Temp-lane exclusion,
+// manifest subtraction, epoch bound) so a refactor cannot silently drop one.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
