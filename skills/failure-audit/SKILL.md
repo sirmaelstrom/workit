@@ -1,6 +1,6 @@
 ---
 name: failure-audit
-description: "Run a delta failure-mode audit over agent-session transcripts archived since the last run — slice new sessions into digests, fan out calibrated auditor waves, aggregate, and run the standing comparisons (treatment check on applied guards, model drift, new-label emergence). Trigger on '/failure-audit', 'failure audit', 'run the failure audit', 'audit the new transcripts', 'delta audit'. Operator-pulled SPOT-CHECK only (scanner-first cadence, 2026-08-21 value review): deterministic treatment scanners cover the watched-class rates continuously; pull the fleet only when scanners or operations surface something semantic worth auditing. Never schedule this."
+description: "Run a delta failure-mode audit over agent-session transcripts archived since the last run — slice new sessions into digests, fan out calibrated auditor waves, aggregate, and run the standing comparisons (treatment check on applied guards, model drift, new-label emergence). Trigger on '/failure-audit', 'failure audit', 'audit the new transcripts', 'delta audit'. Operator-pulled SPOT-CHECK only: deterministic scanners cover the watched-class rates continuously, so pull the fleet only when scanners or operations surface something semantic worth auditing. Never schedule this."
 ---
 
 # Failure audit — delta-run cadence over archived transcripts
@@ -31,12 +31,14 @@ of this to cron.
   A run dir's `manifest.json` **is** the audited-session list; the union of all
   manifests is what has ever been covered. Baseline (frozen, never edit):
   `2026-08-11-failure-audit-data`.
-- **Count contract** (which sessions are auditable/backlog) lives in
-  `scripts/delta.mjs` and is **mirrored** by Observatory's briefing collector
-  (`heathdev-observatory/src/briefings/audit-backlog.ts`). Change one, change
-  both: depth-2 `*.jsonl` only (`subagents/` are sidechains), > 1 KB (stubs
-  skipped), Temp-scratchpad lanes excluded, minus every prior manifest, bounded
-  to mtime after the last run's date.
+- **Count contract** (which sessions are auditable) lives in `scripts/delta.mjs`
+  and nowhere else — `treatment-scan.mjs` imports its constants, and
+  Observatory's briefing collector (`src/briefings/treatment-rates.ts`) calls
+  `treatment-scan.mjs`'s exported `runScan()` directly, so there is no mirror to
+  keep in agreement (the old `audit-backlog.ts` count mirror retired 2026-08-21,
+  quest c9c1c459). Clauses: depth-2 `*.jsonl` only (`subagents/` are
+  sidechains), > 1 KB (stubs skipped), Temp-scratchpad lanes excluded, minus
+  every prior manifest, bounded to mtime after the last run's date.
 
 `{workspace}` is the directory containing `projects/` — resolve it from
 `WORKIT_WORKSPACE_ROOT` or pass `--workspace-root`.
@@ -64,7 +66,7 @@ read as a clean pass.
 node ${CLAUDE_PLUGIN_ROOT}/skills/failure-audit/scripts/slicer.mjs <run-dir> --list=<run-dir>/delta-list.txt
 ```
 Writes `digests/` + `manifest.json`. ⚠️ The manifest marks these sessions
-covered to the backlog detector the moment it exists — if you abandon a run
+covered to every future delta run the moment it exists — if you abandon a run
 before the fleet finishes, trash the run dir (or rename it away from the
 `*failure-audit*` pattern) so unaudited sessions don't hide behind it.
 
@@ -121,9 +123,9 @@ Three reads, every run:
 
 **6. Receipts.**
 Ledger event (thread `failure-audit`, run counts + headline findings), KB save
-for non-obvious findings, spine artifacts on the owning quest if one exists. The
-briefing backlog line resets itself at the next maintenance run — the manifest
-union grew.
+for non-obvious findings, spine artifacts on the owning quest if one exists.
+(The maintenance briefing's treatment-rates line is unaffected by fleet
+coverage — it windows by guard epoch, not by manifests.)
 
 ## Cost and scale
 
