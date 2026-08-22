@@ -33,7 +33,7 @@ of this to cron.
   `2026-08-11-failure-audit-data`.
 - **Count contract** (which sessions are auditable) lives in `scripts/delta.mjs`
   and nowhere else — `treatment-scan.mjs` imports its constants, and
-  Observatory's briefing collector (`src/briefings/treatment-rates.ts`) calls
+  Observatory's briefing collector (`projects/heathdev-observatory/src/briefings/treatment-rates.ts`) calls
   `treatment-scan.mjs`'s exported `runScan()` directly, so there is no mirror to
   keep in agreement (the old `audit-backlog.ts` count mirror retired 2026-08-21,
   quest c9c1c459). Clauses: depth-2 `*.jsonl` only (`subagents/` are
