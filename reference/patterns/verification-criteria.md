@@ -42,6 +42,8 @@ The output is a `verification.md` file in the workshop directory. Structure:
 **Baseline (before):** {Current measurable state, if applicable}
 **Target (after):** {Expected measurable state}
 
+**Negative control:** {The known-bad input and the observed failure — how the verifying instrument was seen to BITE. "Not yet demonstrated" is a legal value; a blank is not.}
+
 **How to verify:**
 {Exact command, URL, or procedure per layer. No ambiguity.}
 
@@ -69,6 +71,8 @@ For each decision, write three sentences an independent observer could use to ve
 ## Verification Layers
 
 "Automated test" is not one thing. The default failure mode is writing unit tests with mocks and calling it verified. Unit tests with mocks verify that your code does what your mock says the world does — they don't verify that the world actually works that way. The seams between services are where things break, and they're exactly where mock-based tests go blind.
+
+And the instruments themselves need calibrating: a test, guard, or checker that has only ever been observed passing has proven nothing — it may be running against empty input, an unset variable, or a helper that failed to load. Each V-block's **Negative control** field records the known-bad input the instrument was seen to fail on. Full rule and calibration recipe: `negative-control.md`.
 
 Every verification criterion must specify **which layer** it targets:
 

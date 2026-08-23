@@ -154,6 +154,11 @@ ruling that binds a later item.
 6. **Sweep the trail.** When an item retires or renames vocabulary, grep the doc
    corpus *and the consuming repos' tests* for the outgoing name before marking
    it done. A ship that adds or renames a thing owes the count.
+7. **An instrument ships with its negative control.** Any item that ships a
+   test, guard, watcher, or checker demonstrates it **failing on a known-bad
+   input** before the PR boundary, and the run-log row records how; an
+   instrument that cannot run exits distinctly as "did not run", never as pass.
+   Rule and calibration recipe: `reference/patterns/negative-control.md`.
 
 ## Stopping
 
