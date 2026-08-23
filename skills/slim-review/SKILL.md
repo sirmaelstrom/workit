@@ -74,6 +74,9 @@ Report correctness defects that would matter after merge:
 - wrong behavior on an input the change makes reachable
 - a contract, invariant, or documented semantic the change violates
 - a case the change's own tests do not cover but its own description claims
+- a test, guard, or checker the change adds that cannot fail on the defect it
+  claims to catch (e.g. it runs against empty input or with its critical
+  dependency absent)
 - an adjacent consumer the change breaks
 
 Do NOT report style, naming, formatting, or speculative refactors.

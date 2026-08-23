@@ -32,6 +32,7 @@ Not sequential steps — principles that govern how artifacts are written throug
 | `trust-ramp` | Autonomy graduation — systems earn trust through empirical success, demote on failure. | trust-ramp.md |
 | `review-council` | Pre-dispatch multi-model review — 3+ independent reviewers, synthesis, amendment cycle. | review-council.md |
 | `observability-contract` | Every automation boundary needs three things: precondition, postcondition, runtime invariant. Design by Contract for agentic systems. | observability-contract.md |
+| `negative-control` | An instrument is trusted only after it's been observed failing on a known-bad input; "did not run" gets its own distinct exit. Calibration recipe for tests, guards, watchers, checkers. | negative-control.md |
 | `html-artifact-shapes` | For decision-point skills: emit structured JSON, deterministically render canonical markdown + interactive single-file HTML, carry a clipboard round-trip back to the next agent turn. | html-artifact-shapes.md |
 
 ## Execution Patterns
