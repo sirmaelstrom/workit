@@ -158,13 +158,12 @@ ruling that binds a later item.
    test, guard, watcher, or checker demonstrates it **failing on a known-bad
    input** before the PR boundary, and the run-log row records how; an
    instrument that cannot run exits distinctly as "did not run", never as pass.
-   Calibrating is itself a tree edit and a claim, so two clauses guard it:
-   **diff before staging** — never `git add -A` a tree that you or a
-   mutation-testing lens have deliberately broken — and **the control must span
-   the regime it claims to test**, naming the boundary the instrument is
-   supposed to detect and showing the control cross it. Rule, both measured
-   receipts, and the calibration recipe:
-   `reference/patterns/negative-control.md`.
+   Calibrating is itself a tree edit and a claim, so two clauses guard it.
+   **Diff before staging.** Never `git add -A` a tree that you or a
+   mutation-testing lens have deliberately broken. **Span the regime.** The
+   control must cross the boundary the instrument is meant to detect; name that
+   boundary and show the crossing. Rule, both measured receipts, and the
+   calibration recipe: `reference/patterns/negative-control.md`.
 
 ## Stopping
 

@@ -43,9 +43,9 @@ For a shipped test suite, the same discipline is **red-first**: run the suite ag
 
 ## The Calibration's Own Hazard
 
-The technique that calibrates a guard needs a guard of its own: **calibrating edits the tree, and an un-reverted edit ships.**
+The technique that calibrates a guard needs a guard of its own. **Calibrating edits the tree, and an un-reverted edit ships.**
 
-Measured 2026-08-24 (burn-down run 15, obs#513, hotfixed as obs#515): an agentic review lens sabotaged a source file to verify a guard failed, and did not revert it. A `git add -A src/` on the amendment commit swept `// SABOTAGE: spread removed` into the PR, and it merged. The affected path then built its SDK options with no tool policy at all — an interface whose profile is meant to be read-only silently lost it. The regression escaped **five** watcher positions: type-check, a 5,741-case suite, CI, and two independent review lenses that both returned merge-ready. Nothing asserted what that path sent, so nothing could see it. It was found incidentally two stops later, by grepping for calibration residue.
+Measured 2026-08-24 (burn-down run 15, obs#513, hotfixed as obs#515): an agentic review lens sabotaged a source file to verify a guard failed, and did not revert it. A `git add -A src/` on the amendment commit swept `// SABOTAGE: spread removed` into the PR, and it merged. The affected path then built its SDK options with no tool policy at all, so an interface meant to be read-only silently lost its restriction. The regression escaped **five** watcher positions: type-check, a 5,741-case suite, CI, and two independent review lenses that both returned merge-ready. Nothing asserted what that path sent, so nothing could see it. Grepping for calibration residue two stops later turned it up — luck, not process, which is why the response was a new gate rather than more care.
 
 The disciplines, in cost order:
 
@@ -69,7 +69,7 @@ Corollary for delegated calibration: **a lens sharing a checkout with the work c
 - *The non-discriminating control (→ rule clause 3).* Stop 4 shipped a per-subject alert-backoff ladder replacing a flat 30-minute cooldown. Its negative control passed calibration while being unable to discriminate: the test's window was 20 minutes, which sits **inside** the 30-minute cooldown being replaced, so old and new code produce the same result. Only widening the window to 11 hours made it bite. The control ran, it failed on the broken fixture, and it still measured nothing about the change — clause 1 was satisfied and the test was worthless.
 - *The un-reverted calibration (→ The Calibration's Own Hazard).* Detailed above. The response was a repo-level gate rather than a resolution to be careful: an integrity test that fails when a `SABOTAGE` marker reaches the tree.
 
-Neither was caught by a watcher. The first the author found by widening a window on a hunch; the second turned up incidentally while grepping for something unrelated. That is the argument for both clauses being required rather than advisory — the positions that would normally catch a defect had all already passed.
+No watcher caught either one. The author found the first by widening a window on a hunch; the second turned up while grepping for something unrelated. That is the argument for making both clauses required rather than advisory — every position that would normally catch a defect had already passed.
 
 ---
 *Source: run 14 item 1 (quest df9f1153), 2026-08-23 — a convergent recommendation reached independently by two analysis passes over the same corpus. Four prior auto-memory filings (2026-08-04 → 2026-08-23) plus four fresh occurrences in a single session established that per-occurrence documentation does not lower the rate.*
