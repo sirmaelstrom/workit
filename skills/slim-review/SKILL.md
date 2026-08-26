@@ -89,6 +89,11 @@ so in the body — but anchor the ones you can.
 Set `coverage` to exactly "examined N of M changed files" with the real counts.
 ```
 
+The instrument bullet is this skill's negative-control binding
+(`reference/patterns/negative-control.md`): an added test, guard, or checker
+that cannot fail on the defect it claims to catch is a reportable correctness
+defect.
+
 ```bash
 codex exec --model gpt-5.6-terra -c model_reasoning_effort=high \
   --sandbox danger-full-access \
