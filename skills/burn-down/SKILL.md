@@ -171,6 +171,12 @@ ruling that binds a later item.
 session-start focus block already carry it. Refresh the anchor's resume note,
 write a run-level receipt, stop.
 
+Refreshing that note means **replacing live state, not appending to it**. A
+burn-down anchor is picked up many times, so it is the quest most likely to
+accumulate a note nothing can read in full; method that survives an item
+unchanged belongs in a document attached to the anchor, not in the note.
+`reference/patterns/re-entry-payload.md`.
+
 **Mid-item:** invoke `handoff` in its **mid-item mode**, which carries the one
 irreducible class — where in the item you stopped, what you tried and what it
 ruled out, the next concrete move, design questions settled so far. Everything

@@ -28,7 +28,10 @@ bloated handoff nobody reads.
 
 **At a PR boundary, write no handoff at all.** The board plus the run doc plus
 the session-start focus block already carry it. A handoff there is duplicate
-state that will go stale — refresh the quest's resume note instead.
+state that will go stale — refresh the quest's resume note instead. Refresh
+means replace: a resume note that grows every stop stops being readable in
+full, and the arrival block truncates it long before anything errors
+(`reference/patterns/re-entry-payload.md`).
 
 ### Mid-item mode: carry nuance, nothing else
 

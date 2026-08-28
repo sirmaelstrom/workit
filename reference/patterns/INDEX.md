@@ -28,6 +28,7 @@ Not sequential steps — principles that govern how artifacts are written throug
 | `correct-the-carrier` | Stale-claim repair — grep all carriers, fix auto-loaded surfaces first, receipt in place of warning. Distinct from corrections-loop (claims, not behavior). | correct-the-carrier.md |
 | `transition-sweep` | Retirement is a documentation event — grep outgoing vocabulary + serving config, disposition every hit at transition time. | transition-sweep.md |
 | `canonical-doc-contract` | Canonical docs point at sources of truth, never copy volatile values — ownership header, snapshot demotion. | canonical-doc-contract.md |
+| `re-entry-payload` | A long-running quest's resume note is a router, not a container — live state and a pointer in the note, durable method in attached documents, per-stop detail in receipts. Three consumers, three limits, and the smallest one truncates silently. | re-entry-payload.md |
 | `constraint-discovery` | Domain knowledge lifecycle — discover, articulate, encode, search, validate constraints across triage, implementation, and review. | constraint-discovery.md |
 | `trust-ramp` | Autonomy graduation — systems earn trust through empirical success, demote on failure. | trust-ramp.md |
 | `review-council` | Pre-dispatch multi-model review — 3+ independent reviewers, synthesis, amendment cycle. | review-council.md |
