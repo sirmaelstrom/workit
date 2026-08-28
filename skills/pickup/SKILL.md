@@ -64,6 +64,13 @@ about the past.
   unless the note points at them.
 - If an artifact locator does not resolve, note it and continue from the resume
   note alone — do not stall on a dead pointer.
+- **A fat resume note is a defect, not a rich payload.** The arrival focus block
+  truncates the note to a fixed cap, so a long note is already mostly unread by
+  the time you get here, silently — and past a further ceiling the full entity
+  read refuses the payload outright. If the note you just read is dominated by
+  method that has not changed in several items, split it: durable half into a
+  document attached to the quest, note back to live state plus a pointer.
+  Procedure: `reference/patterns/re-entry-payload.md`.
 
 ## Claim the quest
 
