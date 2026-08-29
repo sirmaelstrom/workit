@@ -136,6 +136,6 @@ Exit 0 = rooting is cwd-independent. If the recipe in this file ever changes, th
   `skills/audit-skills`. `skills/_shared/output-rooting.test.mjs` keeps them from
   drifting back to a bare `./outputs/`.
 - Workspace-root `CLAUDE.md` §Cross-Repo Agent Work — one-line pointer (operator-maintained; outside this repo).
-- Walk-away pipeline doc §6b — one-line pointer (operator-maintained; outside this repo).
+- Walk-away pipeline doc — one-line pointer (operator-maintained; outside this repo).
 
 If you find the recipe restated anywhere else, that's drift — replace it with a pointer to this file.
