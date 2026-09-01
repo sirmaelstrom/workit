@@ -106,6 +106,23 @@ test('parseDiff handles several hunks in one file', () => {
   assert.deepEqual([...files.get('x.ts')].sort((a, b) => a - b), [1, 60, 61]);
 });
 
+test('parseDiff does not invent a line from the diff\'s own trailing newline', () => {
+  // Real `gh pr diff` stdout always ends with a newline. Splitting on it yields a
+  // trailing '' that falls through the `raw === ''` branch inside the last hunk
+  // and marks one line past the true end as commentable — and a finding anchored
+  // there makes GitHub reject the WHOLE single-POST review (exit 4).
+  const withNewline = parseDiff(`${DIFF}\n`);
+  assert.deepEqual([...withNewline.get('src/b.ts')].sort((x, y) => x - y), [1, 2]);
+  assert.deepEqual(
+    [...withNewline.get('src/b.ts')],
+    [...parseDiff(DIFF).get('src/b.ts')],
+    'a trailing newline must not change the commentable set',
+  );
+  // Same for the CRLF form gh emits on Windows.
+  const crlf = parseDiff(`${DIFF.replace(/\n/g, '\r\n')}\r\n`);
+  assert.deepEqual([...crlf.get('src/b.ts')].sort((x, y) => x - y), [1, 2]);
+});
+
 test('parseDiff tolerates CRLF input', () => {
   const files = parseDiff(DIFF.replace(/\n/g, '\r\n'));
   assert.deepEqual([...files.get('src/a.ts')].sort((x, y) => x - y), [10, 11, 12, 13]);
@@ -153,20 +170,34 @@ const finding = (over) => ({ severity: 'P2', title: 't', path: 'src/a.ts', line:
 
 test('partitionFindings splits anchorable, off-line and off-diff findings', () => {
   const diffFiles = parseDiff(DIFF);
-  const { anchored, offLine, offDiff } = partitionFindings(
+  const { anchored, offLine, offDiffUnchanged } = partitionFindings(
     [
       finding({ line: 11 }),
       finding({ line: 999 }),
       finding({ path: 'src/never-touched.ts', line: 3 }),
     ],
     diffFiles,
+    ['src/a.ts', 'src/b.ts'],
   );
   assert.equal(anchored.length, 1);
   assert.equal(anchored[0].line, 11);
   assert.equal(offLine.length, 1);
   assert.equal(offLine[0].line, 999);
-  assert.equal(offDiff.length, 1);
-  assert.equal(offDiff[0].path, 'src/never-touched.ts');
+  assert.equal(offDiffUnchanged.length, 1);
+  assert.equal(offDiffUnchanged[0].path, 'src/never-touched.ts');
+});
+
+test('partitionFindings separates a changed-but-unanchorable file from an unchanged one', () => {
+  // `gone.ts` is deleted by the PR: the files API lists it, parseDiff's
+  // commentable map never will. Same for binaries and pure renames.
+  const diffFiles = parseDiff(DIFF);
+  const { offDiffChanged, offDiffUnchanged } = partitionFindings(
+    [finding({ path: 'gone.ts', line: 3 }), finding({ path: 'src/never-touched.ts', line: 3 })],
+    diffFiles,
+    ['src/a.ts', 'src/b.ts', 'gone.ts'],
+  );
+  assert.deepEqual(offDiffChanged.map((f) => f.path), ['gone.ts']);
+  assert.deepEqual(offDiffUnchanged.map((f) => f.path), ['src/never-touched.ts']);
 });
 
 test('partitionFindings normalizes backslash and ./ paths before matching', () => {
@@ -174,6 +205,7 @@ test('partitionFindings normalizes backslash and ./ paths before matching', () =
   const { anchored } = partitionFindings(
     [finding({ path: 'src\\a.ts' }), finding({ path: './src/a.ts' })],
     diffFiles,
+    ['src/a.ts', 'src/b.ts'],
   );
   assert.equal(anchored.length, 2);
   assert.equal(anchored[0].path, 'src/a.ts');
@@ -289,6 +321,24 @@ test('validateFindingsShape requires examined_paths as an array of non-empty str
   assert.match(validateFindingsShape({ ...VALID, examined_paths: ['src/a.ts', ''] }).join(' '), /examined_paths\[1\]/);
 });
 
+test('validateFindingsShape requires the examined N of M coverage format', () => {
+  // Prose disarms the count check entirely: "I reviewed the whole thing" passes
+  // and posts, while an honest "examined 1 of 2" exits 5. Block the prose.
+  for (const coverage of ['I reviewed the whole thing.', 'examined many of many changed files', 'complete']) {
+    assert.match(
+      validateFindingsShape({ ...VALID, coverage }).join(' '),
+      /coverage must state "examined N of M"/,
+      `expected ${JSON.stringify(coverage)} to be rejected`,
+    );
+  }
+  assert.deepEqual(validateFindingsShape({ ...VALID, coverage: 'examined 1 of 1 changed files' }), []);
+});
+
+test('validateFindingsShape rejects an empty examined_paths — zero input is not a clean review', () => {
+  const problems = validateFindingsShape({ ...VALID, examined_paths: [] });
+  assert.match(problems.join(' '), /examined_paths must not be empty/);
+});
+
 test('validateFindingsShape rejects duplicate examined_paths like the schema does', () => {
   const problems = validateFindingsShape({ ...VALID, examined_paths: ['src/a.ts', 'src/a.ts'] });
   assert.match(problems.join(' '), /examined_paths must not contain duplicates/);
@@ -310,6 +360,10 @@ test('reviewer prompt carries the authoritative API paths and requires them echo
 test('skill documents required repo, blocking coverage, and examined_paths handback', () => {
   const skill = readFileSync(SKILL, 'utf8');
   assert.match(skill, /--pr <n> --repo <owner\/name> --findings/);
+  // Step 4's two commands must carry --repo too — fixing only `post` left the
+  // cwd-resolution class open on the commands that read the merge-ready signal.
+  assert.match(skill, /threads --pr <n> --repo <owner\/name> --unresolved/);
+  assert.match(skill, /--pr <n> --repo <owner\/name> --comment-id <id> --body-file/);
   assert.match(skill, /\*\*Blocking coverage set check\*\*/);
   assert.match(skill, /Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`/);
 });
@@ -321,6 +375,14 @@ test('skill says examined_paths is exact and bounds what the stale-set guard pro
   assert.match(skill, /detects stale or\s+missing path sets; it does not prove that examination happened/);
 });
 
+test('skill distinguishes the two off-diff buckets and flags the unverified schema keywords', () => {
+  const skill = readFileSync(SKILL, 'utf8');
+  assert.match(skill, /\*\*changed by this PR but not\s+line-anchorable\*\*/);
+  assert.match(skill, /\*\*not a file this PR changes\*\*/);
+  assert.match(skill, /`minLength: 1` and `uniqueItems: true`/);
+  assert.match(skill, /UNVERIFIED against that date/);
+});
+
 // ---------------------------------------------------------------------------
 // buildReviewPayload
 // ---------------------------------------------------------------------------
@@ -330,7 +392,8 @@ test('buildReviewPayload emits COMMENT with line-anchored comments', () => {
     summary: 'Looks mostly fine.',
     coverage: 'examined 2 of 2 changed files',
     anchored: [finding()],
-    offDiff: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
     offLine: [],
     coverageCheck: { ok: true },
   });
@@ -341,7 +404,7 @@ test('buildReviewPayload emits COMMENT with line-anchored comments', () => {
     { path: 'src/a.ts', line: 11, side: 'RIGHT' },
   );
   assert.match(p.comments[0].body, /\*\*\[P2\] t\*\*/);
-  assert.match(p.body, /1 anchored · 0 off-line · 0 off-diff/);
+  assert.match(p.body, /1 anchored · 0 off-line · 0 not-anchorable · 0 off-diff/);
 });
 
 test('buildReviewPayload surfaces an off-diff finding in the body, not silently', () => {
@@ -349,13 +412,69 @@ test('buildReviewPayload surfaces an off-diff finding in the body, not silently'
     summary: 's',
     coverage: 'examined 1 of 1 changed files',
     anchored: [],
-    offDiff: [finding({ path: 'other.ts' })],
+    offDiffChanged: [],
+    offDiffUnchanged: [finding({ path: 'other.ts' })],
     offLine: [],
     coverageCheck: { ok: true },
   });
   assert.equal(p.comments.length, 0);
-  assert.match(p.body, /this PR does not change that file/);
+  assert.match(p.body, /not a file this PR changes/);
   assert.match(p.body, /other\.ts:11/);
+});
+
+test('buildReviewPayload words the two off-diff buckets differently', () => {
+  const p = buildReviewPayload({
+    summary: 's',
+    coverage: 'examined 3 of 3 changed files',
+    anchored: [],
+    offDiffChanged: [finding({ path: 'gone.ts' })],
+    offDiffUnchanged: [finding({ path: 'other.ts' })],
+    offLine: [],
+    coverageCheck: { ok: true },
+  });
+  assert.match(p.body, /`gone\.ts:11` — \*\*changed by this PR, but not line-anchorable/);
+  assert.match(p.body, /`other\.ts:11` — \*\*not a file this PR changes\.\*\*/);
+  // The false statement must not be published about a file the PR does change.
+  assert.doesNotMatch(p.body, /gone\.ts[^\n]*does not change that file/);
+});
+
+test('buildReviewPayload warns, non-blocking, when the diff and the file list disagree', () => {
+  const warned = buildReviewPayload({
+    summary: 's',
+    coverage: 'examined 2 of 2 changed files',
+    anchored: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
+    offLine: [],
+    coverageCheck: { ok: true },
+    warnings: ['diff shows 3 changed files, the PR API lists 2'],
+  });
+  assert.match(warned.body, /diff shows 3 changed files, the PR API lists 2/);
+  assert.doesNotMatch(warned.body, /Coverage check failed/, 'a warning must not read as a failure');
+
+  const quiet = buildReviewPayload({
+    summary: 's',
+    coverage: 'examined 2 of 2 changed files',
+    anchored: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
+    offLine: [],
+    coverageCheck: { ok: true },
+  });
+  assert.doesNotMatch(quiet.body, /⚠️/);
+});
+
+test('cmdPost warns when diffHeaderCount and the PR file list diverge, and still posts', () => {
+  // DIFF has 2 `diff --git` headers; the files API here lists 3.
+  const { calls, error } = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'src/b.ts', 'gone.ts'],
+    coverage: 'examined 3 of 3 changed files',
+    prFilePaths: ['src/a.ts', 'src/b.ts', 'gone.ts'],
+  });
+  assert.equal(error, undefined);
+  const posts = calls.filter(({ args }) => args[0] === 'api' && args.includes('POST'));
+  assert.equal(posts.length, 1);
+  assert.match(JSON.parse(posts[0].opts.input).body, /diff shows 2 changed files, the PR API lists 3/);
 });
 
 test('buildReviewPayload banners a failed coverage check into the posted body', () => {
@@ -363,7 +482,8 @@ test('buildReviewPayload banners a failed coverage check into the posted body', 
     summary: 's',
     coverage: 'examined 1 of 9 changed files',
     anchored: [],
-    offDiff: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
     offLine: [],
     coverageCheck: { ok: false, reason: 'reviewer examined 1 of 9 changed files — the review is partial' },
   });
@@ -388,21 +508,28 @@ test('parseArgs reads the explicit force-post escape hatch', () => {
   assert.equal(o.forcePost, true);
 });
 
-function runPostWithFakeGh({ examinedPaths, forcePost = false }) {
+function runPostWithFakeGh({
+  examinedPaths,
+  forcePost = false,
+  coverage = 'examined 2 of 2 changed files',
+  prFilePaths = ['src/a.ts', 'src/b.ts'],
+}) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-post-'));
   const findings = join(dir, 'findings.json');
   const calls = [];
   let error;
   writeFileSync(findings, JSON.stringify({
     summary: 'summary',
-    coverage: 'examined 2 of 2 changed files',
+    coverage,
     examined_paths: examinedPaths,
     findings: [],
   }), 'utf8');
   const runGh = (args, opts) => {
     calls.push({ args, opts });
     if (args[0] === 'pr' && args[1] === 'diff') return DIFF;
-    if (args[0] === 'api' && args[1] === '--paginate') return 'src/a.ts\nsrc/b.ts\n';
+    if (args[0] === 'api' && args[1] === '--paginate') {
+      return prFilePaths.length === 0 ? '' : `${prFilePaths.join('\n')}\n`;
+    }
     if (args[0] === 'api' && args.includes('POST')) return JSON.stringify({ html_url: 'https://example.test/review' });
     throw new Error(`unexpected gh call: ${args.join(' ')}`);
   };
@@ -439,6 +566,51 @@ test('--force-post sends one mismatched review with the coverage banner', () => 
   const posts = calls.filter(({ args }) => args[0] === 'api' && args.includes('POST'));
   assert.equal(posts.length, 1);
   assert.match(JSON.parse(posts[0].opts.input).body, /Coverage check failed/);
+});
+
+test('a count contradiction with a matching path set exits 5 and posts nothing', () => {
+  // The count branch is nested inside `missing.length === 0 && extra.length === 0`
+  // — the structure a refactor flattens away — and every other integration test
+  // here exercises only the path-set branch.
+  const { calls, error } = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'src/b.ts'],
+    coverage: 'examined 1 of 2 changed files',
+  });
+  assert.equal(error?.code, 5);
+  assert.match(error.message, /examined 1 of 2 changed files — the review is partial/);
+  assert.equal(calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length, 0);
+});
+
+test('an over-claimed count exits 5 too — the widened !== check runs in both directions', () => {
+  // `claimedTotal` must MATCH the PR file count, or the total-mismatch branch
+  // fires first and this never reaches `examined !== claimedTotal`.
+  const { calls, error } = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'src/b.ts'],
+    coverage: 'examined 5 of 2 changed files',
+  });
+  assert.equal(error?.code, 5);
+  assert.match(error.message, /reviewer examined 5 of 2 changed files/);
+  assert.equal(calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length, 0);
+});
+
+test('checkCoverage rejects an over-claim in the examined direction', () => {
+  // The hardening commit widened `examined < claimedTotal` to `!==`; nothing
+  // covered the direction that widening added.
+  const paths = Array.from({ length: 9 }, (_, i) => `f${i}.ts`);
+  const r = checkCoverage('examined 12 of 9 changed files', paths, paths);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /contradicts examined_paths/);
+  assert.match(r.reason, /reviewer examined 12 of 9 changed files/);
+});
+
+test('an empty PR file list exits 5 and posts nothing — a fetch failure is not a clean PR', () => {
+  const { calls, error } = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'src/b.ts'],
+    prFilePaths: [],
+  });
+  assert.equal(error?.code, 5);
+  assert.match(error.message, /PR API returned no changed files/);
+  assert.equal(calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length, 0);
 });
 
 test('matching coverage sends one review without a mismatch banner', () => {
@@ -523,4 +695,18 @@ test('post requires an explicit --repo before reading findings or resolving cwd'
   const r = runCli(['post', '--pr', '1', '--findings', 'missing.json']);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /post needs --repo owner\/name/);
+});
+
+test('threads requires --repo — same-number-different-repo reads as "no unresolved threads"', () => {
+  const r = runCli(['threads', '--pr', '53', '--unresolved']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /threads needs --repo owner\/name/);
+  // Exit 2 must land before any gh call, so a wrong cwd can never answer.
+  assert.doesNotMatch(r.stderr, /gh /);
+});
+
+test('reply requires --repo', () => {
+  const r = runCli(['reply', '--pr', '53', '--comment-id', '1', '--body-file', 'x.md']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /reply needs --repo owner\/name/);
 });

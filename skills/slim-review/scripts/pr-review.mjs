@@ -6,8 +6,11 @@
  * improvise:
  *
  *   post    — turn a delegated reviewer's findings JSON into a line-anchored
- *             GitHub PR review, after checking the findings against the PR's own
- *             diff (authoritative path-set coverage + line anchorability).
+ *             GitHub PR review, after two checks against two different sources:
+ *             path coverage against the PR files API (`fetchPrFilePaths`, the
+ *             authoritative list), and line anchorability against the diff. The
+ *             diff is authoritative for anchoring ONLY — it omits deleted,
+ *             binary and pure-rename files, which are changed files all the same.
  *   threads — list the PR's review threads with their resolved state and the
  *             comment ids you reply to.
  *   reply   — reply to one review thread.
@@ -25,7 +28,8 @@
  *      wrong shape. NOT the same as "no findings"; a reviewer that never ran
  *      must never read as a clean review.
  *   4  a `gh` call failed
- *   5  coverage did not match the authoritative PR file list
+ *   5  coverage did not match the authoritative PR file list, or that list came
+ *      back empty (a fetch failure, never a PR that changes nothing)
  */
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -94,7 +98,11 @@ export function parseDiff(diffText) {
   let newLine = 0;
   let inHunk = false;
 
-  for (const raw of String(diffText).split(/\r?\n/)) {
+  // Strip the ONE trailing newline `gh pr diff` always emits. Left in, the split
+  // yields a trailing '' that the `raw === ''` branch below counts as a context
+  // line, marking one line past the diff's true end as commentable — and a
+  // finding anchored there makes GitHub reject the entire single-POST review.
+  for (const raw of String(diffText).replace(/\r?\n$/, '').split(/\r?\n/)) {
     if (raw.startsWith('diff --git ')) {
       path = null;
       inHunk = false;
@@ -132,16 +140,18 @@ export function parseDiff(diffText) {
 }
 
 /**
- * Count the files this PR changes — every one, not just the ones a comment can
- * anchor to.
+ * Count the `diff --git` headers — every changed file, not just the ones a
+ * comment can anchor to.
  *
- * This is deliberately NOT `parseDiff(...).size`. A deleted file has no
+ * DIAGNOSTIC ONLY. This no longer gates anything: coverage is checked against
+ * `fetchPrFilePaths` (the files API), and the only consumer left is the receipt
+ * line in `cmdPost`, where printing it beside `prFilePaths.length` makes a
+ * divergence between the diff and the file list visible.
+ *
+ * It is still deliberately NOT `parseDiff(...).size`. A deleted file has no
  * post-change side, and a binary or pure-rename change has no hunk at all, so
  * none of them appear in the commentable map — but all of them are changed
- * files, and the reviewer's `examined N of M` claim counts them. Conflating the
- * two made a truthful reviewer fail the coverage check on any PR that deleted a
- * file. Every changed file gets exactly one `diff --git` header, so that is the
- * count.
+ * files. Every changed file gets exactly one `diff --git` header.
  */
 export function countChangedFiles(diffText) {
   let n = 0;
@@ -189,10 +199,21 @@ export function validateFindingsShape(doc) {
   }
   if (typeof doc.coverage !== 'string' || doc.coverage.trim() === '') {
     problems.push('coverage must be a non-empty string');
+  } else if (!/examined\s+\d+\s+of\s+\d+/i.test(doc.coverage)) {
+    // An unparsable string disarms checkCoverage's count check silently, so the
+    // reviewer writing prose gets through while the one honestly reporting
+    // "examined 1 of 2" is blocked. Enforce the format here, where it always
+    // runs, rather than in the JSON schema, which the generator may ignore.
+    problems.push(`coverage must state "examined N of M": ${JSON.stringify(doc.coverage)}`);
   }
   if (!Array.isArray(doc.examined_paths)) {
     problems.push('examined_paths must be an array');
   } else {
+    // A checker over zero input reports "clean": checkCoverage([], []) is ok, so
+    // a handback admitting nothing examined would post as a passing review.
+    if (doc.examined_paths.length === 0) {
+      problems.push('examined_paths must not be empty — a review that examined nothing is not a clean review');
+    }
     doc.examined_paths.forEach((path, i) => {
       if (typeof path !== 'string' || path.trim() === '') {
         problems.push(`examined_paths[${i}] must be a non-empty string`);
@@ -226,26 +247,35 @@ export function validateFindingsShape(doc) {
 /**
  * Split findings by whether GitHub will accept them as line-anchored comments.
  *
- * `offDiff` is the load-bearing bucket: a finding citing a file this PR does not
- * touch is either out of scope or an invented locator, and both are things the
- * operator must see rather than have quietly folded into prose.
+ * Two distinct off-diff buckets, and conflating them publishes a false
+ * statement. Absence from `diffFiles` only means "no commentable line" — a
+ * deleted, binary or pure-rename file never appears there but IS a file this PR
+ * changes. `prFilePaths` (the files API, the authoritative list) is what
+ * separates them:
+ *
+ *   offDiffChanged   — the PR changes the file, but no line can carry a comment
+ *   offDiffUnchanged — the PR does not touch the file at all: out of scope or an
+ *                      invented locator, and the operator must see which
  */
-export function partitionFindings(findings, diffFiles) {
+export function partitionFindings(findings, diffFiles, prFilePaths = []) {
+  const normalizePath = (path) => String(path).replace(/\\/g, '/').replace(/^\.\//, '');
+  const prSet = new Set(prFilePaths.map(normalizePath));
   const anchored = [];
-  const offDiff = [];
+  const offDiffChanged = [];
+  const offDiffUnchanged = [];
   const offLine = [];
   for (const f of findings) {
-    const path = String(f.path).replace(/\\/g, '/').replace(/^\.\//, '');
+    const path = normalizePath(f.path);
     const lines = diffFiles.get(path);
     if (!lines) {
-      offDiff.push({ ...f, path });
+      (prSet.has(path) ? offDiffChanged : offDiffUnchanged).push({ ...f, path });
     } else if (!lines.has(f.line)) {
       offLine.push({ ...f, path });
     } else {
       anchored.push({ ...f, path });
     }
   }
-  return { anchored, offDiff, offLine };
+  return { anchored, offDiffChanged, offDiffUnchanged, offLine };
 }
 
 /**
@@ -316,16 +346,33 @@ function renderFinding(f) {
  * own pull request, and in this loop the PR author is the one running the
  * review. COMMENT works on your own PR and is what the manual loop produced.
  */
-export function buildReviewPayload({ summary, coverage, anchored, offDiff, offLine, coverageCheck }) {
+export function buildReviewPayload({
+  summary,
+  coverage,
+  anchored,
+  offDiffChanged,
+  offDiffUnchanged,
+  offLine,
+  coverageCheck,
+  warnings = [],
+}) {
   const sections = [summary.trim()];
 
-  if (offLine.length > 0 || offDiff.length > 0) {
+  if (offLine.length > 0 || offDiffChanged.length > 0 || offDiffUnchanged.length > 0) {
     const lines = ['', '---', '', '### Findings that could not be line-anchored', ''];
     for (const f of offLine) {
       lines.push(`- \`${f.path}:${f.line}\` — line is outside this PR's diff.`, '', renderFinding(f), '');
     }
-    for (const f of offDiff) {
-      lines.push(`- \`${f.path}:${f.line}\` — **this PR does not change that file.**`, '', renderFinding(f), '');
+    for (const f of offDiffChanged) {
+      lines.push(
+        `- \`${f.path}:${f.line}\` — **changed by this PR, but not line-anchorable** (deleted, binary, or pure rename).`,
+        '',
+        renderFinding(f),
+        '',
+      );
+    }
+    for (const f of offDiffUnchanged) {
+      lines.push(`- \`${f.path}:${f.line}\` — **not a file this PR changes.**`, '', renderFinding(f), '');
     }
     sections.push(lines.join('\n'));
   }
@@ -334,10 +381,13 @@ export function buildReviewPayload({ summary, coverage, anchored, offDiff, offLi
     '',
     '---',
     '',
-    `_Slim review · ${anchored.length} anchored · ${offLine.length} off-line · ${offDiff.length} off-diff · ${coverage.trim()}_`,
+    `_Slim review · ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff · ${coverage.trim()}_`,
   ];
   if (!coverageCheck.ok) {
     footer.push('', `> ⚠️ **Coverage check failed:** ${coverageCheck.reason}`);
+  }
+  for (const warning of warnings) {
+    footer.push('', `> ⚠️ **Warning:** ${warning}`);
   }
   sections.push(footer.join('\n'));
 
@@ -367,29 +417,57 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
   const diffFiles = parseDiff(diffText);
   const diffHeaderCount = countChangedFiles(diffText);
   const prFilePaths = fetchPrFilePaths(repo, opts.pr, opts.cwd, runGh);
-  const { anchored, offDiff, offLine } = partitionFindings(doc.findings, diffFiles);
+  // An empty authoritative list is a fetch failure, not a PR that changes
+  // nothing: GitHub does not create a PR with zero files. Without this floor the
+  // whole coverage guard runs over the empty set and reports OK.
+  if (prFilePaths.length === 0) {
+    die(5, `the PR API returned no changed files for ${repo}#${opts.pr}. That is a fetch failure, not a clean PR — nothing was posted.`);
+  }
+  const { anchored, offDiffChanged, offDiffUnchanged, offLine } =
+    partitionFindings(doc.findings, diffFiles, prFilePaths);
   const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
 
-  if (!coverageCheck.ok && !opts.forcePost) {
-    die(5, `coverage check failed; review was not posted: ${coverageCheck.reason}\nRe-run the reviewer or pass --force-post to post the stamped mismatch.`);
+  // Free ground-truth signal: two independent sources for "what this PR changes"
+  // are already in hand. Divergence means the diff the reviewer read disagrees
+  // with the file list it was told to echo. Non-blocking — it is a heads-up, not
+  // a verdict — but silently discarding it is worse than printing it.
+  const warnings = [];
+  if (diffHeaderCount !== prFilePaths.length) {
+    warnings.push(
+      `diff shows ${diffHeaderCount} changed files, the PR API lists ${prFilePaths.length} — the diff and the authoritative file list disagree`,
+    );
   }
 
   const payload = buildReviewPayload({
     summary: doc.summary,
     coverage: doc.coverage,
     anchored,
-    offDiff,
+    offDiffChanged,
+    offDiffUnchanged,
     offLine,
     coverageCheck,
+    warnings,
   });
 
+  // Print the receipt BEFORE any coverage die: the failure path is exactly where
+  // an operator needs the numbers to decide about --force-post.
   log(`repo           ${repo}`);
   log(`pr             #${opts.pr}`);
   log(`changed files  ${prFilePaths.length} from PR API (${diffHeaderCount} diff headers; ${diffFiles.size} with commentable lines)`);
-  log(`findings       ${doc.findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiff.length} off-diff`);
+  log(`findings       ${doc.findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff`);
   log(`coverage       ${coverageCheck.ok ? `OK${coverageCheck.countReason ? ` — Secondary count check: ${coverageCheck.countReason}` : ''}` : `FAILED — ${coverageCheck.reason}`}`);
-  for (const f of offDiff) {
+  for (const w of warnings) {
+    log(`  warning      ${w}`);
+  }
+  for (const f of offDiffChanged) {
+    log(`  not-anchor   ${f.path}:${f.line} — changed by this PR, but not line-anchorable`);
+  }
+  for (const f of offDiffUnchanged) {
     log(`  off-diff     ${f.path}:${f.line} — not a file this PR changes`);
+  }
+
+  if (!coverageCheck.ok && !opts.forcePost) {
+    die(5, `coverage check failed; review was not posted: ${coverageCheck.reason}\nRe-run the reviewer or pass --force-post to post the stamped mismatch.`);
   }
 
   if (opts.dryRun) {
@@ -449,7 +527,7 @@ function cmdThreads(opts) {
     console.log(`   ${head?.author?.login ?? '?'}: ${first.slice(0, 140)}`);
     console.log('');
   }
-  console.log('reply with:  node pr-review.mjs reply --pr <n> --comment-id <id> --body-file <file>');
+  console.log(`reply with:  node pr-review.mjs reply --pr ${opts.pr} --repo ${repo} --comment-id <id> --body-file <file>`);
 }
 
 function cmdReply(opts) {
@@ -479,11 +557,12 @@ function cmdReply(opts) {
 const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
 
   post     --pr <n> --repo owner/name --findings <file> [--dry-run] [--force-post]
-  threads  --pr <n> [--repo owner/name] [--unresolved]
-  reply    --pr <n> --comment-id <id> --body-file <file> [--repo owner/name]
+  threads  --pr <n> --repo owner/name [--unresolved]
+  reply    --pr <n> --repo owner/name --comment-id <id> --body-file <file>
 
 Common:
-  --repo   required for post; other commands default to gh repo view on cwd
+  --repo   required for every command — cwd resolution silently answers about a
+           different repo's PR of the same number
   --cwd    directory to run gh from (default: process cwd)
 `;
 
@@ -533,8 +612,13 @@ function main(argv) {
       if (!opts.findings) fail(2, 'post needs --findings <file>');
       return cmdPost(opts);
     case 'threads':
+      // Not cosmetic: `threads --pr 53 --unresolved` from the wrong cwd prints
+      // "no unresolved review threads" — the merge-ready signal — about someone
+      // else's PR #53. Same number, different repo, and nothing says so.
+      if (!opts.repo) fail(2, 'threads needs --repo owner/name');
       return cmdThreads(opts);
     case 'reply':
+      if (!opts.repo) fail(2, 'reply needs --repo owner/name');
       if (!opts.commentId || !/^\d+$/.test(String(opts.commentId))) fail(2, 'reply needs --comment-id <numeric id>');
       if (!opts.bodyFile) fail(2, 'reply needs --body-file <file>');
       return cmdReply(opts);
