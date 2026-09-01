@@ -7,6 +7,8 @@ description: "Offload a bounded whole-repo audit, broad search, bulk extraction,
 
 The conductor is the context-rich channel. Token-hungry grunt work burns it on work a cheaper model can do just as well. Delegate the leaf work; keep orchestration, architecture, and integration judgment in the conductor.
 
+For worktree-backed agent execution, the lane lifecycle is encoded in `scripts/lane.mjs`; see the `herdr-lane-gating` spec-lite for the binding behavior.
+
 ## Route by Phase
 
 Pick the execution surface by the **phase** of work, not just its size:
