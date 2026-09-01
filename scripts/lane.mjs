@@ -40,6 +40,9 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   fallback <name> --to claude --model <slug> --reasoning <lvl>
   sweep    [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
            --lane <name> limits the delegate to one lane; --list is a dry run.
+           The delegate is HERDR_LANES_SCRIPT, else <workspace-root>/infrastructure/
+           herdr-lanes.ps1, else that path from the cwd; if none exists, sweep
+           prints the command to run instead of guessing a location.
 
   --log <path>  JSONL instrumentation (default: <workspace>/data/outputs/projects/
                 agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)`;
@@ -47,7 +50,12 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
 // read off lane O's pane at 2026-09-01 22:12Z; herdr reported that agent as
 // `idle` the whole time the modal was up, so the pane text is the only signal.
 export const PLAN_REFUSAL_PATTERNS = Object.freeze([/hit your usage limit/i]);
-const SWEEP_SCRIPT = 'D:\\Development\\infrastructure\\herdr-lanes.ps1';
+// The sweep delegate's location is resolved, never hardcoded: this file ships in
+// a public repo, and one operator's drive layout is not a default. Order:
+// HERDR_LANES_SCRIPT, then <workspace-root>/infrastructure/herdr-lanes.ps1
+// (--workspace-root or WORKIT_WORKSPACE_ROOT), then the same relative path from
+// the cwd. When none of them resolves, `sweep` prints the command to run.
+const SWEEP_DELEGATE = ['infrastructure', 'herdr-lanes.ps1'];
 const POLL_MS = 1_000;
 const LOG_BASENAME = 'lane-log.jsonl';
 const LOG_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 'lanes'];
@@ -839,21 +847,31 @@ function sweepRoots(opts, deps) {
   return present;
 }
 
+function sweepDelegate(opts, deps) {
+  if (deps.env.HERDR_LANES_SCRIPT) return resolve(deps.env.HERDR_LANES_SCRIPT);
+  const workspace = opts.workspaceRoot ?? deps.env.WORKIT_WORKSPACE_ROOT ?? null;
+  if (workspace) return join(resolve(workspace), ...SWEEP_DELEGATE);
+  return resolve(...SWEEP_DELEGATE);
+}
+
 async function sweepLanes(opts, deps) {
   const roots = sweepRoots(opts, deps);
+  const delegate = sweepDelegate(opts, deps);
   // The delegate is LIST-ONLY without -Clean, and S8 wants the directory gone.
   // -Force is never implied: its HOLD verdicts are what keep unfinished work.
   const flags = [];
   if (!opts.list) flags.push('-Clean');
   if (opts.lane) flags.push('-Lane', opts.lane);
   if (opts.force) flags.push('-Force');
-  if (!deps.exists(SWEEP_SCRIPT)) {
+  if (!deps.exists(delegate)) {
     const suffix = flags.length > 0 ? ` ${flags.join(' ')}` : '';
     return {
       exit: EXIT.OK,
       output: {
         delegated: false,
-        commands: roots.map((root) => `pwsh -NoProfile -File "${SWEEP_SCRIPT}" -WorktreeRoot "${root}"${suffix}`),
+        delegate,
+        hint: 'set HERDR_LANES_SCRIPT, or --workspace-root / WORKIT_WORKSPACE_ROOT so infrastructure/herdr-lanes.ps1 resolves',
+        commands: roots.map((root) => `pwsh -NoProfile -File "${delegate}" -WorktreeRoot "${root}"${suffix}`),
       },
       row: { lane: null, state: 'delegate-missing' },
     };
@@ -862,7 +880,7 @@ async function sweepLanes(opts, deps) {
   // lanes unswept behind a failing legacy root — the alert-fan-out failure
   // where one dead target silences the rest.
   const results = roots.map((root) => {
-    const swept = call(deps, 'pwsh', ['-NoProfile', '-File', SWEEP_SCRIPT, '-WorktreeRoot', root, ...flags]);
+    const swept = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', root, ...flags]);
     return {
       root,
       ok: swept.code === 0,

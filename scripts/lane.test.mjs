@@ -181,10 +181,10 @@ test('WP-1 / C13: create honours an explicit --path and refuses one that already
 test('WP-1: codex start waits for codex.exe and a returned prompt before agent start', async (t) => {
   const f = fixture(t);
   f.responses.push(
-    { code: 0, stdout: 'C:\\npm', stderr: '' },
+    { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
-    { code: 0, stdout: 'PS C:\\lane> $env:PATH = "C:\\vendor\\bin;" + $env:PATH; (Get-Command codex).Source', stderr: '' },
-    { code: 0, stdout: 'C:\\vendor\\bin\\codex.exe\nPS C:\\lane>', stderr: '' },
+    { code: 0, stdout: 'PS X:\\fixture\\lane> $env:PATH = "X:\\fixture\\vendor\\bin;" + $env:PATH; (Get-Command codex).Source', stderr: '' },
+    { code: 0, stdout: 'X:\\fixture\\vendor\\bin\\codex.exe\nPS X:\\fixture\\lane>', stderr: '' },
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-c"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
@@ -193,7 +193,7 @@ test('WP-1: codex start waits for codex.exe and a returned prompt before agent s
     ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', f.log],
     // platform is injected: the Windows shim trap (C12) must be exercised by the
     // Linux runner too, and a process.platform read would skip it there.
-    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'C:\\vendor\\bin', sleep: async () => {} },
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {} },
   );
   assert.equal(result.exit, 0);
   assert.equal(f.calls[0].program, 'cmd.exe');
@@ -379,7 +379,7 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
   f.responses.push(
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
-    { code: 0, stdout: 'PS C:\\lane>', stderr: '' },
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
@@ -710,8 +710,8 @@ test('AM7b / U5: a held lock is retried, then released', async (t) => {
 });
 
 test('AM8: the pane-prompt gate rejects a codex TUI line that merely ends in >', () => {
-  assert.equal(paneAtPrompt('PS C:\\lane>'), true);
-  assert.equal(paneAtPrompt('C:\\Users\\lane>'), true);
+  assert.equal(paneAtPrompt('PS X:\\fixture\\lane>'), true);
+  assert.equal(paneAtPrompt('X:\\fixture\\lane>'), true);
   assert.equal(paneAtPrompt('still running codex >'), false, 'this is the failover gate, not a suffix match');
   assert.equal(paneAtPrompt('  › 1. Switch  2. Keep current model'), false);
   assert.equal(paneAtPrompt('│ working on it >'), false);
@@ -720,17 +720,17 @@ test('AM8: the pane-prompt gate rejects a codex TUI line that merely ends in >',
 test('AM9: the codex readiness poll retries a transient pane read instead of aborting', async (t) => {
   const f = fixture(t);
   f.responses.push(
-    { code: 0, stdout: 'C:\\npm', stderr: '' },
+    { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 1, stdout: '', stderr: 'transient read failure' },
-    { code: 0, stdout: 'C:\\vendor\\bin\\codex.exe\nPS C:\\lane>', stderr: '' },
+    { code: 0, stdout: 'X:\\fixture\\vendor\\bin\\codex.exe\nPS X:\\fixture\\lane>', stderr: '' },
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-c"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
   );
   const result = await runLane(
     ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', f.log],
-    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'C:\\vendor\\bin', sleep: async () => {} },
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {} },
   );
   assert.equal(result.exit, 0, 'C12 exists because codex launches were flaky — do not reintroduce the flake');
   assert.ok(f.calls.some((call) => call.args[0] === 'agent' && call.args[1] === 'start'));
@@ -741,7 +741,7 @@ test('AM10: the PATH prepend is a single-quoted PowerShell literal', async (t) =
   f.responses.push(
     { code: 0, stdout: '/usr/lib/node_modules', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
-    { code: 0, stdout: "/ven'dor/bin/codex.exe\nPS C:\\lane>", stderr: '' },
+    { code: 0, stdout: "/ven'dor/bin/codex.exe\nPS X:\\fixture\\lane>", stderr: '' },
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-c"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
@@ -833,6 +833,70 @@ test('AM15: the usage text documents every flag the CLI accepts, including --lan
   assert.match(result.output.usage, /--lane/);
   assert.match(result.output.usage, /sweep/);
   assert.match(result.output.usage, /--plan-floor/);
+});
+
+test('SCRUB: the sweep delegate is resolved, never a hardcoded machine path', async (t) => {
+  const f = fixture(t);
+  const declared = join(f.dir, 'delegate', 'herdr-lanes.ps1');
+  f.responses.push({ code: 0, stdout: 'done', stderr: '' });
+  const fromEnv = await runLane(['sweep', '--root', f.dir, '--log', f.log], {
+    exec: f.exec,
+    exists: fakeExists(),
+    env: { HERDR_LANES_SCRIPT: declared },
+  });
+  assert.equal(fromEnv.exit, 0);
+  assert.equal(f.calls[0].args[2], declared, 'HERDR_LANES_SCRIPT wins');
+
+  const g = fixture(t);
+  g.responses.push({ code: 0, stdout: 'done', stderr: '' });
+  await runLane(['sweep', '--root', g.dir, '--log', g.log], {
+    exec: g.exec,
+    exists: fakeExists(),
+    env: { WORKIT_WORKSPACE_ROOT: g.dir },
+  });
+  assert.equal(g.calls[0].args[2], join(g.dir, 'infrastructure', 'herdr-lanes.ps1'), 'else it derives from the workspace root');
+
+  const h = fixture(t);
+  const missing = await runLane(['sweep', '--root', h.dir, '--log', h.log], {
+    exec: h.exec,
+    exists: fakeExists((path) => !path.endsWith('herdr-lanes.ps1')),
+    env: {},
+  });
+  assert.equal(h.calls.length, 0);
+  assert.match(missing.output.hint, /HERDR_LANES_SCRIPT/, 'and an unresolvable delegate says how to declare one');
+});
+
+test('SCRUB: no host topology reaches the public files (guard is non-vacuous)', () => {
+  // workit is public. This guard is the standing half of the scrub: a one-off
+  // cut refills. Its own patterns are assembled from fragments so the guard
+  // does not match itself, and lane.test.mjs is excluded by design — fixtures
+  // there use Windows-SHAPED paths (X:\fixture\…) that are nobody's machine.
+  const files = [
+    'reference/patterns/lane-supervision.md',
+    'reference/patterns/INDEX.md',
+    'scripts/lane.mjs',
+    'scripts/lane-smoke.mjs',
+    'skills/burn-down/SKILL.md',
+    'skills/codex-delegate/SKILL.md',
+  ];
+  const banned = [
+    ['operator username', new RegExp(['jm', 'hea'].join(''), 'i')],
+    ['user-profile path', /[A-Za-z]:\\+Users/i],
+    ['operator drive layout', /[A-Za-z]:\\+Development/i],
+    ['hostname', new RegExp(`\\b(?:${['fla', 'gg'].join('')}|${['thedark', 'tower'].join('')})\\b`, 'i')],
+    ['LAN address', /\b192\.168\.\d{1,3}\.\d{1,3}\b/],
+  ];
+  let scanned = 0;
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8');
+    scanned += text.length;
+    for (const [label, pattern] of banned) {
+      assert.doesNotMatch(text, pattern, `${file} leaks ${label} into a public repo`);
+    }
+  }
+  assert.ok(scanned > 20_000, `the guard must actually read the files, saw ${scanned} chars`);
+  // The guard discriminates: it catches a planted violation.
+  assert.match(`Q:${'\\'}Users${'\\'}someone`, banned[1][1]);
 });
 
 test('AM16 / C13: create refuses a lane that would land outside the projects tree', async (t) => {
