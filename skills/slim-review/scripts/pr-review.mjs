@@ -7,7 +7,7 @@
  *
  *   post    — turn a delegated reviewer's findings JSON into a line-anchored
  *             GitHub PR review, after checking the findings against the PR's own
- *             diff (coverage arithmetic + line anchorability).
+ *             diff (authoritative path-set coverage + line anchorability).
  *   threads — list the PR's review threads with their resolved state and the
  *             comment ids you reply to.
  *   reply   — reply to one review thread.
@@ -25,6 +25,7 @@
  *      wrong shape. NOT the same as "no findings"; a reviewer that never ran
  *      must never read as a clean review.
  *   4  a `gh` call failed
+ *   5  coverage did not match the authoritative PR file list
  */
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -65,6 +66,13 @@ function ghOrDie(args, opts) {
 function resolveRepo(explicit, cwd) {
   if (explicit) return explicit;
   return ghOrDie(['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], { cwd }).trim();
+}
+
+/** Fetch the PR's authoritative changed-file paths from GitHub's PR files API. */
+export function fetchPrFilePaths(repo, pr, cwd, runGh = ghOrDie) {
+  const raw = runGh(['pr', 'view', String(pr), '--repo', repo, '--json', 'files'], { cwd });
+  const files = JSON.parse(raw).files;
+  return files.map((file) => file.path);
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +188,15 @@ export function validateFindingsShape(doc) {
   if (typeof doc.coverage !== 'string' || doc.coverage.trim() === '') {
     problems.push('coverage must be a non-empty string');
   }
+  if (!Array.isArray(doc.examined_paths)) {
+    problems.push('examined_paths must be an array');
+  } else {
+    doc.examined_paths.forEach((path, i) => {
+      if (typeof path !== 'string' || path.trim() === '') {
+        problems.push(`examined_paths[${i}] must be a non-empty string`);
+      }
+    });
+  }
   if (!Array.isArray(doc.findings)) {
     problems.push('findings must be an array (an empty array is valid)');
     return problems;
@@ -233,30 +250,38 @@ export function partitionFindings(findings, diffFiles) {
  * the files, so a silently partial review is indistinguishable from a thorough
  * one unless something compares the claim to ground truth.
  */
-export function checkCoverage(coverage, actualFileCount) {
+export function checkCoverage(coverage, examinedPaths, prFilePaths) {
   const m = /examined\s+(\d+)\s+of\s+(\d+)/i.exec(String(coverage));
+
+  const normalizePath = (path) => String(path).replace(/\\/g, '/').replace(/^\.\//, '');
+  const examinedSet = new Set(examinedPaths.map(normalizePath));
+  const prSet = new Set(prFilePaths.map(normalizePath));
+  const missing = [...prSet].filter((path) => !examinedSet.has(path)).sort();
+  const extra = [...examinedSet].filter((path) => !prSet.has(path)).sort();
+
+  let countReason;
   if (!m) {
-    return { ok: false, reason: `coverage string does not state "examined N of M": ${JSON.stringify(coverage)}` };
+    countReason = `coverage string does not state "examined N of M": ${JSON.stringify(coverage)}`;
+  } else {
+    const examined = Number(m[1]);
+    const claimedTotal = Number(m[2]);
+    if (claimedTotal !== prSet.size) {
+      countReason = `reviewer claims ${claimedTotal} changed files, the PR API has ${prSet.size}`;
+    } else if (examined < claimedTotal) {
+      countReason = `reviewer examined ${examined} of ${claimedTotal} changed files — the review is partial`;
+    }
   }
-  const examined = Number(m[1]);
-  const claimedTotal = Number(m[2]);
-  if (claimedTotal !== actualFileCount) {
-    return {
-      ok: false,
-      reason: `reviewer claims ${claimedTotal} changed files, the PR diff has ${actualFileCount}`,
-      examined,
-      claimedTotal,
-    };
+
+  if (missing.length === 0 && extra.length === 0) {
+    return { ok: true, missing, extra, countReason };
   }
-  if (examined < claimedTotal) {
-    return {
-      ok: false,
-      reason: `reviewer examined ${examined} of ${claimedTotal} changed files — the review is partial`,
-      examined,
-      claimedTotal,
-    };
-  }
-  return { ok: true, examined, claimedTotal };
+  const pathReasons = [
+    missing.length > 0 ? `missing: ${missing.join(', ')}` : null,
+    extra.length > 0 ? `extra: ${extra.join(', ')}` : null,
+  ].filter(Boolean);
+  const reason = [`examined_paths do not match the PR API (${pathReasons.join('; ')})`];
+  if (countReason) reason.push(`Secondary count check: ${countReason}`);
+  return { ok: false, reason: reason.join('. '), missing, extra, countReason };
 }
 
 // ---------------------------------------------------------------------------
@@ -323,9 +348,14 @@ function cmdPost(opts) {
 
   const diffText = ghOrDie(['pr', 'diff', String(opts.pr), '--repo', repo], { cwd: opts.cwd });
   const diffFiles = parseDiff(diffText);
-  const changedFileCount = countChangedFiles(diffText);
+  const diffHeaderCount = countChangedFiles(diffText);
+  const prFilePaths = fetchPrFilePaths(repo, opts.pr, opts.cwd);
   const { anchored, offDiff, offLine } = partitionFindings(doc.findings, diffFiles);
-  const coverageCheck = checkCoverage(doc.coverage, changedFileCount);
+  const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
+
+  if (!coverageCheck.ok && !opts.forcePost) {
+    fail(5, `coverage check failed; review was not posted: ${coverageCheck.reason}\nRe-run the reviewer or pass --force-post to post the stamped mismatch.`);
+  }
 
   const payload = buildReviewPayload({
     summary: doc.summary,
@@ -338,9 +368,9 @@ function cmdPost(opts) {
 
   console.log(`repo           ${repo}`);
   console.log(`pr             #${opts.pr}`);
-  console.log(`changed files  ${changedFileCount} (${diffFiles.size} with commentable lines)`);
+  console.log(`changed files  ${prFilePaths.length} from PR API (${diffHeaderCount} diff headers; ${diffFiles.size} with commentable lines)`);
   console.log(`findings       ${doc.findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiff.length} off-diff`);
-  console.log(`coverage       ${coverageCheck.ok ? 'OK' : `FAILED — ${coverageCheck.reason}`}`);
+  console.log(`coverage       ${coverageCheck.ok ? `OK${coverageCheck.countReason ? ` — Secondary count check: ${coverageCheck.countReason}` : ''}` : `FAILED — ${coverageCheck.reason}`}`);
   for (const f of offDiff) {
     console.log(`  off-diff     ${f.path}:${f.line} — not a file this PR changes`);
   }
@@ -431,12 +461,12 @@ function cmdReply(opts) {
 
 const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
 
-  post     --pr <n> --findings <file> [--repo owner/name] [--dry-run]
+  post     --pr <n> --repo owner/name --findings <file> [--dry-run] [--force-post]
   threads  --pr <n> [--repo owner/name] [--unresolved]
   reply    --pr <n> --comment-id <id> --body-file <file> [--repo owner/name]
 
 Common:
-  --repo   default: gh repo view on the current directory
+  --repo   required for post; other commands default to gh repo view on cwd
   --cwd    directory to run gh from (default: process cwd)
 `;
 
@@ -463,6 +493,7 @@ export function parseArgs(argv) {
       case '--comment-id': opts.commentId = next(); break;
       case '--body-file': opts.bodyFile = next(); break;
       case '--dry-run': opts.dryRun = true; break;
+      case '--force-post': opts.forcePost = true; break;
       case '--unresolved': opts.unresolved = true; break;
       case '-h': case '--help': opts.help = true; break;
       default: fail(2, `unknown argument: ${a}\n\n${USAGE}`);
@@ -481,6 +512,7 @@ function main(argv) {
 
   switch (opts.cmd) {
     case 'post':
+      if (!opts.repo) fail(2, 'post needs --repo owner/name');
       if (!opts.findings) fail(2, 'post needs --findings <file>');
       return cmdPost(opts);
     case 'threads':

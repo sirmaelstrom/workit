@@ -39,7 +39,7 @@ needs you.
 ## 1. Target
 
 ```bash
-gh pr view <n> --json title,headRefName,baseRefName,files,additions,deletions
+gh pr view <n> --repo <owner/name> --json title,headRefName,baseRefName,files,additions,deletions
 ```
 
 Work from a checkout of the PR's head — the repo root, or the worktree the branch
@@ -56,7 +56,8 @@ mkdir -p "$REVIEW_DIR"
 
 Write the prompt, then spawn one reviewer.
 
-**The prompt must tell the reviewer to read the diff via `gh pr diff <n>`** — the
+**The prompt must tell the reviewer to read the diff via `gh pr diff <n> --repo
+<owner/name>`** — the
 same command step 3 parses for anchoring. If the reviewer reads a differently
 computed diff, its line numbers will not match the ones GitHub accepts and every
 finding degrades to prose.
@@ -66,9 +67,15 @@ Review pull request #<n> in the repository at <ABSOLUTE REPO OR WORKTREE PATH>.
 
 READ-ONLY: do not modify, create, or delete any file in that repository.
 
-Get the diff with `gh pr diff <n>`. Read whatever surrounding source you need in
-order to judge it — the diff alone is not enough to tell whether a change is
-correct.
+Get the diff with `gh pr diff <n> --repo <owner/name>`. Read whatever surrounding
+source you need in order to judge it — the diff alone is not enough to tell
+whether a change is correct.
+
+Authoritative PR file list (from `gh pr view <n> --repo <owner/name> --json files`):
+<one `files[].path` per line, copied from the target response>
+
+This list is the coverage ground truth. Echo every path from that authoritative
+list into `examined_paths`.
 
 Report correctness defects that would matter after merge:
 - wrong behavior on an input the change makes reachable
@@ -88,6 +95,9 @@ so in the body — but anchor the ones you can.
 
 Set `coverage` to exactly "examined N of M changed files" with the real counts.
 ```
+
+Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`.
+`examined_paths` must contain every path in the authoritative list.
 
 The instrument bullet is this skill's negative-control binding
 (`reference/patterns/negative-control.md`): an added test, guard, or checker
@@ -130,14 +140,15 @@ git -C "<ABSOLUTE REPO OR WORKTREE PATH>" status --short
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post \
-  --pr <n> --findings "$REVIEW_DIR/findings.json" [--dry-run]
+  --pr <n> --repo <owner/name> --findings "$REVIEW_DIR/findings.json" [--dry-run] [--force-post]
 ```
 
 The script does the checking you would otherwise have to remember:
 
-- **Coverage arithmetic** — parses `examined N of M` and compares M against the
-  PR's real changed-file count. A silently partial review is otherwise
-  indistinguishable from a clean one, because you never read the files.
+- **Blocking coverage set check** — compares normalized `examined_paths` against
+  the PR API's authoritative file list. Missing or extra paths exit nonzero before
+  posting; `--force-post` is the explicit escape hatch and stamps the mismatch in
+  the review body. The `examined N of M` count remains secondary evidence.
 - **Anchorability** — a finding whose line is in the diff becomes a real
   line-anchored comment; one whose line is not becomes a body entry; one whose
   **file this PR does not touch** becomes a body entry flagged as such. That last
@@ -155,6 +166,7 @@ Exit codes matter here:
 | 0 | Posted. **A zero-finding review is a real result** — it posts, and that is the receipt that review happened |
 | 3 | The handback never arrived: file missing, unparseable, or wrong shape. **This is not a clean review.** Re-run step 2 |
 | 4 | A `gh` call failed |
+| 5 | Coverage paths mismatch; nothing was posted unless `--force-post` was explicit |
 
 The review posts as `COMMENT`, which is the only event GitHub permits on your own
 pull request.

@@ -1,7 +1,7 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "coverage", "findings"],
+  "required": ["summary", "coverage", "examined_paths", "findings"],
   "properties": {
     "summary": {
       "type": "string",
@@ -9,7 +9,16 @@
     },
     "coverage": {
       "type": "string",
-      "description": "Exactly: examined N of M changed files. Real counts — this is checked against the PR diff."
+      "description": "Exactly: examined N of M changed files. The count is secondary to examined_paths set validation."
+    },
+    "examined_paths": {
+      "type": "array",
+      "description": "Every authoritative PR file path examined, echoed exactly from the prompt.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
     },
     "findings": {
       "type": "array",
