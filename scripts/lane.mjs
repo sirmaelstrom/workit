@@ -305,7 +305,10 @@ async function createLane(opts, deps, state) {
 }
 
 async function startLane(opts, deps, state) {
-  required(opts, 'pane', 'kind', 'model');
+  // C8: model AND reasoning effort are launch flags, never inherited. A claude
+  // fallback lane started without --effort ran at xhigh — $5.24 in 9 minutes on
+  // a finish-and-commit task (measured 2026-09-01).
+  required(opts, 'pane', 'kind', 'model', 'reasoning');
   if (!opts.name) usage('start needs <name>');
   if (!['claude', 'codex'].includes(opts.kind)) usage('start --kind must be claude or codex');
 
@@ -316,17 +319,18 @@ async function startLane(opts, deps, state) {
     if (mode === 'dontAsk') usage('claude permission mode dontAsk is refused because it auto-denies tools');
     if (!['bypassPermissions', 'acceptEdits'].includes(mode)) usage(`unsupported claude permission mode: ${mode}`);
     if (mode === 'acceptEdits') warning = 'acceptEdits may block on Bash outside the allowlist';
-    native = withoutOption(native, '--permission-mode');
-    native = ['--model', opts.model, '--permission-mode', mode, ...native];
-    if (opts.reasoning) native.push('--effort', opts.reasoning);
+    native = withoutOption(withoutOption(native, '--permission-mode'), '--effort');
+    native = ['--model', opts.model, '--permission-mode', mode, '--effort', opts.reasoning, ...native];
   } else {
     const sandbox = opts.sandbox ?? agentOption(native, '--sandbox');
     if (!sandbox) usage('codex start needs an explicit --sandbox');
     if (sandbox === 'read-only') usage('codex read-only sandbox is refused on Windows because it can return ungrounded answers');
     native = withoutOption(withoutOption(native, '--sandbox'), '--ask-for-approval');
     await prepareCodexPane(opts, deps);
-    native = ['--model', opts.model, '--ask-for-approval', 'never', '--sandbox', sandbox, ...native];
-    if (opts.reasoning) native.push('-c', `model_reasoning_effort=${opts.reasoning}`);
+    native = [
+      '--model', opts.model, '--ask-for-approval', 'never', '--sandbox', sandbox,
+      '-c', `model_reasoning_effort=${opts.reasoning}`, ...native,
+    ];
   }
 
   const raw = callOrFail(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', opts.pane, '--', ...native]);

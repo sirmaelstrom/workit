@@ -42,7 +42,7 @@ function seedLane(f, lane = {}) {
 test('WP-1: dontAsk is refused before herdr is invoked', async (t) => {
   const f = fixture(t);
   const result = await runLane(
-    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--log', f.log, '--', '--permission-mode', 'dontAsk'],
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log, '--', '--permission-mode', 'dontAsk'],
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
   );
   assert.equal(result.exit, 2);
@@ -50,10 +50,23 @@ test('WP-1: dontAsk is refused before herdr is invoked', async (t) => {
   assert.equal(f.calls.length, 0);
 });
 
+test('WP-1 / C8: start refuses an inherited reasoning effort before herdr is invoked', async (t) => {
+  const f = fixture(t);
+  for (const args of [
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--log', f.log],
+    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--sandbox', 'workspace-write', '--log', f.log],
+  ]) {
+    const result = await runLane(args, { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } });
+    assert.equal(result.exit, 2, `${args[3]} lane must declare --reasoning`);
+    assert.match(result.output.error, /--reasoning/);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
 test('WP-1: read-only codex sandbox is refused before herdr is invoked', async (t) => {
   const f = fixture(t);
   const result = await runLane(
-    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--sandbox', 'read-only', '--log', f.log],
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'read-only', '--log', f.log],
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
   );
   assert.equal(result.exit, 2);
@@ -69,11 +82,11 @@ test('WP-1: claude start supplies the mandatory mode and restores conductor focu
     { code: 0, stdout: '{"result":{"agents":[{"name":"conductor","pane_id":"w1:p1","focused":true}]}}', stderr: '' },
   );
   const result = await runLane(
-    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--log', f.log],
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
   );
   assert.equal(result.exit, 0);
-  assert.deepEqual(f.calls[0].args, ['agent', 'start', 'lane-a', '--kind', 'claude', '--pane', 'w1:p2', '--', '--model', 'opus', '--permission-mode', 'bypassPermissions']);
+  assert.deepEqual(f.calls[0].args, ['agent', 'start', 'lane-a', '--kind', 'claude', '--pane', 'w1:p2', '--', '--model', 'opus', '--permission-mode', 'bypassPermissions', '--effort', 'high']);
   assert.deepEqual(f.calls[1].args, ['agent', 'focus', 'w1:p1']);
   assert.deepEqual(f.calls[2].args, ['agent', 'list']);
 });
@@ -156,7 +169,7 @@ test('WP-1: codex start waits for codex.exe and a returned prompt before agent s
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
   );
   const result = await runLane(
-    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--sandbox', 'workspace-write', '--log', f.log],
+    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', f.log],
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, findCodexBin: () => 'C:\\vendor\\bin', sleep: async () => {} },
   );
   assert.equal(result.exit, 0);
@@ -165,7 +178,7 @@ test('WP-1: codex start waits for codex.exe and a returned prompt before agent s
   const startIndex = f.calls.findIndex((call) => call.program === 'herdr' && call.args[0] === 'agent' && call.args[1] === 'start');
   const readsBeforeStart = f.calls.slice(0, startIndex).filter((call) => call.args[0] === 'pane' && call.args[1] === 'read');
   assert.equal(readsBeforeStart.length, 2);
-  assert.deepEqual(f.calls[startIndex].args.slice(-6), ['--model', 'gpt-5.6-terra', '--ask-for-approval', 'never', '--sandbox', 'workspace-write']);
+  assert.deepEqual(f.calls[startIndex].args.slice(-8), ['--model', 'gpt-5.6-terra', '--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'model_reasoning_effort=medium']);
 });
 
 test('WP-1: every attempted verb appends the complete JSONL instrumentation shape', async (t) => {
@@ -343,7 +356,7 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
     { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
   );
   const result = await runLane(
-    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--log', f.log],
+    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {} },
   );
   assert.equal(result.exit, 0);

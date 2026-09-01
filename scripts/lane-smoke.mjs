@@ -23,6 +23,9 @@ if (!argv.includes('--live')) {
 const repo = value('--repo');
 const base = value('--base') ?? 'main';
 const claudeModel = value('--model') ?? 'opus';
+// C8: effort is never inherited. The smoke is a two-line task, so it declares
+// the cheapest level rather than letting the lane default to xhigh.
+const reasoning = value('--reasoning') ?? 'low';
 if (!repo || !isAbsolute(repo)) {
   console.error('--repo <absolute path> is required');
   process.exit(2);
@@ -54,12 +57,12 @@ async function lane(args, expected) {
 const acceptName = `smoke-a-${stamp}`;
 const bypassName = `smoke-b-${stamp}`;
 const accept = await lane(['create', '--repo', resolve(repo), '--branch', `smoke/lane-accept-${stamp}`, '--base', base, '--label', acceptName], [0]);
-await lane(['start', acceptName, '--pane', accept.paneId, '--kind', 'claude', '--model', claudeModel, '--permission-mode', 'acceptEdits'], [0]);
+await lane(['start', acceptName, '--pane', accept.paneId, '--kind', 'claude', '--model', claudeModel, '--reasoning', reasoning, '--permission-mode', 'acceptEdits'], [0]);
 await lane(['prompt', acceptName, '--file', prompt], [0]);
 await lane(['wait', acceptName, '--until', 'blocked', '--timeout', '120000'], [3]);
 
 const bypass = await lane(['create', '--repo', resolve(repo), '--branch', `smoke/lane-bypass-${stamp}`, '--base', base, '--label', bypassName], [0]);
-await lane(['start', bypassName, '--pane', bypass.paneId, '--kind', 'claude', '--model', claudeModel], [0]);
+await lane(['start', bypassName, '--pane', bypass.paneId, '--kind', 'claude', '--model', claudeModel, '--reasoning', reasoning], [0]);
 await lane(['prompt', bypassName, '--file', prompt], [0]);
 await lane(['wait', bypassName, '--timeout', '120000'], [0]);
 
