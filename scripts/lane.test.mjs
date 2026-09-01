@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { EXIT_CODES, PLAN_REFUSAL_PATTERNS, paneAtPrompt, runLane, scrapePlanMeter } from './lane.mjs';
+// Importing the smoke harness must run nothing: its live path is behind both
+// `--live` and an entry-point check.
+import { listsWorktree, s1Verdict, s2Verdict, teardownSteps } from './lane-smoke.mjs';
 
 // Every fixture path is built from tmpdir with path.join, and every
 // platform-dependent branch is chosen through deps — the suite gates merge from
@@ -363,8 +366,25 @@ test('WP-2 / S6: resume waits explicitly until idle and never consults a bare st
   const result = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 0);
   assert.equal(result.output.state, 'idle');
-  assert.deepEqual(f.calls[0].args.slice(0, 5), ['agent', 'wait', 'lane-a', '--until', 'idle']);
+  assert.deepEqual(f.calls[0].args.slice(0, 7), ['agent', 'wait', 'lane-a', '--until', 'idle', '--until', 'done']);
   assert.equal(f.calls.length, 1);
+});
+
+test('SMOKE6 / S6: resume also accepts done, because an unfocused lane never reaches idle', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  // Measured live: a lane started --no-focus is never "seen", so herdr settles
+  // it to `done`. Waiting only for `idle` burned the full 120s and reported a
+  // timeout while the approved work had already landed.
+  f.responses.push((program, args) => {
+    if (!args.includes('--until')) return { code: 0, stdout: '{"result":{"state":"blocked"}}', stderr: '' };
+    if (!args.includes('done')) return { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' };
+    return { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' };
+  });
+  const result = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 0, 'an approved lane that settled done is resumed, not a timeout');
+  assert.equal(result.output.state, 'done');
+  assert.match(result.output.notice, /status is not evidence/);
 });
 
 test('WP-3 / S7: fallback reuses the same pane and prompt path and records the channel switch', async (t) => {
@@ -835,6 +855,107 @@ test('AM15: the usage text documents every flag the CLI accepts, including --lan
   assert.match(result.output.usage, /--plan-floor/);
 });
 
+test('SMOKE1: wait passes every --until through, so a finished lane is still seen', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+    { code: 0, stdout: 'finished', stderr: '' },
+  );
+  const result = await runLane(
+    ['wait', 'lane-a', '--until', 'blocked', '--until', 'idle', '--until', 'done', '--timeout', '1000', '--log', f.log],
+    { exec: f.exec },
+  );
+  assert.equal(result.exit, 0);
+  assert.equal(result.output.state, 'done');
+  assert.deepEqual(
+    f.calls[0].args,
+    ['agent', 'wait', 'lane-a', '--until', 'blocked', '--until', 'idle', '--until', 'done', '--timeout', '1000'],
+  );
+});
+
+test('SMOKE2: default permission mode is opt-in and announced; dontAsk stays refused', async (t) => {
+  const f = fixture(t);
+  const refused = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low',
+      '--permission-mode', 'default', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+  );
+  assert.equal(refused.exit, 2);
+  assert.match(refused.output.error, /--allow-default-mode/);
+  assert.equal(f.calls.length, 0);
+
+  const g = fixture(t);
+  g.responses.push(
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const allowed = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low',
+      '--permission-mode', 'default', '--allow-default-mode', '--log', g.log],
+    { exec: g.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+  );
+  assert.equal(allowed.exit, 0);
+  assert.match(allowed.output.warning, /default permission mode/);
+  assert.ok(g.calls[0].args.includes('default'));
+
+  // The escape hatch must not reach dontAsk, which auto-denies and still settles.
+  const h = fixture(t);
+  const stillRefused = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low',
+      '--permission-mode', 'dontAsk', '--allow-default-mode', '--log', h.log],
+    { exec: h.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+  );
+  assert.equal(stillRefused.exit, 2);
+  assert.match(stillRefused.output.error, /dontAsk/);
+  assert.equal(h.calls.length, 0);
+});
+
+test('SMOKE3: the harness never passes S1 on a timeout or a lane that finished', () => {
+  assert.equal(s1Verdict(3, 'blocked').ok, true);
+  const settled = s1Verdict(0, 'done');
+  assert.equal(settled.ok, false);
+  assert.match(settled.message, /S1 FAILED: lane settled done without a block/);
+  assert.equal(s1Verdict(0, 'idle').ok, false);
+  const timedOut = s1Verdict(4, 'timeout');
+  assert.equal(timedOut.ok, false);
+  assert.match(timedOut.message, /timed out/);
+  assert.equal(s1Verdict(6, 'plan-low').ok, false);
+
+  // S2 is the negative control and inverts on `blocked`.
+  assert.equal(s2Verdict(0, 'done').ok, true);
+  assert.equal(s2Verdict(0, 'idle').ok, true);
+  assert.equal(s2Verdict(3, 'blocked').ok, false);
+  assert.equal(s2Verdict(4, 'timeout').ok, false);
+});
+
+test('SMOKE4: teardown quits every agent, then closes every workspace, then sweeps', () => {
+  const steps = teardownSteps([
+    { name: 'smoke-a', paneId: 'w1:p1', workspaceId: 'w1', path: join('X:\\fixture', 'workit-wt-a') },
+    { name: 'smoke-b', paneId: 'w2:p1', workspaceId: 'w2', path: join('X:\\fixture', 'workit-wt-b') },
+  ]);
+  assert.deepEqual(steps.map((step) => step.step), [
+    'drop-marker', 'drop-marker', 'quit-agent', 'quit-agent',
+    'close-workspace', 'close-workspace', 'sweep', 'sweep',
+  ]);
+  // The sweeper HOLDS a lane that still hosts an agent OR carries an
+  // uncommitted change — both measured — so the smoke's own marker goes first,
+  // then the agents, then the workspaces, and only then the sweep.
+  assert.ok(steps.findIndex((s) => s.step === 'quit-agent') > steps.findLastIndex((s) => s.step === 'drop-marker'));
+  assert.ok(steps.findIndex((s) => s.step === 'close-workspace') > steps.findLastIndex((s) => s.step === 'quit-agent'));
+  assert.ok(steps.findIndex((s) => s.step === 'sweep') > steps.findLastIndex((s) => s.step === 'close-workspace'));
+  assert.deepEqual(steps.filter((s) => s.step === 'sweep').map((s) => s.laneDir), ['workit-wt-a', 'workit-wt-b']);
+});
+
+test('SMOKE5: the S8 worktree check survives separator differences', () => {
+  const listing = 'X:\\fixture\\projects\\workit-wt-a  abc1234 [smoke/lane-a]';
+  assert.equal(listsWorktree(listing, 'X:/fixture/projects/workit-wt-a'), true, 'herdr returns forward slashes');
+  assert.equal(listsWorktree(listing, 'X:\\fixture\\projects\\workit-wt-a'), true);
+  assert.equal(listsWorktree(listing, 'X:/fixture/projects/workit-wt-b'), false);
+  assert.equal(listsWorktree(listing, null), false);
+});
+
 test('SCRUB: the sweep delegate is resolved, never a hardcoded machine path', async (t) => {
   const f = fixture(t);
   const declared = join(f.dir, 'delegate', 'herdr-lanes.ps1');
@@ -868,14 +989,16 @@ test('SCRUB: the sweep delegate is resolved, never a hardcoded machine path', as
 
 test('SCRUB: no host topology reaches the public files (guard is non-vacuous)', () => {
   // workit is public. This guard is the standing half of the scrub: a one-off
-  // cut refills. Its own patterns are assembled from fragments so the guard
-  // does not match itself, and lane.test.mjs is excluded by design — fixtures
-  // there use Windows-SHAPED paths (X:\fixture\…) that are nobody's machine.
+  // cut refills — a later fixture in this very file reintroduced an operator
+  // drive path, which is why lane.test.mjs is scanned too. Windows-SHAPED
+  // fixtures (X:\fixture\…) are fine; this machine's real paths are not. The
+  // patterns are assembled from fragments so the guard cannot match itself.
   const files = [
     'reference/patterns/lane-supervision.md',
     'reference/patterns/INDEX.md',
     'scripts/lane.mjs',
     'scripts/lane-smoke.mjs',
+    'scripts/lane.test.mjs',
     'skills/burn-down/SKILL.md',
     'skills/codex-delegate/SKILL.md',
   ];

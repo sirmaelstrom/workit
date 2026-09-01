@@ -39,7 +39,7 @@ Every verb appends one JSONL row to `data/outputs/projects/agentic-practice-tran
 2. **Status is never evidence.** `done` is reachable with zero work. Only `lane check` returns a completion verdict; `lane wait` exits 0 on done/idle but prints "status is not evidence — run lane check".
 3. **Allow-rules cannot substitute for the mode.** Agents emit `git -C "<abs>" add … && …`; prefix matching fails. The helper does not try to generate allow-rules.
 4. **Focus is restored.** After `lane start`, `herdr agent list` must show the conductor pane `focused: true`.
-5. **Stale `blocked` after approval.** `lane resume` always waits `--until idle`.
+5. **Stale `blocked` after approval.** `lane resume` never bare-waits — a bare wait returns instantly on the stale `blocked`. It names the settled states explicitly: `--until idle --until done`. *(Amended from "`--until idle`" by the first live approval, 2026-09-01: a lane started `--no-focus` is never "seen" by the UI, so herdr settles it to `done` and never to `idle`. Waiting only for `idle` burned the full 120 s timeout and reported exit 4 while the approved Write had already landed — the artifact check passed in the same run.)*
 6. **Removal leaks the directory while a shell holds cwd.** `lane sweep` closes the workspace first; it never calls `worktree remove --force` directly.
 7. **Worktrees live on `%USERPROFILE%\.herdr\worktrees\<repo>\<slug>`, repos under `<workspace>/projects/` — often on a different volume.** No verb assumes the worktree is under the repo; every path is absolute and comes from `lane create`'s JSON.
 8. **Model AND reasoning effort are launch flags, never inherited.** `--model` is mandatory on `lane start` (4 lanes inheriting opus once burned a 5-hour cap in ~25 min). Measured 2026-09-01: a claude fallback lane started with `--model opus` and no `--effort` ran at **xhigh** ("thinking with xhigh effort", $5.24 in 9 minutes on a finish-and-commit task). `lane start --kind claude` therefore requires `--reasoning` and passes it as `--effort <lvl>`; codex lanes pass `-c model_reasoning_effort=<lvl>`. The JSONL row records both.
@@ -53,7 +53,7 @@ Every verb appends one JSONL row to `data/outputs/projects/agentic-practice-tran
 
 | # | Claim | How it is shown true | What would refute it |
 |---|---|---|---|
-| S1 | A stalled lane is detected without foreground gating | Live smoke: launch a claude lane in `acceptEdits` with a prompt whose first step is a Bash outside the allowlist; `lane wait --until blocked --timeout 120000` exits 3 and prints the approval dialog | It times out, or exits 3 on a lane that is not actually blocked (verify by `agent read`) |
+| S1 | A stalled lane is detected without foreground gating | Live smoke: launch a claude lane in `default` permission mode with a prompt whose first action is a **Write** creating `.lane-smoke-marker`; `lane wait --until blocked --until idle --until done --timeout 120000` exits 3 and prints the approval dialog | It times out, it settles `idle`/`done` without blocking, or it exits 3 on a lane that is not actually blocked (verify by `agent read`) |
 | S2 | The same prompt under `bypassPermissions` never reports blocked (negative control for S1) | Same smoke, mode swapped; `lane wait` exits 0 | Exits 3 |
 | S3 | Status is never evidence | Unit: a fake herdr that reports `done` for a lane with no commits → `lane check --expect-commit` exits 5 | Exits 0 |
 | S4 | `dontAsk` is refused | Unit: `lane start --kind claude -- --permission-mode dontAsk` exits nonzero before invoking herdr | herdr is invoked |
@@ -63,6 +63,20 @@ Every verb appends one JSONL row to `data/outputs/projects/agentic-practice-tran
 | S8 | Sweep leaves no directory | Live smoke on a throwaway lane: after `lane sweep`, the lane dir is gone and `git worktree list` no longer lists it | Directory remains |
 
 Unit tests run under `node --test` with herdr injected as a fake executor (the same injection seam pr-review.mjs uses for `gh`). S1, S2, S5, S8 are LIVE smokes the conductor runs by hand and records in the run log; herdr is not on CI.
+
+**Why the S1 trigger changed (measured 2026-09-01, first live run).** The original
+trigger — `acceptEdits` plus "a Bash outside the allowlist" — does not stall on
+every box. Here the lane ran `git status --short`, replied, and settled `done` in
+6 s; follow-up probes with `echo > file` and `curl` were allowed too. **"Outside
+the allowlist" is a property of the operator's settings, not of the mode**, so it
+is not a spec-able trigger: a broad allowlist silently turns S1 into a test that
+can only time out. `default` mode prompts on the first tool call regardless of
+the allowlist, and a Write is the cheapest such call that leaves an artifact
+behind as evidence that the approval landed. Two consequences bind the harness:
+`lane start` refuses `default` unless `--allow-default-mode` says a blocked lane
+is the point, and the wait must ask for `blocked`, `idle` **and** `done` — a
+blocked-only wait cannot distinguish a lane that stalled from one that finished,
+and reports both as a timeout.
 
 ## Work packages (build lane: codex `gpt-5.6-sol` @medium, workit worktree; T2 on WP-2 because it adds a guard that claims to detect stalls)
 

@@ -32,9 +32,12 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            [--path <abs>] [--slug <text>] [--workspace-root <abs>]
            Roots the lane at <repo>-wt-<slug> under the projects tree (C13).
   start    <name> --pane <id> --kind claude|codex --model <slug> --reasoning <lvl>
-           [--sandbox <mode>] [--permission-mode <mode>] [-- <native agent args>]
+           [--sandbox <mode>] [--permission-mode <mode>] [--allow-default-mode]
+           [-- <native agent args>]
+           dontAsk is always refused; default mode needs --allow-default-mode.
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
-  wait     <name> [--until blocked|idle|done] --timeout <ms> [--plan-floor <pct>]
+  wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
+           --until repeats: a blocked-only wait cannot see a lane that finished.
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
   resume   <name> [--timeout <ms>]      Always waits --until idle (stale blocked).
   fallback <name> --to claude --model <slug> --reasoning <lvl>
@@ -176,10 +179,11 @@ function parseArgs(argv) {
     throw new LaneError(EXIT.USAGE, `expected one verb: ${[...VERBS].join(', ')}`, { usage: USAGE_TEXT });
   }
   const opts = { verb, positional: [], agentArgs: [] };
-  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list']);
+  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode']);
+  const repeatableFlags = new Set(['--root', '--until']);
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
-    '--permission-mode', '--file', '--until', '--timeout', '--expect-file', '--expect-pr', '--to', '--log',
+    '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--to', '--log',
     '--plan-floor', '--path', '--slug', '--workspace-root', '--lane',
   ]);
   for (let i = 0; i < tokens.length; i++) {
@@ -188,10 +192,13 @@ function parseArgs(argv) {
       opts.agentArgs = tokens.slice(i + 1);
       break;
     }
-    if (token === '--root') {
+    // herdr's `agent wait --until` repeats, and a blocked-only wait cannot see a
+    // lane that finished — so this flag repeats here too.
+    if (repeatableFlags.has(token)) {
       const value = tokens[++i];
-      if (value === undefined) usage('--root needs a value');
-      (opts.root ??= []).push(value);
+      if (value === undefined) usage(`${token} needs a value`);
+      const key = token.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      (opts[key] ??= []).push(value);
       continue;
     }
     if (booleanFlags.has(token)) {
@@ -506,9 +513,21 @@ async function startLane(opts, deps, state) {
   let warning = null;
   if (opts.kind === 'claude') {
     const mode = opts.permissionMode ?? agentOption(native, '--permission-mode') ?? 'bypassPermissions';
+    // dontAsk stays refused whatever else is passed: it auto-denies every tool
+    // and still settles to `done`, which is the one failure no flag should buy.
     if (mode === 'dontAsk') usage('claude permission mode dontAsk is refused because it auto-denies tools');
-    if (!['bypassPermissions', 'acceptEdits'].includes(mode)) usage(`unsupported claude permission mode: ${mode}`);
-    if (mode === 'acceptEdits') warning = 'acceptEdits may block on Bash outside the allowlist';
+    if (mode === 'default') {
+      // A lane in default mode blocks on the first tool prompt. That is a broken
+      // lane and a working S1 trigger, so it is opt-in and always announced.
+      if (!opts.allowDefaultMode) {
+        usage('claude permission mode default blocks on the first tool prompt; pass --allow-default-mode if a blocked lane is the point');
+      }
+      warning = 'default permission mode: this lane will block on its first tool prompt and needs an operator approval';
+    } else if (!['bypassPermissions', 'acceptEdits'].includes(mode)) {
+      usage(`unsupported claude permission mode: ${mode}`);
+    } else if (mode === 'acceptEdits') {
+      warning = 'acceptEdits auto-accepts edits; on this box it did not block on ordinary Bash';
+    }
     native = withoutOption(withoutOption(native, '--permission-mode'), '--effort');
     native = ['--model', opts.model, '--permission-mode', mode, '--effort', opts.reasoning, ...native];
   } else {
@@ -614,8 +633,9 @@ function positiveNumber(value, flag, fallback = null) {
 async function waitLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   const timeout = positiveNumber(opts.timeout, '--timeout');
-  if (opts.until && !['blocked', 'idle', 'done'].includes(opts.until)) {
-    usage('wait --until must be blocked, idle, or done');
+  const untilStates = Array.isArray(opts.until) ? opts.until : (opts.until ? [opts.until] : []);
+  for (const state of untilStates) {
+    if (!['blocked', 'idle', 'done'].includes(state)) usage('wait --until must be blocked, idle, or done');
   }
   // 20, not 10: the measured drain was 79% → 0% in ~36 min at four concurrent
   // codex consumers, and the "<10% left" warning arrived ~7 min before refusal.
@@ -630,7 +650,7 @@ async function waitLane(opts, deps, state) {
     const remaining = Math.max(1, deadline - pollStarted);
     const pollMs = Math.min(POLL_MS, remaining);
     const args = ['agent', 'wait', opts.name];
-    if (opts.until) args.push('--until', opts.until);
+    for (const state of untilStates) args.push('--until', state);
     args.push('--timeout', String(pollMs));
     const waited = call(deps, 'herdr', args);
     const stateAfter = waited.code === 0 ? responseState(waited.stdout, null) : null;
@@ -761,7 +781,15 @@ async function checkLane(opts, deps, state) {
 async function resumeLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   const timeout = positiveNumber(opts.timeout, '--timeout', 120_000);
-  const raw = call(deps, 'herdr', ['agent', 'wait', opts.name, '--until', 'idle', '--timeout', String(timeout)]);
+  // C5 says never bare-wait here — a bare wait returns instantly on the stale
+  // `blocked`. It said `--until idle`; the first live approval measured why that
+  // is not enough: a lane started --no-focus is never "seen", so herdr settles
+  // it to `done`, not `idle`, and the resume burned its full 120s and reported a
+  // timeout while the approved work had already landed. Both settled states are
+  // named; this is still not a bare wait.
+  const raw = call(deps, 'herdr', [
+    'agent', 'wait', opts.name, '--until', 'idle', '--until', 'done', '--timeout', String(timeout),
+  ]);
   if (raw.code !== 0) {
     if (/timeout/i.test(`${raw.stderr}\n${raw.stdout}`)) {
       return { exit: EXIT.TIMEOUT, output: { state: 'timeout' }, row: laneInstrumentation(opts.name, lane, 'timeout') };
@@ -1019,6 +1047,7 @@ async function main() {
   // Announce the resolved output root and the rule that produced it (once, on
   // stderr so stdout stays a single JSON document).
   if (result.log) console.error(`lane: log ${result.log} (resolved from ${result.logSource})`);
+  if (result.output?.warning) console.error(`lane: warning — ${result.output.warning}`);
   console.log(JSON.stringify(result.output));
   process.exitCode = result.exit;
 }

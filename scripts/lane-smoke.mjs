@@ -1,95 +1,256 @@
 #!/usr/bin/env node
 /**
- * Destructive live smoke for S1/S2/S5/S8. It creates two throwaway worktrees
- * and delegates cleanup to lane sweep. Never run without an explicit --live.
+ * Destructive live smoke for S1/S2/S5/S8. It creates two throwaway worktrees,
+ * drives them with real herdr, and tears them down. Never runs without --live.
+ *
+ * The decision logic lives in exported pure functions at the top so it can be
+ * unit-tested from lane.test.mjs; importing this file runs nothing.
  */
 
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { execute, runLane } from './lane.mjs';
+import { pathToFileURL } from 'node:url';
+import { execute, paneAtPrompt, runLane } from './lane.mjs';
 
-const argv = process.argv.slice(2);
-const value = (flag) => {
-  const index = argv.indexOf(flag);
-  return index < 0 ? null : argv[index + 1];
-};
+// ---------------------------------------------------------------------------
+// Pure decision logic — unit-tested; no herdr, no filesystem.
+// ---------------------------------------------------------------------------
 
-if (!argv.includes('--live')) {
-  console.error('REFUSED: this creates real Herdr worktrees and agents. Re-run with --live.');
-  process.exit(2);
-}
+// The trigger is a WRITE under `default` permission mode, not a Bash command
+// under acceptEdits. Measured 2026-09-01: on this box acceptEdits let ordinary
+// Bash through (`git status --short`, `echo > file`, `curl`) and the lane
+// settled `done` in 6s, so "a Bash outside the allowlist" has no reliable
+// instance here. Default mode prompts on the first tool call; a Write is the
+// cheapest one that leaves an artifact behind as evidence.
+export const MARKER = '.lane-smoke-marker';
+export const SMOKE_PROMPT = [
+  '# Live lane smoke',
+  '',
+  `Your FIRST action must be a Write tool call creating \`${MARKER}\` in this`,
+  'worktree, containing the single line `smoke`. Do not use Bash for it.',
+  '',
+  'Then reply with exactly: smoke complete',
+  '',
+].join('\n');
 
-const repo = value('--repo');
-const base = value('--base') ?? 'main';
-const claudeModel = value('--model') ?? 'opus';
-// C8: effort is never inherited. The smoke is a two-line task, so it declares
-// the cheapest level rather than letting the lane default to xhigh.
-const reasoning = value('--reasoning') ?? 'low';
-if (!repo || !isAbsolute(repo)) {
-  console.error('--repo <absolute path> is required');
-  process.exit(2);
-}
-
-const stamp = `${Date.now()}`.slice(-9);
-const log = join(tmpdir(), `workit-lane-smoke-${stamp}.jsonl`);
-const prompt = join(tmpdir(), `workit-lane-smoke-${stamp}.md`);
-writeFileSync(prompt, '# Live lane smoke\n\nYour first action must be a Bash command outside the configured allowlist: run `git status --short`. Then reply with `smoke complete`.\n', 'utf8');
-
-const verboseExec = (program, args, options) => {
-  const result = execute(program, args, options);
-  if (program === 'herdr') {
-    console.log(`\n$ herdr ${args.join(' ')}`);
-    console.log(result.stdout || '(empty stdout)');
-    if (result.stderr) console.log(`stderr:\n${result.stderr}`);
-    console.log(`exit: ${result.code}`);
+// S1 asks whether a STALLED lane is detected. A wait that ran out the clock and
+// a lane that finished without ever blocking are both failures, and they are
+// different failures — so they say different things. S1 never passes on a
+// timeout: that is the hole the first live run fell through.
+export function s1Verdict(exit, state) {
+  if (exit === 3) return { ok: true, message: 'S1 PASSED: the lane blocked and the dialog was printed' };
+  if (['idle', 'done'].includes(state)) {
+    return { ok: false, message: `S1 FAILED: lane settled ${state} without a block` };
   }
-  return result;
-};
-
-async function lane(args, expected) {
-  const result = await runLane([...args, '--log', log], { exec: verboseExec });
-  console.log(`lane result: ${JSON.stringify(result.output)} (exit ${result.exit})`);
-  if (!expected.includes(result.exit)) throw new Error(`expected exit ${expected.join(' or ')}, got ${result.exit}`);
-  return result.output;
+  if (exit === 4) return { ok: false, message: 'S1 FAILED: the wait timed out without observing a block' };
+  return { ok: false, message: `S1 FAILED: unexpected wait exit ${exit}${state ? ` (state ${state})` : ''}` };
 }
 
-const acceptName = `smoke-a-${stamp}`;
-const bypassName = `smoke-b-${stamp}`;
-const accept = await lane(['create', '--repo', resolve(repo), '--branch', `smoke/lane-accept-${stamp}`, '--base', base, '--label', acceptName], [0]);
-await lane(['start', acceptName, '--pane', accept.paneId, '--kind', 'claude', '--model', claudeModel, '--reasoning', reasoning, '--permission-mode', 'acceptEdits'], [0]);
-await lane(['prompt', acceptName, '--file', prompt], [0]);
-await lane(['wait', acceptName, '--until', 'blocked', '--timeout', '120000'], [3]);
-
-const bypass = await lane(['create', '--repo', resolve(repo), '--branch', `smoke/lane-bypass-${stamp}`, '--base', base, '--label', bypassName], [0]);
-await lane(['start', bypassName, '--pane', bypass.paneId, '--kind', 'claude', '--model', claudeModel, '--reasoning', reasoning], [0]);
-await lane(['prompt', bypassName, '--file', prompt], [0]);
-await lane(['wait', bypassName, '--timeout', '120000'], [0]);
-
-// Split C is open: nobody has measured whether the delegate discovers a flat
-// <repo>-wt-<slug> lane under DEFAULT root resolution. So prefer the default
-// (WORKIT_WORKSPACE_ROOT) and say loudly when we had to override it, because an
-// overridden run does not settle the question.
-const declaredRoot = process.env.WORKIT_WORKSPACE_ROOT ?? null;
-const derivedRoot = basename(dirname(resolve(repo))) === 'projects' ? resolve(repo, '..', '..') : null;
-if (declaredRoot) {
-  console.log(`\nS8 under DEFAULT root resolution (WORKIT_WORKSPACE_ROOT=${declaredRoot}) — this run settles Split C`);
-} else {
-  console.log(`\nS8 with an OVERRIDDEN root (--workspace-root ${derivedRoot}); WORKIT_WORKSPACE_ROOT is unset,`);
-  console.log('so this run does NOT settle Split C — export it and re-run to measure default resolution.');
+// S2 is S1's negative control: the same prompt under bypassPermissions must
+// never report blocked.
+export function s2Verdict(exit, state) {
+  if (exit === 3) return { ok: false, message: 'S2 FAILED: the bypassPermissions lane reported blocked' };
+  if (exit === 0 && ['idle', 'done'].includes(state)) {
+    return { ok: true, message: `S2 PASSED: the bypassPermissions lane settled ${state} without blocking` };
+  }
+  return { ok: false, message: `S2 FAILED: unexpected wait exit ${exit}${state ? ` (state ${state})` : ''}` };
 }
-await lane(declaredRoot || !derivedRoot ? ['sweep'] : ['sweep', '--workspace-root', derivedRoot], [0]);
-const worktrees = execute('git', ['-C', resolve(repo), 'worktree', 'list'], {});
-console.log(`\n$ git -C ${resolve(repo)} worktree list\n${worktrees.stdout}`);
-const directoriesAbsent = !existsSync(accept.path) && !existsSync(bypass.path);
-const listingsAbsent = !worktrees.stdout.includes(accept.path) && !worktrees.stdout.includes(bypass.path);
-if (!directoriesAbsent || !listingsAbsent) {
-  throw new Error('S8 failed: a smoke lane directory or git worktree entry remains after sweep');
+
+// The sweeper HOLDS any lane whose workspace still hosts an agent, so S8 cannot
+// pass until every agent is quit and every workspace closed. Order matters:
+// quit them all, then close them all, then sweep once per lane.
+export function teardownSteps(lanes) {
+  return [
+    // The smoke's own marker is an uncommitted change, and the delegate HOLDS a
+    // lane that carries one (measured: "HELD BACK … 1 uncommitted change(s)").
+    // Clean up after ourselves before asking the sweeper to judge the lane.
+    ...lanes.map((lane) => ({ step: 'drop-marker', lane: lane.name, path: lane.path })),
+    ...lanes.map((lane) => ({ step: 'quit-agent', lane: lane.name, pane: lane.paneId })),
+    ...lanes.map((lane) => ({ step: 'close-workspace', lane: lane.name, workspaceId: lane.workspaceId })),
+    ...lanes.map((lane) => ({ step: 'sweep', lane: lane.name, laneDir: lane.path ? basename(lane.path) : null })),
+  ];
 }
-console.log(JSON.stringify({
-  S1: 'blocked exit observed with dialog',
-  S2: 'bypass lane settled without blocked',
-  S5: 'agent list responses above show conductor focus restoration',
-  S8: 'both lane directories and git worktree entries are absent',
-  log,
-}));
+
+// `git worktree list` prints OS separators; herdr returns forward slashes. A
+// raw substring test would report a still-registered worktree as gone.
+export function listsWorktree(listing, path) {
+  if (!path) return false;
+  const normalise = (value) => String(value).replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+  return normalise(listing).includes(normalise(path));
+}
+
+// ---------------------------------------------------------------------------
+// Live path — only when this file is the entry point AND --live is passed.
+// ---------------------------------------------------------------------------
+
+async function main(argv) {
+  const value = (flag) => {
+    const index = argv.indexOf(flag);
+    return index < 0 ? null : argv[index + 1];
+  };
+
+  if (!argv.includes('--live')) {
+    console.error('REFUSED: this creates real Herdr worktrees and agents. Re-run with --live.');
+    process.exit(2);
+  }
+
+  const repo = value('--repo');
+  const base = value('--base') ?? 'main';
+  const model = value('--model') ?? 'opus';
+  const reasoning = value('--reasoning') ?? 'low';
+  const sweepAll = argv.includes('--sweep-all');
+  if (!repo || !isAbsolute(repo)) {
+    console.error('--repo <absolute path> is required');
+    process.exit(2);
+  }
+
+  const stamp = `${Date.now()}`.slice(-9);
+  const log = join(tmpdir(), `workit-lane-smoke-${stamp}.jsonl`);
+  const prompt = join(tmpdir(), `workit-lane-smoke-${stamp}.md`);
+  writeFileSync(prompt, SMOKE_PROMPT, 'utf8');
+
+  const verboseExec = (program, args, options) => {
+    const result = execute(program, args, options);
+    if (program === 'herdr') {
+      console.log(`\n$ herdr ${args.join(' ')}`);
+      console.log(result.stdout || '(empty stdout)');
+      if (result.stderr) console.log(`stderr:\n${result.stderr}`);
+      console.log(`exit: ${result.code}`);
+    }
+    return result;
+  };
+
+  async function lane(args, expected = null) {
+    const result = await runLane([...args, '--log', log], { exec: verboseExec });
+    console.log(`lane ${args[0]}: ${JSON.stringify(result.output)} (exit ${result.exit})`);
+    if (expected && !expected.includes(result.exit)) {
+      throw new Error(`lane ${args.join(' ')}: expected exit ${expected.join(' or ')}, got ${result.exit}`);
+    }
+    return result;
+  }
+
+  function herdr(...args) {
+    const result = verboseExec('herdr', args, {});
+    return result;
+  }
+
+  function paneLines(name, count = 20) {
+    const read = execute('herdr', ['agent', 'read', name, '--lines', String(count)], {});
+    return read.stdout || read.stderr || '(no pane output)';
+  }
+
+  const lanes = [];
+  const verdicts = [];
+  const record = (verdict) => {
+    console.log(verdict.message);
+    verdicts.push(verdict);
+    return verdict;
+  };
+
+  async function openLane(name, branch, permissionMode) {
+    const created = await lane(
+      ['create', '--repo', resolve(repo), '--branch', branch, '--base', base, '--label', name],
+      [0],
+    );
+    const entry = { name, branch, ...created.output };
+    lanes.push(entry);
+    if (!entry.paneId) throw new Error(`create returned no paneId for ${name}: ${JSON.stringify(created.output)}`);
+    const startArgs = [
+      'start', name, '--pane', entry.paneId, '--kind', 'claude',
+      '--model', model, '--reasoning', reasoning, '--permission-mode', permissionMode,
+    ];
+    if (permissionMode === 'default') startArgs.push('--allow-default-mode');
+    const started = await lane(startArgs, [0]);
+    // S5 is measured here, on the lane that actually started an agent.
+    record(started.output.focus === 'restored'
+      ? { ok: true, message: `S5 PASSED: conductor focus restored after starting ${name}` }
+      : { ok: false, message: `S5 FAILED: focus was ${started.output.focus} after starting ${name}` });
+    await lane(['prompt', name, '--file', prompt], [0]);
+    return entry;
+  }
+
+  // A blocked-only wait cannot see a lane that finished, so ask for all three.
+  const untils = ['--until', 'blocked', '--until', 'idle', '--until', 'done'];
+
+  try {
+    // --- S1: default mode + a Write must block -----------------------------
+    const acceptName = `smoke-a-${stamp}`;
+    const accepted = await openLane(acceptName, `smoke/lane-block-${stamp}`, 'default');
+    const blocked = await lane(['wait', acceptName, ...untils, '--timeout', '120000']);
+    const s1 = record(s1Verdict(blocked.exit, blocked.output.state));
+    if (!s1.ok) console.log(`--- last 20 pane lines for ${acceptName} ---\n${paneLines(acceptName)}`);
+
+    if (s1.ok) {
+      console.log(`\napproving the dialog on ${acceptName}`);
+      herdr('agent', 'send-keys', acceptName, 'Enter');
+      const resumed = await lane(['resume', acceptName, '--timeout', '120000']);
+      console.log(`resume: exit ${resumed.exit} ${JSON.stringify(resumed.output)}`);
+      const artifact = await lane(['check', acceptName, '--expect-file', join(accepted.path, MARKER)]);
+      record(artifact.exit === 0
+        ? { ok: true, message: 'S1 evidence: the approved Write produced the marker file' }
+        : { ok: false, message: `S1 evidence FAILED: no marker after approval (${JSON.stringify(artifact.output)})` });
+    }
+
+    // --- S2: the same prompt under bypassPermissions must not block --------
+    const bypassName = `smoke-b-${stamp}`;
+    await openLane(bypassName, `smoke/lane-bypass-${stamp}`, 'bypassPermissions');
+    const settled = await lane(['wait', bypassName, ...untils, '--timeout', '120000']);
+    const s2 = record(s2Verdict(settled.exit, settled.output.state));
+    if (!s2.ok) console.log(`--- last 20 pane lines for ${bypassName} ---\n${paneLines(bypassName)}`);
+  } finally {
+    // --- teardown runs even when a verdict threw ---------------------------
+    console.log('\n=== teardown ===');
+    for (const step of teardownSteps(lanes)) {
+      if (step.step === 'drop-marker') {
+        const marker = step.path ? join(step.path, MARKER) : null;
+        if (marker && existsSync(marker)) {
+          rmSync(marker, { force: true });
+          console.log(`dropped ${marker} (the smoke's own artifact, or the sweeper HOLDS the lane)`);
+        }
+      } else if (step.step === 'quit-agent') {
+        herdr('agent', 'prompt', step.lane, '/exit');
+        const deadline = Date.now() + 30_000;
+        let free = null;
+        while (Date.now() < deadline && !free) {
+          // Two independent signals, because the prompt regex is shape-based and
+          // this box's pwsh prompt is an oh-my-posh line it does not match
+          // (measured 2026-09-01): herdr dropping the agent from its listing is
+          // the authoritative one.
+          const snapshot = execute('herdr', ['pane', 'read', step.pane, '--source', 'detection', '--lines', '40'], {});
+          if (snapshot.code === 0 && paneAtPrompt(snapshot.stdout)) { free = 'shell prompt'; break; }
+          const listing = execute('herdr', ['agent', 'list'], {});
+          if (listing.code === 0 && !listing.stdout.includes(`"${step.lane}"`)) { free = 'herdr no longer lists the agent'; break; }
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        console.log(`quit ${step.lane}: ${free ? `pane free (${free})` : 'pane NOT confirmed free in 30s'}`);
+      } else if (step.step === 'close-workspace') {
+        if (!step.workspaceId) { console.log(`close ${step.lane}: no workspace id recorded, skipping`); continue; }
+        herdr('workspace', 'close', String(step.workspaceId));
+      } else if (step.step === 'sweep') {
+        // Scoped by default: -Clean over a whole root would also weigh other
+        // sessions' lanes. --sweep-all measures the unscoped default instead,
+        // and then one pass covers every lane.
+        await lane(sweepAll ? ['sweep'] : ['sweep', '--lane', step.laneDir]);
+        if (sweepAll) break;
+      }
+    }
+
+    const listing = execute('git', ['-C', resolve(repo), 'worktree', 'list'], {});
+    console.log(`\n$ git -C ${resolve(repo)} worktree list\n${listing.stdout}`);
+    for (const entry of lanes) {
+      const gone = !existsSync(entry.path) && !listsWorktree(listing.stdout, entry.path);
+      record(gone
+        ? { ok: true, message: `S8 PASSED: ${basename(entry.path)} is gone from disk and from git worktree list` }
+        : { ok: false, message: `S8 FAILED: ${entry.path} remains (dir ${existsSync(entry.path)}, listed ${listsWorktree(listing.stdout, entry.path)})` });
+    }
+
+    console.log(`\n=== verdicts ===\n${verdicts.map((v) => `${v.ok ? 'PASS' : 'FAIL'} ${v.message}`).join('\n')}`);
+    console.log(`\nlog: ${log}\nprompt: ${prompt}`);
+    if (verdicts.some((v) => !v.ok)) process.exitCode = 1;
+  }
+}
+
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+  await main(process.argv.slice(2));
+}
