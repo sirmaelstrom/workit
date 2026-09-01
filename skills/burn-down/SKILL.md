@@ -13,7 +13,7 @@ The point is not speed. It is that **nothing gets silently dropped** — not the
 side-threads that surface mid-item, not the step someone else owes, not the
 ruling that binds a later item.
 
-For worktree-backed agent execution, the lane lifecycle is encoded in `scripts/lane.mjs`; see the `herdr-lane-gating` spec-lite for the binding behavior.
+For worktree-backed agent execution, the lane lifecycle is encoded in `scripts/lane.mjs`; the binding behavior is `reference/patterns/lane-supervision.md`.
 
 ## Compose the run (once, at the start)
 

@@ -66,11 +66,19 @@ await lane(['start', bypassName, '--pane', bypass.paneId, '--kind', 'claude', '-
 await lane(['prompt', bypassName, '--file', prompt], [0]);
 await lane(['wait', bypassName, '--timeout', '120000'], [0]);
 
-// C13 lanes land beside the repo, so the sweep has to be pointed at the
-// workspace that holds projects/ — the legacy .herdr root is swept by default.
-const workspaceRoot = basename(dirname(resolve(repo))) === 'projects' ? resolve(repo, '..', '..') : null;
-if (workspaceRoot) console.log(`\nsweeping the projects tree under ${workspaceRoot}`);
-await lane(workspaceRoot ? ['sweep', '--workspace-root', workspaceRoot] : ['sweep'], [0]);
+// Split C is open: nobody has measured whether the delegate discovers a flat
+// <repo>-wt-<slug> lane under DEFAULT root resolution. So prefer the default
+// (WORKIT_WORKSPACE_ROOT) and say loudly when we had to override it, because an
+// overridden run does not settle the question.
+const declaredRoot = process.env.WORKIT_WORKSPACE_ROOT ?? null;
+const derivedRoot = basename(dirname(resolve(repo))) === 'projects' ? resolve(repo, '..', '..') : null;
+if (declaredRoot) {
+  console.log(`\nS8 under DEFAULT root resolution (WORKIT_WORKSPACE_ROOT=${declaredRoot}) — this run settles Split C`);
+} else {
+  console.log(`\nS8 with an OVERRIDDEN root (--workspace-root ${derivedRoot}); WORKIT_WORKSPACE_ROOT is unset,`);
+  console.log('so this run does NOT settle Split C — export it and re-run to measure default resolution.');
+}
+await lane(declaredRoot || !derivedRoot ? ['sweep'] : ['sweep', '--workspace-root', derivedRoot], [0]);
 const worktrees = execute('git', ['-C', resolve(repo), 'worktree', 'list'], {});
 console.log(`\n$ git -C ${resolve(repo)} worktree list\n${worktrees.stdout}`);
 const directoriesAbsent = !existsSync(accept.path) && !existsSync(bypass.path);

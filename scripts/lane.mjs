@@ -7,21 +7,50 @@
 import {
   appendFileSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const EXIT = Object.freeze({ OK: 0, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6 });
-export const EXIT_CODES = Object.freeze({ ok: 0, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+// The exit contract a conductor branches on:
+//   0 ok · 1 herdr/infra failure · 2 usage, refused before any mutation
+//   3 blocked (+ dialog) · 4 a wait deadline expired · 5 artifact check failed
+//   6 plan-low or a captured plan refusal
+// 4 means a deadline and nothing else. A dead daemon that reports as a timeout
+// is re-polled forever by a conductor that trusts this table.
+const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6 });
+export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+
+export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per invocation, JSON on stdout.
+
+  create   --repo <abs> --branch <b> --base <ref> --label <text>
+           [--path <abs>] [--slug <text>] [--workspace-root <abs>]
+           Roots the lane at <repo>-wt-<slug> under the projects tree (C13).
+  start    <name> --pane <id> --kind claude|codex --model <slug> --reasoning <lvl>
+           [--sandbox <mode>] [--permission-mode <mode>] [-- <native agent args>]
+  prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
+  wait     <name> [--until blocked|idle|done] --timeout <ms> [--plan-floor <pct>]
+  check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
+  resume   <name> [--timeout <ms>]      Always waits --until idle (stale blocked).
+  fallback <name> --to claude --model <slug> --reasoning <lvl>
+  sweep    [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
+           --lane <name> limits the delegate to one lane; --list is a dry run.
+
+  --log <path>  JSONL instrumentation (default: <workspace>/data/outputs/projects/
+                agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)`;
 // Seeded only from a captured refusal, never an invented one. This string was
 // read off lane O's pane at 2026-09-01 22:12Z; herdr reported that agent as
 // `idle` the whole time the modal was up, so the pane text is the only signal.
 export const PLAN_REFUSAL_PATTERNS = Object.freeze([/hit your usage limit/i]);
 const SWEEP_SCRIPT = 'D:\\Development\\infrastructure\\herdr-lanes.ps1';
+const POLL_MS = 1_000;
+const LOG_BASENAME = 'lane-log.jsonl';
+const LOG_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 'lanes'];
 const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'sweep']);
 
 class LaneError extends Error {
@@ -72,7 +101,7 @@ function callOrFail(deps, program, args, options = {}) {
   const result = call(deps, program, args, options);
   if (result.code !== 0) {
     const detail = result.stderr.trim() || result.stdout.trim();
-    throw new LaneError(EXIT.TIMEOUT, `${program} ${args.join(' ')} failed${detail ? `: ${detail}` : ''}`);
+    throw new LaneError(EXIT.ERROR, `${program} ${args.join(' ')} failed${detail ? `: ${detail}` : ''}`);
   }
   return result.stdout;
 }
@@ -85,35 +114,59 @@ function parseJson(text) {
   }
 }
 
-function deepFind(value, names) {
+// Every herdr response is {"id":"cli:<command>","result":{…}} — verified live on
+// worktree list, pane list and agent list. The envelope's `id` is the command
+// name, so a deep search for an "id" alias reads "cli:worktree:create" as a
+// workspace id. Unwrap the envelope, then read documented fields by name.
+function unwrapResult(text) {
+  const parsed = parseJson(text);
+  if (!parsed || typeof parsed !== 'object') return null;
+  return parsed.result && typeof parsed.result === 'object' ? parsed.result : parsed;
+}
+
+function deepFind(value, names, topLevel = true) {
   if (!value || typeof value !== 'object') return undefined;
   for (const name of names) {
     if (Object.prototype.hasOwnProperty.call(value, name) && value[name] !== undefined) return value[name];
   }
-  for (const child of Object.values(value)) {
-    const found = deepFind(child, names);
+  for (const [key, child] of Object.entries(value)) {
+    if (topLevel && key === 'id') continue;
+    const found = deepFind(child, names, false);
     if (found !== undefined) return found;
   }
   return undefined;
 }
 
+function firstDefined(source, names) {
+  if (!source || typeof source !== 'object') return undefined;
+  for (const name of names) {
+    if (source[name] !== undefined && source[name] !== null) return source[name];
+  }
+  return undefined;
+}
+
 function responseState(text, fallback = null) {
-  const parsed = parseJson(text);
-  const fromJson = deepFind(parsed, ['state', 'status', 'agent_status']);
+  const result = unwrapResult(text);
+  const fromJson = firstDefined(result, ['state', 'status', 'agent_status'])
+    ?? deepFind(result, ['state', 'status', 'agent_status']);
   if (typeof fromJson === 'string') return fromJson.toLowerCase();
   const match = /\b(blocked|working|idle|done|unknown|timeout)\b/i.exec(String(text));
   return match ? match[1].toLowerCase() : fallback;
 }
 
 function responseText(text) {
-  const parsed = parseJson(text);
-  const found = deepFind(parsed, ['text', 'output', 'content']);
+  const found = deepFind(unwrapResult(text), ['text', 'output', 'content']);
   return typeof found === 'string' ? found : String(text);
 }
 
 function parseArgs(argv) {
   const [verb, ...tokens] = argv;
-  if (!VERBS.has(verb)) usage(`expected one verb: ${[...VERBS].join(', ')}`);
+  if (verb === undefined || ['--help', '-h', 'help'].includes(verb)) {
+    throw new LaneError(EXIT.USAGE, 'lane needs one verb', { usage: USAGE_TEXT });
+  }
+  if (!VERBS.has(verb)) {
+    throw new LaneError(EXIT.USAGE, `expected one verb: ${[...VERBS].join(', ')}`, { usage: USAGE_TEXT });
+  }
   const opts = { verb, positional: [], agentArgs: [] };
   const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list']);
   const valueFlags = new Set([
@@ -148,9 +201,36 @@ function parseArgs(argv) {
   }
   opts.name = opts.positional[0] ?? null;
   if (opts.positional.length > 1) usage(`unexpected argument: ${opts.positional[1]}`);
-  opts.log = resolve(opts.log ?? 'lane-log.jsonl');
   return opts;
 }
+
+// Worktree-rooting's output rule: the log root is declared (a flag, then the
+// env var), and falls back to cwd only when neither is set — and then it says
+// so. A cwd-relative default silently gives a later verb a different sidecar,
+// which surfaces as "unknown lane" rather than as the rooting mistake it is.
+function resolveLogPath(opts, deps) {
+  if (opts.log) return { log: resolve(opts.log), logSource: '--log' };
+  const declared = opts.workspaceRoot ?? deps.env.WORKIT_WORKSPACE_ROOT ?? null;
+  if (declared) {
+    return {
+      log: join(resolve(declared), ...LOG_SUBPATH, LOG_BASENAME),
+      logSource: opts.workspaceRoot ? '--workspace-root' : 'WORKIT_WORKSPACE_ROOT',
+    };
+  }
+  return { log: resolve(LOG_BASENAME), logSource: 'cwd' };
+}
+
+// Recovered from raw argv so a refusal that never reached parseArgs can still
+// append its row: the spec says EVERY verb appends one.
+function logPathFromArgv(argv, deps) {
+  const index = argv.indexOf('--log');
+  const root = argv.indexOf('--workspace-root');
+  return resolveLogPath({
+    log: index >= 0 ? argv[index + 1] : undefined,
+    workspaceRoot: root >= 0 ? argv[root + 1] : undefined,
+  }, deps);
+}
+
 
 function emptyState() {
   return { lanes: {}, creates: [] };
@@ -165,14 +245,46 @@ function loadState(deps, logPath) {
   if (!deps.exists(path)) return emptyState();
   try {
     const parsed = JSON.parse(deps.read(path));
-    return parsed && typeof parsed === 'object' ? parsed : emptyState();
+    if (!parsed || typeof parsed !== 'object') return emptyState();
+    return { lanes: parsed.lanes ?? {}, creates: parsed.creates ?? [] };
   } catch {
     throw new LaneError(EXIT.USAGE, `lane state is not valid JSON: ${path}`);
   }
 }
 
-function saveState(deps, logPath, state) {
-  deps.write(statePath(logPath), `${JSON.stringify(state, null, 2)}\n`);
+// The helper is CLI-first and supervises a fleet, so two lane processes can
+// reach the sidecar at once. Read-modify-write without a lock loses one of
+// them outright (measured: two concurrent starts, one lane unrecoverable), and
+// the in-memory copy loaded at entry is stale by the time we save. So: take a
+// lock, re-read, merge into the fresh copy, write, release in a finally.
+async function mergeState(deps, logPath, state, mutate) {
+  const lock = `${statePath(logPath)}.lock`;
+  const release = await acquireLock(deps, lock);
+  try {
+    const fresh = loadState(deps, logPath);
+    await mutate(fresh);
+    deps.mkdir(dirname(statePath(logPath)));
+    deps.write(statePath(logPath), `${JSON.stringify(fresh, null, 2)}\n`);
+    state.lanes = fresh.lanes;
+    state.creates = fresh.creates;
+    return fresh;
+  } finally {
+    release();
+  }
+}
+
+async function acquireLock(deps, lock, attempts = 50) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      deps.mkdir(dirname(lock));
+      deps.writeNew(lock, `${deps.timestamp()}\n`);
+      return () => { try { deps.remove(lock); } catch { /* already gone */ } };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      await deps.sleep(Math.min(200, 10 * (attempt + 1)));
+    }
+  }
+  throw new LaneError(EXIT.ERROR, `could not take the lane state lock: ${lock} (remove it if no lane is running)`);
 }
 
 function required(opts, ...names) {
@@ -214,9 +326,14 @@ function defaultFindCodexBin(npmRoot) {
   throw new LaneError(EXIT.USAGE, `codex.exe not found under: ${vendor}`);
 }
 
-function paneAtPrompt(text) {
+// Every alternative is anchored. An unanchored `>` alternative subsumes the
+// others and matches any line ending in `>` — "still running codex >" passed,
+// and this is the only gate before `agent start` fires into the pane.
+const PANE_PROMPT = /^(?:PS\s+\S.*|[A-Za-z]:\\.*)>\s*$/;
+
+export function paneAtPrompt(text) {
   const lines = responseText(text).split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean);
-  return lines.length > 0 && /(?:^PS\s+.+>|^[A-Za-z]:\\.*>|>)\s*$/.test(lines.at(-1));
+  return lines.length > 0 && PANE_PROMPT.test(lines.at(-1));
 }
 
 function paneIsCodexReady(text) {
@@ -246,33 +363,59 @@ async function prepareCodexPane(opts, deps) {
     ? callOrFail(deps, deps.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm root -g']).trim()
     : callOrFail(deps, 'npm', ['root', '-g']).trim();
   const bin = deps.findCodexBin(npmRoot);
-  const escaped = bin.replace(/"/g, '`"');
-  const command = `$env:PATH = "${escaped};" + $env:PATH; (Get-Command codex).Source`;
+  // A single-quoted PowerShell literal: inside it `$` and backtick are inert,
+  // and an embedded quote is escaped by doubling it.
+  const command = `$env:PATH = '${bin.replace(/'/g, "''")};' + $env:PATH; (Get-Command codex).Source`;
   callOrFail(deps, 'herdr', ['pane', 'run', opts.pane, command]);
   const deadline = deps.now() + 30_000;
   do {
-    const snapshot = callOrFail(deps, 'herdr', ['pane', 'read', opts.pane, '--source', 'detection', '--lines', '40']);
-    if (paneIsCodexReady(snapshot)) return;
+    // C12 exists because codex launches were unreliable — a transient read must
+    // retry inside the budget, not abort the launch it is there to make safe.
+    const snapshot = call(deps, 'herdr', ['pane', 'read', opts.pane, '--source', 'detection', '--lines', '40']);
+    if (snapshot.code === 0 && paneIsCodexReady(snapshot.stdout)) return;
     await deps.sleep(100);
   } while (deps.now() < deadline);
-  throw new LaneError(EXIT.TIMEOUT, `timed out waiting for codex.exe and the shell prompt in pane ${opts.pane}`);
+  throw new LaneError(EXIT.ERROR, `timed out waiting for codex.exe and the shell prompt in pane ${opts.pane}`);
+}
+
+// Returns a verdict; never throws. C4 is an assertion about the world made
+// AFTER a live agent exists, so failing it must not abandon that agent — and a
+// verdict that cannot be tied to the conductor's own pane is `unverified`,
+// never success. The old fallback grepped the raw listing for "focused": true
+// with no association at all: an unrelated focused pane read as S5 holding.
+function agentName(raw) {
+  const result = unwrapResult(raw);
+  if (typeof result?.agent === 'string') return result.agent;
+  if (typeof result?.agent?.name === 'string') return result.agent.name;
+  return typeof result?.name === 'string' ? result.name : null;
 }
 
 function restoreFocus(deps) {
   const conductorPane = deps.env.HERDR_PANE_ID;
-  if (!conductorPane) throw new LaneError(EXIT.TIMEOUT, 'HERDR_PANE_ID is required to restore conductor focus');
-  callOrFail(deps, 'herdr', ['agent', 'focus', conductorPane]);
-  const listing = callOrFail(deps, 'herdr', ['agent', 'list']);
-  const parsed = parseJson(listing);
-  const agents = deepFind(parsed, ['agents']);
-  if (Array.isArray(agents)) {
-    const conductor = agents.find((agent) => (agent.pane_id ?? agent.paneId) === conductorPane);
-    if (!conductor || conductor.focused !== true) {
-      throw new LaneError(EXIT.TIMEOUT, `conductor pane ${conductorPane} was not restored to focus`);
-    }
-  } else if (!/"focused"\s*:\s*true/i.test(listing)) {
-    throw new LaneError(EXIT.TIMEOUT, `could not verify conductor pane ${conductorPane} is focused`);
+  if (!conductorPane) {
+    return { focus: 'unverified', warning: 'HERDR_PANE_ID is not set, so conductor focus could not be restored or verified' };
   }
+  const focused = call(deps, 'herdr', ['agent', 'focus', conductorPane]);
+  if (focused.code !== 0) {
+    const detail = focused.stderr.trim() || focused.stdout.trim();
+    return { focus: 'failed', warning: `could not focus conductor pane ${conductorPane}${detail ? `: ${detail}` : ''}` };
+  }
+  const listing = call(deps, 'herdr', ['agent', 'list']);
+  if (listing.code !== 0) {
+    return { focus: 'unverified', warning: `herdr agent list failed, so focus on ${conductorPane} is unverified` };
+  }
+  const agents = deepFind(unwrapResult(listing.stdout), ['agents']);
+  if (!Array.isArray(agents)) {
+    return { focus: 'unverified', warning: `herdr agent list could not be parsed, so focus on ${conductorPane} is unverified` };
+  }
+  const conductor = agents.find((agent) => (agent?.pane_id ?? agent?.paneId) === conductorPane);
+  if (!conductor) {
+    return { focus: 'unverified', warning: `no agent in the listing holds conductor pane ${conductorPane}` };
+  }
+  if (conductor.focused !== true) {
+    return { focus: 'not-focused', warning: `conductor pane ${conductorPane} was not restored to focus` };
+  }
+  return { focus: 'restored' };
 }
 
 async function createLane(opts, deps, state) {
@@ -281,27 +424,66 @@ async function createLane(opts, deps, state) {
   const repo = resolve(opts.repo);
   const exists = call(deps, 'git', ['-C', repo, 'show-ref', '--verify', '--quiet', `refs/heads/${opts.branch}`]);
   if (exists.code === 0) usage(`branch already exists: ${opts.branch}`);
-  if (exists.code !== 1) throw new LaneError(EXIT.TIMEOUT, `could not inspect branch ${opts.branch}: ${exists.stderr.trim()}`);
+  if (exists.code !== 1) throw new LaneError(EXIT.ERROR, `could not inspect branch ${opts.branch}: ${exists.stderr.trim()}`);
   // C13: the review-council confines code_root to the projects tree and refuses
   // a lane under herdr's default root, so the lane lands beside its repo as
   // <workspace>/projects/<repo>-wt-<slug> — the worktree-rooting recipe. The
   // path is declared here and returned; no other verb may assume it (C7).
   const path = opts.path ? resolve(opts.path) : `${repo}-wt-${laneSlug(opts.slug ?? opts.branch)}`;
+  assertUnderProjects(opts, deps, path);
   if (deps.exists(path)) usage(`worktree path already exists: ${path}`);
   const raw = callOrFail(deps, 'herdr', [
     'worktree', 'create', '--cwd', repo, '--branch', opts.branch, '--base', opts.base, '--no-focus', '--label', opts.label,
     '--path', path,
   ]);
-  const parsed = parseJson(raw);
+  const result = unwrapResult(raw);
+  const worktree = (result && typeof result.worktree === 'object' ? result.worktree : result) ?? {};
+  const workspaceId = firstDefined(worktree, ['open_workspace_id', 'workspace_id', 'workspaceId'])
+    ?? firstDefined(result, ['open_workspace_id', 'workspace_id', 'workspaceId'])
+    ?? null;
   const output = {
-    workspaceId: deepFind(parsed, ['workspace_id', 'workspaceId', 'id']) ?? null,
-    paneId: deepFind(parsed, ['pane_id', 'paneId']) ?? null,
-    path: deepFind(parsed, ['path', 'worktree_path', 'worktreePath']) ?? path,
-    branch: deepFind(parsed, ['branch']) ?? opts.branch,
+    workspaceId,
+    paneId: firstDefined(worktree, ['pane_id', 'paneId'])
+      ?? firstDefined(result, ['pane_id', 'paneId'])
+      ?? resolvePaneId(deps, workspaceId),
+    path: firstDefined(worktree, ['path', 'worktree_path', 'worktreePath']) ?? path,
+    branch: firstDefined(worktree, ['branch']) ?? opts.branch,
   };
-  state.creates.push({ ...output, base: opts.base, label: opts.label });
-  saveState(deps, opts.log, state);
+  await mergeState(deps, opts.log, state, (draft) => {
+    draft.creates.push({ ...output, base: opts.base, label: opts.label });
+  });
   return { output, row: { lane: opts.label, state: 'created' } };
+}
+
+// C13's invariant, not just its shape: a lane that lands outside the projects
+// tree is refused by the council's code_root confinement, which is the whole
+// reason the flag exists. The workspace root is declared (--workspace-root or
+// WORKIT_WORKSPACE_ROOT); with neither, the structural rule still binds — the
+// lane's parent directory must be named `projects`.
+function assertUnderProjects(opts, deps, path) {
+  const declared = opts.workspaceRoot ?? deps.env.WORKIT_WORKSPACE_ROOT ?? null;
+  if (declared) {
+    const required = join(resolve(declared), 'projects');
+    if (dirname(path) !== required) {
+      usage(`C13: the lane must live under ${required}, not ${dirname(path)}`);
+    }
+    return;
+  }
+  if (basename(dirname(path)) !== 'projects') {
+    usage(`C13: the lane must live in a projects tree; ${dirname(path)} is not one (declare --workspace-root to be explicit)`);
+  }
+}
+
+// `worktree create` opens a workspace; the pane it opens is what `lane start`
+// needs. When the create payload carries no pane, ask the workspace for it
+// rather than returning a null that fails deep inside `start`.
+function resolvePaneId(deps, workspaceId) {
+  if (!workspaceId) return null;
+  const listing = call(deps, 'herdr', ['pane', 'list', '--workspace', String(workspaceId)]);
+  if (listing.code !== 0) return null;
+  const panes = deepFind(unwrapResult(listing.stdout), ['panes']);
+  if (!Array.isArray(panes) || panes.length === 0) return null;
+  return firstDefined(panes[0], ['pane_id', 'paneId']) ?? null;
 }
 
 async function startLane(opts, deps, state) {
@@ -334,28 +516,48 @@ async function startLane(opts, deps, state) {
   }
 
   const raw = callOrFail(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', opts.pane, '--', ...native]);
-  restoreFocus(deps);
-  const prior = state.creates.find((created) => created.paneId === opts.pane) ?? {};
-  state.lanes[opts.name] = {
-    ...(state.lanes[opts.name] ?? {}),
-    pane: opts.pane,
-    kind: opts.kind,
-    model: opts.model,
-    reasoning: opts.reasoning ?? null,
-    branch: prior.branch ?? null,
-    base: prior.base ?? null,
-    path: prior.path ?? null,
-  };
-  saveState(deps, opts.log, state);
-  return {
-    output: {
-      agent: deepFind(parseJson(raw), ['name', 'agent']) ?? opts.name,
+  // The agent is live from here on. Record it BEFORE asserting anything about
+  // the world: a focus check that threw here once left a running agent with no
+  // state row, and `lane wait` then answered "unknown lane" — the exact blind
+  // lane this helper exists to prevent.
+  await mergeState(deps, opts.log, state, (draft) => {
+    const existing = draft.lanes[opts.name] ?? {};
+    const prior = draft.creates.find((created) => created.paneId === opts.pane) ?? {};
+    draft.lanes[opts.name] = {
+      ...existing,
+      pane: opts.pane,
       kind: opts.kind,
       model: opts.model,
+      reasoning: opts.reasoning ?? null,
+      // A fallback re-starts an existing lane, and its `creates` lookup misses:
+      // without the existing fallbacks this nulls the lane's identity and
+      // `lane check` — the completion verdict (C2) — is forfeited for good.
+      branch: prior.branch ?? existing.branch ?? null,
+      base: prior.base ?? existing.base ?? null,
+      path: prior.path ?? existing.path ?? null,
+    };
+  });
+
+  const focus = restoreFocus(deps);
+  const warnings = [warning, focus.warning].filter(Boolean);
+  return {
+    output: {
+      agent: agentName(raw) ?? opts.name,
+      kind: opts.kind,
+      model: opts.model,
+      reasoning: opts.reasoning,
       startedAt: deps.timestamp(),
-      ...(warning ? { warning } : {}),
+      focus: focus.focus,
+      ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
     },
-    row: { lane: opts.name, kind: opts.kind, model: opts.model, reasoning: opts.reasoning ?? null, state: 'started' },
+    row: {
+      lane: opts.name,
+      kind: opts.kind,
+      model: opts.model,
+      reasoning: opts.reasoning ?? null,
+      state: 'started',
+      warning: warnings.length > 0 ? warnings.join('; ') : null,
+    },
   };
 }
 
@@ -367,11 +569,12 @@ async function promptLane(opts, deps, state) {
   const wire = `Read ${file} and execute it exactly.`;
   const raw = callOrFail(deps, 'herdr', ['agent', 'prompt', opts.name, wire, '--wait', '--until', 'working']);
   const lane = state.lanes[opts.name] ?? {};
-  state.lanes[opts.name] = { ...lane, promptFile: file };
-  saveState(deps, opts.log, state);
+  await mergeState(deps, opts.log, state, (draft) => {
+    draft.lanes[opts.name] = { ...(draft.lanes[opts.name] ?? lane), promptFile: file };
+  });
   const stateAfter = responseState(raw, 'working');
   return {
-    output: { accepted: deepFind(parseJson(raw), ['accepted']) ?? true, stateAfter },
+    output: { accepted: deepFind(unwrapResult(raw), ['accepted']) ?? true, stateAfter },
     row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter },
   };
 }
@@ -412,24 +615,28 @@ async function waitLane(opts, deps, state) {
   if (floor > 100) usage('--plan-floor must not exceed 100');
   const deadline = deps.now() + timeout;
   let meter = { plan5h: null, planWeekly: null };
+  let dialog = '';
 
   while (true) {
-    const remaining = Math.max(1, deadline - deps.now());
-    const pollMs = Math.min(1_000, remaining);
+    const pollStarted = deps.now();
+    const remaining = Math.max(1, deadline - pollStarted);
+    const pollMs = Math.min(POLL_MS, remaining);
     const args = ['agent', 'wait', opts.name];
     if (opts.until) args.push('--until', opts.until);
     args.push('--timeout', String(pollMs));
     const waited = call(deps, 'herdr', args);
     const stateAfter = waited.code === 0 ? responseState(waited.stdout, null) : null;
 
+    // The read feeds plan metering and the dialog text only. A transient read
+    // failure must not end a wait that herdr is still answering.
     const read = call(deps, 'herdr', ['agent', 'read', opts.name, '--lines', '40']);
-    if (read.code !== 0) {
-      throw new LaneError(EXIT.TIMEOUT, `herdr agent read failed: ${read.stderr.trim() || read.stdout.trim()}`);
+    if (read.code === 0) {
+      meter = scrapePlanMeter(read.stdout);
+      dialog = responseText(read.stdout);
     }
-    meter = scrapePlanMeter(read.stdout);
     // C11(a): herdr reports the lane `idle` while the refusal modal is up, so
     // the pane text is checked before any lifecycle state is trusted.
-    const refusal = matchPlanRefusal(read.stdout);
+    const refusal = read.code === 0 ? matchPlanRefusal(read.stdout) : null;
     if (refusal) {
       return {
         exit: EXIT.PLAN_LOW,
@@ -448,7 +655,7 @@ async function waitLane(opts, deps, state) {
     if (waited.code === 0 && stateAfter === 'blocked') {
       return {
         exit: EXIT.BLOCKED,
-        output: { state: 'blocked', dialog: responseText(read.stdout) },
+        output: { state: 'blocked', dialog },
         row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter },
       };
     }
@@ -463,7 +670,7 @@ async function waitLane(opts, deps, state) {
       };
     }
     if (waited.code !== 0 && !/timeout/i.test(`${waited.stderr}\n${waited.stdout}`)) {
-      throw new LaneError(EXIT.TIMEOUT, `herdr agent wait failed: ${waited.stderr.trim() || waited.stdout.trim()}`);
+      throw new LaneError(EXIT.ERROR, `herdr agent wait failed: ${waited.stderr.trim() || waited.stdout.trim()}`);
     }
     if (deps.now() >= deadline) {
       return {
@@ -472,7 +679,10 @@ async function waitLane(opts, deps, state) {
         row: { ...laneInstrumentation(opts.name, lane, 'timeout'), ...meter },
       };
     }
-    await deps.sleep(Math.min(100, Math.max(1, deadline - deps.now())));
+    // One poll per second, not per 100ms: each poll spawns two herdr processes,
+    // and a 120s wait was costing ~2,400 of them per lane.
+    const elapsed = deps.now() - pollStarted;
+    await deps.sleep(Math.max(0, Math.min(POLL_MS - elapsed, deadline - deps.now())));
   }
 }
 
@@ -516,8 +726,12 @@ async function checkLane(opts, deps, state) {
     } else {
       const doc = parseJson(viewed.stdout);
       evidence = doc;
+      const state = String(doc?.state ?? '').toUpperCase();
       if (doc?.headRefName !== lane.branch) {
         failedExpectation = `--expect-pr ${opts.expectPr}: head must equal ${lane.branch}, got ${doc?.headRefName ?? 'unknown'}`;
+      } else if (!['OPEN', 'MERGED'].includes(state)) {
+        // A closed PR is abandoned work wearing the right head ref.
+        failedExpectation = `--expect-pr ${opts.expectPr}: the PR is ${state.toLowerCase() || 'in an unknown state'}, which is not a completion verdict`;
       }
     }
   }
@@ -544,7 +758,7 @@ async function resumeLane(opts, deps, state) {
     if (/timeout/i.test(`${raw.stderr}\n${raw.stdout}`)) {
       return { exit: EXIT.TIMEOUT, output: { state: 'timeout' }, row: laneInstrumentation(opts.name, lane, 'timeout') };
     }
-    throw new LaneError(EXIT.TIMEOUT, `herdr agent wait failed: ${raw.stderr.trim() || raw.stdout.trim()}`);
+    throw new LaneError(EXIT.ERROR, `herdr agent wait failed: ${raw.stderr.trim() || raw.stdout.trim()}`);
   }
   const stateAfter = responseState(raw.stdout, 'idle');
   if (stateAfter === 'blocked') {
@@ -558,7 +772,10 @@ async function resumeLane(opts, deps, state) {
 }
 
 async function fallbackLane(opts, deps, state) {
-  required(opts, 'to', 'model');
+  // Validate EVERY launch flag before touching the pane. `start`'s own
+  // requirements used to fire after codex had already been quit: the lane was
+  // left with no agent at all, still recorded as codex. Nothing here mutates.
+  required(opts, 'to', 'model', 'reasoning');
   const prior = laneRecord(opts, state);
   if (prior.kind !== 'codex') usage('fallback is only valid for a codex lane');
   if (opts.to !== 'claude') usage('fallback --to must be claude');
@@ -574,15 +791,16 @@ async function fallbackLane(opts, deps, state) {
   call(deps, 'herdr', ['agent', 'prompt', opts.name, '/quit']);
   await waitForPanePrompt(deps, samePane);
 
+  // `verb` is not rewritten: an operator who ran `fallback` must not be told
+  // that "start" is missing a flag.
   const started = await startLane({
     ...opts,
-    verb: 'start',
     pane: samePane,
     kind: 'claude',
     permissionMode: 'bypassPermissions',
     agentArgs: [],
   }, deps, state);
-  const prompted = await promptLane({ ...opts, verb: 'prompt', file: samePrompt }, deps, state);
+  const prompted = await promptLane({ ...opts, file: samePrompt }, deps, state);
   return {
     exit: EXIT.OK,
     output: {
@@ -597,11 +815,15 @@ async function fallbackLane(opts, deps, state) {
       model: opts.model,
       reasoning: opts.reasoning ?? null,
       state: prompted.output.stateAfter,
+      warning: started.row?.warning ?? null,
     },
   };
 }
 
 function sweepRoots(opts, deps) {
+  // An explicitly declared root is never filtered — the operator named it, and
+  // a silent skip would read as "swept" (the same false-clean the empty-input
+  // checker class is named for).
   if (Array.isArray(opts.root) && opts.root.length > 0) return opts.root.map((root) => resolve(root));
   const roots = [];
   // Legacy lanes: herdr's own default root, <profile>\.herdr\worktrees\<repo>\<lane>.
@@ -610,10 +832,11 @@ function sweepRoots(opts, deps) {
   // <root>/<repo>/<lane>, so the root it needs is the WORKSPACE, not projects/.
   const workspace = opts.workspaceRoot ?? deps.env.WORKIT_WORKSPACE_ROOT ?? null;
   if (workspace) roots.push(resolve(workspace));
+  const present = roots.filter((root) => deps.exists(root));
   if (roots.length === 0) {
     usage('sweep needs --root <path>, or --workspace-root / WORKIT_WORKSPACE_ROOT, to know where lanes live');
   }
-  return roots;
+  return present;
 }
 
 async function sweepLanes(opts, deps) {
@@ -635,14 +858,24 @@ async function sweepLanes(opts, deps) {
       row: { lane: null, state: 'delegate-missing' },
     };
   }
-  const results = roots.map((root) => ({
-    root,
-    output: callOrFail(deps, 'pwsh', ['-NoProfile', '-File', SWEEP_SCRIPT, '-WorktreeRoot', root, ...flags]),
-  }));
+  // Every root is visited. Throwing on the first nonzero exit left the C13
+  // lanes unswept behind a failing legacy root — the alert-fan-out failure
+  // where one dead target silences the rest.
+  const results = roots.map((root) => {
+    const swept = call(deps, 'pwsh', ['-NoProfile', '-File', SWEEP_SCRIPT, '-WorktreeRoot', root, ...flags]);
+    return {
+      root,
+      ok: swept.code === 0,
+      exit: swept.code,
+      output: swept.stdout,
+      ...(swept.code === 0 ? {} : { error: swept.stderr.trim() || swept.stdout.trim() }),
+    };
+  });
+  const swept = results.filter((entry) => entry.ok);
   return {
-    exit: EXIT.OK,
-    output: { delegated: true, roots: results },
-    row: { lane: null, state: 'swept' },
+    exit: results.length > 0 && swept.length === 0 ? EXIT.ERROR : EXIT.OK,
+    output: { delegated: true, roots: results, sweptRoots: swept.length, totalRoots: results.length },
+    row: { lane: null, state: swept.length === results.length ? 'swept' : 'swept-partial' },
   };
 }
 
@@ -657,13 +890,16 @@ export function matchPlanRefusal(text) {
 }
 
 export function scrapePlanMeter(text) {
-  const source = String(text);
-  const five = [...source.matchAll(/5h\s+(\d+)%\s+left/gi)].at(-1);
-  const weekly = [...source.matchAll(/weekly\s+(\d+)%\s+left/gi)].at(-1);
+  // C11 says the LAST FOOTER LINE, not the last match in the buffer: mixing
+  // lines returns a live 5h figure beside a stale weekly one.
+  const source = String(text).split(/\r?\n/).filter((line) => /(?:5h|weekly)\s+\d+%\s+left/i.test(line)).at(-1) ?? '';
+  const five = /5h\s+(\d+)%\s+left/i.exec(source);
+  const weekly = /weekly\s+(\d+)%\s+left/i.exec(source);
   return { plan5h: five ? Number(five[1]) : null, planWeekly: weekly ? Number(weekly[1]) : null };
 }
 
 function appendRow(deps, logPath, row) {
+  deps.mkdir(dirname(logPath));
   deps.append(logPath, `${JSON.stringify(row)}\n`);
 }
 
@@ -673,6 +909,9 @@ export async function runLane(argv, overrides = {}) {
     exists: existsSync,
     read: (path) => readFileSync(path, 'utf8'),
     write: (path, value) => writeFileSync(path, value, 'utf8'),
+    writeNew: (path, value) => writeFileSync(path, value, { encoding: 'utf8', flag: 'wx' }),
+    remove: (path) => rmSync(path, { force: true }),
+    mkdir: (path) => mkdirSync(path, { recursive: true }),
     append: (path, value) => appendFileSync(path, value, 'utf8'),
     env: process.env,
     platform: process.platform,
@@ -683,26 +922,29 @@ export async function runLane(argv, overrides = {}) {
     ...overrides,
   };
 
+  const started = deps.now();
   let opts;
   try {
     opts = parseArgs(argv);
+    Object.assign(opts, resolveLogPath(opts, deps));
   } catch (error) {
-    return { exit: error.code ?? EXIT.USAGE, output: { error: error.message } };
+    const { log, logSource } = logPathFromArgv(argv, deps);
+    const output = { error: error.message, ...(error.details ?? {}) };
+    const row = {
+      ...emptyRow(deps), verb: argv[0] ?? null, state: 'usage-error',
+      waitMs: deps.now() - started, exit: error.code ?? EXIT.USAGE, error: error.message,
+    };
+    appendRow(deps, log, row);
+    return { exit: error.code ?? EXIT.USAGE, output, row, log, logSource };
   }
 
-  const started = deps.now();
   const baseRow = {
-    ts: deps.timestamp(),
+    ...emptyRow(deps),
     lane: opts.name ?? opts.label ?? opts.branch ?? null,
     verb: opts.verb,
     kind: opts.kind ?? null,
     model: opts.model ?? null,
     reasoning: opts.reasoning ?? null,
-    state: null,
-    waitMs: 0,
-    exit: EXIT.OK,
-    plan5h: null,
-    planWeekly: null,
   };
   let result;
   try {
@@ -720,8 +962,9 @@ export async function runLane(argv, overrides = {}) {
     }
     result.exit ??= EXIT.OK;
   } catch (error) {
-    const code = error instanceof LaneError ? error.code : EXIT.TIMEOUT;
-    result = { exit: code, output: { error: error.message, ...(error.details ?? {}) }, row: {} };
+    // An unclassified throw is an infrastructure failure, not a deadline.
+    const code = error instanceof LaneError ? error.code : EXIT.ERROR;
+    result = { exit: code, output: { error: error.message, ...(error.details ?? {}) }, row: { state: 'failed' } };
   }
 
   const row = {
@@ -729,13 +972,35 @@ export async function runLane(argv, overrides = {}) {
     ...(result.row ?? {}),
     waitMs: deps.now() - started,
     exit: result.exit,
+    error: result.output?.error ?? null,
   };
   appendRow(deps, opts.log, row);
-  return { exit: result.exit, output: result.output, row };
+  return { exit: result.exit, output: result.output, row, log: opts.log, logSource: opts.logSource };
+}
+
+function emptyRow(deps) {
+  return {
+    ts: deps.timestamp(),
+    lane: null,
+    verb: null,
+    kind: null,
+    model: null,
+    reasoning: null,
+    state: null,
+    waitMs: 0,
+    exit: EXIT.OK,
+    plan5h: null,
+    planWeekly: null,
+    warning: null,
+    error: null,
+  };
 }
 
 async function main() {
   const result = await runLane(process.argv.slice(2));
+  // Announce the resolved output root and the rule that produced it (once, on
+  // stderr so stdout stays a single JSON document).
+  if (result.log) console.error(`lane: log ${result.log} (resolved from ${result.logSource})`);
   console.log(JSON.stringify(result.output));
   process.exitCode = result.exit;
 }
