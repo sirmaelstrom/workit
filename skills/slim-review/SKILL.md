@@ -178,7 +178,13 @@ Exit codes matter here:
 | 0 | Posted. **A zero-finding review is a real result** — it posts, and that is the receipt that review happened |
 | 3 | The handback never arrived: file missing, unparseable, or wrong shape — including an **empty `examined_paths`** or a `coverage` string that does not state `examined N of M`. **This is not a clean review.** Re-run step 2 |
 | 4 | A `gh` call failed |
-| 5 | Coverage paths mismatch, or the PR API returned **no** changed files (a fetch failure, never a PR that changes nothing). Nothing was posted unless `--force-post` was explicit |
+| 5 | A coverage check failed. Three triggers: the `examined_paths` set does not match the PR API's file list; a parseable `examined N of M` contradicts that list; or the PR API returned **no** changed files at all |
+
+`--force-post` overrides the first two — the set mismatch and the count
+contradiction — and posts the review with the mismatch stamped into the body. It
+does **not** override the empty-file-list floor: an empty authoritative list is a
+fetch failure, and there is nothing to check coverage against, so that exit 5 is
+unconditional and posts nothing no matter what flags you pass.
 
 The review posts as `COMMENT`, which is the only event GitHub permits on your own
 pull request.
@@ -196,10 +202,18 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" threads --pr <n> --repo <owner/
 answers about a *different* repository's PR of the same number — and the answer
 it prints, "no unresolved review threads", is the merge-ready signal.
 
-This lists **every** unresolved review thread on the PR, not only the ones this
-loop just posted — a human's or a bot's open comment deserves the same verdict,
-and a PR whose threads are all answered is the actual merge-ready condition. If
-you need to tell them apart, `post` printed the URL of the review it created.
+This lists every unresolved review thread on the PR, not only the ones this loop
+just posted — a human's or a bot's open comment deserves the same verdict, and a
+PR whose threads are all answered is the actual merge-ready condition. If you
+need to tell them apart, `post` printed the URL of the review it created.
+
+**Bounded, and it says so.** The query asks for 100 threads and 50 comments per
+thread and does not paginate. If either page comes back full, the command exits
+**6** with a truncation warning and prints no listing at all — because "no
+unresolved review threads" read off a truncated page is a false merge-ready
+signal, which is the one thing this skill exists to prevent. Adjudicate from the
+PR page in that case. Full `pageInfo` pagination is a known follow-up, not
+implemented here.
 
 For **each** thread, in order:
 

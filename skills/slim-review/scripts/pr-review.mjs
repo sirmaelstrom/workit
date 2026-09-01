@@ -30,6 +30,11 @@
  *   4  a `gh` call failed
  *   5  coverage did not match the authoritative PR file list, or that list came
  *      back empty (a fetch failure, never a PR that changes nothing)
+ *
+ * Exit codes (`threads`):
+ *   6  the result was truncated by the query's own page size, so the thread list
+ *      is incomplete and must not be read as a merge-ready signal. Full
+ *      pagination is a follow-up; this is the floor that keeps the gap loud.
  */
 
 import { readFileSync, existsSync } from 'node:fs';
@@ -422,6 +427,9 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
   // whole coverage guard runs over the empty set and reports OK.
   if (prFilePaths.length === 0) {
     die(5, `the PR API returned no changed files for ${repo}#${opts.pr}. That is a fetch failure, not a clean PR — nothing was posted.`);
+    // `die` is an injected seam; never rely on it terminating. Falling through
+    // here would run checkCoverage over an empty set, get ok:true, and post.
+    return;
   }
   const { anchored, offDiffChanged, offDiffUnchanged, offLine } =
     partitionFindings(doc.findings, diffFiles, prFilePaths);
@@ -468,6 +476,7 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
 
   if (!coverageCheck.ok && !opts.forcePost) {
     die(5, `coverage check failed; review was not posted: ${coverageCheck.reason}\nRe-run the reviewer or pass --force-post to post the stamped mismatch.`);
+    return;
   }
 
   if (opts.dryRun) {
@@ -483,6 +492,11 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
   const posted = JSON.parse(res);
   log(`\nposted         ${posted.html_url}`);
 }
+
+// GitHub's GraphQL connections are paged, and these two page sizes are the ones
+// this query asks for. A full page means there is more behind it.
+const THREADS_PAGE = 100;
+const COMMENTS_PAGE = 50;
 
 const THREADS_QUERY = `
 query($owner:String!, $name:String!, $pr:Int!) {
@@ -503,40 +517,67 @@ query($owner:String!, $name:String!, $pr:Int!) {
   }
 }`;
 
-function cmdThreads(opts) {
+export function cmdThreads(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
   const repo = resolveRepo(opts.repo, opts.cwd);
   const [owner, name] = repo.split('/');
-  const res = ghOrDie(
+  const res = runGh(
     ['api', 'graphql', '-f', `query=${THREADS_QUERY}`, '-F', `owner=${owner}`, '-F', `name=${name}`, '-F', `pr=${opts.pr}`],
     { cwd: opts.cwd },
   );
   const threads = JSON.parse(res).data.repository.pullRequest.reviewThreads.nodes;
+
+  // Completeness check BEFORE any output. This query is unpaginated, and
+  // SKILL.md leans on the result as the merge-ready signal — so a full page must
+  // never be reported as the whole story. "no unresolved review threads" printed
+  // off a truncated page is the same silent-completeness claim this script
+  // removed from `post`, on the command that decides whether to merge.
+  const fatThread = threads.find((t) => t.comments?.nodes?.length === COMMENTS_PAGE);
+  if (threads.length === THREADS_PAGE || fatThread) {
+    const what = threads.length === THREADS_PAGE
+      ? `the thread list came back with exactly ${THREADS_PAGE} entries`
+      : `thread ${fatThread.path}:${fatThread.line ?? '?'} came back with exactly ${COMMENTS_PAGE} comments`;
+    die(
+      6,
+      `TRUNCATED: ${what}, which is this query's page size — there are almost certainly more.\n`
+      + 'This command is not paginated, so its output cannot be trusted as a complete\n'
+      + 'thread list, and "no unresolved review threads" would be a false merge-ready\n'
+      + `signal. Adjudicate from the PR page instead: https://github.com/${repo}/pull/${opts.pr}/files`,
+    );
+    return;
+  }
+
   const shown = opts.unresolved ? threads.filter((t) => !t.isResolved) : threads;
 
   if (shown.length === 0) {
-    console.log(opts.unresolved ? 'no unresolved review threads' : 'no review threads on this PR');
+    log(opts.unresolved ? 'no unresolved review threads' : 'no review threads on this PR');
     return;
   }
-  console.log(`${shown.length} of ${threads.length} thread(s)${opts.unresolved ? ' (unresolved)' : ''}\n`);
+  log(`${shown.length} of ${threads.length} thread(s)${opts.unresolved ? ' (unresolved)' : ''}\n`);
   for (const t of shown) {
     const head = t.comments.nodes[0];
     const replies = t.comments.nodes.length - 1;
     const state = t.isResolved ? 'resolved' : 'OPEN';
     const first = String(head?.body ?? '').split(/\r?\n/).find((l) => l.trim() !== '') ?? '';
-    console.log(`#${head?.databaseId}  ${t.path}:${t.line ?? '?'}  [${state}${t.isOutdated ? ', outdated' : ''}]  replies:${replies}`);
-    console.log(`   ${head?.author?.login ?? '?'}: ${first.slice(0, 140)}`);
-    console.log('');
+    log(`#${head?.databaseId}  ${t.path}:${t.line ?? '?'}  [${state}${t.isOutdated ? ', outdated' : ''}]  replies:${replies}`);
+    log(`   ${head?.author?.login ?? '?'}: ${first.slice(0, 140)}`);
+    log('');
   }
-  console.log(`reply with:  node pr-review.mjs reply --pr ${opts.pr} --repo ${repo} --comment-id <id> --body-file <file>`);
+  log(`reply with:  node pr-review.mjs reply --pr ${opts.pr} --repo ${repo} --comment-id <id> --body-file <file>`);
 }
 
-function cmdReply(opts) {
+export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
   const repo = resolveRepo(opts.repo, opts.cwd);
-  if (!existsSync(opts.bodyFile)) fail(2, `body file not found: ${opts.bodyFile}`);
+  if (!existsSync(opts.bodyFile)) {
+    die(2, `body file not found: ${opts.bodyFile}`);
+    return;
+  }
   const body = readFileSync(opts.bodyFile, 'utf8');
-  if (body.trim() === '') fail(2, `body file is empty: ${opts.bodyFile}`);
+  if (body.trim() === '') {
+    die(2, `body file is empty: ${opts.bodyFile}`);
+    return;
+  }
 
-  const res = ghOrDie(
+  const res = runGh(
     [
       'api',
       '--method',
@@ -547,7 +588,7 @@ function cmdReply(opts) {
     ],
     { input: JSON.stringify({ body }), cwd: opts.cwd },
   );
-  console.log(`replied        ${JSON.parse(res).html_url}`);
+  log(`replied        ${JSON.parse(res).html_url}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -583,7 +624,19 @@ export function parseArgs(argv) {
     };
     switch (a) {
       case '--pr': opts.pr = next(); break;
-      case '--repo': opts.repo = next(); break;
+      case '--repo': {
+        // Format-check here, not at use. `own/er/repo` passed every earlier
+        // check, and cmdThreads destructures [owner, name] off the split — so it
+        // queried a DIFFERENT repository and printed "no unresolved review
+        // threads", the merge-ready signal, about it. Requiring --repo without
+        // validating it left that hole open.
+        const v = next();
+        if (!/^[^/\s]+\/[^/\s]+$/.test(v)) {
+          fail(2, `--repo must be owner/name (exactly one slash, no spaces), got: ${JSON.stringify(v)}`);
+        }
+        opts.repo = v;
+        break;
+      }
       case '--cwd': opts.cwd = next(); break;
       case '--findings': opts.findings = next(); break;
       case '--comment-id': opts.commentId = next(); break;

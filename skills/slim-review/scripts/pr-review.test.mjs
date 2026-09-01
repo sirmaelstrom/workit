@@ -17,6 +17,8 @@ import {
   buildReviewPayload,
   parseArgs,
   cmdPost,
+  cmdThreads,
+  cmdReply,
 } from './pr-review.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
@@ -383,6 +385,19 @@ test('skill distinguishes the two off-diff buckets and flags the unverified sche
   assert.match(skill, /UNVERIFIED against that date/);
 });
 
+test('skill states the force-post boundary and the threads truncation floor truthfully', () => {
+  const skill = readFileSync(SKILL, 'utf8');
+  // The old row claimed --force-post covered BOTH exit-5 triggers. It never
+  // consults forcePost on the empty-list floor.
+  assert.match(skill, /does \*\*not\*\* override the empty-file-list floor/);
+  assert.match(skill, /unconditional and posts nothing no matter what flags you pass/);
+  // All three exit-5 triggers named, count contradiction included.
+  assert.match(skill, /a parseable `examined N of M` contradicts that list/);
+  // The truncation floor and its follow-up.
+  assert.match(skill, /exits\s+\*\*6\*\* with a truncation warning/);
+  assert.match(skill, /Full `pageInfo` pagination is a known follow-up/);
+});
+
 // ---------------------------------------------------------------------------
 // buildReviewPayload
 // ---------------------------------------------------------------------------
@@ -511,8 +526,10 @@ test('parseArgs reads the explicit force-post escape hatch', () => {
 function runPostWithFakeGh({
   examinedPaths,
   forcePost = false,
+  dryRun = false,
   coverage = 'examined 2 of 2 changed files',
   prFilePaths = ['src/a.ts', 'src/b.ts'],
+  die,
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-post-'));
   const findings = join(dir, 'findings.json');
@@ -533,15 +550,15 @@ function runPostWithFakeGh({
     if (args[0] === 'api' && args.includes('POST')) return JSON.stringify({ html_url: 'https://example.test/review' });
     throw new Error(`unexpected gh call: ${args.join(' ')}`);
   };
-  const die = (code, message) => {
+  const throwingDie = (code, message) => {
     const err = new Error(message);
     err.code = code;
     throw err;
   };
   try {
     cmdPost(
-      { pr: '42', repo: 'owner/repo', findings, forcePost },
-      { runGh, die, log: () => {} },
+      { pr: '42', repo: 'owner/repo', findings, forcePost, dryRun },
+      { runGh, die: die ?? throwingDie, log: () => {} },
     );
   } catch (err) {
     error = err;
@@ -550,6 +567,52 @@ function runPostWithFakeGh({
   }
   return { calls, error };
 }
+
+test('--dry-run posts nothing and is not an error', () => {
+  // Every other non-posting path here has a POST-counting test; without this one
+  // deleting `if (opts.dryRun) return` ships green and --dry-run posts for real.
+  const { calls, error } = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'src/b.ts'],
+    dryRun: true,
+  });
+  assert.equal(error, undefined);
+  assert.equal(calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length, 0);
+  // It must still have done the real work it is previewing.
+  assert.equal(calls.filter(({ args }) => args[0] === 'pr' && args[1] === 'diff').length, 1);
+});
+
+test('every exit-5 floor stops the function, not just the process', () => {
+  // `die` is an INJECTED seam. A non-terminating impl must not fall through to
+  // the POST — an empty prSet makes checkCoverage return ok:true, which is
+  // exactly the false clean the floor exists to prevent.
+  const deaths = [];
+  const recordingDie = (code, message) => deaths.push({ code, message });
+
+  const empty = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts'],
+    prFilePaths: [],
+    die: recordingDie,
+  });
+  assert.equal(empty.error, undefined, 'the recording die does not throw');
+  assert.equal(deaths[0]?.code, 5);
+  assert.equal(
+    empty.calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length,
+    0,
+    'empty-file-list floor must return, not fall through to the POST',
+  );
+
+  deaths.length = 0;
+  const mismatch = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'stale.ts'],
+    die: recordingDie,
+  });
+  assert.equal(deaths[0]?.code, 5);
+  assert.equal(
+    mismatch.calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length,
+    0,
+    'coverage-mismatch floor must return, not fall through to the POST',
+  );
+});
 
 test('coverage mismatch exits 5 and makes zero review POST calls', () => {
   const { calls, error } = runPostWithFakeGh({ examinedPaths: ['src/a.ts', 'stale.ts'] });
@@ -619,6 +682,109 @@ test('matching coverage sends one review without a mismatch banner', () => {
   const posts = calls.filter(({ args }) => args[0] === 'api' && args.includes('POST'));
   assert.equal(posts.length, 1);
   assert.doesNotMatch(JSON.parse(posts[0].opts.input).body, /Coverage check failed/);
+});
+
+// ---------------------------------------------------------------------------
+// cmdThreads — the merge-ready signal must never claim completeness it lacks
+// ---------------------------------------------------------------------------
+
+const thread = (over = {}) => ({
+  isResolved: true,
+  isOutdated: false,
+  path: 'src/a.ts',
+  line: 11,
+  comments: { nodes: [{ databaseId: 1, author: { login: 'someone' }, body: 'a comment' }] },
+  ...over,
+});
+
+function runThreadsWithFakeGh({ threads, unresolved = false }) {
+  const calls = [];
+  const logs = [];
+  const deaths = [];
+  const runGh = (args, opts) => {
+    calls.push({ args, opts });
+    return JSON.stringify({
+      data: { repository: { pullRequest: { reviewThreads: { nodes: threads } } } },
+    });
+  };
+  cmdThreads(
+    { pr: '53', repo: 'owner/repo', unresolved },
+    { runGh, die: (code, message) => deaths.push({ code, message }), log: (m) => logs.push(String(m)) },
+  );
+  return { calls, out: logs.join('\n'), deaths };
+}
+
+test('threads lists normally when nothing is truncated', () => {
+  const { out, deaths } = runThreadsWithFakeGh({
+    threads: [thread({ isResolved: false }), thread()],
+  });
+  assert.deepEqual(deaths, []);
+  assert.match(out, /2 of 2 thread\(s\)/);
+});
+
+test('a full 100-thread page exits nonzero instead of claiming completeness', () => {
+  // The exact silent-completeness class this PR removed from `post`, left
+  // standing on the command that prints the merge verdict.
+  const { out, deaths } = runThreadsWithFakeGh({
+    threads: Array.from({ length: 100 }, () => thread()),
+    unresolved: true,
+  });
+  assert.equal(deaths[0]?.code, 6);
+  assert.match(deaths[0].message, /truncat/i);
+  assert.doesNotMatch(
+    out,
+    /no unresolved review threads/,
+    'the merge-ready signal must never be printed off a truncated page',
+  );
+});
+
+test('a full 50-comment page on any one thread also exits nonzero', () => {
+  const fat = thread({
+    comments: {
+      nodes: Array.from({ length: 50 }, (_, i) => ({
+        databaseId: i + 1,
+        author: { login: 'someone' },
+        body: 'a comment',
+      })),
+    },
+  });
+  const { deaths } = runThreadsWithFakeGh({ threads: [thread({ isResolved: false }), fat] });
+  assert.equal(deaths[0]?.code, 6);
+  assert.match(deaths[0].message, /comments/i);
+});
+
+test('threads takes an injectable runGh — it no longer reaches the network to be tested', () => {
+  const { calls } = runThreadsWithFakeGh({ threads: [thread()] });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args[0], 'api');
+  assert.equal(calls[0].args[1], 'graphql');
+  assert.ok(calls[0].args.includes('owner=owner'));
+  assert.ok(calls[0].args.includes('name=repo'));
+});
+
+test('reply takes an injectable runGh and posts one reply to the given comment', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-reply-'));
+  const bodyFile = join(dir, 'reply.md');
+  const calls = [];
+  try {
+    writeFileSync(bodyFile, 'confirmed, fixed in abc1234', 'utf8');
+    cmdReply(
+      { pr: '53', repo: 'owner/repo', commentId: '99', bodyFile },
+      {
+        runGh: (args, opts) => {
+          calls.push({ args, opts });
+          return JSON.stringify({ html_url: 'https://example.test/reply' });
+        },
+        die: (code, message) => { throw Object.assign(new Error(message), { code }); },
+        log: () => {},
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].args.includes('repos/owner/repo/pulls/53/comments/99/replies'));
+  assert.equal(JSON.parse(calls[0].opts.input).body, 'confirmed, fixed in abc1234');
 });
 
 // ---------------------------------------------------------------------------
@@ -703,6 +869,29 @@ test('threads requires --repo — same-number-different-repo reads as "no unreso
   assert.match(r.stderr, /threads needs --repo owner\/name/);
   // Exit 2 must land before any gh call, so a wrong cwd can never answer.
   assert.doesNotMatch(r.stderr, /gh /);
+});
+
+test('a malformed --repo is a usage error on every subcommand, with the value echoed', () => {
+  // `own/er/repo` used to sail through: cmdThreads destructures [owner, name]
+  // and drops the third segment, so `threads` printed "no unresolved review
+  // threads" — the merge-ready signal — about a DIFFERENT repository.
+  const bad = ['own/er/repo', 'noslash', 'owner/', '/name', 'own er/repo', ''];
+  for (const repo of bad) {
+    const r = runCli(['threads', '--pr', '53', '--repo', repo]);
+    assert.equal(r.code, 2, `expected exit 2 for --repo ${JSON.stringify(repo)}`);
+    assert.match(r.stderr, /--repo must be owner\/name/);
+    if (repo !== '') assert.ok(r.stderr.includes(repo), 'the rejected value must be echoed');
+  }
+  for (const cmd of [
+    ['post', '--pr', '1', '--repo', 'own/er/repo', '--findings', 'f.json'],
+    ['reply', '--pr', '1', '--repo', 'own/er/repo', '--comment-id', '1', '--body-file', 'x.md'],
+  ]) {
+    const r = runCli(cmd);
+    assert.equal(r.code, 2, `expected exit 2 for ${cmd[0]}`);
+    assert.match(r.stderr, /--repo must be owner\/name/);
+  }
+  // A well-formed value must still get past parsing.
+  assert.equal(parseArgs(['threads', '--pr', '1', '--repo', 'sirmaelstrom/workit']).repo, 'sirmaelstrom/workit');
 });
 
 test('reply requires --repo', () => {
