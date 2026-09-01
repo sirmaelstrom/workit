@@ -71,7 +71,7 @@ Get the diff with `gh pr diff <n> --repo <owner/name>`. Read whatever surroundin
 source you need in order to judge it — the diff alone is not enough to tell
 whether a change is correct.
 
-Authoritative PR file list (from `gh pr view <n> --repo <owner/name> --json files`):
+Authoritative PR file list (from `gh api --paginate repos/<owner>/<repo>/pulls/<n>/files --jq '.[].filename'`):
 <one `files[].path` per line, copied from the target response>
 
 This list is the coverage ground truth. Echo every path from that authoritative
@@ -97,7 +97,8 @@ Set `coverage` to exactly "examined N of M changed files" with the real counts.
 ```
 
 Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`.
-`examined_paths` must contain every path in the authoritative list.
+`examined_paths` must be EXACTLY the authoritative list. Context-only paths are
+extras and fail the check.
 
 The instrument bullet is this skill's negative-control binding
 (`reference/patterns/negative-control.md`): an added test, guard, or checker
@@ -148,7 +149,9 @@ The script does the checking you would otherwise have to remember:
 - **Blocking coverage set check** — compares normalized `examined_paths` against
   the PR API's authoritative file list. Missing or extra paths exit nonzero before
   posting; `--force-post` is the explicit escape hatch and stamps the mismatch in
-  the review body. The `examined N of M` count remains secondary evidence.
+  the review body. A parseable `examined N of M` contradiction also fails; an
+  absent or unparsable count remains secondary evidence. This detects stale or
+  missing path sets; it does not prove that examination happened.
 - **Anchorability** — a finding whose line is in the diff becomes a real
   line-anchored comment; one whose line is not becomes a body entry; one whose
   **file this PR does not touch** becomes a body entry flagged as such. That last

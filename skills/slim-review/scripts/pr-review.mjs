@@ -70,9 +70,11 @@ function resolveRepo(explicit, cwd) {
 
 /** Fetch the PR's authoritative changed-file paths from GitHub's PR files API. */
 export function fetchPrFilePaths(repo, pr, cwd, runGh = ghOrDie) {
-  const raw = runGh(['pr', 'view', String(pr), '--repo', repo, '--json', 'files'], { cwd });
-  const files = JSON.parse(raw).files;
-  return files.map((file) => file.path);
+  const raw = runGh(
+    ['api', '--paginate', `repos/${repo}/pulls/${pr}/files`, '--jq', '.[].filename'],
+    { cwd },
+  );
+  return String(raw).split(/\r?\n/).filter((path) => path !== '');
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +198,9 @@ export function validateFindingsShape(doc) {
         problems.push(`examined_paths[${i}] must be a non-empty string`);
       }
     });
+    if (new Set(doc.examined_paths).size !== doc.examined_paths.length) {
+      problems.push('examined_paths must not contain duplicates');
+    }
   }
   if (!Array.isArray(doc.findings)) {
     problems.push('findings must be an array (an empty array is valid)');
@@ -260,6 +265,7 @@ export function checkCoverage(coverage, examinedPaths, prFilePaths) {
   const extra = [...examinedSet].filter((path) => !prSet.has(path)).sort();
 
   let countReason;
+  let countContradiction = false;
   if (!m) {
     countReason = `coverage string does not state "examined N of M": ${JSON.stringify(coverage)}`;
   } else {
@@ -267,12 +273,23 @@ export function checkCoverage(coverage, examinedPaths, prFilePaths) {
     const claimedTotal = Number(m[2]);
     if (claimedTotal !== prSet.size) {
       countReason = `reviewer claims ${claimedTotal} changed files, the PR API has ${prSet.size}`;
-    } else if (examined < claimedTotal) {
+      countContradiction = true;
+    } else if (examined !== claimedTotal) {
       countReason = `reviewer examined ${examined} of ${claimedTotal} changed files — the review is partial`;
+      countContradiction = true;
     }
   }
 
   if (missing.length === 0 && extra.length === 0) {
+    if (countContradiction) {
+      return {
+        ok: false,
+        reason: `coverage count contradicts examined_paths: ${countReason}`,
+        missing,
+        extra,
+        countReason,
+      };
+    }
     return { ok: true, missing, extra, countReason };
   }
   const pathReasons = [
@@ -340,21 +357,21 @@ export function buildReviewPayload({ summary, coverage, anchored, offDiff, offLi
 // Subcommands
 // ---------------------------------------------------------------------------
 
-function cmdPost(opts) {
+export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
   // Load the handback FIRST: a reviewer that never ran should fail before we
   // touch the network, and exit 3 must not depend on gh being reachable.
   const doc = loadFindings(opts.findings);
   const repo = resolveRepo(opts.repo, opts.cwd);
 
-  const diffText = ghOrDie(['pr', 'diff', String(opts.pr), '--repo', repo], { cwd: opts.cwd });
+  const diffText = runGh(['pr', 'diff', String(opts.pr), '--repo', repo], { cwd: opts.cwd });
   const diffFiles = parseDiff(diffText);
   const diffHeaderCount = countChangedFiles(diffText);
-  const prFilePaths = fetchPrFilePaths(repo, opts.pr, opts.cwd);
+  const prFilePaths = fetchPrFilePaths(repo, opts.pr, opts.cwd, runGh);
   const { anchored, offDiff, offLine } = partitionFindings(doc.findings, diffFiles);
   const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
 
   if (!coverageCheck.ok && !opts.forcePost) {
-    fail(5, `coverage check failed; review was not posted: ${coverageCheck.reason}\nRe-run the reviewer or pass --force-post to post the stamped mismatch.`);
+    die(5, `coverage check failed; review was not posted: ${coverageCheck.reason}\nRe-run the reviewer or pass --force-post to post the stamped mismatch.`);
   }
 
   const payload = buildReviewPayload({
@@ -366,27 +383,27 @@ function cmdPost(opts) {
     coverageCheck,
   });
 
-  console.log(`repo           ${repo}`);
-  console.log(`pr             #${opts.pr}`);
-  console.log(`changed files  ${prFilePaths.length} from PR API (${diffHeaderCount} diff headers; ${diffFiles.size} with commentable lines)`);
-  console.log(`findings       ${doc.findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiff.length} off-diff`);
-  console.log(`coverage       ${coverageCheck.ok ? `OK${coverageCheck.countReason ? ` — Secondary count check: ${coverageCheck.countReason}` : ''}` : `FAILED — ${coverageCheck.reason}`}`);
+  log(`repo           ${repo}`);
+  log(`pr             #${opts.pr}`);
+  log(`changed files  ${prFilePaths.length} from PR API (${diffHeaderCount} diff headers; ${diffFiles.size} with commentable lines)`);
+  log(`findings       ${doc.findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiff.length} off-diff`);
+  log(`coverage       ${coverageCheck.ok ? `OK${coverageCheck.countReason ? ` — Secondary count check: ${coverageCheck.countReason}` : ''}` : `FAILED — ${coverageCheck.reason}`}`);
   for (const f of offDiff) {
-    console.log(`  off-diff     ${f.path}:${f.line} — not a file this PR changes`);
+    log(`  off-diff     ${f.path}:${f.line} — not a file this PR changes`);
   }
 
   if (opts.dryRun) {
-    console.log('\n--dry-run: nothing posted. Payload:\n');
-    console.log(JSON.stringify(payload, null, 2));
+    log('\n--dry-run: nothing posted. Payload:\n');
+    log(JSON.stringify(payload, null, 2));
     return;
   }
 
-  const res = ghOrDie(
+  const res = runGh(
     ['api', '--method', 'POST', `repos/${repo}/pulls/${opts.pr}/reviews`, '--input', '-'],
     { input: JSON.stringify(payload), cwd: opts.cwd },
   );
   const posted = JSON.parse(res);
-  console.log(`\nposted         ${posted.html_url}`);
+  log(`\nposted         ${posted.html_url}`);
 }
 
 const THREADS_QUERY = `

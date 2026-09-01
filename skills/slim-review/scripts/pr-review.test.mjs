@@ -16,6 +16,7 @@ import {
   validateFindingsShape,
   buildReviewPayload,
   parseArgs,
+  cmdPost,
 } from './pr-review.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
@@ -26,11 +27,25 @@ test('fetchPrFilePaths reads paths from the authoritative PR files API', () => {
   const calls = [];
   const paths = fetchPrFilePaths('owner/repo', 42, 'C:/repo', (args, opts) => {
     calls.push({ args, opts });
-    return JSON.stringify({ files: [{ path: 'src/a.ts' }, { path: 'docs/readme.md' }] });
+    return 'src/a.ts\ndocs/readme.md\n';
   });
   assert.deepEqual(paths, ['src/a.ts', 'docs/readme.md']);
   assert.deepEqual(calls, [{
-    args: ['pr', 'view', '42', '--repo', 'owner/repo', '--json', 'files'],
+    args: ['api', '--paginate', 'repos/owner/repo/pulls/42/files', '--jq', '.[].filename'],
+    opts: { cwd: 'C:/repo' },
+  }]);
+});
+
+test('fetchPrFilePaths collects every path from paginated REST output beyond 100 files', () => {
+  const expected = Array.from({ length: 152 }, (_, i) => `src/file-${i + 1}.ts`);
+  const calls = [];
+  const paths = fetchPrFilePaths('owner/repo', 42, 'C:/repo', (args, opts) => {
+    calls.push({ args, opts });
+    return `${expected.slice(0, 100).join('\n')}\n${expected.slice(100).join('\n')}\n`;
+  });
+  assert.deepEqual(paths, expected);
+  assert.deepEqual(calls, [{
+    args: ['api', '--paginate', 'repos/owner/repo/pulls/42/files', '--jq', '.[].filename'],
     opts: { cwd: 'C:/repo' },
   }]);
 });
@@ -172,21 +187,29 @@ test('checkCoverage accepts a full, truthful claim', () => {
   assert.equal(checkCoverage('examined 2 of 2 changed files.', ['a', 'b'], ['a', 'b']).ok, true);
 });
 
-test('checkCoverage keeps a disagreeing total as a secondary message', () => {
+test('checkCoverage rejects a total that contradicts the matching path set', () => {
   const r = checkCoverage('examined 5 of 5 changed files.', ['a', 'b'], ['a', 'b']);
-  assert.equal(r.ok, true);
-  assert.match(r.countReason, /claims 5 changed files, the PR API has 2/);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /contradicts examined_paths/);
+  assert.match(r.reason, /claims 5 changed files, the PR API has 2/);
 });
 
-test('checkCoverage keeps a partial count claim as a secondary message', () => {
+test('checkCoverage rejects a count claim that contradicts the matching path set', () => {
   const paths = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
   const r = checkCoverage('examined 3 of 7 changed files', paths, paths);
-  assert.equal(r.ok, true);
-  assert.match(r.countReason, /examined 3 of 7/);
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /contradicts examined_paths/);
+  assert.match(r.reason, /examined 3 of 7/);
 });
 
 test('checkCoverage keeps a count-free coverage string as a secondary message', () => {
   const r = checkCoverage('I looked at everything.', ['a'], ['a']);
+  assert.equal(r.ok, true);
+  assert.match(r.countReason, /does not state/);
+});
+
+test('checkCoverage keeps an unparsable count as a secondary message', () => {
+  const r = checkCoverage('examined many of many changed files', ['a'], ['a']);
   assert.equal(r.ok, true);
   assert.match(r.countReason, /does not state/);
 });
@@ -214,6 +237,17 @@ test('checkCoverage names missing and extra paths, with count mismatch secondary
   assert.match(r.reason, /missing: src\/current\.ts/);
   assert.match(r.reason, /extra: stale\.ts/);
   assert.match(r.reason, /Secondary count check: reviewer claims 9 changed files, the PR API has 2/);
+});
+
+test('checkCoverage rejects a stale same-count path set', () => {
+  const r = checkCoverage(
+    'examined 2 of 2 changed files',
+    ['a.ts', 'stale.ts'],
+    ['a.ts', 'b.ts'],
+  );
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.missing, ['b.ts']);
+  assert.deepEqual(r.extra, ['stale.ts']);
 });
 
 // ---------------------------------------------------------------------------
@@ -255,6 +289,11 @@ test('validateFindingsShape requires examined_paths as an array of non-empty str
   assert.match(validateFindingsShape({ ...VALID, examined_paths: ['src/a.ts', ''] }).join(' '), /examined_paths\[1\]/);
 });
 
+test('validateFindingsShape rejects duplicate examined_paths like the schema does', () => {
+  const problems = validateFindingsShape({ ...VALID, examined_paths: ['src/a.ts', 'src/a.ts'] });
+  assert.match(problems.join(' '), /examined_paths must not contain duplicates/);
+});
+
 test('findings schema requires examined_paths strings', () => {
   const schema = JSON.parse(readFileSync(SCHEMA, 'utf8'));
   assert.ok(schema.required.includes('examined_paths'));
@@ -264,7 +303,7 @@ test('findings schema requires examined_paths strings', () => {
 
 test('reviewer prompt carries the authoritative API paths and requires them echoed back', () => {
   const skill = readFileSync(SKILL, 'utf8');
-  assert.match(skill, /Authoritative PR file list \(from `gh pr view <n> --repo <owner\/name> --json files`\):/);
+  assert.match(skill, /Authoritative PR file list \(from `gh api --paginate repos\/<owner>\/<repo>\/pulls\/<n>\/files --jq '\.\[\]\.filename'`\):/);
   assert.match(skill, /Echo every path from that authoritative\s+list into `examined_paths`/);
 });
 
@@ -273,6 +312,13 @@ test('skill documents required repo, blocking coverage, and examined_paths handb
   assert.match(skill, /--pr <n> --repo <owner\/name> --findings/);
   assert.match(skill, /\*\*Blocking coverage set check\*\*/);
   assert.match(skill, /Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`/);
+});
+
+test('skill says examined_paths is exact and bounds what the stale-set guard proves', () => {
+  const skill = readFileSync(SKILL, 'utf8');
+  assert.match(skill, /`examined_paths` must be EXACTLY the authoritative list/);
+  assert.match(skill, /Context-only paths are\s+extras and fail the check/);
+  assert.match(skill, /detects stale or\s+missing path sets; it does not prove that examination happened/);
 });
 
 // ---------------------------------------------------------------------------
@@ -342,13 +388,65 @@ test('parseArgs reads the explicit force-post escape hatch', () => {
   assert.equal(o.forcePost, true);
 });
 
-test('post fails closed on coverage before building or sending a review payload', () => {
-  const src = readFileSync(SCRIPT, 'utf8');
-  const post = src.slice(src.indexOf('function cmdPost('), src.indexOf('const THREADS_QUERY'));
-  const guard = post.indexOf('if (!coverageCheck.ok && !opts.forcePost)');
-  assert.notEqual(guard, -1, 'post must reject mismatched coverage unless --force-post is explicit');
-  assert.ok(guard < post.indexOf('buildReviewPayload('), 'coverage guard must run before payload construction');
-  assert.ok(guard < post.indexOf("['api', '--method', 'POST'"), 'coverage guard must run before the GitHub write');
+function runPostWithFakeGh({ examinedPaths, forcePost = false }) {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-post-'));
+  const findings = join(dir, 'findings.json');
+  const calls = [];
+  let error;
+  writeFileSync(findings, JSON.stringify({
+    summary: 'summary',
+    coverage: 'examined 2 of 2 changed files',
+    examined_paths: examinedPaths,
+    findings: [],
+  }), 'utf8');
+  const runGh = (args, opts) => {
+    calls.push({ args, opts });
+    if (args[0] === 'pr' && args[1] === 'diff') return DIFF;
+    if (args[0] === 'api' && args[1] === '--paginate') return 'src/a.ts\nsrc/b.ts\n';
+    if (args[0] === 'api' && args.includes('POST')) return JSON.stringify({ html_url: 'https://example.test/review' });
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  const die = (code, message) => {
+    const err = new Error(message);
+    err.code = code;
+    throw err;
+  };
+  try {
+    cmdPost(
+      { pr: '42', repo: 'owner/repo', findings, forcePost },
+      { runGh, die, log: () => {} },
+    );
+  } catch (err) {
+    error = err;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return { calls, error };
+}
+
+test('coverage mismatch exits 5 and makes zero review POST calls', () => {
+  const { calls, error } = runPostWithFakeGh({ examinedPaths: ['src/a.ts', 'stale.ts'] });
+  assert.equal(error?.code, 5);
+  assert.equal(calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length, 0);
+});
+
+test('--force-post sends one mismatched review with the coverage banner', () => {
+  const { calls, error } = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'stale.ts'],
+    forcePost: true,
+  });
+  assert.equal(error, undefined);
+  const posts = calls.filter(({ args }) => args[0] === 'api' && args.includes('POST'));
+  assert.equal(posts.length, 1);
+  assert.match(JSON.parse(posts[0].opts.input).body, /Coverage check failed/);
+});
+
+test('matching coverage sends one review without a mismatch banner', () => {
+  const { calls, error } = runPostWithFakeGh({ examinedPaths: ['src/a.ts', 'src/b.ts'] });
+  assert.equal(error, undefined);
+  const posts = calls.filter(({ args }) => args[0] === 'api' && args.includes('POST'));
+  assert.equal(posts.length, 1);
+  assert.doesNotMatch(JSON.parse(posts[0].opts.input).body, /Coverage check failed/);
 });
 
 // ---------------------------------------------------------------------------
