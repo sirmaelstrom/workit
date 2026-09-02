@@ -39,7 +39,7 @@ needs you.
 ## 1. Target
 
 ```bash
-gh pr view <n> --json title,headRefName,baseRefName,files,additions,deletions
+gh pr view <n> --repo <owner/name> --json title,headRefName,baseRefName,files,additions,deletions
 ```
 
 Work from a checkout of the PR's head — the repo root, or the worktree the branch
@@ -56,7 +56,8 @@ mkdir -p "$REVIEW_DIR"
 
 Write the prompt, then spawn one reviewer.
 
-**The prompt must tell the reviewer to read the diff via `gh pr diff <n>`** — the
+**The prompt must tell the reviewer to read the diff via `gh pr diff <n> --repo
+<owner/name>`** — the
 same command step 3 parses for anchoring. If the reviewer reads a differently
 computed diff, its line numbers will not match the ones GitHub accepts and every
 finding degrades to prose.
@@ -66,9 +67,15 @@ Review pull request #<n> in the repository at <ABSOLUTE REPO OR WORKTREE PATH>.
 
 READ-ONLY: do not modify, create, or delete any file in that repository.
 
-Get the diff with `gh pr diff <n>`. Read whatever surrounding source you need in
-order to judge it — the diff alone is not enough to tell whether a change is
-correct.
+Get the diff with `gh pr diff <n> --repo <owner/name>`. Read whatever surrounding
+source you need in order to judge it — the diff alone is not enough to tell
+whether a change is correct.
+
+Authoritative PR file list (from `gh api --paginate repos/<owner>/<repo>/pulls/<n>/files --jq '.[].filename'`):
+<one `files[].path` per line, copied from the target response>
+
+This list is the coverage ground truth. Echo every path from that authoritative
+list into `examined_paths`.
 
 Report correctness defects that would matter after merge:
 - wrong behavior on an input the change makes reachable
@@ -88,6 +95,12 @@ so in the body — but anchor the ones you can.
 
 Set `coverage` to exactly "examined N of M changed files" with the real counts.
 ```
+
+Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`.
+`examined_paths` must be EXACTLY the authoritative list. Context-only paths are
+extras and fail the check. It must also be **non-empty**, and `coverage` must
+literally state `examined N of M` — a handback admitting nothing, or one whose
+coverage is prose, is exit 3, not a clean review.
 
 The instrument bullet is this skill's negative-control binding
 (`reference/patterns/negative-control.md`): an added test, guard, or checker
@@ -130,18 +143,28 @@ git -C "<ABSOLUTE REPO OR WORKTREE PATH>" status --short
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post \
-  --pr <n> --findings "$REVIEW_DIR/findings.json" [--dry-run]
+  --pr <n> --repo <owner/name> --findings "$REVIEW_DIR/findings.json" [--dry-run] [--force-post]
 ```
 
 The script does the checking you would otherwise have to remember:
 
-- **Coverage arithmetic** — parses `examined N of M` and compares M against the
-  PR's real changed-file count. A silently partial review is otherwise
-  indistinguishable from a clean one, because you never read the files.
+- **Blocking coverage set check** — compares normalized `examined_paths` against
+  the PR API's authoritative file list. Missing or extra paths exit nonzero before
+  posting; `--force-post` is the explicit escape hatch and stamps the mismatch in
+  the review body. A parseable `examined N of M` contradiction also fails; an
+  absent or unparsable count remains secondary evidence. This detects stale or
+  missing path sets; it does not prove that examination happened.
 - **Anchorability** — a finding whose line is in the diff becomes a real
-  line-anchored comment; one whose line is not becomes a body entry; one whose
-  **file this PR does not touch** becomes a body entry flagged as such. That last
-  bucket is where invented locators surface.
+  line-anchored comment; one whose line is not becomes a body entry. A finding on
+  a file with no commentable line splits into two buckets with different wording,
+  because they mean different things: **changed by this PR but not
+  line-anchorable** (deleted, binary, or pure rename — the diff has no
+  post-change side to comment on) versus **not a file this PR changes**. Only the
+  second is where invented locators surface; publishing the second's wording over
+  the first tells the reader something false about a real defect.
+- **Diff-vs-file-list warning** — if the diff's `diff --git` header count differs
+  from the PR API's file count, the footer says so. Non-blocking; it means the
+  two sources disagree about what the PR changes.
 - **No shell re-parsing** — the payload is built in Node and handed to
   `gh api --input -`, so backticks and quotes in the review text land verbatim.
 
@@ -153,8 +176,15 @@ Exit codes matter here:
 | Code | Meaning |
 |---|---|
 | 0 | Posted. **A zero-finding review is a real result** — it posts, and that is the receipt that review happened |
-| 3 | The handback never arrived: file missing, unparseable, or wrong shape. **This is not a clean review.** Re-run step 2 |
+| 3 | The handback never arrived: file missing, unparseable, or wrong shape — including an **empty `examined_paths`** or a `coverage` string that does not state `examined N of M`. **This is not a clean review.** Re-run step 2 |
 | 4 | A `gh` call failed |
+| 5 | A coverage check failed. Three triggers: the `examined_paths` set does not match the PR API's file list; a parseable `examined N of M` contradicts that list; or the PR API returned **no** changed files at all |
+
+`--force-post` overrides the first two — the set mismatch and the count
+contradiction — and posts the review with the mismatch stamped into the body. It
+does **not** override the empty-file-list floor: an empty authoritative list is a
+fetch failure, and there is nothing to check coverage against, so that exit 5 is
+unconditional and posts nothing no matter what flags you pass.
 
 The review posts as `COMMENT`, which is the only event GitHub permits on your own
 pull request.
@@ -165,13 +195,25 @@ This is the half that caught real defects three times out of three when it was
 run by hand, and it is the half no script can do.
 
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" threads --pr <n> --unresolved
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" threads --pr <n> --repo <owner/name> --unresolved
 ```
 
-This lists **every** unresolved review thread on the PR, not only the ones this
-loop just posted — a human's or a bot's open comment deserves the same verdict,
-and a PR whose threads are all answered is the actual merge-ready condition. If
-you need to tell them apart, `post` printed the URL of the review it created.
+`--repo` is required here, not optional. Resolved from cwd, `--pr <n>` silently
+answers about a *different* repository's PR of the same number — and the answer
+it prints, "no unresolved review threads", is the merge-ready signal.
+
+This lists every unresolved review thread on the PR, not only the ones this loop
+just posted — a human's or a bot's open comment deserves the same verdict, and a
+PR whose threads are all answered is the actual merge-ready condition. If you
+need to tell them apart, `post` printed the URL of the review it created.
+
+**Bounded, and it says so.** The query asks for 100 threads and 50 comments per
+thread and does not paginate. If either page comes back full, the command exits
+**6** with a truncation warning and prints no listing at all — because "no
+unresolved review threads" read off a truncated page is a false merge-ready
+signal, which is the one thing this skill exists to prevent. Adjudicate from the
+PR page in that case. Full `pageInfo` pagination is a known follow-up, not
+implemented here.
 
 For **each** thread, in order:
 
@@ -186,7 +228,7 @@ For **each** thread, in order:
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" reply \
-  --pr <n> --comment-id <id> --body-file "$REVIEW_DIR/reply-<id>.md"
+  --pr <n> --repo <owner/name> --comment-id <id> --body-file "$REVIEW_DIR/reply-<id>.md"
 ```
 
 Write the reply to a file and pass `--body-file`; reply bodies quote code and
@@ -248,5 +290,16 @@ conforming JSON on a real Observatory commit, and `git status --short` confirmed
 the read-only clause held. `codex exec review` was tested and rejected — it
 exposes no `--sandbox` flag, so it hit `CreateProcessAsUserW failed: 5` on this
 box (auto-memory `codex-exec-readonly-sandbox-broken-windows`) and returned prose.*
+
+*UNVERIFIED against that date, and the date must not be refreshed until it is:
+`findings.schema.json` has since gained `minLength: 1` and `uniqueItems: true` on
+`examined_paths`. Both appear on OpenAI Structured Outputs' unsupported-keyword
+list for strict mode, and the live `codex exec --output-schema` probe was blocked
+by a usage limit. Re-run one real `codex exec --output-schema` against the current
+schema before touching the line above. Do **not** drop the keywords pre-emptively:
+`validateFindingsShape` enforces non-empty strings and uniqueness unconditionally
+at runtime, so a schema codex rejects degrades to a loud exit 3, never to a false
+clean — and if a live probe does show rejection, the keywords can simply be
+removed with no loss of enforcement.*
 
 </supporting_info>
