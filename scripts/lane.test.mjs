@@ -1687,6 +1687,8 @@ test('Q-5: unknown sweep lane refusal lists known agent names, labels, and basen
   assert.match(result.output.error, /lane-a/);
   assert.match(result.output.error, /label a/);
   assert.match(result.output.error, /workit-wt-lane-a/);
+  assert.match(result.output.error, /lanes\[\].*creates\[\]/);
+  assert.match(result.output.error, /Agent names come from lanes\[\].*labels and basenames come from creates\[\]/);
 });
 
 test('Q-6: every C13 root spelling reaches the recorded lane in exactly two delegate levels', async (t) => {
@@ -1710,6 +1712,24 @@ test('Q-6: every C13 root spelling reaches the recorded lane in exactly two dele
   const refused = await runLane(['sweep', '--lane', 'workit-wt-lane-a', '--root', filesystemRoot, '--log', f.log], { exec: f.exec, exists: fakeExists(), env: {}, platform: 'win32' });
   assert.equal(refused.exit, 2);
   assert.match(refused.output.error, /delegate root|root/i);
+});
+
+test('Q-6: win32 ancestor guard folds casing from path canonicalization', async (t) => {
+  const f = fixture(t);
+  const recorded = join(f.dir, 'projects', 'workit-wt-lane-a');
+  seedCreates(f, [recorded]);
+  const casingSegment = f.dir.split(sep).at(-1);
+  const resolveWithWindowsCasing = (path) => {
+    const resolved = resolve(path);
+    if (path === recorded) return resolved.replace(casingSegment, casingSegment.toUpperCase());
+    if (path.includes(casingSegment.toUpperCase())) return resolved.replace(casingSegment.toUpperCase(), casingSegment);
+    return resolved;
+  };
+  f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+  const result = await runLane(['sweep', '--lane', 'workit-wt-lane-a', '--root', join(f.dir, 'projects'), '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: {}, platform: 'win32', resolve: resolveWithWindowsCasing,
+  });
+  assert.equal(result.exit, 0);
 });
 
 test('Q-7: a lanes entry without a matching create is not sweepable', async (t) => {

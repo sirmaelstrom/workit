@@ -1202,10 +1202,11 @@ function knownLanesUnder(state, root, deps) {
 }
 
 function delegateRootForLane(lanePath, deps) {
-  const resolvedLane = resolve(lanePath);
+  const resolvePath = deps.resolve ?? resolve;
+  const resolvedLane = resolvePath(lanePath);
   const delegateRoot = dirname(dirname(resolvedLane));
   const fold = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
-  const ancestor = `${resolve(delegateRoot)}${sep}`;
+  const ancestor = `${resolvePath(delegateRoot)}${sep}`;
   if (dirname(delegateRoot) === delegateRoot || !fold(resolvedLane).startsWith(fold(ancestor))) {
     usage(`cannot derive a safe delegate root for lane ${resolvedLane}: ${delegateRoot} is not a non-root ancestor`);
   }
@@ -1281,7 +1282,7 @@ async function sweepLanes(opts, deps, state) {
     const known = roots.map((root) => ({ root: root.path, matches: knownLanesUnder(state, root.path, deps).map((entry) => ({
       agentNames: entry.agentName ? [entry.agentName] : [], labels: entry.label ? [entry.label] : [], basenames: [entry.basename],
     })) }));
-    usage(`--lane ${opts.lane} is not a lane this helper created under any swept root; nothing in the sidecar creates[] matches. Known spellings by root: ${JSON.stringify(known)}. Sweep it by hand if you mean it.`);
+    usage(`--lane ${opts.lane} is not a lane this helper created under any swept root; nothing in the sidecar lanes[] or creates[] matches. Agent names come from lanes[] only when their path equals a creates[] path; labels and basenames come from creates[]. Known spellings by root: ${JSON.stringify(known)}. Sweep it by hand if you mean it.`);
   }
 
   const present = plan.filter((entry) => !entry.skipped && deps.exists(entry.delegateRoot ?? entry.root));
