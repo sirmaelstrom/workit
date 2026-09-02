@@ -4,7 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
-import { EXIT_CODES, PLAN_REFUSAL_PATTERNS, paneAtPrompt, runLane, scrapePlanMeter } from './lane.mjs';
+import {
+  EXIT_CODES, PLAN_REFUSAL_PATTERNS, paneAtPrompt, panePromptSignature, runLane, scrapePlanMeter,
+} from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
 import { listsWorktree, s1Verdict, s2Verdict, stimulusFired, teardownSteps } from './lane-smoke.mjs';
@@ -41,6 +43,15 @@ function readState(f) {
 // and its lock keep using the real filesystem.
 function fakeExists(present = () => true) {
   return (path) => (String(path).includes('.state.json') ? existsSync(path) : present(String(path)));
+}
+
+// `start` reads the pane once — while it is still a shell — to record that
+// pane's own prompt signature (A3). Every start-driving fixture therefore opens
+// with a shell read.
+const SHELL_READ = { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' };
+
+function agentStartCall(f) {
+  return f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
 }
 
 function seedLane(f, lane = {}) {
@@ -102,6 +113,7 @@ test('WP-1: read-only codex sandbox is refused before herdr is invoked', async (
 test('WP-1: claude start supplies the mandatory mode and restores conductor focus', async (t) => {
   const f = fixture(t);
   f.responses.push(
+    SHELL_READ,
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a","state":"idle"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{"focused":true}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"name":"conductor","pane_id":"w1:p1","focused":true}]}}', stderr: '' },
@@ -111,9 +123,10 @@ test('WP-1: claude start supplies the mandatory mode and restores conductor focu
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
   );
   assert.equal(result.exit, 0);
-  assert.deepEqual(f.calls[0].args, ['agent', 'start', 'lane-a', '--kind', 'claude', '--pane', 'w1:p2', '--', '--model', 'opus', '--permission-mode', 'bypassPermissions', '--effort', 'high']);
-  assert.deepEqual(f.calls[1].args, ['agent', 'focus', 'w1:p1']);
-  assert.deepEqual(f.calls[2].args, ['agent', 'list']);
+  assert.deepEqual(agentStartCall(f).args, ['agent', 'start', 'lane-a', '--kind', 'claude', '--pane', 'w1:p2', '--', '--model', 'opus', '--permission-mode', 'bypassPermissions', '--effort', 'high']);
+  const after = f.calls.slice(f.calls.indexOf(agentStartCall(f)) + 1);
+  assert.deepEqual(after[0].args, ['agent', 'focus', 'w1:p1']);
+  assert.deepEqual(after[1].args, ['agent', 'list']);
 });
 
 test('WP-1: prompt sends only the absolute prompt-file instruction', async (t) => {
@@ -186,6 +199,7 @@ test('WP-1 / C13: create honours an explicit --path and refuses one that already
 test('WP-1: codex start waits for codex.exe and a returned prompt before agent start', async (t) => {
   const f = fixture(t);
   f.responses.push(
+    SHELL_READ,
     { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: 'PS X:\\fixture\\lane> $env:PATH = "X:\\fixture\\vendor\\bin;" + $env:PATH; (Get-Command codex).Source', stderr: '' },
@@ -201,11 +215,12 @@ test('WP-1: codex start waits for codex.exe and a returned prompt before agent s
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {} },
   );
   assert.equal(result.exit, 0);
-  assert.equal(f.calls[0].program, 'cmd.exe');
-  assert.deepEqual(f.calls[0].args, ['/d', '/s', '/c', 'npm root -g']);
+  const npmRoot = f.calls.find((call) => call.program === 'cmd.exe');
+  assert.deepEqual(npmRoot.args, ['/d', '/s', '/c', 'npm root -g']);
   const startIndex = f.calls.findIndex((call) => call.program === 'herdr' && call.args[0] === 'agent' && call.args[1] === 'start');
-  const readsBeforeStart = f.calls.slice(0, startIndex).filter((call) => call.args[0] === 'pane' && call.args[1] === 'read');
-  assert.equal(readsBeforeStart.length, 2);
+  const runIndex = f.calls.findIndex((call) => call.args[0] === 'pane' && call.args[1] === 'run');
+  const readsAfterRun = f.calls.slice(runIndex, startIndex).filter((call) => call.args[0] === 'pane' && call.args[1] === 'read');
+  assert.equal(readsAfterRun.length, 2, 'the readiness poll ran twice before the agent was started');
   assert.deepEqual(f.calls[startIndex].args.slice(-8), ['--model', 'gpt-5.6-terra', '--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'model_reasoning_effort=medium']);
 });
 
@@ -369,7 +384,10 @@ test('WP-2 / S6: resume waits explicitly until idle and never consults a bare st
   assert.equal(result.exit, 0);
   assert.equal(result.output.state, 'idle');
   assert.deepEqual(f.calls[0].args.slice(0, 7), ['agent', 'wait', 'lane-a', '--until', 'idle', '--until', 'done']);
-  assert.equal(f.calls.length, 1);
+  // One wait, never a bare one; the second call is the shared plan scrape that
+  // `wait` also runs (R3-U7) — it reads the pane, it does not wait again.
+  assert.equal(f.calls.filter((call) => call.args[1] === 'wait').length, 1);
+  assert.deepEqual(f.calls[1].args.slice(0, 3), ['agent', 'read', 'lane-a']);
 });
 
 test('SMOKE6 / S6: resume also accepts done, because an unfocused lane never reaches idle', async (t) => {
@@ -511,7 +529,7 @@ test('WP-3: sweep prints the canonical operator commands when its delegate is ab
     exec: f.exec,
     exists: fakeExists((path) => !path.endsWith('herdr-lanes.ps1')),
   });
-  assert.equal(result.exit, 0);
+  assert.equal(result.exit, 1, 'nothing was swept, so the exit code says so (R3-U2)');
   assert.equal(f.calls.length, 0);
   assert.match(result.output.commands[0], /^pwsh -NoProfile -File ".*herdr-lanes\.ps1"/);
   assert.match(result.output.commands[0], /-Clean$/);
@@ -528,6 +546,12 @@ test('WP-4: burn-down and codex-delegate each point at the helper and a spec tha
     assert.equal(text.match(/scripts\/lane\.mjs/g)?.length, 1, `${file} must contain exactly one helper pointer`);
     assert.ok(text.includes(spec), `${file} must point at ${spec}`);
     assert.doesNotMatch(text, /data\/outputs\/workshops/, `${file} must not point outside the repo`);
+    // A bare relative path does not resolve from the plugin cache, and the
+    // standing bundled-ref guard only sees ${CLAUDE_*} refs — so a bare one is
+    // both broken for consumers and invisible to CI.
+    for (const ref of [`\${CLAUDE_PLUGIN_ROOT}/scripts/lane.mjs`, `\${CLAUDE_PLUGIN_ROOT}/${spec}`]) {
+      assert.ok(text.includes(ref), `${file} must reference ${ref} so the bundled-ref guard covers it`);
+    }
   }
 });
 
@@ -554,6 +578,7 @@ test('AM1: fallback validates its launch flags before it touches the pane', asyn
 test('AM2: a failed focus check warns and still records the running agent', async (t) => {
   const f = fixture(t);
   f.responses.push(
+    SHELL_READ,
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 1, stdout: '', stderr: 'no such target' },
   );
@@ -586,6 +611,7 @@ test('AM3 / S5: an unassociable agent listing reports focus unverified, never re
 test('AM3b / S5: a listing that shows the conductor unfocused is reported, not swallowed', async (t) => {
   const f = fixture(t);
   f.responses.push(
+    SHELL_READ,
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":false},{"pane_id":"w9:p9","focused":true}]}}', stderr: '' },
@@ -750,6 +776,7 @@ test('AM8: the pane-prompt gate rejects a codex TUI line that merely ends in >',
 test('AM9: the codex readiness poll retries a transient pane read instead of aborting', async (t) => {
   const f = fixture(t);
   f.responses.push(
+    SHELL_READ,
     { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 1, stdout: '', stderr: 'transient read failure' },
@@ -837,6 +864,9 @@ test('AM13: a failed agent read does not abort the wait, and the poll interval i
   });
   assert.equal(result.exit, 3, 'metering is not the wait — a failed read must not end it');
   assert.match(result.output.dialog, /Approve running npm test/);
+  // This asserts the pacing arithmetic under a fake clock, not wall-clock
+  // behaviour. Production pacing is pinned by the herdr `--timeout` value the
+  // poll sends (A3-10), which is what actually blocks for a second.
   assert.ok(sleeps.every((ms) => ms >= 1000), `poll interval must be >= 1s, saw ${sleeps.join(', ')}`);
 });
 
@@ -894,6 +924,7 @@ test('SMOKE2: default permission mode is opt-in and announced; dontAsk stays ref
 
   const g = fixture(t);
   g.responses.push(
+    SHELL_READ,
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
@@ -905,7 +936,7 @@ test('SMOKE2: default permission mode is opt-in and announced; dontAsk stays ref
   );
   assert.equal(allowed.exit, 0);
   assert.match(allowed.output.warning, /default permission mode/);
-  assert.ok(g.calls[0].args.includes('default'));
+  assert.ok(agentStartCall(g).args.includes('default'));
 
   // The escape hatch must not reach dontAsk, which auto-denies and still settles.
   const h = fixture(t);
@@ -1197,6 +1228,7 @@ test('A2-4 / U3: a blocked lane is reported even when the caller asked for --unt
 test('A2-5 / U5: a forwarded --model cannot override the enforced one', async (t) => {
   const f = fixture(t);
   f.responses.push(
+    SHELL_READ,
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
@@ -1207,13 +1239,14 @@ test('A2-5 / U5: a forwarded --model cannot override the enforced one', async (t
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
   );
   assert.equal(claude.exit, 0);
-  const emitted = f.calls[0].args;
+  const emitted = agentStartCall(f).args;
   assert.equal(emitted.filter((arg) => arg === '--model').length, 1, 'C8 cost $5.24 in 9 minutes; last-flag-wins reopens it');
   assert.equal(emitted[emitted.indexOf('--model') + 1], 'opus');
   assert.equal(emitted.includes('sonnet-cheap'), false);
 
   const g = fixture(t);
   g.responses.push(
+    SHELL_READ,
     { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: 'X:\\fixture\\vendor\\bin\\codex.exe\nPS X:\\fixture\\lane>', stderr: '' },
@@ -1338,6 +1371,272 @@ test('A2-11 / U15: an unreadable sidecar does not read as invalid JSON', async (
 
 test('A2-12 / U15: EXIT_CODES carries every code the header documents', () => {
   assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+});
+
+// ---------------------------------------------------------------------------
+// Amendment 3 — the prompt-shape detector. Measured on the box this was built
+// on: the pwsh prompt here is two oh-my-posh lines whose last line ends in `~`.
+// No `>`, no `❯`, no `$` — so NO shape-based default could ever match it, and
+// `prepareCodexPane` and every `fallback` would poll 30s and exit 1.
+// ---------------------------------------------------------------------------
+
+// The live signature, read from a fresh herdr pane on this box (glyphs dropped
+// by the same reader that will compare it — which is the point).
+const MEASURED_PROMPT = '~  home / .herdr / worktrees / workit / feat-lane-helper ~';
+
+// A live claude TUI: the composer is a bare `❯`, but it is never the LAST line —
+// the status footer is. Both facts are load-bearing below.
+const CLAUDE_TUI = [
+  '● smoke complete',
+  '─────────────────────────────────────────────',
+  '❯',
+  '─────────────────────────────────────────────',
+  '  ⚡ Opus 5 │ 🌿 smoke/lane-a │ ▓░░░░░░░░░ 7% │ $0.70',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
+].join('\n');
+
+const CODEX_TUI = [
+  '  Ask Codex to do something',
+  '  gpt-5.6-terra high · Context 62% left · 5h 79% left · weekly 91% left',
+].join('\n');
+
+test('A3-1: the pane\'s own last line is the signature, volatile prompt segments excluded', () => {
+  // The first oh-my-posh line carries a clock and a duration; the last line is
+  // the stable one, which is why the signature is taken from the tail.
+  const pane = [
+    '~ sirm   feat/lane-helper   pwsh        0.001s  Tuesday at 7:17 PM ',
+    MEASURED_PROMPT,
+  ].join('\n');
+  assert.equal(panePromptSignature(pane), MEASURED_PROMPT);
+  assert.equal(panePromptSignature(`${pane}\n\n  \n`), MEASURED_PROMPT, 'trailing blank lines are not the signature');
+  assert.equal(panePromptSignature(''), null);
+});
+
+test('A3-2: a recorded signature is what the wait matches — this box has no matchable shape', () => {
+  const pane = `~ sirm  pwsh  0.9s\n${MEASURED_PROMPT}`;
+  assert.equal(paneAtPrompt(pane), false, 'no default shape matches this prompt; that is the reported defect');
+  assert.equal(paneAtPrompt(pane, { signature: MEASURED_PROMPT }), true);
+  assert.equal(paneAtPrompt(`${pane}\n$p = Start-Process -FilePath codex`, { signature: MEASURED_PROMPT }), false,
+    'a typed command means the pane is busy, not free');
+  assert.equal(paneAtPrompt(CLAUDE_TUI, { signature: MEASURED_PROMPT }), false);
+});
+
+test('A3-3: the default shapes cover the common prompts and reject TUI lines', () => {
+  assert.equal(paneAtPrompt('PS X:\\fixture\\lane>'), true);
+  assert.equal(paneAtPrompt('X:\\fixture\\lane>'), true);
+  assert.equal(paneAtPrompt('>'), true, 'a BARE > is a prompt');
+  assert.equal(paneAtPrompt('$'), true);
+  assert.equal(paneAtPrompt('~/work ❯'), true);
+  assert.equal(paneAtPrompt('➜  workit'.concat(' ➜')), true);
+  assert.equal(paneAtPrompt('λ'), true);
+
+  // Round 1's negatives must stay negative: never an unanchored `>`.
+  assert.equal(paneAtPrompt('still running codex >'), false);
+  assert.equal(paneAtPrompt('  › 1. Switch  2. Keep current model'), false);
+  assert.equal(paneAtPrompt('│ working on it >'), false);
+
+  // A live TUI is not a free pane, even though its composer is a bare glyph.
+  assert.equal(paneAtPrompt(CLAUDE_TUI), false, 'the claude composer ❯ is not a shell prompt');
+  assert.equal(paneAtPrompt(CODEX_TUI), false, 'the Ask Codex footer is not a shell prompt');
+});
+
+test('A3-4: an operator can declare the prompt, by flag or by env', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'prompt.md');
+  writeFileSync(prompt, 'task', 'utf8');
+  seedLane(f, { promptFile: prompt, promptSignature: null });
+  // Two herdr calls to quit codex, then pane reads until the prompt is back.
+  f.responses.push(
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: `remnant\n${MEASURED_PROMPT}`, stderr: '' },
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+  );
+  const byEnv = await runLane(
+    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1', LANE_PROMPT_REGEX: '.*helper ~$' }, sleep: async () => {} },
+  );
+  assert.equal(byEnv.exit, 0, 'LANE_PROMPT_REGEX declares what this box\'s prompt looks like');
+
+  const g = fixture(t);
+  const bad = await runLane(
+    ['wait', 'lane-a', '--timeout', '1000', '--prompt-regex', '([unclosed', '--log', g.log],
+    { exec: g.exec },
+  );
+  assert.equal(bad.exit, 2, 'an unusable prompt regex is refused, not silently ignored');
+  assert.match(bad.output.error, /prompt-regex/);
+});
+
+test('A3-5: start records the pane signature while the pane is still a shell', async (t) => {
+  const f = fixture(t);
+  f.responses.push(
+    { code: 0, stdout: `~ sirm  pwsh\n${MEASURED_PROMPT}`, stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+  );
+  assert.equal(result.exit, 0);
+  const read = f.calls[0];
+  assert.deepEqual(read.args.slice(0, 2), ['pane', 'read'], 'the signature is captured BEFORE the agent takes the pane');
+  assert.equal(readState(f).lanes['lane-a'].promptSignature, MEASURED_PROMPT);
+});
+
+test('A3-6: fallback waits for the signature the lane recorded', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'prompt.md');
+  writeFileSync(prompt, 'task', 'utf8');
+  seedLane(f, { promptFile: prompt, promptSignature: MEASURED_PROMPT });
+  f.responses.push(
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: CODEX_TUI, stderr: '' },
+    { code: 0, stdout: `some codex remnant\n~ sirm  pwsh\n${MEASURED_PROMPT}`, stderr: '' },
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+  );
+  const result = await runLane(
+    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {} },
+  );
+  assert.equal(result.exit, 0);
+  const startIndex = f.calls.indexOf(agentStartCall(f));
+  const reads = f.calls.slice(0, startIndex).filter((call) => call.args[0] === 'pane' && call.args[1] === 'read');
+  // Two waiting reads (the codex footer is rejected, the signature accepted),
+  // then the re-start's own capture of the now-free pane.
+  assert.equal(reads.length, 3, 'it waited for the signature rather than accepting the codex footer');
+});
+
+test('A3-7 / R3-U1: --lane is intersected with the sidecar, not passed through', async (t) => {
+  const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-alpha')]);
+  const refused = await runLane(['sweep', '--lane', 'memory', '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: f.dir },
+  });
+  assert.equal(refused.exit, 2, 'an operator-typed name is not evidence that we created that directory');
+  assert.match(refused.output.error, /creates|sidecar/i);
+  assert.equal(f.calls.length, 0, 'nothing reaches a delegate that deletes with -Recurse -Force');
+
+  const g = fixture(t);
+  seedCreates(g, [join(g.dir, 'projects', 'workit-wt-alpha')]);
+  g.responses.push({ code: 0, stdout: 'removing ... done', stderr: '' });
+  const allowed = await runLane(['sweep', '--lane', 'workit-wt-alpha', '--log', g.log], {
+    exec: g.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: g.dir },
+  });
+  assert.equal(allowed.exit, 0);
+  assert.equal(g.calls[0].args[g.calls[0].args.indexOf('-Lane') + 1], 'workit-wt-alpha');
+});
+
+test('A3-8 / R3-M1: --expect-pr refuses without a lane path, and reads gh failures precisely', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { path: null });
+  const noPath = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  assert.equal(noPath.exit, 1, 'with no cwd, gh answers about whatever repo the conductor is sitting in');
+  assert.equal(f.calls.length, 0);
+  assert.match(noPath.output.error, /path/i);
+
+  const g = fixture(t);
+  seedLane(g);
+  for (const [stderr, expected, why] of [
+    ['gh: command not found', 1, 'a missing gh is infrastructure'],
+    ['repository not found', 1, 'a missing REPO is not a missing PR'],
+    ['GraphQL: Could not resolve to a PullRequest with the number of 42.', 5, 'no such PR is a verdict'],
+    ['no pull requests found for branch "feat/lane-a"', 5, 'no such PR is a verdict'],
+  ]) {
+    g.responses.push({ code: 1, stdout: '', stderr });
+    const result = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', g.log], { exec: g.exec });
+    assert.equal(result.exit, expected, `${why}: ${stderr}`);
+  }
+});
+
+test('A3-9 / R3-U2: a sweep whose delegate is missing exits nonzero and still prints the command', async (t) => {
+  const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-alpha')]);
+  const result = await runLane(['sweep', '--log', f.log], {
+    exec: f.exec,
+    exists: fakeExists((path) => !path.endsWith('herdr-lanes.ps1')),
+    env: { WORKIT_WORKSPACE_ROOT: f.dir },
+  });
+  assert.equal(result.exit, 1, 'the exit code is the machine-readable half of the contract');
+  assert.equal(f.calls.length, 0);
+  assert.match(result.output.commands[0], /herdr-lanes\.ps1/, 'and the runnable command is still there');
+});
+
+test('A3-10 / R3-M2: a bare wait sends no --until, and the poll timeout is the pacing', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+    { code: 0, stdout: 'finished', stderr: '' },
+  );
+  await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', f.log], { exec: f.exec });
+  // herdr's own default already matches idle|done|blocked, so the bare shape
+  // forwards nothing — and the per-poll timeout is what paces production.
+  assert.equal(f.calls[0].args.includes('--until'), false);
+  assert.deepEqual(f.calls[0].args, ['agent', 'wait', 'lane-a', '--timeout', '1000']);
+});
+
+test('A3-11 / R3-U4: the plan meter unwraps the herdr envelope before reading the last footer line', () => {
+  const enveloped = JSON.stringify({
+    id: 'cli:agent:read',
+    result: { text: 'old 5h 80% left · weekly 90% left\nnew 5h 9% left · weekly 40% left' },
+  });
+  assert.deepEqual(scrapePlanMeter(enveloped), { plan5h: 9, planWeekly: 40 },
+    'an enveloped response collapses to one line, turning "last footer line" into "first match"');
+});
+
+test('A3-12 / R3-U6: herdr\'s structured error code decides a timeout, not a substring', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  let clock = 0;
+  f.responses.push(
+    // A real herdr timeout envelope, and a genuine failure whose text merely
+    // mentions the word.
+    () => { clock = 10; return { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"},"id":"cli:agent:wait"}' }; },
+    { code: 0, stdout: 'still working', stderr: '' },
+  );
+  const timedOut = await runLane(['wait', 'lane-a', '--timeout', '5', '--log', f.log], { exec: f.exec, now: () => clock });
+  assert.equal(timedOut.exit, 4);
+
+  const g = fixture(t);
+  seedLane(g);
+  g.responses.push({ code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found","message":"no agent; the timeout setting is irrelevant"}}' });
+  const failed = await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', g.log], { exec: g.exec, sleep: async () => {} });
+  assert.equal(failed.exit, 1, 'a failure that merely says "timeout" is not a timeout');
+});
+
+test('A3-13 / R3-U7: resume reports a plan refusal the same way wait does', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"state":"idle"}}', stderr: '' },
+    { code: 0, stdout: "■ You've hit your usage limit. Try again at 11:42 PM.", stderr: '' },
+  );
+  const result = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 6, 'the modal is up whether the operator resumed or waited');
+  assert.equal(result.output.state, 'plan-refused');
+});
+
+test('A3-14 / R3-U9: sweep --list is a dry run and never asks the delegate to clean', async (t) => {
+  const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-alpha')]);
+  f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+  const result = await runLane(['sweep', '--list', '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: f.dir },
+  });
+  assert.equal(result.exit, 0);
+  assert.equal(f.calls[0].args.includes('-Clean'), false);
+  assert.equal(f.calls[0].args.includes('-Force'), false);
 });
 
 test('A2-13 / U1: the harness verifies the stimulus fired, and S1 needs a real dialog', () => {

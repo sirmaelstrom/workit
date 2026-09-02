@@ -39,6 +39,8 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
   wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
+           Naming any state adds blocked; a bare wait forwards none (herdr's
+           default already matches idle|done|blocked).
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
   resume   <name> [--timeout <ms>]      Waits --until idle --until done, never bare.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
@@ -51,7 +53,10 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            prints the command to run instead of guessing a location.
 
   --log <path>  JSONL instrumentation (default: <workspace>/data/outputs/projects/
-                agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)`;
+                agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)
+  --prompt-regex <re>  How this box's shell prompt looks (or LANE_PROMPT_REGEX).
+                Otherwise the pane's own prompt, captured at start, is the
+                signature; default shapes are the last resort.`;
 // Seeded only from a captured refusal, never an invented one. This string was
 // read off lane O's pane at 2026-09-01 22:12Z; herdr reported that agent as
 // `idle` the whole time the modal was up, so the pane text is the only signal.
@@ -187,7 +192,7 @@ function parseArgs(argv) {
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
     '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--to', '--log',
-    '--plan-floor', '--path', '--slug', '--workspace-root', '--lane',
+    '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -219,6 +224,15 @@ function parseArgs(argv) {
   }
   opts.name = opts.positional[0] ?? null;
   if (opts.positional.length > 1) usage(`unexpected argument: ${opts.positional[1]}`);
+  // Refused here, for every verb: a prompt pattern that cannot compile is a
+  // typo the operator wants told about, not a setting to fall back from.
+  if (opts.promptRegex !== undefined) {
+    try {
+      new RegExp(opts.promptRegex);
+    } catch (error) {
+      usage(`--prompt-regex is not a usable regular expression: ${error.message}`);
+    }
+  }
   return opts;
 }
 
@@ -390,30 +404,98 @@ function defaultFindCodexBin(npmRoot) {
 // Every alternative is anchored. An unanchored `>` alternative subsumes the
 // others and matches any line ending in `>` — "still running codex >" passed,
 // and this is the only gate before `agent start` fires into the pane.
-const PANE_PROMPT = /^(?:PS\s+\S.*|[A-Za-z]:\\.*)>\s*$/;
+//
+// But shape is a weak instrument, and this box proves it: the pwsh prompt here
+// is two oh-my-posh lines whose last line is
+//   ~  home / .herdr / worktrees / workit / feat-lane-helper ~
+// with no `>`, `❯` or `$` anywhere. No default set can match every prompt, so
+// shapes are the LAST resort. In order: an operator-declared regex, then the
+// pane's own recorded signature, then these.
+const DEFAULT_PROMPT_PATTERNS = Object.freeze([
+  /^PS\s+\S.*>$/,          // PowerShell
+  /^[A-Za-z]:\\.*>$/,      // cmd
+  /^[>$#]$/,               // a BARE prompt character, never a line ending in one
+  /^.*[❯➜λ]$/,             // oh-my-posh / starship glyphs, which prose does not end with
+]);
 
-export function paneAtPrompt(text) {
-  const lines = responseText(text).split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean);
-  return lines.length > 0 && PANE_PROMPT.test(lines.at(-1));
+// A live TUI is not a free pane. The veto looks at the last two non-empty lines
+// only: a quit agent leaves its frame in the scrollback above the fresh prompt,
+// and vetoing on the whole snapshot would reject the very pane we are waiting
+// for. A live TUI always draws its footer at the bottom.
+const LIVE_TUI = [
+  /[─━]{6,}/,
+  /shift\+tab to cycle/i,
+  /esc to interrupt/i,
+  /Ask Codex/i,
+  /←\s*for agents/i,
+  /⏵⏵/,
+  /Context \d+% left/i,
+];
+
+function paneLines(text) {
+  return responseText(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
-function paneIsCodexReady(text) {
-  const lines = responseText(text).split(/\r?\n/).map((line) => line.trimEnd()).filter(Boolean);
-  const hasExecutable = lines.some((line) => /(?:^|[\\/])codex\.exe\s*$/i.test(line));
-  return hasExecutable && paneAtPrompt(text);
+// The pane's own prompt is the only prompt that matters. Its last non-empty
+// line is the stable half — the first oh-my-posh line carries a clock and a
+// command duration, which change between reads.
+export function panePromptSignature(text) {
+  const lines = paneLines(text);
+  return lines.length > 0 ? lines.at(-1) : null;
 }
 
-async function waitForPanePrompt(deps, pane, timeoutMs = 30_000) {
+export function paneAtPrompt(text, { signature = null, patterns = DEFAULT_PROMPT_PATTERNS } = {}) {
+  const lines = paneLines(text);
+  if (lines.length === 0) return false;
+  const last = lines.at(-1);
+  if (signature && last === String(signature).trim()) return true;
+  if (LIVE_TUI.some((pattern) => lines.slice(-2).some((line) => pattern.test(line)))) return false;
+  return patterns.some((pattern) => pattern.test(last));
+}
+
+// An operator who knows their prompt can say so; anything unparseable is a
+// usage error rather than a silently ignored setting.
+function promptPatterns(opts, deps) {
+  const declared = opts.promptRegex ?? deps.env.LANE_PROMPT_REGEX ?? null;
+  if (!declared) return DEFAULT_PROMPT_PATTERNS;
+  try {
+    return [new RegExp(declared)];
+  } catch (error) {
+    usage(`--prompt-regex / LANE_PROMPT_REGEX is not a usable regular expression: ${error.message}`);
+    return DEFAULT_PROMPT_PATTERNS;
+  }
+}
+
+function paneIsCodexReady(text, options) {
+  const hasExecutable = paneLines(text).some((line) => /(?:^|[\\/])codex\.exe\s*$/i.test(line));
+  return hasExecutable && paneAtPrompt(text, options);
+}
+
+function readPane(deps, pane) {
+  return call(deps, 'herdr', ['pane', 'read', pane, '--source', 'detection', '--lines', '40']);
+}
+
+// Records what THIS pane's prompt looks like while it is known to be idle, so a
+// later wait can match the pane against itself instead of against a guess.
+function capturePromptSignature(deps, pane, options) {
+  const snapshot = readPane(deps, pane);
+  if (snapshot.code !== 0) return null;
+  return paneAtPrompt(snapshot.stdout, options) || !options?.strict
+    ? panePromptSignature(snapshot.stdout)
+    : null;
+}
+
+async function waitForPanePrompt(deps, pane, options = {}, timeoutMs = 30_000) {
   const deadline = deps.now() + timeoutMs;
   do {
-    const snapshot = call(deps, 'herdr', ['pane', 'read', pane, '--source', 'detection', '--lines', '40']);
-    if (snapshot.code === 0 && paneAtPrompt(snapshot.stdout)) return;
+    const snapshot = readPane(deps, pane);
+    if (snapshot.code === 0 && paneAtPrompt(snapshot.stdout, options)) return;
     await deps.sleep(100);
   } while (deps.now() < deadline);
   // A wedged pane is infrastructure, not the operator's deadline: 4 belongs to
   // `lane wait` alone, and prepareCodexPane already raises ERROR for the same
   // shape of failure.
-  throw new LaneError(EXIT.ERROR, `pane ${pane} never returned to a shell prompt`);
+  throw new LaneError(EXIT.ERROR, `pane ${pane} never returned to a shell prompt${options.signature ? ` (${JSON.stringify(options.signature)})` : ''}`);
 }
 
 function laneSlug(value) {
@@ -422,10 +504,11 @@ function laneSlug(value) {
   return slug;
 }
 
-async function prepareCodexPane(opts, deps) {
+async function prepareCodexPane(opts, deps, signature) {
   // Windows-only by C12 (startLane refuses codex elsewhere), and `npm` on PATH
   // here is npm.ps1 — a shim execFileSync cannot launch — so it is routed
   // through cmd.exe rather than spawned directly.
+  const patterns = promptPatterns(opts, deps);
   const npmRoot = callOrFail(deps, deps.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm root -g']).trim();
   const bin = deps.findCodexBin(npmRoot);
   // A single-quoted PowerShell literal: inside it `$` and backtick are inert,
@@ -436,11 +519,11 @@ async function prepareCodexPane(opts, deps) {
   do {
     // C12 exists because codex launches were unreliable — a transient read must
     // retry inside the budget, not abort the launch it is there to make safe.
-    const snapshot = call(deps, 'herdr', ['pane', 'read', opts.pane, '--source', 'detection', '--lines', '40']);
-    if (snapshot.code === 0 && paneIsCodexReady(snapshot.stdout)) return;
+    const snapshot = readPane(deps, opts.pane);
+    if (snapshot.code === 0 && paneIsCodexReady(snapshot.stdout, { signature, patterns })) return;
     await deps.sleep(100);
   } while (deps.now() < deadline);
-  throw new LaneError(EXIT.ERROR, `timed out waiting for codex.exe and the shell prompt in pane ${opts.pane}`);
+  throw new LaneError(EXIT.ERROR, `timed out waiting for codex.exe and the shell prompt in pane ${opts.pane}${signature ? ` (${JSON.stringify(signature)})` : ''}`);
 }
 
 // Returns a verdict; never throws. C4 is an assertion about the world made
@@ -610,12 +693,19 @@ async function startLane(opts, deps, state) {
     if (!sandbox) usage('codex start needs an explicit --sandbox');
     if (sandbox === 'read-only') usage('codex read-only sandbox is refused on Windows because it can return ungrounded answers');
     native = withoutConfig(withoutOption(withoutOption(withoutOption(native, '--sandbox'), '--ask-for-approval'), '--model'), 'model_reasoning_effort');
-    await prepareCodexPane(opts, deps);
     native = [
       '--model', opts.model, '--ask-for-approval', 'never', '--sandbox', sandbox,
       '-c', `model_reasoning_effort=${opts.reasoning}`, ...native,
     ];
   }
+
+  // Every refusal above is herdr-free; the first call happens only once the
+  // launch is known to be legal. This read is the last moment the pane is known
+  // to be a shell — once an agent owns it, its prompt is gone until the agent
+  // quits, which is exactly when `fallback` has to recognise it again.
+  const patterns = promptPatterns(opts, deps);
+  const promptSignature = capturePromptSignature(deps, opts.pane, { patterns });
+  if (opts.kind === 'codex') await prepareCodexPane(opts, deps, promptSignature);
 
   const raw = callOrFail(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', opts.pane, '--', ...native]);
   // The agent is live from here on. Record it BEFORE asserting anything about
@@ -637,6 +727,7 @@ async function startLane(opts, deps, state) {
       branch: prior.branch ?? existing.branch ?? null,
       base: prior.base ?? existing.base ?? null,
       path: prior.path ?? existing.path ?? null,
+      promptSignature: promptSignature ?? existing.promptSignature ?? null,
     };
   });
 
@@ -709,8 +800,9 @@ async function waitLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   const timeout = positiveNumber(opts.timeout, '--timeout');
   const untilStates = Array.isArray(opts.until) ? opts.until : (opts.until ? [opts.until] : []);
-  for (const state of untilStates) {
-    if (!['blocked', 'idle', 'done'].includes(state)) usage('wait --until must be blocked, idle, or done');
+  // Named `until`, not `state`: the lane-state parameter is in scope here.
+  for (const until of untilStates) {
+    if (!['blocked', 'idle', 'done'].includes(until)) usage('wait --until must be blocked, idle, or done');
   }
   // 20, not 10: the measured drain was 79% → 0% in ~36 min at four concurrent
   // codex consumers, and the "<10% left" warning arrived ~7 min before refusal.
@@ -730,8 +822,8 @@ async function waitLane(opts, deps, state) {
     // bare `herdr agent wait`: a blocked lane timed out every poll, the exit-3
     // branch was unreachable, and `--until done --timeout 1800000` became a
     // 30-minute silent stall.
-    for (const state of [...new Set([...untilStates, ...(untilStates.length > 0 ? ['blocked'] : [])])]) {
-      args.push('--until', state);
+    for (const until of [...new Set([...untilStates, ...(untilStates.length > 0 ? ['blocked'] : [])])]) {
+      args.push('--until', until);
     }
     args.push('--timeout', String(pollMs));
     const waited = call(deps, 'herdr', args);
@@ -745,18 +837,18 @@ async function waitLane(opts, deps, state) {
     //   3. a real settled state wins over the meter — work that finished is
     //      done whatever the footer says;
     //   4. the plan floor applies only to a lane that is still working.
-    if (waited.code !== 0 && !/timeout/i.test(`${waited.stderr}\n${waited.stdout}`)) {
+    if (waited.code !== 0 && !isTimeoutFailure(waited)) {
       throw new LaneError(EXIT.ERROR, `herdr agent wait failed: ${waited.stderr.trim() || waited.stdout.trim()}`);
     }
 
     // The read feeds plan metering and the dialog text only. A transient read
     // failure must not end a wait that herdr is still answering.
-    const read = call(deps, 'herdr', ['agent', 'read', opts.name, '--lines', '40']);
-    if (read.code === 0) {
-      meter = scrapePlanMeter(read.stdout);
-      dialog = responseText(read.stdout);
+    const plan = readPlanState(deps, opts.name);
+    if (plan.ok) {
+      meter = plan.meter;
+      dialog = plan.dialog;
     }
-    const refusal = read.code === 0 ? matchPlanRefusal(read.stdout) : null;
+    const refusal = plan.refusal;
     if (refusal) {
       return {
         exit: EXIT.PLAN_LOW,
@@ -840,12 +932,23 @@ async function checkLane(opts, deps, state) {
   } else {
     if (!/^\d+$/.test(String(opts.expectPr))) usage('--expect-pr must be a PR number');
     if (!lane.branch) usage(`lane ${opts.name} has no branch metadata`);
+    // Without the lane's path, `gh` runs with cwd undefined and answers about
+    // whatever repo the conductor happens to be sitting in — a verdict about
+    // the wrong thing is worse than no verdict.
+    if (!lane.path) {
+      throw new LaneError(EXIT.ERROR, `lane ${opts.name} has no worktree path; gh would answer about the conductor's own repo`);
+    }
     const viewed = call(deps, 'gh', ['pr', 'view', String(opts.expectPr), '--json', 'headRefName,state'], { cwd: lane.path ?? undefined });
     if (viewed.code !== 0) {
-      // "No such PR" is a failed expectation (5). Expired auth, no network or a
-      // rate limit is infrastructure (1) — same family as the git call above.
+      // "No such PR" is a failed expectation (5). Anything else — a missing gh,
+      // a missing repo, expired auth, no network, a rate limit — is
+      // infrastructure (1). The classifier matches only the shapes gh uses for
+      // "that PR isn't there": a bare `not found` also matches
+      // "gh: command not found" and "repository not found", which are not
+      // verdicts about the work. Unrecognised failures default to infra.
       const detail = `${viewed.stderr}\n${viewed.stdout}`.trim();
-      if (/no pull requests found|could not resolve to a pullrequest|not found/i.test(detail)) {
+      const noSuchPr = /no pull requests found|could not resolve to a pullrequest/i.test(detail);
+      if (noSuchPr) {
         failedExpectation = `--expect-pr ${opts.expectPr}: PR does not exist`;
       } else {
         throw new LaneError(EXIT.ERROR, `gh pr view failed: ${detail || `exit ${viewed.code}`}`);
@@ -890,19 +993,35 @@ async function resumeLane(opts, deps, state) {
     'agent', 'wait', opts.name, '--until', 'idle', '--until', 'done', '--timeout', String(timeout),
   ]);
   if (raw.code !== 0) {
-    if (/timeout/i.test(`${raw.stderr}\n${raw.stdout}`)) {
+    if (isTimeoutFailure(raw)) {
       return { exit: EXIT.TIMEOUT, output: { state: 'timeout' }, row: laneInstrumentation(opts.name, lane, 'timeout') };
     }
     throw new LaneError(EXIT.ERROR, `herdr agent wait failed: ${raw.stderr.trim() || raw.stdout.trim()}`);
   }
-  const stateAfter = responseState(raw.stdout, 'idle');
-  if (stateAfter === 'blocked') {
-    return { exit: EXIT.BLOCKED, output: { state: 'blocked' }, row: laneInstrumentation(opts.name, lane, 'blocked') };
+  // The same pane scrape `wait` runs: the plan meter and the captured refusal
+  // belong to the lane, not to the verb that happened to look. C11(a) again —
+  // herdr reports `idle` while that modal is up, so this outranks the state.
+  const plan = readPlanState(deps, opts.name);
+  const meter = plan.meter ?? { plan5h: null, planWeekly: null };
+  if (plan.refusal) {
+    return {
+      exit: EXIT.PLAN_LOW,
+      output: { state: 'plan-refused', refusal: plan.refusal, ...meter },
+      row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter },
+    };
+  }
+  const statusAfter = responseState(raw.stdout, 'idle');
+  if (statusAfter === 'blocked') {
+    return {
+      exit: EXIT.BLOCKED,
+      output: { state: 'blocked', dialog: plan.dialog },
+      row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter },
+    };
   }
   return {
     exit: EXIT.OK,
-    output: { state: stateAfter, notice: 'status is not evidence — run lane check' },
-    row: laneInstrumentation(opts.name, lane, stateAfter),
+    output: { state: statusAfter, notice: 'status is not evidence — run lane check' },
+    row: { ...laneInstrumentation(opts.name, lane, statusAfter), ...meter },
   };
 }
 
@@ -924,7 +1043,12 @@ async function fallbackLane(opts, deps, state) {
   // shell prompt is the evidence that the pane is free, not their exit codes.
   call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'esc']);
   call(deps, 'herdr', ['agent', 'prompt', opts.name, '/quit']);
-  await waitForPanePrompt(deps, samePane);
+  // The pane's own recorded prompt is the evidence — no shape guess can cover
+  // every shell (this box's prompt ends in `~`, with no prompt character at all).
+  await waitForPanePrompt(deps, samePane, {
+    signature: prior.promptSignature ?? null,
+    patterns: promptPatterns(opts, deps),
+  });
 
   // `verb` is not rewritten: an operator who ran `fallback` must not be told
   // that "start" is missing a flag.
@@ -1037,7 +1161,14 @@ async function sweepLanes(opts, deps, state) {
       plan.push({ root: root.path, kind: root.kind, flags: opts.lane ? ['-Lane', opts.lane, ...baseFlags] : [...baseFlags] });
       continue;
     }
-    const lanes = opts.lane ? [opts.lane] : knownLanesUnder(state, root.path);
+    // `--lane` is intersected with the sidecar, never trusted on its own: an
+    // operator-typed string is not evidence that this helper created that
+    // directory, and the delegate deletes with -Recurse -Force.
+    const known = knownLanesUnder(state, root.path);
+    if (opts.lane && !known.includes(opts.lane)) {
+      usage(`--lane ${opts.lane} is not a lane this helper created under ${root.path} (nothing in the sidecar's creates[] matches). Sweep it by hand if you mean it.`);
+    }
+    const lanes = opts.lane ? [opts.lane] : known;
     if (lanes.length === 0) {
       plan.push({ root: root.path, kind: root.kind, skipped: 'no known lanes under this root' });
       continue;
@@ -1066,8 +1197,10 @@ async function sweepLanes(opts, deps, state) {
   }
 
   if (!deps.exists(delegate)) {
+    // Nonzero: the exit code is the machine-readable half of the contract, and
+    // nothing was swept. The runnable command is still in the payload.
     return {
-      exit: EXIT.OK,
+      exit: EXIT.ERROR,
       output: {
         delegated: false,
         delegate,
@@ -1105,6 +1238,28 @@ async function sweepLanes(opts, deps, state) {
   };
 }
 
+// herdr answers failures with {"error":{"code":"…"}}. Read the code; the word
+// "timeout" can appear in a message that is not one.
+function isTimeoutFailure(result) {
+  const parsed = parseJson(result.stderr) ?? parseJson(result.stdout);
+  const code = parsed?.error?.code;
+  if (typeof code === 'string') return code === 'timeout';
+  return /timeout/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+// One pane read, shared by `wait` and `resume`: the plan meter and the captured
+// refusal are properties of the lane, not of the verb that happened to look.
+function readPlanState(deps, name) {
+  const read = call(deps, 'herdr', ['agent', 'read', name, '--lines', '40']);
+  if (read.code !== 0) return { ok: false, meter: null, refusal: null, dialog: '' };
+  return {
+    ok: true,
+    meter: scrapePlanMeter(read.stdout),
+    refusal: matchPlanRefusal(read.stdout),
+    dialog: responseText(read.stdout),
+  };
+}
+
 export function matchPlanRefusal(text) {
   const source = responseText(text);
   for (const pattern of PLAN_REFUSAL_PATTERNS) {
@@ -1117,8 +1272,10 @@ export function matchPlanRefusal(text) {
 
 export function scrapePlanMeter(text) {
   // C11 says the LAST FOOTER LINE, not the last match in the buffer: mixing
-  // lines returns a live 5h figure beside a stale weekly one.
-  const source = String(text).split(/\r?\n/).filter((line) => /(?:5h|weekly)\s+\d+%\s+left/i.test(line)).at(-1) ?? '';
+  // lines returns a live 5h figure beside a stale weekly one. Unwrap first —
+  // an enveloped response is one JSON line, which silently turns "last footer
+  // line" into "first match" (measured: enveloped 80%, plain 9%).
+  const source = responseText(text).split(/\r?\n/).filter((line) => /(?:5h|weekly)\s+\d+%\s+left/i.test(line)).at(-1) ?? '';
   const five = /5h\s+(\d+)%\s+left/i.exec(source);
   const weekly = /weekly\s+(\d+)%\s+left/i.exec(source);
   return { plan5h: five ? Number(five[1]) : null, planWeekly: weekly ? Number(weekly[1]) : null };

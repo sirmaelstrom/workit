@@ -7,7 +7,7 @@ description: "Offload a bounded whole-repo audit, broad search, bulk extraction,
 
 The conductor is the context-rich channel. Token-hungry grunt work burns it on work a cheaper model can do just as well. Delegate the leaf work; keep orchestration, architecture, and integration judgment in the conductor.
 
-For worktree-backed agent execution, the lane lifecycle is encoded in `scripts/lane.mjs`; the binding behavior is `reference/patterns/lane-supervision.md`.
+For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_PLUGIN_ROOT}/scripts/lane.mjs`; the binding behavior is `${CLAUDE_PLUGIN_ROOT}/reference/patterns/lane-supervision.md`.
 
 ## Route by Phase
 
