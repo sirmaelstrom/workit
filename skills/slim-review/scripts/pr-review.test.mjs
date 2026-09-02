@@ -847,6 +847,8 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), codex
   }
 }
 
+class DieSentinel extends Error {}
+
 test('lens codex reads its -o findings file, builds the Terra argv, and sends every authoritative path on stdin', () => {
   const fromFile = JSON.stringify({ ...VALID, summary: 'read from codex -o file' });
   const { calls, deaths, out } = runLensWithFake({ codexOutput: fromFile });
@@ -934,17 +936,59 @@ test('lens dry-run prints its argv and prompt path without invoking the injected
   assert.match(logs.join('\n'), /prompt path:/);
 });
 
-test('lens rejects prose, a P4 handback, and incomplete coverage without writing --out or leaking its temp dir', () => {
+test('lens rejects prose, a P4 handback, and incomplete coverage without writing --out', () => {
   for (const result of [
     'this is not JSON',
     JSON.stringify({ ...VALID, findings: [finding({ severity: 'P4' })] }),
     JSON.stringify({ ...VALID, coverage: 'examined 1 of 1 changed files', examined_paths: ['other.ts'] }),
   ]) {
-    const { deaths, outExists, tempOut } = runLensWithFake({ codexOutput: result });
+    const { deaths, outExists } = runLensWithFake({ codexOutput: result });
     assert.equal(deaths[0]?.code, 3);
     assert.match(deaths[0]?.message ?? '', /output|severity/i);
     assert.equal(outExists, false);
-    assert.equal(existsSync(dirname(tempOut)), false, 'failed validation must remove the lens temp dir before die()');
+  }
+});
+
+test('lens removes its temp dir before the validation die path throws', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-lens-die-'));
+  const out = join(dir, 'findings.json');
+  const measureLog = join(dir, 'measure.jsonl');
+  let tempOut;
+  let tempDirGoneAtSentinelCatch = false;
+  let statusCalls = 0;
+  try {
+    assert.throws(
+      () => cmdLens(
+        { pr: '42', repo: 'owner/repo', lens: 'codex', cwd: 'C:/repo', out, measureLog },
+        {
+          run: (program, args) => {
+            if (args[0] === 'api') return 'src/a.ts\n';
+            if (args.includes('status')) return ++statusCalls === 1 ? '' : '';
+            if (args[0] === 'exec') {
+              tempOut = args[args.indexOf('-o') + 1];
+              writeFileSync(tempOut, 'not JSON', 'utf8');
+              return 'different stdout';
+            }
+            throw new Error(`unexpected ${program}`);
+          },
+          findCodexExe: () => 'C:/codex/vendor/bin/codex.exe',
+          die: (code, message) => {
+            try {
+              throw new DieSentinel(`${code}: ${message}`);
+            } catch (err) {
+              tempDirGoneAtSentinelCatch = !existsSync(dirname(tempOut));
+              throw err;
+            }
+          },
+          log: () => {},
+        },
+      ),
+      DieSentinel,
+    );
+    assert.equal(tempDirGoneAtSentinelCatch, true, 'the explicit cleanup must run before die(), not only in finally');
+    assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -1004,24 +1048,25 @@ test('post accepts two complete handbacks whose coverage paths use different sep
   const codex = join(dir, 'codex.json');
   const opus = join(dir, 'opus.json');
   const slash = String.fromCharCode(92);
-  let posted = false;
+  let payload;
   try {
-    writeFileSync(codex, JSON.stringify({ ...VALID, lens: 'codex', coverage: 'examined 2 of 2 changed files', examined_paths: ['src/a.ts', 'src/b.ts'] }));
-    writeFileSync(opus, JSON.stringify({ ...VALID, lens: 'opus', coverage: 'examined 2 of 2 changed files', examined_paths: [`src${slash}a.ts`, `src${slash}b.ts`] }));
+    const prPaths = ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'];
+    writeFileSync(codex, JSON.stringify({ ...VALID, lens: 'codex', coverage: 'examined 4 of 4 changed files', examined_paths: prPaths }));
+    writeFileSync(opus, JSON.stringify({ ...VALID, lens: 'opus', coverage: 'examined 4 of 4 changed files', examined_paths: prPaths.map((path) => path.replace('/', slash)) }));
     cmdPost(
       { pr: '42', repo: 'owner/repo', findings: [codex, opus] },
       {
-        runGh: (args) => {
+        runGh: (args, opts) => {
           if (args[0] === 'pr') return DIFF;
-          if (args[0] === 'api' && args[1] === '--paginate') return 'src/a.ts\nsrc/b.ts\n';
-          if (args.includes('POST')) { posted = true; return JSON.stringify({ html_url: 'https://example.test/review' }); }
+          if (args[0] === 'api' && args[1] === '--paginate') return `${prPaths.join('\n')}\n`;
+          if (args.includes('POST')) { payload = JSON.parse(opts.input); return JSON.stringify({ html_url: 'https://example.test/review' }); }
           throw new Error('unexpected gh call');
         },
         die: (code, message) => { throw Object.assign(new Error(message), { code }); },
         log: () => {},
       },
     );
-    assert.equal(posted, true);
+    assert.match(payload.body, /_Slim review · \d+ anchored · \d+ off-line · \d+ not-anchorable · \d+ off-diff · examined 4 of 4 changed files_/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

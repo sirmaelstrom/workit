@@ -278,8 +278,11 @@ export function validateFindingsShape(doc) {
  *   offDiffUnchanged — the PR does not touch the file at all: out of scope or an
  *                      invented locator, and the operator must see which
  */
+function normalizePath(path) {
+  return String(path).replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
 export function partitionFindings(findings, diffFiles, prFilePaths = []) {
-  const normalizePath = (path) => String(path).replace(/\\/g, '/').replace(/^\.\//, '');
   const prSet = new Set(prFilePaths.map(normalizePath));
   const anchored = [];
   const offDiffChanged = [];
@@ -309,7 +312,6 @@ export function partitionFindings(findings, diffFiles, prFilePaths = []) {
 export function checkCoverage(coverage, examinedPaths, prFilePaths) {
   const m = /examined\s+(\d+)\s+of\s+(\d+)/i.exec(String(coverage));
 
-  const normalizePath = (path) => String(path).replace(/\\/g, '/').replace(/^\.\//, '');
   const examinedSet = new Set(examinedPaths.map(normalizePath));
   const prSet = new Set(prFilePaths.map(normalizePath));
   const missing = [...prSet].filter((path) => !examinedSet.has(path)).sort();
@@ -446,8 +448,7 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
     // Each handback is checked against the PR API below. Normalize this display
     // union too: otherwise two complete lenses using Windows and POSIX separators
     // inflate its count and make the combined receipt falsely claim it is partial.
-    examined_paths: [...new Set(docs.flatMap((item) => item.examined_paths)
-      .map((path) => String(path).replace(/\\\\/g, '/').replace(/^\.\//, '')))],
+    examined_paths: [...new Set(docs.flatMap((item) => item.examined_paths).map(normalizePath))],
     // A stamped document is the authority when an otherwise-valid handback
     // predates per-finding lens metadata. Without this, post loses the tag that
     // reply needs to attribute an adjudication.
