@@ -1704,9 +1704,10 @@ test('Q-6: every C13 root spelling reaches the recorded lane in exactly two dele
     assert.deepEqual(relative(delegateRoot, recorded).split(/[\\/]/), ['projects', 'workit-wt-lane-a']);
   }
   const f = fixture(t);
-  const recorded = join('C:\\', 'workit-wt-lane-a');
+  const filesystemRoot = resolve(sep);
+  const recorded = join(filesystemRoot, 'workit-wt-lane-a');
   seedCreates(f, [recorded]);
-  const refused = await runLane(['sweep', '--lane', 'workit-wt-lane-a', '--root', 'C:\\', '--log', f.log], { exec: f.exec, exists: fakeExists(), env: {}, platform: 'win32' });
+  const refused = await runLane(['sweep', '--lane', 'workit-wt-lane-a', '--root', filesystemRoot, '--log', f.log], { exec: f.exec, exists: fakeExists(), env: {}, platform: 'win32' });
   assert.equal(refused.exit, 2);
   assert.match(refused.output.error, /delegate root|root/i);
 });
