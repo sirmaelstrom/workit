@@ -48,6 +48,7 @@ How to run work once it's specified:
 | `cross-repo-contract` | Wire format contracts for multi-repo campaigns — exact types, payload shapes, schema registration | cross-repo-contract.md |
 | `meta-prompt` | 3-part architecture for complex multi-agent work — orchestrator, parallelization plan, spec | meta-prompt.md |
 | `worktree-rooting` | Deterministic target rooting — declared targets (spec/quest/explicit path, never cwd), the canonical worktree-creation recipe, STEP-0 identity assertion, joint-merge minimum | worktree-rooting.md |
+| `lane-supervision` | The binding spec for `scripts/lane.mjs` — lane verbs and exit codes, launch-mode enforcement, status-is-never-evidence, plan-limit fallback, projects-tree confinement | lane-supervision.md |
 
 ## Checklists & Conventions
 

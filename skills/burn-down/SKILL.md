@@ -13,6 +13,8 @@ The point is not speed. It is that **nothing gets silently dropped** — not the
 side-threads that surface mid-item, not the step someone else owes, not the
 ruling that binds a later item.
 
+For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_PLUGIN_ROOT}/scripts/lane.mjs`; the binding behavior is `${CLAUDE_PLUGIN_ROOT}/reference/patterns/lane-supervision.md`.
+
 ## Compose the run (once, at the start)
 
 1. **Read the whole board** — `spine_digest` first (bounded aggregate counts;
