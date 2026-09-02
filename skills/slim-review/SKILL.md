@@ -28,7 +28,7 @@ failure this tier exists to prevent.
 
 ```
 1. target   →  2. elicit  →  3. post   →  4. adjudicate
-   PR + diff    codex exec    the script   confirm / refute / fix / reply
+   PR + diff    lens verb     the script   confirm / refute / fix / reply
 ```
 
 Steps 2 and 3 are mechanical — run them as written. Step 4 is the part that
@@ -54,47 +54,29 @@ mkdir -p "$REVIEW_DIR"
 
 ## 2. Elicit
 
-Write the prompt, then spawn one reviewer.
+Run the lens verb. It builds the grounded prompt itself from the authoritative
+PR file list, requires the reviewer to read `gh pr diff <n> --repo <owner/name>`,
+and rejects prose or incomplete handbacks.
 
-**The prompt must tell the reviewer to read the diff via `gh pr diff <n> --repo
-<owner/name>`** — the
-same command step 3 parses for anchoring. If the reviewer reads a differently
-computed diff, its line numbers will not match the ones GitHub accepts and every
-finding degrades to prose.
-
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens \
+  --pr <n> --repo <owner/name> --lens codex|opus \
+  --cwd "<ABSOLUTE REPO OR WORKTREE PATH>" \
+  --out "$REVIEW_DIR/findings.json" \
+  [--reasoning low|medium|high] [--measure-log <path>] [--dry-run]
 ```
-Review pull request #<n> in the repository at <ABSOLUTE REPO OR WORKTREE PATH>.
 
-READ-ONLY: do not modify, create, or delete any file in that repository.
+Choose `--lens` with the Reviewer ≠ author rule below. `--reasoning` defaults
+to `high` for codex and `low` for opus; `--measure-log` overrides the per-lens
+JSONL destination; `--dry-run` prints the resolved argv and prompt path without
+running a reviewer. Use `--prompt-out <path>` when you need to retain that exact
+grounded prompt for inspection.
 
-Get the diff with `gh pr diff <n> --repo <owner/name>`. Read whatever surrounding
-source you need in order to judge it — the diff alone is not enough to tell
-whether a change is correct.
+### Reviewer ≠ author
 
-Authoritative PR file list (from `gh api --paginate repos/<owner>/<repo>/pulls/<n>/files --jq '.[].filename'`):
-<one `files[].path` per line, copied from the target response>
-
-This list is the coverage ground truth. Echo every path from that authoritative
-list into `examined_paths`.
-
-Report correctness defects that would matter after merge:
-- wrong behavior on an input the change makes reachable
-- a contract, invariant, or documented semantic the change violates
-- a case the change's own tests do not cover but its own description claims
-- a test, guard, or checker the change adds that cannot fail on the defect it
-  claims to catch (e.g. it runs against empty input or with its critical
-  dependency absent)
-- an adjacent consumer the change breaks
-
-Do NOT report style, naming, formatting, or speculative refactors.
-
-For every finding: `path` must be a repository-relative path that this PR
-changes, and `line` must be a line number that appears in `gh pr diff <n>` for
-that file. A finding you cannot anchor that way still belongs in the list — say
-so in the body — but anchor the ones you can.
-
-Set `coverage` to exactly "examined N of M changed files" with the real counts.
-```
+A PR authored by a codex lane takes `--lens opus`; a PR authored by a Claude
+session takes `--lens codex`. Read the author from the PR's commits or the lane
+record; never assume.
 
 Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`.
 `examined_paths` must be EXACTLY the authoritative list. Context-only paths are
@@ -107,20 +89,9 @@ The instrument bullet is this skill's negative-control binding
 that cannot fail on the defect it claims to catch is a reportable correctness
 defect.
 
-```bash
-codex exec --model gpt-5.6-terra -c model_reasoning_effort=high \
-  --sandbox danger-full-access \
-  -C "<ABSOLUTE REPO OR WORKTREE PATH>" \
-  --output-schema "${CLAUDE_SKILL_DIR}/reference/findings.schema.json" \
-  -o "$REVIEW_DIR/findings.json" \
-  - < "$REVIEW_DIR/prompt.txt"
-```
-
-On PowerShell, pipe the prompt instead: `Get-Content prompt.txt -Raw | codex exec ... -`.
-
 Non-negotiable flags, each for a measured reason:
 
-- **`--model gpt-5.6-terra` at high effort.** A review is a verdict about
+- **Codex `--model gpt-5.6-terra` at high effort.** A review is a verdict about
   correctness, and Luna returns confident wrong PASSes on those. See
   `codex-delegate`'s Terra-vs-Luna threshold.
 - **`--sandbox danger-full-access`.** `--sandbox read-only` is broken on this
@@ -133,11 +104,16 @@ Non-negotiable flags, each for a measured reason:
   review`: it takes no sandbox flag, so it hits the read-only bug on this box,
   and its output is unstructured prose.
 
-Then confirm the repo is untouched:
+The verb captures `git -C "<ABSOLUTE REPO OR WORKTREE PATH>" status --short
+--porcelain` before and after the reviewer and fails on every status line added
+by the reviewer, even when the worktree was already dirty before it ran.
 
-```bash
-git -C "<ABSOLUTE REPO OR WORKTREE PATH>" status --short
-```
+### Shadow arm (measurement, opt-in)
+
+On a PR the conductor names, run **both** lenses, post both, and adjudicate both
+with `reply --verdict`. The measurement log then captures unique-to-lens
+confirmed catches. Post the two handbacks with repeated flags, for example
+`post --findings codex.json --findings opus.json`. Two lenses is the ceiling.
 
 ## 3. Post
 
@@ -148,12 +124,13 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post \
 
 The script does the checking you would otherwise have to remember:
 
-- **Blocking coverage set check** — compares normalized `examined_paths` against
-  the PR API's authoritative file list. Missing or extra paths exit nonzero before
-  posting; `--force-post` is the explicit escape hatch and stamps the mismatch in
-  the review body. A parseable `examined N of M` contradiction also fails; an
-  absent or unparsable count remains secondary evidence. This detects stale or
-  missing path sets; it does not prove that examination happened.
+- **Blocking per-handback coverage check** — compares each findings document's
+  normalized `examined_paths` against the PR API's authoritative file list.
+  Missing or extra paths exit nonzero before posting; `--force-post` is the
+  explicit escape hatch and stamps the mismatch in the review body. A parseable
+  `examined N of M` contradiction also fails; an absent or unparsable count
+  remains secondary evidence. This detects stale or missing path sets; it does
+  not prove that examination happened.
 - **Anchorability** — a finding whose line is in the diff becomes a real
   line-anchored comment; one whose line is not becomes a body entry. A finding on
   a file with no commentable line splits into two buckets with different wording,
@@ -228,7 +205,8 @@ For **each** thread, in order:
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" reply \
-  --pr <n> --repo <owner/name> --comment-id <id> --body-file "$REVIEW_DIR/reply-<id>.md"
+  --pr <n> --repo <owner/name> --comment-id <id> --body-file "$REVIEW_DIR/reply-<id>.md" \
+  --verdict confirmed|refuted|note
 ```
 
 Write the reply to a file and pass `--body-file`; reply bodies quote code and
