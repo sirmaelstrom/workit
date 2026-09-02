@@ -477,12 +477,24 @@ function readPane(deps, pane) {
 
 // Records what THIS pane's prompt looks like while it is known to be idle, so a
 // later wait can match the pane against itself instead of against a guess.
-function capturePromptSignature(deps, pane, options) {
-  const snapshot = readPane(deps, pane);
-  if (snapshot.code !== 0) return null;
-  return paneAtPrompt(snapshot.stdout, options) || !options?.strict
-    ? panePromptSignature(snapshot.stdout)
-    : null;
+//
+// It polls, because a freshly created pane has not drawn its prompt yet: read
+// immediately after `lane create` and the snapshot is empty, which is how the
+// first live run recorded `promptSignature: null` for both lanes — and a null
+// signature silently drops `fallback` back to the shape guess this exists to
+// replace. Bounded and non-fatal: a lane still starts if the pane stays quiet.
+async function capturePromptSignature(deps, pane, options, timeoutMs = 5_000) {
+  const deadline = deps.now() + timeoutMs;
+  let signature = null;
+  do {
+    const snapshot = readPane(deps, pane);
+    if (snapshot.code === 0) {
+      signature = panePromptSignature(snapshot.stdout);
+      if (signature) return signature;
+    }
+    await deps.sleep(250);
+  } while (deps.now() < deadline);
+  return signature;
 }
 
 async function waitForPanePrompt(deps, pane, options = {}, timeoutMs = 30_000) {
@@ -704,7 +716,7 @@ async function startLane(opts, deps, state) {
   // to be a shell — once an agent owns it, its prompt is gone until the agent
   // quits, which is exactly when `fallback` has to recognise it again.
   const patterns = promptPatterns(opts, deps);
-  const promptSignature = capturePromptSignature(deps, opts.pane, { patterns });
+  const promptSignature = await capturePromptSignature(deps, opts.pane, { patterns });
   if (opts.kind === 'codex') await prepareCodexPane(opts, deps, promptSignature);
 
   const raw = callOrFail(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', opts.pane, '--', ...native]);

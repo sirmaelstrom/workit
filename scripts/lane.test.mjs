@@ -1489,6 +1489,43 @@ test('A3-5: start records the pane signature while the pane is still a shell', a
   assert.equal(readState(f).lanes['lane-a'].promptSignature, MEASURED_PROMPT);
 });
 
+test('A3-5b: the capture waits for a freshly created pane to draw its prompt', async (t) => {
+  const f = fixture(t);
+  // Measured live at 349c11b: read immediately after `lane create`, the pane is
+  // still empty and the signature landed as null — which silently drops
+  // `fallback` back to the shape guess this whole mechanism replaces.
+  f.responses.push(
+    { code: 0, stdout: '', stderr: '' },
+    { code: 0, stdout: '   \n', stderr: '' },
+    { code: 0, stdout: `~ sirm  pwsh\n${MEASURED_PROMPT}`, stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {} },
+  );
+  assert.equal(result.exit, 0);
+  assert.equal(readState(f).lanes['lane-a'].promptSignature, MEASURED_PROMPT);
+
+  // A pane that never draws a prompt must not block the launch.
+  const g = fixture(t);
+  let clock = 0;
+  g.responses.push(
+    () => { clock += 6000; return { code: 0, stdout: '', stderr: '' }; },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const quiet = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', g.log],
+    { exec: g.exec, env: { HERDR_PANE_ID: 'w1:p1' }, now: () => clock, sleep: async () => {} },
+  );
+  assert.equal(quiet.exit, 0, 'the capture is best-effort; a quiet pane still starts its lane');
+  assert.equal(readState(g).lanes['lane-a'].promptSignature, null);
+});
+
 test('A3-6: fallback waits for the signature the lane recorded', async (t) => {
   const f = fixture(t);
   const prompt = join(f.dir, 'prompt.md');
