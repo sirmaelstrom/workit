@@ -37,9 +37,11 @@
  *      pagination is a follow-up; this is the floor that keeps the gap loud.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, appendFileSync, mkdirSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
 // gh plumbing
@@ -53,7 +55,7 @@ import { pathToFileURL } from 'node:url';
  * quotes. The GraphQL query in `threads` is exactly such an argument.
  */
 export function gh(args, { input, cwd } = {}) {
-  return execFileSync('gh', args, {
+  return execFileSync(process.platform === 'win32' ? 'gh.exe' : 'gh', args, {
     input,
     cwd,
     encoding: 'utf8',
@@ -171,6 +173,9 @@ export function countChangedFiles(diffText) {
 // ---------------------------------------------------------------------------
 
 const SEVERITIES = new Set(['P1', 'P2', 'P3']);
+const LENSES = new Set(['codex', 'opus']);
+const FINDING_KEYS = new Set(['severity', 'title', 'path', 'line', 'body', 'lens']);
+const DOCUMENT_KEYS = new Set(['summary', 'coverage', 'examined_paths', 'findings', 'lens', 'model', 'reasoning', 'wall_ms']);
 
 /**
  * Load the handback. Anything short of a well-formed object is exit 3: a
@@ -199,6 +204,13 @@ export function validateFindingsShape(doc) {
   if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
     return ['top level must be an object'];
   }
+  for (const key of Object.keys(doc)) {
+    if (!DOCUMENT_KEYS.has(key)) problems.push(`top level has unknown property: ${key}`);
+  }
+  if (doc.lens !== undefined && !LENSES.has(doc.lens)) problems.push('lens must be codex or opus');
+  if (doc.model !== undefined && (typeof doc.model !== 'string' || doc.model.trim() === '')) problems.push('model must be a non-empty string');
+  if (doc.reasoning !== undefined && (typeof doc.reasoning !== 'string' || doc.reasoning.trim() === '')) problems.push('reasoning must be a non-empty string');
+  if (doc.wall_ms !== undefined && (!Number.isInteger(doc.wall_ms) || doc.wall_ms < 0)) problems.push('wall_ms must be a non-negative integer');
   if (typeof doc.summary !== 'string' || doc.summary.trim() === '') {
     problems.push('summary must be a non-empty string');
   }
@@ -238,6 +250,10 @@ export function validateFindingsShape(doc) {
       problems.push(`${at} must be an object`);
       return;
     }
+    for (const key of Object.keys(f)) {
+      if (!FINDING_KEYS.has(key)) problems.push(`${at} has unknown property: ${key}`);
+    }
+    if (f.lens !== undefined && !LENSES.has(f.lens)) problems.push(`${at}.lens must be codex or opus`);
     if (!SEVERITIES.has(f.severity)) problems.push(`${at}.severity must be one of P1, P2, P3`);
     for (const key of ['title', 'path', 'body']) {
       if (typeof f[key] !== 'string' || f[key].trim() === '') {
@@ -341,7 +357,7 @@ export function checkCoverage(coverage, examinedPaths, prFilePaths) {
 // ---------------------------------------------------------------------------
 
 function renderFinding(f) {
-  return `**[${f.severity}] ${f.title}**\n\n${f.body}`;
+  return `${f.lens ? `**lens:** ${f.lens}\n\n` : ''}**[${f.severity}] ${f.title}**\n\n${f.body}`;
 }
 
 /**
@@ -360,8 +376,15 @@ export function buildReviewPayload({
   offLine,
   coverageCheck,
   warnings = [],
+  lensCounts = [],
 }) {
   const sections = [summary.trim()];
+
+  if (lensCounts.length > 0) {
+    sections.push(['### Findings by lens', '', ...lensCounts.map((count) =>
+      `- ${count.lens}: ${count.P1} P1 / ${count.P2} P2 / ${count.P3} P3`,
+    )].join('\n'));
+  }
 
   if (offLine.length > 0 || offDiffChanged.length > 0 || offDiffUnchanged.length > 0) {
     const lines = ['', '---', '', '### Findings that could not be line-anchored', ''];
@@ -415,7 +438,20 @@ export function buildReviewPayload({
 export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
   // Load the handback FIRST: a reviewer that never ran should fail before we
   // touch the network, and exit 3 must not depend on gh being reachable.
-  const doc = loadFindings(opts.findings);
+  const findingFiles = Array.isArray(opts.findings) ? opts.findings : [opts.findings];
+  const docs = findingFiles.map(loadFindings);
+  const doc = {
+    summary: docs.map((item) => item.summary).join('\n\n'),
+    coverage: '',
+    examined_paths: [...new Set(docs.flatMap((item) => item.examined_paths))],
+    // A stamped document is the authority when an otherwise-valid handback
+    // predates per-finding lens metadata. Without this, post loses the tag that
+    // reply needs to attribute an adjudication.
+    findings: docs.flatMap((item) => item.findings.map((finding) => ({
+      ...finding,
+      lens: finding.lens ?? item.lens,
+    }))),
+  };
   const repo = resolveRepo(opts.repo, opts.cwd);
 
   const diffText = runGh(['pr', 'diff', String(opts.pr), '--repo', repo], { cwd: opts.cwd });
@@ -431,9 +467,35 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
     // here would run checkCoverage over an empty set, get ok:true, and post.
     return;
   }
+  // Preserve the original single-handback count check. With several independent
+  // lenses, the posting guard deliberately evaluates their path-set union.
+  doc.coverage = docs.length === 1
+    ? docs[0].coverage
+    : `examined ${doc.examined_paths.length} of ${prFilePaths.length} changed files`;
   const { anchored, offDiffChanged, offDiffUnchanged, offLine } =
     partitionFindings(doc.findings, diffFiles, prFilePaths);
-  const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
+  const unionCoverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
+  // The union is the posting surface, but it must not launder a lens that
+  // admits it reviewed only part of the PR. Keep the single-handback guard on
+  // every input, then apply it to the union too.
+  const individualCoverageChecks = docs.map((item) => checkCoverage(item.coverage, item.examined_paths, prFilePaths));
+  const individualFailures = individualCoverageChecks
+    .map((check, i) => check.ok ? null : `findings file ${findingFiles[i]}: ${check.reason}`)
+    .filter(Boolean);
+  const coverageCheck = {
+    ...unionCoverageCheck,
+    ok: unionCoverageCheck.ok && individualFailures.length === 0,
+    reason: [unionCoverageCheck.ok ? null : unionCoverageCheck.reason, ...individualFailures].filter(Boolean).join('. '),
+  };
+  const lensCounts = [...new Set(docs.map((item) => item.lens).filter(Boolean))].map((lens) => {
+    const findings = doc.findings.filter((finding) => finding.lens === lens);
+    return {
+      lens,
+      P1: findings.filter((finding) => finding.severity === 'P1').length,
+      P2: findings.filter((finding) => finding.severity === 'P2').length,
+      P3: findings.filter((finding) => finding.severity === 'P3').length,
+    };
+  });
 
   // Free ground-truth signal: two independent sources for "what this PR changes"
   // are already in hand. Divergence means the diff the reviewer read disagrees
@@ -455,6 +517,7 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
     offLine,
     coverageCheck,
     warnings,
+    lensCounts,
   });
 
   // Print the receipt BEFORE any coverage die: the failure path is exactly where
@@ -577,6 +640,15 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log 
     return;
   }
 
+  let lens = null;
+  if (opts.verdict) {
+    const original = JSON.parse(runGh(
+      ['api', `repos/${repo}/pulls/comments/${opts.commentId}`],
+      { cwd: opts.cwd },
+    ));
+    lens = /\*\*lens:\*\*\s*(codex|opus)\b/i.exec(String(original.body ?? ''))?.[1]?.toLowerCase() ?? null;
+  }
+
   const res = runGh(
     [
       'api',
@@ -589,6 +661,194 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log 
     { input: JSON.stringify({ body }), cwd: opts.cwd },
   );
   log(`replied        ${JSON.parse(res).html_url}`);
+  if (opts.verdict) {
+    appendMeasurementRow(resolveMeasureLog(opts.measureLog, opts.cwd), {
+      ts: new Date().toISOString(), repo, pr: Number(opts.pr), comment_id: Number(opts.commentId), lens, verdict: opts.verdict,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reviewer lenses
+// ---------------------------------------------------------------------------
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const SCHEMA_PATH = join(SCRIPT_DIR, '..', 'reference', 'findings.schema.json');
+const MEASURE_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 't1-lens-measure.jsonl'];
+
+/** Build the prompt from the same authoritative list that posting later checks. */
+export function buildReviewerPrompt({ pr, repo, prFilePaths }) {
+  return `Review pull request #${pr} in the repository at the current working directory.
+
+READ-ONLY: modify nothing; do not create or delete files, and do not run git write commands.
+
+Read the diff with \`gh pr diff ${pr} --repo ${repo}\`. Read surrounding source as needed to judge correctness.
+
+Authoritative PR file list:
+${prFilePaths.join('\n')}
+
+This list is coverage ground truth. Examine every entry and echo every entry you examined verbatim in \`examined_paths\`.
+
+Report only correctness defects that matter after merge: wrong reachable behavior, violated contracts or invariants, an uncovered claimed case, a test/guard/checker that cannot fail on its claimed defect, or a broken adjacent consumer. Do not report style, naming, formatting, or speculative refactors.
+
+Use severity P1 (blocks merge), P2 (should be resolved), or P3 (advisory). Each finding needs a changed repository-relative \`path\`, an anchorable post-change \`line\` where possible, and evidence in \`body\`.
+
+Return ONLY JSON matching the schema. \`coverage\` is exactly \`examined ${prFilePaths.length} of ${prFilePaths.length} changed files\`; \`examined_paths\` echoes the authoritative list entries you examined verbatim.`;
+}
+
+function defaultRun(program, args, { input, cwd } = {}) {
+  return execFileSync(program, args, {
+    input,
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    windowsHide: true,
+  });
+}
+
+function defaultCodexExe() {
+  const cmd = process.env.ComSpec || (process.platform === 'win32' ? 'cmd.exe' : null);
+  if (!cmd) throw new Error('codex vendor-bin resolution is only configured for Windows');
+  const npmRoot = execFileSync(cmd, ['/d', '/s', '/c', 'npm root -g'], { encoding: 'utf8', windowsHide: true }).trim();
+  const vendor = join(npmRoot, '@openai', 'codex', 'node_modules', '@openai', 'codex-win32-x64', 'vendor');
+  for (const entry of readdirSync(vendor, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const candidate = join(vendor, entry.name, 'bin', 'codex.exe');
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`codex.exe not found under: ${vendor}`);
+}
+
+function findWorkspaceRoot(cwd = process.cwd()) {
+  for (let current = resolve(cwd); ; current = dirname(current)) {
+    if (existsSync(join(current, 'projects')) && existsSync(join(current, 'data'))) return current;
+    if (dirname(current) === current) return null;
+  }
+}
+
+function resolveMeasureLog(explicit, cwd) {
+  if (explicit) return resolve(explicit);
+  const root = process.env.WORKIT_WORKSPACE_ROOT || findWorkspaceRoot(cwd);
+  return root ? join(root, ...MEASURE_SUBPATH) : resolve('t1-lens-measure.jsonl');
+}
+
+function appendMeasurementRow(file, row) {
+  mkdirSync(dirname(file), { recursive: true });
+  appendFileSync(file, `${JSON.stringify(row)}\n`, 'utf8');
+}
+
+function stripCodeFences(text) {
+  const trimmed = String(text).trim();
+  const fenced = /^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n```$/i.exec(trimmed);
+  return fenced ? fenced[1].trim() : trimmed;
+}
+
+function parseLensOutput(raw, lens) {
+  if (lens === 'opus') {
+    const envelope = JSON.parse(stripCodeFences(raw));
+    const structured = envelope?.structured_output ?? envelope?.result;
+    return typeof structured === 'string' ? JSON.parse(stripCodeFences(structured)) : structured;
+  }
+  return JSON.parse(stripCodeFences(raw));
+}
+
+function countSeverities(findings) {
+  return Object.fromEntries([...SEVERITIES].map((severity) => [severity.toLowerCase(), findings.filter((f) => f.severity === severity).length]));
+}
+
+class LensOutputError extends Error {}
+
+/** Run exactly one model lens. The process runner is injected so tests never spawn. */
+export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log, now = Date.now, findCodexExe = defaultCodexExe } = {}) {
+  const cwd = resolve(opts.cwd ?? process.cwd());
+  const repo = opts.repo;
+  const reasoning = opts.reasoning ?? (opts.lens === 'codex' ? 'high' : 'low');
+  const model = opts.lens === 'codex' ? 'gpt-5.6-terra' : 'opus';
+  const promptPath = opts.promptOut ? resolve(opts.promptOut) : join(tmpdir(), `slim-review-${opts.lens}-${opts.pr}-prompt.txt`);
+  const lensArgv = (tempOut) => opts.lens === 'codex'
+    ? ['exec', '--model', model, '-c', `model_reasoning_effort=${reasoning}`, '--sandbox', 'danger-full-access', '--skip-git-repo-check', '-C', cwd, '--output-schema', SCHEMA_PATH, '-o', tempOut, '-']
+    : ['-p', '--model', model, '--effort', reasoning, '--permission-mode', 'bypassPermissions', '--disallowedTools', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', '--output-format', 'json', '--json-schema', readFileSync(SCHEMA_PATH, 'utf8')];
+
+  if (opts.dryRun) {
+    log(`argv: ${JSON.stringify(lensArgv('<temporary findings.json>'))}`);
+    log(`prompt path: ${promptPath}`);
+    return;
+  }
+  const tempDir = mkdtempSync(join(tmpdir(), 'slim-review-lens-'));
+  const tempOut = join(tempDir, 'findings.json');
+  const argv = lensArgv(tempOut);
+  let prFilePaths;
+  try {
+    prFilePaths = fetchPrFilePaths(repo, opts.pr, cwd, (args, ghOpts) => run(process.platform === 'win32' ? 'gh.exe' : 'gh', args, ghOpts));
+  } catch (err) {
+    rmSync(tempDir, { recursive: true, force: true });
+    die(4, `could not fetch PR files for ${repo}#${opts.pr}: ${err.message}`);
+    return;
+  }
+  if (prFilePaths.length === 0) {
+    rmSync(tempDir, { recursive: true, force: true });
+    die(5, `the PR API returned no changed files for ${repo}#${opts.pr}; reviewer was not run.`);
+    return;
+  }
+  const prompt = buildReviewerPrompt({ pr: opts.pr, repo, prFilePaths });
+  if (opts.promptOut) {
+    mkdirSync(dirname(promptPath), { recursive: true });
+    writeFileSync(promptPath, prompt, 'utf8');
+  }
+
+  let raw;
+  let wallMs;
+  try {
+    const program = opts.lens === 'codex' ? findCodexExe() : (process.platform === 'win32' ? 'claude.exe' : 'claude');
+    const before = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short'], { cwd }));
+    const started = now();
+    // Claude's -p mode on this box does not consume stdin (the live probe
+    // returned a stale placeholder result), so its prompt is positional.
+    raw = run(program, opts.lens === 'opus' ? [...argv, prompt] : argv, {
+      ...(opts.lens === 'codex' ? { input: prompt } : {}),
+      cwd,
+    });
+    wallMs = now() - started;
+    // Observe the reviewer immediately, before our own --out and measurement
+    // writes can make a deliberately in-worktree output look like misconduct.
+    const after = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short'], { cwd }));
+    const source = opts.lens === 'codex' && existsSync(tempOut) ? readFileSync(tempOut, 'utf8') : raw;
+    let doc;
+    try {
+      doc = parseLensOutput(source, opts.lens);
+    } catch (err) {
+      throw new LensOutputError(`reviewer output is not valid JSON: ${err.message}`);
+    }
+    const problems = validateFindingsShape(doc);
+    if (problems.length > 0) {
+      throw new LensOutputError(`reviewer output has the wrong shape:\n  - ${problems.join('\n  - ')}`);
+    }
+    const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
+    if (!coverageCheck.ok) {
+      throw new LensOutputError(`reviewer output coverage check failed: ${coverageCheck.reason}`);
+    }
+    doc.lens = opts.lens;
+    doc.model = model;
+    doc.reasoning = reasoning;
+    doc.wall_ms = wallMs;
+    doc.findings = doc.findings.map((finding) => ({ ...finding, lens: opts.lens }));
+    mkdirSync(dirname(resolve(opts.out)), { recursive: true });
+    writeFileSync(opts.out, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+    if (before.trim() === '' && after.trim() !== '') {
+      die(4, `reviewer dirtied a previously clean worktree:\n${after.trim()}`);
+      return;
+    }
+    const counts = countSeverities(doc.findings);
+    appendMeasurementRow(resolveMeasureLog(opts.measureLog, cwd), {
+      ts: new Date().toISOString(), repo, pr: Number(opts.pr), lens: opts.lens, model, reasoning, wall_ms: wallMs,
+      ...counts, examined: doc.examined_paths.length, coverage: doc.coverage,
+    });
+    log(`wrote          ${opts.out}`);
+  } catch (err) {
+    die(err instanceof LensOutputError ? 3 : 4, err instanceof LensOutputError ? err.message : `lens ${opts.lens} failed: ${err.message}`);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -597,9 +857,13 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log 
 
 const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
 
-  post     --pr <n> --repo owner/name --findings <file> [--dry-run] [--force-post]
+  lens     --pr <n> --repo owner/name --lens codex|opus --out <findings.json>
+           [--reasoning low|medium|high] [--cwd <abs repo or worktree>]
+           [--prompt-out <path>] [--measure-log <path>] [--dry-run]
+  post     --pr <n> --repo owner/name --findings <file> [--findings <file> ...] [--dry-run] [--force-post]
   threads  --pr <n> --repo owner/name [--unresolved]
   reply    --pr <n> --repo owner/name --comment-id <id> --body-file <file>
+           [--verdict confirmed|refuted|note] [--measure-log <path>]
 
 Common:
   --repo   required for every command — cwd resolution silently answers about a
@@ -638,7 +902,17 @@ export function parseArgs(argv) {
         break;
       }
       case '--cwd': opts.cwd = next(); break;
-      case '--findings': opts.findings = next(); break;
+      case '--findings': {
+        const finding = next();
+        opts.findings = opts.findings === undefined ? finding : (Array.isArray(opts.findings) ? [...opts.findings, finding] : [opts.findings, finding]);
+        break;
+      }
+      case '--lens': opts.lens = next(); break;
+      case '--out': opts.out = next(); break;
+      case '--reasoning': opts.reasoning = next(); break;
+      case '--prompt-out': opts.promptOut = next(); break;
+      case '--measure-log': opts.measureLog = next(); break;
+      case '--verdict': opts.verdict = next(); break;
       case '--comment-id': opts.commentId = next(); break;
       case '--body-file': opts.bodyFile = next(); break;
       case '--dry-run': opts.dryRun = true; break;
@@ -664,6 +938,12 @@ function main(argv) {
       if (!opts.repo) fail(2, 'post needs --repo owner/name');
       if (!opts.findings) fail(2, 'post needs --findings <file>');
       return cmdPost(opts);
+    case 'lens':
+      if (!opts.repo) fail(2, 'lens needs --repo owner/name');
+      if (!LENSES.has(opts.lens)) fail(2, 'lens needs --lens codex|opus');
+      if (!opts.out) fail(2, 'lens needs --out <findings.json>');
+      if (opts.reasoning && !['low', 'medium', 'high'].includes(opts.reasoning)) fail(2, 'lens --reasoning must be low, medium, or high');
+      return cmdLens(opts);
     case 'threads':
       // Not cosmetic: `threads --pr 53 --unresolved` from the wrong cwd prints
       // "no unresolved review threads" — the merge-ready signal — about someone
@@ -674,6 +954,7 @@ function main(argv) {
       if (!opts.repo) fail(2, 'reply needs --repo owner/name');
       if (!opts.commentId || !/^\d+$/.test(String(opts.commentId))) fail(2, 'reply needs --comment-id <numeric id>');
       if (!opts.bodyFile) fail(2, 'reply needs --body-file <file>');
+      if (opts.verdict && !['confirmed', 'refuted', 'note'].includes(opts.verdict)) fail(2, 'reply --verdict must be confirmed, refuted, or note');
       return cmdReply(opts);
     default:
       fail(2, `unknown command: ${opts.cmd}\n\n${USAGE}`);

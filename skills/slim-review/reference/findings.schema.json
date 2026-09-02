@@ -48,9 +48,32 @@
           "body": {
             "type": "string",
             "description": "The evidence: what breaks, on what input, and why the change causes it."
+          },
+          "lens": {
+            "type": "string",
+            "enum": ["codex", "opus"],
+            "description": "The reviewing lens that produced this finding."
           }
         }
       }
+    },
+    "lens": {
+      "type": "string",
+      "enum": ["codex", "opus"],
+      "description": "The reviewing lens that produced this document."
+    },
+    "model": {
+      "type": "string",
+      "description": "The model selected for the lens."
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "The selected reasoning effort."
+    },
+    "wall_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock execution time for the reviewing model."
     }
   }
 }
