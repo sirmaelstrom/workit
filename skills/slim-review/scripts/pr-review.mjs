@@ -443,7 +443,11 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
   const doc = {
     summary: docs.map((item) => item.summary).join('\n\n'),
     coverage: '',
-    examined_paths: [...new Set(docs.flatMap((item) => item.examined_paths))],
+    // Each handback is checked against the PR API below. Normalize this display
+    // union too: otherwise two complete lenses using Windows and POSIX separators
+    // inflate its count and make the combined receipt falsely claim it is partial.
+    examined_paths: [...new Set(docs.flatMap((item) => item.examined_paths)
+      .map((path) => String(path).replace(/\\\\/g, '/').replace(/^\.\//, '')))],
     // A stamped document is the authority when an otherwise-valid handback
     // predates per-finding lens metadata. Without this, post loses the tag that
     // reply needs to attribute an adjudication.
@@ -467,25 +471,25 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
     // here would run checkCoverage over an empty set, get ok:true, and post.
     return;
   }
-  // Preserve the original single-handback count check. With several independent
-  // lenses, the posting guard deliberately evaluates their path-set union.
+  // The receipt summarizes the normalized union, but the guard is deliberately
+  // per-handback: a union cannot prove each independent reviewer covered the PR.
   doc.coverage = docs.length === 1
     ? docs[0].coverage
     : `examined ${doc.examined_paths.length} of ${prFilePaths.length} changed files`;
   const { anchored, offDiffChanged, offDiffUnchanged, offLine } =
     partitionFindings(doc.findings, diffFiles, prFilePaths);
-  const unionCoverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
-  // The union is the posting surface, but it must not launder a lens that
-  // admits it reviewed only part of the PR. Keep the single-handback guard on
-  // every input, then apply it to the union too.
+  // A completed union follows automatically from completed individual sets, and
+  // its former count comparison could only reject separator variants falsely.
+  // Keep every handback fail-closed against the authoritative PR API instead.
   const individualCoverageChecks = docs.map((item) => checkCoverage(item.coverage, item.examined_paths, prFilePaths));
   const individualFailures = individualCoverageChecks
     .map((check, i) => check.ok ? null : `findings file ${findingFiles[i]}: ${check.reason}`)
     .filter(Boolean);
   const coverageCheck = {
-    ...unionCoverageCheck,
-    ok: unionCoverageCheck.ok && individualFailures.length === 0,
-    reason: [unionCoverageCheck.ok ? null : unionCoverageCheck.reason, ...individualFailures].filter(Boolean).join('. '),
+    ok: individualFailures.length === 0,
+    missing: [],
+    extra: [],
+    reason: individualFailures.join('. '),
   };
   const lensCounts = [...new Set(docs.map((item) => item.lens).filter(Boolean))].map((lens) => {
     const findings = doc.findings.filter((finding) => finding.lens === lens);
@@ -639,6 +643,8 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log 
     die(2, `body file is empty: ${opts.bodyFile}`);
     return;
   }
+  const measureLog = opts.verdict ? resolveMeasureLog(opts.measureLog, opts.cwd, die) : null;
+  if (opts.verdict && !measureLog) return;
 
   let lens = null;
   if (opts.verdict) {
@@ -662,7 +668,7 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log 
   );
   log(`replied        ${JSON.parse(res).html_url}`);
   if (opts.verdict) {
-    appendMeasurementRow(resolveMeasureLog(opts.measureLog, opts.cwd), {
+    appendMeasurementRow(measureLog, {
       ts: new Date().toISOString(), repo, pr: Number(opts.pr), comment_id: Number(opts.commentId), lens, verdict: opts.verdict,
     });
   }
@@ -706,10 +712,12 @@ function defaultRun(program, args, { input, cwd } = {}) {
   });
 }
 
-function defaultCodexExe() {
-  const cmd = process.env.ComSpec || (process.platform === 'win32' ? 'cmd.exe' : null);
-  if (!cmd) throw new Error('codex vendor-bin resolution is only configured for Windows');
-  const npmRoot = execFileSync(cmd, ['/d', '/s', '/c', 'npm root -g'], { encoding: 'utf8', windowsHide: true }).trim();
+export function defaultCodexExe({ platform = process.platform } = {}) {
+  if (platform !== 'win32') return 'codex';
+  // Accepted Windows-only command-interpreter exception: this fixed argv only
+  // invokes `npm root -g`, because npm is a .cmd shim. Pin cmd.exe rather than
+  // accepting an environment-controlled ComSpec launch target.
+  const npmRoot = execFileSync('cmd.exe', ['/d', '/s', '/c', 'npm root -g'], { encoding: 'utf8', windowsHide: true }).trim();
   const vendor = join(npmRoot, '@openai', 'codex', 'node_modules', '@openai', 'codex-win32-x64', 'vendor');
   for (const entry of readdirSync(vendor, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
@@ -726,10 +734,12 @@ function findWorkspaceRoot(cwd = process.cwd()) {
   }
 }
 
-function resolveMeasureLog(explicit, cwd) {
+function resolveMeasureLog(explicit, cwd, die = fail) {
   if (explicit) return resolve(explicit);
   const root = process.env.WORKIT_WORKSPACE_ROOT || findWorkspaceRoot(cwd);
-  return root ? join(root, ...MEASURE_SUBPATH) : resolve('t1-lens-measure.jsonl');
+  if (root) return join(root, ...MEASURE_SUBPATH);
+  die(2, 'no workspace root found; pass --measure-log');
+  return null;
 }
 
 function appendMeasurementRow(file, row) {
@@ -746,7 +756,14 @@ function stripCodeFences(text) {
 function parseLensOutput(raw, lens) {
   if (lens === 'opus') {
     const envelope = JSON.parse(stripCodeFences(raw));
-    const structured = envelope?.structured_output ?? envelope?.result;
+    // Claude can return a structured object, but an empty object is not a
+    // findings document and must not mask a valid JSON-string `result`.
+    const structured = envelope?.structured_output
+      && typeof envelope.structured_output === 'object'
+      && !Array.isArray(envelope.structured_output)
+      && Object.keys(envelope.structured_output).length > 0
+      ? envelope.structured_output
+      : envelope?.result;
     return typeof structured === 'string' ? JSON.parse(stripCodeFences(structured)) : structured;
   }
   return JSON.parse(stripCodeFences(raw));
@@ -774,6 +791,8 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
     log(`prompt path: ${promptPath}`);
     return;
   }
+  const measureLog = resolveMeasureLog(opts.measureLog, cwd, die);
+  if (!measureLog) return;
   const tempDir = mkdtempSync(join(tmpdir(), 'slim-review-lens-'));
   const tempOut = join(tempDir, 'findings.json');
   const argv = lensArgv(tempOut);
@@ -800,7 +819,8 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
   let wallMs;
   try {
     const program = opts.lens === 'codex' ? findCodexExe() : (process.platform === 'win32' ? 'claude.exe' : 'claude');
-    const before = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short'], { cwd }));
+    const before = new Set(String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }))
+      .split(/\r?\n/).filter(Boolean));
     const started = now();
     // Claude's -p mode on this box does not consume stdin (the live probe
     // returned a stale placeholder result), so its prompt is positional.
@@ -811,7 +831,7 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
     wallMs = now() - started;
     // Observe the reviewer immediately, before our own --out and measurement
     // writes can make a deliberately in-worktree output look like misconduct.
-    const after = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short'], { cwd }));
+    const after = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }));
     const source = opts.lens === 'codex' && existsSync(tempOut) ? readFileSync(tempOut, 'utf8') : raw;
     let doc;
     try {
@@ -834,17 +854,19 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
     doc.findings = doc.findings.map((finding) => ({ ...finding, lens: opts.lens }));
     mkdirSync(dirname(resolve(opts.out)), { recursive: true });
     writeFileSync(opts.out, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
-    if (before.trim() === '' && after.trim() !== '') {
-      die(4, `reviewer dirtied a previously clean worktree:\n${after.trim()}`);
+    const counts = countSeverities(doc.findings);
+    const dirty = after.split(/\r?\n/).filter(Boolean).filter((line) => !before.has(line));
+    appendMeasurementRow(measureLog, {
+      ts: new Date().toISOString(), repo, pr: Number(opts.pr), lens: opts.lens, model, reasoning, wall_ms: wallMs,
+      ...counts, examined: doc.examined_paths.length, coverage: doc.coverage, ...(dirty.length > 0 ? { dirty: true } : {}),
+    });
+    if (dirty.length > 0) {
+      die(4, `reviewer added worktree changes:\n${dirty.join('\n')}`);
       return;
     }
-    const counts = countSeverities(doc.findings);
-    appendMeasurementRow(resolveMeasureLog(opts.measureLog, cwd), {
-      ts: new Date().toISOString(), repo, pr: Number(opts.pr), lens: opts.lens, model, reasoning, wall_ms: wallMs,
-      ...counts, examined: doc.examined_paths.length, coverage: doc.coverage,
-    });
     log(`wrote          ${opts.out}`);
   } catch (err) {
+    rmSync(tempDir, { recursive: true, force: true });
     die(err instanceof LensOutputError ? 3 : 4, err instanceof LensOutputError ? err.message : `lens ${opts.lens} failed: ${err.message}`);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
@@ -869,6 +891,13 @@ Common:
   --repo   required for every command — cwd resolution silently answers about a
            different repo's PR of the same number
   --cwd    directory to run gh from (default: process cwd)
+
+Lens safety:
+  --lens         choose codex or opus; it must not be the PR authoring model
+  --reasoning    defaults to high for codex and low for opus
+  --measure-log  overrides the per-lens JSONL log (otherwise a workspace root is required)
+  --dry-run      prints the exact reviewer argv and prompt path without running it
+  status guard   fails if the reviewer adds any git status --porcelain line
 `;
 
 function fail(code, msg) {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -21,6 +21,7 @@ import {
   cmdReply,
   cmdLens,
   buildReviewerPrompt,
+  defaultCodexExe,
 } from './pr-review.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
@@ -370,6 +371,11 @@ test('skill delegates prompt construction to the lens verb and requires reviewer
   assert.match(skill, /pr-review\.mjs" lens/);
   assert.match(skill, /Reviewer ≠ author/);
   assert.match(skill, /Shadow arm \(measurement, opt-in\)/);
+  assert.match(skill, /--lens codex\|opus/);
+  assert.match(skill, /--reasoning low\|medium\|high/);
+  assert.match(skill, /--measure-log <path>/);
+  assert.match(skill, /--dry-run/);
+  assert.match(skill, /status line added/);
 });
 
 test('skill documents required repo, blocking coverage, and examined_paths handback', () => {
@@ -379,7 +385,7 @@ test('skill documents required repo, blocking coverage, and examined_paths handb
   // cwd-resolution class open on the commands that read the merge-ready signal.
   assert.match(skill, /threads --pr <n> --repo <owner\/name> --unresolved/);
   assert.match(skill, /--pr <n> --repo <owner\/name> --comment-id <id> --body-file/);
-  assert.match(skill, /\*\*Blocking coverage set check\*\*/);
+  assert.match(skill, /\*\*Blocking per-handback coverage check\*\*/);
   assert.match(skill, /Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`/);
 });
 
@@ -387,7 +393,7 @@ test('skill says examined_paths is exact and bounds what the stale-set guard pro
   const skill = readFileSync(SKILL, 'utf8');
   assert.match(skill, /`examined_paths` must be EXACTLY the authoritative list/);
   assert.match(skill, /Context-only paths are\s+extras and fail the check/);
-  assert.match(skill, /detects stale or\s+missing path sets; it does not prove that examination happened/);
+  assert.match(skill, /detects stale or\s+missing path sets; it does\s+not prove that examination happened/);
 });
 
 test('skill distinguishes the two off-diff buckets and flags the unverified schema keywords', () => {
@@ -804,7 +810,7 @@ test('reply takes an injectable runGh and posts one reply to the given comment',
 // lens — second T1 reviewer and measurement instrument
 // ---------------------------------------------------------------------------
 
-function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), dirty = false } = {}) {
+function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), codexOutput = result, beforeStatus = '', afterStatus = '' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-lens-'));
   const out = join(dir, 'findings.json');
   const measureLog = join(dir, 'measure.jsonl');
@@ -818,7 +824,11 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), dirty
         run: (program, args, opts = {}) => {
           calls.push({ program, args, opts });
           if (args[0] === 'api') return 'src/a.ts\n';
-          if (args.includes('status')) return ++statusCalls === 1 ? '' : (dirty ? ' M changed.ts\n' : '');
+          if (args.includes('status')) return ++statusCalls === 1 ? beforeStatus : afterStatus;
+          if (args[0] === 'exec') {
+            writeFileSync(args[args.indexOf('-o') + 1], codexOutput, 'utf8');
+            return 'codex stdout that must not be parsed';
+          }
           return result;
         },
         findCodexExe: () => 'C:/codex/vendor/bin/codex.exe',
@@ -829,6 +839,7 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), dirty
     );
     return {
       calls, deaths, outExists: existsSync(out), out: existsSync(out) ? JSON.parse(readFileSync(out, 'utf8')) : null,
+      tempOut: calls.find(({ args }) => args[0] === 'exec')?.args.at(-2),
       rows: existsSync(measureLog) ? readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).filter(Boolean).map(JSON.parse) : [],
     };
   } finally {
@@ -836,22 +847,27 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), dirty
   }
 }
 
-test('lens codex builds the Terra argv and sends every authoritative path on stdin', () => {
-  const { calls, deaths } = runLensWithFake();
+test('lens codex reads its -o findings file, builds the Terra argv, and sends every authoritative path on stdin', () => {
+  const fromFile = JSON.stringify({ ...VALID, summary: 'read from codex -o file' });
+  const { calls, deaths, out } = runLensWithFake({ codexOutput: fromFile });
   assert.deepEqual(deaths, []);
   const call = calls.find(({ args }) => args[0] === 'exec');
   assert.ok(call);
-  assert.ok(call.args.includes('--model'));
-  assert.ok(call.args.includes('gpt-5.6-terra'));
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-5.6-terra');
   assert.ok(call.args.includes('model_reasoning_effort=high'));
   assert.ok(call.args.includes('--sandbox'));
   assert.ok(call.args.includes('danger-full-access'));
-  assert.ok(call.args.includes('--output-schema'));
-  assert.ok(call.args.includes('-o'));
+  const schemaPath = call.args[call.args.indexOf('--output-schema') + 1];
+  assert.ok(schemaPath.endsWith('findings.schema.json'));
+  assert.ok(existsSync(schemaPath));
+  assert.ok(call.args.includes('--skip-git-repo-check'));
+  const tempOut = call.args[call.args.indexOf('-o') + 1];
+  assert.equal(relative(resolve(tmpdir()), resolve(tempOut)).startsWith('..'), false, '-o must be inside the temp directory');
   assert.deepEqual(call.args.slice(-1), ['-']);
   assert.match(call.opts.input, /src\/a\.ts/);
   assert.ok(call.args.includes('-C'));
   assert.equal(call.args[call.args.indexOf('-C') + 1], resolve('C:/repo'));
+  assert.equal(out.summary, 'read from codex -o file', 'codex stdout must not replace its -o findings file');
 });
 
 test('lens opus builds the constrained structured-output argv', () => {
@@ -868,8 +884,44 @@ test('lens opus builds the constrained structured-output argv', () => {
   assert.ok(call.args.includes('--output-format'));
   assert.ok(call.args.includes('json'));
   assert.ok(call.args.includes('--json-schema'));
+  assert.equal(JSON.parse(call.args[call.args.indexOf('--json-schema') + 1]).additionalProperties, false);
   assert.match(call.args.at(-1), /Review pull request #42/);
   assert.equal(call.opts.input, undefined, 'Claude -p receives its prompt positionally on this host');
+});
+
+test('lens opus accepts fenced result JSON, structured_output, and ignores an empty structured_output in favor of result', () => {
+  const fenced = `\`\`\`json\n${JSON.stringify(VALID)}\n\`\`\``;
+  for (const result of [
+    JSON.stringify({ result: fenced }),
+    JSON.stringify({ structured_output: VALID }),
+    JSON.stringify({ structured_output: {}, result: JSON.stringify(VALID) }),
+  ]) {
+    const { deaths, out } = runLensWithFake({ lens: 'opus', result });
+    assert.deepEqual(deaths, []);
+    assert.equal(out.lens, 'opus');
+  }
+});
+
+test('the codex executable resolver uses plain codex outside Windows without mutating process.platform', () => {
+  assert.equal(defaultCodexExe({ platform: 'linux' }), 'codex');
+});
+
+test('lens requires an explicit measurement log when no workspace root can be found', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-no-workspace-'));
+  const savedWorkspaceRoot = process.env.WORKIT_WORKSPACE_ROOT;
+  const deaths = [];
+  try {
+    delete process.env.WORKIT_WORKSPACE_ROOT;
+    cmdLens(
+      { pr: '42', repo: 'owner/repo', lens: 'codex', cwd: dir, out: join(dir, 'findings.json') },
+      { run: () => { throw new Error('measurement root must fail before any process starts'); }, die: (code, message) => deaths.push({ code, message }), log: () => {} },
+    );
+    assert.deepEqual(deaths, [{ code: 2, message: 'no workspace root found; pass --measure-log' }]);
+  } finally {
+    if (savedWorkspaceRoot === undefined) delete process.env.WORKIT_WORKSPACE_ROOT;
+    else process.env.WORKIT_WORKSPACE_ROOT = savedWorkspaceRoot;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('lens dry-run prints its argv and prompt path without invoking the injected runner', () => {
@@ -882,16 +934,17 @@ test('lens dry-run prints its argv and prompt path without invoking the injected
   assert.match(logs.join('\n'), /prompt path:/);
 });
 
-test('lens rejects prose, a P4 handback, and incomplete coverage without writing --out', () => {
+test('lens rejects prose, a P4 handback, and incomplete coverage without writing --out or leaking its temp dir', () => {
   for (const result of [
     'this is not JSON',
     JSON.stringify({ ...VALID, findings: [finding({ severity: 'P4' })] }),
     JSON.stringify({ ...VALID, coverage: 'examined 1 of 1 changed files', examined_paths: ['other.ts'] }),
   ]) {
-    const { deaths, outExists } = runLensWithFake({ result });
+    const { deaths, outExists, tempOut } = runLensWithFake({ codexOutput: result });
     assert.equal(deaths[0]?.code, 3);
     assert.match(deaths[0]?.message ?? '', /output|severity/i);
     assert.equal(outExists, false);
+    assert.equal(existsSync(dirname(tempOut)), false, 'failed validation must remove the lens temp dir before die()');
   }
 });
 
@@ -901,17 +954,20 @@ test('lens stamps document/findings and appends one per-lens measurement row', (
   assert.equal(out.lens, 'codex');
   assert.equal(out.model, 'gpt-5.6-terra');
   assert.equal(out.reasoning, 'high');
+  assert.equal(out.wall_ms, 25);
   assert.equal(out.findings[0].lens, 'codex');
   assert.equal(rows.length, 1);
   assert.deepEqual({ lens: rows[0].lens, p1: rows[0].p1, p2: rows[0].p2, p3: rows[0].p3, examined: rows[0].examined },
     { lens: 'codex', p1: 0, p2: 1, p3: 0, examined: 1 });
+  assert.equal(rows[0].wall_ms, 25);
 });
 
-test('lens dirty-tree guard fails after preserving the output and names changed paths', () => {
-  const { deaths, outExists } = runLensWithFake({ dirty: true });
+test('lens dirty-tree guard detects a new path on an already-dirty tree and records it', () => {
+  const { deaths, outExists, rows } = runLensWithFake({ beforeStatus: ' M existing.ts\n', afterStatus: ' M existing.ts\n?? reviewer-created.ts\n' });
   assert.equal(deaths[0]?.code, 4);
-  assert.match(deaths[0]?.message ?? '', /changed\.ts/);
+  assert.match(deaths[0]?.message ?? '', /reviewer-created\.ts/);
   assert.equal(outExists, true);
+  assert.deepEqual(rows.map((row) => row.dirty), [true]);
 });
 
 test('post combines lens findings, tags comment bodies, counts each lens, and guards their path union', () => {
@@ -943,6 +999,34 @@ test('post combines lens findings, tags comment bodies, counts each lens, and gu
   }
 });
 
+test('post accepts two complete handbacks whose coverage paths use different separators', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-post-normalized-union-'));
+  const codex = join(dir, 'codex.json');
+  const opus = join(dir, 'opus.json');
+  const slash = String.fromCharCode(92);
+  let posted = false;
+  try {
+    writeFileSync(codex, JSON.stringify({ ...VALID, lens: 'codex', coverage: 'examined 2 of 2 changed files', examined_paths: ['src/a.ts', 'src/b.ts'] }));
+    writeFileSync(opus, JSON.stringify({ ...VALID, lens: 'opus', coverage: 'examined 2 of 2 changed files', examined_paths: [`src${slash}a.ts`, `src${slash}b.ts`] }));
+    cmdPost(
+      { pr: '42', repo: 'owner/repo', findings: [codex, opus] },
+      {
+        runGh: (args) => {
+          if (args[0] === 'pr') return DIFF;
+          if (args[0] === 'api' && args[1] === '--paginate') return 'src/a.ts\nsrc/b.ts\n';
+          if (args.includes('POST')) { posted = true; return JSON.stringify({ html_url: 'https://example.test/review' }); }
+          throw new Error('unexpected gh call');
+        },
+        die: (code, message) => { throw Object.assign(new Error(message), { code }); },
+        log: () => {},
+      },
+    );
+    assert.equal(posted, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('post refuses a partial individual lens even when another lens covers the union', () => {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-post-partial-lens-'));
   const complete = join(dir, 'complete.json');
@@ -953,9 +1037,16 @@ test('post refuses a partial individual lens even when another lens covers the u
     const runGh = (args) => {
       if (args[0] === 'pr') return DIFF;
       if (args[0] === 'api' && args[1] === '--paginate') return 'src/a.ts\nsrc/b.ts\n';
-      throw new Error('a partial lens must stop before POST');
+      throw new Error('unexpected gh call');
     };
-    assert.throws(() => cmdPost({ pr: '42', repo: 'owner/repo', findings: [complete, partial] }, { runGh, die: (code, message) => { throw Object.assign(new Error(message), { code }); }, log: () => {} }), /partial|findings file/);
+    assert.throws(
+      () => cmdPost({ pr: '42', repo: 'owner/repo', findings: [complete, partial] }, { runGh, die: (code, message) => { throw Object.assign(new Error(message), { code }); }, log: () => {} }),
+      (err) => {
+        assert.equal(err.code, 5);
+        assert.match(err.message, /findings file .*reviewer examined 1 of 2 changed files — the review is partial/);
+        return true;
+      },
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -992,7 +1083,7 @@ test('schema permits optional lens metadata but preserves additionalProperties f
 // Exit codes — the distinction the whole loop rests on
 // ---------------------------------------------------------------------------
 
-test('gh() never spawns through a shell — a shell concatenates argv instead of escaping it', () => {
+test('process launches never opt into shell parsing', () => {
   // Pinning the exact regression this file was born from: with `shell: true`,
   // Node joins the argv into one command string, so the multi-line GraphQL query
   // in `threads` arrived at gh as fragments and it reported "A query attribute
@@ -1000,8 +1091,14 @@ test('gh() never spawns through a shell — a shell concatenates argv instead of
   // so no shell is needed. Source-level assertion — the behavioral proof is that
   // `threads` returns real data, which needs a live PR.
   const src = readFileSync(SCRIPT, 'utf8');
-  const body = src.slice(src.indexOf('export function gh('), src.indexOf('function ghOrDie('));
-  assert.doesNotMatch(body, /shell\s*:/, 'gh() must not pass a shell option to execFileSync');
+  for (const [name, start, end] of [
+    ['gh()', 'export function gh(', 'function ghOrDie('],
+    ['defaultRun()', 'function defaultRun(', 'export function defaultCodexExe('],
+    ['defaultCodexExe()', 'export function defaultCodexExe(', 'function findWorkspaceRoot('],
+  ]) {
+    const body = src.slice(src.indexOf(start), src.indexOf(end));
+    assert.doesNotMatch(body, /shell\s*:/, `${name} must not pass a shell option to execFileSync`);
+  }
   assert.equal(typeof gh, 'function');
 });
 

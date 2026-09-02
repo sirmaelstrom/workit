@@ -28,7 +28,7 @@ failure this tier exists to prevent.
 
 ```
 1. target   →  2. elicit  →  3. post   →  4. adjudicate
-   PR + diff    codex exec    the script   confirm / refute / fix / reply
+   PR + diff    lens verb     the script   confirm / refute / fix / reply
 ```
 
 Steps 2 and 3 are mechanical — run them as written. Step 4 is the part that
@@ -60,10 +60,17 @@ and rejects prose or incomplete handbacks.
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens \
-  --pr <n> --repo <owner/name> --lens codex \
+  --pr <n> --repo <owner/name> --lens codex|opus \
   --cwd "<ABSOLUTE REPO OR WORKTREE PATH>" \
-  --out "$REVIEW_DIR/findings.json"
+  --out "$REVIEW_DIR/findings.json" \
+  [--reasoning low|medium|high] [--measure-log <path>] [--dry-run]
 ```
+
+Choose `--lens` with the Reviewer ≠ author rule below. `--reasoning` defaults
+to `high` for codex and `low` for opus; `--measure-log` overrides the per-lens
+JSONL destination; `--dry-run` prints the resolved argv and prompt path without
+running a reviewer. Use `--prompt-out <path>` when you need to retain that exact
+grounded prompt for inspection.
 
 ### Reviewer ≠ author
 
@@ -84,7 +91,7 @@ defect.
 
 Non-negotiable flags, each for a measured reason:
 
-- **`--model gpt-5.6-terra` at high effort.** A review is a verdict about
+- **Codex `--model gpt-5.6-terra` at high effort.** A review is a verdict about
   correctness, and Luna returns confident wrong PASSes on those. See
   `codex-delegate`'s Terra-vs-Luna threshold.
 - **`--sandbox danger-full-access`.** `--sandbox read-only` is broken on this
@@ -97,8 +104,9 @@ Non-negotiable flags, each for a measured reason:
   review`: it takes no sandbox flag, so it hits the read-only bug on this box,
   and its output is unstructured prose.
 
-The verb checks `git -C "<ABSOLUTE REPO OR WORKTREE PATH>" status --short`
-before and after the reviewer and fails if a clean worktree becomes dirty.
+The verb captures `git -C "<ABSOLUTE REPO OR WORKTREE PATH>" status --short
+--porcelain` before and after the reviewer and fails on every status line added
+by the reviewer, even when the worktree was already dirty before it ran.
 
 ### Shadow arm (measurement, opt-in)
 
@@ -116,12 +124,13 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post \
 
 The script does the checking you would otherwise have to remember:
 
-- **Blocking coverage set check** — compares normalized `examined_paths` against
-  the PR API's authoritative file list. Missing or extra paths exit nonzero before
-  posting; `--force-post` is the explicit escape hatch and stamps the mismatch in
-  the review body. A parseable `examined N of M` contradiction also fails; an
-  absent or unparsable count remains secondary evidence. This detects stale or
-  missing path sets; it does not prove that examination happened.
+- **Blocking per-handback coverage check** — compares each findings document's
+  normalized `examined_paths` against the PR API's authoritative file list.
+  Missing or extra paths exit nonzero before posting; `--force-post` is the
+  explicit escape hatch and stamps the mismatch in the review body. A parseable
+  `examined N of M` contradiction also fails; an absent or unparsable count
+  remains secondary evidence. This detects stale or missing path sets; it does
+  not prove that examination happened.
 - **Anchorability** — a finding whose line is in the diff becomes a real
   line-anchored comment; one whose line is not becomes a body entry. A finding on
   a file with no commentable line splits into two buckets with different wording,
