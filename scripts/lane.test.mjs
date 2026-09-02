@@ -1574,6 +1574,63 @@ test('A3-7 / R3-U1: --lane is intersected with the sidecar, not passed through',
   assert.equal(g.calls[0].args[g.calls[0].args.indexOf('-Lane') + 1], 'workit-wt-alpha');
 });
 
+test('A4-1: the sidecar check covers the herdr root too, not just the workspace root', async (t) => {
+  // A3-7 never set USERPROFILE, so it only ever exercised the checked branch.
+  // With only the herdr root present — the common shape on this box, since
+  // WORKIT_WORKSPACE_ROOT is usually unset — `--lane` reached the delegate
+  // unchecked, and `--force` is allowed on a lane root.
+  const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'profile', '.herdr', 'worktrees', 'workit', 'mine')]);
+  const herdrOnly = await runLane(['sweep', '--lane', 'memory', '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: { USERPROFILE: join(f.dir, 'profile') },
+  });
+  assert.equal(herdrOnly.exit, 2, 'the herdr root is not a licence to delete a name we never created');
+  assert.match(herdrOnly.output.error, /creates|sidecar/i);
+  assert.equal(f.calls.length, 0);
+
+  // Both roots present: the refusal must come from the check, not from which
+  // root happened to be iterated first.
+  const g = fixture(t);
+  seedCreates(g, [join(g.dir, 'projects', 'workit-wt-alpha')]);
+  const bothRoots = await runLane(['sweep', '--lane', 'memory', '--force', '--log', g.log], {
+    exec: g.exec,
+    exists: fakeExists(),
+    env: { USERPROFILE: join(g.dir, 'profile'), WORKIT_WORKSPACE_ROOT: g.dir },
+  });
+  assert.equal(bothRoots.exit, 2);
+  assert.equal(g.calls.length, 0, 'no delegate call on either root');
+
+  // A lane the sidecar knows is still swept, on whichever root holds it.
+  const h = fixture(t);
+  seedCreates(h, [join(h.dir, 'profile', '.herdr', 'worktrees', 'workit', 'mine')]);
+  h.responses.push({ code: 0, stdout: 'removing mine ... done', stderr: '' });
+  const known = await runLane(['sweep', '--lane', 'mine', '--log', h.log], {
+    exec: h.exec, exists: fakeExists(), env: { USERPROFILE: join(h.dir, 'profile') },
+  });
+  assert.equal(known.exit, 0);
+  assert.equal(h.calls[0].args[h.calls[0].args.indexOf('-Lane') + 1], 'mine');
+});
+
+test('A4-2: --lane matching follows the filesystem\'s casing rules', async (t) => {
+  const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-Alpha')]);
+  f.responses.push({ code: 0, stdout: 'removing ... done', stderr: '' });
+  const windows = await runLane(['sweep', '--lane', 'workit-wt-alpha', '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: f.dir }, platform: 'win32',
+  });
+  assert.equal(windows.exit, 0, 'Windows paths are case-insensitive; a casing mismatch is not a different lane');
+  assert.equal(f.calls[0].args[f.calls[0].args.indexOf('-Lane') + 1], 'workit-wt-Alpha',
+    'the delegate gets the sidecar\'s spelling, not the operator\'s');
+
+  const g = fixture(t);
+  seedCreates(g, [join(g.dir, 'projects', 'workit-wt-Alpha')]);
+  const posix = await runLane(['sweep', '--lane', 'workit-wt-alpha', '--log', g.log], {
+    exec: g.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: g.dir }, platform: 'linux',
+  });
+  assert.equal(posix.exit, 2, 'elsewhere those are two different directories');
+  assert.equal(g.calls.length, 0);
+});
+
 test('A3-8 / R3-M1: --expect-pr refuses without a lane path, and reads gh failures precisely', async (t) => {
   const f = fixture(t);
   seedLane(f, { path: null });

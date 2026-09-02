@@ -1131,12 +1131,25 @@ function sweepRoots(opts, deps) {
 // The lanes this helper actually created under a given root, by directory name.
 // `creates[]` is the sidecar's record of every path it made — the only list of
 // directories the sweeper is entitled to delete.
-function knownLanesUnder(state, root) {
-  const prefix = `${resolve(root)}${sep}`.toLowerCase();
+// Returns the sidecar's own spelling of the requested lane, or null. Windows
+// paths are case-insensitive, so a casing mismatch there is the same directory,
+// not a different one — and the delegate is handed the recorded name either way.
+function matchKnownLane(known, lane, deps) {
+  if (deps.platform === 'win32') {
+    const wanted = String(lane).toLowerCase();
+    return known.find((name) => name.toLowerCase() === wanted) ?? null;
+  }
+  return known.includes(lane) ? lane : null;
+}
+
+function knownLanesUnder(state, root, deps) {
+  // Same casing rule as the lane name: fold on win32, respect it elsewhere.
+  const fold = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
+  const prefix = fold(`${resolve(root)}${sep}`);
   return [...new Set(
     (state.creates ?? [])
       .map((created) => created?.path)
-      .filter((path) => typeof path === 'string' && resolve(path).toLowerCase().startsWith(prefix))
+      .filter((path) => typeof path === 'string' && fold(resolve(path)).startsWith(prefix))
       .map((path) => basename(resolve(path))),
   )];
 }
@@ -1168,24 +1181,38 @@ async function sweepLanes(opts, deps, state) {
   // One plan entry per delegate invocation. A non-lane root is only ever swept
   // with an explicit -Lane naming a directory this helper created.
   const plan = [];
+  // `--lane` is intersected with the sidecar on EVERY root, never trusted on
+  // its own: an operator-typed string is not evidence that this helper created
+  // that directory, and the delegate deletes with -Recurse -Force. The herdr
+  // root is no exception — everything under it is a lane, but not necessarily
+  // OUR lane, and --force is permitted there.
+  let laneFound = false;
   for (const root of roots) {
+    const known = knownLanesUnder(state, root.path, deps);
+    const requested = opts.lane ? matchKnownLane(known, opts.lane, deps) : null;
+    // A named lane lives under exactly one root; the others simply have nothing
+    // to do, which is not a refusal.
+    if (opts.lane && !requested) continue;
+    laneFound = laneFound || Boolean(requested);
+
     if (root.laneRoot) {
-      plan.push({ root: root.path, kind: root.kind, flags: opts.lane ? ['-Lane', opts.lane, ...baseFlags] : [...baseFlags] });
+      plan.push({
+        root: root.path,
+        kind: root.kind,
+        ...(requested ? { lane: requested } : {}),
+        flags: requested ? ['-Lane', requested, ...baseFlags] : [...baseFlags],
+      });
       continue;
     }
-    // `--lane` is intersected with the sidecar, never trusted on its own: an
-    // operator-typed string is not evidence that this helper created that
-    // directory, and the delegate deletes with -Recurse -Force.
-    const known = knownLanesUnder(state, root.path);
-    if (opts.lane && !known.includes(opts.lane)) {
-      usage(`--lane ${opts.lane} is not a lane this helper created under ${root.path} (nothing in the sidecar's creates[] matches). Sweep it by hand if you mean it.`);
-    }
-    const lanes = opts.lane ? [opts.lane] : known;
+    const lanes = requested ? [requested] : known;
     if (lanes.length === 0) {
       plan.push({ root: root.path, kind: root.kind, skipped: 'no known lanes under this root' });
       continue;
     }
     for (const lane of lanes) plan.push({ root: root.path, kind: root.kind, lane, flags: ['-Lane', lane, ...baseFlags] });
+  }
+  if (opts.lane && !laneFound) {
+    usage(`--lane ${opts.lane} is not a lane this helper created under any swept root (nothing in the sidecar's creates[] matches). Sweep it by hand if you mean it.`);
   }
 
   const present = plan.filter((entry) => !entry.skipped && deps.exists(entry.root));

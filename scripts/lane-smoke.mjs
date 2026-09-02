@@ -5,6 +5,29 @@
  *
  * The decision logic lives in exported pure functions at the top so it can be
  * unit-tested from lane.test.mjs; importing this file runs nothing.
+ *
+ * ## Live evidence — 2026-09-01, at 349c11b, real herdr, claude opus @low
+ *
+ * Recorded here because the unit suite cannot stand in for it: every `blocked`
+ * in that suite is a hand-written herdr payload, which is an assertion about
+ * what herdr would say, not a measurement that it does.
+ *
+ *   PASS S5 PASSED: conductor focus restored after starting smoke-a-309521125
+ *   PASS stimulus confirmed on smoke-a-309521125: the prompt reached the agent
+ *   PASS S1 PASSED: the lane blocked and the approval dialog is on the pane
+ *   PASS S1 dialog: the pane tail carries approval text
+ *   PASS S1 evidence: the approved Write produced the marker file
+ *   PASS S5 PASSED: conductor focus restored after starting smoke-b-309521125
+ *   PASS stimulus confirmed on smoke-b-309521125: the prompt reached the agent
+ *   PASS S2 PASSED: the bypassPermissions lane settled done without blocking
+ *   PASS S8 PASSED: workit-wt-smoke-lane-block-309521125 is gone from disk and from git worktree list
+ *   PASS S8 PASSED: workit-wt-smoke-lane-bypass-309521125 is gone from disk and from git worktree list
+ *
+ * From the same run's JSONL, the two rulings that had only been reasoned about:
+ *   {"verb":"wait","lane":"smoke-a","state":"blocked","exit":3,"waitMs":3918}
+ *   {"verb":"resume","lane":"smoke-a","state":"done","exit":0,"waitMs":1885}
+ * `resume` had previously burned 120,133 ms and reported exit 4 on that path,
+ * before it was amended to name both settled states (C5).
  */
 
 import { existsSync, rmSync, writeFileSync } from 'node:fs';
