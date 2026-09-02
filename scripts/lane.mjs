@@ -1166,7 +1166,8 @@ function sweepRoots(opts, deps) {
 
 // The lanes this helper actually created under a given root, by directory name.
 // `creates[]` is the sidecar's record of every path it made — the only list of
-// directories the sweeper is entitled to delete.
+// directories the sweeper is entitled to delete. A lane record contributes its
+// agent name only when its path exactly matches one of those creates.
 // Returns the sidecar's own spelling of the requested lane, or null. Windows
 // paths are case-insensitive, so a casing mismatch there is the same directory,
 // not a different one — and the delegate is handed the recorded name either way.
@@ -1190,14 +1191,25 @@ function knownLanesUnder(state, root, deps) {
   for (const [agentName, lane] of Object.entries(state.lanes ?? {})) {
     if (typeof lane?.path !== 'string' || !fold(resolve(lane.path)).startsWith(prefix)) continue;
     const key = fold(resolve(lane.path));
-    if (!paths.has(key)) paths.set(key, { path: lane.path });
-    paths.get(key).agentName = agentName;
+    if (paths.has(key)) paths.get(key).agentName = agentName;
   }
   return [...paths.values()].map((created) => ({
     agentName: created.agentName ?? null,
     label: created.label ?? null,
+    path: resolve(created.path),
     basename: basename(resolve(created.path)),
   }));
+}
+
+function delegateRootForLane(lanePath, deps) {
+  const resolvedLane = resolve(lanePath);
+  const delegateRoot = dirname(dirname(resolvedLane));
+  const fold = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
+  const ancestor = `${resolve(delegateRoot)}${sep}`;
+  if (dirname(delegateRoot) === delegateRoot || !fold(resolvedLane).startsWith(fold(ancestor))) {
+    usage(`cannot derive a safe delegate root for lane ${resolvedLane}: ${delegateRoot} is not a non-root ancestor`);
+  }
+  return delegateRoot;
 }
 
 function sweepDelegate(opts, deps) {
@@ -1227,9 +1239,11 @@ async function sweepLanes(opts, deps, state) {
   // One plan entry per delegate invocation. A non-lane root is only ever swept
   // with an explicit -Lane naming a directory this helper created.
   const plan = [];
-  // `--lane` is intersected with the sidecar on EVERY root, never trusted on
-  // its own: an operator-typed string is not evidence that this helper created
-  // that directory, and the delegate deletes with -Recurse -Force. The herdr
+  // C6: `--lane` is intersected with the sidecar on EVERY root, never trusted
+  // on its own: an operator-typed string is not evidence that this helper
+  // created that directory, and the delegate deletes with -Recurse -Force. A
+  // `lanes[<name>].path` is admitted only when it exactly equals a
+  // `creates[].path`; creates[] remains the sole delete authority. The herdr
   // root is no exception — everything under it is a lane, but not necessarily
   // OUR lane, and --force is permitted there.
   let laneFound = false;
@@ -1242,10 +1256,12 @@ async function sweepLanes(opts, deps, state) {
     laneFound = laneFound || Boolean(requested);
 
     if (root.laneRoot) {
+      const record = requested ? known.find((entry) => entry.basename === requested) : null;
       plan.push({
         root: root.path,
         kind: root.kind,
         ...(requested ? { lane: requested } : {}),
+        ...(record ? { lanePath: record.path, delegateRoot: delegateRootForLane(record.path, deps) } : {}),
         flags: requested ? ['-Lane', requested, ...baseFlags] : [...baseFlags],
       });
       continue;
@@ -1255,7 +1271,11 @@ async function sweepLanes(opts, deps, state) {
       plan.push({ root: root.path, kind: root.kind, skipped: 'no known lanes under this root' });
       continue;
     }
-    for (const lane of lanes) plan.push({ root: root.path, kind: root.kind, lane, delegateRoot: dirname(root.path), flags: ['-Lane', lane, ...baseFlags] });
+    for (const lane of lanes) {
+      const record = known.find((entry) => entry.basename === lane);
+      const lanePath = record?.path ?? join(root.path, lane);
+      plan.push({ root: root.path, kind: root.kind, lane, lanePath, delegateRoot: delegateRootForLane(lanePath, deps), flags: ['-Lane', lane, ...baseFlags] });
+    }
   }
   if (opts.lane && !laneFound) {
     const known = roots.map((root) => ({ root: root.path, matches: knownLanesUnder(state, root.path, deps).map((entry) => ({
@@ -1264,8 +1284,8 @@ async function sweepLanes(opts, deps, state) {
     usage(`--lane ${opts.lane} is not a lane this helper created under any swept root; nothing in the sidecar creates[] matches. Known spellings by root: ${JSON.stringify(known)}. Sweep it by hand if you mean it.`);
   }
 
-  const present = plan.filter((entry) => !entry.skipped && deps.exists(entry.root));
-  const missing = plan.filter((entry) => !entry.skipped && !deps.exists(entry.root)).map((entry) => entry.root);
+  const present = plan.filter((entry) => !entry.skipped && deps.exists(entry.delegateRoot ?? entry.root));
+  const missing = plan.filter((entry) => !entry.skipped && !deps.exists(entry.delegateRoot ?? entry.root)).map((entry) => entry.delegateRoot ?? entry.root);
   if (present.length === 0) {
     // A sweep that visited nothing is not a sweep. Reporting `swept` here was
     // the checker-over-zero-input read: exit 0 with the delegate never invoked.
@@ -1293,7 +1313,7 @@ async function sweepLanes(opts, deps, state) {
         delegated: false,
         delegate,
         hint: 'set HERDR_LANES_SCRIPT, or --workspace-root / WORKIT_WORKSPACE_ROOT so infrastructure/herdr-lanes.ps1 resolves',
-        commands: present.map((entry) => `pwsh -NoProfile -File "${delegate}" -WorktreeRoot "${entry.root}"${entry.flags.length > 0 ? ` ${entry.flags.join(' ')}` : ''}`),
+        commands: present.map((entry) => `pwsh -NoProfile -File "${delegate}" -WorktreeRoot "${entry.delegateRoot ?? entry.root}"${entry.flags.length > 0 ? ` ${entry.flags.join(' ')}` : ''}`),
       },
       row: { lane: null, state: 'delegate-missing' },
     };

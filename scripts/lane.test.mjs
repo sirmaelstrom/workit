@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 
 import {
   EXIT_CODES, PLAN_REFUSAL_PATTERNS, paneAtPrompt, panePromptSignature, runLane, scrapePlanMeter,
@@ -525,6 +525,19 @@ test('Q-3: lane stop fails when agent list still contains the lane', async (t) =
   assert.match(result.output.error, /still listed|agent list/i);
 });
 
+test('Q-9: lane stop uses the measured claude /exit sequence', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: SHELL_READ.stdout, stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+  );
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.exit, 0);
+  assert.deepEqual(f.calls[0].args, ['agent', 'prompt', 'lane-a', '/exit']);
+});
+
 test('WP-3: the refusal pattern list carries the captured live refusal', () => {
   // Captured 2026-09-01 22:12Z, lane O. Nothing here is invented.
   const captured = "■ You've hit your usage limit. Try again at 11:42 PM.";
@@ -566,7 +579,9 @@ test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', 
     assert.equal(call.args.includes('-Force'), false, 'never force by default — HOLD verdicts are the point');
   }
   const roots = f.calls.map((call) => call.args[call.args.indexOf('-WorktreeRoot') + 1]);
-  assert.deepEqual(roots, [legacyRoot, dirname(f.dir)]);
+  assert.deepEqual(roots, [legacyRoot, f.dir]);
+  const recorded = join(f.dir, 'projects', 'workit-wt-lane');
+  assert.deepEqual(relative(roots[1], recorded).split(/[\\/]/), ['projects', 'workit-wt-lane']);
   assert.equal(result.output.roots.length, 2);
   assert.match(result.output.roots[1].output, /workit-wt-lane/);
 });
@@ -1672,6 +1687,52 @@ test('Q-5: unknown sweep lane refusal lists known agent names, labels, and basen
   assert.match(result.output.error, /lane-a/);
   assert.match(result.output.error, /label a/);
   assert.match(result.output.error, /workit-wt-lane-a/);
+});
+
+test('Q-6: every C13 root spelling reaches the recorded lane in exactly two delegate levels', async (t) => {
+  for (const root of [null, 'projects', 'workspace']) {
+    const f = fixture(t);
+    const recorded = join(f.dir, 'projects', 'workit-wt-lane-a');
+    seedCreates(f, [recorded]);
+    const argv = root === null ? ['sweep', '--log', f.log]
+      : ['sweep', '--root', root === 'projects' ? join(f.dir, 'projects') : f.dir, '--log', f.log];
+    f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+    const result = await runLane(argv, { exec: f.exec, exists: fakeExists(), env: root === null ? { WORKIT_WORKSPACE_ROOT: f.dir } : {} });
+    assert.equal(result.exit, 0);
+    const call = f.calls.find((entry) => entry.program === 'pwsh');
+    const delegateRoot = call.args[call.args.indexOf('-WorktreeRoot') + 1];
+    assert.deepEqual(relative(delegateRoot, recorded).split(/[\\/]/), ['projects', 'workit-wt-lane-a']);
+  }
+  const f = fixture(t);
+  const recorded = join('C:\\', 'workit-wt-lane-a');
+  seedCreates(f, [recorded]);
+  const refused = await runLane(['sweep', '--lane', 'workit-wt-lane-a', '--root', 'C:\\', '--log', f.log], { exec: f.exec, exists: fakeExists(), env: {}, platform: 'win32' });
+  assert.equal(refused.exit, 2);
+  assert.match(refused.output.error, /delegate root|root/i);
+});
+
+test('Q-7: a lanes entry without a matching create is not sweepable', async (t) => {
+  const f = fixture(t);
+  const lanePath = join(f.dir, 'projects', 'workit-wt-uncreated');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({ lanes: { uncreated: { path: lanePath } }, creates: [] }), 'utf8');
+  const result = await runLane(['sweep', '--lane', 'uncreated', '--root', join(f.dir, 'projects'), '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: {},
+  });
+  assert.equal(result.exit, 2);
+  assert.match(result.output.error, /creates|sidecar/i);
+  assert.equal(f.calls.length, 0);
+});
+
+test('Q-8: a missing delegate command names the same WorktreeRoot as execution would use', async (t) => {
+  const f = fixture(t);
+  const lanePath = join(f.dir, 'projects', 'workit-wt-lane-a');
+  seedCreates(f, [lanePath]);
+  const result = await runLane(['sweep', '--root', join(f.dir, 'projects'), '--log', f.log], {
+    exec: f.exec, exists: fakeExists((path) => !path.endsWith('herdr-lanes.ps1')), env: {},
+  });
+  assert.equal(result.exit, 1);
+  const commandRoot = result.output.commands[0].match(/-WorktreeRoot "([^"]+)"/)[1];
+  assert.equal(commandRoot, dirname(dirname(lanePath)));
 });
 
 test('A4-1: the sidecar check covers the herdr root too, not just the workspace root', async (t) => {
