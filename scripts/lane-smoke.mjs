@@ -38,13 +38,40 @@ export const SMOKE_PROMPT = [
 // a lane that finished without ever blocking are both failures, and they are
 // different failures — so they say different things. S1 never passes on a
 // timeout: that is the hole the first live run fell through.
-export function s1Verdict(exit, state) {
-  if (exit === 3) return { ok: true, message: 'S1 PASSED: the lane blocked and the dialog was printed' };
+export function s1Verdict(exit, state, dialog = '') {
+  if (exit === 3) {
+    // S1's own falsifier says "exits 3 on a lane that is not actually blocked"
+    // is a failure, and names `agent read` as the check. An exit code alone is
+    // the helper agreeing with itself.
+    return String(dialog).trim()
+      ? { ok: true, message: 'S1 PASSED: the lane blocked and the approval dialog is on the pane' }
+      : { ok: false, message: 'S1 FAILED: exit 3 with no approval dialog on the pane — the block is unverified' };
+  }
   if (['idle', 'done'].includes(state)) {
     return { ok: false, message: `S1 FAILED: lane settled ${state} without a block` };
   }
   if (exit === 4) return { ok: false, message: 'S1 FAILED: the wait timed out without observing a block' };
   return { ok: false, message: `S1 FAILED: unexpected wait exit ${exit}${state ? ` (state ${state})` : ''}` };
+}
+
+// Verify the instrument fired before trusting either arm: a lane that never
+// received the prompt proves nothing about blocking, and its silence looks
+// exactly like a negative result.
+const STIMULUS = [
+  /execute it exactly\./i,
+  /Write\(/,
+  new RegExp(MARKER.replace('.', '\\.')),
+];
+export function stimulusFired(paneText) {
+  const text = String(paneText ?? '');
+  return STIMULUS.some((pattern) => pattern.test(text));
+}
+
+// The approval UI's wording is not ours to pin exactly, so match the shapes it
+// has been observed to use and let the caller print the tail on a miss.
+const APPROVAL = /do you want|would you like|allow .* to|\b1\.\s*Yes|❯\s*1\./i;
+export function looksLikeApproval(paneText) {
+  return APPROVAL.test(String(paneText ?? ''));
 }
 
 // S2 is S1's negative control: the same prompt under bypassPermissions must
@@ -167,6 +194,17 @@ async function main(argv) {
       ? { ok: true, message: `S5 PASSED: conductor focus restored after starting ${name}` }
       : { ok: false, message: `S5 FAILED: focus was ${started.output.focus} after starting ${name}` });
     await lane(['prompt', name, '--file', prompt], [0]);
+    // U1: verify the stimulus crossed the boundary before trusting either arm.
+    const deadline = Date.now() + 60_000;
+    let fired = false;
+    while (Date.now() < deadline && !fired) {
+      fired = stimulusFired(paneLines(name, 40));
+      if (!fired) await new Promise((r) => setTimeout(r, 1000));
+    }
+    record(fired
+      ? { ok: true, message: `stimulus confirmed on ${name}: the prompt reached the agent` }
+      : { ok: false, message: `STIMULUS FAILED on ${name}: the prompt never appeared on the pane, so neither arm is informative` });
+    if (!fired) console.log(`--- last 20 pane lines for ${name} ---\n${paneLines(name)}`);
     return entry;
   }
 
@@ -178,7 +216,13 @@ async function main(argv) {
     const acceptName = `smoke-a-${stamp}`;
     const accepted = await openLane(acceptName, `smoke/lane-block-${stamp}`, 'default');
     const blocked = await lane(['wait', acceptName, ...untils, '--timeout', '120000']);
-    const s1 = record(s1Verdict(blocked.exit, blocked.output.state));
+    const dialog = blocked.output.dialog ?? '';
+    const s1 = record(s1Verdict(blocked.exit, blocked.output.state, dialog));
+    if (s1.ok) {
+      record(looksLikeApproval(dialog)
+        ? { ok: true, message: 'S1 dialog: the pane tail carries approval text' }
+        : { ok: false, message: 'S1 dialog FAILED: exit 3, but the pane tail carries no approval prompt' });
+    }
     if (!s1.ok) console.log(`--- last 20 pane lines for ${acceptName} ---\n${paneLines(acceptName)}`);
 
     if (s1.ok) {

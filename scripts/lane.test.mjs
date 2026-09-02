@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 import { EXIT_CODES, PLAN_REFUSAL_PATTERNS, paneAtPrompt, runLane, scrapePlanMeter } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
-import { listsWorktree, s1Verdict, s2Verdict, teardownSteps } from './lane-smoke.mjs';
+import { listsWorktree, s1Verdict, s2Verdict, stimulusFired, teardownSteps } from './lane-smoke.mjs';
 
 // Every fixture path is built from tmpdir with path.join, and every
 // platform-dependent branch is chosen through deps — the suite gates merge from
@@ -90,7 +90,9 @@ test('WP-1: read-only codex sandbox is refused before herdr is invoked', async (
   const f = fixture(t);
   const result = await runLane(
     ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'read-only', '--log', f.log],
-    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+    // platform injected: codex lanes are Windows-only (C12/U12), and without
+    // this the Linux runner would exercise that refusal instead of this one.
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32' },
   );
   assert.equal(result.exit, 2);
   assert.match(result.output.error, /read-only/);
@@ -454,13 +456,16 @@ test('WP-3: the refusal pattern list carries the captured live refusal', () => {
 test('WP-3: exported lifecycle exit codes match the binding table', () => {
   // 1 is the herdr/infra failure code. Without it every hard failure reported as
   // 4 and a dead daemon was indistinguishable from a retryable wait timeout.
-  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
 });
 
 test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', async (t) => {
   const f = fixture(t);
   const profile = join(f.dir, 'profile');
   const legacyRoot = join(profile, '.herdr', 'worktrees');
+  // The workspace root is not a lane root, so its call is scoped to a lane the
+  // sidecar records as ours.
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-lane')]);
   f.responses.push(
     { code: 0, stdout: 'removing legacy lane ... done', stderr: '' },
     { code: 0, stdout: 'removing workit-wt-lane ... done', stderr: '' },
@@ -488,10 +493,11 @@ test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', 
 
 test('WP-3 / C13: sweep accepts explicit roots and refuses when no location is declared', async (t) => {
   const f = fixture(t);
+  const laneRoot = join(f.dir, '.herdr', 'worktrees');
   f.responses.push({ code: 0, stdout: 'nothing to remove', stderr: '' });
-  const explicit = await runLane(['sweep', '--root', f.dir, '--log', f.log], { exec: f.exec, env: {}, exists: fakeExists() });
+  const explicit = await runLane(['sweep', '--root', laneRoot, '--log', f.log], { exec: f.exec, env: {}, exists: fakeExists() });
   assert.equal(explicit.exit, 0);
-  assert.deepEqual(f.calls.map((call) => call.args[call.args.indexOf('-WorktreeRoot') + 1]), [f.dir]);
+  assert.deepEqual(f.calls.map((call) => call.args[call.args.indexOf('-WorktreeRoot') + 1]), [laneRoot]);
 
   const undeclared = await runLane(['sweep', '--log', f.log], { exec: f.exec, env: {} });
   assert.equal(undeclared.exit, 2);
@@ -500,7 +506,8 @@ test('WP-3 / C13: sweep accepts explicit roots and refuses when no location is d
 
 test('WP-3: sweep prints the canonical operator commands when its delegate is absent', async (t) => {
   const f = fixture(t);
-  const result = await runLane(['sweep', '--root', f.dir, '--log', f.log], {
+  const laneRoot = join(f.dir, '.herdr', 'worktrees');
+  const result = await runLane(['sweep', '--root', laneRoot, '--log', f.log], {
     exec: f.exec,
     exists: fakeExists((path) => !path.endsWith('herdr-lanes.ps1')),
   });
@@ -508,7 +515,7 @@ test('WP-3: sweep prints the canonical operator commands when its delegate is ab
   assert.equal(f.calls.length, 0);
   assert.match(result.output.commands[0], /^pwsh -NoProfile -File ".*herdr-lanes\.ps1"/);
   assert.match(result.output.commands[0], /-Clean$/);
-  assert.ok(result.output.commands[0].includes(`-WorktreeRoot "${f.dir}"`));
+  assert.ok(result.output.commands[0].includes(`-WorktreeRoot "${laneRoot}"`));
 });
 
 test('WP-4: burn-down and codex-delegate each point at the helper and a spec that resolves in-repo', () => {
@@ -605,6 +612,7 @@ test('AM4: a herdr failure exits 1 and never masquerades as a wait timeout', asy
 test('AM5 / U3: sweep visits every root even when one fails, and skips roots that are absent', async (t) => {
   const f = fixture(t);
   const profile = join(f.dir, 'profile');
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-lane')]);
   f.responses.push(
     { code: 1, stdout: '', stderr: 'legacy root exploded' },
     { code: 0, stdout: 'removing workit-wt-lane ... done', stderr: '' },
@@ -619,6 +627,7 @@ test('AM5 / U3: sweep visits every root even when one fails, and skips roots tha
   assert.deepEqual(result.output.roots.map((entry) => entry.ok), [false, true]);
 
   const g = fixture(t);
+  seedCreates(g, [join(g.dir, 'projects', 'workit-wt-lane')]);
   g.responses.push({ code: 0, stdout: 'done', stderr: '' });
   const skipped = await runLane(['sweep', '--log', g.log], {
     exec: g.exec,
@@ -631,6 +640,7 @@ test('AM5 / U3: sweep visits every root even when one fails, and skips roots tha
 
 test('AM5b: sweep exits 1 only when every root failed', async (t) => {
   const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-lane')]);
   f.responses.push(
     { code: 1, stdout: '', stderr: 'boom' },
     { code: 1, stdout: '', stderr: 'boom' },
@@ -759,23 +769,20 @@ test('AM9: the codex readiness poll retries a transient pane read instead of abo
 test('AM10: the PATH prepend is a single-quoted PowerShell literal', async (t) => {
   const f = fixture(t);
   f.responses.push(
-    { code: 0, stdout: '/usr/lib/node_modules', stderr: '' },
+    { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
-    { code: 0, stdout: "/ven'dor/bin/codex.exe\nPS X:\\fixture\\lane>", stderr: '' },
+    { code: 0, stdout: "X:\\fixture\\ven'dor\\bin\\codex.exe\nPS X:\\fixture\\lane>", stderr: '' },
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-c"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
   );
   await runLane(
     ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', f.log],
-    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'linux', findCodexBin: () => "/ven'dor/bin", sleep: async () => {} },
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => "X:\\fixture\\ven'dor\\bin", sleep: async () => {} },
   );
-  // platform injection also proves the POSIX branch calls npm directly.
-  assert.equal(f.calls[0].program, 'npm');
-  assert.deepEqual(f.calls[0].args, ['root', '-g']);
   const paneRun = f.calls.find((call) => call.args[0] === 'pane' && call.args[1] === 'run');
   assert.match(paneRun.args[3], /^\$env:PATH = '/, 'a single-quoted literal, so $ and ` cannot interpolate');
-  assert.ok(paneRun.args[3].includes("/ven''dor/bin"), "an embedded quote is doubled, not left to terminate the literal");
+  assert.ok(paneRun.args[3].includes("ven''dor"), "an embedded quote is doubled, not left to terminate the literal");
 });
 
 test('AM11: a parse-time refusal still appends its instrumentation row', async (t) => {
@@ -913,8 +920,8 @@ test('SMOKE2: default permission mode is opt-in and announced; dontAsk stays ref
 });
 
 test('SMOKE3: the harness never passes S1 on a timeout or a lane that finished', () => {
-  assert.equal(s1Verdict(3, 'blocked').ok, true);
-  const settled = s1Verdict(0, 'done');
+  assert.equal(s1Verdict(3, 'blocked', 'Do you want to create .lane-smoke-marker?').ok, true);
+  const settled = s1Verdict(0, 'done', '');
   assert.equal(settled.ok, false);
   assert.match(settled.message, /S1 FAILED: lane settled done without a block/);
   assert.equal(s1Verdict(0, 'idle').ok, false);
@@ -960,7 +967,7 @@ test('SCRUB: the sweep delegate is resolved, never a hardcoded machine path', as
   const f = fixture(t);
   const declared = join(f.dir, 'delegate', 'herdr-lanes.ps1');
   f.responses.push({ code: 0, stdout: 'done', stderr: '' });
-  const fromEnv = await runLane(['sweep', '--root', f.dir, '--log', f.log], {
+  const fromEnv = await runLane(['sweep', '--root', join(f.dir, '.herdr', 'worktrees'), '--log', f.log], {
     exec: f.exec,
     exists: fakeExists(),
     env: { HERDR_LANES_SCRIPT: declared },
@@ -970,7 +977,7 @@ test('SCRUB: the sweep delegate is resolved, never a hardcoded machine path', as
 
   const g = fixture(t);
   g.responses.push({ code: 0, stdout: 'done', stderr: '' });
-  await runLane(['sweep', '--root', g.dir, '--log', g.log], {
+  await runLane(['sweep', '--root', join(g.dir, '.herdr', 'worktrees'), '--log', g.log], {
     exec: g.exec,
     exists: fakeExists(),
     env: { WORKIT_WORKSPACE_ROOT: g.dir },
@@ -978,7 +985,7 @@ test('SCRUB: the sweep delegate is resolved, never a hardcoded machine path', as
   assert.equal(g.calls[0].args[2], join(g.dir, 'infrastructure', 'herdr-lanes.ps1'), 'else it derives from the workspace root');
 
   const h = fixture(t);
-  const missing = await runLane(['sweep', '--root', h.dir, '--log', h.log], {
+  const missing = await runLane(['sweep', '--root', join(h.dir, '.herdr', 'worktrees'), '--log', h.log], {
     exec: h.exec,
     exists: fakeExists((path) => !path.endsWith('herdr-lanes.ps1')),
     env: {},
@@ -1043,4 +1050,309 @@ test('AM16 / C13: create refuses a lane that would land outside the projects tre
   );
   assert.equal(wrongWorkspace.exit, 2, 'the declared workspace root binds the lane location');
   assert.match(wrongWorkspace.output.error, /projects/);
+});
+
+// ---------------------------------------------------------------------------
+// Amendment 2 — council round 2. Each fix ships with its negative control:
+// round 1 closed reproduced instances, and the classes came back.
+// ---------------------------------------------------------------------------
+
+function sweepEnv(f) {
+  return { USERPROFILE: join(f.dir, 'profile'), WORKIT_WORKSPACE_ROOT: f.dir };
+}
+
+function seedCreates(f, paths) {
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    lanes: {},
+    creates: paths.map((path, index) => ({
+      path, branch: `smoke/lane-${index}`, base: 'main', label: `lane-${index}`,
+      workspaceId: `w${index}`, paneId: `w${index}:p1`,
+    })),
+  }), 'utf8');
+}
+
+test('A2-1 / U2: no delegate call against a non-lane root may go unscoped, and --force is refused there', async (t) => {
+  const f = fixture(t);
+  const laneDir = join(f.dir, 'projects', 'workit-wt-alpha');
+  seedCreates(f, [laneDir]);
+  f.responses.push({ code: 0, stdout: 'removing workit-wt-alpha ... done', stderr: '' });
+  const swept = await runLane(['sweep', '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: sweepEnv(f),
+  });
+  assert.equal(swept.exit, 0);
+
+  // The delegate deletes with Remove-Item -Recurse -Force. A workspace root is
+  // NOT a lane root — it holds data/ and projects/ — so every call against one
+  // must carry a -Lane filter naming a lane this helper actually created.
+  for (const call of f.calls) {
+    const root = call.args[call.args.indexOf('-WorktreeRoot') + 1];
+    if (root === f.dir) {
+      assert.ok(call.args.includes('-Lane'), `unscoped delegate call against the workspace root: ${call.args.join(' ')}`);
+      assert.equal(call.args[call.args.indexOf('-Lane') + 1], 'workit-wt-alpha');
+    }
+  }
+
+  const g = fixture(t);
+  seedCreates(g, [join(g.dir, 'projects', 'workit-wt-alpha')]);
+  const forced = await runLane(['sweep', '--force', '--log', g.log], {
+    exec: g.exec, exists: fakeExists(), env: sweepEnv(g),
+  });
+  assert.equal(forced.exit, 2, '--force against a workspace root is refused outright');
+  assert.match(forced.output.error, /--force/);
+  assert.equal(g.calls.length, 0, 'nothing is delegated when --force is refused');
+});
+
+test('A2-1b / U2: a root with no known lanes is reported, never swept wholesale', async (t) => {
+  const f = fixture(t);
+  seedCreates(f, []);
+  const result = await runLane(['sweep', '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: f.dir },
+  });
+  assert.equal(f.calls.length, 0, 'an unscoped workspace-root sweep is exactly the 77-directory blast radius');
+  assert.equal(result.output.roots[0].skipped, 'no known lanes under this root');
+});
+
+test('A2-1c / U2: the herdr worktree root IS a lane root and sweeps unfiltered', async (t) => {
+  const f = fixture(t);
+  const legacy = join(f.dir, 'profile', '.herdr', 'worktrees');
+  seedCreates(f, []);
+  f.responses.push({ code: 0, stdout: 'No lanes.', stderr: '' });
+  await runLane(['sweep', '--log', f.log], {
+    exec: f.exec, exists: fakeExists((path) => !path.includes(`${sep}data${sep}`)), env: { USERPROFILE: join(f.dir, 'profile') },
+  });
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].args[f.calls[0].args.indexOf('-WorktreeRoot') + 1], legacy);
+  assert.equal(f.calls[0].args.includes('-Lane'), false, 'every directory under the herdr root is a lane by construction');
+});
+
+test('A2-2 / C1: a git failure in --expect-commit is exit 1, never a timeout', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push({ code: 128, stdout: '', stderr: 'fatal: bad revision main..feat/lane-a' });
+  const result = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 1, 'a conductor that trusts the table re-polls a 4 forever');
+  assert.match(result.output.error, /bad revision/);
+});
+
+test('A2-2b / U13: --expect-pr separates "no such PR" from a gh failure', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push({ code: 1, stdout: '', stderr: 'no pull requests found for branch "feat/lane-a"' });
+  const missing = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  assert.equal(missing.exit, 5, 'a missing PR is a failed expectation');
+  assert.match(missing.output.failedExpectation, /does not exist/);
+
+  f.responses.push({ code: 1, stdout: '', stderr: 'gh: To get started with GitHub CLI, please run: gh auth login' });
+  const broken = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  assert.equal(broken.exit, 1, 'expired auth is infrastructure, not a verdict about the work');
+  assert.match(broken.output.error, /auth/i);
+});
+
+test('A2-2c / S4: a wedged pane is an infra failure (1), not a wait deadline (4)', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'prompt.md');
+  writeFileSync(prompt, 'task', 'utf8');
+  seedLane(f, { promptFile: prompt });
+  let clock = 0;
+  f.responses.push(
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    () => { clock += 40_000; return { code: 0, stdout: 'codex is still running', stderr: '' }; },
+  );
+  const result = await runLane(
+    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, now: () => clock, sleep: async () => {} },
+  );
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /shell prompt/);
+});
+
+test('A2-3 / C2: a sweep that found no root to visit is not a sweep', async (t) => {
+  const f = fixture(t);
+  const result = await runLane(['sweep', '--log', f.log], {
+    exec: f.exec,
+    // Both defaults declared, neither present: a typo'd WORKIT_WORKSPACE_ROOT.
+    exists: fakeExists((path) => !path.includes('nowhere')),
+    env: { USERPROFILE: join('nowhere', 'profile'), WORKIT_WORKSPACE_ROOT: join('nowhere', 'workspace') },
+  });
+  assert.equal(result.exit, 1, 'zero roots visited must not report success');
+  assert.equal(result.output.state ?? result.row.state, 'no-roots-present');
+  assert.equal(f.calls.length, 0);
+  assert.match(JSON.stringify(result.output.missingRoots), /nowhere/, 'name the roots it looked for');
+});
+
+test('A2-4 / U3: a blocked lane is reported even when the caller asked for --until done', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"state":"blocked"}}', stderr: '' },
+    { code: 0, stdout: 'Do you want to create .lane-smoke-marker?', stderr: '' },
+  );
+  const result = await runLane(['wait', 'lane-a', '--until', 'done', '--timeout', '5000', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 3, 'the helper must not be blinder than the tool it wraps');
+  assert.ok(f.calls[0].args.includes('blocked'), 'blocked is always added to the caller\'s target states');
+  assert.ok(f.calls[0].args.includes('done'));
+});
+
+test('A2-5 / U5: a forwarded --model cannot override the enforced one', async (t) => {
+  const f = fixture(t);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const claude = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high',
+      '--log', f.log, '--', '--model', 'sonnet-cheap'],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+  );
+  assert.equal(claude.exit, 0);
+  const emitted = f.calls[0].args;
+  assert.equal(emitted.filter((arg) => arg === '--model').length, 1, 'C8 cost $5.24 in 9 minutes; last-flag-wins reopens it');
+  assert.equal(emitted[emitted.indexOf('--model') + 1], 'opus');
+  assert.equal(emitted.includes('sonnet-cheap'), false);
+
+  const g = fixture(t);
+  g.responses.push(
+    { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: 'X:\\fixture\\vendor\\bin\\codex.exe\nPS X:\\fixture\\lane>', stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-c"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const codex = await runLane(
+    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium',
+      '--sandbox', 'workspace-write', '--log', g.log, '--', '--model', 'gpt-cheap', '-c', 'model_reasoning_effort=xhigh'],
+    { exec: g.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {} },
+  );
+  assert.equal(codex.exit, 0);
+  const codexArgs = g.calls.find((call) => call.args[1] === 'start').args;
+  assert.equal(codexArgs.filter((arg) => arg === '--model').length, 1);
+  assert.equal(codexArgs.filter((arg) => String(arg).startsWith('model_reasoning_effort=')).length, 1);
+  assert.equal(codexArgs.includes('model_reasoning_effort=xhigh'), false);
+});
+
+test('A2-6 / S2: C13 is asserted on the path herdr RETURNED, not only the one requested', async (t) => {
+  const f = fixture(t);
+  const elsewhere = join(f.dir, 'profile', '.herdr', 'worktrees', 'workit', 'lane');
+  f.responses.push(
+    { code: 1, stdout: '', stderr: '' },
+    { code: 0, stdout: JSON.stringify({ id: 'cli:worktree:create', result: { worktree: { path: elsewhere, branch: 'feat/x', open_workspace_id: 'wZ', pane_id: 'wZ:p1' } } }), stderr: '' },
+  );
+  const result = await runLane(
+    ['create', '--repo', f.repo, '--branch', 'feat/x', '--base', 'main', '--label', 'lane-x',
+      '--workspace-root', f.dir, '--log', f.log],
+    { exec: f.exec },
+  );
+  assert.equal(result.exit, 1, 'a lane that landed outside the projects tree is a failure, not a success document');
+  assert.match(result.output.error, /projects/);
+  assert.match(result.output.error, /\.herdr/);
+});
+
+test('A2-7 / U6: create refuses to return a document with no pane', async (t) => {
+  const f = fixture(t);
+  const path = `${f.repo}-wt-feat-x`;
+  f.responses.push(
+    { code: 1, stdout: '', stderr: '' },
+    { code: 0, stdout: JSON.stringify({ result: { worktree: { path, branch: 'feat/x', open_workspace_id: 'wZ' } } }), stderr: '' },
+    { code: 1, stdout: '', stderr: 'no such workspace' },
+  );
+  const result = await runLane(
+    ['create', '--repo', f.repo, '--branch', 'feat/x', '--base', 'main', '--label', 'lane-x', '--log', f.log],
+    { exec: f.exec },
+  );
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /paneId/, 'name the missing field where it went missing, not one verb later');
+});
+
+test('A2-8 / U7: an infra error is not masked by the plan meter, and a finished lane is not plan-low', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push({ code: 1, stdout: '', stderr: 'daemon is not running' });
+  const dead = await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(dead.exit, 1, 'a dead daemon outranks a stale meter reading');
+
+  const g = fixture(t);
+  seedLane(g);
+  g.responses.push(
+    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+    { code: 0, stdout: 'gpt-5.6-terra · 5h 3% left · weekly 40% left', stderr: '' },
+  );
+  const finished = await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', g.log], { exec: g.exec, sleep: async () => {} });
+  assert.equal(finished.exit, 0, 'work that finished is done, whatever the meter says');
+  assert.equal(finished.output.state, 'done');
+  assert.equal(finished.row.plan5h, 3, 'the meter is still recorded');
+});
+
+test('A2-9 / U10: a stale lock is reclaimed with a warning instead of wedging every later call', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'prompt.md');
+  writeFileSync(prompt, 'task', 'utf8');
+  seedLane(f);
+  const warnings = [];
+  let attempts = 0;
+  f.responses.push({ code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' });
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], {
+    exec: f.exec,
+    writeNew: () => {
+      if (++attempts === 1) {
+        const error = new Error('EEXIST');
+        error.code = 'EEXIST';
+        throw error;
+      }
+    },
+    stat: () => ({ mtimeMs: 0 }),
+    now: () => 3_600_000,
+    remove: () => {},
+    warn: (message) => warnings.push(message),
+    sleep: async () => {},
+  });
+  assert.equal(result.exit, 0);
+  assert.equal(attempts, 2, 'the stale lock is broken and the write retried');
+  assert.match(warnings.join('\n'), /stale lock/i);
+});
+
+test('A2-10 / U12: codex lanes are refused off Windows instead of hunting a win32 vendor path', async (t) => {
+  const f = fixture(t);
+  const result = await runLane(
+    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium',
+      '--sandbox', 'workspace-write', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'linux' },
+  );
+  assert.equal(result.exit, 2);
+  assert.match(result.output.error, /windows/i);
+  assert.equal(f.calls.length, 0);
+});
+
+test('A2-11 / U15: an unreadable sidecar does not read as invalid JSON', async (t) => {
+  const f = fixture(t);
+  const result = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], {
+    exec: f.exec,
+    exists: () => true,
+    read: () => { const error = new Error('EBUSY: resource busy or locked'); error.code = 'EBUSY'; throw error; },
+  });
+  assert.match(result.output.error, /EBUSY|could not read/i);
+  assert.doesNotMatch(result.output.error, /not valid JSON/, 'do not send the operator to delete a healthy sidecar');
+});
+
+test('A2-12 / U15: EXIT_CODES carries every code the header documents', () => {
+  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+});
+
+test('A2-13 / U1: the harness verifies the stimulus fired, and S1 needs a real dialog', () => {
+  // "Verify the instrument fired before trusting a null result" — a lane that
+  // never received the prompt proves nothing about blocking, either way.
+  assert.equal(stimulusFired('❯ Read X:\\fixture\\prompt.md and execute it exactly.'), true);
+  assert.equal(stimulusFired('● Write(.lane-smoke-marker)'), true);
+  assert.equal(stimulusFired('▐▛███▛█   Claude Code v2.1.258\n❯'), false, 'a bare startup banner is not the stimulus');
+  assert.equal(stimulusFired(''), false);
+
+  // S1 without a visible approval dialog is exit 3 and nothing else.
+  assert.equal(s1Verdict(3, 'blocked', 'Do you want to create .lane-smoke-marker?').ok, true);
+  const noDialog = s1Verdict(3, 'blocked', '   ');
+  assert.equal(noDialog.ok, false);
+  assert.match(noDialog.message, /dialog/i);
+  assert.equal(s1Verdict(0, 'done', '').ok, false);
+  assert.equal(s1Verdict(4, 'timeout', '').ok, false);
 });

@@ -11,10 +11,11 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 // The exit contract a conductor branches on:
@@ -24,7 +25,7 @@ import { pathToFileURL } from 'node:url';
 // 4 means a deadline and nothing else. A dead daemon that reports as a timeout
 // is re-polled forever by a conductor that trusts this table.
 const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6 });
-export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
 
 export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per invocation, JSON on stdout.
 
@@ -39,10 +40,12 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
-  resume   <name> [--timeout <ms>]      Always waits --until idle (stale blocked).
+  resume   <name> [--timeout <ms>]      Waits --until idle --until done, never bare.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
   sweep    [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
            --lane <name> limits the delegate to one lane; --list is a dry run.
+           Outside a herdr worktrees root, every call is scoped to a lane this
+           helper created (from the sidecar), and --force is refused there.
            The delegate is HERDR_LANES_SCRIPT, else <workspace-root>/infrastructure/
            herdr-lanes.ps1, else that path from the cwd; if none exists, sweep
            prints the command to run instead of guessing a location.
@@ -258,8 +261,17 @@ function statePath(logPath) {
 function loadState(deps, logPath) {
   const path = statePath(logPath);
   if (!deps.exists(path)) return emptyState();
+  // Read and parse fail for different reasons and want different answers. One
+  // try around both told an operator whose sidecar was merely locked that their
+  // JSON was invalid — which points them at deleting a healthy file.
+  let raw;
   try {
-    const parsed = JSON.parse(deps.read(path));
+    raw = deps.read(path);
+  } catch (error) {
+    throw new LaneError(EXIT.ERROR, `could not read lane state (${error.code ?? 'read failed'}): ${path}`);
+  }
+  try {
+    const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return emptyState();
     return { lanes: parsed.lanes ?? {}, creates: parsed.creates ?? [] };
   } catch {
@@ -288,6 +300,8 @@ async function mergeState(deps, logPath, state, mutate) {
   }
 }
 
+const LOCK_STALE_MS = 60_000;
+
 async function acquireLock(deps, lock, attempts = 50) {
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
@@ -296,10 +310,28 @@ async function acquireLock(deps, lock, attempts = 50) {
       return () => { try { deps.remove(lock); } catch { /* already gone */ } };
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
+      // A lane killed mid-write leaves a lock that would fail every later call
+      // until someone deletes it by hand. Reclaim it once it is older than any
+      // plausible in-flight write, and say so — silence here looks like a hang.
+      const age = lockAge(deps, lock);
+      if (age !== null && age > LOCK_STALE_MS) {
+        deps.warn(`lane: reclaiming a stale lock (${Math.round(age / 1000)}s old): ${lock}`);
+        try { deps.remove(lock); } catch { /* someone else won the race */ }
+        continue;
+      }
       await deps.sleep(Math.min(200, 10 * (attempt + 1)));
     }
   }
   throw new LaneError(EXIT.ERROR, `could not take the lane state lock: ${lock} (remove it if no lane is running)`);
+}
+
+function lockAge(deps, lock) {
+  try {
+    const stat = deps.stat(lock);
+    return deps.now() - Number(stat?.mtimeMs ?? stat?.mtime ?? 0);
+  } catch {
+    return null;
+  }
 }
 
 function required(opts, ...names) {
@@ -309,6 +341,20 @@ function required(opts, ...names) {
 function agentOption(args, flag) {
   const index = args.indexOf(flag);
   return index >= 0 ? args[index + 1] : undefined;
+}
+
+// Strips `-c <key>=…` pairs for one key only: a codex lane may legitimately
+// carry other -c overrides, but not one that reopens the enforced effort level.
+function withoutConfig(args, key) {
+  const copy = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '-c' && String(args[i + 1] ?? '').startsWith(`${key}=`)) {
+      i++;
+      continue;
+    }
+    copy.push(args[i]);
+  }
+  return copy;
 }
 
 function withoutOption(args, flag) {
@@ -364,7 +410,10 @@ async function waitForPanePrompt(deps, pane, timeoutMs = 30_000) {
     if (snapshot.code === 0 && paneAtPrompt(snapshot.stdout)) return;
     await deps.sleep(100);
   } while (deps.now() < deadline);
-  throw new LaneError(EXIT.TIMEOUT, `pane ${pane} never returned to a shell prompt`);
+  // A wedged pane is infrastructure, not the operator's deadline: 4 belongs to
+  // `lane wait` alone, and prepareCodexPane already raises ERROR for the same
+  // shape of failure.
+  throw new LaneError(EXIT.ERROR, `pane ${pane} never returned to a shell prompt`);
 }
 
 function laneSlug(value) {
@@ -374,9 +423,10 @@ function laneSlug(value) {
 }
 
 async function prepareCodexPane(opts, deps) {
-  const npmRoot = deps.platform === 'win32'
-    ? callOrFail(deps, deps.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm root -g']).trim()
-    : callOrFail(deps, 'npm', ['root', '-g']).trim();
+  // Windows-only by C12 (startLane refuses codex elsewhere), and `npm` on PATH
+  // here is npm.ps1 — a shim execFileSync cannot launch — so it is routed
+  // through cmd.exe rather than spawned directly.
+  const npmRoot = callOrFail(deps, deps.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm root -g']).trim();
   const bin = deps.findCodexBin(npmRoot);
   // A single-quoted PowerShell literal: inside it `$` and backtick are inert,
   // and an embedded quote is escaped by doubling it.
@@ -464,6 +514,18 @@ async function createLane(opts, deps, state) {
     path: firstDefined(worktree, ['path', 'worktree_path', 'worktreePath']) ?? path,
     branch: firstDefined(worktree, ['branch']) ?? opts.branch,
   };
+  // C13 binds the lane that EXISTS, not the one we asked for. herdr returning a
+  // different path is exactly the state the constraint exists to prevent: the
+  // council's code_root refuses it and the agentic seats silently ground
+  // against the canonical checkout instead.
+  if (resolve(output.path) !== resolve(path)) {
+    assertUnderProjects(opts, deps, resolve(output.path), EXIT.ERROR);
+  }
+  // `{workspaceId, paneId, path, branch}` is the documented return. A null pane
+  // is not an instance of it, and it surfaces one verb later inside `start`.
+  if (!output.paneId) {
+    throw new LaneError(EXIT.ERROR, `herdr worktree create returned no paneId for ${output.path}; cannot start a lane without a pane`);
+  }
   await mergeState(deps, opts.log, state, (draft) => {
     draft.creates.push({ ...output, base: opts.base, label: opts.label });
   });
@@ -475,17 +537,21 @@ async function createLane(opts, deps, state) {
 // reason the flag exists. The workspace root is declared (--workspace-root or
 // WORKIT_WORKSPACE_ROOT); with neither, the structural rule still binds — the
 // lane's parent directory must be named `projects`.
-function assertUnderProjects(opts, deps, path) {
+function assertUnderProjects(opts, deps, path, code = EXIT.USAGE) {
+  const refuse = (message) => {
+    if (code === EXIT.USAGE) usage(message);
+    throw new LaneError(code, message);
+  };
   const declared = opts.workspaceRoot ?? deps.env.WORKIT_WORKSPACE_ROOT ?? null;
   if (declared) {
     const required = join(resolve(declared), 'projects');
     if (dirname(path) !== required) {
-      usage(`C13: the lane must live under ${required}, not ${dirname(path)}`);
+      refuse(`C13: the lane must live under ${required}, not ${dirname(path)}`);
     }
     return;
   }
   if (basename(dirname(path)) !== 'projects') {
-    usage(`C13: the lane must live in a projects tree; ${dirname(path)} is not one (declare --workspace-root to be explicit)`);
+    refuse(`C13: the lane must live in a projects tree; ${dirname(path)} is not one (declare --workspace-root to be explicit)`);
   }
 }
 
@@ -528,13 +594,22 @@ async function startLane(opts, deps, state) {
     } else if (mode === 'acceptEdits') {
       warning = 'acceptEdits auto-accepts edits; on this box it did not block on ordinary Bash';
     }
-    native = withoutOption(withoutOption(native, '--permission-mode'), '--effort');
+    // C8 is a cost guard with a measured incident behind it, and `-- <native>`
+    // is the documented extension point: a forwarded --model would sit AFTER
+    // the enforced one, and last-flag-wins would silently pick it.
+    native = withoutOption(withoutOption(withoutOption(native, '--permission-mode'), '--effort'), '--model');
     native = ['--model', opts.model, '--permission-mode', mode, '--effort', opts.reasoning, ...native];
   } else {
+    // C12 makes codex lanes Windows-only here: the launch depends on the real
+    // codex.exe under a win32 vendor path. Refuse elsewhere rather than hunt
+    // for a directory that cannot exist.
+    if (deps.platform !== 'win32') {
+      usage(`codex lanes are Windows-only (C12: the launch needs the win32 codex.exe); platform is ${deps.platform}`);
+    }
     const sandbox = opts.sandbox ?? agentOption(native, '--sandbox');
     if (!sandbox) usage('codex start needs an explicit --sandbox');
     if (sandbox === 'read-only') usage('codex read-only sandbox is refused on Windows because it can return ungrounded answers');
-    native = withoutOption(withoutOption(native, '--sandbox'), '--ask-for-approval');
+    native = withoutConfig(withoutOption(withoutOption(withoutOption(native, '--sandbox'), '--ask-for-approval'), '--model'), 'model_reasoning_effort');
     await prepareCodexPane(opts, deps);
     native = [
       '--model', opts.model, '--ask-for-approval', 'never', '--sandbox', sandbox,
@@ -650,10 +725,29 @@ async function waitLane(opts, deps, state) {
     const remaining = Math.max(1, deadline - pollStarted);
     const pollMs = Math.min(POLL_MS, remaining);
     const args = ['agent', 'wait', opts.name];
-    for (const state of untilStates) args.push('--until', state);
+    // `blocked` is always asked for alongside whatever the caller wanted. The
+    // flag repeats, and narrowing it to idle|done made the helper BLINDER than
+    // bare `herdr agent wait`: a blocked lane timed out every poll, the exit-3
+    // branch was unreachable, and `--until done --timeout 1800000` became a
+    // 30-minute silent stall.
+    for (const state of [...new Set([...untilStates, ...(untilStates.length > 0 ? ['blocked'] : [])])]) {
+      args.push('--until', state);
+    }
     args.push('--timeout', String(pollMs));
     const waited = call(deps, 'herdr', args);
     const stateAfter = waited.code === 0 ? responseState(waited.stdout, null) : null;
+
+    // Order matters, and it is not the obvious one:
+    //   1. a herdr that could not answer is an infra failure (1), never a
+    //      plan-low reading taken from a stale pane;
+    //   2. the captured refusal still pre-empts the lifecycle state, because
+    //      herdr reports `idle` while that modal is up (C11(a), measured);
+    //   3. a real settled state wins over the meter — work that finished is
+    //      done whatever the footer says;
+    //   4. the plan floor applies only to a lane that is still working.
+    if (waited.code !== 0 && !/timeout/i.test(`${waited.stderr}\n${waited.stdout}`)) {
+      throw new LaneError(EXIT.ERROR, `herdr agent wait failed: ${waited.stderr.trim() || waited.stdout.trim()}`);
+    }
 
     // The read feeds plan metering and the dialog text only. A transient read
     // failure must not end a wait that herdr is still answering.
@@ -662,21 +756,12 @@ async function waitLane(opts, deps, state) {
       meter = scrapePlanMeter(read.stdout);
       dialog = responseText(read.stdout);
     }
-    // C11(a): herdr reports the lane `idle` while the refusal modal is up, so
-    // the pane text is checked before any lifecycle state is trusted.
     const refusal = read.code === 0 ? matchPlanRefusal(read.stdout) : null;
     if (refusal) {
       return {
         exit: EXIT.PLAN_LOW,
         output: { state: 'plan-refused', refusal, plan5h: meter.plan5h, planWeekly: meter.planWeekly },
         row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter },
-      };
-    }
-    if (meter.plan5h !== null && meter.plan5h < floor) {
-      return {
-        exit: EXIT.PLAN_LOW,
-        output: { state: 'plan-low', plan5h: meter.plan5h, planWeekly: meter.planWeekly, planFloor: floor },
-        row: { ...laneInstrumentation(opts.name, lane, 'plan-low'), ...meter },
       };
     }
 
@@ -697,8 +782,12 @@ async function waitLane(opts, deps, state) {
         row: { ...laneInstrumentation(opts.name, lane, stateAfter), ...meter },
       };
     }
-    if (waited.code !== 0 && !/timeout/i.test(`${waited.stderr}\n${waited.stdout}`)) {
-      throw new LaneError(EXIT.ERROR, `herdr agent wait failed: ${waited.stderr.trim() || waited.stdout.trim()}`);
+    if (meter.plan5h !== null && meter.plan5h < floor) {
+      return {
+        exit: EXIT.PLAN_LOW,
+        output: { state: 'plan-low', plan5h: meter.plan5h, planWeekly: meter.planWeekly, planFloor: floor },
+        row: { ...laneInstrumentation(opts.name, lane, 'plan-low'), ...meter },
+      };
     }
     if (deps.now() >= deadline) {
       return {
@@ -733,7 +822,10 @@ async function checkLane(opts, deps, state) {
   if (opts.expectCommit) {
     if (!lane.path || !lane.base || !lane.branch) usage(`lane ${opts.name} has no worktree/base/branch metadata`);
     const count = call(deps, 'git', ['-C', lane.path, 'rev-list', '--count', `${lane.base}..${lane.branch}`]);
-    if (count.code !== 0) throw new LaneError(EXIT.TIMEOUT, `git rev-list failed: ${count.stderr.trim()}`);
+    // A git that could not answer is infrastructure, not a verdict about the
+    // work — and 4 would have a conductor re-poll this forever. Ordinary
+    // triggers: a base that is not a local ref, or a swept worktree.
+    if (count.code !== 0) throw new LaneError(EXIT.ERROR, `git rev-list failed: ${count.stderr.trim()}`);
     const ahead = Number(count.stdout.trim());
     evidence = { commitsAhead: ahead };
     if (!Number.isInteger(ahead) || ahead < 1) failedExpectation = '--expect-commit: branch is not ahead of base by at least one commit';
@@ -750,16 +842,23 @@ async function checkLane(opts, deps, state) {
     if (!lane.branch) usage(`lane ${opts.name} has no branch metadata`);
     const viewed = call(deps, 'gh', ['pr', 'view', String(opts.expectPr), '--json', 'headRefName,state'], { cwd: lane.path ?? undefined });
     if (viewed.code !== 0) {
-      failedExpectation = `--expect-pr ${opts.expectPr}: PR does not exist`;
+      // "No such PR" is a failed expectation (5). Expired auth, no network or a
+      // rate limit is infrastructure (1) — same family as the git call above.
+      const detail = `${viewed.stderr}\n${viewed.stdout}`.trim();
+      if (/no pull requests found|could not resolve to a pullrequest|not found/i.test(detail)) {
+        failedExpectation = `--expect-pr ${opts.expectPr}: PR does not exist`;
+      } else {
+        throw new LaneError(EXIT.ERROR, `gh pr view failed: ${detail || `exit ${viewed.code}`}`);
+      }
     } else {
       const doc = parseJson(viewed.stdout);
       evidence = doc;
-      const state = String(doc?.state ?? '').toUpperCase();
+      const prStatus = String(doc?.state ?? '').toUpperCase();
       if (doc?.headRefName !== lane.branch) {
         failedExpectation = `--expect-pr ${opts.expectPr}: head must equal ${lane.branch}, got ${doc?.headRefName ?? 'unknown'}`;
-      } else if (!['OPEN', 'MERGED'].includes(state)) {
+      } else if (!['OPEN', 'MERGED'].includes(prStatus)) {
         // A closed PR is abandoned work wearing the right head ref.
-        failedExpectation = `--expect-pr ${opts.expectPr}: the PR is ${state.toLowerCase() || 'in an unknown state'}, which is not a completion verdict`;
+        failedExpectation = `--expect-pr ${opts.expectPr}: the PR is ${prStatus.toLowerCase() || 'in an unknown state'}, which is not a completion verdict`;
       }
     }
   }
@@ -856,23 +955,54 @@ async function fallbackLane(opts, deps, state) {
   };
 }
 
+// A root is a LANE root when everything under it is a lane by construction —
+// herdr's own worktrees directory. A workspace root is not: it holds data/ and
+// projects/, and the delegate deletes with `Remove-Item -Recurse -Force`. A
+// list-only run against one enumerated 77 candidate directories, including
+// data/auto-memory, data/backups and data/memory.
 function sweepRoots(opts, deps) {
-  // An explicitly declared root is never filtered — the operator named it, and
-  // a silent skip would read as "swept" (the same false-clean the empty-input
-  // checker class is named for).
-  if (Array.isArray(opts.root) && opts.root.length > 0) return opts.root.map((root) => resolve(root));
+  // An explicitly declared root is never filtered for existence — the operator
+  // named it, and a silent skip would read as "swept". Its KIND is still
+  // unknown, so it is treated as a non-lane root.
+  if (Array.isArray(opts.root) && opts.root.length > 0) {
+    return opts.root.map((root) => ({
+      path: resolve(root),
+      kind: 'declared',
+      // A declared root is only a lane root when it IS a herdr worktrees
+      // directory — the one shape where every child is a lane by construction.
+      // Anything else is treated as a workspace: scoped, and no --force.
+      laneRoot: /[\\/]\.herdr[\\/]worktrees[\\/]?$/i.test(resolve(root)),
+    }));
+  }
   const roots = [];
   // Legacy lanes: herdr's own default root, <profile>\.herdr\worktrees\<repo>\<lane>.
-  if (deps.env.USERPROFILE) roots.push(join(deps.env.USERPROFILE, '.herdr', 'worktrees'));
+  if (deps.env.USERPROFILE) {
+    roots.push({ path: join(deps.env.USERPROFILE, '.herdr', 'worktrees'), kind: 'herdr', laneRoot: true });
+  }
   // C13 lanes: <workspace>\projects\<repo>-wt-<slug>. The delegate walks
-  // <root>/<repo>/<lane>, so the root it needs is the WORKSPACE, not projects/.
+  // <root>/<repo>/<lane>, so pointing it at <workspace>/projects would see
+  // projects/<repo>/<subdir> and never find a lane — the workspace root is the
+  // only root that works, which is exactly why every call against it must be
+  // scoped to lanes this helper created.
   const workspace = opts.workspaceRoot ?? deps.env.WORKIT_WORKSPACE_ROOT ?? null;
-  if (workspace) roots.push(resolve(workspace));
-  const present = roots.filter((root) => deps.exists(root));
+  if (workspace) roots.push({ path: resolve(workspace), kind: 'workspace', laneRoot: false });
   if (roots.length === 0) {
     usage('sweep needs --root <path>, or --workspace-root / WORKIT_WORKSPACE_ROOT, to know where lanes live');
   }
-  return present;
+  return roots;
+}
+
+// The lanes this helper actually created under a given root, by directory name.
+// `creates[]` is the sidecar's record of every path it made — the only list of
+// directories the sweeper is entitled to delete.
+function knownLanesUnder(state, root) {
+  const prefix = `${resolve(root)}${sep}`.toLowerCase();
+  return [...new Set(
+    (state.creates ?? [])
+      .map((created) => created?.path)
+      .filter((path) => typeof path === 'string' && resolve(path).toLowerCase().startsWith(prefix))
+      .map((path) => basename(resolve(path))),
+  )];
 }
 
 function sweepDelegate(opts, deps) {
@@ -882,35 +1012,80 @@ function sweepDelegate(opts, deps) {
   return resolve(...SWEEP_DELEGATE);
 }
 
-async function sweepLanes(opts, deps) {
+async function sweepLanes(opts, deps, state) {
   const roots = sweepRoots(opts, deps);
   const delegate = sweepDelegate(opts, deps);
+  // -Force removes HOLD verdicts too, and HOLD is the only thing standing
+  // between an unfinished lane and `Remove-Item -Recurse -Force`. On a root
+  // that is not a lane root, every directory two levels down is in range, so
+  // the combination is refused rather than scoped.
+  if (opts.force && roots.some((root) => !root.laneRoot)) {
+    const named = roots.filter((root) => !root.laneRoot).map((root) => root.path).join(', ');
+    usage(`--force is refused for a root that is not a herdr worktrees root (${named}): everything two levels below it would be in range. Sweep it by hand if you mean it.`);
+  }
+
   // The delegate is LIST-ONLY without -Clean, and S8 wants the directory gone.
-  // -Force is never implied: its HOLD verdicts are what keep unfinished work.
-  const flags = [];
-  if (!opts.list) flags.push('-Clean');
-  if (opts.lane) flags.push('-Lane', opts.lane);
-  if (opts.force) flags.push('-Force');
+  const baseFlags = [];
+  if (!opts.list) baseFlags.push('-Clean');
+  if (opts.force) baseFlags.push('-Force');
+
+  // One plan entry per delegate invocation. A non-lane root is only ever swept
+  // with an explicit -Lane naming a directory this helper created.
+  const plan = [];
+  for (const root of roots) {
+    if (root.laneRoot) {
+      plan.push({ root: root.path, kind: root.kind, flags: opts.lane ? ['-Lane', opts.lane, ...baseFlags] : [...baseFlags] });
+      continue;
+    }
+    const lanes = opts.lane ? [opts.lane] : knownLanesUnder(state, root.path);
+    if (lanes.length === 0) {
+      plan.push({ root: root.path, kind: root.kind, skipped: 'no known lanes under this root' });
+      continue;
+    }
+    for (const lane of lanes) plan.push({ root: root.path, kind: root.kind, lane, flags: ['-Lane', lane, ...baseFlags] });
+  }
+
+  const present = plan.filter((entry) => !entry.skipped && deps.exists(entry.root));
+  const missing = plan.filter((entry) => !entry.skipped && !deps.exists(entry.root)).map((entry) => entry.root);
+  if (present.length === 0) {
+    // A sweep that visited nothing is not a sweep. Reporting `swept` here was
+    // the checker-over-zero-input read: exit 0 with the delegate never invoked.
+    const declared = [...new Set(plan.map((entry) => entry.root))];
+    return {
+      exit: EXIT.ERROR,
+      output: {
+        delegated: false,
+        state: 'no-roots-present',
+        missingRoots: [...new Set(missing)],
+        declaredRoots: declared,
+        skipped: plan.filter((entry) => entry.skipped),
+        roots: plan.map((entry) => ({ root: entry.root, ...(entry.skipped ? { skipped: entry.skipped } : { missing: true }) })),
+      },
+      row: { lane: null, state: 'no-roots-present' },
+    };
+  }
+
   if (!deps.exists(delegate)) {
-    const suffix = flags.length > 0 ? ` ${flags.join(' ')}` : '';
     return {
       exit: EXIT.OK,
       output: {
         delegated: false,
         delegate,
         hint: 'set HERDR_LANES_SCRIPT, or --workspace-root / WORKIT_WORKSPACE_ROOT so infrastructure/herdr-lanes.ps1 resolves',
-        commands: roots.map((root) => `pwsh -NoProfile -File "${delegate}" -WorktreeRoot "${root}"${suffix}`),
+        commands: present.map((entry) => `pwsh -NoProfile -File "${delegate}" -WorktreeRoot "${entry.root}"${entry.flags.length > 0 ? ` ${entry.flags.join(' ')}` : ''}`),
       },
       row: { lane: null, state: 'delegate-missing' },
     };
   }
-  // Every root is visited. Throwing on the first nonzero exit left the C13
+
+  // Every entry is visited. Throwing on the first nonzero exit left the C13
   // lanes unswept behind a failing legacy root — the alert-fan-out failure
   // where one dead target silences the rest.
-  const results = roots.map((root) => {
-    const swept = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', root, ...flags]);
+  const results = present.map((entry) => {
+    const swept = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', entry.root, ...entry.flags]);
     return {
-      root,
+      root: entry.root,
+      ...(entry.lane ? { lane: entry.lane } : {}),
       ok: swept.code === 0,
       exit: swept.code,
       output: swept.stdout,
@@ -919,8 +1094,13 @@ async function sweepLanes(opts, deps) {
   });
   const swept = results.filter((entry) => entry.ok);
   return {
-    exit: results.length > 0 && swept.length === 0 ? EXIT.ERROR : EXIT.OK,
-    output: { delegated: true, roots: results, sweptRoots: swept.length, totalRoots: results.length },
+    exit: swept.length === 0 ? EXIT.ERROR : EXIT.OK,
+    output: {
+      delegated: true,
+      roots: [...results, ...plan.filter((entry) => entry.skipped).map((entry) => ({ root: entry.root, skipped: entry.skipped }))],
+      sweptRoots: swept.length,
+      totalRoots: results.length,
+    },
     row: { lane: null, state: swept.length === results.length ? 'swept' : 'swept-partial' },
   };
 }
@@ -958,6 +1138,8 @@ export async function runLane(argv, overrides = {}) {
     writeNew: (path, value) => writeFileSync(path, value, { encoding: 'utf8', flag: 'wx' }),
     remove: (path) => rmSync(path, { force: true }),
     mkdir: (path) => mkdirSync(path, { recursive: true }),
+    stat: (path) => statSync(path),
+    warn: (message) => console.error(message),
     append: (path, value) => appendFileSync(path, value, 'utf8'),
     env: process.env,
     platform: process.platform,
@@ -1003,7 +1185,7 @@ export async function runLane(argv, overrides = {}) {
       case 'check': result = await checkLane(opts, deps, state); break;
       case 'resume': result = await resumeLane(opts, deps, state); break;
       case 'fallback': result = await fallbackLane(opts, deps, state); break;
-      case 'sweep': result = await sweepLanes(opts, deps); break;
+      case 'sweep': result = await sweepLanes(opts, deps, state); break;
       default: throw new LaneError(EXIT.USAGE, `${opts.verb} is not implemented yet`);
     }
     result.exit ??= EXIT.OK;
