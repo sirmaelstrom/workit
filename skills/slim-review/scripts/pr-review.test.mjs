@@ -356,6 +356,35 @@ test('findings schema requires examined_paths strings', () => {
   assert.equal(schema.properties.examined_paths.items.type, 'string');
 });
 
+test('findings schema is strict-mode valid: every object property is required, at every depth', () => {
+  // The schema is handed to codex `--output-schema`, which the OpenAI API
+  // validates under structured-output STRICT rules: with additionalProperties
+  // false, `required` must list every key in `properties`. 1.21.4 folded the
+  // per-lens metadata (lens / model / reasoning / wall_ms) into the schema as
+  // optional properties and the API refused the whole request with
+  // `invalid_json_schema … Missing 'lens'` — the lens never ran (verb exit 4,
+  // measured 2026-09-03 on heathdev-me/observatory#594). The verb stamps that
+  // metadata itself after the model answers, so the schema the model must
+  // satisfy carries none of it.
+  const schema = JSON.parse(readFileSync(SCHEMA, 'utf8'));
+  const walk = (node, at) => {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'object' && node.properties) {
+      const keys = Object.keys(node.properties);
+      const required = node.required ?? [];
+      assert.deepEqual(keys.filter((key) => !required.includes(key)), [], `${at}: properties missing from required`);
+      assert.equal(node.additionalProperties, false, `${at}: additionalProperties must be false`);
+      for (const key of keys) walk(node.properties[key], `${at}.${key}`);
+    }
+    if (node.items) walk(node.items, `${at}[]`);
+  };
+  walk(schema, '$');
+  for (const stamped of ['lens', 'model', 'reasoning', 'wall_ms']) {
+    assert.equal(schema.properties[stamped], undefined, `${stamped} is stamped by the verb, never asked of the model`);
+    assert.equal(schema.properties.findings.items.properties[stamped], undefined, `findings[].${stamped} is stamped by the verb`);
+  }
+});
+
 test('reviewer prompt carries the authoritative API paths and requires them echoed back', () => {
   const prompt = buildReviewerPrompt({ pr: 42, repo: 'owner/repo', prFilePaths: ['src/a.ts', 'docs/readme.md'] });
   assert.match(prompt, /gh pr diff 42 --repo owner\/repo/);
