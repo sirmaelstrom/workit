@@ -122,6 +122,8 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post \
   --pr <n> --repo <owner/name> --findings "$REVIEW_DIR/findings.json" [--dry-run] [--force-post]
 ```
 
+The review is pinned to the reviewed head and refuses to post if the head moved.
+
 The script does the checking you would otherwise have to remember:
 
 - **Blocking per-handback coverage check** — compares each findings document's
@@ -156,12 +158,16 @@ Exit codes matter here:
 | 3 | The handback never arrived: file missing, unparseable, or wrong shape — including an **empty `examined_paths`** or a `coverage` string that does not state `examined N of M`. **This is not a clean review.** Re-run step 2 |
 | 4 | A `gh` call failed |
 | 5 | A coverage check failed. Three triggers: the `examined_paths` set does not match the PR API's file list; a parseable `examined N of M` contradicts that list; or the PR API returned **no** changed files at all |
+| 6 | The PR head moved between the diff fetch and the post. The findings were anchored on the old head, so nothing was posted — re-run step 2 against the new head. Not a transient `gh` failure (that is 4) |
 
-`--force-post` overrides the first two — the set mismatch and the count
-contradiction — and posts the review with the mismatch stamped into the body. It
-does **not** override the empty-file-list floor: an empty authoritative list is a
-fetch failure, and there is nothing to check coverage against, so that exit 5 is
-unconditional and posts nothing no matter what flags you pass.
+`--force-post` overrides the first two exit-5 triggers — the set mismatch and
+the count contradiction — and posts the review with the mismatch stamped into
+the body. It does **not** override the empty-file-list floor: an empty
+authoritative list is a fetch failure, and there is nothing to check coverage
+against, so that exit 5 is
+unconditional and posts nothing no matter what flags you pass. It does **not**
+override exit 6 either: a moved head is stale findings, not a coverage question,
+and no flag posts them.
 
 The review posts as `COMMENT`, which is the only event GitHub permits on your own
 pull request.

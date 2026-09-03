@@ -459,6 +459,7 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
   };
   const repo = resolveRepo(opts.repo, opts.cwd);
 
+  const reviewedHead = runGh(['pr', 'view', String(opts.pr), '--repo', repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd: opts.cwd }).trim();
   const diffText = runGh(['pr', 'diff', String(opts.pr), '--repo', repo], { cwd: opts.cwd });
   const diffFiles = parseDiff(diffText);
   const diffHeaderCount = countChangedFiles(diffText);
@@ -524,11 +525,13 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
     warnings,
     lensCounts,
   });
+  payload.commit_id = reviewedHead;
 
   // Print the receipt BEFORE any coverage die: the failure path is exactly where
   // an operator needs the numbers to decide about --force-post.
   log(`repo           ${repo}`);
   log(`pr             #${opts.pr}`);
+  log(`head           ${reviewedHead.slice(0, 7)}`);
   log(`changed files  ${prFilePaths.length} from PR API (${diffHeaderCount} diff headers; ${diffFiles.size} with commentable lines)`);
   log(`findings       ${doc.findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff`);
   log(`coverage       ${coverageCheck.ok ? `OK${coverageCheck.countReason ? ` — Secondary count check: ${coverageCheck.countReason}` : ''}` : `FAILED — ${coverageCheck.reason}`}`);
@@ -550,6 +553,12 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
   if (opts.dryRun) {
     log('\n--dry-run: nothing posted. Payload:\n');
     log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  const headNow = runGh(['pr', 'view', String(opts.pr), '--repo', repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd: opts.cwd }).trim();
+  if (headNow !== reviewedHead) {
+    die(6, `PR head advanced from ${reviewedHead.slice(0,7)} to ${headNow.slice(0,7)} between the diff fetch and the post; the findings were anchored on the old head — re-run the reviewer. Nothing was posted.`);
     return;
   }
 

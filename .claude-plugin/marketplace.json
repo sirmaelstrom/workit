@@ -10,7 +10,7 @@
       "name": "workit",
       "source": "./",
       "description": "A Claude Code plugin — skills for specification, execution, review, diagnosis, and skill self-improvement.",
-      "version": "1.21.5",
+      "version": "1.21.6",
       "author": {
         "name": "Justin Heath"
       },
