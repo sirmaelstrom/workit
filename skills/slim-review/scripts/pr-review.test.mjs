@@ -577,11 +577,13 @@ function runPostWithFakeGh({
   dryRun = false,
   coverage = 'examined 2 of 2 changed files',
   prFilePaths = ['src/a.ts', 'src/b.ts'],
+  headRefOids = ['1111111111111111111111111111111111111111', '1111111111111111111111111111111111111111'],
   die,
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-post-'));
   const findings = join(dir, 'findings.json');
   const calls = [];
+  const logs = [];
   let error;
   writeFileSync(findings, JSON.stringify({
     summary: 'summary',
@@ -591,6 +593,9 @@ function runPostWithFakeGh({
   }), 'utf8');
   const runGh = (args, opts) => {
     calls.push({ args, opts });
+    if (args[0] === 'pr' && args[1] === 'view' && headRefOids) {
+      return headRefOids.shift();
+    }
     if (args[0] === 'pr' && args[1] === 'diff') return DIFF;
     if (args[0] === 'api' && args[1] === '--paginate') {
       return prFilePaths.length === 0 ? '' : `${prFilePaths.join('\n')}\n`;
@@ -606,15 +611,51 @@ function runPostWithFakeGh({
   try {
     cmdPost(
       { pr: '42', repo: 'owner/repo', findings, forcePost, dryRun },
-      { runGh, die: die ?? throwingDie, log: () => {} },
+      { runGh, die: die ?? throwingDie, log: (line) => logs.push(line) },
     );
   } catch (err) {
     error = err;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-  return { calls, error };
+  return { calls, error, logs };
 }
+
+test('cmdPost refuses to post when the PR head advances after the diff fetch', () => {
+  const { calls, error } = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'src/b.ts'],
+    headRefOids: ['1111111111111111111111111111111111111111', '2222222222222222222222222222222222222222'],
+  });
+  assert.equal(error?.code, 6);
+  assert.match(error?.message ?? '', /1111111/);
+  assert.match(error?.message ?? '', /2222222/);
+  assert.equal(calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length, 0);
+});
+
+test('cmdPost pins the posted review to the reviewed head', () => {
+  const head = '1111111111111111111111111111111111111111';
+  const { calls, error } = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'src/b.ts'],
+    headRefOids: [head, head],
+  });
+  assert.equal(error, undefined);
+  const posts = calls.filter(({ args }) => args[0] === 'api' && args.includes('POST'));
+  assert.equal(posts.length, 1);
+  assert.equal(JSON.parse(posts[0].opts.input).commit_id, head);
+});
+
+test('--dry-run payload includes the reviewed commit_id', () => {
+  const head = '1111111111111111111111111111111111111111';
+  const { calls, error, logs } = runPostWithFakeGh({
+    examinedPaths: ['src/a.ts', 'src/b.ts'],
+    dryRun: true,
+    headRefOids: [head, head],
+  });
+  assert.equal(error, undefined);
+  const payload = JSON.parse(logs.find((line) => line.startsWith('{')));
+  assert.equal(payload.commit_id, head);
+  assert.equal(calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length, 0);
+});
 
 test('--dry-run posts nothing and is not an error', () => {
   // Every other non-posting path here has a POST-counting test; without this one

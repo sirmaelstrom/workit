@@ -122,6 +122,8 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post \
   --pr <n> --repo <owner/name> --findings "$REVIEW_DIR/findings.json" [--dry-run] [--force-post]
 ```
 
+The review is pinned to the reviewed head and refuses to post if the head moved.
+
 The script does the checking you would otherwise have to remember:
 
 - **Blocking per-handback coverage check** — compares each findings document's
