@@ -164,9 +164,10 @@ Exit codes matter here:
 the count contradiction — and posts the review with the mismatch stamped into
 the body. It does **not** override the empty-file-list floor: an empty
 authoritative list is a fetch failure, and there is nothing to check coverage
-against, so that exit 5 is unconditional and posts nothing no matter what flags
-you pass. It does **not** override exit 6 either: a moved head is stale
-findings, not a coverage question, and no flag posts them.
+against, so that exit 5 is
+unconditional and posts nothing no matter what flags you pass. It does **not**
+override exit 6 either: a moved head is stale findings, not a coverage question,
+and no flag posts them.
 
 The review posts as `COMMENT`, which is the only event GitHub permits on your own
 pull request.
