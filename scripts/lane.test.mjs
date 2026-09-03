@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 
 import {
   EXIT_CODES, PLAN_REFUSAL_PATTERNS, paneAtPrompt, panePromptSignature, runLane, scrapePlanMeter,
@@ -419,6 +419,8 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
   f.responses.push(
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
     { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
@@ -435,9 +437,9 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
   // C11(b): the rate-limit modal must be dismissed and codex quit before a
   // claude agent can take the pane — and the pane prompt is the evidence.
   const escIndex = f.calls.findIndex((call) => call.args[0] === 'agent' && call.args[1] === 'send-keys' && call.args.includes('esc'));
-  const quitIndex = f.calls.findIndex((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && call.args.includes('/quit'));
+  const quitIndex = f.calls.findLastIndex((call) => call.args[0] === 'agent' && call.args[1] === 'send-keys' && call.args.includes('ctrl+c'));
   const paneReadIndex = f.calls.findIndex((call) => call.args[0] === 'pane' && call.args[1] === 'read');
-  assert.ok(escIndex >= 0 && quitIndex > escIndex, 'esc then /quit');
+  assert.ok(escIndex >= 0 && quitIndex > escIndex, 'esc then ctrl+c twice');
   assert.ok(paneReadIndex > quitIndex && paneReadIndex < startIndex, 'the shell prompt is confirmed before agent start');
   const promptCall = f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && call.args[3] !== '/quit');
   assert.equal(start.args[start.args.indexOf('--pane') + 1], 'w1:p2');
@@ -461,6 +463,79 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
   f.responses.push({ code: 0, stdout: '2\n', stderr: '' });
   const verdict = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], { exec: f.exec });
   assert.equal(verdict.exit, 0, 'lane check must still resolve after a channel switch');
+});
+
+test('Q-1: fallback quits codex with esc and ctrl+c twice, never /quit', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'prompt.md');
+  writeFileSync(prompt, 'original task', 'utf8');
+  seedLane(f, { promptFile: prompt });
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+  );
+  const result = await runLane(
+    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {} },
+  );
+  assert.equal(result.exit, 0);
+  const keys = f.calls.filter((call) => call.args[0] === 'agent' && call.args[1] === 'send-keys');
+  assert.deepEqual(keys.map((call) => call.args[3]), ['esc', 'ctrl+c', 'ctrl+c']);
+  assert.equal(f.calls.some((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && call.args[3] === '/quit'), false);
+});
+
+test('Q-2: lane stop quits codex and succeeds only when agent list omits it', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { promptSignature: 'PS X:\\fixture\\lane>' });
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+  );
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.exit, 0);
+  assert.deepEqual(f.calls.slice(0, 3).map((call) => call.args.slice(0, 4)), [
+    ['agent', 'send-keys', 'lane-a', 'esc'],
+    ['agent', 'send-keys', 'lane-a', 'ctrl+c'],
+    ['agent', 'send-keys', 'lane-a', 'ctrl+c'],
+  ]);
+});
+
+test('Q-3: lane stop fails when agent list still contains the lane', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { promptSignature: 'PS X:\\fixture\\lane>' });
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a"}]}}', stderr: '' },
+  );
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /still listed|agent list/i);
+});
+
+test('Q-9: lane stop uses the measured claude /exit sequence', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: SHELL_READ.stdout, stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+  );
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.exit, 0);
+  assert.deepEqual(f.calls[0].args, ['agent', 'prompt', 'lane-a', '/exit']);
 });
 
 test('WP-3: the refusal pattern list carries the captured live refusal', () => {
@@ -505,6 +580,8 @@ test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', 
   }
   const roots = f.calls.map((call) => call.args[call.args.indexOf('-WorktreeRoot') + 1]);
   assert.deepEqual(roots, [legacyRoot, f.dir]);
+  const recorded = join(f.dir, 'projects', 'workit-wt-lane');
+  assert.deepEqual(relative(roots[1], recorded).split(/[\\/]/), ['projects', 'workit-wt-lane']);
   assert.equal(result.output.roots.length, 2);
   assert.match(result.output.roots[1].output, /workit-wt-lane/);
 });
@@ -1188,6 +1265,7 @@ test('A2-2c / S4: a wedged pane is an infra failure (1), not a wait deadline (4)
   f.responses.push(
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
     () => { clock += 40_000; return { code: 0, stdout: 'codex is still running', stderr: '' }; },
   );
   const result = await runLane(
@@ -1449,6 +1527,7 @@ test('A3-4: an operator can declare the prompt, by flag or by env', async (t) =>
   f.responses.push(
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: `remnant\n${MEASURED_PROMPT}`, stderr: '' },
     SHELL_READ,
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
@@ -1534,6 +1613,7 @@ test('A3-6: fallback waits for the signature the lane recorded', async (t) => {
   f.responses.push(
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: CODEX_TUI, stderr: '' },
     { code: 0, stdout: `some codex remnant\n~ sirm  pwsh\n${MEASURED_PROMPT}`, stderr: '' },
     SHELL_READ,
@@ -1572,6 +1652,108 @@ test('A3-7 / R3-U1: --lane is intersected with the sidecar, not passed through',
   });
   assert.equal(allowed.exit, 0);
   assert.equal(g.calls[0].args[g.calls[0].args.indexOf('-Lane') + 1], 'workit-wt-alpha');
+});
+
+test('Q-4: sweep --lane resolves agent name, create label, and basename identically', async (t) => {
+  for (const spelling of ['lane-a', 'label a', 'workit-wt-lane-a']) {
+    const f = fixture(t);
+    const lanePath = join(f.dir, 'projects', 'workit-wt-lane-a');
+    writeFileSync(`${f.log}.state.json`, JSON.stringify({
+      lanes: { 'lane-a': { path: lanePath } },
+      creates: [{ path: lanePath, label: 'label a' }],
+    }), 'utf8');
+    f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+    const result = await runLane(['sweep', '--lane', spelling, '--list', '--root', join(f.dir, 'projects'), '--log', f.log], {
+      exec: f.exec, exists: fakeExists(), env: {},
+    });
+    assert.equal(result.exit, 0, spelling);
+    assert.deepEqual(f.calls[0].args.slice(f.calls[0].args.indexOf('-WorktreeRoot')), [
+      '-WorktreeRoot', join(f.dir), '-Lane', 'workit-wt-lane-a',
+    ], spelling);
+  }
+});
+
+test('Q-5: unknown sweep lane refusal lists known agent names, labels, and basenames', async (t) => {
+  const f = fixture(t);
+  const lanePath = join(f.dir, 'projects', 'workit-wt-lane-a');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    lanes: { 'lane-a': { path: lanePath } },
+    creates: [{ path: lanePath, label: 'label a' }],
+  }), 'utf8');
+  const result = await runLane(['sweep', '--lane', 'unknown', '--root', join(f.dir, 'projects'), '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: {},
+  });
+  assert.equal(result.exit, 2);
+  assert.match(result.output.error, /lane-a/);
+  assert.match(result.output.error, /label a/);
+  assert.match(result.output.error, /workit-wt-lane-a/);
+  assert.match(result.output.error, /lanes\[\].*creates\[\]/);
+  assert.match(result.output.error, /Agent names come from lanes\[\].*labels and basenames come from creates\[\]/);
+});
+
+test('Q-6: every C13 root spelling reaches the recorded lane in exactly two delegate levels', async (t) => {
+  for (const root of [null, 'projects', 'workspace']) {
+    const f = fixture(t);
+    const recorded = join(f.dir, 'projects', 'workit-wt-lane-a');
+    seedCreates(f, [recorded]);
+    const argv = root === null ? ['sweep', '--log', f.log]
+      : ['sweep', '--root', root === 'projects' ? join(f.dir, 'projects') : f.dir, '--log', f.log];
+    f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+    const result = await runLane(argv, { exec: f.exec, exists: fakeExists(), env: root === null ? { WORKIT_WORKSPACE_ROOT: f.dir } : {} });
+    assert.equal(result.exit, 0);
+    const call = f.calls.find((entry) => entry.program === 'pwsh');
+    const delegateRoot = call.args[call.args.indexOf('-WorktreeRoot') + 1];
+    assert.deepEqual(relative(delegateRoot, recorded).split(/[\\/]/), ['projects', 'workit-wt-lane-a']);
+  }
+  const f = fixture(t);
+  const filesystemRoot = resolve(sep);
+  const recorded = join(filesystemRoot, 'workit-wt-lane-a');
+  seedCreates(f, [recorded]);
+  const refused = await runLane(['sweep', '--lane', 'workit-wt-lane-a', '--root', filesystemRoot, '--log', f.log], { exec: f.exec, exists: fakeExists(), env: {}, platform: 'win32' });
+  assert.equal(refused.exit, 2);
+  assert.match(refused.output.error, /delegate root|root/i);
+});
+
+test('Q-6: win32 ancestor guard folds casing from path canonicalization', async (t) => {
+  const f = fixture(t);
+  const recorded = join(f.dir, 'projects', 'workit-wt-lane-a');
+  seedCreates(f, [recorded]);
+  const casingSegment = f.dir.split(sep).at(-1);
+  const resolveWithWindowsCasing = (path) => {
+    const resolved = resolve(path);
+    if (path === recorded) return resolved.replace(casingSegment, casingSegment.toUpperCase());
+    if (path.includes(casingSegment.toUpperCase())) return resolved.replace(casingSegment.toUpperCase(), casingSegment);
+    return resolved;
+  };
+  f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+  const result = await runLane(['sweep', '--lane', 'workit-wt-lane-a', '--root', join(f.dir, 'projects'), '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: {}, platform: 'win32', resolve: resolveWithWindowsCasing,
+  });
+  assert.equal(result.exit, 0);
+});
+
+test('Q-7: a lanes entry without a matching create is not sweepable', async (t) => {
+  const f = fixture(t);
+  const lanePath = join(f.dir, 'projects', 'workit-wt-uncreated');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({ lanes: { uncreated: { path: lanePath } }, creates: [] }), 'utf8');
+  const result = await runLane(['sweep', '--lane', 'uncreated', '--root', join(f.dir, 'projects'), '--log', f.log], {
+    exec: f.exec, exists: fakeExists(), env: {},
+  });
+  assert.equal(result.exit, 2);
+  assert.match(result.output.error, /creates|sidecar/i);
+  assert.equal(f.calls.length, 0);
+});
+
+test('Q-8: a missing delegate command names the same WorktreeRoot as execution would use', async (t) => {
+  const f = fixture(t);
+  const lanePath = join(f.dir, 'projects', 'workit-wt-lane-a');
+  seedCreates(f, [lanePath]);
+  const result = await runLane(['sweep', '--root', join(f.dir, 'projects'), '--log', f.log], {
+    exec: f.exec, exists: fakeExists((path) => !path.endsWith('herdr-lanes.ps1')), env: {},
+  });
+  assert.equal(result.exit, 1);
+  const commandRoot = result.output.commands[0].match(/-WorktreeRoot "([^"]+)"/)[1];
+  assert.equal(commandRoot, dirname(dirname(lanePath)));
 });
 
 test('A4-1: the sidecar check covers the herdr root too, not just the workspace root', async (t) => {

@@ -826,7 +826,7 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), codex
           if (args[0] === 'api') return 'src/a.ts\n';
           if (args.includes('status')) return ++statusCalls === 1 ? beforeStatus : afterStatus;
           if (args[0] === 'exec') {
-            writeFileSync(args[args.indexOf('-o') + 1], codexOutput, 'utf8');
+            if (codexOutput !== null) writeFileSync(args[args.indexOf('-o') + 1], codexOutput, 'utf8');
             return 'codex stdout that must not be parsed';
           }
           return result;
@@ -870,6 +870,20 @@ test('lens codex reads its -o findings file, builds the Terra argv, and sends ev
   assert.ok(call.args.includes('-C'));
   assert.equal(call.args[call.args.indexOf('-C') + 1], resolve('C:/repo'));
   assert.equal(out.summary, 'read from codex -o file', 'codex stdout must not replace its -o findings file');
+});
+
+test('codex output schema omits unsupported uniqueItems', () => {
+  const { calls } = runLensWithFake();
+  const call = calls.find(({ args }) => args[0] === 'exec');
+  const schemaPath = call.args[call.args.indexOf('--output-schema') + 1];
+  assert.doesNotMatch(readFileSync(schemaPath, 'utf8'), /uniqueItems/);
+});
+
+test('codex lens exits non-zero with API output when -o produces no findings file', () => {
+  const { deaths, outExists } = runLensWithFake({ codexOutput: null, result: 'API error: Invalid schema for response_format' });
+  assert.equal(outExists, false);
+  assert.equal(deaths[0]?.code, 3);
+  assert.match(deaths[0]?.message ?? '', /API error|no findings file/i);
 });
 
 test('lens opus builds the constrained structured-output argv', () => {

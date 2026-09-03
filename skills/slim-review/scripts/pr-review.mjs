@@ -833,7 +833,10 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
     // Observe the reviewer immediately, before our own --out and measurement
     // writes can make a deliberately in-worktree output look like misconduct.
     const after = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }));
-    const source = opts.lens === 'codex' && existsSync(tempOut) ? readFileSync(tempOut, 'utf8') : raw;
+    if (opts.lens === 'codex' && !existsSync(tempOut)) {
+      throw new LensOutputError(`codex lens produced no findings file; API/CLI output: ${String(raw).trim()}`);
+    }
+    const source = opts.lens === 'codex' ? readFileSync(tempOut, 'utf8') : raw;
     let doc;
     try {
       doc = parseLensOutput(source, opts.lens);

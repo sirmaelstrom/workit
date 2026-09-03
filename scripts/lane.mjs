@@ -44,6 +44,7 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
   resume   <name> [--timeout <ms>]      Waits --until idle --until done, never bare.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
+  stop     <name> [--timeout <ms>]  Stops the lane agent and verifies it exited.
   sweep    [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
            --lane <name> limits the delegate to one lane; --list is a dry run.
            Outside a herdr worktrees root, every call is scoped to a lane this
@@ -70,7 +71,7 @@ const SWEEP_DELEGATE = ['infrastructure', 'herdr-lanes.ps1'];
 const POLL_MS = 1_000;
 const LOG_BASENAME = 'lane-log.jsonl';
 const LOG_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 'lanes'];
-const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'sweep']);
+const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'sweep']);
 
 class LaneError extends Error {
   constructor(code, message, details = {}) {
@@ -1054,7 +1055,8 @@ async function fallbackLane(opts, deps, state) {
   // pane will take a claude agent. Both sends are best-effort — the pane's own
   // shell prompt is the evidence that the pane is free, not their exit codes.
   call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'esc']);
-  call(deps, 'herdr', ['agent', 'prompt', opts.name, '/quit']);
+  call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'ctrl+c']);
+  call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'ctrl+c']);
   // The pane's own recorded prompt is the evidence — no shape guess can cover
   // every shell (this box's prompt ends in `~`, with no prompt character at all).
   await waitForPanePrompt(deps, samePane, {
@@ -1089,6 +1091,40 @@ async function fallbackLane(opts, deps, state) {
       warning: started.row?.warning ?? null,
     },
   };
+}
+
+function listedAgentNames(raw) {
+  const agents = deepFind(unwrapResult(raw), ['agents']);
+  return Array.isArray(agents) ? agents.map((agent) => agent?.name ?? agent?.agent).filter((name) => typeof name === 'string') : null;
+}
+
+async function stopLane(opts, deps, state) {
+  const lane = laneRecord(opts, state);
+  if (!lane.pane) usage(`lane ${opts.name} has no pane metadata`);
+  const timeout = positiveNumber(opts.timeout, '--timeout', 30_000);
+  if (lane.kind === 'codex') {
+    call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'esc']);
+    call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'ctrl+c']);
+    call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'ctrl+c']);
+  } else if (lane.kind === 'claude') {
+    call(deps, 'herdr', ['agent', 'prompt', opts.name, '/exit']);
+  } else {
+    usage(`lane ${opts.name} has unsupported kind: ${lane.kind}`);
+  }
+  try {
+    await waitForPanePrompt(deps, lane.pane, {
+      signature: lane.promptSignature ?? null,
+      patterns: promptPatterns(opts, deps),
+    }, timeout);
+  } catch (error) {
+    throw new LaneError(EXIT.ERROR, `stop pane prompt check failed: ${error.message}`);
+  }
+  const listing = call(deps, 'herdr', ['agent', 'list']);
+  if (listing.code !== 0) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${listing.stderr.trim() || listing.stdout.trim()}`);
+  const names = listedAgentNames(listing.stdout);
+  if (!names) throw new LaneError(EXIT.ERROR, 'stop agent list check failed: response did not contain agents');
+  if (names.some((name) => name === opts.name)) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed`);
+  return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: true, agentListed: false }, row: laneInstrumentation(opts.name, lane, 'stopped') };
 }
 
 // A root is a LANE root when everything under it is a lane by construction —
@@ -1130,28 +1166,51 @@ function sweepRoots(opts, deps) {
 
 // The lanes this helper actually created under a given root, by directory name.
 // `creates[]` is the sidecar's record of every path it made — the only list of
-// directories the sweeper is entitled to delete.
+// directories the sweeper is entitled to delete. A lane record contributes its
+// agent name only when its path exactly matches one of those creates.
 // Returns the sidecar's own spelling of the requested lane, or null. Windows
 // paths are case-insensitive, so a casing mismatch there is the same directory,
 // not a different one — and the delegate is handed the recorded name either way.
 function matchKnownLane(known, lane, deps) {
   if (deps.platform === 'win32') {
     const wanted = String(lane).toLowerCase();
-    return known.find((name) => name.toLowerCase() === wanted) ?? null;
+    return known.find((entry) => [entry.agentName, entry.label, entry.basename].some((name) => name?.toLowerCase() === wanted))?.basename ?? null;
   }
-  return known.includes(lane) ? lane : null;
+  return known.find((entry) => [entry.agentName, entry.label, entry.basename].includes(lane))?.basename ?? null;
 }
 
 function knownLanesUnder(state, root, deps) {
   // Same casing rule as the lane name: fold on win32, respect it elsewhere.
   const fold = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
   const prefix = fold(`${resolve(root)}${sep}`);
-  return [...new Set(
-    (state.creates ?? [])
-      .map((created) => created?.path)
-      .filter((path) => typeof path === 'string' && fold(resolve(path)).startsWith(prefix))
-      .map((path) => basename(resolve(path))),
-  )];
+  const creates = (state.creates ?? []).filter((created) => {
+    const path = created?.path;
+    return typeof path === 'string' && fold(resolve(path)).startsWith(prefix);
+  });
+  const paths = new Map(creates.map((created) => [fold(resolve(created.path)), created]));
+  for (const [agentName, lane] of Object.entries(state.lanes ?? {})) {
+    if (typeof lane?.path !== 'string' || !fold(resolve(lane.path)).startsWith(prefix)) continue;
+    const key = fold(resolve(lane.path));
+    if (paths.has(key)) paths.get(key).agentName = agentName;
+  }
+  return [...paths.values()].map((created) => ({
+    agentName: created.agentName ?? null,
+    label: created.label ?? null,
+    path: resolve(created.path),
+    basename: basename(resolve(created.path)),
+  }));
+}
+
+function delegateRootForLane(lanePath, deps) {
+  const resolvePath = deps.resolve ?? resolve;
+  const resolvedLane = resolvePath(lanePath);
+  const delegateRoot = dirname(dirname(resolvedLane));
+  const fold = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
+  const ancestor = `${resolvePath(delegateRoot)}${sep}`;
+  if (dirname(delegateRoot) === delegateRoot || !fold(resolvedLane).startsWith(fold(ancestor))) {
+    usage(`cannot derive a safe delegate root for lane ${resolvedLane}: ${delegateRoot} is not a non-root ancestor`);
+  }
+  return delegateRoot;
 }
 
 function sweepDelegate(opts, deps) {
@@ -1181,9 +1240,11 @@ async function sweepLanes(opts, deps, state) {
   // One plan entry per delegate invocation. A non-lane root is only ever swept
   // with an explicit -Lane naming a directory this helper created.
   const plan = [];
-  // `--lane` is intersected with the sidecar on EVERY root, never trusted on
-  // its own: an operator-typed string is not evidence that this helper created
-  // that directory, and the delegate deletes with -Recurse -Force. The herdr
+  // C6: `--lane` is intersected with the sidecar on EVERY root, never trusted
+  // on its own: an operator-typed string is not evidence that this helper
+  // created that directory, and the delegate deletes with -Recurse -Force. A
+  // `lanes[<name>].path` is admitted only when it exactly equals a
+  // `creates[].path`; creates[] remains the sole delete authority. The herdr
   // root is no exception — everything under it is a lane, but not necessarily
   // OUR lane, and --force is permitted there.
   let laneFound = false;
@@ -1196,27 +1257,36 @@ async function sweepLanes(opts, deps, state) {
     laneFound = laneFound || Boolean(requested);
 
     if (root.laneRoot) {
+      const record = requested ? known.find((entry) => entry.basename === requested) : null;
       plan.push({
         root: root.path,
         kind: root.kind,
         ...(requested ? { lane: requested } : {}),
+        ...(record ? { lanePath: record.path, delegateRoot: delegateRootForLane(record.path, deps) } : {}),
         flags: requested ? ['-Lane', requested, ...baseFlags] : [...baseFlags],
       });
       continue;
     }
-    const lanes = requested ? [requested] : known;
+    const lanes = requested ? [requested] : known.map((entry) => entry.basename);
     if (lanes.length === 0) {
       plan.push({ root: root.path, kind: root.kind, skipped: 'no known lanes under this root' });
       continue;
     }
-    for (const lane of lanes) plan.push({ root: root.path, kind: root.kind, lane, flags: ['-Lane', lane, ...baseFlags] });
+    for (const lane of lanes) {
+      const record = known.find((entry) => entry.basename === lane);
+      const lanePath = record?.path ?? join(root.path, lane);
+      plan.push({ root: root.path, kind: root.kind, lane, lanePath, delegateRoot: delegateRootForLane(lanePath, deps), flags: ['-Lane', lane, ...baseFlags] });
+    }
   }
   if (opts.lane && !laneFound) {
-    usage(`--lane ${opts.lane} is not a lane this helper created under any swept root (nothing in the sidecar's creates[] matches). Sweep it by hand if you mean it.`);
+    const known = roots.map((root) => ({ root: root.path, matches: knownLanesUnder(state, root.path, deps).map((entry) => ({
+      agentNames: entry.agentName ? [entry.agentName] : [], labels: entry.label ? [entry.label] : [], basenames: [entry.basename],
+    })) }));
+    usage(`--lane ${opts.lane} is not a lane this helper created under any swept root; nothing in the sidecar lanes[] or creates[] matches. Agent names come from lanes[] only when their path equals a creates[] path; labels and basenames come from creates[]. Known spellings by root: ${JSON.stringify(known)}. Sweep it by hand if you mean it.`);
   }
 
-  const present = plan.filter((entry) => !entry.skipped && deps.exists(entry.root));
-  const missing = plan.filter((entry) => !entry.skipped && !deps.exists(entry.root)).map((entry) => entry.root);
+  const present = plan.filter((entry) => !entry.skipped && deps.exists(entry.delegateRoot ?? entry.root));
+  const missing = plan.filter((entry) => !entry.skipped && !deps.exists(entry.delegateRoot ?? entry.root)).map((entry) => entry.delegateRoot ?? entry.root);
   if (present.length === 0) {
     // A sweep that visited nothing is not a sweep. Reporting `swept` here was
     // the checker-over-zero-input read: exit 0 with the delegate never invoked.
@@ -1244,7 +1314,7 @@ async function sweepLanes(opts, deps, state) {
         delegated: false,
         delegate,
         hint: 'set HERDR_LANES_SCRIPT, or --workspace-root / WORKIT_WORKSPACE_ROOT so infrastructure/herdr-lanes.ps1 resolves',
-        commands: present.map((entry) => `pwsh -NoProfile -File "${delegate}" -WorktreeRoot "${entry.root}"${entry.flags.length > 0 ? ` ${entry.flags.join(' ')}` : ''}`),
+        commands: present.map((entry) => `pwsh -NoProfile -File "${delegate}" -WorktreeRoot "${entry.delegateRoot ?? entry.root}"${entry.flags.length > 0 ? ` ${entry.flags.join(' ')}` : ''}`),
       },
       row: { lane: null, state: 'delegate-missing' },
     };
@@ -1254,7 +1324,7 @@ async function sweepLanes(opts, deps, state) {
   // lanes unswept behind a failing legacy root — the alert-fan-out failure
   // where one dead target silences the rest.
   const results = present.map((entry) => {
-    const swept = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', entry.root, ...entry.flags]);
+    const swept = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', entry.delegateRoot ?? entry.root, ...entry.flags]);
     return {
       root: entry.root,
       ...(entry.lane ? { lane: entry.lane } : {}),
@@ -1381,6 +1451,7 @@ export async function runLane(argv, overrides = {}) {
       case 'check': result = await checkLane(opts, deps, state); break;
       case 'resume': result = await resumeLane(opts, deps, state); break;
       case 'fallback': result = await fallbackLane(opts, deps, state); break;
+      case 'stop': result = await stopLane(opts, deps, state); break;
       case 'sweep': result = await sweepLanes(opts, deps, state); break;
       default: throw new LaneError(EXIT.USAGE, `${opts.verb} is not implemented yet`);
     }
