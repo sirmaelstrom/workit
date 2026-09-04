@@ -1972,7 +1972,7 @@ test('c952d41e DO 1 and 10: Codex supplies Serena timeout, preserves caller conf
   };
   const defaulted = await start();
   assert.match(agentStartCall(defaulted.f).args.join(' '), /mcp_servers\.serena\.startup_timeout_sec=3/);
-  assert.equal(defaulted.result.row.mcpStartupTimeoutSec, 3);
+  assert.deepEqual(defaulted.result.row.mcpStartupTimeoutSec, { server: 'serena', seconds: 3 });
   const supplied = await start(['-c', 'mcp_servers.other.startup_timeout_sec=9']);
   assert.equal(agentStartCall(supplied.f).args.filter((arg) => String(arg).includes('startup_timeout_sec')).length, 1);
   const refused = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', supplied.f.log], { exec: supplied.f.exec, platform: 'win32' });
@@ -2096,4 +2096,40 @@ test('c952d41e DO 6-8: late stop succeeds, hooks trust is dismissed, and sweep f
   sweep.responses.push({ code: 0, stdout: 'HOLD lane', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p9","state":"idle"}]}}', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' });
   const held = await runLane(['sweep', '--root', root, '--log', sweep.log], { exec: sweep.exec, exists: fakeExists() });
   assert.deepEqual(held.output.holds[0], { pane: 'w1:p9', agent: '<unnamed>', state: 'idle', ghost: true, message: 'HOLD on w1:p9 by <unnamed> (ghost: true); remove by hand with herdr workspace close <ws> then git worktree remove' });
+});
+
+test('amend 1 P1 and P4c/P4d: footer composer is retried; banner fires while modal without corroboration times out', async (t) => {
+  const p = fixture(t); const file = join(p.dir, 'prompt.md'); writeFileSync(file, 'task'); seedLane(p);
+  const wire = `› Read ${resolve(file)} and execute it exactly.`;
+  p.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"done"}}', stderr: '' },
+    { code: 0, stdout: `${wire}\ngpt-5.6-terra high · Context 62% left`, stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"working"}]}}', stderr: '' },
+    { code: 0, stdout: 'working', stderr: '' },
+  );
+  const composer = await runLane(['prompt', 'lane-a', '--file', file, '--log', p.log], { exec: p.exec });
+  assert.equal(composer.output.enterRetries, 1);
+
+  const banner = fixture(t); seedLane(banner);
+  banner.responses.push({ code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' }, { code: 0, stdout: "■ You've hit your usage limit\n5h 74% left · weekly 0% left", stderr: '' });
+  const p4c = await runLane(['wait', 'lane-a', '--until', 'done', '--timeout', '1000', '--log', banner.log], { exec: banner.exec, sleep: async () => {} });
+  assert.equal(p4c.exit, 6); assert.equal(p4c.row.refusalShape, 'banner');
+
+  const modal = fixture(t); seedLane(modal); let clock = 0;
+  modal.responses.push({ code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' }, { code: 0, stdout: 'Approaching rate limits — Switch to gpt-5.6-luna\n  1. Switch', stderr: '' });
+  const p4d = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', modal.log], { exec: modal.exec, now: () => (clock += 10), sleep: async () => {} });
+  assert.equal(p4d.exit, 4, 'modal-only is a corroborated pre-limit nudge, not a refusal');
+});
+
+test('amend 1 P5/P6: unread disappeared agent succeeds; live TUI and still-listed late paths fail', async (t) => {
+  const unread = fixture(t); seedLane(unread, { promptSignature: 'PS X:\\fixture\\lane>' }); let clock = 0;
+  unread.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 1, stdout: '', stderr: 'read failed' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  const p5 = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', unread.log], { exec: unread.exec, now: () => (clock += 10), sleep: async () => {}, warn: () => {} });
+  assert.equal(p5.output.promptCheck, 'unread');
+
+  const live = fixture(t); seedLane(live, { promptSignature: 'PS X:\\fixture\\lane>' }); clock = 0;
+  live.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\src>\n| Ask Codex to do anything |\ngpt-5.6-terra high · Context 62% left', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  const p6 = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', live.log], { exec: live.exec, now: () => (clock += 10), sleep: async () => {} });
+  assert.equal(p6.exit, 1);
 });

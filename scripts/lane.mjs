@@ -285,7 +285,7 @@ function logPathFromArgv(argv, deps) {
 
 
 function emptyState() {
-  return { lanes: {}, creates: [] };
+  return { lanes: {}, creates: [], ghostCandidates: [] };
 }
 
 function statePath(logPath) {
@@ -307,7 +307,7 @@ function loadState(deps, logPath) {
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return emptyState();
-    return { lanes: parsed.lanes ?? {}, creates: parsed.creates ?? [] };
+    return { lanes: parsed.lanes ?? {}, creates: parsed.creates ?? [], ghostCandidates: parsed.ghostCandidates ?? [] };
   } catch {
     throw new LaneError(EXIT.USAGE, `lane state is not valid JSON: ${path}`);
   }
@@ -328,6 +328,7 @@ async function mergeState(deps, logPath, state, mutate) {
     deps.write(statePath(logPath), `${JSON.stringify(fresh, null, 2)}\n`);
     state.lanes = fresh.lanes;
     state.creates = fresh.creates;
+    state.ghostCandidates = fresh.ghostCandidates;
     return fresh;
   } finally {
     release();
@@ -835,6 +836,9 @@ async function startLane(opts, deps, state) {
       if (split.code !== 0) {
         const detail = split.stderr.trim() || split.stdout.trim();
         const holder = startLock.holder ? `; other in-flight lane: ${startLock.holder}` : '';
+        await mergeState(deps, opts.log, state, (draft) => {
+          (draft.ghostCandidates ??= []).push({ pane, reason: 'pane split fallback failed', at: deps.timestamp() });
+        });
         throw new LaneError(EXIT.ERROR, `agent target pane ${pane} was busy and pane split fallback failed${holder}${detail ? `: ${detail}` : ''}`);
       }
       const splitResult = unwrapResult(split.stdout);
@@ -885,8 +889,8 @@ async function startLane(opts, deps, state) {
 
     const focus = restoreFocus(deps);
     const warnings = [warning, focus.warning].filter(Boolean);
-    const mcpStartupTimeoutSec = opts.kind === 'codex'
-      ? (mcpStartupTimeoutValue(opts.agentArgs) ?? positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout', 3))
+    const mcpStartupTimeoutSec = opts.kind === 'codex' && !hasMcpStartupTimeoutConfig(opts.agentArgs)
+      ? { server: 'serena', seconds: positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout', 3) }
       : null;
     return {
     output: {
@@ -1586,7 +1590,15 @@ async function sweepLanes(opts, deps, state) {
     const listing = call(deps, 'herdr', ['agent', 'list']);
     const agents = listing.code === 0 ? listedAgents(listing.stdout) : null;
     if (Array.isArray(agents)) {
-      holds = agents.map((agent) => {
+      const heldPanes = new Set(Object.values(state.lanes ?? {})
+        .filter((lane) => held.some((entry) => entry.lane ? entry.lane === basename(lane.path ?? '') : String(lane.path ?? '').startsWith(entry.root)))
+        .map((lane) => lane.pane).filter(Boolean));
+      // A delegate-wide HOLD has no lane token; preserve its report-only
+      // compatibility while a scoped hold is intersected with its lane pane.
+      const relevant = heldPanes.size > 0
+        ? agents.filter((agent) => heldPanes.has(agent?.pane_id ?? agent?.paneId))
+        : agents;
+      holds = relevant.map((agent) => {
         const pane = agent?.pane_id ?? agent?.paneId ?? '<unknown-pane>';
         const name = agent?.name ?? agent?.agent ?? '<unnamed>';
         const state = String(agent?.state ?? agent?.status ?? 'unknown').toLowerCase();
