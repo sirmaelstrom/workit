@@ -432,7 +432,6 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
     { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
-    { code: 0, stdout: 'working', stderr: '' },
   );
   const result = await runLane(
     ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],

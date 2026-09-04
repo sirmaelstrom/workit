@@ -66,6 +66,14 @@ Every verb appends one JSONL row to `data/outputs/projects/agentic-practice-tran
 23. **Windows workspace-write is refused.** The helper names the measured runner-pipe failure and directs the operator to `danger-full-access`; it never rewrites the sandbox flag.
 24. **Plan refusal is a TUI shape, never vocabulary alone.** Only the anchored Codex usage-limit banner or a rate-limit modal with its numbered option list counts, and it must coincide with a meter at or below the plan floor or an `idle`/`done` agent; compiler errors, paths, and quoted refusal words are not evidence. The JSONL row records `refusalShape: banner|modal`.
 
+**Amendment to 11(a), 2026-09-04.** The anchored `■ You've hit your usage limit` banner is itself refusal evidence and exits 6 regardless of meter or lifecycle state. The `Approaching rate limits` modal is only a pre-limit nudge and additionally needs low-meter or settled-state corroboration.
+
+**Amendment to 15, 2026-09-04.** The per-`--log` start lock has a 120-second stale window, is refreshed around long launch calls, and releases only when it still owns the receipt. Different logs are different fleets; cross-sidecar collisions still use the busy-pane split guard.
+
+**Amendment to 17, 2026-09-04.** First starts inherit create identity by their recorded original pane; a re-start with an existing lane path prefers that create path before pane lookup.
+
+**Amendment to 24, 2026-09-04.** Banner-alone behavior restores 11(a); the modal remains gated to avoid treating a model-switch offer as a refusal.
+
 ## Success criteria, each with its falsifier
 
 | # | Claim | How it is shown true | What would refute it |

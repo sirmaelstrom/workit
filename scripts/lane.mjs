@@ -12,6 +12,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -47,7 +48,8 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
   resume   <name> [--timeout <ms>]      Waits --until idle --until done, never bare.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
-  stop     <name> [--timeout <ms>]  Stops the lane agent and verifies it exited.
+  stop     <name> [--timeout <ms>]  Stops the lane agent; a late shell/banner
+           check is accepted only after the live-TUI veto.
   sweep    [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
            --lane <name> limits the delegate to one lane; --list is a dry run.
            Outside a herdr worktrees root, every call is scoped to a lane this
@@ -60,7 +62,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
                 agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)
   --prompt-regex <re>  How this box's shell prompt looks (or LANE_PROMPT_REGEX).
                 Otherwise the pane's own prompt, captured at start, is the
-                signature; default shapes are the last resort.`;
+                signature; default shapes are the last resort.
+  start serializes for about 120s per --log sidecar (not across different logs),
+        splits a busy pane once, and logs waitedForStartLockMs, paneSplitFrom,
+        hooksTrusted, queued, enterRetries, composerCleared, promptCheck,
+        ghost, and refusalShape.`;
 // Seeded only from a captured refusal, never an invented one. This string was
 // read off lane O's pane at 2026-09-01 22:12Z; herdr reported that agent as
 // `idle` the whole time the modal was up, so the pane text is the only signal.
@@ -329,15 +335,24 @@ async function mergeState(deps, logPath, state, mutate) {
 }
 
 const LOCK_STALE_MS = 60_000;
+// Two split-path passes can each spend 5s capturing + 30s preparing, followed
+// by agent start and trust handling. 120s leaves one full pass plus margin.
+const START_LOCK_STALE_MS = 120_000;
 
-async function acquireLock(deps, lock, attempts = 50, contents = null) {
+async function acquireLock(deps, lock, attempts = 50, contents = null, staleMs = LOCK_STALE_MS) {
   const started = deps.now();
   let holder = null;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       deps.mkdir(dirname(lock));
       deps.writeNew(lock, contents ?? `${deps.timestamp()}\n`);
-      const release = () => { try { deps.remove(lock); } catch { /* already gone */ } };
+      const expected = String(contents ?? '').trim();
+      const release = () => {
+        try {
+          // A stale-lock reclaimer may own this path now. Never delete its lock.
+          if (!expected || String(deps.read(lock)).trim() === expected) deps.remove(lock);
+        } catch { /* already gone or unreadable */ }
+      };
       release.waitedMs = deps.now() - started;
       release.holder = holder;
       return release;
@@ -353,7 +368,7 @@ async function acquireLock(deps, lock, attempts = 50, contents = null) {
       // until someone deletes it by hand. Reclaim it once it is older than any
       // plausible in-flight write, and say so — silence here looks like a hang.
       const age = lockAge(deps, lock);
-      if (age !== null && age > LOCK_STALE_MS) {
+      if (age !== null && age > staleMs) {
         deps.warn(`lane: reclaiming a stale lock (${Math.round(age / 1000)}s old): ${lock}`);
         try { deps.remove(lock); } catch { /* someone else won the race */ }
         continue;
@@ -416,13 +431,19 @@ function startCollision(result) {
   return /agent_pane_busy/i.test(`${result.stderr}\n${result.stdout}`);
 }
 
-function bareShellWithoutAgent(deps, pane) {
+function bareShellWithoutAgent(deps, pane, promptOptions = {}) {
   const snapshot = readPane(deps, pane);
-  if (snapshot.code !== 0 || !paneAtPrompt(snapshot.stdout)) return false;
+  if (snapshot.code !== 0 || !paneAtPrompt(snapshot.stdout, promptOptions)) return false;
   const listing = call(deps, 'herdr', ['agent', 'list']);
   if (listing.code !== 0) return false;
   const agents = listedAgents(listing.stdout);
   return Array.isArray(agents) && !agents.some((agent) => (agent?.pane_id ?? agent?.paneId) === pane);
+}
+
+function refreshLock(deps, lock, owner) {
+  try {
+    if (String(deps.read(lock)).trim() === String(owner).trim()) deps.touch(lock);
+  } catch { /* another owner won the path */ }
 }
 
 function withoutOption(args, flag) {
@@ -758,7 +779,7 @@ async function startLane(opts, deps, state) {
     const sandbox = opts.sandbox ?? agentOption(native, '--sandbox');
     if (!sandbox) usage('codex start needs an explicit --sandbox');
     if (sandbox === 'read-only') usage('codex read-only sandbox is refused on Windows because it can return ungrounded answers');
-    if (deps.platform === 'win32' && sandbox === 'workspace-write') {
+    if (sandbox === 'workspace-write') {
       usage('codex workspace-write sandbox is refused on Windows: unified exec can time out connecting its runner pipe; use danger-full-access instead');
     }
     native = withoutConfig(withoutOption(withoutOption(withoutOption(native, '--sandbox'), '--ask-for-approval'), '--model'), 'model_reasoning_effort');
@@ -774,11 +795,13 @@ async function startLane(opts, deps, state) {
 
   // A sidecar write lock prevents lost state; this separate, longer-lived lock
   // prevents two launches from both claiming the same shell between writes.
+  const startLockContent = `${JSON.stringify({ lane: opts.name, startedAt: deps.timestamp() })}\n`;
   const startLock = await acquireLock(
     deps,
     `${opts.log}.start.lock`,
     600,
-    `${JSON.stringify({ lane: opts.name, startedAt: deps.timestamp() })}\n`,
+    startLockContent,
+    START_LOCK_STALE_MS,
   );
   const waitedForStartLockMs = startLock.waitedMs;
   try {
@@ -792,14 +815,17 @@ async function startLane(opts, deps, state) {
     let promptSignature = null;
     let raw = null;
     for (let attempt = 0; attempt < 2; attempt++) {
+      refreshLock(deps, `${opts.log}.start.lock`, startLockContent);
       promptSignature = await capturePromptSignature(deps, pane, { patterns });
+      refreshLock(deps, `${opts.log}.start.lock`, startLockContent);
       if (opts.kind === 'codex') await prepareCodexPane({ ...opts, pane }, deps, promptSignature);
+      refreshLock(deps, `${opts.log}.start.lock`, startLockContent);
       const started = call(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', pane, '--', ...native]);
       if (started.code === 0) {
         raw = started.stdout;
         break;
       }
-      const recoverable = startCollision(started) || (isTimeoutFailure(started) && bareShellWithoutAgent(deps, pane));
+      const recoverable = startCollision(started) || (isTimeoutFailure(started) && bareShellWithoutAgent(deps, pane, { signature: promptSignature, patterns }));
       if (!recoverable || attempt > 0) {
         const detail = started.stderr.trim() || started.stdout.trim();
         const holder = startLock.holder ? ` while ${startLock.holder} was starting` : '';
@@ -848,7 +874,8 @@ async function startLane(opts, deps, state) {
     let hooksTrusted = false;
     if (opts.kind === 'codex') {
       const trust = readPane(deps, pane);
-      if (trust.code === 0 && HOOKS_TRUST_PATTERNS.some((pattern) => pattern.test(responseText(trust.stdout)))) {
+      const trustLines = trust.code === 0 ? paneLines(trust.stdout).slice(-12) : [];
+      if (trustLines.some((line) => HOOKS_TRUST_PATTERNS[0].test(line)) && trustLines.some((line) => HOOKS_TRUST_PATTERNS[1].test(line))) {
         call(deps, 'herdr', ['agent', 'send-keys', opts.name, 't']);
         call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'esc']);
         readPane(deps, pane);
@@ -901,6 +928,17 @@ async function promptLane(opts, deps, state) {
   const initial = agentState(deps, opts.name);
   if (!initial) throw new LaneError(EXIT.ERROR, `prompt agent state check failed: ${opts.name} is not listed`);
   const queued = initial.state === 'working';
+  let composerCleared = false;
+  if (queued && lane.pane && opts.verb === 'prompt') {
+    const beforeSteer = readPane(deps, lane.pane);
+    const dirty = beforeSteer.code === 0 && paneLines(beforeSteer.stdout).slice(-5)
+      .some((line) => line.startsWith('›') && !/Ask Codex to do anything/i.test(line));
+    if (dirty) {
+      call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'esc']);
+      readPane(deps, lane.pane);
+      composerCleared = true;
+    }
+  }
   const promptArgs = ['agent', 'prompt', opts.name, wire, ...(queued ? [] : ['--wait', '--until', 'working'])];
   let sent = call(deps, 'herdr', promptArgs);
   let enterRetries = 0;
@@ -917,11 +955,10 @@ async function promptLane(opts, deps, state) {
   }
 
   const composerStalled = () => {
-    if (!lane.pane) return false;
+    if (opts.verb !== 'prompt' || stateAfter === 'working' || !lane.pane) return false;
     const pane = readPane(deps, lane.pane);
     if (pane.code !== 0) return false;
-    const last = paneLines(pane.stdout).at(-1) ?? '';
-    return stateAfter !== 'working' && last.startsWith('›') && last.includes('execute it exactly');
+    return paneLines(pane.stdout).slice(-5).some((line) => line.startsWith('›') && line.includes('execute it exactly'));
   };
   if (composerStalled()) {
     call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'enter']);
@@ -934,8 +971,8 @@ async function promptLane(opts, deps, state) {
     draft.lanes[opts.name] = { ...(draft.lanes[opts.name] ?? lane), promptFile: file };
   });
   return {
-    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, stateAfter },
-    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries },
+    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, composerCleared, stateAfter },
+    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries, composerCleared },
   };
 }
 
@@ -1016,9 +1053,9 @@ async function waitLane(opts, deps, state) {
       dialog = plan.dialog;
     }
     const refusal = plan.refusal;
-    const refusalEligible = refusal && (
-      (meter.plan5h !== null && meter.plan5h <= floor) || ['idle', 'done'].includes(stateAfter)
-    );
+    const modalEligible = plan.refusalShape === 'modal'
+      && ((meter.plan5h !== null && meter.plan5h <= floor) || ['idle', 'done'].includes(stateAfter));
+    const refusalEligible = Boolean(refusal) && (plan.refusalShape === 'banner' || modalEligible);
     if (refusalEligible) {
       return {
         exit: EXIT.PLAN_LOW,
@@ -1173,9 +1210,10 @@ async function resumeLane(opts, deps, state) {
   // herdr reports `idle` while that modal is up, so this outranks the state.
   const plan = readPlanState(deps, opts.name);
   const meter = plan.meter ?? { plan5h: null, planWeekly: null };
-  const refusalEligible = plan.refusal && (
-    (meter.plan5h !== null && meter.plan5h <= 20) || ['idle', 'done'].includes(responseState(raw.stdout, null))
-  );
+  const floor = positiveNumber(opts.planFloor, '--plan-floor', 20);
+  const modalEligible = plan.refusalShape === 'modal'
+    && ((meter.plan5h !== null && meter.plan5h <= floor) || ['idle', 'done'].includes(responseState(raw.stdout, null)));
+  const refusalEligible = Boolean(plan.refusal) && (plan.refusalShape === 'banner' || modalEligible);
   if (refusalEligible) {
     return {
       exit: EXIT.PLAN_LOW,
@@ -1300,11 +1338,17 @@ async function stopLane(opts, deps, state) {
     const lateListing = call(deps, 'herdr', ['agent', 'list']);
     const lateNames = lateListing.code === 0 ? listedAgentNames(lateListing.stdout) : null;
     const lateText = latePane.code === 0 ? responseText(latePane.stdout) : '';
+    const lateLines = paneLines(lateText);
+    const liveTui = LIVE_TUI.some((pattern) => lateLines.slice(-2).some((line) => pattern.test(line)));
     const latePrompt = latePane.code === 0 && paneAtPrompt(latePane.stdout, {
       signature: lane.promptSignature ?? null,
       patterns: promptPatterns(opts, deps),
     });
-    const exitBanner = /(?:goodbye|exited|codex.*(?:exit|closed)|PS\s+\S.*>)$/im.test(lateText);
+    const exitBanner = !liveTui && lateLines.slice(-3).some((line) => /^(?:goodbye|codex\s+(?:exited|closed))/i.test(line));
+    if (Array.isArray(lateNames) && !lateNames.includes(opts.name) && latePane.code !== 0) {
+      deps.warn(`lane: stop pane re-read failed after ${opts.name} disappeared; accepting unread exit`);
+      return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'unread' }, row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'unread' } };
+    }
     if (Array.isArray(lateNames) && !lateNames.includes(opts.name) && (latePrompt || exitBanner)) {
       return {
         exit: EXIT.OK,
@@ -1548,7 +1592,7 @@ async function sweepLanes(opts, deps, state) {
         const state = String(agent?.state ?? agent?.status ?? 'unknown').toLowerCase();
         const snapshot = pane === '<unknown-pane>' ? null : readPane(deps, pane);
         const ghost = name === '<unnamed>' && ['idle', 'done'].includes(state)
-          && snapshot?.code === 0 && paneAtPrompt(snapshot.stdout);
+          && snapshot?.code === 0 && paneAtPrompt(snapshot.stdout, { patterns: promptPatterns(opts, deps) });
         return {
           pane,
           agent: name,
@@ -1638,6 +1682,7 @@ export async function runLane(argv, overrides = {}) {
     remove: (path) => rmSync(path, { force: true }),
     mkdir: (path) => mkdirSync(path, { recursive: true }),
     stat: (path) => statSync(path),
+    touch: (path) => utimesSync(path, new Date(), new Date()),
     warn: (message) => console.error(message),
     append: (path, value) => appendFileSync(path, value, 'utf8'),
     env: process.env,
