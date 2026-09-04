@@ -54,7 +54,7 @@ Every verb appends one JSONL row to `data/outputs/projects/agentic-practice-tran
 
 ## Amendments 2026-09-04 (quest c952d41e)
 
-14. **Codex MCP startup is bounded.** `lane start --kind codex` supplies `-c mcp_servers.serena.startup_timeout_sec=3` unless the caller supplied a startup-timeout config for any MCP server; `--mcp-startup-timeout` changes Serena's value and the JSONL row records it.
+14. **Codex MCP startup is opt-in and bounded.** `lane start --kind codex` supplies no MCP startup-timeout config by default. Passing both `--mcp-startup-timeout <sec>` and `--mcp-startup-server <name>` injects `-c mcp_servers.<name>.startup_timeout_sec=<sec>` and records the named pair in the JSONL row; a caller-supplied `mcp_servers.<x>.startup_timeout_sec` wins, with a warning when it suppresses the pair. The default went because a named-server override for a server that is not configured is a hard Codex config error (measured 2026-09-04).
 15. **Starts serialize before pane ownership.** A bounded sidecar start lock records its owner, recovers stale locks, and records any wait so competing starts cannot both claim one pane.
 16. **A busy or abandoned start gets one fresh pane.** On the measured busy signature, or a timeout that leaves a bare shell with no agent, split right once, preserve the old pane as `paneSplitFrom`, and retry on the new pane.
 17. **Lane identity follows path, not a disposable pane id.** A split lane inherits branch, base, and path by matching its create record's path before falling back to the original pane id.

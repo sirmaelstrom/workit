@@ -226,7 +226,8 @@ test('WP-1: codex start waits for codex.exe and a returned prompt before agent s
   const runIndex = f.calls.findIndex((call) => call.args[0] === 'pane' && call.args[1] === 'run');
   const readsAfterRun = f.calls.slice(runIndex, startIndex).filter((call) => call.args[0] === 'pane' && call.args[1] === 'read');
   assert.equal(readsAfterRun.length, 2, 'the readiness poll ran twice before the agent was started');
-  assert.deepEqual(f.calls[startIndex].args.slice(-10), ['--model', 'gpt-5.6-terra', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', '-c', 'model_reasoning_effort=medium', '-c', 'mcp_servers.serena.startup_timeout_sec=3']);
+  assert.deepEqual(f.calls[startIndex].args.slice(-8), ['--model', 'gpt-5.6-terra', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', '-c', 'model_reasoning_effort=medium']);
+  assert.equal(f.calls[startIndex].args.some((arg) => String(arg).includes('startup_timeout_sec')), false);
 });
 
 test('WP-1: every attempted verb appends the complete JSONL instrumentation shape', async (t) => {
@@ -1956,8 +1957,8 @@ test('A2-13 / U1: the harness verifies the stimulus fired, and S1 needs a real d
   assert.equal(s1Verdict(4, 'timeout', '').ok, false);
 });
 
-test('c952d41e DO 1 and 10: Codex supplies Serena timeout, preserves caller config, and refuses workspace-write only on win32', async (t) => {
-  const start = async (agentArgs = [], platform = 'win32') => {
+test('c952d41e DO 1 and 10: Codex MCP timeout is opt-in, paired, caller-overridable, and refuses workspace-write only on win32', async (t) => {
+  const start = async (agentArgs = [], platform = 'win32', helperArgs = []) => {
     const f = fixture(t);
     f.responses.push(
       SHELL_READ, { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
@@ -1966,16 +1967,26 @@ test('c952d41e DO 1 and 10: Codex supplies Serena timeout, preserves caller conf
       { code: 0, stdout: 'no dialog', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
       { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
     );
-    const result = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'danger-full-access', '--log', f.log, '--', ...agentArgs], {
+    const result = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'danger-full-access', '--log', f.log, ...helperArgs, '--', ...agentArgs], {
       exec: f.exec, platform, env: { HERDR_PANE_ID: 'w1:p1' }, findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {},
     });
     return { f, result };
   };
-  const defaulted = await start();
-  assert.match(agentStartCall(defaulted.f).args.join(' '), /mcp_servers\.serena\.startup_timeout_sec=3/);
-  assert.deepEqual(defaulted.result.row.mcpStartupTimeoutSec, { server: 'serena', seconds: 3 });
-  const supplied = await start(['-c', 'mcp_servers.other.startup_timeout_sec=9']);
+  const bare = await start();
+  assert.equal(agentStartCall(bare.f).args.some((arg) => String(arg).includes('startup_timeout_sec')), false);
+  assert.equal('mcpStartupTimeoutSec' in bare.result.output, false);
+  assert.equal('mcpStartupTimeoutSec' in bare.result.row, false);
+  const optedIn = await start([], 'win32', ['--mcp-startup-timeout', '5', '--mcp-startup-server', 'observatory']);
+  assert.equal(agentStartCall(optedIn.f).args.filter((arg) => arg === 'mcp_servers.observatory.startup_timeout_sec=5').length, 1);
+  assert.deepEqual(optedIn.result.row.mcpStartupTimeoutSec, { server: 'observatory', seconds: 5 });
+  const lone = await start([], 'win32', ['--mcp-startup-timeout', '5']);
+  assert.equal(lone.result.exit, 2);
+  assert.match(lone.result.output.error, /--mcp-startup-server/);
+  const supplied = await start(['-c', 'mcp_servers.other.startup_timeout_sec=9'], 'win32', ['--mcp-startup-timeout', '5', '--mcp-startup-server', 'observatory']);
   assert.equal(agentStartCall(supplied.f).args.filter((arg) => String(arg).includes('startup_timeout_sec')).length, 1);
+  assert.equal(agentStartCall(supplied.f).args.includes('mcp_servers.other.startup_timeout_sec=9'), true);
+  assert.equal('mcpStartupTimeoutSec' in supplied.result.row, false);
+  assert.match(supplied.result.output.warning, /ignored.*--mcp-startup-timeout.*--mcp-startup-server/);
   const refused = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', supplied.f.log], { exec: supplied.f.exec, platform: 'win32' });
   assert.equal(refused.exit, 2);
   assert.match(refused.output.error, /danger-full-access/);
