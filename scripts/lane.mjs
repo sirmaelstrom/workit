@@ -46,7 +46,8 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Naming any state adds blocked; a bare wait forwards none (herdr's
            default already matches idle|done|blocked).
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
-  resume   <name> [--timeout <ms>]      Waits --until idle --until done, never bare.
+  resume   <name> [--timeout <ms>] [--plan-floor <pct>]
+           Waits --until idle --until done, never bare; honours --plan-floor.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
   stop     <name> [--timeout <ms>]  Stops the lane agent; a late shell/banner
            check is accepted only after the live-TUI veto.
@@ -79,7 +80,6 @@ export const PLAN_REFUSAL_PATTERNS = Object.freeze([
 export const HOOKS_TRUST_PATTERNS = Object.freeze([
   /hooks need review/i,
   /press t to trust/i,
-  /plugin\s*-\s*browser/i,
 ]);
 // The sweep delegate's location is resolved, never hardcoded: this file ships in
 // a public repo, and one operator's drive layout is not a default. Order:
@@ -512,6 +512,12 @@ function paneLines(text) {
   return responseText(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
+// Composer safety needs the original indentation: a quoted transcript line is
+// not a live composer line, even though its trimmed text begins with `›`.
+function paneRawLines(text) {
+  return responseText(text).split(/\r?\n/).filter((line) => line.trim());
+}
+
 // The pane's own prompt is the only prompt that matters. Its last non-empty
 // line is the stable half — the first oh-my-posh line carries a clock and a
 // command duration, which change between reads.
@@ -935,8 +941,15 @@ async function promptLane(opts, deps, state) {
   let composerCleared = false;
   if (queued && lane.pane && opts.verb === 'prompt') {
     const beforeSteer = readPane(deps, lane.pane);
-    const dirty = beforeSteer.code === 0 && paneLines(beforeSteer.stdout).slice(-5)
-      .some((line) => line.startsWith('›') && !/Ask Codex to do anything/i.test(line));
+    const lines = beforeSteer.code === 0 ? paneRawLines(beforeSteer.stdout) : [];
+    // Esc interrupts a working Codex agent. Only a column-zero composer
+    // directly above its live footer is evidence that it is safe to clear.
+    const composer = lines.at(-2);
+    const footer = lines.at(-1);
+    const dirty = Boolean(composer && footer
+      && composer.startsWith('›')
+      && !/Ask Codex to do anything/i.test(composer)
+      && LIVE_TUI.some((pattern) => pattern.test(footer)));
     if (dirty) {
       call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'esc']);
       readPane(deps, lane.pane);
@@ -947,7 +960,7 @@ async function promptLane(opts, deps, state) {
   let sent = call(deps, 'herdr', promptArgs);
   let enterRetries = 0;
   let stateAfter = queued ? 'working' : responseState(sent.stdout, initial.state ?? 'working');
-  if (sent.code !== 0 && !/agent_prompt_stalled|timeout/i.test(`${sent.stderr}\n${sent.stdout}`)) {
+  if (sent.code !== 0 && !isTimeoutFailure(sent)) {
     const detail = sent.stderr.trim() || sent.stdout.trim();
     throw new LaneError(EXIT.ERROR, `herdr agent prompt failed${detail ? `: ${detail}` : ''}`);
   }
@@ -1349,7 +1362,7 @@ async function stopLane(opts, deps, state) {
       patterns: promptPatterns(opts, deps),
     });
     const exitBanner = !liveTui && lateLines.slice(-3).some((line) => /^(?:goodbye|codex\s+(?:exited|closed))/i.test(line));
-    if (Array.isArray(lateNames) && !lateNames.includes(opts.name) && latePane.code !== 0) {
+    if (lateListing.code === 0 && Array.isArray(lateNames) && !lateNames.includes(opts.name) && latePane.code !== 0) {
       deps.warn(`lane: stop pane re-read failed after ${opts.name} disappeared; accepting unread exit`);
       return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'unread' }, row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'unread' } };
     }
@@ -1590,21 +1603,25 @@ async function sweepLanes(opts, deps, state) {
     const listing = call(deps, 'herdr', ['agent', 'list']);
     const agents = listing.code === 0 ? listedAgents(listing.stdout) : null;
     if (Array.isArray(agents)) {
-      const heldPanes = new Set(Object.values(state.lanes ?? {})
-        .filter((lane) => held.some((entry) => entry.lane ? entry.lane === basename(lane.path ?? '') : String(lane.path ?? '').startsWith(entry.root)))
-        .map((lane) => lane.pane).filter(Boolean));
-      // A delegate-wide HOLD has no lane token; preserve its report-only
-      // compatibility while a scoped hold is intersected with its lane pane.
-      const relevant = heldPanes.size > 0
-        ? agents.filter((agent) => heldPanes.has(agent?.pane_id ?? agent?.paneId))
-        : agents;
+      const heldLanes = Object.values(state.lanes ?? {}).filter((lane) => held.some((entry) => {
+        if (entry.lane) return entry.lane === basename(lane.path ?? '');
+        return knownLanesUnder(state, entry.root, deps).some((known) => known.path === resolve(lane.path ?? ''));
+      }));
+      const heldPanes = new Set(heldLanes.flatMap((lane) => [lane.pane, lane.paneSplitFrom]).filter(Boolean));
+      const paneSignatures = new Map(Object.values(state.lanes ?? {}).map((lane) => [lane.pane, lane.promptSignature]));
+      // A HOLD is scoped to a pane the sidecar knows; never turn an empty or
+      // ambiguous association into a report about every live agent.
+      const relevant = agents.filter((agent) => heldPanes.has(agent?.pane_id ?? agent?.paneId));
       holds = relevant.map((agent) => {
         const pane = agent?.pane_id ?? agent?.paneId ?? '<unknown-pane>';
         const name = agent?.name ?? agent?.agent ?? '<unnamed>';
         const state = String(agent?.state ?? agent?.status ?? 'unknown').toLowerCase();
         const snapshot = pane === '<unknown-pane>' ? null : readPane(deps, pane);
         const ghost = name === '<unnamed>' && ['idle', 'done'].includes(state)
-          && snapshot?.code === 0 && paneAtPrompt(snapshot.stdout, { patterns: promptPatterns(opts, deps) });
+          && snapshot?.code === 0 && paneAtPrompt(snapshot.stdout, {
+            signature: paneSignatures.get(pane) ?? null,
+            patterns: promptPatterns(opts, deps),
+          });
         return {
           pane,
           agent: name,
@@ -1617,6 +1634,10 @@ async function sweepLanes(opts, deps, state) {
       });
     }
   }
+  const candidates = (state.ghostCandidates ?? []).map((candidate) => ({
+    pane: candidate.pane,
+    message: `HOLD candidate (split failed at ${candidate.at})`,
+  }));
   return {
     exit: swept.length === 0 ? EXIT.ERROR : EXIT.OK,
     output: {
@@ -1624,7 +1645,7 @@ async function sweepLanes(opts, deps, state) {
       roots: [...results, ...plan.filter((entry) => entry.skipped).map((entry) => ({ root: entry.root, skipped: entry.skipped }))],
       sweptRoots: swept.length,
       totalRoots: results.length,
-      ...(holds.length > 0 ? { holds } : {}),
+      ...((holds.length > 0 || candidates.length > 0) ? { holds: [...holds, ...candidates] } : {}),
     },
     row: { lane: null, state: swept.length === results.length ? 'swept' : 'swept-partial' },
   };
@@ -1635,8 +1656,7 @@ async function sweepLanes(opts, deps, state) {
 function isTimeoutFailure(result) {
   const parsed = parseJson(result.stderr) ?? parseJson(result.stdout);
   const code = parsed?.error?.code;
-  if (typeof code === 'string') return code === 'timeout';
-  return /timeout/i.test(`${result.stderr}\n${result.stdout}`);
+  return code === 'timeout' || code === 'agent_prompt_stalled';
 }
 
 // One pane read, shared by `wait` and `resume`: the plan meter and the captured
@@ -1658,14 +1678,11 @@ function planRefusal(text) {
   const source = responseText(text);
   const lines = source.split(/\r?\n/);
   const banner = lines.find((line) => PLAN_REFUSAL_PATTERNS[0].test(line));
-  if (banner) return { shape: 'banner', line: banner.trim() };
+  const liveFooter = LIVE_TUI.some((pattern) => lines.slice(-2).some((line) => pattern.test(line)));
+  if (banner && liveFooter) return { shape: 'banner', line: banner.trim() };
   const modal = lines.find((line) => PLAN_REFUSAL_PATTERNS[1].test(line));
   if (modal && /(?:^|\n)\s*(?:›\s*)?1\.\s*Switch\b/i.test(source)) return { shape: 'modal', line: modal.trim() };
   return null;
-}
-
-export function matchPlanRefusal(text) {
-  return planRefusal(text)?.line ?? null;
 }
 
 export function scrapePlanMeter(text) {
