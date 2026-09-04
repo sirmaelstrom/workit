@@ -34,8 +34,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Roots the lane at <repo>-wt-<slug> under the projects tree (C13).
   start    <name> --pane <id> --kind claude|codex --model <slug> --reasoning <lvl>
            [--sandbox <mode>] [--permission-mode <mode>] [--allow-default-mode]
+           [--mcp-startup-timeout <sec>]
            [-- <native agent args>]
            dontAsk is always refused; default mode needs --allow-default-mode.
+           Codex defaults Serena's startup timeout to 3 seconds; a caller-supplied
+           mcp_servers.<server>.startup_timeout_sec config is left unchanged.
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
   wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
@@ -62,6 +65,13 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
 // read off lane O's pane at 2026-09-01 22:12Z; herdr reported that agent as
 // `idle` the whole time the modal was up, so the pane text is the only signal.
 export const PLAN_REFUSAL_PATTERNS = Object.freeze([/hit your usage limit/i]);
+// Captured from the first-run trust interstitial. Keep these together: this is
+// a launch recovery, not a generic attempt to dismiss arbitrary Codex UI.
+export const HOOKS_TRUST_PATTERNS = Object.freeze([
+  /hooks need review/i,
+  /press t to trust/i,
+  /plugin\s*-\s*browser/i,
+]);
 // The sweep delegate's location is resolved, never hardcoded: this file ships in
 // a public repo, and one operator's drive layout is not a default. Order:
 // HERDR_LANES_SCRIPT, then <workspace-root>/infrastructure/herdr-lanes.ps1
@@ -193,7 +203,7 @@ function parseArgs(argv) {
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
     '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--to', '--log',
-    '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex',
+    '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex', '--mcp-startup-timeout',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -317,14 +327,25 @@ async function mergeState(deps, logPath, state, mutate) {
 
 const LOCK_STALE_MS = 60_000;
 
-async function acquireLock(deps, lock, attempts = 50) {
+async function acquireLock(deps, lock, attempts = 50, contents = null) {
+  const started = deps.now();
+  let holder = null;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       deps.mkdir(dirname(lock));
-      deps.writeNew(lock, `${deps.timestamp()}\n`);
-      return () => { try { deps.remove(lock); } catch { /* already gone */ } };
+      deps.writeNew(lock, contents ?? `${deps.timestamp()}\n`);
+      const release = () => { try { deps.remove(lock); } catch { /* already gone */ } };
+      release.waitedMs = deps.now() - started;
+      release.holder = holder;
+      return release;
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
+      // The start lock has a small JSON receipt so a collision can name the
+      // lane already launching instead of making the operator guess.
+      try {
+        const parsed = JSON.parse(deps.read(lock));
+        holder = typeof parsed?.lane === 'string' ? parsed.lane : holder;
+      } catch { /* legacy timestamp-only locks have no owner */ }
       // A lane killed mid-write leaves a lock that would fail every later call
       // until someone deletes it by hand. Reclaim it once it is older than any
       // plausible in-flight write, and say so — silence here looks like a hang.
@@ -370,6 +391,35 @@ function withoutConfig(args, key) {
     copy.push(args[i]);
   }
   return copy;
+}
+
+function hasMcpStartupTimeoutConfig(args) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== '-c') continue;
+    if (/^mcp_servers\.[^.]+\.startup_timeout_sec=/.test(String(args[i + 1] ?? ''))) return true;
+  }
+  return false;
+}
+
+function mcpStartupTimeoutValue(args) {
+  for (let i = 0; i < args.length; i++) {
+    const match = args[i] === '-c' && /^mcp_servers\.[^.]+\.startup_timeout_sec=(.+)$/.exec(String(args[i + 1] ?? ''));
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+function startCollision(result) {
+  return /agent_pane_busy/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+function bareShellWithoutAgent(deps, pane) {
+  const snapshot = readPane(deps, pane);
+  if (snapshot.code !== 0 || !paneAtPrompt(snapshot.stdout)) return false;
+  const listing = call(deps, 'herdr', ['agent', 'list']);
+  if (listing.code !== 0) return false;
+  const agents = listedAgents(listing.stdout);
+  return Array.isArray(agents) && !agents.some((agent) => (agent?.pane_id ?? agent?.paneId) === pane);
 }
 
 function withoutOption(args, flag) {
@@ -705,32 +755,79 @@ async function startLane(opts, deps, state) {
     const sandbox = opts.sandbox ?? agentOption(native, '--sandbox');
     if (!sandbox) usage('codex start needs an explicit --sandbox');
     if (sandbox === 'read-only') usage('codex read-only sandbox is refused on Windows because it can return ungrounded answers');
+    if (deps.platform === 'win32' && sandbox === 'workspace-write') {
+      usage('codex workspace-write sandbox is refused on Windows: unified exec can time out connecting its runner pipe; use danger-full-access instead');
+    }
     native = withoutConfig(withoutOption(withoutOption(withoutOption(native, '--sandbox'), '--ask-for-approval'), '--model'), 'model_reasoning_effort');
     native = [
       '--model', opts.model, '--ask-for-approval', 'never', '--sandbox', sandbox,
       '-c', `model_reasoning_effort=${opts.reasoning}`, ...native,
     ];
+    const mcpStartupTimeoutSec = positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout', 3);
+    if (!hasMcpStartupTimeoutConfig(native)) {
+      native.push('-c', `mcp_servers.serena.startup_timeout_sec=${mcpStartupTimeoutSec}`);
+    }
   }
 
-  // Every refusal above is herdr-free; the first call happens only once the
-  // launch is known to be legal. This read is the last moment the pane is known
-  // to be a shell — once an agent owns it, its prompt is gone until the agent
-  // quits, which is exactly when `fallback` has to recognise it again.
-  const patterns = promptPatterns(opts, deps);
-  const promptSignature = await capturePromptSignature(deps, opts.pane, { patterns });
-  if (opts.kind === 'codex') await prepareCodexPane(opts, deps, promptSignature);
-
-  const raw = callOrFail(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', opts.pane, '--', ...native]);
+  // A sidecar write lock prevents lost state; this separate, longer-lived lock
+  // prevents two launches from both claiming the same shell between writes.
+  const startLock = await acquireLock(
+    deps,
+    `${opts.log}.start.lock`,
+    600,
+    `${JSON.stringify({ lane: opts.name, startedAt: deps.timestamp() })}\n`,
+  );
+  const waitedForStartLockMs = startLock.waitedMs;
+  try {
+    // Every refusal above is herdr-free; the first call happens only once the
+    // launch is known to be legal. This read is the last moment the pane is known
+    // to be a shell — once an agent owns it, its prompt is gone until the agent
+    // quits, which is exactly when `fallback` has to recognise it again.
+    const patterns = promptPatterns(opts, deps);
+    let pane = opts.pane;
+    let paneSplitFrom = null;
+    let promptSignature = null;
+    let raw = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      promptSignature = await capturePromptSignature(deps, pane, { patterns });
+      if (opts.kind === 'codex') await prepareCodexPane({ ...opts, pane }, deps, promptSignature);
+      const started = call(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', pane, '--', ...native]);
+      if (started.code === 0) {
+        raw = started.stdout;
+        break;
+      }
+      const recoverable = startCollision(started) || (isTimeoutFailure(started) && bareShellWithoutAgent(deps, pane));
+      if (!recoverable || attempt > 0) {
+        const detail = started.stderr.trim() || started.stdout.trim();
+        const holder = startLock.holder ? ` while ${startLock.holder} was starting` : '';
+        throw new LaneError(EXIT.ERROR, `herdr agent start failed${holder}${detail ? `: ${detail}` : ''}`);
+      }
+      const split = call(deps, 'herdr', ['pane', 'split', pane, '--direction', 'right']);
+      if (split.code !== 0) {
+        const detail = split.stderr.trim() || split.stdout.trim();
+        const holder = startLock.holder ? `; other in-flight lane: ${startLock.holder}` : '';
+        throw new LaneError(EXIT.ERROR, `agent target pane ${pane} was busy and pane split fallback failed${holder}${detail ? `: ${detail}` : ''}`);
+      }
+      const splitResult = unwrapResult(split.stdout);
+      const newPane = firstDefined(splitResult, ['pane_id', 'paneId']) ?? deepFind(splitResult, ['pane_id', 'paneId']);
+      if (!newPane) throw new LaneError(EXIT.ERROR, `agent target pane ${pane} was busy and pane split returned no pane id`);
+      paneSplitFrom ??= pane;
+      pane = String(newPane);
+    }
+    if (raw === null) throw new LaneError(EXIT.ERROR, `agent start did not return a result for ${opts.name}`);
   // The agent is live from here on. Record it BEFORE asserting anything about
   // the world: a focus check that threw here once left a running agent with no
   // state row, and `lane wait` then answered "unknown lane" — the exact blind
   // lane this helper exists to prevent.
-  await mergeState(deps, opts.log, state, (draft) => {
+    await mergeState(deps, opts.log, state, (draft) => {
     const existing = draft.lanes[opts.name] ?? {};
-    const prior = draft.creates.find((created) => created.paneId === opts.pane) ?? {};
+    const byPath = existing.path
+      ? draft.creates.find((created) => created.path && resolve(created.path) === resolve(existing.path))
+      : null;
+    const prior = byPath ?? draft.creates.find((created) => created.paneId === opts.pane || created.paneId === pane) ?? {};
     draft.lanes[opts.name] = {
       ...existing,
-      pane: opts.pane,
+      pane,
       kind: opts.kind,
       model: opts.model,
       reasoning: opts.reasoning ?? null,
@@ -741,12 +838,27 @@ async function startLane(opts, deps, state) {
       base: prior.base ?? existing.base ?? null,
       path: prior.path ?? existing.path ?? null,
       promptSignature: promptSignature ?? existing.promptSignature ?? null,
+      ...(paneSplitFrom ? { paneSplitFrom } : {}),
     };
   });
 
-  const focus = restoreFocus(deps);
-  const warnings = [warning, focus.warning].filter(Boolean);
-  return {
+    let hooksTrusted = false;
+    if (opts.kind === 'codex') {
+      const trust = readPane(deps, pane);
+      if (trust.code === 0 && HOOKS_TRUST_PATTERNS.some((pattern) => pattern.test(responseText(trust.stdout)))) {
+        call(deps, 'herdr', ['agent', 'send-keys', opts.name, 't']);
+        call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'esc']);
+        readPane(deps, pane);
+        hooksTrusted = true;
+      }
+    }
+
+    const focus = restoreFocus(deps);
+    const warnings = [warning, focus.warning].filter(Boolean);
+    const mcpStartupTimeoutSec = opts.kind === 'codex'
+      ? (mcpStartupTimeoutValue(opts.agentArgs) ?? positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout', 3))
+      : null;
+    return {
     output: {
       agent: agentName(raw) ?? opts.name,
       kind: opts.kind,
@@ -754,6 +866,9 @@ async function startLane(opts, deps, state) {
       reasoning: opts.reasoning,
       startedAt: deps.timestamp(),
       focus: focus.focus,
+      ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
+      ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
+      ...(hooksTrusted ? { hooksTrusted: true } : {}),
       ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
     },
     row: {
@@ -762,9 +877,15 @@ async function startLane(opts, deps, state) {
       model: opts.model,
       reasoning: opts.reasoning ?? null,
       state: 'started',
+      ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
+      ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
+      ...(hooksTrusted ? { hooksTrusted: true } : {}),
       warning: warnings.length > 0 ? warnings.join('; ') : null,
     },
-  };
+    };
+  } finally {
+    startLock();
+  }
 }
 
 async function promptLane(opts, deps, state) {
@@ -773,15 +894,45 @@ async function promptLane(opts, deps, state) {
   const file = resolve(opts.file);
   if (!deps.exists(file)) usage(`prompt file does not exist: ${file}`);
   const wire = `Read ${file} and execute it exactly.`;
-  const raw = callOrFail(deps, 'herdr', ['agent', 'prompt', opts.name, wire, '--wait', '--until', 'working']);
   const lane = state.lanes[opts.name] ?? {};
+  const initial = agentState(deps, opts.name);
+  if (!initial) throw new LaneError(EXIT.ERROR, `prompt agent state check failed: ${opts.name} is not listed`);
+  const queued = initial.state === 'working';
+  const promptArgs = ['agent', 'prompt', opts.name, wire, ...(queued ? [] : ['--wait', '--until', 'working'])];
+  let sent = call(deps, 'herdr', promptArgs);
+  let enterRetries = 0;
+  let stateAfter = queued ? 'working' : responseState(sent.stdout, initial.state ?? 'working');
+  if (sent.code !== 0 && !/agent_prompt_stalled|timeout/i.test(`${sent.stderr}\n${sent.stdout}`)) {
+    const detail = sent.stderr.trim() || sent.stdout.trim();
+    throw new LaneError(EXIT.ERROR, `herdr agent prompt failed${detail ? `: ${detail}` : ''}`);
+  }
+  if (sent.code !== 0) {
+    call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'enter']);
+    enterRetries++;
+    const reread = agentState(deps, opts.name);
+    stateAfter = reread?.state ?? stateAfter;
+  }
+
+  const composerStalled = () => {
+    if (!lane.pane) return false;
+    const pane = readPane(deps, lane.pane);
+    if (pane.code !== 0) return false;
+    const last = paneLines(pane.stdout).at(-1) ?? '';
+    return stateAfter !== 'working' && last.startsWith('›') && last.includes('execute it exactly');
+  };
+  if (composerStalled()) {
+    call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'enter']);
+    enterRetries++;
+    const reread = agentState(deps, opts.name);
+    stateAfter = reread?.state ?? stateAfter;
+    if (composerStalled()) throw new LaneError(EXIT.ERROR, `composer not submitted for ${opts.name} after Enter retry`);
+  }
   await mergeState(deps, opts.log, state, (draft) => {
     draft.lanes[opts.name] = { ...(draft.lanes[opts.name] ?? lane), promptFile: file };
   });
-  const stateAfter = responseState(raw, 'working');
   return {
-    output: { accepted: deepFind(unwrapResult(raw), ['accepted']) ?? true, stateAfter },
-    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter },
+    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, stateAfter },
+    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries },
   };
 }
 
@@ -1093,9 +1244,24 @@ async function fallbackLane(opts, deps, state) {
   };
 }
 
-function listedAgentNames(raw) {
+function listedAgents(raw) {
   const agents = deepFind(unwrapResult(raw), ['agents']);
+  return Array.isArray(agents) ? agents : null;
+}
+
+function listedAgentNames(raw) {
+  const agents = listedAgents(raw);
   return Array.isArray(agents) ? agents.map((agent) => agent?.name ?? agent?.agent).filter((name) => typeof name === 'string') : null;
+}
+
+function agentState(deps, name) {
+  const listing = call(deps, 'herdr', ['agent', 'list']);
+  if (listing.code !== 0) return null;
+  const agents = listedAgents(listing.stdout);
+  if (!agents) return null;
+  const agent = agents.find((entry) => (entry?.name ?? entry?.agent) === name);
+  if (!agent) return null;
+  return { agent, state: String(agent.state ?? agent.status ?? 'unknown').toLowerCase() };
 }
 
 async function stopLane(opts, deps, state) {
@@ -1117,6 +1283,29 @@ async function stopLane(opts, deps, state) {
       patterns: promptPatterns(opts, deps),
     }, timeout);
   } catch (error) {
+    // Codex can draw its exit banner and only then repaint the prompt. Give
+    // that hand-off one short second look before calling a completed exit a
+    // failure; the agent listing is the deciding signal.
+    await deps.sleep(5_000);
+    const latePane = readPane(deps, lane.pane);
+    const lateListing = call(deps, 'herdr', ['agent', 'list']);
+    const lateNames = lateListing.code === 0 ? listedAgentNames(lateListing.stdout) : null;
+    const lateText = latePane.code === 0 ? responseText(latePane.stdout) : '';
+    const latePrompt = latePane.code === 0 && paneAtPrompt(latePane.stdout, {
+      signature: lane.promptSignature ?? null,
+      patterns: promptPatterns(opts, deps),
+    });
+    const exitBanner = /(?:goodbye|exited|codex.*(?:exit|closed)|PS\s+\S.*>)$/im.test(lateText);
+    if (Array.isArray(lateNames) && !lateNames.includes(opts.name) && (latePrompt || exitBanner)) {
+      return {
+        exit: EXIT.OK,
+        output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'late' },
+        row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'late' },
+      };
+    }
+    if (Array.isArray(lateNames) && lateNames.includes(opts.name)) {
+      throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed after late prompt check`);
+    }
     throw new LaneError(EXIT.ERROR, `stop pane prompt check failed: ${error.message}`);
   }
   const listing = call(deps, 'herdr', ['agent', 'list']);
@@ -1335,6 +1524,34 @@ async function sweepLanes(opts, deps, state) {
     };
   });
   const swept = results.filter((entry) => entry.ok);
+  // A delegate HOLD is useful only if it identifies the pane that prevented
+  // cleanup. Query live records only when one was reported, preserving the
+  // normal sweep's one-call-per-root behavior.
+  const held = results.filter((entry) => /\bHOLD\b/i.test(entry.output));
+  let holds = [];
+  if (held.length > 0) {
+    const listing = call(deps, 'herdr', ['agent', 'list']);
+    const agents = listing.code === 0 ? listedAgents(listing.stdout) : null;
+    if (Array.isArray(agents)) {
+      holds = agents.map((agent) => {
+        const pane = agent?.pane_id ?? agent?.paneId ?? '<unknown-pane>';
+        const name = agent?.name ?? agent?.agent ?? '<unnamed>';
+        const state = String(agent?.state ?? agent?.status ?? 'unknown').toLowerCase();
+        const snapshot = pane === '<unknown-pane>' ? null : readPane(deps, pane);
+        const ghost = name === '<unnamed>' && ['idle', 'done'].includes(state)
+          && snapshot?.code === 0 && paneAtPrompt(snapshot.stdout);
+        return {
+          pane,
+          agent: name,
+          state,
+          ...(ghost ? { ghost: true } : {}),
+          message: ghost
+            ? `HOLD on ${pane} by ${name} (ghost: true); remove by hand with herdr workspace close <ws> then git worktree remove`
+            : `HOLD on ${pane} by ${name}`,
+        };
+      });
+    }
+  }
   return {
     exit: swept.length === 0 ? EXIT.ERROR : EXIT.OK,
     output: {
@@ -1342,6 +1559,7 @@ async function sweepLanes(opts, deps, state) {
       roots: [...results, ...plan.filter((entry) => entry.skipped).map((entry) => ({ root: entry.root, skipped: entry.skipped }))],
       sweptRoots: swept.length,
       totalRoots: results.length,
+      ...(holds.length > 0 ? { holds } : {}),
     },
     row: { lane: null, state: swept.length === results.length ? 'swept' : 'swept-partial' },
   };
