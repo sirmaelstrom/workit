@@ -1957,8 +1957,8 @@ test('A2-13 / U1: the harness verifies the stimulus fired, and S1 needs a real d
   assert.equal(s1Verdict(4, 'timeout', '').ok, false);
 });
 
-test('c952d41e DO 1 and 10: Codex MCP timeout is opt-in, paired, caller-overridable, and refuses workspace-write only on win32', async (t) => {
-  const start = async (agentArgs = [], platform = 'win32', helperArgs = []) => {
+test('c952d41e DO 1 and 10: Codex MCP timeout is opt-in, paired, validated, caller-overridable, and refuses workspace-write only on win32', async (t) => {
+  const start = async (agentArgs = [], platform = 'win32', helperArgs = [], kind = 'codex') => {
     const f = fixture(t);
     f.responses.push(
       SHELL_READ, { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
@@ -1967,7 +1967,7 @@ test('c952d41e DO 1 and 10: Codex MCP timeout is opt-in, paired, caller-overrida
       { code: 0, stdout: 'no dialog', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
       { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
     );
-    const result = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'danger-full-access', '--log', f.log, ...helperArgs, '--', ...agentArgs], {
+    const result = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', kind, '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'danger-full-access', '--log', f.log, ...helperArgs, '--', ...agentArgs], {
       exec: f.exec, platform, env: { HERDR_PANE_ID: 'w1:p1' }, findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {},
     });
     return { f, result };
@@ -1982,6 +1982,18 @@ test('c952d41e DO 1 and 10: Codex MCP timeout is opt-in, paired, caller-overrida
   const lone = await start([], 'win32', ['--mcp-startup-timeout', '5']);
   assert.equal(lone.result.exit, 2);
   assert.match(lone.result.output.error, /--mcp-startup-server/);
+  const loneServer = await start([], 'win32', ['--mcp-startup-server', 'observatory']);
+  assert.equal(loneServer.result.exit, 2);
+  assert.match(loneServer.result.output.error, /--mcp-startup-timeout/);
+  const emptyServer = await start([], 'win32', ['--mcp-startup-timeout', '5', '--mcp-startup-server', '']);
+  assert.equal(emptyServer.result.exit, 2);
+  assert.match(emptyServer.result.output.error, /bare MCP server name/);
+  const dottedServer = await start([], 'win32', ['--mcp-startup-timeout', '5', '--mcp-startup-server', 'a.b']);
+  assert.equal(dottedServer.result.exit, 2);
+  assert.match(dottedServer.result.output.error, /bare MCP server name/);
+  const claudePair = await start([], 'win32', ['--mcp-startup-timeout', '5', '--mcp-startup-server', 'observatory'], 'claude');
+  assert.equal(claudePair.result.exit, 2);
+  assert.match(claudePair.result.output.error, /codex/);
   const supplied = await start(['-c', 'mcp_servers.other.startup_timeout_sec=9'], 'win32', ['--mcp-startup-timeout', '5', '--mcp-startup-server', 'observatory']);
   assert.equal(agentStartCall(supplied.f).args.filter((arg) => String(arg).includes('startup_timeout_sec')).length, 1);
   assert.equal(agentStartCall(supplied.f).args.includes('mcp_servers.other.startup_timeout_sec=9'), true);

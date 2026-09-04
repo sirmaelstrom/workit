@@ -420,14 +420,6 @@ function hasMcpStartupTimeoutConfig(args) {
   return false;
 }
 
-function mcpStartupTimeoutValue(args) {
-  for (let i = 0; i < args.length; i++) {
-    const match = args[i] === '-c' && /^mcp_servers\.[^.]+\.startup_timeout_sec=(.+)$/.exec(String(args[i + 1] ?? ''));
-    if (match) return Number(match[1]);
-  }
-  return null;
-}
-
 function startCollision(result) {
   return /agent_pane_busy/i.test(`${result.stderr}\n${result.stdout}`);
 }
@@ -756,9 +748,19 @@ async function startLane(opts, deps, state) {
   let warning = null;
   const hasMcpStartupTimeout = opts.mcpStartupTimeout !== undefined;
   const hasMcpStartupServer = opts.mcpStartupServer !== undefined;
+  const callerMcpStartupTimeout = hasMcpStartupTimeoutConfig(opts.agentArgs);
+  if (opts.kind !== 'codex' && (hasMcpStartupTimeout || hasMcpStartupServer)) {
+    usage('--mcp-startup-timeout/--mcp-startup-server apply to codex lanes only');
+  }
   if (hasMcpStartupTimeout !== hasMcpStartupServer) {
     usage(`${hasMcpStartupTimeout ? '--mcp-startup-server' : '--mcp-startup-timeout'} is required with the other MCP startup option`);
   }
+  if (hasMcpStartupServer && !/^[A-Za-z0-9_-]+$/.test(opts.mcpStartupServer)) {
+    usage('--mcp-startup-server must be a bare MCP server name');
+  }
+  const mcpStartup = hasMcpStartupTimeout && !callerMcpStartupTimeout
+    ? { server: opts.mcpStartupServer, seconds: positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout') }
+    : null;
   if (opts.kind === 'claude') {
     const mode = opts.permissionMode ?? agentOption(native, '--permission-mode') ?? 'bypassPermissions';
     // dontAsk stays refused whatever else is passed: it auto-denies every tool
@@ -799,13 +801,9 @@ async function startLane(opts, deps, state) {
       '--model', opts.model, '--ask-for-approval', 'never', '--sandbox', sandbox,
       '-c', `model_reasoning_effort=${opts.reasoning}`, ...native,
     ];
-    const mcpStartupTimeoutSec = hasMcpStartupTimeout
-      ? positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout')
-      : null;
-    const callerMcpStartupTimeout = hasMcpStartupTimeoutConfig(opts.agentArgs);
-    if (mcpStartupTimeoutSec !== null && !callerMcpStartupTimeout) {
-      native.push('-c', `mcp_servers.${opts.mcpStartupServer}.startup_timeout_sec=${mcpStartupTimeoutSec}`);
-    } else if (mcpStartupTimeoutSec !== null && callerMcpStartupTimeout) {
+    if (mcpStartup !== null) {
+      native.push('-c', `mcp_servers.${mcpStartup.server}.startup_timeout_sec=${mcpStartup.seconds}`);
+    } else if (hasMcpStartupTimeout && callerMcpStartupTimeout) {
       warning = `ignored --mcp-startup-timeout ${opts.mcpStartupTimeout} + --mcp-startup-server ${opts.mcpStartupServer}: caller-supplied MCP startup-timeout config wins`;
     }
   }
@@ -905,9 +903,7 @@ async function startLane(opts, deps, state) {
 
     const focus = restoreFocus(deps);
     const warnings = [warning, focus.warning].filter(Boolean);
-    const mcpStartupTimeoutSec = opts.kind === 'codex' && opts.mcpStartupTimeout !== undefined && !hasMcpStartupTimeoutConfig(opts.agentArgs)
-      ? { server: opts.mcpStartupServer, seconds: positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout') }
-      : null;
+    const mcpStartupTimeoutSec = mcpStartup;
     return {
     output: {
       agent: agentName(raw) ?? opts.name,
