@@ -12,6 +12,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -34,17 +35,22 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Roots the lane at <repo>-wt-<slug> under the projects tree (C13).
   start    <name> --pane <id> --kind claude|codex --model <slug> --reasoning <lvl>
            [--sandbox <mode>] [--permission-mode <mode>] [--allow-default-mode]
+           [--mcp-startup-timeout <sec>]
            [-- <native agent args>]
            dontAsk is always refused; default mode needs --allow-default-mode.
+           Codex defaults Serena's startup timeout to 3 seconds; a caller-supplied
+           mcp_servers.<server>.startup_timeout_sec config is left unchanged.
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
   wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
            Naming any state adds blocked; a bare wait forwards none (herdr's
            default already matches idle|done|blocked).
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
-  resume   <name> [--timeout <ms>]      Waits --until idle --until done, never bare.
+  resume   <name> [--timeout <ms>] [--plan-floor <pct>]
+           Waits --until idle --until done, never bare; honours --plan-floor.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
-  stop     <name> [--timeout <ms>]  Stops the lane agent and verifies it exited.
+  stop     <name> [--timeout <ms>]  Stops the lane agent; a late shell/banner
+           check is accepted only after the live-TUI veto.
   sweep    [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
            --lane <name> limits the delegate to one lane; --list is a dry run.
            Outside a herdr worktrees root, every call is scoped to a lane this
@@ -57,11 +63,24 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
                 agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)
   --prompt-regex <re>  How this box's shell prompt looks (or LANE_PROMPT_REGEX).
                 Otherwise the pane's own prompt, captured at start, is the
-                signature; default shapes are the last resort.`;
+                signature; default shapes are the last resort.
+  start serializes for about 120s per --log sidecar (not across different logs),
+        splits a busy pane once, and logs waitedForStartLockMs, paneSplitFrom,
+        hooksTrusted, queued, enterRetries, composerCleared, promptCheck,
+        ghost, and refusalShape.`;
 // Seeded only from a captured refusal, never an invented one. This string was
 // read off lane O's pane at 2026-09-01 22:12Z; herdr reported that agent as
 // `idle` the whole time the modal was up, so the pane text is the only signal.
-export const PLAN_REFUSAL_PATTERNS = Object.freeze([/hit your usage limit/i]);
+export const PLAN_REFUSAL_PATTERNS = Object.freeze([
+  /^\s*■\s*You've hit your usage limit/i,
+  /^\s*Approaching rate limits\s+—\s+Switch to /i,
+]);
+// Captured from the first-run trust interstitial. Keep these together: this is
+// a launch recovery, not a generic attempt to dismiss arbitrary Codex UI.
+export const HOOKS_TRUST_PATTERNS = Object.freeze([
+  /hooks need review/i,
+  /press t to trust/i,
+]);
 // The sweep delegate's location is resolved, never hardcoded: this file ships in
 // a public repo, and one operator's drive layout is not a default. Order:
 // HERDR_LANES_SCRIPT, then <workspace-root>/infrastructure/herdr-lanes.ps1
@@ -193,7 +212,7 @@ function parseArgs(argv) {
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
     '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--to', '--log',
-    '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex',
+    '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex', '--mcp-startup-timeout',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -266,7 +285,7 @@ function logPathFromArgv(argv, deps) {
 
 
 function emptyState() {
-  return { lanes: {}, creates: [] };
+  return { lanes: {}, creates: [], ghostCandidates: [] };
 }
 
 function statePath(logPath) {
@@ -288,7 +307,7 @@ function loadState(deps, logPath) {
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return emptyState();
-    return { lanes: parsed.lanes ?? {}, creates: parsed.creates ?? [] };
+    return { lanes: parsed.lanes ?? {}, creates: parsed.creates ?? [], ghostCandidates: parsed.ghostCandidates ?? [] };
   } catch {
     throw new LaneError(EXIT.USAGE, `lane state is not valid JSON: ${path}`);
   }
@@ -309,6 +328,7 @@ async function mergeState(deps, logPath, state, mutate) {
     deps.write(statePath(logPath), `${JSON.stringify(fresh, null, 2)}\n`);
     state.lanes = fresh.lanes;
     state.creates = fresh.creates;
+    state.ghostCandidates = fresh.ghostCandidates;
     return fresh;
   } finally {
     release();
@@ -316,20 +336,40 @@ async function mergeState(deps, logPath, state, mutate) {
 }
 
 const LOCK_STALE_MS = 60_000;
+// Two split-path passes can each spend 5s capturing + 30s preparing, followed
+// by agent start and trust handling. 120s leaves one full pass plus margin.
+const START_LOCK_STALE_MS = 120_000;
 
-async function acquireLock(deps, lock, attempts = 50) {
+async function acquireLock(deps, lock, attempts = 50, contents = null, staleMs = LOCK_STALE_MS) {
+  const started = deps.now();
+  let holder = null;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       deps.mkdir(dirname(lock));
-      deps.writeNew(lock, `${deps.timestamp()}\n`);
-      return () => { try { deps.remove(lock); } catch { /* already gone */ } };
+      deps.writeNew(lock, contents ?? `${deps.timestamp()}\n`);
+      const expected = String(contents ?? '').trim();
+      const release = () => {
+        try {
+          // A stale-lock reclaimer may own this path now. Never delete its lock.
+          if (!expected || String(deps.read(lock)).trim() === expected) deps.remove(lock);
+        } catch { /* already gone or unreadable */ }
+      };
+      release.waitedMs = deps.now() - started;
+      release.holder = holder;
+      return release;
     } catch (error) {
       if (error?.code !== 'EEXIST') throw error;
+      // The start lock has a small JSON receipt so a collision can name the
+      // lane already launching instead of making the operator guess.
+      try {
+        const parsed = JSON.parse(deps.read(lock));
+        holder = typeof parsed?.lane === 'string' ? parsed.lane : holder;
+      } catch { /* legacy timestamp-only locks have no owner */ }
       // A lane killed mid-write leaves a lock that would fail every later call
       // until someone deletes it by hand. Reclaim it once it is older than any
       // plausible in-flight write, and say so — silence here looks like a hang.
       const age = lockAge(deps, lock);
-      if (age !== null && age > LOCK_STALE_MS) {
+      if (age !== null && age > staleMs) {
         deps.warn(`lane: reclaiming a stale lock (${Math.round(age / 1000)}s old): ${lock}`);
         try { deps.remove(lock); } catch { /* someone else won the race */ }
         continue;
@@ -370,6 +410,41 @@ function withoutConfig(args, key) {
     copy.push(args[i]);
   }
   return copy;
+}
+
+function hasMcpStartupTimeoutConfig(args) {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== '-c') continue;
+    if (/^mcp_servers\.[^.]+\.startup_timeout_sec=/.test(String(args[i + 1] ?? ''))) return true;
+  }
+  return false;
+}
+
+function mcpStartupTimeoutValue(args) {
+  for (let i = 0; i < args.length; i++) {
+    const match = args[i] === '-c' && /^mcp_servers\.[^.]+\.startup_timeout_sec=(.+)$/.exec(String(args[i + 1] ?? ''));
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+function startCollision(result) {
+  return /agent_pane_busy/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+function bareShellWithoutAgent(deps, pane, promptOptions = {}) {
+  const snapshot = readPane(deps, pane);
+  if (snapshot.code !== 0 || !paneAtPrompt(snapshot.stdout, promptOptions)) return false;
+  const listing = call(deps, 'herdr', ['agent', 'list']);
+  if (listing.code !== 0) return false;
+  const agents = listedAgents(listing.stdout);
+  return Array.isArray(agents) && !agents.some((agent) => (agent?.pane_id ?? agent?.paneId) === pane);
+}
+
+function refreshLock(deps, lock, owner) {
+  try {
+    if (String(deps.read(lock)).trim() === String(owner).trim()) deps.touch(lock);
+  } catch { /* another owner won the path */ }
 }
 
 function withoutOption(args, flag) {
@@ -435,6 +510,12 @@ const LIVE_TUI = [
 
 function paneLines(text) {
   return responseText(text).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+// Composer safety needs the original indentation: a quoted transcript line is
+// not a live composer line, even though its trimmed text begins with `›`.
+function paneRawLines(text) {
+  return responseText(text).split(/\r?\n/).filter((line) => line.trim());
 }
 
 // The pane's own prompt is the only prompt that matters. Its last non-empty
@@ -705,32 +786,87 @@ async function startLane(opts, deps, state) {
     const sandbox = opts.sandbox ?? agentOption(native, '--sandbox');
     if (!sandbox) usage('codex start needs an explicit --sandbox');
     if (sandbox === 'read-only') usage('codex read-only sandbox is refused on Windows because it can return ungrounded answers');
+    if (sandbox === 'workspace-write') {
+      usage('codex workspace-write sandbox is refused on Windows: unified exec can time out connecting its runner pipe; use danger-full-access instead');
+    }
     native = withoutConfig(withoutOption(withoutOption(withoutOption(native, '--sandbox'), '--ask-for-approval'), '--model'), 'model_reasoning_effort');
     native = [
       '--model', opts.model, '--ask-for-approval', 'never', '--sandbox', sandbox,
       '-c', `model_reasoning_effort=${opts.reasoning}`, ...native,
     ];
+    const mcpStartupTimeoutSec = positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout', 3);
+    if (!hasMcpStartupTimeoutConfig(native)) {
+      native.push('-c', `mcp_servers.serena.startup_timeout_sec=${mcpStartupTimeoutSec}`);
+    }
   }
 
-  // Every refusal above is herdr-free; the first call happens only once the
-  // launch is known to be legal. This read is the last moment the pane is known
-  // to be a shell — once an agent owns it, its prompt is gone until the agent
-  // quits, which is exactly when `fallback` has to recognise it again.
-  const patterns = promptPatterns(opts, deps);
-  const promptSignature = await capturePromptSignature(deps, opts.pane, { patterns });
-  if (opts.kind === 'codex') await prepareCodexPane(opts, deps, promptSignature);
-
-  const raw = callOrFail(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', opts.pane, '--', ...native]);
+  // A sidecar write lock prevents lost state; this separate, longer-lived lock
+  // prevents two launches from both claiming the same shell between writes.
+  const startLockContent = `${JSON.stringify({ lane: opts.name, startedAt: deps.timestamp() })}\n`;
+  const startLock = await acquireLock(
+    deps,
+    `${opts.log}.start.lock`,
+    600,
+    startLockContent,
+    START_LOCK_STALE_MS,
+  );
+  const waitedForStartLockMs = startLock.waitedMs;
+  try {
+    // Every refusal above is herdr-free; the first call happens only once the
+    // launch is known to be legal. This read is the last moment the pane is known
+    // to be a shell — once an agent owns it, its prompt is gone until the agent
+    // quits, which is exactly when `fallback` has to recognise it again.
+    const patterns = promptPatterns(opts, deps);
+    let pane = opts.pane;
+    let paneSplitFrom = null;
+    let promptSignature = null;
+    let raw = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      refreshLock(deps, `${opts.log}.start.lock`, startLockContent);
+      promptSignature = await capturePromptSignature(deps, pane, { patterns });
+      refreshLock(deps, `${opts.log}.start.lock`, startLockContent);
+      if (opts.kind === 'codex') await prepareCodexPane({ ...opts, pane }, deps, promptSignature);
+      refreshLock(deps, `${opts.log}.start.lock`, startLockContent);
+      const started = call(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', pane, '--', ...native]);
+      if (started.code === 0) {
+        raw = started.stdout;
+        break;
+      }
+      const recoverable = startCollision(started) || (isTimeoutFailure(started) && bareShellWithoutAgent(deps, pane, { signature: promptSignature, patterns }));
+      if (!recoverable || attempt > 0) {
+        const detail = started.stderr.trim() || started.stdout.trim();
+        const holder = startLock.holder ? ` while ${startLock.holder} was starting` : '';
+        throw new LaneError(EXIT.ERROR, `herdr agent start failed${holder}${detail ? `: ${detail}` : ''}`);
+      }
+      const split = call(deps, 'herdr', ['pane', 'split', pane, '--direction', 'right']);
+      if (split.code !== 0) {
+        const detail = split.stderr.trim() || split.stdout.trim();
+        const holder = startLock.holder ? `; other in-flight lane: ${startLock.holder}` : '';
+        await mergeState(deps, opts.log, state, (draft) => {
+          (draft.ghostCandidates ??= []).push({ pane, reason: 'pane split fallback failed', at: deps.timestamp() });
+        });
+        throw new LaneError(EXIT.ERROR, `agent target pane ${pane} was busy and pane split fallback failed${holder}${detail ? `: ${detail}` : ''}`);
+      }
+      const splitResult = unwrapResult(split.stdout);
+      const newPane = firstDefined(splitResult, ['pane_id', 'paneId']) ?? deepFind(splitResult, ['pane_id', 'paneId']);
+      if (!newPane) throw new LaneError(EXIT.ERROR, `agent target pane ${pane} was busy and pane split returned no pane id`);
+      paneSplitFrom ??= pane;
+      pane = String(newPane);
+    }
+    if (raw === null) throw new LaneError(EXIT.ERROR, `agent start did not return a result for ${opts.name}`);
   // The agent is live from here on. Record it BEFORE asserting anything about
   // the world: a focus check that threw here once left a running agent with no
   // state row, and `lane wait` then answered "unknown lane" — the exact blind
   // lane this helper exists to prevent.
-  await mergeState(deps, opts.log, state, (draft) => {
+    await mergeState(deps, opts.log, state, (draft) => {
     const existing = draft.lanes[opts.name] ?? {};
-    const prior = draft.creates.find((created) => created.paneId === opts.pane) ?? {};
+    const byPath = existing.path
+      ? draft.creates.find((created) => created.path && resolve(created.path) === resolve(existing.path))
+      : null;
+    const prior = byPath ?? draft.creates.find((created) => created.paneId === opts.pane || created.paneId === pane) ?? {};
     draft.lanes[opts.name] = {
       ...existing,
-      pane: opts.pane,
+      pane,
       kind: opts.kind,
       model: opts.model,
       reasoning: opts.reasoning ?? null,
@@ -741,12 +877,28 @@ async function startLane(opts, deps, state) {
       base: prior.base ?? existing.base ?? null,
       path: prior.path ?? existing.path ?? null,
       promptSignature: promptSignature ?? existing.promptSignature ?? null,
+      ...(paneSplitFrom ? { paneSplitFrom } : {}),
     };
   });
 
-  const focus = restoreFocus(deps);
-  const warnings = [warning, focus.warning].filter(Boolean);
-  return {
+    let hooksTrusted = false;
+    if (opts.kind === 'codex') {
+      const trust = readPane(deps, pane);
+      const trustLines = trust.code === 0 ? paneLines(trust.stdout).slice(-12) : [];
+      if (trustLines.some((line) => HOOKS_TRUST_PATTERNS[0].test(line)) && trustLines.some((line) => HOOKS_TRUST_PATTERNS[1].test(line))) {
+        call(deps, 'herdr', ['agent', 'send-keys', opts.name, 't']);
+        call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'esc']);
+        readPane(deps, pane);
+        hooksTrusted = true;
+      }
+    }
+
+    const focus = restoreFocus(deps);
+    const warnings = [warning, focus.warning].filter(Boolean);
+    const mcpStartupTimeoutSec = opts.kind === 'codex' && !hasMcpStartupTimeoutConfig(opts.agentArgs)
+      ? { server: 'serena', seconds: positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout', 3) }
+      : null;
+    return {
     output: {
       agent: agentName(raw) ?? opts.name,
       kind: opts.kind,
@@ -754,6 +906,9 @@ async function startLane(opts, deps, state) {
       reasoning: opts.reasoning,
       startedAt: deps.timestamp(),
       focus: focus.focus,
+      ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
+      ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
+      ...(hooksTrusted ? { hooksTrusted: true } : {}),
       ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
     },
     row: {
@@ -762,9 +917,15 @@ async function startLane(opts, deps, state) {
       model: opts.model,
       reasoning: opts.reasoning ?? null,
       state: 'started',
+      ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
+      ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
+      ...(hooksTrusted ? { hooksTrusted: true } : {}),
       warning: warnings.length > 0 ? warnings.join('; ') : null,
     },
-  };
+    };
+  } finally {
+    startLock();
+  }
 }
 
 async function promptLane(opts, deps, state) {
@@ -773,15 +934,62 @@ async function promptLane(opts, deps, state) {
   const file = resolve(opts.file);
   if (!deps.exists(file)) usage(`prompt file does not exist: ${file}`);
   const wire = `Read ${file} and execute it exactly.`;
-  const raw = callOrFail(deps, 'herdr', ['agent', 'prompt', opts.name, wire, '--wait', '--until', 'working']);
   const lane = state.lanes[opts.name] ?? {};
+  const initial = agentState(deps, opts.name);
+  if (!initial) throw new LaneError(EXIT.ERROR, `prompt agent state check failed: ${opts.name} is not listed`);
+  const queued = initial.state === 'working';
+  let composerCleared = false;
+  if (queued && lane.pane && opts.verb === 'prompt') {
+    const beforeSteer = readPane(deps, lane.pane);
+    const lines = beforeSteer.code === 0 ? paneRawLines(beforeSteer.stdout) : [];
+    // Esc interrupts a working Codex agent. Only a column-zero composer
+    // directly above its live footer is evidence that it is safe to clear.
+    const composer = lines.at(-2);
+    const footer = lines.at(-1);
+    const dirty = Boolean(composer && footer
+      && composer.startsWith('›')
+      && !/Ask Codex to do anything/i.test(composer)
+      && LIVE_TUI.some((pattern) => pattern.test(footer)));
+    if (dirty) {
+      call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'esc']);
+      readPane(deps, lane.pane);
+      composerCleared = true;
+    }
+  }
+  const promptArgs = ['agent', 'prompt', opts.name, wire, ...(queued ? [] : ['--wait', '--until', 'working'])];
+  let sent = call(deps, 'herdr', promptArgs);
+  let enterRetries = 0;
+  let stateAfter = queued ? 'working' : responseState(sent.stdout, initial.state ?? 'working');
+  if (sent.code !== 0 && !isTimeoutFailure(sent)) {
+    const detail = sent.stderr.trim() || sent.stdout.trim();
+    throw new LaneError(EXIT.ERROR, `herdr agent prompt failed${detail ? `: ${detail}` : ''}`);
+  }
+  if (sent.code !== 0) {
+    call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'enter']);
+    enterRetries++;
+    const reread = agentState(deps, opts.name);
+    stateAfter = reread?.state ?? stateAfter;
+  }
+
+  const composerStalled = () => {
+    if (opts.verb !== 'prompt' || stateAfter === 'working' || !lane.pane) return false;
+    const pane = readPane(deps, lane.pane);
+    if (pane.code !== 0) return false;
+    return paneLines(pane.stdout).slice(-5).some((line) => line.startsWith('›') && line.includes('execute it exactly'));
+  };
+  if (composerStalled()) {
+    call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'enter']);
+    enterRetries++;
+    const reread = agentState(deps, opts.name);
+    stateAfter = reread?.state ?? stateAfter;
+    if (composerStalled()) throw new LaneError(EXIT.ERROR, `composer not submitted for ${opts.name} after Enter retry`);
+  }
   await mergeState(deps, opts.log, state, (draft) => {
     draft.lanes[opts.name] = { ...(draft.lanes[opts.name] ?? lane), promptFile: file };
   });
-  const stateAfter = responseState(raw, 'working');
   return {
-    output: { accepted: deepFind(unwrapResult(raw), ['accepted']) ?? true, stateAfter },
-    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter },
+    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, composerCleared, stateAfter },
+    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries, composerCleared },
   };
 }
 
@@ -862,11 +1070,14 @@ async function waitLane(opts, deps, state) {
       dialog = plan.dialog;
     }
     const refusal = plan.refusal;
-    if (refusal) {
+    const modalEligible = plan.refusalShape === 'modal'
+      && ((meter.plan5h !== null && meter.plan5h <= floor) || ['idle', 'done'].includes(stateAfter));
+    const refusalEligible = Boolean(refusal) && (plan.refusalShape === 'banner' || modalEligible);
+    if (refusalEligible) {
       return {
         exit: EXIT.PLAN_LOW,
-        output: { state: 'plan-refused', refusal, plan5h: meter.plan5h, planWeekly: meter.planWeekly },
-        row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter },
+        output: { state: 'plan-refused', refusal, refusalShape: plan.refusalShape, plan5h: meter.plan5h, planWeekly: meter.planWeekly },
+        row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape },
       };
     }
 
@@ -1016,11 +1227,15 @@ async function resumeLane(opts, deps, state) {
   // herdr reports `idle` while that modal is up, so this outranks the state.
   const plan = readPlanState(deps, opts.name);
   const meter = plan.meter ?? { plan5h: null, planWeekly: null };
-  if (plan.refusal) {
+  const floor = positiveNumber(opts.planFloor, '--plan-floor', 20);
+  const modalEligible = plan.refusalShape === 'modal'
+    && ((meter.plan5h !== null && meter.plan5h <= floor) || ['idle', 'done'].includes(responseState(raw.stdout, null)));
+  const refusalEligible = Boolean(plan.refusal) && (plan.refusalShape === 'banner' || modalEligible);
+  if (refusalEligible) {
     return {
       exit: EXIT.PLAN_LOW,
-      output: { state: 'plan-refused', refusal: plan.refusal, ...meter },
-      row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter },
+      output: { state: 'plan-refused', refusal: plan.refusal, refusalShape: plan.refusalShape, ...meter },
+      row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape },
     };
   }
   const statusAfter = responseState(raw.stdout, 'idle');
@@ -1093,9 +1308,24 @@ async function fallbackLane(opts, deps, state) {
   };
 }
 
-function listedAgentNames(raw) {
+function listedAgents(raw) {
   const agents = deepFind(unwrapResult(raw), ['agents']);
+  return Array.isArray(agents) ? agents : null;
+}
+
+function listedAgentNames(raw) {
+  const agents = listedAgents(raw);
   return Array.isArray(agents) ? agents.map((agent) => agent?.name ?? agent?.agent).filter((name) => typeof name === 'string') : null;
+}
+
+function agentState(deps, name) {
+  const listing = call(deps, 'herdr', ['agent', 'list']);
+  if (listing.code !== 0) return null;
+  const agents = listedAgents(listing.stdout);
+  if (!agents) return null;
+  const agent = agents.find((entry) => (entry?.name ?? entry?.agent) === name);
+  if (!agent) return null;
+  return { agent, state: String(agent.state ?? agent.status ?? 'unknown').toLowerCase() };
 }
 
 async function stopLane(opts, deps, state) {
@@ -1117,6 +1347,35 @@ async function stopLane(opts, deps, state) {
       patterns: promptPatterns(opts, deps),
     }, timeout);
   } catch (error) {
+    // Codex can draw its exit banner and only then repaint the prompt. Give
+    // that hand-off one short second look before calling a completed exit a
+    // failure; the agent listing is the deciding signal.
+    await deps.sleep(5_000);
+    const latePane = readPane(deps, lane.pane);
+    const lateListing = call(deps, 'herdr', ['agent', 'list']);
+    const lateNames = lateListing.code === 0 ? listedAgentNames(lateListing.stdout) : null;
+    const lateText = latePane.code === 0 ? responseText(latePane.stdout) : '';
+    const lateLines = paneLines(lateText);
+    const liveTui = LIVE_TUI.some((pattern) => lateLines.slice(-2).some((line) => pattern.test(line)));
+    const latePrompt = latePane.code === 0 && paneAtPrompt(latePane.stdout, {
+      signature: lane.promptSignature ?? null,
+      patterns: promptPatterns(opts, deps),
+    });
+    const exitBanner = !liveTui && lateLines.slice(-3).some((line) => /^(?:goodbye|codex\s+(?:exited|closed))/i.test(line));
+    if (lateListing.code === 0 && Array.isArray(lateNames) && !lateNames.includes(opts.name) && latePane.code !== 0) {
+      deps.warn(`lane: stop pane re-read failed after ${opts.name} disappeared; accepting unread exit`);
+      return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'unread' }, row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'unread' } };
+    }
+    if (Array.isArray(lateNames) && !lateNames.includes(opts.name) && (latePrompt || exitBanner)) {
+      return {
+        exit: EXIT.OK,
+        output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'late' },
+        row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'late' },
+      };
+    }
+    if (Array.isArray(lateNames) && lateNames.includes(opts.name)) {
+      throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed after late prompt check`);
+    }
     throw new LaneError(EXIT.ERROR, `stop pane prompt check failed: ${error.message}`);
   }
   const listing = call(deps, 'herdr', ['agent', 'list']);
@@ -1335,6 +1594,50 @@ async function sweepLanes(opts, deps, state) {
     };
   });
   const swept = results.filter((entry) => entry.ok);
+  // A delegate HOLD is useful only if it identifies the pane that prevented
+  // cleanup. Query live records only when one was reported, preserving the
+  // normal sweep's one-call-per-root behavior.
+  const held = results.filter((entry) => /\bHOLD\b/i.test(entry.output));
+  let holds = [];
+  if (held.length > 0) {
+    const listing = call(deps, 'herdr', ['agent', 'list']);
+    const agents = listing.code === 0 ? listedAgents(listing.stdout) : null;
+    if (Array.isArray(agents)) {
+      const heldLanes = Object.values(state.lanes ?? {}).filter((lane) => held.some((entry) => {
+        if (entry.lane) return entry.lane === basename(lane.path ?? '');
+        return knownLanesUnder(state, entry.root, deps).some((known) => known.path === resolve(lane.path ?? ''));
+      }));
+      const heldPanes = new Set(heldLanes.flatMap((lane) => [lane.pane, lane.paneSplitFrom]).filter(Boolean));
+      const paneSignatures = new Map(Object.values(state.lanes ?? {}).map((lane) => [lane.pane, lane.promptSignature]));
+      // A HOLD is scoped to a pane the sidecar knows; never turn an empty or
+      // ambiguous association into a report about every live agent.
+      const relevant = agents.filter((agent) => heldPanes.has(agent?.pane_id ?? agent?.paneId));
+      holds = relevant.map((agent) => {
+        const pane = agent?.pane_id ?? agent?.paneId ?? '<unknown-pane>';
+        const name = agent?.name ?? agent?.agent ?? '<unnamed>';
+        const state = String(agent?.state ?? agent?.status ?? 'unknown').toLowerCase();
+        const snapshot = pane === '<unknown-pane>' ? null : readPane(deps, pane);
+        const ghost = name === '<unnamed>' && ['idle', 'done'].includes(state)
+          && snapshot?.code === 0 && paneAtPrompt(snapshot.stdout, {
+            signature: paneSignatures.get(pane) ?? null,
+            patterns: promptPatterns(opts, deps),
+          });
+        return {
+          pane,
+          agent: name,
+          state,
+          ...(ghost ? { ghost: true } : {}),
+          message: ghost
+            ? `HOLD on ${pane} by ${name} (ghost: true); remove by hand with herdr workspace close <ws> then git worktree remove`
+            : `HOLD on ${pane} by ${name}`,
+        };
+      });
+    }
+  }
+  const candidates = (state.ghostCandidates ?? []).map((candidate) => ({
+    pane: candidate.pane,
+    message: `HOLD candidate (split failed at ${candidate.at})`,
+  }));
   return {
     exit: swept.length === 0 ? EXIT.ERROR : EXIT.OK,
     output: {
@@ -1342,6 +1645,7 @@ async function sweepLanes(opts, deps, state) {
       roots: [...results, ...plan.filter((entry) => entry.skipped).map((entry) => ({ root: entry.root, skipped: entry.skipped }))],
       sweptRoots: swept.length,
       totalRoots: results.length,
+      ...((holds.length > 0 || candidates.length > 0) ? { holds: [...holds, ...candidates] } : {}),
     },
     row: { lane: null, state: swept.length === results.length ? 'swept' : 'swept-partial' },
   };
@@ -1352,30 +1656,32 @@ async function sweepLanes(opts, deps, state) {
 function isTimeoutFailure(result) {
   const parsed = parseJson(result.stderr) ?? parseJson(result.stdout);
   const code = parsed?.error?.code;
-  if (typeof code === 'string') return code === 'timeout';
-  return /timeout/i.test(`${result.stderr}\n${result.stdout}`);
+  return code === 'timeout' || code === 'agent_prompt_stalled';
 }
 
 // One pane read, shared by `wait` and `resume`: the plan meter and the captured
 // refusal are properties of the lane, not of the verb that happened to look.
 function readPlanState(deps, name) {
   const read = call(deps, 'herdr', ['agent', 'read', name, '--lines', '40']);
-  if (read.code !== 0) return { ok: false, meter: null, refusal: null, dialog: '' };
+  if (read.code !== 0) return { ok: false, meter: null, refusal: null, refusalShape: null, dialog: '' };
+  const refusal = planRefusal(read.stdout);
   return {
     ok: true,
     meter: scrapePlanMeter(read.stdout),
-    refusal: matchPlanRefusal(read.stdout),
+    refusal: refusal?.line ?? null,
+    refusalShape: refusal?.shape ?? null,
     dialog: responseText(read.stdout),
   };
 }
 
-export function matchPlanRefusal(text) {
+function planRefusal(text) {
   const source = responseText(text);
-  for (const pattern of PLAN_REFUSAL_PATTERNS) {
-    if (!pattern.test(source)) continue;
-    const line = source.split(/\r?\n/).find((candidate) => pattern.test(candidate));
-    return (line ?? pattern.exec(source)[0]).trim();
-  }
+  const lines = source.split(/\r?\n/);
+  const banner = lines.find((line) => PLAN_REFUSAL_PATTERNS[0].test(line));
+  const liveFooter = LIVE_TUI.some((pattern) => lines.slice(-2).some((line) => pattern.test(line)));
+  if (banner && liveFooter) return { shape: 'banner', line: banner.trim() };
+  const modal = lines.find((line) => PLAN_REFUSAL_PATTERNS[1].test(line));
+  if (modal && /(?:^|\n)\s*(?:›\s*)?1\.\s*Switch\b/i.test(source)) return { shape: 'modal', line: modal.trim() };
   return null;
 }
 
@@ -1405,6 +1711,7 @@ export async function runLane(argv, overrides = {}) {
     remove: (path) => rmSync(path, { force: true }),
     mkdir: (path) => mkdirSync(path, { recursive: true }),
     stat: (path) => statSync(path),
+    touch: (path) => utimesSync(path, new Date(), new Date()),
     warn: (message) => console.error(message),
     append: (path, value) => appendFileSync(path, value, 'utf8'),
     env: process.env,

@@ -133,11 +133,16 @@ test('WP-1: prompt sends only the absolute prompt-file instruction', async (t) =
   const f = fixture(t);
   const prompt = join(f.dir, 'task prompt.md');
   writeFileSync(prompt, 'shell-active `content`; must never be argv', 'utf8');
-  f.responses.push({ code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' });
+  seedLane(f);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
+    { code: 0, stdout: 'working', stderr: '' },
+  );
   const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 0);
-  assert.deepEqual(f.calls[0].args, ['agent', 'prompt', 'lane-a', `Read ${resolve(prompt)} and execute it exactly.`, '--wait', '--until', 'working']);
-  assert.doesNotMatch(f.calls[0].args.join(' '), /shell-active/);
+  assert.deepEqual(f.calls[1].args, ['agent', 'prompt', 'lane-a', `Read ${resolve(prompt)} and execute it exactly.`, '--wait', '--until', 'working']);
+  assert.doesNotMatch(f.calls[1].args.join(' '), /shell-active/);
 });
 
 test('WP-1: prompt refuses a missing file before herdr is invoked', async (t) => {
@@ -209,7 +214,7 @@ test('WP-1: codex start waits for codex.exe and a returned prompt before agent s
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
   );
   const result = await runLane(
-    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', f.log],
+    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'danger-full-access', '--log', f.log],
     // platform is injected: the Windows shim trap (C12) must be exercised by the
     // Linux runner too, and a process.platform read would skip it there.
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {} },
@@ -221,7 +226,7 @@ test('WP-1: codex start waits for codex.exe and a returned prompt before agent s
   const runIndex = f.calls.findIndex((call) => call.args[0] === 'pane' && call.args[1] === 'run');
   const readsAfterRun = f.calls.slice(runIndex, startIndex).filter((call) => call.args[0] === 'pane' && call.args[1] === 'read');
   assert.equal(readsAfterRun.length, 2, 'the readiness poll ran twice before the agent was started');
-  assert.deepEqual(f.calls[startIndex].args.slice(-8), ['--model', 'gpt-5.6-terra', '--ask-for-approval', 'never', '--sandbox', 'workspace-write', '-c', 'model_reasoning_effort=medium']);
+  assert.deepEqual(f.calls[startIndex].args.slice(-10), ['--model', 'gpt-5.6-terra', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', '-c', 'model_reasoning_effort=medium', '-c', 'mcp_servers.serena.startup_timeout_sec=3']);
 });
 
 test('WP-1: every attempted verb appends the complete JSONL instrumentation shape', async (t) => {
@@ -302,7 +307,7 @@ test('WP-2: wait exits 4 when its overall timeout expires', async (t) => {
   seedLane(f);
   let clock = 0;
   f.responses.push(
-    () => { clock = 10; return { code: 1, stdout: '', stderr: '{"error":"timeout"}' }; },
+    () => { clock = 10; return { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' }; },
     { code: 0, stdout: 'still working', stderr: '' },
   );
   const result = await runLane(['wait', 'lane-a', '--timeout', '5', '--log', f.log], { exec: f.exec, now: () => clock });
@@ -314,7 +319,7 @@ test('WP-2: footer meter below the plan floor exits 6 and is logged', async (t) 
   const f = fixture(t);
   seedLane(f);
   f.responses.push(
-    { code: 1, stdout: '', stderr: '{"error":"timeout"}' },
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
     { code: 0, stdout: 'gpt-5.6-terra high · Context 62% left · 5h 9% left · weekly 91% left', stderr: '' },
   );
   const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--plan-floor', '10', '--log', f.log], { exec: f.exec, sleep: async () => {} });
@@ -335,6 +340,7 @@ test('WP-2 / C11: the captured refusal exits 6 even while herdr still reports id
         "■ You've hit your usage limit. Try again at 11:42 PM.",
         'Approaching rate limits — Switch to gpt-5.6-luna for lower credit usage?',
         '  › 1. Switch  2. Keep current model  3. Keep current model (never show again)',
+        'gpt-5.6-terra high · Context 62% left · 5h 0% left · weekly 91% left',
       ].join('\n'),
       stderr: '',
     },
@@ -350,7 +356,7 @@ test('WP-2 / C11: the default plan floor is the measured 20%, not 10%', async (t
   const f = fixture(t);
   seedLane(f);
   f.responses.push(
-    { code: 1, stdout: '', stderr: '{"error":"timeout"}' },
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
     { code: 0, stdout: 'gpt-5.6-terra high · Context 62% left · 5h 15% left · weekly 91% left', stderr: '' },
   );
   const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
@@ -425,6 +431,7 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
     { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
   );
   const result = await runLane(
@@ -479,7 +486,9 @@ test('Q-1: fallback quits codex with esc and ctrl+c twice, never /quit', async (
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 0, stdout: '{}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
     { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    { code: 0, stdout: 'working', stderr: '' },
   );
   const result = await runLane(
     ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
@@ -541,7 +550,7 @@ test('Q-9: lane stop uses the measured claude /exit sequence', async (t) => {
 test('WP-3: the refusal pattern list carries the captured live refusal', () => {
   // Captured 2026-09-01 22:12Z, lane O. Nothing here is invented.
   const captured = "■ You've hit your usage limit. Try again at 11:42 PM.";
-  assert.equal(PLAN_REFUSAL_PATTERNS.length, 1);
+  assert.equal(PLAN_REFUSAL_PATTERNS.length, 2);
   assert.ok(PLAN_REFUSAL_PATTERNS.some((pattern) => pattern.test(captured)));
   assert.equal(PLAN_REFUSAL_PATTERNS.some((pattern) => pattern.test('5h 79% left · weekly 91% left')), false);
 });
@@ -705,7 +714,10 @@ test('AM4: a herdr failure exits 1 and never masquerades as a wait timeout', asy
   const f = fixture(t);
   const prompt = join(f.dir, 'prompt.md');
   writeFileSync(prompt, 'task', 'utf8');
-  f.responses.push({ code: 1, stdout: '', stderr: 'daemon is not running' });
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 1, stdout: '', stderr: 'daemon is not running' },
+  );
   const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 1, 'a dead daemon is not a retryable timeout');
   assert.match(result.output.error, /daemon is not running/);
@@ -822,7 +834,11 @@ test('AM7b / U5: a held lock is retried, then released', async (t) => {
   let attempts = 0;
   const removed = [];
   const sleeps = [];
-  f.responses.push({ code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' });
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
+    { code: 0, stdout: 'working', stderr: '' },
+  );
   const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], {
     exec: f.exec,
     writeNew: (path) => {
@@ -863,7 +879,7 @@ test('AM9: the codex readiness poll retries a transient pane read instead of abo
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
   );
   const result = await runLane(
-    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', f.log],
+    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'danger-full-access', '--log', f.log],
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {} },
   );
   assert.equal(result.exit, 0, 'C12 exists because codex launches were flaky — do not reintroduce the flake');
@@ -881,7 +897,7 @@ test('AM10: the PATH prepend is a single-quoted PowerShell literal', async (t) =
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
   );
   await runLane(
-    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', f.log],
+    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'danger-full-access', '--log', f.log],
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => "X:\\fixture\\ven'dor\\bin", sleep: async () => {} },
   );
   const paneRun = f.calls.find((call) => call.args[0] === 'pane' && call.args[1] === 'run');
@@ -929,7 +945,7 @@ test('AM13: a failed agent read does not abort the wait, and the poll interval i
   const sleeps = [];
   let clock = 0;
   f.responses.push(
-    { code: 1, stdout: '', stderr: '{"error":"timeout"}' },
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
     { code: 1, stdout: '', stderr: 'read failed' },
     { code: 0, stdout: '{"result":{"state":"blocked"}}', stderr: '' },
     { code: 0, stdout: 'Approve running npm test?', stderr: '' },
@@ -1334,7 +1350,7 @@ test('A2-5 / U5: a forwarded --model cannot override the enforced one', async (t
   );
   const codex = await runLane(
     ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium',
-      '--sandbox', 'workspace-write', '--log', g.log, '--', '--model', 'gpt-cheap', '-c', 'model_reasoning_effort=xhigh'],
+      '--sandbox', 'danger-full-access', '--log', g.log, '--', '--model', 'gpt-cheap', '-c', 'model_reasoning_effort=xhigh'],
     { exec: g.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {} },
   );
   assert.equal(codex.exit, 0);
@@ -1403,7 +1419,11 @@ test('A2-9 / U10: a stale lock is reclaimed with a warning instead of wedging ev
   seedLane(f);
   const warnings = [];
   let attempts = 0;
-  f.responses.push({ code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' });
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
+    { code: 0, stdout: 'working', stderr: '' },
+  );
   const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], {
     exec: f.exec,
     writeNew: () => {
@@ -1533,7 +1553,9 @@ test('A3-4: an operator can declare the prompt, by flag or by env', async (t) =>
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
     { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    { code: 0, stdout: 'working', stderr: '' },
   );
   const byEnv = await runLane(
     ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
@@ -1620,7 +1642,9 @@ test('A3-6: fallback waits for the signature the lane recorded', async (t) => {
     { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
     { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    { code: 0, stdout: 'working', stderr: '' },
   );
   const result = await runLane(
     ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
@@ -1896,7 +1920,7 @@ test('A3-13 / R3-U7: resume reports a plan refusal the same way wait does', asyn
   seedLane(f);
   f.responses.push(
     { code: 0, stdout: '{"result":{"state":"idle"}}', stderr: '' },
-    { code: 0, stdout: "■ You've hit your usage limit. Try again at 11:42 PM.", stderr: '' },
+    { code: 0, stdout: "■ You've hit your usage limit. Try again at 11:42 PM.\ngpt-5.6-terra high · Context 62% left · 5h 0% left · weekly 91% left", stderr: '' },
   );
   const result = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 6, 'the modal is up whether the operator resumed or waited');
@@ -1930,4 +1954,362 @@ test('A2-13 / U1: the harness verifies the stimulus fired, and S1 needs a real d
   assert.match(noDialog.message, /dialog/i);
   assert.equal(s1Verdict(0, 'done', '').ok, false);
   assert.equal(s1Verdict(4, 'timeout', '').ok, false);
+});
+
+test('c952d41e DO 1 and 10: Codex supplies Serena timeout, preserves caller config, and refuses workspace-write only on win32', async (t) => {
+  const start = async (agentArgs = [], platform = 'win32') => {
+    const f = fixture(t);
+    f.responses.push(
+      SHELL_READ, { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
+      { code: 0, stdout: 'X:\\fixture\\vendor\\bin\\codex.exe\nPS X:\\fixture\\lane>', stderr: '' },
+      { code: 0, stdout: '{"result":{"agent":{"name":"lane-c"}}}', stderr: '' },
+      { code: 0, stdout: 'no dialog', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
+      { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+    );
+    const result = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'danger-full-access', '--log', f.log, '--', ...agentArgs], {
+      exec: f.exec, platform, env: { HERDR_PANE_ID: 'w1:p1' }, findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {},
+    });
+    return { f, result };
+  };
+  const defaulted = await start();
+  assert.match(agentStartCall(defaulted.f).args.join(' '), /mcp_servers\.serena\.startup_timeout_sec=3/);
+  assert.deepEqual(defaulted.result.row.mcpStartupTimeoutSec, { server: 'serena', seconds: 3 });
+  const supplied = await start(['-c', 'mcp_servers.other.startup_timeout_sec=9']);
+  assert.equal(agentStartCall(supplied.f).args.filter((arg) => String(arg).includes('startup_timeout_sec')).length, 1);
+  const refused = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', supplied.f.log], { exec: supplied.f.exec, platform: 'win32' });
+  assert.equal(refused.exit, 2);
+  assert.match(refused.output.error, /danger-full-access/);
+});
+
+test('c952d41e DO 2-4: a start lock wait is recorded and busy starts split once while retaining create identity', async (t) => {
+  const f = fixture(t);
+  const lanePath = join(f.dir, 'projects', 'workit-wt-lane');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    creates: [{ paneId: 'w1:p2', path: lanePath, branch: 'feat/lane', base: 'main' }],
+    lanes: { 'lane-a': { path: lanePath } },
+  }), 'utf8');
+  let clock = 0;
+  let first = true;
+  f.responses.push(
+    SHELL_READ,
+    { code: 1, stdout: '', stderr: 'agent_pane_busy: agent target pane w1:p2 is not an available shell' },
+    { code: 0, stdout: '{"result":{"pane_id":"w1:p3"}}', stderr: '' },
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log], {
+    exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, now: () => clock, sleep: async () => { clock += 20; },
+    writeNew: (path, value) => { if (first && path.endsWith('.start.lock')) { first = false; const error = new Error('held'); error.code = 'EEXIST'; throw error; } writeFileSync(path, value, { flag: 'wx' }); },
+  });
+  assert.equal(result.exit, 0);
+  assert.ok(result.row.waitedForStartLockMs > 0);
+  assert.ok(f.calls.some((call) => call.args[0] === 'pane' && call.args[1] === 'split'));
+  const saved = readState(f).lanes['lane-a'];
+  assert.deepEqual([saved.pane, saved.paneSplitFrom, saved.branch, saved.base, saved.path], ['w1:p3', 'w1:p2', 'feat/lane', 'main', lanePath]);
+});
+
+test('c952d41e DO 5 and 9: working prompts queue directly; a retained composer is retried then fails', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'prompt.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"working"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"accepted":true}}', stderr: '' },
+    { code: 0, stdout: 'working', stderr: '' },
+  );
+  const queued = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec });
+  assert.equal(queued.output.queued, true);
+  assert.equal(f.calls[1].args.includes('--wait'), false, 'mutation control: restoring unconditional --wait fails this assertion');
+
+  const g = fixture(t); writeFileSync(prompt, 'task', 'utf8'); seedLane(g, { promptFile: prompt });
+  const composer = `› Read ${resolve(prompt)} and execute it exactly.`;
+  g.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 1, stdout: '', stderr: '{"error":{"code":"agent_prompt_stalled"}}' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: composer, stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: composer, stderr: '' },
+  );
+  const failed = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', g.log], { exec: g.exec });
+  assert.equal(failed.exit, 1);
+  assert.match(failed.output.error, /composer not submitted/);
+  assert.equal(g.calls.filter((call) => call.args[1] === 'send-keys').length, 2, 'stalled wait and retained composer each retry Enter once');
+});
+
+test('c952d41e DO 8: a hooks-trust dialog sends t then esc and is logged', async (t) => {
+  const f = fixture(t);
+  f.responses.push(
+    SHELL_READ, { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: 'X:\\fixture\\vendor\\bin\\codex.exe\nPS X:\\fixture\\lane>', stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-c"}}}', stderr: '' },
+    { code: 0, stdout: '2 hooks need review before they can run\nPress t to trust', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'clear', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'danger-full-access', '--log', f.log], {
+    exec: f.exec, platform: 'win32', env: { HERDR_PANE_ID: 'w1:p1' }, findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {},
+  });
+  assert.equal(result.row.hooksTrusted, true);
+  assert.deepEqual(f.calls.filter((call) => call.args[1] === 'send-keys').map((call) => call.args[3]), ['t', 'esc']);
+});
+
+test('c952d41e DO 11: plan refusal requires a Codex banner or numbered modal plus low meter or settled state', async (t) => {
+  const compiler = fixture(t); seedLane(compiler); let clock = 0;
+  compiler.responses.push(
+    { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
+    { code: 0, stdout: 'src/mcp/review-council/seat-fallback.ts(78,26): error TS2367: This comparison appears to be unintentional because the types \"usage limit\" | \"hit your usage limit\" | \"rate limit\" | \"Approaching rate limits\" and \"CODEX_SILENT_STREAM_ERROR\" have no overlap.\ngpt-5.6-terra high · 5h 81% left · weekly 91% left', stderr: '' },
+  );
+  const falsePositive = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', compiler.log], { exec: compiler.exec, now: () => (clock += 10), sleep: async () => {} });
+  assert.equal(falsePositive.exit, 4);
+
+  const sourceLine = fixture(t); seedLane(sourceLine); let sourceClock = 0;
+  sourceLine.responses.push(
+    { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
+    { code: 0, stdout: 'export const PLAN_REFUSAL_PATTERNS = Object.freeze([/hit your usage limit/i]);\ngpt-5.6-terra high · 5h 77% left · weekly 91% left', stderr: '' },
+  );
+  const ownSource = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', sourceLine.log], { exec: sourceLine.exec, now: () => (sourceClock += 10), sleep: async () => {} });
+  assert.equal(ownSource.exit, 4, 'a visible regex literal in helper source is not a refusal');
+
+  const refused = fixture(t); seedLane(refused);
+  refused.responses.push(
+    { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
+    { code: 0, stdout: "■ You've hit your usage limit. Try again later.\nApproaching rate limits — Switch to gpt-5.6-luna for lower credit usage?\n  › 1. Switch  2. Keep current model\ngpt-5.6-terra high · Context 62% left · 5h 0% left · weekly 91% left", stderr: '' },
+  );
+  const real = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', refused.log], { exec: refused.exec, sleep: async () => {} });
+  assert.equal(real.exit, 6);
+  assert.equal(real.row.refusalShape, 'banner');
+});
+
+test('c952d41e DO 6-8: late stop succeeds, hooks trust is dismissed, and sweep flags an unnamed shell ghost', async (t) => {
+  const stopped = fixture(t); seedLane(stopped, { promptSignature: 'PS X:\\fixture\\lane>' }); let clock = 0;
+  stopped.responses.push(
+    { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: 'still exiting', stderr: '' }, { code: 0, stdout: 'Codex exited\nPS X:\\fixture\\lane>', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+  );
+  const late = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', stopped.log], { exec: stopped.exec, now: () => clock, sleep: async () => { clock += 10; } });
+  assert.equal(late.output.promptCheck, 'late');
+
+  const sweep = fixture(t); const root = join(sweep.dir, '.herdr', 'worktrees'); const lanePath = join(root, 'repo', 'lane-a');
+  writeFileSync(`${sweep.log}.state.json`, JSON.stringify({
+    creates: [{ path: lanePath, label: 'lane-a', paneId: 'w1:p9' }],
+    lanes: { 'lane-a': { pane: 'w1:p9', path: lanePath, promptSignature: 'PS X:\\fixture\\lane>' } },
+  }), 'utf8');
+  sweep.responses.push({ code: 0, stdout: 'HOLD lane', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p9","state":"idle"}]}}', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' });
+  const held = await runLane(['sweep', '--root', root, '--log', sweep.log], { exec: sweep.exec, exists: fakeExists() });
+  assert.deepEqual(held.output.holds[0], { pane: 'w1:p9', agent: '<unnamed>', state: 'idle', ghost: true, message: 'HOLD on w1:p9 by <unnamed> (ghost: true); remove by hand with herdr workspace close <ws> then git worktree remove' });
+});
+
+test('amend 1 P1 and P4c/P4d: footer composer is retried; banner fires while modal without corroboration times out', async (t) => {
+  const p = fixture(t); const file = join(p.dir, 'prompt.md'); writeFileSync(file, 'task'); seedLane(p);
+  const wire = `› Read ${resolve(file)} and execute it exactly.`;
+  p.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"done"}}', stderr: '' },
+    { code: 0, stdout: `${wire}\ngpt-5.6-terra high · Context 62% left`, stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"working"}]}}', stderr: '' },
+    { code: 0, stdout: 'working', stderr: '' },
+  );
+  const composer = await runLane(['prompt', 'lane-a', '--file', file, '--log', p.log], { exec: p.exec });
+  assert.equal(composer.output.enterRetries, 1);
+
+  const banner = fixture(t); seedLane(banner);
+  banner.responses.push({ code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' }, { code: 0, stdout: "■ You've hit your usage limit\ngpt-5.6-terra high · Context 62% left · 5h 74% left · weekly 0% left", stderr: '' });
+  const p4c = await runLane(['wait', 'lane-a', '--until', 'done', '--timeout', '1000', '--log', banner.log], { exec: banner.exec, sleep: async () => {} });
+  assert.equal(p4c.exit, 6); assert.equal(p4c.row.refusalShape, 'banner');
+
+  const modal = fixture(t); seedLane(modal); let clock = 0;
+  modal.responses.push({ code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' }, { code: 0, stdout: 'Approaching rate limits — Switch to gpt-5.6-luna\n  1. Switch', stderr: '' });
+  const p4d = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', modal.log], { exec: modal.exec, now: () => (clock += 10), sleep: async () => {} });
+  assert.equal(p4d.exit, 4, 'modal-only is a corroborated pre-limit nudge, not a refusal');
+});
+
+test('amend 1 P5/P6: unread disappeared agent succeeds; live TUI and still-listed late paths fail', async (t) => {
+  const unread = fixture(t); seedLane(unread, { promptSignature: 'PS X:\\fixture\\lane>' }); let clock = 0;
+  unread.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 1, stdout: '', stderr: 'read failed' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  const p5 = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', unread.log], { exec: unread.exec, now: () => (clock += 10), sleep: async () => {}, warn: () => {} });
+  assert.equal(p5.output.promptCheck, 'unread');
+
+  const live = fixture(t); seedLane(live, { promptSignature: 'PS X:\\fixture\\lane>' }); clock = 0;
+  live.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\src>\n| Ask Codex to do anything |\ngpt-5.6-terra high · Context 62% left', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  const p6 = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', live.log], { exec: live.exec, now: () => (clock += 10), sleep: async () => {} });
+  assert.equal(p6.exit, 1);
+});
+
+test('amend 1 P2: timeout on the pane\'s own oh-my-posh signature splits and records paneSplitFrom', async (t) => {
+  const f = fixture(t);
+  const prompt = '~  home / .herdr / worktrees / repo/slug ~';
+  f.responses.push(
+    { code: 0, stdout: prompt, stderr: '' },
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: prompt, stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"pane_id":"w1:p3"}}', stderr: '' },
+    { code: 0, stdout: prompt, stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log], { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {} });
+  assert.equal(result.exit, 0);
+  assert.ok(f.calls.some((call) => call.args[0] === 'pane' && call.args[1] === 'split'));
+  assert.equal(readState(f).lanes['lane-a'].paneSplitFrom, 'w1:p2');
+});
+
+test('amend 2 P3: an unnamed idle HOLD on the recorded oh-my-posh signature is a ghost without a regex', async (t) => {
+  const f = fixture(t);
+  const root = join(f.dir, '.herdr', 'worktrees');
+  const lanePath = join(root, 'repo', 'slug');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    creates: [{ path: lanePath, label: 'slug', paneId: 'w1:p9' }],
+    lanes: { 'lane-a': { pane: 'w1:p9', path: lanePath, promptSignature: '~  home / .herdr / worktrees / repo/slug ~' } },
+  }), 'utf8');
+  f.responses.push(
+    { code: 0, stdout: 'HOLD lane', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p9","state":"idle"}]}}', stderr: '' },
+    { code: 0, stdout: '~  home / .herdr / worktrees / repo/slug ~', stderr: '' },
+  );
+  const result = await runLane(['sweep', '--root', root, '--log', f.log], { exec: f.exec, exists: fakeExists() });
+  assert.equal(result.output.holds[0].ghost, true);
+});
+
+test('amend 1 P7: an untouched start lock beyond the 120-second window is reclaimed', async (t) => {
+  const f = fixture(t);
+  writeFileSync(`${f.log}.start.lock`, '{"lane":"lane-slow","startedAt":"old"}\n', 'utf8');
+  const warnings = [];
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log], {
+    exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, now: () => 130_000, stat: () => ({ mtimeMs: 0 }), warn: (message) => warnings.push(message), sleep: async () => {},
+  });
+  assert.equal(result.exit, 0);
+  assert.match(warnings.join('\n'), /stale lock/i);
+});
+
+test('amend 2 X2: only a dirty column-zero composer directly above the live footer is cleared', async (t) => {
+  const quoted = fixture(t); const prompt = join(quoted.dir, 'prompt.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(quoted);
+  quoted.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"working"}]}}', stderr: '' },
+    { code: 0, stdout: 'thinking about the plan\n    › quoting the operator brief here\n› Ask Codex to do anything\nesc to interrupt · Context 62% left', stderr: '' },
+    { code: 0, stdout: '{"result":{"accepted":true}}', stderr: '' },
+  );
+  const x2 = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', quoted.log], { exec: quoted.exec });
+  assert.equal(x2.output.composerCleared, false);
+  assert.equal(quoted.calls.filter((call) => call.args[1] === 'send-keys' && call.args[3] === 'esc').length, 0);
+
+  const dirty = fixture(t); seedLane(dirty);
+  dirty.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"working"}]}}', stderr: '' },
+    { code: 0, stdout: 'thinking about the plan\n› half-typed text\nesc to interrupt · Context 62% left', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '› Ask Codex to do anything\nesc to interrupt · Context 62% left', stderr: '' },
+    { code: 0, stdout: '{"result":{"accepted":true}}', stderr: '' },
+  );
+  const cleared = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', dirty.log], { exec: dirty.exec });
+  assert.equal(cleared.output.composerCleared, true);
+  assert.equal(dirty.calls.filter((call) => call.args[1] === 'send-keys' && call.args[3] === 'esc').length, 1);
+});
+
+test('amend 2: a prompt error whose text says timeout does not authorize Enter', async (t) => {
+  const f = fixture(t); const prompt = join(f.dir, 'prompt.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found","message":"timeout mentioned here"}}' },
+  );
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 1);
+  assert.equal(f.calls.some((call) => call.args[1] === 'send-keys' && call.args[3] === 'enter'), false);
+});
+
+test('amend 2: a column-zero banner in prose needs a live TUI footer', async (t) => {
+  const f = fixture(t); seedLane(f); let clock = 0;
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
+    { code: 0, stdout: "■ You've hit your usage limit. Try again later.\ngpt-5.6-terra high · 5h 81% left · weekly 91% left", stderr: '' },
+  );
+  const result = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => (clock += 10), sleep: async () => {} });
+  assert.equal(result.exit, 4);
+});
+
+test('amend 2: sweep scopes HOLDs to known panes and surfaces split-failure candidates', async (t) => {
+  const f = fixture(t); const root = join(f.dir, '.herdr', 'worktrees');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    creates: [],
+    lanes: {},
+    ghostCandidates: [{ pane: 'w1:p2', reason: 'pane split fallback failed', at: '2026-09-04T00:00:00.000Z' }],
+  }), 'utf8');
+  f.responses.push(
+    { code: 0, stdout: 'HOLD lane', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p9","name":"other","state":"working"},{"pane_id":"w1:p8","name":"other-two","state":"idle"}]}}', stderr: '' },
+  );
+  const result = await runLane(['sweep', '--root', root, '--log', f.log], { exec: f.exec, exists: fakeExists() });
+  assert.deepEqual(result.output.holds, [{ pane: 'w1:p2', message: 'HOLD candidate (split failed at 2026-09-04T00:00:00.000Z)' }]);
+});
+
+test('amend 2 P7b: a holder refreshed during a 90-second wait is never reclaimed', async (t) => {
+  const f = fixture(t); let now = 0; let lock = null; let holderSleep; let holderReleased = false; let paneReads = 0; let refreshed = false; const warnings = [];
+  const startArgs = (name) => ['start', name, '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log];
+  const exec = (program, args) => {
+    if (args[0] === 'pane' && args[1] === 'read') return ++paneReads === 1 ? { code: 0, stdout: '', stderr: '' } : SHELL_READ;
+    return { code: 0, stdout: '{"result":{}}', stderr: '' };
+  };
+  const common = {
+    exec, env: { HERDR_PANE_ID: 'w1:p1' }, now: () => now, timestamp: () => '2026-09-04T00:00:00.000Z',
+    warn: (message) => { warnings.push(message); if (/stale lock/i.test(message) && holderSleep) holderSleep(); },
+    writeNew: (path, value) => { if (!path.endsWith('.start.lock')) return writeFileSync(path, value, { flag: 'wx' }); if (lock !== null) { const error = new Error('held'); error.code = 'EEXIST'; throw error; } lock = value; },
+    read: (path) => path.endsWith('.start.lock') ? lock : readFileSync(path, 'utf8'),
+    remove: (path) => { if (path.endsWith('.start.lock')) lock = null; else rmSync(path, { force: true }); },
+    stat: () => ({ mtimeMs: refreshed ? Math.min(80_000, Math.floor(now / 20_000) * 20_000) : -90_000 }),
+    touch: () => { refreshed = true; },
+    sleep: async (ms) => {
+      if (!holderSleep) return new Promise((resolveSleep) => { holderSleep = resolveSleep; });
+      now += ms;
+      if (now >= 90_000 && !holderReleased) { holderReleased = true; holderSleep(); }
+    },
+  };
+  const holder = runLane(startArgs('lane-holder'), common);
+  await Promise.resolve();
+  const waiter = await runLane(startArgs('lane-waiter'), common);
+  await holder;
+  assert.equal(waiter.exit, 0);
+  assert.ok(now >= 90_000);
+  assert.equal(warnings.some((message) => /stale lock/i.test(message)), false);
+});
+
+test('amend 2 P7c: a reclaimed lock survives the original holder release', async (t) => {
+  const f = fixture(t); let now = 0; let lock = null; let paneReads = 0; const sleeps = [];
+  const startArgs = (name) => ['start', name, '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log];
+  const exec = (program, args) => {
+    if (args[0] === 'pane' && args[1] === 'read') return ++paneReads <= 2 ? { code: 0, stdout: '', stderr: '' } : SHELL_READ;
+    if (args[0] === 'agent' && args[1] === 'start') return { code: 1, stdout: '', stderr: 'start failed' };
+    return { code: 0, stdout: '{"result":{}}', stderr: '' };
+  };
+  const common = {
+    exec, env: { HERDR_PANE_ID: 'w1:p1' }, now: () => now, timestamp: () => '2026-09-04T00:00:00.000Z',
+    writeNew: (path, value) => { if (!path.endsWith('.start.lock')) return writeFileSync(path, value, { flag: 'wx' }); if (lock !== null) { const error = new Error('held'); error.code = 'EEXIST'; throw error; } lock = value; },
+    read: (path) => path.endsWith('.start.lock') ? lock : readFileSync(path, 'utf8'),
+    remove: (path) => { if (path.endsWith('.start.lock')) lock = null; else rmSync(path, { force: true }); },
+    stat: () => ({ mtimeMs: 0 }), touch: () => {}, sleep: () => new Promise((resolveSleep) => sleeps.push(resolveSleep)),
+  };
+  const holder = runLane(startArgs('lane-holder'), common);
+  await Promise.resolve();
+  now = 400_000;
+  const reclaimer = runLane(startArgs('lane-reclaimer'), common);
+  await Promise.resolve();
+  sleeps.shift()();
+  const holderResult = await holder;
+  const afterHolderRelease = lock;
+  assert.equal(holderResult.exit, 1);
+  assert.match(afterHolderRelease, /lane-reclaimer/);
+  sleeps.shift()();
+  const reclaimerResult = await reclaimer;
+  assert.equal(reclaimerResult.exit, 1);
+  assert.equal(lock, null);
 });
