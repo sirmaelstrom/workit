@@ -1,7 +1,6 @@
 node_modules/
 .claude/*.local.md
 .orphaned_at
-.serena/
 skills.db
 skills.db-shm
 skills.db-wal

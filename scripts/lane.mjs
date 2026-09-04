@@ -35,11 +35,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Roots the lane at <repo>-wt-<slug> under the projects tree (C13).
   start    <name> --pane <id> --kind claude|codex --model <slug> --reasoning <lvl>
            [--sandbox <mode>] [--permission-mode <mode>] [--allow-default-mode]
-           [--mcp-startup-timeout <sec>]
+           [--mcp-startup-timeout <sec> --mcp-startup-server <name>]
            [-- <native agent args>]
            dontAsk is always refused; default mode needs --allow-default-mode.
-           Codex defaults Serena's startup timeout to 3 seconds; a caller-supplied
-           mcp_servers.<server>.startup_timeout_sec config is left unchanged.
+           Codex has no default MCP startup timeout. Opt in with the timeout/server
+           pair; a caller-supplied mcp_servers.<server>.startup_timeout_sec wins.
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
   wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
@@ -212,7 +212,7 @@ function parseArgs(argv) {
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
     '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--to', '--log',
-    '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex', '--mcp-startup-timeout',
+    '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex', '--mcp-startup-timeout', '--mcp-startup-server',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -415,17 +415,9 @@ function withoutConfig(args, key) {
 function hasMcpStartupTimeoutConfig(args) {
   for (let i = 0; i < args.length; i++) {
     if (args[i] !== '-c') continue;
-    if (/^mcp_servers\.[^.]+\.startup_timeout_sec=/.test(String(args[i + 1] ?? ''))) return true;
+    if (/^mcp_servers\..+\.startup_timeout_sec=/.test(String(args[i + 1] ?? ''))) return true;
   }
   return false;
-}
-
-function mcpStartupTimeoutValue(args) {
-  for (let i = 0; i < args.length; i++) {
-    const match = args[i] === '-c' && /^mcp_servers\.[^.]+\.startup_timeout_sec=(.+)$/.exec(String(args[i + 1] ?? ''));
-    if (match) return Number(match[1]);
-  }
-  return null;
 }
 
 function startCollision(result) {
@@ -754,6 +746,21 @@ async function startLane(opts, deps, state) {
 
   let native = [...opts.agentArgs];
   let warning = null;
+  const hasMcpStartupTimeout = opts.mcpStartupTimeout !== undefined;
+  const hasMcpStartupServer = opts.mcpStartupServer !== undefined;
+  const callerMcpStartupTimeout = hasMcpStartupTimeoutConfig(opts.agentArgs);
+  if (opts.kind !== 'codex' && (hasMcpStartupTimeout || hasMcpStartupServer)) {
+    usage('--mcp-startup-timeout/--mcp-startup-server apply to codex lanes only');
+  }
+  if (hasMcpStartupTimeout !== hasMcpStartupServer) {
+    usage(`${hasMcpStartupTimeout ? '--mcp-startup-server' : '--mcp-startup-timeout'} is required with the other MCP startup option`);
+  }
+  if (hasMcpStartupServer && !/^[A-Za-z0-9_-]+$/.test(opts.mcpStartupServer)) {
+    usage('--mcp-startup-server must be a bare MCP server name');
+  }
+  const mcpStartup = hasMcpStartupTimeout && !callerMcpStartupTimeout
+    ? { server: opts.mcpStartupServer, seconds: positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout') }
+    : null;
   if (opts.kind === 'claude') {
     const mode = opts.permissionMode ?? agentOption(native, '--permission-mode') ?? 'bypassPermissions';
     // dontAsk stays refused whatever else is passed: it auto-denies every tool
@@ -794,9 +801,10 @@ async function startLane(opts, deps, state) {
       '--model', opts.model, '--ask-for-approval', 'never', '--sandbox', sandbox,
       '-c', `model_reasoning_effort=${opts.reasoning}`, ...native,
     ];
-    const mcpStartupTimeoutSec = positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout', 3);
-    if (!hasMcpStartupTimeoutConfig(native)) {
-      native.push('-c', `mcp_servers.serena.startup_timeout_sec=${mcpStartupTimeoutSec}`);
+    if (mcpStartup !== null) {
+      native.push('-c', `mcp_servers.${mcpStartup.server}.startup_timeout_sec=${mcpStartup.seconds}`);
+    } else if (hasMcpStartupTimeout && callerMcpStartupTimeout) {
+      warning = `ignored --mcp-startup-timeout ${opts.mcpStartupTimeout} + --mcp-startup-server ${opts.mcpStartupServer}: caller-supplied MCP startup-timeout config wins`;
     }
   }
 
@@ -895,9 +903,7 @@ async function startLane(opts, deps, state) {
 
     const focus = restoreFocus(deps);
     const warnings = [warning, focus.warning].filter(Boolean);
-    const mcpStartupTimeoutSec = opts.kind === 'codex' && !hasMcpStartupTimeoutConfig(opts.agentArgs)
-      ? { server: 'serena', seconds: positiveNumber(opts.mcpStartupTimeout, '--mcp-startup-timeout', 3) }
-      : null;
+    const mcpStartupTimeoutSec = mcpStartup;
     return {
     output: {
       agent: agentName(raw) ?? opts.name,
