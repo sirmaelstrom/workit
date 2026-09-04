@@ -1999,6 +1999,11 @@ test('c952d41e DO 1 and 10: Codex MCP timeout is opt-in, paired, validated, call
   assert.equal(agentStartCall(supplied.f).args.includes('mcp_servers.other.startup_timeout_sec=9'), true);
   assert.equal('mcpStartupTimeoutSec' in supplied.result.row, false);
   assert.match(supplied.result.output.warning, /ignored.*--mcp-startup-timeout.*--mcp-startup-server/);
+  const suppliedDotted = await start(['-c', 'mcp_servers.a.b.startup_timeout_sec=9'], 'win32', ['--mcp-startup-timeout', '5', '--mcp-startup-server', 'observatory']);
+  assert.equal(agentStartCall(suppliedDotted.f).args.filter((arg) => String(arg).includes('startup_timeout_sec')).length, 1);
+  assert.equal(agentStartCall(suppliedDotted.f).args.includes('mcp_servers.a.b.startup_timeout_sec=9'), true);
+  assert.equal('mcpStartupTimeoutSec' in suppliedDotted.result.row, false);
+  assert.match(suppliedDotted.result.output.warning, /ignored.*--mcp-startup-timeout.*--mcp-startup-server/);
   const refused = await runLane(['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'medium', '--sandbox', 'workspace-write', '--log', supplied.f.log], { exec: supplied.f.exec, platform: 'win32' });
   assert.equal(refused.exit, 2);
   assert.match(refused.output.error, /danger-full-access/);

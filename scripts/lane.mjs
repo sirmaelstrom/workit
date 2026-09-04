@@ -415,7 +415,7 @@ function withoutConfig(args, key) {
 function hasMcpStartupTimeoutConfig(args) {
   for (let i = 0; i < args.length; i++) {
     if (args[i] !== '-c') continue;
-    if (/^mcp_servers\.[^.]+\.startup_timeout_sec=/.test(String(args[i + 1] ?? ''))) return true;
+    if (/^mcp_servers\..+\.startup_timeout_sec=/.test(String(args[i + 1] ?? ''))) return true;
   }
   return false;
 }
