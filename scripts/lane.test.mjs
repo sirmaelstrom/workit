@@ -2133,3 +2133,52 @@ test('amend 1 P5/P6: unread disappeared agent succeeds; live TUI and still-liste
   const p6 = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', live.log], { exec: live.exec, now: () => (clock += 10), sleep: async () => {} });
   assert.equal(p6.exit, 1);
 });
+
+test('amend 1 P2: timeout on the pane\'s own oh-my-posh signature splits and records paneSplitFrom', async (t) => {
+  const f = fixture(t);
+  const prompt = '~  home / .herdr / worktrees / repo/slug ~';
+  f.responses.push(
+    { code: 0, stdout: prompt, stderr: '' },
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: prompt, stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"pane_id":"w1:p3"}}', stderr: '' },
+    { code: 0, stdout: prompt, stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log], { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {} });
+  assert.equal(result.exit, 0);
+  assert.ok(f.calls.some((call) => call.args[0] === 'pane' && call.args[1] === 'split'));
+  assert.equal(readState(f).lanes['lane-a'].paneSplitFrom, 'w1:p2');
+});
+
+test('amend 1 P3: an unnamed idle HOLD on an oh-my-posh prompt is a ghost with an operator regex', async (t) => {
+  const f = fixture(t);
+  const root = join(f.dir, '.herdr', 'worktrees');
+  f.responses.push(
+    { code: 0, stdout: 'HOLD lane', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p9","state":"idle"}]}}', stderr: '' },
+    { code: 0, stdout: '~  home / .herdr / worktrees / repo/slug ~', stderr: '' },
+  );
+  const result = await runLane(['sweep', '--root', root, '--log', f.log], { exec: f.exec, exists: fakeExists(), env: { LANE_PROMPT_REGEX: '.*~$' } });
+  assert.equal(result.output.holds[0].ghost, true);
+});
+
+test('amend 1 P7: an untouched start lock beyond the 120-second window is reclaimed', async (t) => {
+  const f = fixture(t);
+  writeFileSync(`${f.log}.start.lock`, '{"lane":"lane-slow","startedAt":"old"}\n', 'utf8');
+  const warnings = [];
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log], {
+    exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, now: () => 130_000, stat: () => ({ mtimeMs: 0 }), warn: (message) => warnings.push(message), sleep: async () => {},
+  });
+  assert.equal(result.exit, 0);
+  assert.match(warnings.join('\n'), /stale lock/i);
+});
