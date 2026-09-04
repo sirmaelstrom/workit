@@ -64,7 +64,10 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
 // Seeded only from a captured refusal, never an invented one. This string was
 // read off lane O's pane at 2026-09-01 22:12Z; herdr reported that agent as
 // `idle` the whole time the modal was up, so the pane text is the only signal.
-export const PLAN_REFUSAL_PATTERNS = Object.freeze([/hit your usage limit/i]);
+export const PLAN_REFUSAL_PATTERNS = Object.freeze([
+  /^\s*■\s*You've hit your usage limit/i,
+  /^\s*Approaching rate limits\s+—\s+Switch to /i,
+]);
 // Captured from the first-run trust interstitial. Keep these together: this is
 // a launch recovery, not a generic attempt to dismiss arbitrary Codex UI.
 export const HOOKS_TRUST_PATTERNS = Object.freeze([
@@ -1013,11 +1016,14 @@ async function waitLane(opts, deps, state) {
       dialog = plan.dialog;
     }
     const refusal = plan.refusal;
-    if (refusal) {
+    const refusalEligible = refusal && (
+      (meter.plan5h !== null && meter.plan5h <= floor) || ['idle', 'done'].includes(stateAfter)
+    );
+    if (refusalEligible) {
       return {
         exit: EXIT.PLAN_LOW,
-        output: { state: 'plan-refused', refusal, plan5h: meter.plan5h, planWeekly: meter.planWeekly },
-        row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter },
+        output: { state: 'plan-refused', refusal, refusalShape: plan.refusalShape, plan5h: meter.plan5h, planWeekly: meter.planWeekly },
+        row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape },
       };
     }
 
@@ -1167,11 +1173,14 @@ async function resumeLane(opts, deps, state) {
   // herdr reports `idle` while that modal is up, so this outranks the state.
   const plan = readPlanState(deps, opts.name);
   const meter = plan.meter ?? { plan5h: null, planWeekly: null };
-  if (plan.refusal) {
+  const refusalEligible = plan.refusal && (
+    (meter.plan5h !== null && meter.plan5h <= 20) || ['idle', 'done'].includes(responseState(raw.stdout, null))
+  );
+  if (refusalEligible) {
     return {
       exit: EXIT.PLAN_LOW,
-      output: { state: 'plan-refused', refusal: plan.refusal, ...meter },
-      row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter },
+      output: { state: 'plan-refused', refusal: plan.refusal, refusalShape: plan.refusalShape, ...meter },
+      row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape },
     };
   }
   const statusAfter = responseState(raw.stdout, 'idle');
@@ -1578,23 +1587,29 @@ function isTimeoutFailure(result) {
 // refusal are properties of the lane, not of the verb that happened to look.
 function readPlanState(deps, name) {
   const read = call(deps, 'herdr', ['agent', 'read', name, '--lines', '40']);
-  if (read.code !== 0) return { ok: false, meter: null, refusal: null, dialog: '' };
+  if (read.code !== 0) return { ok: false, meter: null, refusal: null, refusalShape: null, dialog: '' };
+  const refusal = planRefusal(read.stdout);
   return {
     ok: true,
     meter: scrapePlanMeter(read.stdout),
-    refusal: matchPlanRefusal(read.stdout),
+    refusal: refusal?.line ?? null,
+    refusalShape: refusal?.shape ?? null,
     dialog: responseText(read.stdout),
   };
 }
 
-export function matchPlanRefusal(text) {
+function planRefusal(text) {
   const source = responseText(text);
-  for (const pattern of PLAN_REFUSAL_PATTERNS) {
-    if (!pattern.test(source)) continue;
-    const line = source.split(/\r?\n/).find((candidate) => pattern.test(candidate));
-    return (line ?? pattern.exec(source)[0]).trim();
-  }
+  const lines = source.split(/\r?\n/);
+  const banner = lines.find((line) => PLAN_REFUSAL_PATTERNS[0].test(line));
+  if (banner) return { shape: 'banner', line: banner.trim() };
+  const modal = lines.find((line) => PLAN_REFUSAL_PATTERNS[1].test(line));
+  if (modal && /(?:^|\n)\s*(?:›\s*)?1\.\s*Switch\b/i.test(source)) return { shape: 'modal', line: modal.trim() };
   return null;
+}
+
+export function matchPlanRefusal(text) {
+  return planRefusal(text)?.line ?? null;
 }
 
 export function scrapePlanMeter(text) {

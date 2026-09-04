@@ -64,6 +64,7 @@ Every verb appends one JSONL row to `data/outputs/projects/agentic-practice-tran
 21. **Sweep HOLDs identify their holder.** HOLD output names pane and agent (or `<unnamed>`), and a settled unnamed record on a bare shell is marked `ghost: true` but never auto-removed.
 22. **Hooks trust is a known launch interstitial.** Its measured text is matched from a single exported pattern set; the helper sends `t`, then `esc`, re-reads, and records `hooksTrusted`.
 23. **Windows workspace-write is refused.** The helper names the measured runner-pipe failure and directs the operator to `danger-full-access`; it never rewrites the sandbox flag.
+24. **Plan refusal is a TUI shape, never vocabulary alone.** Only the anchored Codex usage-limit banner or a rate-limit modal with its numbered option list counts, and it must coincide with a meter at or below the plan floor or an `idle`/`done` agent; compiler errors, paths, and quoted refusal words are not evidence. The JSONL row records `refusalShape: banner|modal`.
 
 ## Success criteria, each with its falsifier
 

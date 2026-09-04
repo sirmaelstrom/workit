@@ -550,7 +550,7 @@ test('Q-9: lane stop uses the measured claude /exit sequence', async (t) => {
 test('WP-3: the refusal pattern list carries the captured live refusal', () => {
   // Captured 2026-09-01 22:12Z, lane O. Nothing here is invented.
   const captured = "■ You've hit your usage limit. Try again at 11:42 PM.";
-  assert.equal(PLAN_REFUSAL_PATTERNS.length, 1);
+  assert.equal(PLAN_REFUSAL_PATTERNS.length, 2);
   assert.ok(PLAN_REFUSAL_PATTERNS.some((pattern) => pattern.test(captured)));
   assert.equal(PLAN_REFUSAL_PATTERNS.some((pattern) => pattern.test('5h 79% left · weekly 91% left')), false);
 });
@@ -2055,6 +2055,33 @@ test('c952d41e DO 8: a hooks-trust dialog sends t then esc and is logged', async
   });
   assert.equal(result.row.hooksTrusted, true);
   assert.deepEqual(f.calls.filter((call) => call.args[1] === 'send-keys').map((call) => call.args[3]), ['t', 'esc']);
+});
+
+test('c952d41e DO 11: plan refusal requires a Codex banner or numbered modal plus low meter or settled state', async (t) => {
+  const compiler = fixture(t); seedLane(compiler); let clock = 0;
+  compiler.responses.push(
+    { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
+    { code: 0, stdout: 'src/mcp/review-council/seat-fallback.ts(78,26): error TS2367: This comparison appears to be unintentional because the types \"usage limit\" | \"hit your usage limit\" | \"rate limit\" | \"Approaching rate limits\" and \"CODEX_SILENT_STREAM_ERROR\" have no overlap.\ngpt-5.6-terra high · 5h 81% left · weekly 91% left', stderr: '' },
+  );
+  const falsePositive = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', compiler.log], { exec: compiler.exec, now: () => (clock += 10), sleep: async () => {} });
+  assert.equal(falsePositive.exit, 4);
+
+  const sourceLine = fixture(t); seedLane(sourceLine); let sourceClock = 0;
+  sourceLine.responses.push(
+    { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
+    { code: 0, stdout: 'export const PLAN_REFUSAL_PATTERNS = Object.freeze([/hit your usage limit/i]);\ngpt-5.6-terra high · 5h 77% left · weekly 91% left', stderr: '' },
+  );
+  const ownSource = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', sourceLine.log], { exec: sourceLine.exec, now: () => (sourceClock += 10), sleep: async () => {} });
+  assert.equal(ownSource.exit, 4, 'a visible regex literal in helper source is not a refusal');
+
+  const refused = fixture(t); seedLane(refused);
+  refused.responses.push(
+    { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
+    { code: 0, stdout: "■ You've hit your usage limit. Try again later.\nApproaching rate limits — Switch to gpt-5.6-luna for lower credit usage?\n  › 1. Switch  2. Keep current model\ngpt-5.6-terra high · 5h 0% left · weekly 91% left", stderr: '' },
+  );
+  const real = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', refused.log], { exec: refused.exec, sleep: async () => {} });
+  assert.equal(real.exit, 6);
+  assert.equal(real.row.refusalShape, 'banner');
 });
 
 test('c952d41e DO 6-8: late stop succeeds, hooks trust is dismissed, and sweep flags an unnamed shell ghost', async (t) => {
