@@ -124,6 +124,16 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    later with no in-band answer, and recorded "on operator go" in the receipt —
    failure-audit quest e8e289e1).** Then close out via `pickup`'s closeout:
    `done` + `landed` + artifacts, with `ripple` in the response as the read-back.
+
+   **A red gate names an oracle; re-derive WHICH one per red step before
+   monitoring anything.** A CI red is reached through several steps that may
+   share one external oracle (run K: the named audit step, `npm ci`'s implicit
+   audit at its 300 s fetch-timeout, and the runtime guard billing both — one
+   flapping advisories endpoint, three symptoms). Read the failing step's own
+   log, name the oracle it actually waited on, and arm the rerun on a probe of
+   *that* oracle — K's first monitor watched the right endpoint for the wrong
+   step for 45 minutes. A gate on a remote oracle is three-valued (tree / runner
+   / oracle); a red that is the oracle's is a rerun, never a tree finding.
 5. **Log one row to the run doc per stop — on every exit, not only landings.**
    Landed, refuted, blocked, and dropped all get their row (the template's
    event vocabulary names them); a blocked item exits at step 2 and still owes
@@ -155,7 +165,14 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    surface everything renders.
 6. **Sweep the trail.** When an item retires or renames vocabulary, grep the doc
    corpus *and the consuming repos' tests* for the outgoing name before marking
-   it done. A ship that adds or renames a thing owes the count.
+   it done. A ship that adds or renames a thing owes the count. **The sweep
+   covers config keys and server names, not only prose** — `grep -rn <key>`
+   across `projects/` *and the plugin cache* before a removal is marked landed.
+   Run K (2026-09-04) retired the `serena` MCP server correctly and measured,
+   and every codex lane start still broke: `lane.mjs` injected
+   `-c mcp_servers.serena.startup_timeout_sec` by name, and codex treats an
+   override on an unconfigured server as a hard config error. The quest note
+   had guessed the consumer would ignore it; the guess was wrong by 0 s.
 7. **An instrument ships with its negative control.** Any item that ships a
    test, guard, watcher, or checker demonstrates it **failing on a known-bad
    input** before the PR boundary, and the run-log row records how; an
