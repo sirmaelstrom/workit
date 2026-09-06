@@ -977,6 +977,22 @@ test('AM14: a closed PR is not a completion verdict', async (t) => {
   assert.equal(merged.exit, 0, 'a merged PR is the work landing, not a failure');
 });
 
+test('HELP1: a help request never appends a usage-error row to the lane log', async (t) => {
+  const f = fixture(t);
+  const appended = [];
+  const append = (...args) => appended.push(args);
+  for (const argv of [['--help'], ['-h'], ['help'], []]) {
+    const result = await runLane(argv, { exec: f.exec, append, mkdir: () => {} });
+    assert.equal(result.exit, 2, `${JSON.stringify(argv)} still exits with the usage code`);
+  }
+  assert.equal(appended.length, 0, 'help is not a lane event — no row in any repo\'s log');
+  // Control: a wrong verb is a real mistake and still leaves its trail.
+  const bad = await runLane(['launch', 'lane-a'], { exec: f.exec, append, mkdir: () => {} });
+  assert.equal(bad.exit, 2);
+  assert.equal(appended.length, 1, 'a bad verb still appends its usage-error row');
+  assert.equal(JSON.parse(appended[0][1]).state, 'usage-error');
+});
+
 test('AM15: the usage text documents every flag the CLI accepts, including --lane', async (t) => {
   const f = fixture(t);
   const result = await runLane(['--help'], { exec: f.exec, append: () => {}, mkdir: () => {} });

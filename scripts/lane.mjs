@@ -198,9 +198,13 @@ function responseText(text) {
   return typeof found === 'string' ? found : String(text);
 }
 
+function isHelpRequest(verb) {
+  return verb === undefined || ['--help', '-h', 'help'].includes(verb);
+}
+
 function parseArgs(argv) {
   const [verb, ...tokens] = argv;
-  if (verb === undefined || ['--help', '-h', 'help'].includes(verb)) {
+  if (isHelpRequest(verb)) {
     throw new LaneError(EXIT.USAGE, 'lane needs one verb', { usage: USAGE_TEXT });
   }
   if (!VERBS.has(verb)) {
@@ -1741,7 +1745,11 @@ export async function runLane(argv, overrides = {}) {
       ...emptyRow(deps), verb: argv[0] ?? null, state: 'usage-error',
       waitMs: deps.now() - started, exit: error.code ?? EXIT.USAGE, error: error.message,
     };
-    appendRow(deps, log, row);
+    // A help request is not a lane event. `lane --help` (or a bare `lane`) run
+    // from any repo used to append a usage-error row to THAT repo's lane log —
+    // Session G opened 2026-09-03 by trashing a row this way. A wrong verb or a
+    // bad flag still logs: those are real mistakes worth a trail.
+    if (!isHelpRequest(argv[0])) appendRow(deps, log, row);
     return { exit: error.code ?? EXIT.USAGE, output, row, log, logSource };
   }
 
