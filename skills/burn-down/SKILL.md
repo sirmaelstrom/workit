@@ -137,7 +137,12 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
 5. **Log one row to the run doc per stop — on every exit, not only landings.**
    Landed, refuted, blocked, and dropped all get their row (the template's
    event vocabulary names them); a blocked item exits at step 2 and still owes
-   its row before you move on. Append-only, never rewrite.
+   its row before you move on. Append-only, never rewrite. **Every row's
+   timestamp is measured, not written:** run `date -u` at the moment of the row
+   and paste its output. Three consecutive sessions (I, J, M — 2026-09-04/05)
+   hand-wrote stamps 60–70 minutes ahead of the ledger's own clock, and the
+   overnight friction memo re-reported it each morning; a row whose time the
+   deploy receipt contradicts is a row nobody can trust.
 
 ## Standing rules (write these once; do not re-transmit per handoff)
 
