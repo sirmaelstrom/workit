@@ -1,6 +1,6 @@
 ---
 name: codex-delegate
-description: "Offload a bounded whole-repo audit, broad search, bulk extraction, or repetitive mechanical edit to a plan-covered CLI agent (codex exec — Astra by default, Luna for enumeration, Terra as fallback) instead of reading every file yourself. Use BEFORE you open ~10 files to produce one short answer, even if nobody says 'delegate' or 'offload'. Not for PR review (use slim-review), work needing this session's decisions, or edits to a repo you are mid-edit on."
+description: "Offload a bounded whole-repo audit, broad search, bulk extraction, or repetitive mechanical edit to a plan-covered CLI agent (codex exec — Terra by default, Luna for enumeration, Astra only on explicit opt-in for verdict-critical single arms) instead of reading every file yourself. Use BEFORE you open ~10 files to produce one short answer, even if nobody says 'delegate' or 'offload'. Not for PR review (use slim-review), work needing this session's decisions, or edits to a repo you are mid-edit on."
 ---
 
 # Model-Aware Delegate — Route Leaf Work Off the Expensive Channel
@@ -27,8 +27,8 @@ Apply the self-containment gate first, then select the least expensive surface t
 
 | Target | Choose it when | Cost / effort posture | Do not choose it for |
 |---|---|---|---|
-| **Astra** (`codex-astra` — GPT-6 Astra in the Codex harness, since 2026-09-05) | **Default for every delegation**: codebase audits, "is X guarded", pre-merge verification, difficult bounded implementation, repair | **$0 marginal**, ChatGPT-plan covered; run at **low** effort (the CLI default) — measured identical verdicts to high at less plan cost; proven 88x conductor-token saving | Fan-out that may exhaust plan throughput; work requiring conductor context |
-| **Terra** (`codex`, Terra at high) | **Fallback** when `gpt-6-astra` is unavailable or its window is exhausted | Same $0 channel; high reasoning | Anything Astra can take — measured 6 wrong verdicts on 41 files where Astra had 0 in the checked sample (see the Astra re-cut) |
+| **Terra** (`codex`, Terra at high) | **Default for every delegation**: codebase audits, difficult bounded implementation, repair, or verification where stronger leaf reasoning lowers retry risk | **$0 marginal**, ChatGPT-plan covered; high reasoning; proven 88x conductor-token saving | Fan-out that may exhaust plan throughput; work requiring conductor context |
+| **Astra** (`codex-astra` — GPT-6 Astra in the Codex harness, since 2026-09-05) | **Explicit opt-in only, one arm at a time** — when a wrong verdict would ship a bug and Terra's measured failure mode (false GUARDED on a file it did read) is the risk: pre-merge verification of a guard, "is X guarded" over a narrow set | Same $0 channel, run at **low** effort — **but it drains the $20 plan's 5-hour window faster than Terra** (operator-read 2026-09-05/06: three audit arms plus probes ≈ 35% of a window and a burned reset, and the window closed again that evening under ordinary use). Plan draw per model is unpublished, so the token counts in the re-cut below do **not** predict it | The default slot, any fan-out, anything Terra or Luna can take. Do not reach for it because the alias is registered — **operator ruling 2026-09-06: not the default until the capacity experiment (quest `13255ef0`) measures plan draw per model** |
 | **Luna** (`codex-luna` in the Codex harness; `luna` where an API agent runner exists) | High-volume, repetitive, well-specified leaf grunt: mechanical edits, test generation, extraction, classification, or many independent small checks | **Also $0** through the Codex harness — 43% faster, ~15% fewer plan tokens; medium reasoning by default | Architecture, ambiguous diagnosis, synthesis across leaf results, direct conversational work — **and any verdict about safety or correctness** (see threshold) |
 
 **Grok is off the delegation roster (operator decision, 2026-08-10).** It is metered
@@ -59,7 +59,7 @@ GPT-6 Astra landed on the plan and re-ran the same byte-identical FCA audit the 
 | **Astra @ high** | 0 in the 10 DEFECTs checked; found 5 real defects Terra called GUARDED (cached-reopen paths, last-item archive, an unretired optimistic write) | 6.3k / 1.8k | 21% less input than Terra for a strictly better handback |
 | **Astra @ low** | identical DEFECT set to Astra@high | 4.8k / 0.7k | **Dropped the repo path prefix on every locator** — the locator grep below catches it; add "repo-relative paths" to the prompt |
 
-So the Terra-vs-Luna split (*depth vs breadth*) is now *Astra vs Luna*: Astra@low is the default for anything with a verdict in it; Luna stays the enumeration tier when Astra's window is the constraint; Terra is the fallback slug. **n=1 per arm, one task shape, one grader** — directional, like the Luna numbers. ⚠️ Untested: the diff-review shape (a paired slim-review-style run is prepared in that doc's caveats and unrun).
+On verdict quality Astra@low dominated Terra@high on this task shape. **The plan window, not the verdict, is the constraint:** the same afternoon burned a codex reset, and Astra's 5-hour window closed again the following evening under ordinary use. The plan cost line in that doc ("~8% of a window per audit arm") is derived from one whole-afternoon reading, not measured per arm, and OpenAI does not publish per-model plan draw — so "fewer tokens" is not "cheaper on the plan". **Operator ruling 2026-09-06: Terra stays the default; Astra is explicit opt-in for verdict-critical, single-arm work until the AI subscription capacity experiment (quest `13255ef0`) measures plan draw per model.** Luna stays the enumeration tier. **n=1 per arm, one task shape, one grader** — directional, like the Luna numbers. ⚠️ Untested: the diff-review shape (a paired slim-review-style run is prepared in that doc's caveats and unrun, quest `fcb42e75`).
 
 ### Assert the handback (all tiers, non-negotiable)
 
@@ -110,14 +110,15 @@ If the task needs the conductor's working memory, the conductor does it.
 ## Codex-Harness Invocation
 
 ```bash
-codex exec --model gpt-6-astra -c model_reasoning_effort=low --sandbox danger-full-access --skip-git-repo-check -C "<absolute target dir>" - <<'EOF'
+codex exec --model gpt-5.6-terra -c model_reasoning_effort=high --sandbox danger-full-access --skip-git-repo-check -C "<absolute target dir>" - <<'EOF'
 <self-contained prompt, ending with the bounded-return contract>
 EOF
 ```
 
 (`-` reads the prompt from stdin — safest for multi-line prompts. On Windows/PowerShell, pipe the prompt file: `Get-Content prompt.txt -Raw | codex exec ... -`.)
 
-- **Default model:** use `gpt-6-astra` at **low** effort (the Observatory `codex-astra` slug; the CLI's own default effort). Tell it *"cite repo-relative paths"* — at low it dropped the path prefix on every locator in the 2026-09-05 arm. **Fallback:** `gpt-5.6-terra -c model_reasoning_effort=high` (the Observatory `codex` posture) when Astra is unavailable. Slugs rot — before a large fan-out, or on a 400, verify the live slug against `~/.codex/models_cache.json` / `projects/heathdev-observatory/src/models.ts`.
+- **Default model:** use `gpt-5.6-terra` at high effort (the Observatory `codex` posture). Slugs rot — before a large fan-out, or on a 400, verify the live slug against `~/.codex/models_cache.json` / `projects/heathdev-observatory/src/models.ts`.
+- **Verdict-critical opt-in:** `--model gpt-6-astra -c model_reasoning_effort=low` (the Observatory `codex-astra` slug; the CLI's own default effort). One arm, never a fan-out, and read the plan window first — it closes faster under Astra. Tell it *"cite repo-relative paths"* — at low it dropped the path prefix on every locator in the 2026-09-05 arm.
 - **High-volume grunt:** use `--model gpt-5.6-luna -c model_reasoning_effort=medium` (the Observatory `codex-luna` posture). Set it explicitly: the Codex CLI's configured default may otherwise raise Luna to high.
 - Use model slugs, not Observatory aliases, on the raw `codex exec --model` flag. The aliases describe the roster posture; the CLI accepts the underlying slug.
 - **Sandbox:** `--sandbox danger-full-access` for audits/scans/extraction (most delegations), with an explicit "do not modify any files" clause in the prompt — Terra honors it (verified). ⚠️ Do NOT use `--sandbox read-only` on this Windows box: the sandbox runner fails at the first child spawn (`CreateProcessAsUserW failed: 5`) and the model returns a plausible **ungrounded** answer with no surfaced error (auto-memory `codex-exec-readonly-sandbox-broken-windows`). Use `workspace-write` only when the delegated task must produce files, and point it at a scratch dir or worktree — never let a delegated task write into a repo the conductor is mid-edit on.
