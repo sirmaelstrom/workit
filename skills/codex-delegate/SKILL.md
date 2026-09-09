@@ -133,6 +133,11 @@ You are auditing/processing <target> at <absolute path>. READ-ONLY — modify no
 Task: <complete, standalone description — include definitions of every
 pattern/term, because you have no other context>.
 
+EARLY EXIT: <the investigate or build clause from "Standing prompt clauses"
+below, verbatim>.
+Do NOT open GitHub issues or PRs beyond the one asked for; anything you cannot
+do or think should follow goes in your final message.
+
 Return DISTILLED findings only:
 - <exact output structure: e.g. "file path — pattern # — one-line evidence — line ref">
 - Close with EXACTLY: "examined N of M files matching <glob>" — the real counts.
@@ -143,6 +148,35 @@ The coverage line is load-bearing, not politeness: it is the only thing that mak
 incomplete audit distinguishable from a clean one. Check its N against your own `find`,
 and grep every returned path against the filesystem — both tiers have been measured
 silently skipping files and citing at least one directory that does not exist.
+
+### Standing prompt clauses (every delegated or lane prompt)
+
+Two clauses ride every prompt this skill, a burn-down lane, or a fan-out sends. Both are
+cost controls: the first stops a leaf from grinding through options 2–17 when option 1 was
+right and cheap (a bounded audit arm costs ~8% of a Codex 5-hour window, and a mid-run
+limit hit is `turn.failed` with no handback); the second stops it from filing follow-ups
+into the repo's issue tracker.
+
+**Early exit.** Pick the shape by the prompt's verb and paste it verbatim:
+
+- *Investigate / audit / diagnose:*
+  `EARLY EXIT: if you find a fix that is small (roughly one file, a few lines) and you believe it is sufficient, STOP and report it instead of continuing the sweep. Report exactly: (1) the edit, as a diff; (2) file path and line; (3) the evidence of sufficiency — the failing behavior it closes, and what you checked that shows nothing else depends on the change. Do not apply it. An early exit that omits (3) is a lazy handback and will be rejected.`
+- *Build / repair:*
+  `EARLY EXIT: if the brief assumed more work than the fix needs, make the small fix, stop, and say so — do not build the assumed scope around it. Your final message names the fix, its location, and the evidence that it is sufficient (the behavior it closes; what you checked that shows nothing else depends on it).`
+
+The evidence line is the guard, not decoration: the failure an early exit invites is a fix
+that is simple and *wrong*, and the clause makes such a fix refutable by the reader in one
+read rather than trusted on the writer's say-so. A handback that claims an early exit
+without (3) is treated as incomplete and re-run with the clause quoted back. (Source: the
+investigating-agent prompt in Theo's 2026-09-08 video; quest 8945de7f.)
+
+**Follow-ups destination.**
+`Do NOT open GitHub issues or PRs beyond the one asked for; anything you cannot do or think should follow goes in your final message.`
+Measured 2026-09-03: three lanes in one sitting each filed a GitHub issue for something
+outside their brief when the prompt left this unsaid — "do not merge" constrains git, not
+the tracker (auto-memory `lane-prompt-must-name-where-followups-go`). The conductor
+harvests follow-ups to the Spine; a lane that files one anyway gets it closed with a
+comment pointing at the quest.
 
 ### Reading the result
 

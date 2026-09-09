@@ -34,6 +34,8 @@ A conductor launches worktree lanes (claude or codex) and today cannot see a lan
 
 Every verb appends one JSONL row to `data/outputs/projects/agentic-practice-transfer/lanes/<run-anchor>.jsonl`: `{ts, lane, verb, kind, model, reasoning, state, waitMs, exit}`. This is the run's "lanes concurrently live" instrument (Session D delta 1).
 
+The prompt file's body is the conductor's to write, and every lane prompt carries the two standing clauses from `skills/codex-delegate/SKILL.md` → *Standing prompt clauses*: the **early-exit** clause (stop on a small sufficient fix and report it with the evidence of sufficiency, so a simple-but-wrong fix is refutable in one read) and the **follow-ups destination** (no GitHub issues or extra PRs; anything the lane cannot do goes in its final message). Quest 8945de7f, 2026-09-09.
+
 ## Constraints (binding; each measured)
 
 1. **Mode is set at launch, per kind.** claude → `--permission-mode bypassPermissions`; the helper REFUSES `dontAsk` (auto-denies every tool and still settles to `done`) and warns on `acceptEdits` (stalls on every Bash outside the allowlist). codex → `--ask-for-approval never` plus an explicit `--sandbox`; on this Windows box `read-only` is broken (ungrounded answers, no error), so the helper refuses it.
