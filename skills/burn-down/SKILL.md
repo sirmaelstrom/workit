@@ -89,8 +89,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    - **T0 — no review.** Docs, config, comments, mechanical renames, with a
      green build. This tier exists so the policy is credible — it is the
      deliberate, named exception to `slim-review`'s every-PR-boundary default.
-   - **T1 — `slim-review`.** The default for any code diff (one external lens
-     at the PR boundary).
+   - **T1 — `slim-review`.** The default for any code diff (two external
+     lenses at the PR boundary — Terra and Astra, both posted, since 2026-09-09).
    - **T2 — full council.** Fired when the change **touches a contract or an
      invariant**, or **adds tests that claim to prove something**. T1 asks
      whether the diff is correct; T2 asks whether it was *permitted* — the

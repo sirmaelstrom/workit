@@ -1,12 +1,12 @@
 ---
 name: slim-review
-description: "Run the slim PR-review loop — delegate one external reviewer (Codex/Terra) at a PR boundary, post its findings as line-anchored GitHub review comments, then confirm or refute each one and reply on the thread. Trigger on '/slim-review', 'slim review', 'review this PR before merge', 'get a second pass on the PR', or at any PR boundary during a burn-down. This is the LIGHT tier: one external lens, posted to the PR. Use '/review' for the in-session multi-reviewer pipeline and the review-council for complex multi-component PRs."
+description: "Run the slim PR-review loop — delegate two external reviewers (Codex/Terra and GPT-6 Astra, both plan-covered) at a PR boundary, post both sets of findings as line-anchored GitHub review comments, then confirm or refute each one and reply on the thread. Trigger on '/slim-review', 'slim review', 'review this PR before merge', 'get a second pass on the PR', or at any PR boundary during a burn-down. This is the LIGHT tier: two lenses, no synthesis, posted to the PR. Use '/review' for the in-session multi-reviewer pipeline and the review-council for complex multi-component PRs."
 ---
 
-# Slim PR Review — one external lens, on the PR, adjudicated
+# Slim PR Review — two external lenses, on the PR, adjudicated
 
-A PR-boundary review that is cheap enough to run **every time**. One external
-reviewer looks at the diff, its findings land on the pull request as real review
+A PR-boundary review that is cheap enough to run **every time**. Two external
+reviewers (Terra and Astra, one invocation each) look at the diff, their findings land on the pull request as real review
 comments, and you then confirm or refute each one in public and reply on the
 thread.
 
@@ -60,23 +60,34 @@ and rejects prose or incomplete handbacks.
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens \
-  --pr <n> --repo <owner/name> --lens codex|opus \
+  --pr <n> --repo <owner/name> --lens codex|astra|opus \
   --cwd "<ABSOLUTE REPO OR WORKTREE PATH>" \
   --out "$REVIEW_DIR/findings.json" \
   [--reasoning low|medium|high] [--measure-log <path>] [--dry-run]
 ```
 
-Choose `--lens` with the Reviewer ≠ author rule below. `--reasoning` defaults
-to `high` for codex and `low` for opus; `--measure-log` overrides the per-lens
-JSONL destination; `--dry-run` prints the resolved argv and prompt path without
-running a reviewer. Use `--prompt-out <path>` when you need to retain that exact
-grounded prompt for inspection.
+**The loop runs two lenses and posts both** (operator ruling 2026-09-09, quest
+`bcc11983`): invoke the verb once per lens with a distinct `--out`, then hand
+both files to `post`. `--lens` is `codex` (Terra @ high), `astra` (GPT-6 Astra @
+low), or `opus`; `--reasoning` overrides the per-lens default; `--measure-log`
+overrides the per-lens JSONL destination; `--dry-run` prints the resolved argv
+and prompt path without running a reviewer. Use `--prompt-out <path>` when you
+need to retain that exact grounded prompt for inspection.
+
+Why two: on observatory#620 (2026-09-09, paired on a byte-identical prompt)
+Terra@high and Astra@low each found a real defect the other missed, neither
+produced a false finding, and Astra was better calibrated on severity — Terra
+graded a deliberate two-fetch startup window as P1 — at half the input, 6× less
+output and a third of the wall clock. Both arms together did not move the plan
+meter one integer point (`astra-diff-review-measurement.md`). Two lenses is the
+ceiling; three is a council.
 
 ### Reviewer ≠ author
 
-A PR authored by a codex lane takes `--lens opus`; a PR authored by a Claude
-session takes `--lens codex`. Read the author from the PR's commits or the lane
-record; never assume.
+The pair is chosen so neither lens is the PR's authoring model: a PR authored by
+a Claude session takes `codex` + `astra`; a PR authored by a Terra lane takes
+`astra` + `opus`; a PR authored by an Astra lane takes `codex` + `opus`. Read
+the author from the PR's commits or the lane record; never assume.
 
 Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`.
 `examined_paths` must be EXACTLY the authoritative list. Context-only paths are
@@ -94,6 +105,10 @@ Non-negotiable flags, each for a measured reason:
 - **Codex `--model gpt-5.6-terra` at high effort.** A review is a verdict about
   correctness, and Luna returns confident wrong PASSes on those. See
   `codex-delegate`'s Terra-vs-Luna threshold.
+- **Astra `--model gpt-6-astra` at low effort.** Low is the CLI's own default
+  and lost nothing but a path prefix on the measured arms; the prompt now
+  carries the one-line repo-relative-paths instruction that fixed that. Pin
+  `--reasoning high` only when a low handback shows a coverage or locator gap.
 - **`--sandbox danger-full-access`.** `--sandbox read-only` is broken on this
   Windows box — the sandbox runner dies at the first child spawn and the model
   returns a plausible **ungrounded** answer with no surfaced error. The read-only
@@ -108,12 +123,15 @@ The verb captures `git -C "<ABSOLUTE REPO OR WORKTREE PATH>" status --short
 --porcelain` before and after the reviewer and fails on every status line added
 by the reviewer, even when the worktree was already dirty before it ran.
 
-### Shadow arm (measurement, opt-in)
+### The pair is the measurement
 
-On a PR the conductor names, run **both** lenses, post both, and adjudicate both
-with `reply --verdict`. The measurement log then captures unique-to-lens
-confirmed catches. Post the two handbacks with repeated flags, for example
-`post --findings codex.json --findings opus.json`. Two lenses is the ceiling.
+Every run is the shadow arm now: two lenses, both posted, both adjudicated with
+`reply --verdict`, so the measurement log accumulates unique-to-lens confirmed
+catches on every PR instead of on the ones someone remembered to name. Post the
+two handbacks with repeated flags: `post --findings codex.json --findings
+astra.json`. Where both lenses anchor the same defect on the same line, post
+both — the duplicate is the agreement signal, and one reply resolves both
+threads.
 
 ## 3. Post
 
@@ -231,7 +249,7 @@ operator's merge call.
 
 ## What this deliberately is not
 
-- **Not a council.** One lens, no synthesis, no challenge pass. If lenses would
+- **Not a council.** Two lenses, no synthesis, no challenge pass. If the two
   disagree in an interesting way, that PR wants `council_review`, not this.
 - **Not a merge gate.** It posts findings and adjudications; merging stays the
   operator's call.

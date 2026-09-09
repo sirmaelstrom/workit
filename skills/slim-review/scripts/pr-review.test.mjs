@@ -399,8 +399,9 @@ test('skill delegates prompt construction to the lens verb and requires reviewer
   const skill = readFileSync(SKILL, 'utf8');
   assert.match(skill, /pr-review\.mjs" lens/);
   assert.match(skill, /Reviewer ≠ author/);
-  assert.match(skill, /Shadow arm \(measurement, opt-in\)/);
-  assert.match(skill, /--lens codex\|opus/);
+  assert.match(skill, /The pair is the measurement/);
+  assert.match(skill, /--lens codex\|astra\|opus/);
+  assert.match(skill, /codex` \+ `astra`/, 'the default pair for a Claude-authored PR must be named');
   assert.match(skill, /--reasoning low\|medium\|high/);
   assert.match(skill, /--measure-log <path>/);
   assert.match(skill, /--dry-run/);
@@ -940,6 +941,36 @@ test('lens codex reads its -o findings file, builds the Terra argv, and sends ev
   assert.ok(call.args.includes('-C'));
   assert.equal(call.args[call.args.indexOf('-C') + 1], resolve('C:/repo'));
   assert.equal(out.summary, 'read from codex -o file', 'codex stdout must not replace its -o findings file');
+});
+
+test('lens astra rides the codex harness with the Astra slug at low effort and reads its -o file', () => {
+  const fromFile = JSON.stringify({ ...VALID, summary: 'read from astra -o file' });
+  const { calls, deaths, out, rows } = runLensWithFake({ lens: 'astra', codexOutput: fromFile });
+  assert.deepEqual(deaths, []);
+  const call = calls.find(({ args }) => args[0] === 'exec');
+  assert.ok(call, 'astra must spawn codex exec, not claude -p');
+  assert.equal(call.program, 'C:/codex/vendor/bin/codex.exe');
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6-astra');
+  assert.ok(call.args.includes('model_reasoning_effort=low'), 'the CLI default effort; high lost nothing on the measured arms');
+  assert.ok(call.args.includes('danger-full-access'));
+  assert.deepEqual(call.args.slice(-1), ['-']);
+  assert.match(call.opts.input, /src\/a\.ts/);
+  // The one-line locator instruction that fixed Astra@low's prefix drop (2026-09-05 → 09-09).
+  assert.match(call.opts.input, /Cite repo-relative paths exactly as they appear in the authoritative PR file list/);
+  assert.equal(out.summary, 'read from astra -o file');
+  assert.equal(out.lens, 'astra');
+  assert.equal(out.model, 'gpt-6-astra');
+  assert.equal(out.reasoning, 'low');
+  assert.ok(out.findings.every((finding) => finding.lens === 'astra'));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].lens, 'astra');
+  assert.equal(rows[0].model, 'gpt-6-astra');
+});
+
+test('validateFindingsShape accepts the astra lens tag and rejects an unknown one', () => {
+  assert.deepEqual(validateFindingsShape({ ...VALID, lens: 'astra', findings: VALID.findings.map((f) => ({ ...f, lens: 'astra' })) }), []);
+  const problems = validateFindingsShape({ ...VALID, lens: 'luna' });
+  assert.ok(problems.some((p) => /lens must be one of codex\|astra\|opus/.test(p)), problems.join('\n'));
 });
 
 test('codex output schema omits unsupported uniqueItems', () => {

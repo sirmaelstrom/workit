@@ -173,7 +173,20 @@ export function countChangedFiles(diffText) {
 // ---------------------------------------------------------------------------
 
 const SEVERITIES = new Set(['P1', 'P2', 'P3']);
-const LENSES = new Set(['codex', 'opus']);
+// Lens → model + default effort. `codex` (Terra) and `astra` both ride the
+// codex-cli harness; `opus` rides `claude -p`. Astra joined 2026-09-09 as the
+// default PAIR partner (operator ruling, quest bcc11983): on observatory#620
+// Terra@high and Astra@low each found a real defect the other missed, neither
+// produced a false finding, and Astra was better calibrated on severity at half
+// the input — so the loop runs both and posts the union.
+const LENS_MODELS = {
+  codex: { model: 'gpt-5.6-terra', reasoning: 'high' },
+  astra: { model: 'gpt-6-astra', reasoning: 'low' },
+  opus: { model: 'opus', reasoning: 'low' },
+};
+const LENSES = new Set(Object.keys(LENS_MODELS));
+const LENS_LIST = [...LENSES].join('|');
+const isCodexLens = (lens) => lens === 'codex' || lens === 'astra';
 const FINDING_KEYS = new Set(['severity', 'title', 'path', 'line', 'body', 'lens']);
 const DOCUMENT_KEYS = new Set(['summary', 'coverage', 'examined_paths', 'findings', 'lens', 'model', 'reasoning', 'wall_ms']);
 
@@ -207,7 +220,7 @@ export function validateFindingsShape(doc) {
   for (const key of Object.keys(doc)) {
     if (!DOCUMENT_KEYS.has(key)) problems.push(`top level has unknown property: ${key}`);
   }
-  if (doc.lens !== undefined && !LENSES.has(doc.lens)) problems.push('lens must be codex or opus');
+  if (doc.lens !== undefined && !LENSES.has(doc.lens)) problems.push(`lens must be one of ${LENS_LIST}`);
   if (doc.model !== undefined && (typeof doc.model !== 'string' || doc.model.trim() === '')) problems.push('model must be a non-empty string');
   if (doc.reasoning !== undefined && (typeof doc.reasoning !== 'string' || doc.reasoning.trim() === '')) problems.push('reasoning must be a non-empty string');
   if (doc.wall_ms !== undefined && (!Number.isInteger(doc.wall_ms) || doc.wall_ms < 0)) problems.push('wall_ms must be a non-negative integer');
@@ -253,7 +266,7 @@ export function validateFindingsShape(doc) {
     for (const key of Object.keys(f)) {
       if (!FINDING_KEYS.has(key)) problems.push(`${at} has unknown property: ${key}`);
     }
-    if (f.lens !== undefined && !LENSES.has(f.lens)) problems.push(`${at}.lens must be codex or opus`);
+    if (f.lens !== undefined && !LENSES.has(f.lens)) problems.push(`${at}.lens must be one of ${LENS_LIST}`);
     if (!SEVERITIES.has(f.severity)) problems.push(`${at}.severity must be one of P1, P2, P3`);
     for (const key of ['title', 'path', 'body']) {
       if (typeof f[key] !== 'string' || f[key].trim() === '') {
@@ -662,7 +675,7 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log 
       ['api', `repos/${repo}/pulls/comments/${opts.commentId}`],
       { cwd: opts.cwd },
     ));
-    lens = /\*\*lens:\*\*\s*(codex|opus)\b/i.exec(String(original.body ?? ''))?.[1]?.toLowerCase() ?? null;
+    lens = new RegExp(`\\*\\*lens:\\*\\*\\s*(${LENS_LIST})\\b`, 'i').exec(String(original.body ?? ''))?.[1]?.toLowerCase() ?? null;
   }
 
   const res = runGh(
@@ -709,7 +722,9 @@ Report only correctness defects that matter after merge: wrong reachable behavio
 
 Use severity P1 (blocks merge), P2 (should be resolved), or P3 (advisory). Each finding needs a changed repository-relative \`path\`, an anchorable post-change \`line\` where possible, and evidence in \`body\`.
 
-Return ONLY JSON matching the schema. \`coverage\` is exactly \`examined ${prFilePaths.length} of ${prFilePaths.length} changed files\`; \`examined_paths\` echoes the authoritative list entries you examined verbatim.`;
+Return ONLY JSON matching the schema. \`coverage\` is exactly \`examined ${prFilePaths.length} of ${prFilePaths.length} changed files\`; \`examined_paths\` echoes the authoritative list entries you examined verbatim.
+
+Cite repo-relative paths exactly as they appear in the authoritative PR file list.`;
 }
 
 function defaultRun(program, args, { input, cwd } = {}) {
@@ -789,10 +804,10 @@ class LensOutputError extends Error {}
 export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log, now = Date.now, findCodexExe = defaultCodexExe } = {}) {
   const cwd = resolve(opts.cwd ?? process.cwd());
   const repo = opts.repo;
-  const reasoning = opts.reasoning ?? (opts.lens === 'codex' ? 'high' : 'low');
-  const model = opts.lens === 'codex' ? 'gpt-5.6-terra' : 'opus';
+  const reasoning = opts.reasoning ?? LENS_MODELS[opts.lens].reasoning;
+  const model = LENS_MODELS[opts.lens].model;
   const promptPath = opts.promptOut ? resolve(opts.promptOut) : join(tmpdir(), `slim-review-${opts.lens}-${opts.pr}-prompt.txt`);
-  const lensArgv = (tempOut) => opts.lens === 'codex'
+  const lensArgv = (tempOut) => isCodexLens(opts.lens)
     ? ['exec', '--model', model, '-c', `model_reasoning_effort=${reasoning}`, '--sandbox', 'danger-full-access', '--skip-git-repo-check', '-C', cwd, '--output-schema', SCHEMA_PATH, '-o', tempOut, '-']
     : ['-p', '--model', model, '--effort', reasoning, '--permission-mode', 'bypassPermissions', '--disallowedTools', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', '--output-format', 'json', '--json-schema', readFileSync(SCHEMA_PATH, 'utf8')];
 
@@ -828,24 +843,24 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
   let raw;
   let wallMs;
   try {
-    const program = opts.lens === 'codex' ? findCodexExe() : (process.platform === 'win32' ? 'claude.exe' : 'claude');
+    const program = isCodexLens(opts.lens) ? findCodexExe() : (process.platform === 'win32' ? 'claude.exe' : 'claude');
     const before = new Set(String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }))
       .split(/\r?\n/).filter(Boolean));
     const started = now();
     // Claude's -p mode on this box does not consume stdin (the live probe
     // returned a stale placeholder result), so its prompt is positional.
     raw = run(program, opts.lens === 'opus' ? [...argv, prompt] : argv, {
-      ...(opts.lens === 'codex' ? { input: prompt } : {}),
+      ...(isCodexLens(opts.lens) ? { input: prompt } : {}),
       cwd,
     });
     wallMs = now() - started;
     // Observe the reviewer immediately, before our own --out and measurement
     // writes can make a deliberately in-worktree output look like misconduct.
     const after = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }));
-    if (opts.lens === 'codex' && !existsSync(tempOut)) {
-      throw new LensOutputError(`codex lens produced no findings file; API/CLI output: ${String(raw).trim()}`);
+    if (isCodexLens(opts.lens) && !existsSync(tempOut)) {
+      throw new LensOutputError(`${opts.lens} lens produced no findings file; API/CLI output: ${String(raw).trim()}`);
     }
-    const source = opts.lens === 'codex' ? readFileSync(tempOut, 'utf8') : raw;
+    const source = isCodexLens(opts.lens) ? readFileSync(tempOut, 'utf8') : raw;
     let doc;
     try {
       doc = parseLensOutput(source, opts.lens);
@@ -892,7 +907,7 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
 
 const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
 
-  lens     --pr <n> --repo owner/name --lens codex|opus --out <findings.json>
+  lens     --pr <n> --repo owner/name --lens codex|astra|opus --out <findings.json>
            [--reasoning low|medium|high] [--cwd <abs repo or worktree>]
            [--prompt-out <path>] [--measure-log <path>] [--dry-run]
   post     --pr <n> --repo owner/name --findings <file> [--findings <file> ...] [--dry-run] [--force-post]
@@ -906,8 +921,10 @@ Common:
   --cwd    directory to run gh from (default: process cwd)
 
 Lens safety:
-  --lens         choose codex or opus; it must not be the PR authoring model
-  --reasoning    defaults to high for codex and low for opus
+  --lens         codex (Terra), astra (GPT-6 Astra), or opus; run one lens per
+                 invocation, never the PR authoring model — the default loop
+                 runs codex AND astra and posts both handbacks
+  --reasoning    defaults to high for codex, low for astra and opus
   --measure-log  overrides the per-lens JSONL log (otherwise a workspace root is required)
   --dry-run      prints the exact reviewer argv and prompt path without running it
   status guard   fails if the reviewer adds any git status --porcelain line
@@ -982,7 +999,7 @@ function main(argv) {
       return cmdPost(opts);
     case 'lens':
       if (!opts.repo) fail(2, 'lens needs --repo owner/name');
-      if (!LENSES.has(opts.lens)) fail(2, 'lens needs --lens codex|opus');
+      if (!LENSES.has(opts.lens)) fail(2, `lens needs --lens ${LENS_LIST}`);
       if (!opts.out) fail(2, 'lens needs --out <findings.json>');
       if (opts.reasoning && !['low', 'medium', 'high'].includes(opts.reasoning)) fail(2, 'lens --reasoning must be low, medium, or high');
       return cmdLens(opts);
