@@ -113,12 +113,12 @@ function read(...parts) {
 // ---------------------------------------------------------------------------
 
 test('canonical fixture validates with exit 0', () => {
-  const { status } = runValidator(CANONICAL);
+  const { status } = runValidator(CANONICAL, { env: NO_ROOT });
   assert.equal(status, 0, 'by-the-book spec must exit 0 (no errors)');
 });
 
 test('canonical fixture validates with 0 errors and 0 warnings', () => {
-  const { out } = runValidator(CANONICAL);
+  const { out } = runValidator(CANONICAL, { env: NO_ROOT });
   assert.match(out, /0 errors, 0 warnings/, `expected a clean report, got:\n${out}`);
 });
 
@@ -185,7 +185,7 @@ test('broken fixture still flags missing constraint categories', () => {
 // ---------------------------------------------------------------------------
 
 test('canonical no-root invocation emits no workspace/disk-check output (pin guard)', () => {
-  const { out } = runValidator(CANONICAL);
+  const { out } = runValidator(CANONICAL, { env: NO_ROOT });
   assert.match(out, /0 errors, 0 warnings/, 'the no-root pin must stay 0/0');
   assert.ok(!/workspace-root/i.test(out), 'no root provided → the disk check must be silent, not even a warning');
 });

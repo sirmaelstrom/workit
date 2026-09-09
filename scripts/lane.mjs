@@ -1027,6 +1027,12 @@ function positiveNumber(value, flag, fallback = null) {
   return number;
 }
 
+function planFloorOption(opts) {
+  const floor = positiveNumber(opts.planFloor, '--plan-floor', 20);
+  if (floor > 100) usage('--plan-floor must not exceed 100');
+  return floor;
+}
+
 async function waitLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   const timeout = positiveNumber(opts.timeout, '--timeout');
@@ -1037,8 +1043,7 @@ async function waitLane(opts, deps, state) {
   }
   // 20, not 10: the measured drain was 79% → 0% in ~36 min at four concurrent
   // codex consumers, and the "<10% left" warning arrived ~7 min before refusal.
-  const floor = positiveNumber(opts.planFloor, '--plan-floor', 20);
-  if (floor > 100) usage('--plan-floor must not exceed 100');
+  const floor = planFloorOption(opts);
   const deadline = deps.now() + timeout;
   let meter = { plan5h: null, planWeekly: null };
   let dialog = '';
@@ -1078,24 +1083,29 @@ async function waitLane(opts, deps, state) {
     if (plan.ok) {
       meter = plan.meter;
       dialog = plan.dialog;
+    } else {
+      // Do not make the last good footer look fresh after a failed pane read.
+      meter = { plan5h: null, planWeekly: null };
+      dialog = '';
     }
+    const warning = planMeterWarning(meter, lane.kind);
     const refusal = plan.refusal;
     const modalEligible = plan.refusalShape === 'modal'
-      && ((meter.plan5h !== null && meter.plan5h <= floor) || ['idle', 'done'].includes(stateAfter));
+      && (planFloorReached(meter, floor) || ['idle', 'done'].includes(stateAfter));
     const refusalEligible = Boolean(refusal) && (plan.refusalShape === 'banner' || modalEligible);
     if (refusalEligible) {
       return {
         exit: EXIT.PLAN_LOW,
-        output: { state: 'plan-refused', refusal, refusalShape: plan.refusalShape, plan5h: meter.plan5h, planWeekly: meter.planWeekly },
-        row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape },
+        output: { state: 'plan-refused', refusal, refusalShape: plan.refusalShape, plan5h: meter.plan5h, planWeekly: meter.planWeekly, ...warning },
+        row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape, ...warning },
       };
     }
 
     if (waited.code === 0 && stateAfter === 'blocked') {
       return {
         exit: EXIT.BLOCKED,
-        output: { state: 'blocked', dialog },
-        row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter },
+        output: { state: 'blocked', dialog, ...warning },
+        row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter, ...warning },
       };
     }
     if (waited.code === 0 && ['idle', 'done'].includes(stateAfter)) {
@@ -1104,11 +1114,12 @@ async function waitLane(opts, deps, state) {
         output: {
           state: stateAfter,
           notice: 'status is not evidence — run lane check',
+          ...warning,
         },
-        row: { ...laneInstrumentation(opts.name, lane, stateAfter), ...meter },
+        row: { ...laneInstrumentation(opts.name, lane, stateAfter), ...meter, ...warning },
       };
     }
-    if (meter.plan5h !== null && meter.plan5h < floor) {
+    if (planFloorReached(meter, floor)) {
       return {
         exit: EXIT.PLAN_LOW,
         output: { state: 'plan-low', plan5h: meter.plan5h, planWeekly: meter.planWeekly, planFloor: floor },
@@ -1118,8 +1129,8 @@ async function waitLane(opts, deps, state) {
     if (deps.now() >= deadline) {
       return {
         exit: EXIT.TIMEOUT,
-        output: { state: 'timeout' },
-        row: { ...laneInstrumentation(opts.name, lane, 'timeout'), ...meter },
+        output: { state: 'timeout', ...warning },
+        row: { ...laneInstrumentation(opts.name, lane, 'timeout'), ...meter, ...warning },
       };
     }
     // One poll per second, not per 100ms: each poll spawns two herdr processes,
@@ -1217,6 +1228,7 @@ async function checkLane(opts, deps, state) {
 async function resumeLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   const timeout = positiveNumber(opts.timeout, '--timeout', 120_000);
+  const floor = planFloorOption(opts);
   // C5 says never bare-wait here — a bare wait returns instantly on the stale
   // `blocked`. It said `--until idle`; the first live approval measured why that
   // is not enough: a lane started --no-focus is never "seen", so herdr settles
@@ -1228,7 +1240,33 @@ async function resumeLane(opts, deps, state) {
   ]);
   if (raw.code !== 0) {
     if (isTimeoutFailure(raw)) {
-      return { exit: EXIT.TIMEOUT, output: { state: 'timeout' }, row: laneInstrumentation(opts.name, lane, 'timeout') };
+      // A timeout says the lane is still working, not that its pane is
+      // unreadable. Take one fresh reading so a live reserve floor can still
+      // stop dispatch; resume remains a settled-state wait, never a poll loop.
+      const plan = readPlanState(deps, opts.name);
+      const meter = plan.meter ?? { plan5h: null, planWeekly: null };
+      const warning = planMeterWarning(meter, lane.kind);
+      const modalEligible = plan.refusalShape === 'modal' && planFloorReached(meter, floor);
+      const refusalEligible = Boolean(plan.refusal) && (plan.refusalShape === 'banner' || modalEligible);
+      if (refusalEligible) {
+        return {
+          exit: EXIT.PLAN_LOW,
+          output: { state: 'plan-refused', refusal: plan.refusal, refusalShape: plan.refusalShape, ...meter, ...warning },
+          row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape, ...warning },
+        };
+      }
+      if (plan.ok && planFloorReached(meter, floor)) {
+        return {
+          exit: EXIT.PLAN_LOW,
+          output: { state: 'plan-low', plan5h: meter.plan5h, planWeekly: meter.planWeekly, planFloor: floor },
+          row: { ...laneInstrumentation(opts.name, lane, 'plan-low'), ...meter },
+        };
+      }
+      return {
+        exit: EXIT.TIMEOUT,
+        output: { state: 'timeout', ...meter, ...warning },
+        row: { ...laneInstrumentation(opts.name, lane, 'timeout'), ...meter, ...warning },
+      };
     }
     throw new LaneError(EXIT.ERROR, `herdr agent wait failed: ${raw.stderr.trim() || raw.stdout.trim()}`);
   }
@@ -1237,29 +1275,29 @@ async function resumeLane(opts, deps, state) {
   // herdr reports `idle` while that modal is up, so this outranks the state.
   const plan = readPlanState(deps, opts.name);
   const meter = plan.meter ?? { plan5h: null, planWeekly: null };
-  const floor = positiveNumber(opts.planFloor, '--plan-floor', 20);
+  const warning = planMeterWarning(meter, lane.kind);
   const modalEligible = plan.refusalShape === 'modal'
-    && ((meter.plan5h !== null && meter.plan5h <= floor) || ['idle', 'done'].includes(responseState(raw.stdout, null)));
+    && (planFloorReached(meter, floor) || ['idle', 'done'].includes(responseState(raw.stdout, null)));
   const refusalEligible = Boolean(plan.refusal) && (plan.refusalShape === 'banner' || modalEligible);
   if (refusalEligible) {
     return {
       exit: EXIT.PLAN_LOW,
-      output: { state: 'plan-refused', refusal: plan.refusal, refusalShape: plan.refusalShape, ...meter },
-      row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape },
+      output: { state: 'plan-refused', refusal: plan.refusal, refusalShape: plan.refusalShape, ...meter, ...warning },
+      row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape, ...warning },
     };
   }
   const statusAfter = responseState(raw.stdout, 'idle');
   if (statusAfter === 'blocked') {
     return {
       exit: EXIT.BLOCKED,
-      output: { state: 'blocked', dialog: plan.dialog },
-      row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter },
+      output: { state: 'blocked', dialog: plan.dialog, ...warning },
+      row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter, ...warning },
     };
   }
   return {
     exit: EXIT.OK,
-    output: { state: statusAfter, notice: 'status is not evidence — run lane check' },
-    row: { ...laneInstrumentation(opts.name, lane, statusAfter), ...meter },
+    output: { state: statusAfter, notice: 'status is not evidence — run lane check', ...warning },
+    row: { ...laneInstrumentation(opts.name, lane, statusAfter), ...meter, ...warning },
   };
 }
 
@@ -1693,6 +1731,22 @@ function planRefusal(text) {
   const modal = lines.find((line) => PLAN_REFUSAL_PATTERNS[1].test(line));
   if (modal && /(?:^|\n)\s*(?:›\s*)?1\.\s*Switch\b/i.test(source)) return { shape: 'modal', line: modal.trim() };
   return null;
+}
+
+function selectedPlanWindow(meter) {
+  return meter?.plan5h ?? meter?.planWeekly ?? null;
+}
+
+function planFloorReached(meter, floor) {
+  const selected = selectedPlanWindow(meter);
+  return selected !== null && selected <= floor;
+}
+
+function planMeterWarning(meter, kind) {
+  const expectsCodexMeter = kind === undefined || kind === null || kind === 'codex';
+  return expectsCodexMeter && selectedPlanWindow(meter) === null
+    ? { warning: 'plan meter unavailable; capacity is unknown' }
+    : {};
 }
 
 export function scrapePlanMeter(text) {
