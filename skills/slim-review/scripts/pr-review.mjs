@@ -728,6 +728,8 @@ READ-ONLY: modify nothing; do not create or delete files, and do not run git wri
 
 Read the diff with \`gh pr diff ${pr} --repo ${repo}\`. Read surrounding source as needed to judge correctness.
 
+When a changed file affects prompt/template generation, configuration resolution, or dispatch selection, identify one concrete claim, its consumer, and the path producing the consumer input. Inspect the real rendered or resolved result through an existing safe renderer/resolver, or a captured result from that same path. In \`summary\`, record the claim, command or supplied-evidence provenance, decisive excerpt, and any unverified limitation. Do not create worktrees, write source or configuration, install packages, run git writes, start services, or dispatch real actions to obtain evidence; use in-memory inputs and read-only paths. If that is impossible, state the limitation and ask the conductor for a render capture. A tool-less reviewer may assess supplied render evidence but must never claim to have run the renderer. Do not report a defect finding solely because a check was skipped; record the skip as a stated limitation, as Workspace Integrity requires. A match found inside quoted source or inlined artifacts does not prove delivery: where a slot or insertion is claimed, pass a distinct sentinel through the slot and a different marker through the artifacts, and confirm the sentinel lands outside the artifacts section.
+
 Authoritative PR file list:
 ${prFilePaths.join('\n')}
 

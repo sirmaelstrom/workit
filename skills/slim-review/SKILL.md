@@ -95,6 +95,25 @@ extras and fail the check. It must also be **non-empty**, and `coverage` must
 literally state `examined N of M` — a handback admitting nothing, or one whose
 coverage is prose, is exit 3, not a clean review.
 
+### Consumer-visible artifact evidence
+
+When a changed file affects prompt/template generation, configuration resolution,
+or dispatch selection, name one concrete claim, its consumer, and the path that
+produces the consumer input. Inspect the real rendered or resolved result with an
+existing safe renderer/resolver, or use a capture from that same path. In
+`summary`, record the claim, command or supplied-evidence provenance, decisive
+excerpt, and any unverified limitation. Do not create worktrees, write source or
+configuration, install packages, run git writes, start services, or dispatch real
+actions to obtain evidence; use in-memory inputs and read-only paths. If that is
+impossible, state the limitation and ask the conductor for a render capture. A
+tool-less reviewer may assess supplied render evidence but must never claim to
+have run the renderer. Do not report a defect finding solely because a check was
+skipped; record the skip as a stated limitation, as Workspace Integrity requires.
+A match found inside quoted source or inlined artifacts does not prove delivery:
+where a slot or insertion is claimed, pass a distinct sentinel through the slot
+and a different marker through the artifacts, and confirm the sentinel lands
+outside the artifacts section.
+
 The instrument bullet is this skill's negative-control binding
 (`reference/patterns/negative-control.md`): an added test, guard, or checker
 that cannot fail on the defect it claims to catch is a reportable correctness
