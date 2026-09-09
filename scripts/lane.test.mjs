@@ -686,6 +686,24 @@ test('quest 653c5b81 amendment 4: resume timeout warns only when its single pane
   }
 });
 
+test('quest 653c5b81 amendment 5: resume timeout warns when its pane read has no meter', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
+  );
+  const result = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 4);
+  assert.equal(result.output.state, 'timeout');
+  assert.equal(result.output.plan5h, null);
+  assert.equal(result.output.planWeekly, null);
+  assert.equal(result.output.warning, 'plan meter unavailable; capacity is unknown');
+  assert.equal(result.row.warning, 'plan meter unavailable; capacity is unknown');
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(f.calls[1].args.slice(0, 3), ['agent', 'read', 'lane-a']);
+});
+
 test('quest 653c5b81 amendment 3: wait and resume validate plan floors before herdr', async (t) => {
   for (const [verb, value, expected] of [
     ['wait', '0', /positive number/],

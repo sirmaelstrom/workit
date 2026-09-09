@@ -1245,7 +1245,7 @@ async function resumeLane(opts, deps, state) {
       // stop dispatch; resume remains a settled-state wait, never a poll loop.
       const plan = readPlanState(deps, opts.name);
       const meter = plan.meter ?? { plan5h: null, planWeekly: null };
-      const warning = plan.ok ? {} : planMeterWarning(meter, lane.kind);
+      const warning = planMeterWarning(meter, lane.kind);
       const modalEligible = plan.refusalShape === 'modal' && planFloorReached(meter, floor);
       const refusalEligible = Boolean(plan.refusal) && (plan.refusalShape === 'banner' || modalEligible);
       if (refusalEligible) {
