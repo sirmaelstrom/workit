@@ -645,11 +645,35 @@ test('WP-2 / S6: resume waits explicitly until idle and never consults a bare st
   assert.deepEqual(f.calls[1].args.slice(0, 3), ['agent', 'read', 'lane-a']);
 });
 
-test('quest 653c5b81 amendment 3: resume timeout reports unknown capacity only for codex lanes', async (t) => {
+test('quest 653c5b81 amendment 4: resume timeout reads the pane and honours the reserve floor', async (t) => {
+  for (const [weekly, exit, state] of [
+    [15, 6, 'plan-low'],
+    [90, 4, 'timeout'],
+  ]) {
+    const f = fixture(t);
+    seedLane(f);
+    f.responses.push(
+      { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+      { code: 0, stdout: `gpt-5.6-terra high · Context 62% left · weekly ${weekly}% left`, stderr: '' },
+    );
+    const result = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
+    assert.equal(result.exit, exit);
+    assert.equal(result.output.state, state);
+    assert.equal(result.output.planWeekly, weekly);
+    assert.equal(Object.hasOwn(result.output, 'warning'), false);
+    assert.equal(f.calls.length, 2);
+    assert.deepEqual(f.calls[1].args.slice(0, 3), ['agent', 'read', 'lane-a']);
+  }
+});
+
+test('quest 653c5b81 amendment 4: resume timeout warns only when its single pane read fails', async (t) => {
   for (const [kind, hasWarning] of [['codex', true], ['claude', false]]) {
     const f = fixture(t);
     seedLane(f, { kind });
-    f.responses.push({ code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' });
+    f.responses.push(
+      { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+      { code: 1, stdout: '', stderr: 'pane unavailable' },
+    );
     const result = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
     assert.equal(result.exit, 4);
     assert.equal(result.output.state, 'timeout');
@@ -657,6 +681,8 @@ test('quest 653c5b81 amendment 3: resume timeout reports unknown capacity only f
     assert.equal(result.row.warning, hasWarning ? 'plan meter unavailable; capacity is unknown' : null);
     assert.equal(result.row.plan5h, null);
     assert.equal(result.row.planWeekly, null);
+    assert.equal(f.calls.length, 2);
+    assert.deepEqual(f.calls[1].args.slice(0, 3), ['agent', 'read', 'lane-a']);
   }
 });
 

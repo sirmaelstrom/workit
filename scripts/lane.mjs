@@ -1240,11 +1240,31 @@ async function resumeLane(opts, deps, state) {
   ]);
   if (raw.code !== 0) {
     if (isTimeoutFailure(raw)) {
-      const meter = { plan5h: null, planWeekly: null };
-      const warning = planMeterWarning(meter, lane.kind);
+      // A timeout says the lane is still working, not that its pane is
+      // unreadable. Take one fresh reading so a live reserve floor can still
+      // stop dispatch; resume remains a settled-state wait, never a poll loop.
+      const plan = readPlanState(deps, opts.name);
+      const meter = plan.meter ?? { plan5h: null, planWeekly: null };
+      const warning = plan.ok ? {} : planMeterWarning(meter, lane.kind);
+      const modalEligible = plan.refusalShape === 'modal' && planFloorReached(meter, floor);
+      const refusalEligible = Boolean(plan.refusal) && (plan.refusalShape === 'banner' || modalEligible);
+      if (refusalEligible) {
+        return {
+          exit: EXIT.PLAN_LOW,
+          output: { state: 'plan-refused', refusal: plan.refusal, refusalShape: plan.refusalShape, ...meter, ...warning },
+          row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape, ...warning },
+        };
+      }
+      if (plan.ok && planFloorReached(meter, floor)) {
+        return {
+          exit: EXIT.PLAN_LOW,
+          output: { state: 'plan-low', plan5h: meter.plan5h, planWeekly: meter.planWeekly, planFloor: floor },
+          row: { ...laneInstrumentation(opts.name, lane, 'plan-low'), ...meter },
+        };
+      }
       return {
         exit: EXIT.TIMEOUT,
-        output: { state: 'timeout', ...warning },
+        output: { state: 'timeout', ...meter, ...warning },
         row: { ...laneInstrumentation(opts.name, lane, 'timeout'), ...meter, ...warning },
       };
     }
