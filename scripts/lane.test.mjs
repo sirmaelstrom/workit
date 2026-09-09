@@ -533,12 +533,12 @@ test('quest 653c5b81: low weekly meter preserves blocked and settled precedence'
   }
 });
 
-test('quest 653c5b81: weekly-only modal corroboration is shared by wait and resume', async (t) => {
-  for (const verb of ['wait', 'resume']) {
+test('quest 653c5b81 amendment 2: weekly-only modal corroboration requires the floor in wait and resume', async (t) => {
+  for (const [verb, state] of [['wait', 'working'], ['resume', 'blocked']]) {
     const f = fixture(t);
     seedLane(f);
     f.responses.push(
-      { code: 0, stdout: JSON.stringify({ result: { state: verb === 'wait' ? 'working' : 'idle' } }), stderr: '' },
+      { code: 0, stdout: JSON.stringify({ result: { state } }), stderr: '' },
       {
         code: 0,
         stdout: 'Approaching rate limits — Switch to gpt-5.6-luna for lower credit usage?\n  › 1. Switch  2. Keep current model\ngpt-6-astra medium · Context 100% left · weekly 15% left',
@@ -549,6 +549,32 @@ test('quest 653c5b81: weekly-only modal corroboration is shared by wait and resu
     assert.equal(result.exit, 6);
     assert.equal(result.output.state, 'plan-refused');
     assert.equal(result.row.refusalShape, 'modal');
+  }
+});
+
+test('quest 653c5b81 amendment 2: a modal above the weekly floor follows the ordinary lifecycle', async (t) => {
+  for (const [verb, state, exit, expectedState] of [
+    ['wait', 'working', 4, 'timeout'],
+    ['resume', 'blocked', 3, 'blocked'],
+  ]) {
+    const f = fixture(t);
+    seedLane(f);
+    let clock = 0;
+    f.responses.push(
+      { code: 0, stdout: JSON.stringify({ result: { state } }), stderr: '' },
+      {
+        code: 0,
+        stdout: 'Approaching rate limits — Switch to gpt-5.6-luna for lower credit usage?\n  › 1. Switch  2. Keep current model\ngpt-6-astra medium · Context 100% left · weekly 90% left',
+        stderr: '',
+      },
+    );
+    const result = await runLane([verb, 'lane-a', '--timeout', '1000', '--log', f.log], {
+      exec: f.exec,
+      now: () => (clock += 1000),
+      sleep: async () => {},
+    });
+    assert.equal(result.exit, exit);
+    assert.equal(result.output.state, expectedState);
   }
 });
 
