@@ -1027,6 +1027,12 @@ function positiveNumber(value, flag, fallback = null) {
   return number;
 }
 
+function planFloorOption(opts) {
+  const floor = positiveNumber(opts.planFloor, '--plan-floor', 20);
+  if (floor > 100) usage('--plan-floor must not exceed 100');
+  return floor;
+}
+
 async function waitLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   const timeout = positiveNumber(opts.timeout, '--timeout');
@@ -1037,8 +1043,7 @@ async function waitLane(opts, deps, state) {
   }
   // 20, not 10: the measured drain was 79% → 0% in ~36 min at four concurrent
   // codex consumers, and the "<10% left" warning arrived ~7 min before refusal.
-  const floor = positiveNumber(opts.planFloor, '--plan-floor', 20);
-  if (floor > 100) usage('--plan-floor must not exceed 100');
+  const floor = planFloorOption(opts);
   const deadline = deps.now() + timeout;
   let meter = { plan5h: null, planWeekly: null };
   let dialog = '';
@@ -1223,6 +1228,7 @@ async function checkLane(opts, deps, state) {
 async function resumeLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   const timeout = positiveNumber(opts.timeout, '--timeout', 120_000);
+  const floor = planFloorOption(opts);
   // C5 says never bare-wait here — a bare wait returns instantly on the stale
   // `blocked`. It said `--until idle`; the first live approval measured why that
   // is not enough: a lane started --no-focus is never "seen", so herdr settles
@@ -1234,7 +1240,13 @@ async function resumeLane(opts, deps, state) {
   ]);
   if (raw.code !== 0) {
     if (isTimeoutFailure(raw)) {
-      return { exit: EXIT.TIMEOUT, output: { state: 'timeout' }, row: laneInstrumentation(opts.name, lane, 'timeout') };
+      const meter = { plan5h: null, planWeekly: null };
+      const warning = planMeterWarning(meter, lane.kind);
+      return {
+        exit: EXIT.TIMEOUT,
+        output: { state: 'timeout', ...warning },
+        row: { ...laneInstrumentation(opts.name, lane, 'timeout'), ...meter, ...warning },
+      };
     }
     throw new LaneError(EXIT.ERROR, `herdr agent wait failed: ${raw.stderr.trim() || raw.stdout.trim()}`);
   }
@@ -1244,7 +1256,6 @@ async function resumeLane(opts, deps, state) {
   const plan = readPlanState(deps, opts.name);
   const meter = plan.meter ?? { plan5h: null, planWeekly: null };
   const warning = planMeterWarning(meter, lane.kind);
-  const floor = positiveNumber(opts.planFloor, '--plan-floor', 20);
   const modalEligible = plan.refusalShape === 'modal'
     && (planFloorReached(meter, floor) || ['idle', 'done'].includes(responseState(raw.stdout, null)));
   const refusalEligible = Boolean(plan.refusal) && (plan.refusalShape === 'banner' || modalEligible);

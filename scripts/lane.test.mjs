@@ -175,7 +175,7 @@ test('WP-1 / C13: create roots the lane beside the repo in the projects tree', a
   );
   const result = await runLane(
     ['create', '--repo', repo, '--branch', 'feat/lane-helper', '--base', 'main', '--label', 'lane-w2', '--log', f.log],
-    { exec: f.exec },
+    { exec: f.exec, env: {} },
   );
   assert.equal(result.exit, 0);
   const create = f.calls.find((call) => call.program === 'herdr');
@@ -194,7 +194,7 @@ test('WP-1 / C13: create honours an explicit --path and refuses one that already
   f.responses.push({ code: 1, stdout: '', stderr: '' });
   const result = await runLane(
     ['create', '--repo', f.repo, '--branch', 'feat/x', '--base', 'main', '--label', 'lane-x', '--path', taken, '--log', f.log],
-    { exec: f.exec },
+    { exec: f.exec, env: {} },
   );
   assert.equal(result.exit, 2);
   assert.match(result.output.error, /already exists/);
@@ -645,6 +645,37 @@ test('WP-2 / S6: resume waits explicitly until idle and never consults a bare st
   assert.deepEqual(f.calls[1].args.slice(0, 3), ['agent', 'read', 'lane-a']);
 });
 
+test('quest 653c5b81 amendment 3: resume timeout reports unknown capacity only for codex lanes', async (t) => {
+  for (const [kind, hasWarning] of [['codex', true], ['claude', false]]) {
+    const f = fixture(t);
+    seedLane(f, { kind });
+    f.responses.push({ code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' });
+    const result = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
+    assert.equal(result.exit, 4);
+    assert.equal(result.output.state, 'timeout');
+    assert.equal(Object.hasOwn(result.output, 'warning'), hasWarning);
+    assert.equal(result.row.warning, hasWarning ? 'plan meter unavailable; capacity is unknown' : null);
+    assert.equal(result.row.plan5h, null);
+    assert.equal(result.row.planWeekly, null);
+  }
+});
+
+test('quest 653c5b81 amendment 3: wait and resume validate plan floors before herdr', async (t) => {
+  for (const [verb, value, expected] of [
+    ['wait', '0', /positive number/],
+    ['wait', '101', /must not exceed 100/],
+    ['resume', '0', /positive number/],
+    ['resume', '101', /must not exceed 100/],
+  ]) {
+    const f = fixture(t);
+    seedLane(f);
+    const result = await runLane([verb, 'lane-a', '--timeout', '1000', '--plan-floor', value, '--log', f.log], { exec: f.exec });
+    assert.equal(result.exit, 2);
+    assert.match(result.output.error, expected);
+    assert.equal(f.calls.length, 0, `${verb} --plan-floor ${value} must not call herdr`);
+  }
+});
+
 test('SMOKE6 / S6: resume also accepts done, because an unfocused lane never reaches idle', async (t) => {
   const f = fixture(t);
   seedLane(f);
@@ -1036,7 +1067,7 @@ test('AM6 / U4: create reads the herdr result envelope, never its cli id', async
   );
   const result = await runLane(
     ['create', '--repo', f.repo, '--branch', 'feat/x', '--base', 'main', '--label', 'lane-x', '--log', f.log],
-    { exec: f.exec },
+    { exec: f.exec, env: {} },
   );
   assert.equal(result.exit, 0);
   assert.equal(result.output.workspaceId, 'wZ');
@@ -1652,7 +1683,7 @@ test('A2-7 / U6: create refuses to return a document with no pane', async (t) =>
   );
   const result = await runLane(
     ['create', '--repo', f.repo, '--branch', 'feat/x', '--base', 'main', '--label', 'lane-x', '--log', f.log],
-    { exec: f.exec },
+    { exec: f.exec, env: {} },
   );
   assert.equal(result.exit, 1);
   assert.match(result.output.error, /paneId/, 'name the missing field where it went missing, not one verb later');
