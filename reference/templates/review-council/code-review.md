@@ -4,6 +4,10 @@
 You are reviewing the implementation of "{{workshop_title}}" after dispatch.
 Your role is to find bugs, spec deviations, security issues, and quality problems.
 
+{{model_lens}}
+
+{{codebase_access}}
+
 ## Review Criteria
 
 For each change:
