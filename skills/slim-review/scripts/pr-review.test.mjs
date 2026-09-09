@@ -399,8 +399,9 @@ test('skill delegates prompt construction to the lens verb and requires reviewer
   const skill = readFileSync(SKILL, 'utf8');
   assert.match(skill, /pr-review\.mjs" lens/);
   assert.match(skill, /Reviewer ≠ author/);
-  assert.match(skill, /Shadow arm \(measurement, opt-in\)/);
-  assert.match(skill, /--lens codex\|opus/);
+  assert.match(skill, /The pair is the measurement/);
+  assert.match(skill, /--lens codex\|astra\|opus/);
+  assert.match(skill, /codex` \+ `astra`/, 'the default pair for a Claude-authored PR must be named');
   assert.match(skill, /--reasoning low\|medium\|high/);
   assert.match(skill, /--measure-log <path>/);
   assert.match(skill, /--dry-run/);
@@ -409,7 +410,7 @@ test('skill delegates prompt construction to the lens verb and requires reviewer
 
 test('skill documents required repo, blocking coverage, and examined_paths handback', () => {
   const skill = readFileSync(SKILL, 'utf8');
-  assert.match(skill, /--pr <n> --repo <owner\/name> --findings/);
+  assert.match(skill, /--pr <n> --repo <owner\/name>[\s\\]+--findings/);
   // Step 4's two commands must carry --repo too — fixing only `post` left the
   // cwd-resolution class open on the commands that read the merge-ready signal.
   assert.match(skill, /threads --pr <n> --repo <owner\/name> --unresolved/);
@@ -579,6 +580,9 @@ function runPostWithFakeGh({
   prFilePaths = ['src/a.ts', 'src/b.ts'],
   headRefOids = ['1111111111111111111111111111111111111111', '1111111111111111111111111111111111111111'],
   die,
+  // The fixture is one untagged handback; the two-lens guard would refuse it.
+  // Pass `singleLens: null` to exercise the guard itself.
+  singleLens = 'test fixture: one handback',
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-post-'));
   const findings = join(dir, 'findings.json');
@@ -610,7 +614,7 @@ function runPostWithFakeGh({
   };
   try {
     cmdPost(
-      { pr: '42', repo: 'owner/repo', findings, forcePost, dryRun },
+      { pr: '42', repo: 'owner/repo', findings, forcePost, dryRun, ...(singleLens ? { singleLens } : {}) },
       { runGh, die: die ?? throwingDie, log: (line) => logs.push(line) },
     );
   } catch (err) {
@@ -620,6 +624,23 @@ function runPostWithFakeGh({
   }
   return { calls, error, logs };
 }
+
+test('post refuses a single handback without --single-lens (exit 7, nothing posted) and stamps the reason when it is given', () => {
+  const refused = runPostWithFakeGh({ examinedPaths: ['src/a.ts', 'src/b.ts'], singleLens: null });
+  assert.equal(refused.error?.code, 7);
+  assert.match(refused.error?.message ?? '', /two lenses/);
+  assert.equal(refused.calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length, 0, 'nothing may be posted');
+
+  const stamped = runPostWithFakeGh({ examinedPaths: ['src/a.ts', 'src/b.ts'], dryRun: true, singleLens: 'astra window closed' });
+  assert.equal(stamped.error, undefined);
+  const payload = JSON.parse(stamped.logs.slice(stamped.logs.findIndex((l) => l.includes('--dry-run')) + 1).join('\n'));
+  assert.match(payload.body, /single lens \(untagged\) — astra window closed\. Not a paired measurement\./);
+});
+
+test('parseArgs takes --single-lens with a reason', () => {
+  assert.equal(parseArgs(['post', '--pr', '1', '--repo', 'o/r', '--findings', 'a.json', '--single-lens', 'codex window closed']).singleLens, 'codex window closed');
+  assert.equal(parseArgs(['post', '--pr', '1', '--repo', 'o/r', '--findings', 'a.json']).singleLens, undefined);
+});
 
 test('cmdPost refuses to post when the PR head advances after the diff fetch', () => {
   const { calls, error } = runPostWithFakeGh({
@@ -940,6 +961,36 @@ test('lens codex reads its -o findings file, builds the Terra argv, and sends ev
   assert.ok(call.args.includes('-C'));
   assert.equal(call.args[call.args.indexOf('-C') + 1], resolve('C:/repo'));
   assert.equal(out.summary, 'read from codex -o file', 'codex stdout must not replace its -o findings file');
+});
+
+test('lens astra rides the codex harness with the Astra slug at low effort and reads its -o file', () => {
+  const fromFile = JSON.stringify({ ...VALID, summary: 'read from astra -o file' });
+  const { calls, deaths, out, rows } = runLensWithFake({ lens: 'astra', codexOutput: fromFile });
+  assert.deepEqual(deaths, []);
+  const call = calls.find(({ args }) => args[0] === 'exec');
+  assert.ok(call, 'astra must spawn codex exec, not claude -p');
+  assert.equal(call.program, 'C:/codex/vendor/bin/codex.exe');
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6-astra');
+  assert.ok(call.args.includes('model_reasoning_effort=low'), 'the CLI default effort; high lost nothing on the measured arms');
+  assert.ok(call.args.includes('danger-full-access'));
+  assert.deepEqual(call.args.slice(-1), ['-']);
+  assert.match(call.opts.input, /src\/a\.ts/);
+  // The one-line locator instruction that fixed Astra@low's prefix drop (2026-09-05 → 09-09).
+  assert.match(call.opts.input, /Cite repo-relative paths exactly as they appear in the authoritative PR file list/);
+  assert.equal(out.summary, 'read from astra -o file');
+  assert.equal(out.lens, 'astra');
+  assert.equal(out.model, 'gpt-6-astra');
+  assert.equal(out.reasoning, 'low');
+  assert.ok(out.findings.every((finding) => finding.lens === 'astra'));
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].lens, 'astra');
+  assert.equal(rows[0].model, 'gpt-6-astra');
+});
+
+test('validateFindingsShape accepts the astra lens tag and rejects an unknown one', () => {
+  assert.deepEqual(validateFindingsShape({ ...VALID, lens: 'astra', findings: VALID.findings.map((f) => ({ ...f, lens: 'astra' })) }), []);
+  const problems = validateFindingsShape({ ...VALID, lens: 'luna' });
+  assert.ok(problems.some((p) => /lens must be one of codex\|astra\|opus/.test(p)), problems.join('\n'));
 });
 
 test('codex output schema omits unsupported uniqueItems', () => {
