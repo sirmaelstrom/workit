@@ -112,8 +112,14 @@ Non-negotiable flags, each for a measured reason:
 - **`--sandbox danger-full-access`.** `--sandbox read-only` is broken on this
   Windows box — the sandbox runner dies at the first child spawn and the model
   returns a plausible **ungrounded** answer with no surfaced error. The read-only
-  clause in the prompt is what keeps it honest, and Terra honors it; verify with
-  `git status --short` afterwards.
+  clause in the prompt is the only thing asking it to behave, and it is a
+  request, not a sandbox: on 2026-09-09 a Terra council seat under the same
+  clause created and recursively deleted git worktrees whose `node_modules`
+  were junctioned to the live checkout (quest a0180149). The lens verb's
+  before/after `git status --short --porcelain` check catches writes inside
+  the reviewed tree; it cannot see a worktree created beside it, so read the
+  handback for "worktree", "cleaned", or "removed" and count the canonical
+  `node_modules` when they appear.
 - **`--output-schema` + `-o`.** Forces the handback into a shape step 3 can check
   instead of a prose blob you have to trust. Do not substitute `codex exec
   review`: it takes no sandbox flag, so it hits the read-only bug on this box,
