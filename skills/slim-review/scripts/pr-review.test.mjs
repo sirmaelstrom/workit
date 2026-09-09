@@ -27,6 +27,25 @@ import {
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
 const SCHEMA = join(dirname(fileURLToPath(import.meta.url)), '..', 'reference', 'findings.schema.json');
 const SKILL = join(dirname(fileURLToPath(import.meta.url)), '..', 'SKILL.md');
+const COUNCIL_TEMPLATES = [
+  join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'reference', 'templates', 'review-council', 'code-review.md'),
+  join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'reference', 'templates', 'review-council', 'spec-review.md'),
+  join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'reference', 'templates', 'review-council', 'spec-lite-review.md'),
+];
+const COUNCIL_EVIDENCE_CLAUSE = 'When a change affects prompt/template generation, configuration resolution, or dispatch selection, identify one concrete claim, its consumer, and the path producing the consumer input. Inspect the real rendered or resolved result through an existing safe renderer/resolver, or a captured result from that same path. Under Grounding Integrity, state the claim, command or supplied-evidence provenance, decisive excerpt, and any unverified limitation. Do not create worktrees, write source or configuration, install packages, run git writes, start services, or dispatch real actions to obtain evidence; use in-memory inputs and read-only paths. If that is impossible, state the limitation and ask the conductor for a render capture. A tool-less seat may assess supplied render evidence but must never claim it ran the renderer. Do not report a finding solely because the check was skipped.';
+
+function groundingIntegritySection(template) {
+  const match = /^## Grounding Integrity\r?\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(template);
+  assert.ok(match, 'template must have a Grounding Integrity section');
+  return match[1];
+}
+
+function assertCouncilEvidenceClause(template) {
+  assert.ok(
+    groundingIntegritySection(template).includes(COUNCIL_EVIDENCE_CLAUSE),
+    'consumer-visible evidence clause must appear in Grounding Integrity, not only in artifacts',
+  );
+}
 
 test('fetchPrFilePaths reads paths from the authoritative PR files API', () => {
   const calls = [];
@@ -391,8 +410,25 @@ test('reviewer prompt carries the authoritative API paths and requires them echo
   assert.match(prompt, /src\/a\.ts/);
   assert.match(prompt, /docs\/readme\.md/);
   assert.match(prompt, /READ-ONLY: modify nothing/);
+  assert.match(prompt, /prompt\/template generation, configuration resolution, or dispatch selection/);
+  assert.match(prompt, /In `summary`, record the claim, command or supplied-evidence provenance, decisive excerpt, and any unverified limitation/);
+  assert.match(prompt, /Do not create worktrees, write source or configuration, install packages, run git writes, start services, or dispatch real actions/);
   assert.match(prompt, /P1.*P2.*P3/s);
   assert.match(prompt, /Return ONLY JSON matching the schema/);
+});
+
+test('council templates put the consumer-visible evidence clause in Grounding Integrity', () => {
+  for (const templatePath of COUNCIL_TEMPLATES) {
+    assertCouncilEvidenceClause(readFileSync(templatePath, 'utf8'));
+  }
+});
+
+test('council template contract rejects a clause quoted only in artifacts', () => {
+  const positive = `## Grounding Integrity\n\n${COUNCIL_EVIDENCE_CLAUSE}\n\n## Artifacts\n\nartifact text`;
+  const badFixture = `## Grounding Integrity\n\nClaim verification only for executed checks.\n\n## Artifacts\n\n> ${COUNCIL_EVIDENCE_CLAUSE}`;
+
+  assert.doesNotThrow(() => assertCouncilEvidenceClause(positive));
+  assert.throws(() => assertCouncilEvidenceClause(badFixture), /Grounding Integrity/);
 });
 
 test('skill delegates prompt construction to the lens verb and requires reviewer diversity', () => {
@@ -417,6 +453,7 @@ test('skill documents required repo, blocking coverage, and examined_paths handb
   assert.match(skill, /--pr <n> --repo <owner\/name> --comment-id <id> --body-file/);
   assert.match(skill, /\*\*Blocking per-handback coverage check\*\*/);
   assert.match(skill, /Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`/);
+  assert.match(skill, /Consumer-visible artifact evidence/);
 });
 
 test('skill says examined_paths is exact and bounds what the stale-set guard proves', () => {
