@@ -410,7 +410,7 @@ test('skill delegates prompt construction to the lens verb and requires reviewer
 
 test('skill documents required repo, blocking coverage, and examined_paths handback', () => {
   const skill = readFileSync(SKILL, 'utf8');
-  assert.match(skill, /--pr <n> --repo <owner\/name> --findings/);
+  assert.match(skill, /--pr <n> --repo <owner\/name>[\s\\]+--findings/);
   // Step 4's two commands must carry --repo too — fixing only `post` left the
   // cwd-resolution class open on the commands that read the merge-ready signal.
   assert.match(skill, /threads --pr <n> --repo <owner\/name> --unresolved/);
@@ -580,6 +580,9 @@ function runPostWithFakeGh({
   prFilePaths = ['src/a.ts', 'src/b.ts'],
   headRefOids = ['1111111111111111111111111111111111111111', '1111111111111111111111111111111111111111'],
   die,
+  // The fixture is one untagged handback; the two-lens guard would refuse it.
+  // Pass `singleLens: null` to exercise the guard itself.
+  singleLens = 'test fixture: one handback',
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-post-'));
   const findings = join(dir, 'findings.json');
@@ -611,7 +614,7 @@ function runPostWithFakeGh({
   };
   try {
     cmdPost(
-      { pr: '42', repo: 'owner/repo', findings, forcePost, dryRun },
+      { pr: '42', repo: 'owner/repo', findings, forcePost, dryRun, ...(singleLens ? { singleLens } : {}) },
       { runGh, die: die ?? throwingDie, log: (line) => logs.push(line) },
     );
   } catch (err) {
@@ -621,6 +624,23 @@ function runPostWithFakeGh({
   }
   return { calls, error, logs };
 }
+
+test('post refuses a single handback without --single-lens (exit 7, nothing posted) and stamps the reason when it is given', () => {
+  const refused = runPostWithFakeGh({ examinedPaths: ['src/a.ts', 'src/b.ts'], singleLens: null });
+  assert.equal(refused.error?.code, 7);
+  assert.match(refused.error?.message ?? '', /two lenses/);
+  assert.equal(refused.calls.filter(({ args }) => args[0] === 'api' && args.includes('POST')).length, 0, 'nothing may be posted');
+
+  const stamped = runPostWithFakeGh({ examinedPaths: ['src/a.ts', 'src/b.ts'], dryRun: true, singleLens: 'astra window closed' });
+  assert.equal(stamped.error, undefined);
+  const payload = JSON.parse(stamped.logs.slice(stamped.logs.findIndex((l) => l.includes('--dry-run')) + 1).join('\n'));
+  assert.match(payload.body, /single lens \(untagged\) — astra window closed\. Not a paired measurement\./);
+});
+
+test('parseArgs takes --single-lens with a reason', () => {
+  assert.equal(parseArgs(['post', '--pr', '1', '--repo', 'o/r', '--findings', 'a.json', '--single-lens', 'codex window closed']).singleLens, 'codex window closed');
+  assert.equal(parseArgs(['post', '--pr', '1', '--repo', 'o/r', '--findings', 'a.json']).singleLens, undefined);
+});
 
 test('cmdPost refuses to post when the PR head advances after the diff fetch', () => {
   const { calls, error } = runPostWithFakeGh({

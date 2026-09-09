@@ -130,17 +130,31 @@ Every run is the shadow arm now: two lenses, both posted, both adjudicated with
 catches on every PR instead of on the ones someone remembered to name. Post the
 two handbacks with repeated flags: `post --findings codex.json --findings
 astra.json`. Where both lenses anchor the same defect on the same line, post
-both — the duplicate is the agreement signal, and one reply resolves both
-threads.
+both — the duplicate is the agreement signal — and **reply to each comment**
+with its own `--verdict`: `reply` posts to one comment id and records one
+measurement row attributed to that comment's lens, so a single reply would
+leave the other lens without an adjudication and lose its confirmed/refuted
+row (Astra's own review of this change caught that, workit#76). The two
+replies may reuse the same evidence.
 
 ## 3. Post
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post \
-  --pr <n> --repo <owner/name> --findings "$REVIEW_DIR/findings.json" [--dry-run] [--force-post]
+  --pr <n> --repo <owner/name> \
+  --findings "$REVIEW_DIR/codex.json" --findings "$REVIEW_DIR/astra.json" \
+  [--dry-run] [--force-post] [--single-lens "<reason>"]
 ```
 
 The review is pinned to the reviewed head and refuses to post if the head moved.
+
+**Two lenses is enforced, not described.** A post carrying fewer than two lens
+tags is exit 7 and nothing is posted; the pair is the loop, and a one-lens
+review published as a clean slim review is the failure Terra's own review of
+this change caught (workit#76). When one lens genuinely cannot run — its plan
+window closed, the harness is down — pass `--single-lens "<reason>"`: the
+review posts with the reason stamped in the body as **not a paired
+measurement**, so the measurement log never counts it as one.
 
 The script does the checking you would otherwise have to remember:
 
@@ -177,6 +191,7 @@ Exit codes matter here:
 | 4 | A `gh` call failed |
 | 5 | A coverage check failed. Three triggers: the `examined_paths` set does not match the PR API's file list; a parseable `examined N of M` contradicts that list; or the PR API returned **no** changed files at all |
 | 6 | The PR head moved between the diff fetch and the post. The findings were anchored on the old head, so nothing was posted — re-run step 2 against the new head. Not a transient `gh` failure (that is 4) |
+| 7 | Fewer than two lens tags across the `--findings` files and no `--single-lens` reason. Nothing was posted — run the missing lens, or state why it could not run |
 
 `--force-post` overrides the first two exit-5 triggers — the set mismatch and
 the count contradiction — and posts the review with the mismatch stamped into

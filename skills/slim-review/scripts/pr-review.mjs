@@ -455,6 +455,16 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
   // touch the network, and exit 3 must not depend on gh being reachable.
   const findingFiles = Array.isArray(opts.findings) ? opts.findings : [opts.findings];
   const docs = findingFiles.map(loadFindings);
+  // The loop is two lenses posted as one review (2026-09-09). Terra's own review
+  // of that change (workit#76) pointed out the policy was prose only: `post`
+  // happily published a single handback as a clean slim review. Enforce it here,
+  // before the network — one lens is a documented exception, never a default.
+  const lensesPresent = [...new Set(docs.map((item) => item.lens).filter(Boolean))];
+  if (lensesPresent.length < 2 && !opts.singleLens) {
+    const carried = lensesPresent.length === 1 ? `only the \`${lensesPresent[0]}\` lens` : 'no lens tag';
+    die(7, `the slim-review loop posts two lenses (codex + astra); this post carries ${carried}. Run the second lens and pass both --findings files, or pass --single-lens "<why the pair could not run>" to post one and stamp the reason into the review body. Nothing was posted.`);
+    return;
+  }
   const doc = {
     summary: docs.map((item) => item.summary).join('\n\n'),
     coverage: '',
@@ -521,6 +531,11 @@ export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log }
   // with the file list it was told to echo. Non-blocking — it is a heads-up, not
   // a verdict — but silently discarding it is worse than printing it.
   const warnings = [];
+  if (lensesPresent.length < 2) {
+    warnings.push(
+      `single lens (${lensesPresent.join(', ') || 'untagged'}) — ${String(opts.singleLens).trim()}. Not a paired measurement.`,
+    );
+  }
   if (diffHeaderCount !== prFilePaths.length) {
     warnings.push(
       `diff shows ${diffHeaderCount} changed files, the PR API lists ${prFilePaths.length} — the diff and the authoritative file list disagree`,
@@ -910,7 +925,8 @@ const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
   lens     --pr <n> --repo owner/name --lens codex|astra|opus --out <findings.json>
            [--reasoning low|medium|high] [--cwd <abs repo or worktree>]
            [--prompt-out <path>] [--measure-log <path>] [--dry-run]
-  post     --pr <n> --repo owner/name --findings <file> [--findings <file> ...] [--dry-run] [--force-post]
+  post     --pr <n> --repo owner/name --findings <file> --findings <file> [--dry-run] [--force-post]
+           [--single-lens "<reason>"]   posting one lens is exit 7 unless the reason is given (it is stamped into the review)
   threads  --pr <n> --repo owner/name [--unresolved]
   reply    --pr <n> --repo owner/name --comment-id <id> --body-file <file>
            [--verdict confirmed|refuted|note] [--measure-log <path>]
@@ -976,6 +992,12 @@ export function parseArgs(argv) {
       case '--body-file': opts.bodyFile = next(); break;
       case '--dry-run': opts.dryRun = true; break;
       case '--force-post': opts.forcePost = true; break;
+      case '--single-lens': {
+        const v = next();
+        if (v.trim() === '') fail(2, '--single-lens needs a non-empty reason');
+        opts.singleLens = v;
+        break;
+      }
       case '--unresolved': opts.unresolved = true; break;
       case '-h': case '--help': opts.help = true; break;
       default: fail(2, `unknown argument: ${a}\n\n${USAGE}`);
