@@ -51,7 +51,7 @@ Open 3 CLI sessions simultaneously:
 | Gemini | Gemini CLI or API | Good at completeness checking, catches missing edge cases |
 | GPT-5 / Codex | ChatGPT or Codex CLI | Good at implementation feasibility, catches practical issues |
 
-**Lens model selection (2026-05-25 A/B):** The `claude` lens defaults to **sonnet** — adequate and faster for code/conformance review. **Escalate to `claude-opus`** when the artifact is a *spec at a decision gate* (reviewing decisions/constraints for internal contradictions), where sonnet tends to accept a self-contradictory spec as coherent. **Synthesis stays on opus** (`synthesisModel: "claude-opus"` in `models.json`) — the hardest reasoning in the flow.
+**Lens model selection (2026-05-25 A/B):** The `claude` lens defaults to **sonnet** — adequate and faster for code/conformance review. **Escalate to `claude-opus`** when the artifact is a *spec at a decision gate* (reviewing decisions/constraints for internal contradictions), where sonnet tends to accept a self-contradictory spec as coherent. Synthesis was on opus at the time of that A/B; since then the synthesizer has been the Codex-harness LEAD seat (`codex`/Terra from 2026-07-10, `astra` from 2026-09-09 — quest d0620857). `defaults.synthesisModel` in `data/config/review-council/models.json` is the truth; this paragraph is history.
 
 Provide each model with:
 - The reviewer prompt

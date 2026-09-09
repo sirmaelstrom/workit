@@ -365,7 +365,7 @@ If the **council** call fails, retry it once; if it still fails, see the unavail
 You (the orchestrator, running as opus) are the council's synthesizer — read **all** lens outputs and reconcile them before applying:
 - **Inputs:** the lens files in `{workshop_path}/reviews/review-1/`. Read each lens file the `council_review` summary marked `success`; skip ones marked `failed`/`timeout`.
 - **Convergence is signal:** a finding two or more lenses raise independently — *especially across vendor families (codex/grok/opus/sonnet)* — is high-confidence. Fix it.
-- **Weight the lead:** codex is the strongest adversarial/grounding reviewer and explores the real code; give its concrete, file-cited findings (e.g. EF/migration traps, integration gaps) extra weight even when raised alone.
+- **Weight the lead:** the LEAD seat (`astra` since 2026-09-09, quest d0620857; `codex`/Terra before that, now the second seat) explores the real code; give its concrete, file-cited findings (e.g. EF/migration traps, integration gaps) extra weight even when raised alone. Read which seat is LEAD from `data/config/review-council/models.json` (first entry of the profile, `defaults.synthesisModel`), never from this line.
 - **Dedupe:** collapse the same issue reported by multiple lenses into one.
 - **Then apply by severity:**
   - **Critical findings:** Fix immediately in the spec files.
