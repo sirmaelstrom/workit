@@ -442,7 +442,7 @@ test('quest 653c5b81: 5h remains first and the last footer is never combined wit
   assert.equal(selectedLast.row.planWeekly, 15);
 });
 
-test('quest 653c5b81: an unknown meter warns and never claims plan-low', async (t) => {
+test('quest 653c5b81 amendment 1: a codex lane with an unknown meter warns and never claims plan-low', async (t) => {
   const f = fixture(t);
   seedLane(f);
   let clock = 0;
@@ -459,6 +459,21 @@ test('quest 653c5b81: an unknown meter warns and never claims plan-low', async (
   assert.equal(result.output.state, 'timeout');
   assert.equal(result.output.warning, 'plan meter unavailable; capacity is unknown');
   assert.equal(result.row.warning, 'plan meter unavailable; capacity is unknown');
+  assert.equal(result.row.plan5h, null);
+  assert.equal(result.row.planWeekly, null);
+});
+
+test('quest 653c5b81 amendment 1: a claude lane with no footer stays silent', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+    { code: 0, stdout: 'finished', stderr: '' },
+  );
+  const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 0);
+  assert.equal(Object.hasOwn(result.output, 'warning'), false);
+  assert.equal(result.row.warning, null, 'the fixed JSONL warning column remains null');
   assert.equal(result.row.plan5h, null);
   assert.equal(result.row.planWeekly, null);
 });

@@ -1083,7 +1083,7 @@ async function waitLane(opts, deps, state) {
       meter = { plan5h: null, planWeekly: null };
       dialog = '';
     }
-    const warning = planMeterWarning(meter);
+    const warning = planMeterWarning(meter, lane.kind);
     const refusal = plan.refusal;
     const modalEligible = plan.refusalShape === 'modal'
       && (planFloorReached(meter, floor) || ['idle', 'done'].includes(stateAfter));
@@ -1243,7 +1243,7 @@ async function resumeLane(opts, deps, state) {
   // herdr reports `idle` while that modal is up, so this outranks the state.
   const plan = readPlanState(deps, opts.name);
   const meter = plan.meter ?? { plan5h: null, planWeekly: null };
-  const warning = planMeterWarning(meter);
+  const warning = planMeterWarning(meter, lane.kind);
   const floor = positiveNumber(opts.planFloor, '--plan-floor', 20);
   const modalEligible = plan.refusalShape === 'modal'
     && (planFloorReached(meter, floor) || ['idle', 'done'].includes(responseState(raw.stdout, null)));
@@ -1711,8 +1711,11 @@ function planFloorReached(meter, floor) {
   return selected !== null && selected <= floor;
 }
 
-function planMeterWarning(meter) {
-  return selectedPlanWindow(meter) === null ? { warning: 'plan meter unavailable; capacity is unknown' } : {};
+function planMeterWarning(meter, kind) {
+  const expectsCodexMeter = kind === undefined || kind === null || kind === 'codex';
+  return expectsCodexMeter && selectedPlanWindow(meter) === null
+    ? { warning: 'plan meter unavailable; capacity is unknown' }
+    : {};
 }
 
 export function scrapePlanMeter(text) {
