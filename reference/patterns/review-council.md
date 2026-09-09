@@ -133,7 +133,8 @@ council_review(workshop_path, surface, round, profile | models[])
   → Prefer a config-owned profile over an explicit models[] list (roster v2,
     2026-07-11): pass profile:"spec" for spec/plan surfaces, profile:"code"
     for PR/branch/code surfaces, profile:"deep" to escalate (adds the
-    sol@xhigh seat), profile:"spec-external" from /spec Phase 8 (external-
+    sol seat — effort is declared in models.json, not here: high since
+    2026-09-09, was xhigh), profile:"spec-external" from /spec Phase 8 (external-
     only; the pivotal Anthropic lenses run as in-session subagents there).
     Explicit models[] still wins verbatim when passed; omitting both uses
     the config defaultProfile ("spec").
