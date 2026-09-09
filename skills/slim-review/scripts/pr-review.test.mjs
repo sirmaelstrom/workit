@@ -32,18 +32,55 @@ const COUNCIL_TEMPLATES = [
   join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'reference', 'templates', 'review-council', 'spec-review.md'),
   join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'reference', 'templates', 'review-council', 'spec-lite-review.md'),
 ];
-const COUNCIL_EVIDENCE_CLAUSE = 'When a change affects prompt/template generation, configuration resolution, or dispatch selection, identify one concrete claim, its consumer, and the path producing the consumer input. Inspect the real rendered or resolved result through an existing safe renderer/resolver, or a captured result from that same path. Under Grounding Integrity, state the claim, command or supplied-evidence provenance, decisive excerpt, and any unverified limitation. Do not create worktrees, write source or configuration, install packages, run git writes, start services, or dispatch real actions to obtain evidence; use in-memory inputs and read-only paths. If that is impossible, state the limitation and ask the conductor for a render capture. A tool-less seat may assess supplied render evidence but must never claim it ran the renderer. Do not report a finding solely because the check was skipped.';
+const COUNCIL_EVIDENCE_CLAUSE = 'When a change affects prompt/template generation, configuration resolution, or dispatch selection, identify one concrete claim, its consumer, and the path producing the consumer input. Inspect the real rendered or resolved result through an existing safe renderer/resolver, or a captured result from that same path. Under Grounding Integrity, state the claim, command or supplied-evidence provenance, decisive excerpt, and any unverified limitation. Do not create worktrees, write source or configuration, install packages, run git writes, start services, or dispatch real actions to obtain evidence; use in-memory inputs and read-only paths. If that is impossible, state the limitation and ask the conductor for a render capture. A tool-less seat may assess supplied render evidence but must never claim it ran the renderer. Do not report a defect finding solely because a check was skipped; record the skip as a stated limitation, as Workspace Integrity requires. A match found inside quoted source or inlined artifacts does not prove delivery: where a slot or insertion is claimed, pass a distinct sentinel through the slot and a different marker through the artifacts, and confirm the sentinel lands outside the artifacts section.';
+const COUNCIL_GROUNDING_OUTPUT_BULLET = '- **Grounding:** for any finding about prompt/template generation, configuration resolution, or dispatch selection — the claim, its provenance (command run or supplied evidence), the decisive excerpt, and any unverified limitation';
+
+function textBeforeArtifacts(template) {
+  const lines = template.split(/\r?\n/);
+  let artifactsAt = -1;
+  let inFence = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (/^## Artifacts$/.test(line)) {
+      assert.equal(artifactsAt, -1, 'template must have one Artifacts section');
+      artifactsAt = index;
+      continue;
+    }
+    if (artifactsAt !== -1) assert.doesNotMatch(line, /^## /, 'Artifacts must be last');
+  }
+
+  assert.notEqual(artifactsAt, -1, 'template must have an Artifacts section');
+  return lines.slice(0, artifactsAt).join('\n');
+}
+
+function sectionBeforeArtifacts(template, heading) {
+  const match = new RegExp(`^## ${heading}\\r?\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`, 'm').exec(textBeforeArtifacts(template));
+  assert.ok(match, `template must have a ${heading} section`);
+  return match[1];
+}
 
 function groundingIntegritySection(template) {
-  const match = /^## Grounding Integrity\r?\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(template);
-  assert.ok(match, 'template must have a Grounding Integrity section');
-  return match[1];
+  return sectionBeforeArtifacts(template, 'Grounding Integrity');
+}
+
+function outputFormatSection(template) {
+  return sectionBeforeArtifacts(template, 'Output Format');
 }
 
 function assertCouncilEvidenceClause(template) {
   assert.ok(
     groundingIntegritySection(template).includes(COUNCIL_EVIDENCE_CLAUSE),
     'consumer-visible evidence clause must appear in Grounding Integrity, not only in artifacts',
+  );
+  assert.ok(
+    outputFormatSection(template).includes(COUNCIL_GROUNDING_OUTPUT_BULLET),
+    'Grounding output bullet must appear in Output Format',
   );
 }
 
@@ -413,6 +450,8 @@ test('reviewer prompt carries the authoritative API paths and requires them echo
   assert.match(prompt, /prompt\/template generation, configuration resolution, or dispatch selection/);
   assert.match(prompt, /In `summary`, record the claim, command or supplied-evidence provenance, decisive excerpt, and any unverified limitation/);
   assert.match(prompt, /Do not create worktrees, write source or configuration, install packages, run git writes, start services, or dispatch real actions/);
+  assert.match(prompt, /Do not report a defect finding solely because a check was skipped; record the skip as a stated limitation, as Workspace Integrity requires/);
+  assert.match(prompt, /A match found inside quoted source or inlined artifacts does not prove delivery: where a slot or insertion is claimed, pass a distinct sentinel through the slot and a different marker through the artifacts, and confirm the sentinel lands outside the artifacts section/);
   assert.match(prompt, /P1.*P2.*P3/s);
   assert.match(prompt, /Return ONLY JSON matching the schema/);
 });
@@ -424,11 +463,17 @@ test('council templates put the consumer-visible evidence clause in Grounding In
 });
 
 test('council template contract rejects a clause quoted only in artifacts', () => {
-  const positive = `## Grounding Integrity\n\n${COUNCIL_EVIDENCE_CLAUSE}\n\n## Artifacts\n\nartifact text`;
-  const badFixture = `## Grounding Integrity\n\nClaim verification only for executed checks.\n\n## Artifacts\n\n> ${COUNCIL_EVIDENCE_CLAUSE}`;
+  const positive = `## Grounding Integrity\n\n${COUNCIL_EVIDENCE_CLAUSE}\n\n## Output Format\n\n${COUNCIL_GROUNDING_OUTPUT_BULLET}\n\n## Artifacts\n\nartifact text`;
+  const badFixture = `## Grounding Integrity\n\nClaim verification only for executed checks.\n\n## Output Format\n\n${COUNCIL_GROUNDING_OUTPUT_BULLET}\n\n## Artifacts\n\n> ${COUNCIL_EVIDENCE_CLAUSE}`;
 
   assert.doesNotThrow(() => assertCouncilEvidenceClause(positive));
-  assert.throws(() => assertCouncilEvidenceClause(badFixture), /Grounding Integrity/);
+  assert.throws(() => assertCouncilEvidenceClause(badFixture), /not only in artifacts/);
+});
+
+test('council template contract ignores Grounding Integrity headings embedded in artifacts', () => {
+  const embeddedHeadingFixture = `## Output Format\n\n${COUNCIL_GROUNDING_OUTPUT_BULLET}\n\n## Artifacts\n\n\`\`\`md\n## Grounding Integrity\n\n${COUNCIL_EVIDENCE_CLAUSE}\n\`\`\``;
+
+  assert.throws(() => assertCouncilEvidenceClause(embeddedHeadingFixture), /must have a Grounding Integrity section/);
 });
 
 test('skill delegates prompt construction to the lens verb and requires reviewer diversity', () => {
@@ -454,6 +499,8 @@ test('skill documents required repo, blocking coverage, and examined_paths handb
   assert.match(skill, /\*\*Blocking per-handback coverage check\*\*/);
   assert.match(skill, /Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`/);
   assert.match(skill, /Consumer-visible artifact evidence/);
+  assert.match(skill, /must never claim to\s+have run the renderer/);
+  assert.match(skill, /Do not report a defect finding solely because a check was\s+skipped; record the skip as a stated limitation, as Workspace Integrity requires/);
 });
 
 test('skill says examined_paths is exact and bounds what the stale-set guard proves', () => {

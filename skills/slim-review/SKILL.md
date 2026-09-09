@@ -107,7 +107,12 @@ configuration, install packages, run git writes, start services, or dispatch rea
 actions to obtain evidence; use in-memory inputs and read-only paths. If that is
 impossible, state the limitation and ask the conductor for a render capture. A
 tool-less reviewer may assess supplied render evidence but must never claim to
-have run the renderer. Do not report a P3 merely because a check was skipped.
+have run the renderer. Do not report a defect finding solely because a check was
+skipped; record the skip as a stated limitation, as Workspace Integrity requires.
+A match found inside quoted source or inlined artifacts does not prove delivery:
+where a slot or insertion is claimed, pass a distinct sentinel through the slot
+and a different marker through the artifacts, and confirm the sentinel lands
+outside the artifacts section.
 
 The instrument bullet is this skill's negative-control binding
 (`reference/patterns/negative-control.md`): an added test, guard, or checker
