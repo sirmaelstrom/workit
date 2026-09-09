@@ -20,6 +20,10 @@ Agents receive ONLY the orchestrator + their own work package file. They do NOT 
 
 {{codebase_access}}
 
+## Workspace Integrity
+
+If you have codebase access, the tree is shared with other reviewers and with a running service. Three prohibitions, no exceptions: **do not create git worktrees**, **do not delete directories**, and **do not run git commands that write** (checkout, switch, branch, worktree, reset, clean, stash, commit, merge, rebase, tag). Do not run `npm install`, `npm ci`, or anything else that rewrites `node_modules` — it may be a link into a shared install, and a recursive delete follows that link. If a check you want needs any of those, skip the check and say so in your review. The harness measures the tree before and after your run; a review that changed it is failed and withheld from synthesis.
+
 ## Review Criteria
 
 Evaluate the full specification across six dimensions:
