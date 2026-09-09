@@ -330,6 +330,213 @@ test('WP-2: footer meter below the plan floor exits 6 and is logged', async (t) 
   assert.equal(result.row.planWeekly, 91);
 });
 
+test('quest 653c5b81: weekly-only 15 trips the default reserve floor', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-6-astra medium · Context 100% left · weekly 15% left · Fast off', stderr: '' },
+  );
+  const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.exit, 6);
+  assert.equal(result.output.state, 'plan-low');
+  assert.equal(result.row.plan5h, null);
+  assert.equal(result.row.planWeekly, 15);
+});
+
+test('quest 653c5b81: the weekly selected window trips at the boundary and honours a custom floor', async (t) => {
+  const boundary = fixture(t);
+  seedLane(boundary);
+  boundary.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    {
+      code: 0,
+      stdout: JSON.stringify({ result: { text: 'gpt-6-astra medium · Context 100% left · weekly 20% left · Fast off' } }),
+      stderr: '',
+    },
+  );
+  const atFloor = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', boundary.log], { exec: boundary.exec, sleep: async () => {} });
+  assert.equal(atFloor.exit, 6);
+  assert.equal(atFloor.row.planWeekly, 20);
+
+  const fiveHourBoundary = fixture(t);
+  seedLane(fiveHourBoundary);
+  fiveHourBoundary.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-5.6-terra high · 5h 20% left · weekly 15% left', stderr: '' },
+  );
+  const fiveHourAtFloor = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', fiveHourBoundary.log], { exec: fiveHourBoundary.exec, sleep: async () => {} });
+  assert.equal(fiveHourAtFloor.exit, 6, 'the 5h exact boundary now trips too');
+  assert.equal(fiveHourAtFloor.row.plan5h, 20);
+
+  const custom = fixture(t);
+  seedLane(custom);
+  custom.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-6-astra medium · Context 100% left · weekly 15% left · Fast off', stderr: '' },
+  );
+  const customFloor = await runLane(['wait', 'lane-a', '--timeout', '1000', '--plan-floor', '15', '--log', custom.log], { exec: custom.exec, sleep: async () => {} });
+  assert.equal(customFloor.exit, 6);
+  assert.equal(customFloor.output.planFloor, 15);
+});
+
+test('quest 653c5b81: a weekly-only reading above the floor stays on the ordinary lifecycle', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  let clock = 0;
+  f.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-6-astra medium · Context 100% left · weekly 21% left · Fast off', stderr: '' },
+  );
+  const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], {
+    exec: f.exec,
+    now: () => (clock += 1000),
+    sleep: async () => {},
+  });
+  assert.equal(result.exit, 4);
+  assert.equal(result.output.state, 'timeout');
+  assert.equal(result.row.planWeekly, 21);
+
+  const observed = fixture(t);
+  seedLane(observed);
+  let observedClock = 0;
+  observed.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-6-astra medium · Context 100% left · weekly 92% left · Fast off', stderr: '' },
+  );
+  const normal = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', observed.log], {
+    exec: observed.exec,
+    now: () => (observedClock += 1000),
+    sleep: async () => {},
+  });
+  assert.equal(normal.exit, 4);
+  assert.equal(normal.row.planWeekly, 92);
+});
+
+test('quest 653c5b81: 5h remains first and the last footer is never combined with an earlier one', async (t) => {
+  const fiveHour = fixture(t);
+  seedLane(fiveHour);
+  let fiveHourClock = 0;
+  fiveHour.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-5.6-terra high · 5h 80% left · weekly 15% left', stderr: '' },
+  );
+  const fiveHourFirst = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', fiveHour.log], {
+    exec: fiveHour.exec,
+    now: () => (fiveHourClock += 1000),
+    sleep: async () => {},
+  });
+  assert.equal(fiveHourFirst.exit, 4, 'the available 5h window wins over a lower weekly reading');
+  assert.equal(fiveHourFirst.row.plan5h, 80);
+  assert.equal(fiveHourFirst.row.planWeekly, 15);
+
+  const lastFooter = fixture(t);
+  seedLane(lastFooter);
+  lastFooter.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-5.6-terra high · 5h 80% left · weekly 90% left\nworking\ngpt-6-astra medium · weekly 15% left', stderr: '' },
+  );
+  const selectedLast = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', lastFooter.log], { exec: lastFooter.exec, sleep: async () => {} });
+  assert.equal(selectedLast.exit, 6);
+  assert.equal(selectedLast.row.plan5h, null);
+  assert.equal(selectedLast.row.planWeekly, 15);
+});
+
+test('quest 653c5b81: an unknown meter warns and never claims plan-low', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  let clock = 0;
+  f.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-6-astra medium · Context 100% left · Fast off', stderr: '' },
+  );
+  const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], {
+    exec: f.exec,
+    now: () => (clock += 1000),
+    sleep: async () => {},
+  });
+  assert.equal(result.exit, 4);
+  assert.equal(result.output.state, 'timeout');
+  assert.equal(result.output.warning, 'plan meter unavailable; capacity is unknown');
+  assert.equal(result.row.warning, 'plan meter unavailable; capacity is unknown');
+  assert.equal(result.row.plan5h, null);
+  assert.equal(result.row.planWeekly, null);
+});
+
+test('quest 653c5b81: a failed pane read clears the prior meter and a later read recovers it', async (t) => {
+  const stale = fixture(t);
+  seedLane(stale);
+  let staleClock = 0;
+  stale.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-5.6-terra high · 5h 80% left · weekly 90% left', stderr: '' },
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 1, stdout: '', stderr: 'pane read failed' },
+  );
+  const cleared = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', stale.log], {
+    exec: stale.exec,
+    now: () => staleClock,
+    sleep: async (ms) => { staleClock += ms; },
+  });
+  assert.equal(cleared.exit, 4);
+  assert.equal(cleared.row.plan5h, null);
+  assert.equal(cleared.row.planWeekly, null);
+  assert.equal(cleared.row.warning, 'plan meter unavailable; capacity is unknown');
+
+  const recovered = fixture(t);
+  seedLane(recovered);
+  let recoveredClock = 0;
+  recovered.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: 'gpt-5.6-terra high · 5h 80% left · weekly 90% left', stderr: '' },
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 1, stdout: '', stderr: 'pane read failed' },
+    { code: 0, stdout: '{"result":{"state":"blocked"}}', stderr: '' },
+    { code: 0, stdout: 'Approve running tests\nweekly 55% left', stderr: '' },
+  );
+  const recoveredResult = await runLane(['wait', 'lane-a', '--until', 'blocked', '--timeout', '2000', '--log', recovered.log], {
+    exec: recovered.exec,
+    now: () => recoveredClock,
+    sleep: async (ms) => { recoveredClock += ms; },
+  });
+  assert.equal(recoveredResult.exit, 3);
+  assert.equal(recoveredResult.row.planWeekly, 55);
+  assert.equal(recoveredResult.row.warning, null);
+});
+
+test('quest 653c5b81: low weekly meter preserves blocked and settled precedence', async (t) => {
+  for (const [state, exit] of [['blocked', 3], ['idle', 0], ['done', 0]]) {
+    const f = fixture(t);
+    seedLane(f);
+    f.responses.push(
+      { code: 0, stdout: JSON.stringify({ result: { state } }), stderr: '' },
+      { code: 0, stdout: `gpt-6-astra medium · Context 100% left · weekly 15% left`, stderr: '' },
+    );
+    const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+    assert.equal(result.exit, exit, `${state} remains a lifecycle result, not plan-low`);
+    assert.equal(result.output.state, state);
+  }
+});
+
+test('quest 653c5b81: weekly-only modal corroboration is shared by wait and resume', async (t) => {
+  for (const verb of ['wait', 'resume']) {
+    const f = fixture(t);
+    seedLane(f);
+    f.responses.push(
+      { code: 0, stdout: JSON.stringify({ result: { state: verb === 'wait' ? 'working' : 'idle' } }), stderr: '' },
+      {
+        code: 0,
+        stdout: 'Approaching rate limits — Switch to gpt-5.6-luna for lower credit usage?\n  › 1. Switch  2. Keep current model\ngpt-6-astra medium · Context 100% left · weekly 15% left',
+        stderr: '',
+      },
+    );
+    const result = await runLane([verb, 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+    assert.equal(result.exit, 6);
+    assert.equal(result.output.state, 'plan-refused');
+    assert.equal(result.row.refusalShape, 'modal');
+  }
+});
+
 test('WP-2 / C11: the captured refusal exits 6 even while herdr still reports idle', async (t) => {
   const f = fixture(t);
   seedLane(f);
