@@ -37,11 +37,15 @@
  *      pagination is a follow-up; this is the floor that keeps the gap loud.
  */
 
-import { readFileSync, existsSync, writeFileSync, appendFileSync, mkdirSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import {
+  readFileSync, existsSync, writeFileSync, appendFileSync, mkdirSync, mkdtempSync,
+  rmSync, readdirSync, renameSync, chmodSync, unlinkSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 
 import { createClient } from './pr-review-coordinator.mjs';
 import {
@@ -51,6 +55,8 @@ import {
   resolveManaged,
   MANAGED_MODES,
 } from './pr-review-managed.mjs';
+import { emitOutcome, WITHDRAW_REASONS } from './pr-review-outcomes.mjs';
+import { buildMarker, recognise } from './pr-review-recognise.mjs';
 
 // ---------------------------------------------------------------------------
 // gh plumbing
@@ -95,6 +101,40 @@ export function fetchPrFilePaths(repo, pr, cwd, runGh = ghOrDie) {
     { cwd },
   );
   return String(raw).split(/\r?\n/).filter((path) => path !== '');
+}
+
+/**
+ * Fetch the same list with the three extra fields the manifest binds to.
+ *
+ * Two fetchers, not one with a wrapper (P3 asks for the wrapper): the standalone
+ * path's `gh` argv is pinned byte-for-byte by the characterisation suite (M4),
+ * and the richer projection is a different `--jq`. What P3 is actually
+ * protecting against — a second, duplicate files request inside one flow, or a
+ * changed public signature — does not happen either way: the coordinated flow
+ * fetches files exactly once, in `manifest`, and every later step reads that
+ * manifest back from the coordinator.
+ *
+ * `runGh` defaults to the raw `gh`, which throws: every caller here is a
+ * coordinated path that must classify its own `gh-failure` rather than exit
+ * from underneath the JSON outcome line.
+ */
+export function fetchPrFiles(repo, pr, cwd, runGh = gh) {
+  const raw = runGh(
+    ['api', '--paginate', `repos/${repo}/pulls/${pr}/files`, '--jq', '.[] | {filename, sha, status, has_patch: has("patch")}'],
+    { cwd },
+  );
+  return String(raw)
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== '')
+    .map((line) => {
+      const entry = JSON.parse(line);
+      return {
+        filename: entry.filename,
+        sha: entry.sha ?? null,
+        status: entry.status ?? null,
+        has_patch: entry.has_patch === true,
+      };
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -197,7 +237,26 @@ const LENSES = new Set(Object.keys(LENS_MODELS));
 const LENS_LIST = [...LENSES].join('|');
 const isCodexLens = (lens) => lens === 'codex' || lens === 'astra';
 const FINDING_KEYS = new Set(['severity', 'title', 'path', 'line', 'body', 'lens']);
-const DOCUMENT_KEYS = new Set(['summary', 'coverage', 'examined_paths', 'findings', 'lens', 'model', 'reasoning', 'wall_ms']);
+/**
+ * Keys a persisted findings document may carry.
+ *
+ * This is a closed allowlist and `loadFindings` runs it on every read, so the
+ * four revision stamps a coordinated `lens` writes (`head_sha`, `base_sha`,
+ * `attempt`, `run_id`) have to be admitted here or the writer's own loader
+ * would reject every document it just produced, at `post`, with "top level has
+ * unknown property: head_sha". They stay optional: a standalone document has
+ * none of them and is unchanged.
+ *
+ * `findings.schema.json` is NOT widened — it governs what the model returns
+ * through `--output-schema`, and the stamps (like `lens` / `model` / `wall_ms`
+ * before them) are added by this script afterwards.
+ */
+const DOCUMENT_KEYS = new Set([
+  'summary', 'coverage', 'examined_paths', 'findings', 'lens', 'model', 'reasoning', 'wall_ms',
+  'head_sha', 'base_sha', 'attempt', 'run_id',
+]);
+/** The four revision stamps, in the order `lens --attempt-ref` writes them. */
+export const DOCUMENT_STAMPS = Object.freeze(['head_sha', 'base_sha', 'attempt', 'run_id']);
 
 /**
  * Load the handback. Anything short of a well-formed object is exit 3: a
@@ -233,6 +292,14 @@ export function validateFindingsShape(doc) {
   if (doc.model !== undefined && (typeof doc.model !== 'string' || doc.model.trim() === '')) problems.push('model must be a non-empty string');
   if (doc.reasoning !== undefined && (typeof doc.reasoning !== 'string' || doc.reasoning.trim() === '')) problems.push('reasoning must be a non-empty string');
   if (doc.wall_ms !== undefined && (!Number.isInteger(doc.wall_ms) || doc.wall_ms < 0)) problems.push('wall_ms must be a non-negative integer');
+  // The revision stamps: optional, but a present one that is empty or the wrong
+  // type is worse than an absent one — `post` compares them to the AttemptRef.
+  for (const key of ['head_sha', 'base_sha', 'run_id']) {
+    if (doc[key] !== undefined && (typeof doc[key] !== 'string' || doc[key].trim() === '')) {
+      problems.push(`${key} must be a non-empty string`);
+    }
+  }
+  if (doc.attempt !== undefined && (!Number.isInteger(doc.attempt) || doc.attempt < 1)) problems.push('attempt must be a positive integer');
   if (typeof doc.summary !== 'string' || doc.summary.trim() === '') {
     problems.push('summary must be a non-empty string');
   }
@@ -459,11 +526,26 @@ export function buildReviewPayload({
 // Subcommands
 // ---------------------------------------------------------------------------
 
-export function cmdPost(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
+/**
+ * `post` — standalone, or coordinated when an attempt-ref is supplied.
+ *
+ * The branch is here and nothing below it changes: an edit to the standalone
+ * body is a change to behaviour the characterisation suite pins byte-for-byte
+ * (M4), so the coordinated path is a separate function reached before any of it.
+ * Only the coordinated path returns a Promise.
+ */
+export function cmdPost(opts, deps = {}) {
+  if (opts.attemptRef) return cmdPostCoordinated(opts, deps);
+  return cmdPostStandalone(opts, deps);
+}
+
+function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.log, env = process.env, homeDir } = {}) {
   // Load the handback FIRST: a reviewer that never ran should fail before we
   // touch the network, and exit 3 must not depend on gh being reachable.
   const findingFiles = Array.isArray(opts.findings) ? opts.findings : [opts.findings];
   const docs = findingFiles.map(loadFindings);
+  const gate = managedGate({ command: 'post', repo: opts.repo, env, homeDir, log, die });
+  if (gate) return undefined;
   // The loop is two lenses posted as one review (2026-09-09). Terra's own review
   // of that change (workit#76) pointed out the policy was prose only: `post`
   // happily published a single handback as a clean slim review. Enforce it here,
@@ -729,20 +811,50 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = join(SCRIPT_DIR, '..', 'reference', 'findings.schema.json');
 const MEASURE_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 't1-lens-measure.jsonl'];
 
-/** Build the prompt from the same authoritative list that posting later checks. */
-export function buildReviewerPrompt({ pr, repo, prFilePaths }) {
+/**
+ * Build the prompt from the same authoritative list that posting later checks.
+ *
+ * Two renders, one template. Standalone (`pinned_diff` absent) is byte-identical
+ * to the baseline and tells the reviewer to fetch the diff itself. Coordinated
+ * (`pinned_diff` present) inlines the compare-API patches captured at the pinned
+ * head and removes the fetch instruction entirely: two lens invocations and a
+ * post reading three separate live listings can otherwise review three different
+ * things. The sentinel assertion in the tests runs on the RENDERED prompt — a
+ * grep of this source would match the source, not the delivery.
+ */
+export function buildReviewerPrompt({ pr, repo, prFilePaths, pinned_diff, manifest }) {
+  const paths = prFilePaths ?? (manifest?.files ?? []).map((file) => file.filename);
+  const diffInstruction = pinned_diff === undefined
+    ? `Read the diff with \`gh pr diff ${pr} --repo ${repo}\`. Read surrounding source as needed to judge correctness.`
+    : 'Do not fetch the diff; review only the diff below. Read surrounding source as needed to judge correctness — it is read from the working directory, which can differ from the pinned revision below.';
+  const pinnedSection = pinned_diff === undefined ? '' : [
+    '',
+    '',
+    `## Authoritative diff (pinned at \`${pinned_diff.head_sha}\`)`,
+    '',
+    `Captured from \`${pinned_diff.base_sha}...${pinned_diff.head_sha}\`. This is the whole change under review.`,
+    ...(pinned_diff.not_reviewed?.length > 0
+      ? ['', `Not reviewed (no patch in the pinned compare — binary, or a change with no text side): ${pinned_diff.not_reviewed.join(', ')}.`]
+      : []),
+    '',
+    pinned_diff.text,
+  ].join('\n');
+  return buildPromptText({ pr, repo, prFilePaths: paths, diffInstruction, pinnedSection });
+}
+
+function buildPromptText({ pr, repo, prFilePaths, diffInstruction, pinnedSection }) {
   return `Review pull request #${pr} in the repository at the current working directory.
 
 READ-ONLY: modify nothing; do not create or delete files, and do not run git write commands.
 
-Read the diff with \`gh pr diff ${pr} --repo ${repo}\`. Read surrounding source as needed to judge correctness.
+${diffInstruction}
 
 When a changed file affects prompt/template generation, configuration resolution, or dispatch selection, identify one concrete claim, its consumer, and the path producing the consumer input. Inspect the real rendered or resolved result through an existing safe renderer/resolver, or a captured result from that same path. In \`summary\`, record the claim, command or supplied-evidence provenance, decisive excerpt, and any unverified limitation. Do not create worktrees, write source or configuration, install packages, run git writes, start services, or dispatch real actions to obtain evidence; use in-memory inputs and read-only paths. If that is impossible, state the limitation and ask the conductor for a render capture. A tool-less reviewer may assess supplied render evidence but must never claim to have run the renderer. Do not report a defect finding solely because a check was skipped; record the skip as a stated limitation, as Workspace Integrity requires. A match found inside quoted source or inlined artifacts does not prove delivery: where a slot or insertion is claimed, pass a distinct sentinel through the slot and a different marker through the artifacts, and confirm the sentinel lands outside the artifacts section.
 
 Authoritative PR file list:
 ${prFilePaths.join('\n')}
 
-This list is coverage ground truth. Examine every entry and echo every entry you examined verbatim in \`examined_paths\`.
+This list is coverage ground truth. Examine every entry and echo every entry you examined verbatim in \`examined_paths\`.${pinnedSection}
 
 Report only correctness defects that matter after merge: wrong reachable behavior, violated contracts or invariants, an uncovered claimed case, a test/guard/checker that cannot fail on its claimed defect, or a broken adjacent consumer. Do not report style, naming, formatting, or speculative refactors.
 
@@ -826,8 +938,44 @@ function countSeverities(findings) {
 
 class LensOutputError extends Error {}
 
+/**
+ * Fail closed on a managed repository (D14).
+ *
+ * The expensive mistake is posting a review nobody coordinated, so a standalone
+ * invocation on a coordinated repository refuses rather than proceeding, and an
+ * installation that has a token but no readable list refuses everywhere. Returns
+ * true when it refused.
+ */
+function managedGate({ command, repo, env, homeDir, log, die }) {
+  const resolvedMode = resolveManaged({ repo, env, homeDir });
+  if (resolvedMode.mode === MANAGED_MODES.configMissing) {
+    emitOutcome({ outcome: 'refused', reason: MANAGED_MODES.configMissing, directory: resolvedMode.directory }, log);
+    die(1, `a coordinator token is present but ${join(resolvedMode.directory, 'managed.json')} is missing or unreadable, so this repository cannot be classified. Nothing was ${command === 'post' ? 'posted' : 'run'}.`);
+    return true;
+  }
+  if (resolvedMode.mode === MANAGED_MODES.managed) {
+    // A usage error, deliberately, and not a JSON outcome line: `${command}`
+    // without --attempt-ref is not a coordinated invocation, and D12's table
+    // carries no reason for "you skipped claim".
+    die(2, `${repo} is a managed repository: run \`pr-review.mjs claim --repo ${repo} --pr <n>\` first and pass its --attempt-ref to ${command}. Nothing was ${command === 'post' ? 'posted' : 'run'}.`);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * `lens` — standalone, or coordinated when an attempt-ref is supplied.
+ *
+ * Same branch discipline as `post`: the standalone body below is unchanged.
+ */
+export function cmdLens(opts, deps = {}) {
+  if (opts.attemptRef) return cmdLensCoordinated(opts, deps);
+  return cmdLensStandalone(opts, deps);
+}
+
 /** Run exactly one model lens. The process runner is injected so tests never spawn. */
-export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log, now = Date.now, findCodexExe = defaultCodexExe } = {}) {
+function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.log, now = Date.now, findCodexExe = defaultCodexExe, env = process.env, homeDir } = {}) {
+  if (managedGate({ command: 'lens', repo: opts.repo, env, homeDir, log, die })) return;
   const cwd = resolve(opts.cwd ?? process.cwd());
   const repo = opts.repo;
   const reasoning = opts.reasoning ?? LENS_MODELS[opts.lens].reasoning;
@@ -928,6 +1076,242 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
 }
 
 // ---------------------------------------------------------------------------
+// Coordinated plumbing
+//
+// Everything below runs only when a repository is coordinated: a manifest
+// pinned between two head reads, an attempt claimed at the coordinator before
+// any lens runs, the pinned diff inlined into the prompt, and a review POST the
+// writer makes itself so that the process which reserved is the process which
+// sends. Standalone invocations never reach any of it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Bounds (decisions.md D3). `maxFiles` is bounded by the compare API's 300-file
+ * ceiling — raising it past 300 turns every large PR into a compare that cannot
+ * agree with the manifest, which is `input-mismatch`, not a bigger review.
+ * `maxDiffBytes` is measured over the compare payload the lens has just fetched,
+ * before the model is invoked: nothing earlier knows the byte count, because the
+ * listing carries additions/deletions and the manifest carries `has_patch`.
+ */
+export const MAX_FILES = 250;
+export const MAX_DIFF_BYTES = 1024 * 1024;
+
+/** The review POST target. The env override is the test seam for a fake endpoint. */
+export const GITHUB_API_DEFAULT = 'https://api.github.com';
+export function githubApiBase(env = process.env) {
+  const raw = env?.PR_REVIEW_GITHUB_API_BASE;
+  return typeof raw === 'string' && raw.trim() !== '' ? raw.trim().replace(/\/+$/, '') : GITHUB_API_DEFAULT;
+}
+export function reviewsUrl({ repo, pr, env = process.env }) {
+  return `${githubApiBase(env)}/repos/${repo}/pulls/${pr}/reviews`;
+}
+
+/** The plugin version, stamped into the marker as the policy revision. */
+export function pluginVersion({ scriptDir = SCRIPT_DIR } = {}) {
+  try {
+    return JSON.parse(readFileSync(join(scriptDir, '..', '..', '..', '.claude-plugin', 'plugin.json'), 'utf8')).version ?? '-';
+  } catch {
+    return '-';
+  }
+}
+
+/**
+ * Produce the manifest — the one projection of "what this PR changes" that the
+ * whole pinning design binds to.
+ *
+ * Order matters and is the point: `headRefOid` + `baseRefOid`, then the
+ * paginated files list, then `headRefOid` again. A head that moved between the
+ * two reads means the file list belongs to neither revision, so nothing is
+ * produced and nothing is claimed. `base_sha` comes from the same read window,
+ * so the three-dot compare a lens runs later describes the same change.
+ *
+ * There is exactly one implementation: a session's `claim` calls this in
+ * process, the scheduled half spawns `pr-review.mjs manifest`.
+ */
+export function produceManifest({ repo, pr, cwd }, { runGh = gh, now = () => new Date() } = {}) {
+  const readRefs = () => JSON.parse(runGh(['pr', 'view', String(pr), '--repo', repo, '--json', 'headRefOid,baseRefOid'], { cwd }));
+  const before = readRefs();
+  const files = fetchPrFiles(repo, pr, cwd, runGh);
+  const after = readRefs();
+  if (before.headRefOid !== after.headRefOid) {
+    return { ok: false, reason: 'revision-mismatch', head_before: before.headRefOid, head_now: after.headRefOid };
+  }
+  if (files.length === 0) {
+    // A PR with no files is a fetch failure, never a real pull request — and an
+    // empty manifest would allocate an attempt that reviews nothing.
+    return { ok: false, reason: 'empty-file-list', head_sha: before.headRefOid };
+  }
+  return {
+    ok: true,
+    head_sha: before.headRefOid,
+    base_sha: before.baseRefOid,
+    manifest: {
+      files,
+      head_before: before.headRefOid,
+      head_after: after.headRefOid,
+      captured_at: now().toISOString(),
+    },
+  };
+}
+
+// --- the attempt-ref file --------------------------------------------------
+
+/**
+ * Where a session's attempt-ref file lives.
+ *
+ * Under the managed directory, which is per-user and root-independent, so the
+ * same attempt resolves the same path from any checkout — and so the file
+ * holding `worker_key` never lands inside a repository.
+ */
+export function attemptRefPath({ attemptRef, homeDir, explicit }) {
+  if (explicit) return resolve(explicit);
+  const [owner, name] = String(attemptRef.repo).split('/');
+  return join(
+    managedDirectory({ homeDir }),
+    'attempts', `${owner}__${name}`, String(attemptRef.pr), String(attemptRef.head_sha), String(attemptRef.attempt),
+    'attempt-ref.json',
+  );
+}
+
+/**
+ * Apply an owner-only ACL and read back what the filesystem actually did.
+ *
+ * M8: the mode is instructed HERE, at the write site, because this file carries
+ * `worker_key` — the one credential that authorises calls against this attempt.
+ * The observation is returned rather than enforced: a file whose ACL cannot be
+ * tightened is a thing to report, not a reason to fail a claim that already
+ * happened at the coordinator.
+ */
+function applyOwnerOnly(path, { platform = process.platform, run = defaultRun } = {}) {
+  if (platform !== 'win32') {
+    try {
+      chmodSync(path, 0o600);
+      return `chmod 0600 applied on ${platform}`;
+    } catch (err) {
+      return `chmod failed on ${platform}: ${err.message}`;
+    }
+  }
+  let account;
+  try {
+    account = userInfo().username;
+  } catch (err) {
+    return `could not resolve the current account: ${err.message}`;
+  }
+  try {
+    run('icacls', [path, '/inheritance:r', '/grant:r', `${account}:F`], {});
+    return String(run('icacls', [path], {})).trim().split(/\r?\n/).join(' | ');
+  } catch (err) {
+    return `icacls failed: ${err.message}`;
+  }
+}
+
+/**
+ * Write the attempt-ref file atomically, owner-only.
+ *
+ * Temp file plus rename: a half-written ref file is indistinguishable from a
+ * ref file for a different attempt, and the reader is a separate process.
+ */
+export function writeAttemptRefFile(path, payload, { platform = process.platform, run = defaultRun } = {}) {
+  mkdirSync(dirname(path), { recursive: true });
+  const temp = `${path}.tmp-${randomBytes(6).toString('hex')}`;
+  writeFileSync(temp, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  renameSync(temp, path);
+  return { path, observed: applyOwnerOnly(path, { platform, run }) };
+}
+
+/** Read it back, with every field the W endpoints need validated. */
+export function readAttemptRefFile(path) {
+  const raw = readFileSync(resolve(path), 'utf8');
+  const parsed = JSON.parse(raw);
+  for (const key of ['attempt_ref', 'worker_key', 'coordinator']) {
+    if (parsed?.[key] === undefined) throw new TypeError(`attempt-ref file is missing ${key}: ${path}`);
+  }
+  return parsed;
+}
+
+/** Delete it — only ever called once the attempt has left the live set. */
+function discardAttemptRefFile(path, diag) {
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if (err?.code !== 'ENOENT') diag(`could not remove the attempt-ref file ${path}: ${err.message}`);
+  }
+}
+
+// --- the pinned diff -------------------------------------------------------
+
+/**
+ * Render the compare payload as one unified diff.
+ *
+ * The same text is the prompt's diff section and the anchoring input for
+ * `post`, so a finding can only be line-anchored against the bytes the reviewer
+ * was actually shown. Entries with no patch (binary, or a change with no text
+ * side) are disclosed rather than dropped silently — they are files this PR
+ * changes, and a reviewer told nothing about them cannot say so.
+ */
+export function renderPinnedDiff(comparePayload) {
+  const sections = [];
+  const notReviewed = [];
+  let bytes = 0;
+  for (const file of comparePayload?.files ?? []) {
+    if (typeof file.patch !== 'string' || file.patch === '') {
+      notReviewed.push(`${file.filename} (${file.status ?? 'unknown'})`);
+      continue;
+    }
+    bytes += Buffer.byteLength(file.patch, 'utf8');
+    sections.push(`diff --git a/${file.filename} b/${file.filename}\n--- a/${file.filename}\n+++ b/${file.filename}\n${file.patch}`);
+  }
+  return { text: sections.join('\n'), not_reviewed: notReviewed, bytes };
+}
+
+// --- the review POST -------------------------------------------------------
+
+/**
+ * The positive allowlist for "no bytes left this process".
+ *
+ * undici raises exactly these before any application write, on the initial
+ * connection attempt — and there is only ever an initial attempt, because
+ * nothing here retries. Everything else, including a reset mid-body and a
+ * timeout after the request was sent, is `unresolved`: process death cannot
+ * retract bytes a server already received.
+ */
+export const NOT_SENT_CODES = Object.freeze(new Set([
+  'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'CERT_HAS_EXPIRED',
+]));
+
+/**
+ * Classify one submission. Receipt parsing lives inside the classifier: a 2xx
+ * whose body will not parse is an unknown outcome, not a posted review.
+ */
+export function classifyPostOutcome({ response, error, bodyText }) {
+  if (error) {
+    const code = error?.cause?.code ?? error?.code;
+    if (typeof code === 'string' && NOT_SENT_CODES.has(code)) {
+      return { outcome: 'not_sent', wire: 'not-sent', reason: 'not-sent', detail: code };
+    }
+    return { outcome: 'unresolved', wire: 'unresolved', reason: 'delivery-unknown', detail: code ?? error?.name ?? String(error?.message ?? error) };
+  }
+  const status = response?.status;
+  if (status >= 200 && status < 300) {
+    let parsed;
+    try {
+      parsed = JSON.parse(String(bodyText));
+    } catch {
+      return { outcome: 'unresolved', wire: 'unresolved', reason: 'delivery-unknown', detail: `HTTP ${status} with an unparseable body` };
+    }
+    if (Number.isInteger(parsed?.id)) {
+      return { outcome: 'posted', wire: 'posted', review_id: parsed.id, html_url: parsed.html_url };
+    }
+    return { outcome: 'unresolved', wire: 'unresolved', reason: 'delivery-unknown', detail: `HTTP ${status} with no review id` };
+  }
+  if ([401, 403, 404, 422].includes(status)) {
+    return { outcome: 'post_rejected', wire: 'post_rejected', reason: 'definite-rejection', detail: `HTTP ${status}` };
+  }
+  return { outcome: 'unresolved', wire: 'unresolved', reason: 'delivery-unknown', detail: `HTTP ${status}` };
+}
+
+// ---------------------------------------------------------------------------
 // Coordinated subcommands
 //
 // `managed` and `identity` are read-only-or-operator commands about the
@@ -941,12 +1325,6 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
 // outcome is `ok`, 1 when it is `refused`, and 4 when a `gh` call failed, the
 // same 4 the rest of this script uses. The JSON line is the contract.
 // ---------------------------------------------------------------------------
-
-/** The one JSON line. `retry` is three-valued; nothing here is ever retryable. */
-function emitOutcome(line, log) {
-  log(JSON.stringify(line));
-  return line;
-}
 
 /**
  * Recovery and identity calls are logged verbatim on the coordinator's row with
@@ -970,7 +1348,6 @@ export function cmdManaged(opts, { log = console.log, die = fail, env = process.
   emitOutcome({
     outcome: refused ? 'refused' : 'ok',
     ...(refused ? { reason: MANAGED_MODES.configMissing } : {}),
-    retry: 'stop',
     mode: resolved.mode,
     repo: opts.repo,
     directory: resolved.directory,
@@ -1004,7 +1381,7 @@ export async function cmdIdentity(opts, {
   const token = loadCoordinatorToken({ env, homeDir });
   const list = readManagedList({ homeDir });
   if (token === null || !list.ok) {
-    emitOutcome({ outcome: 'refused', reason: MANAGED_MODES.configMissing, retry: 'stop', directory }, log);
+    emitOutcome({ outcome: 'refused', reason: MANAGED_MODES.configMissing, directory }, log);
     die(1, token === null
       ? `no coordinator token in ${directory} and none in the environment; there is nothing to authenticate with.`
       : `no readable managed.json in ${directory}; the coordinator URL comes from that file.`);
@@ -1018,12 +1395,12 @@ export async function cmdIdentity(opts, {
     const stderr = err?.stderr ? String(err.stderr).trim() : '';
     // `gh-failure` is the reason table's name for a gh call that did not
     // answer. Its `retry` value is the table's, not this path's judgement.
-    emitOutcome({ outcome: 'failed', reason: 'gh-failure', retry: 'lens-budget' }, log);
+    emitOutcome({ outcome: 'failed', reason: 'gh-failure' }, log);
     die(4, `gh api user failed${stderr ? `:\n${stderr}` : ''}`);
     return;
   }
   if (login === '') {
-    emitOutcome({ outcome: 'failed', reason: 'gh-failure', retry: 'lens-budget' }, log);
+    emitOutcome({ outcome: 'failed', reason: 'gh-failure' }, log);
     die(4, 'gh api user returned an empty login; nothing was pinned.');
     return;
   }
@@ -1034,13 +1411,1140 @@ export async function cmdIdentity(opts, {
     emitOutcome({
       outcome: 'refused',
       reason: result.code,
-      retry: 'stop',
       ...(result.source === 'coordinator' ? { coordinator_code: result.code } : {}),
     }, log);
     die(1, `the coordinator did not pin ${login}: ${result.message}`);
     return;
   }
-  emitOutcome({ outcome: 'ok', retry: 'stop', login, coordinator: list.coordinator }, log);
+  emitOutcome({ outcome: 'ok', login, coordinator: list.coordinator }, log);
+}
+
+/**
+ * Resolve the coordinator this invocation talks to, and the token to talk with.
+ *
+ * URL precedence (decisions.md §W.1): under `--attempt-ref` the file's
+ * `coordinator` is authoritative, for `claim` it is `managed.json`'s — and when
+ * both are present and disagree the writer refuses rather than picking. Two
+ * lists compared is the drift class; one list plus a refusal is the design.
+ */
+function resolveCoordinator({ env, homeDir, fileCoordinator }) {
+  const directory = managedDirectory({ homeDir });
+  const token = loadCoordinatorToken({ env, homeDir });
+  if (token === null) {
+    return { ok: false, reason: MANAGED_MODES.configMissing, directory, message: `no coordinator token in ${directory} and none in the environment; this installation is not provisioned to reach a coordinator.` };
+  }
+  const list = readManagedList({ homeDir });
+  if (!list.ok) {
+    return { ok: false, reason: MANAGED_MODES.configMissing, directory, message: `no readable managed.json in ${directory}; the coordinator URL comes from that file.` };
+  }
+  if (fileCoordinator !== undefined && fileCoordinator !== list.coordinator) {
+    return {
+      ok: false,
+      reason: 'managed-resolver-disagreement',
+      directory,
+      message: `the attempt-ref file names the coordinator ${fileCoordinator} and ${join(directory, 'managed.json')} names ${list.coordinator}; refusing rather than choosing one.`,
+    };
+  }
+  return { ok: true, token, coordinator: fileCoordinator ?? list.coordinator, directory, repos: list.repos };
+}
+
+/** Read the PR's review listing, projected to the fields both recognisers read. */
+export function readReviewListing({ repo, pr, cwd, runGh = gh }) {
+  const raw = runGh(
+    ['api', '--paginate', `repos/${repo}/pulls/${pr}/reviews`, '--jq', '.[] | {review_id: .id, author_login: .user.login, commit_id, submitted_at, state, body}'],
+    { cwd },
+  );
+  return String(raw).split(/\r?\n/).filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
+}
+
+/**
+ * `manifest --repo <r> --pr <n>` — the one manifest producer, as a subcommand.
+ *
+ * Read-only. The scheduled half spawns this before its in-process claim so that
+ * there is exactly one implementation of the projection the pinning binds to,
+ * in one language, with one set of fixtures behind it.
+ */
+export function cmdManifest(opts, { runGh = gh, log = console.log, die = fail, diag = console.error, now } = {}) {
+  let produced;
+  try {
+    produced = produceManifest({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd }, { runGh, ...(now ? { now } : {}) });
+  } catch (err) {
+    emitOutcome({ outcome: 'failed', reason: 'gh-failure' }, log);
+    die(4, `could not read the PR files for ${opts.repo}#${opts.pr}: ${err.message}`);
+    return undefined;
+  }
+  if (!produced.ok) {
+    emitOutcome({
+      outcome: 'refused',
+      reason: produced.reason,
+      ...(produced.head_now === undefined ? {} : { head_now: produced.head_now }),
+    }, log);
+    die(1, produced.reason === 'revision-mismatch'
+      ? `the head moved from ${produced.head_before} to ${produced.head_now} while the file list was being read; no manifest was produced.`
+      : `the PR API returned no changed files for ${opts.repo}#${opts.pr}. That is a fetch failure, not a clean PR.`);
+    return undefined;
+  }
+  diag(`manifest       ${produced.manifest.files.length} files at ${produced.head_sha.slice(0, 7)} (base ${produced.base_sha.slice(0, 7)})`);
+  if (produced.manifest.files.length > MAX_FILES) {
+    // Said out loud rather than refused here: the claim transaction is the
+    // authority on the file-count bound, and it answers `bad-request`.
+    diag(`note           ${produced.manifest.files.length} files is over the ${MAX_FILES}-file bound; a claim carrying this manifest will be refused`);
+  }
+  return emitOutcome({
+    outcome: 'ok',
+    manifest: produced.manifest,
+    base_sha: produced.base_sha,
+    // The file count is reported rather than judged: `maxFiles` is enforced by
+    // the claim transaction (§W.3 step 2, `bad-request`) and, for the scheduled
+    // half, by the listing-phase classifier. There is no writer-side reason
+    // code for an over-count, and inventing one is an E2 escalation.
+    file_count: produced.manifest.files.length,
+  }, log);
+}
+
+/**
+ * `claim` — allocate one attempt for this head and write the attempt-ref file.
+ *
+ * Order is the contract: identity before anything (a writer that would post as
+ * the wrong login must not spend), then the manifest, then the dedupe
+ * recogniser — which imports a review posted outside any attempt so the head
+ * reads as reviewed and can be superseded — and only then `/claim`.
+ */
+export async function cmdClaim(opts, {
+  runGh = gh,
+  log = console.log,
+  die = fail,
+  diag = console.error,
+  env = process.env,
+  homeDir,
+  makeClient = createClient,
+  platform = process.platform,
+  run = defaultRun,
+} = {}) {
+  const refuse = (reason, extra, message, code = 1) => {
+    emitOutcome({ outcome: 'refused', reason, ...extra }, log);
+    die(code, message);
+  };
+  const resolved = resolveCoordinator({ env, homeDir });
+  if (!resolved.ok) {
+    refuse(resolved.reason, { directory: resolved.directory }, resolved.message);
+    return undefined;
+  }
+  const client = makeClient({ coordinator: resolved.coordinator, token: resolved.token });
+
+  // 1. identity — the pinned login, and the credential this process would post
+  //    with. A mismatch here has no attempt to withdraw yet, which is the whole
+  //    reason the check runs before the claim as well as before the POST.
+  const pinned = await client.readIdentity();
+  if (!pinned.ok) {
+    refuse(pinned.code, pinned.source === 'coordinator' ? { coordinator_code: pinned.code } : {}, pinned.message);
+    return undefined;
+  }
+  let login;
+  try {
+    login = String(runGh(['api', 'user', '-q', '.login'], { cwd: opts.cwd })).trim();
+  } catch (err) {
+    emitOutcome({ outcome: 'failed', reason: 'gh-failure' }, log);
+    die(4, `gh api user failed: ${err?.stderr ? String(err.stderr).trim() : err.message}`);
+    return undefined;
+  }
+  if (login !== pinned.body?.login) {
+    refuse('identity-mismatch', { login, pinned_login: pinned.body?.login ?? null },
+      `this credential posts as ${login || '(nothing)'} and the coordinator has ${pinned.body?.login} pinned; nothing was claimed.`);
+    return undefined;
+  }
+
+  // 2. the manifest, pinned between two head reads
+  let produced;
+  try {
+    produced = produceManifest({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd }, { runGh });
+  } catch (err) {
+    emitOutcome({ outcome: 'failed', reason: 'gh-failure' }, log);
+    die(4, `could not read the PR files for ${opts.repo}#${opts.pr}: ${err.message}`);
+    return undefined;
+  }
+  if (!produced.ok) {
+    refuse(produced.reason, produced.head_now === undefined ? {} : { head_now: produced.head_now },
+      `no manifest for ${opts.repo}#${opts.pr}: ${produced.reason}. Nothing was claimed.`);
+    return undefined;
+  }
+
+  // 3. the dedupe recogniser — skipped for an explicit supersede, which is the
+  //    operator saying "yes, review this head again".
+  if (!opts.supersede) {
+    const status = await client.readStatus({ repo: opts.repo, pr: Number(opts.pr) });
+    if (!status.ok) {
+      refuse(status.code, status.source === 'coordinator' ? { coordinator_code: status.code } : {}, status.message);
+      return undefined;
+    }
+    const replacedReviewIds = (status.body?.attempts ?? [])
+      .filter((row) => row.state === 'replaced')
+      .map((row) => row.review_id)
+      .filter((id) => id !== null && id !== undefined);
+    const listingCheckedAt = new Date().toISOString();
+    let reviews;
+    try {
+      reviews = readReviewListing({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh });
+    } catch (err) {
+      emitOutcome({ outcome: 'failed', reason: 'gh-failure' }, log);
+      die(4, `could not read the review listing for ${opts.repo}#${opts.pr}: ${err.message}`);
+      return undefined;
+    }
+    const found = recognise({ reviews, head: produced.head_sha, serviceLogin: login, replacedReviewIds, listingCheckedAt });
+    const hit = found.hits.find((item) => item.kind === 'dedupe');
+    if (hit) {
+      diag(`recognised     review ${hit.review_id} already covers ${produced.head_sha.slice(0, 7)}; importing it`);
+      const imported = await client.recogniseImport({
+        repo: opts.repo,
+        pr: Number(opts.pr),
+        head_sha: produced.head_sha,
+        review_id: hit.review_id,
+        author_login: hit.author_login,
+        commit_id: hit.commit_id ?? produced.head_sha,
+        listing_checked_at: found.listing_checked_at,
+        ...(hit.marker === undefined ? {} : { marker: JSON.stringify(hit.marker) }),
+      });
+      if (!imported.ok) {
+        refuse(imported.code, imported.source === 'coordinator' ? { coordinator_code: imported.code, review_id: hit.review_id } : { review_id: hit.review_id }, imported.message);
+        return undefined;
+      }
+    }
+  }
+
+  // 4. the claim itself
+  const workerKey = randomBytes(32).toString('hex');
+  const result = await client.claim({
+    repo: opts.repo,
+    pr: Number(opts.pr),
+    head_sha: produced.head_sha,
+    base_sha: produced.base_sha,
+    worker_key: workerKey,
+    owner_label: opts.ownerLabel ?? 'session',
+    manifest: produced.manifest,
+    required_lenses: opts.singleLens ? [opts.lens ?? 'codex'] : ['codex', 'astra'],
+    ...(opts.singleLens ? { exception_reason: opts.singleLens } : {}),
+    ...(opts.supersede === undefined ? {} : { supersede_review_id: Number(opts.supersede), actor: IDENTITY_ACTOR, reason: opts.reason }),
+  });
+  if (!result.ok) {
+    if (result.ended) diag(`ended attempt  ${JSON.stringify(result.ended)}`);
+    if (result.live) diag(`live attempt   ${JSON.stringify(result.live)}`);
+    refuse(
+      result.code,
+      {
+        ...(result.source === 'coordinator' ? { coordinator_code: result.code } : {}),
+        ...(result.live === undefined ? {} : { live: result.live }),
+        ...(result.ended === undefined ? {} : { ended: result.ended }),
+      },
+      result.message,
+    );
+    return undefined;
+  }
+
+  const attemptRef = result.body.attempt_ref;
+  const path = attemptRefPath({ attemptRef, homeDir, explicit: opts.attemptRefOut });
+  const written = writeAttemptRefFile(path, {
+    attempt_ref: attemptRef,
+    worker_key: workerKey,
+    coordinator: resolved.coordinator,
+    required_lenses: result.body.required_lenses,
+  }, { platform, run });
+  diag(`attempt-ref    ${written.path}`);
+  diag(`acl            ${written.observed}`);
+  return emitOutcome({
+    outcome: 'ok',
+    attempt_ref: attemptRef,
+    attempt_ref_file: written.path,
+    required_lenses: result.body.required_lenses,
+    ...(result.body.lease_until === undefined ? {} : { lease_until: result.body.lease_until }),
+    // A replayed claim (the response was lost, the key decided) is `ok` with
+    // this flag — v5.1 deleted the separate `reused` outcome.
+    ...(result.status === 200 ? { replayed: true } : {}),
+  }, log);
+}
+
+/**
+ * `recognise --repo --pr --head [--run --attempt]` — run both recognisers over
+ * the PR's review listing and print what they found.
+ *
+ * The scheduled half spawns this because it cannot run `gh` itself; a session
+ * calls the same predicates in process. Neither the listing nor this command
+ * resolves anything: it reports, and the caller decides.
+ */
+export async function cmdRecognise(opts, {
+  runGh = gh,
+  log = console.log,
+  die = fail,
+  env = process.env,
+  homeDir,
+  makeClient = createClient,
+} = {}) {
+  const refuse = (reason, extra, message, code = 1) => {
+    emitOutcome({ outcome: 'refused', reason, ...extra }, log);
+    die(code, message);
+  };
+  const resolved = resolveCoordinator({ env, homeDir });
+  if (!resolved.ok) {
+    refuse(resolved.reason, { directory: resolved.directory }, resolved.message);
+    return undefined;
+  }
+  const client = makeClient({ coordinator: resolved.coordinator, token: resolved.token });
+  const pinned = await client.readIdentity();
+  if (!pinned.ok) {
+    refuse(pinned.code, pinned.source === 'coordinator' ? { coordinator_code: pinned.code } : {}, pinned.message);
+    return undefined;
+  }
+  const status = await client.readStatus({ repo: opts.repo, pr: Number(opts.pr) });
+  if (!status.ok) {
+    refuse(status.code, status.source === 'coordinator' ? { coordinator_code: status.code } : {}, status.message);
+    return undefined;
+  }
+  const attempts = status.body?.attempts ?? [];
+  const replacedReviewIds = attempts.filter((row) => row.state === 'replaced').map((row) => row.review_id).filter((id) => id !== null && id !== undefined);
+  // Taken BEFORE the read: the coordinator compares this against a floor, and a
+  // timestamp taken afterwards would claim the listing is fresher than it is.
+  const listingCheckedAt = new Date().toISOString();
+  let reviews;
+  try {
+    reviews = readReviewListing({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh });
+  } catch (err) {
+    emitOutcome({ outcome: 'failed', reason: 'gh-failure' }, log);
+    die(4, `could not read the review listing for ${opts.repo}#${opts.pr}: ${err.message}`);
+    return undefined;
+  }
+  const found = recognise({
+    reviews,
+    head: opts.head,
+    serviceLogin: pinned.body?.login,
+    replacedReviewIds,
+    runId: opts.run,
+    attempt: opts.attempt,
+    // `probable` is "a review by this identity, created after the submission",
+    // so it needs the submission's timestamp. `/status` does not carry one, so
+    // the caller that has it — the row's owner — passes it.
+    postAttemptedAt: opts.postAttemptedAt ?? attempts.find((row) => row.state === 'delivery-unresolved')?.post_attempted_at,
+    listingCheckedAt,
+  });
+  return emitOutcome({ outcome: 'ok', hits: found.hits, listing_checked_at: found.listing_checked_at }, log);
+}
+
+/**
+ * `recover <abandon|not-delivered|withdraw> --attempt-ref <file> --reason "<why>"`
+ *
+ * The operator's half of the R endpoints. None of them allocates anything.
+ * `not-delivered` reads the listing itself — the coordinator requires a listing
+ * checked after the floor, and if that listing shows the review, the honest
+ * answer is that it was delivered, not that it was not.
+ */
+export async function cmdRecover(opts, {
+  runGh = gh,
+  log = console.log,
+  die = fail,
+  diag = console.error,
+  env = process.env,
+  homeDir,
+  makeClient = createClient,
+} = {}) {
+  const refuse = (reason, extra, message, code = 1) => {
+    emitOutcome({ outcome: 'refused', reason, ...extra }, log);
+    die(code, message);
+  };
+  let file;
+  try {
+    file = readAttemptRefFile(opts.attemptRef);
+  } catch (err) {
+    die(2, `could not read the attempt-ref file: ${err.message}`);
+    return undefined;
+  }
+  const resolved = resolveCoordinator({ env, homeDir, fileCoordinator: file.coordinator });
+  if (!resolved.ok) {
+    refuse(resolved.reason, { directory: resolved.directory }, resolved.message);
+    return undefined;
+  }
+  const client = makeClient({ coordinator: resolved.coordinator, token: resolved.token });
+  const attemptRef = file.attempt_ref;
+  const done = (result, line) => {
+    if (!result.ok) {
+      refuse(result.code, result.source === 'coordinator' ? { coordinator_code: result.code } : {}, result.message);
+      return undefined;
+    }
+    discardAttemptRefFile(resolve(opts.attemptRef), diag);
+    return emitOutcome(line, log);
+  };
+
+  if (opts.recoverAction === 'abandon') {
+    return done(await client.recoverAbandon({ attempt_ref: attemptRef, actor: IDENTITY_ACTOR, reason: opts.reason }), { outcome: 'ok', attempt_ref: attemptRef, recovered: 'abandon' });
+  }
+  if (opts.recoverAction === 'withdraw') {
+    return done(await client.recoverWithdraw({ attempt_ref: attemptRef, actor: IDENTITY_ACTOR, reason: opts.reason }), { outcome: 'ok', attempt_ref: attemptRef, recovered: 'withdraw' });
+  }
+
+  const attempt = await client.readAttempt(attemptRef);
+  if (!attempt.ok) {
+    refuse(attempt.code, attempt.source === 'coordinator' ? { coordinator_code: attempt.code } : {}, attempt.message);
+    return undefined;
+  }
+  const postGeneration = attempt.body?.post_generation;
+  // The pinned login comes from the endpoint the contract guarantees for it;
+  // a recogniser with no login to match on would find nothing and report the
+  // head undelivered, which is the one answer that must not be guessed.
+  const pinned = await client.readIdentity();
+  if (!pinned.ok) {
+    refuse(pinned.code, pinned.source === 'coordinator' ? { coordinator_code: pinned.code } : {}, pinned.message);
+    return undefined;
+  }
+  const listingCheckedAt = new Date().toISOString();
+  let reviews;
+  try {
+    reviews = readReviewListing({ repo: attemptRef.repo, pr: attemptRef.pr, cwd: opts.cwd, runGh });
+  } catch (err) {
+    emitOutcome({ outcome: 'failed', reason: 'gh-failure' }, log);
+    die(4, `could not read the review listing for ${attemptRef.repo}#${attemptRef.pr}: ${err.message}`);
+    return undefined;
+  }
+  const found = recognise({
+    reviews,
+    serviceLogin: pinned.body?.login,
+    runId: attemptRef.run_id,
+    attempt: attemptRef.attempt,
+    postAttemptedAt: attempt.body?.post_attempted_at,
+    listingCheckedAt,
+  });
+  const delivered = found.hits.find((item) => item.kind === 'delivery');
+  if (delivered) {
+    // The review is on the pull request. Releasing the head now would invite a
+    // second one; recording the delivery is the arc the contract has for this.
+    diag(`delivered      review ${delivered.review_id} carries this run and attempt`);
+    return done(
+      await client.recoverDelivery({ attempt_ref: attemptRef, actor: IDENTITY_ACTOR, reason: opts.reason, review_id: delivered.review_id, post_generation: postGeneration }),
+      { outcome: 'posted', review_id: delivered.review_id, post_generation: postGeneration },
+    );
+  }
+  return done(
+    await client.recoverNotDelivered({
+      attempt_ref: attemptRef,
+      actor: IDENTITY_ACTOR,
+      reason: opts.reason,
+      post_generation: postGeneration,
+      listing_checked_at: found.listing_checked_at,
+      ...(opts.forceUnverified === undefined ? {} : { force_unverified: opts.forceUnverified }),
+    }),
+    { outcome: 'ok', attempt_ref: attemptRef, recovered: 'not-delivered', post_generation: postGeneration, listing_checked_at: found.listing_checked_at },
+  );
+}
+
+/** `gh` through whichever process runner the caller injected. */
+const ghVia = (runner) => (args, ghOpts) => runner(process.platform === 'win32' ? 'gh.exe' : 'gh', args, ghOpts);
+
+/**
+ * The `provider-limit` signature.
+ *
+ * D8 owes a measured capture of what the harness actually prints when the plan
+ * window closes; until the activation preflight records one, this conservative
+ * match is an ASSUMPTION and everything it does not match is `lens-error`, not
+ * a pause. It is data, in one place, so the preflight can correct it without
+ * touching the classifier.
+ */
+export const PROVIDER_LIMIT_PATTERNS = Object.freeze([
+  /\busage limit\b/i,
+  /\brate limit\b/i,
+  /\bquota exceeded\b/i,
+  /\bplan limit\b/i,
+]);
+
+/** Classify a lens invocation that did not produce a document. */
+export function classifyLensFailure(err) {
+  const text = `${err?.stdout ?? ''}\n${err?.stderr ?? ''}\n${err?.message ?? ''}`;
+  if (err?.killed === true || err?.signal === 'SIGTERM' || err?.code === 'ETIMEDOUT') return 'timeout';
+  if (['ENOENT', 'EACCES', 'EPERM', 'ENOEXEC'].includes(err?.code)) return 'spawn-error';
+  if (PROVIDER_LIMIT_PATTERNS.some((pattern) => pattern.test(text))) return 'provider-limit';
+  return 'lens-error';
+}
+
+/**
+ * Invoke one model lens against an already-rendered prompt.
+ *
+ * Shared with nothing: the standalone path keeps its own body byte-for-byte
+ * (M4). What this adds is classification — every failure leaves as one of D12's
+ * lens reasons, because the caller has to tell the coordinator which of them
+ * happened and the coordinator decides whether another start is allowed.
+ */
+function runLensModel({ lens, cwd, prompt, prFilePaths, run, findCodexExe, now }) {
+  const reasoning = LENS_MODELS[lens].reasoning;
+  const model = LENS_MODELS[lens].model;
+  const tempDir = mkdtempSync(join(tmpdir(), 'slim-review-lens-'));
+  const tempOut = join(tempDir, 'findings.json');
+  const argv = isCodexLens(lens)
+    ? ['exec', '--model', model, '-c', `model_reasoning_effort=${reasoning}`, '--sandbox', 'danger-full-access', '--skip-git-repo-check', '-C', cwd, '--output-schema', SCHEMA_PATH, '-o', tempOut, '-']
+    : ['-p', '--model', model, '--effort', reasoning, '--permission-mode', 'bypassPermissions', '--disallowedTools', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', '--output-format', 'json', '--json-schema', readFileSync(SCHEMA_PATH, 'utf8')];
+  try {
+    let program;
+    try {
+      program = isCodexLens(lens) ? findCodexExe() : (process.platform === 'win32' ? 'claude.exe' : 'claude');
+    } catch (err) {
+      return { ok: false, reason: 'spawn-error', message: `could not resolve the ${lens} executable: ${err.message}` };
+    }
+    const gitExe = process.platform === 'win32' ? 'git.exe' : 'git';
+    let before;
+    try {
+      before = new Set(String(run(gitExe, ['-C', cwd, 'status', '--short', '--porcelain'], { cwd })).split(/\r?\n/).filter(Boolean));
+    } catch (err) {
+      return { ok: false, reason: 'lens-error', message: `could not read the worktree status before the lens: ${err.message}` };
+    }
+    const started = now();
+    let raw;
+    try {
+      raw = run(program, lens === 'opus' ? [...argv, prompt] : argv, { ...(isCodexLens(lens) ? { input: prompt } : {}), cwd });
+    } catch (err) {
+      return { ok: false, reason: classifyLensFailure(err), message: `lens ${lens} failed: ${err.message}` };
+    }
+    const wallMs = now() - started;
+    let after;
+    try {
+      after = String(run(gitExe, ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }));
+    } catch (err) {
+      return { ok: false, reason: 'lens-error', message: `could not read the worktree status after the lens: ${err.message}` };
+    }
+    if (isCodexLens(lens) && !existsSync(tempOut)) {
+      return { ok: false, reason: 'malformed-output', message: `${lens} lens produced no findings file; API/CLI output: ${String(raw).trim()}` };
+    }
+    const source = isCodexLens(lens) ? readFileSync(tempOut, 'utf8') : raw;
+    let doc;
+    try {
+      doc = parseLensOutput(source, lens);
+    } catch (err) {
+      return { ok: false, reason: 'malformed-output', message: `reviewer output is not valid JSON: ${err.message}` };
+    }
+    const problems = validateFindingsShape(doc);
+    if (problems.length > 0) {
+      return { ok: false, reason: 'malformed-output', message: `reviewer output has the wrong shape:\n  - ${problems.join('\n  - ')}` };
+    }
+    const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
+    if (!coverageCheck.ok) {
+      // An incomplete review is an incomplete handback, not a verdict: D5(c)
+      // classes it with malformed output, and the coordinator's per-lens count
+      // decides whether this lens gets another start.
+      return { ok: false, reason: 'malformed-output', message: `reviewer output coverage check failed: ${coverageCheck.reason}` };
+    }
+    const dirty = after.split(/\r?\n/).filter(Boolean).filter((line) => !before.has(line));
+    if (dirty.length > 0) {
+      return { ok: false, reason: 'worktree-dirty', message: `reviewer added worktree changes:\n${dirty.join('\n')}`, wallMs };
+    }
+    return { ok: true, doc, wallMs, model, reasoning };
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * `lens --attempt-ref <file>` — one lens execution against pinned input.
+ *
+ * The manifest comes from the coordinator, the patches from the compare API at
+ * the pinned base and head, and the model is shown that diff instead of being
+ * told to fetch one. Every exit from here reports to `/lens-end`, which is the
+ * sole exhaustion authority: when it answers `terminal`, this writer says
+ * `stop` and never starts another lens itself.
+ */
+async function cmdLensCoordinated(opts, {
+  run = defaultRun,
+  log = console.log,
+  die = fail,
+  diag = console.error,
+  env = process.env,
+  homeDir,
+  makeClient = createClient,
+  findCodexExe = defaultCodexExe,
+  now = Date.now,
+} = {}) {
+  const runGh = ghVia(run);
+  const cwd = resolve(opts.cwd ?? process.cwd());
+  const emit = (line) => emitOutcome(line, log);
+  const refuse = (reason, extra, message, code = 1) => {
+    emit({ outcome: 'refused', reason, ...extra });
+    die(code, message);
+  };
+
+  let file;
+  try {
+    file = readAttemptRefFile(opts.attemptRef);
+  } catch (err) {
+    die(2, `could not read the attempt-ref file: ${err.message}`);
+    return undefined;
+  }
+  const attemptRef = file.attempt_ref;
+  const resolved = resolveCoordinator({ env, homeDir, fileCoordinator: file.coordinator });
+  if (!resolved.ok) {
+    refuse(resolved.reason, { directory: resolved.directory }, resolved.message);
+    return undefined;
+  }
+  const client = makeClient({ coordinator: resolved.coordinator, token: resolved.token });
+  const readHeadNow = () => {
+    try {
+      return String(runGh(['pr', 'view', String(attemptRef.pr), '--repo', attemptRef.repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd })).trim();
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** A writer-local stop refusal after claim: withdraw, then report (D19). */
+  const stop = async (reason, extra, message) => {
+    const headNow = WITHDRAW_REASONS.has(reason) ? readHeadNow() : undefined;
+    if (WITHDRAW_REASONS.has(reason)) {
+      const withdrawn = await client.withdraw({
+        attempt_ref: attemptRef,
+        worker_key: file.worker_key,
+        reason,
+        ...(headNow === undefined ? {} : { head_now: headNow }),
+      });
+      if (!withdrawn.ok) {
+        emit({ outcome: 'refused', reason: withdrawn.code, withdraw_reason: reason, ...(withdrawn.source === 'coordinator' ? { coordinator_code: withdrawn.code } : {}) });
+        die(1, `${message}\nThe withdrawal itself was refused (${withdrawn.code}): ${withdrawn.message}`);
+        return undefined;
+      }
+      discardAttemptRefFile(resolve(opts.attemptRef), diag);
+    }
+    emit({ outcome: 'refused', reason, ...(headNow === undefined ? {} : { head_now: headNow }), ...extra });
+    die(1, message);
+    return undefined;
+  };
+
+  if (opts.forcePost) {
+    return stop('force-post-refused', {}, '--force-post is not available on a coordinated attempt (MN9); the attempt was withdrawn.');
+  }
+  if (opts.singleLens) {
+    return stop('single-lens-refused', {}, '--single-lens is not available on a coordinated attempt: the lens set was fixed at claim; the attempt was withdrawn.');
+  }
+
+  const attempt = await client.readAttempt(attemptRef);
+  if (!attempt.ok) {
+    refuse(attempt.code, attempt.source === 'coordinator' ? { coordinator_code: attempt.code } : {}, attempt.message);
+    return undefined;
+  }
+  const required = attempt.body?.required_lenses ?? file.required_lenses ?? [];
+  if (!required.includes(opts.lens)) {
+    return stop('lens-set-mismatch', { lens: opts.lens, required_lenses: required },
+      `this attempt requires ${required.join(' + ') || '(nothing)'}, and --lens ${opts.lens} is not one of them; the attempt was withdrawn.`);
+  }
+  const manifest = attempt.body?.manifest;
+  if (!manifest || !Array.isArray(manifest.files)) {
+    refuse('coordinator-unreachable', {}, `the coordinator answered without a manifest for ${attemptRef.repo}#${attemptRef.pr}; nothing was started.`);
+    return undefined;
+  }
+  const manifestPaths = manifest.files.map((entry) => entry.filename);
+  const maxDiffBytes = attempt.body?.policy?.maxDiffBytes ?? MAX_DIFF_BYTES;
+  const fetchCompare = () => JSON.parse(runGh(['api', `repos/${attemptRef.repo}/compare/${attemptRef.base_sha}...${attemptRef.head_sha}`], { cwd }));
+  const compareDisagreement = (payload) => {
+    const compareSet = new Set((payload?.files ?? []).map((entry) => entry.filename));
+    const missing = manifestPaths.filter((path) => !compareSet.has(path));
+    const extra = [...compareSet].filter((path) => !manifestPaths.includes(path));
+    return missing.length > 0 || extra.length > 0 ? { missing, extra } : null;
+  };
+  const promptPath = opts.promptOut ? resolve(opts.promptOut) : join(tmpdir(), `slim-review-${opts.lens}-${attemptRef.pr}-prompt.txt`);
+
+  // The dry run renders from the same pinned inputs and stops before anything
+  // mutating: a start consumed by a preview is a start the real run cannot have.
+  if (opts.dryRun) {
+    let payload;
+    try {
+      payload = fetchCompare();
+    } catch (err) {
+      emit({ outcome: 'failed', reason: 'gh-failure' });
+      die(4, `could not fetch the pinned compare: ${err.message}`);
+      return undefined;
+    }
+    const rendered = renderPinnedDiff(payload);
+    const prompt = buildReviewerPrompt({
+      pr: attemptRef.pr,
+      repo: attemptRef.repo,
+      prFilePaths: manifestPaths,
+      manifest,
+      pinned_diff: { head_sha: attemptRef.head_sha, base_sha: attemptRef.base_sha, text: rendered.text, not_reviewed: rendered.not_reviewed },
+    });
+    if (opts.promptOut) {
+      mkdirSync(dirname(promptPath), { recursive: true });
+      writeFileSync(promptPath, prompt, 'utf8');
+    }
+    diag(`prompt path: ${promptPath}`);
+    return emit({ outcome: 'ok', dry_run: true, prompt_path: promptPath, prompt_bytes: Buffer.byteLength(prompt, 'utf8') });
+  }
+
+  const started = await client.lensStart({ attempt_ref: attemptRef, worker_key: file.worker_key, lens: opts.lens });
+  if (!started.ok) {
+    refuse(started.code, {
+      ...(started.source === 'coordinator' ? { coordinator_code: started.code } : {}),
+      ...(started.ended === undefined ? {} : { ended: started.ended }),
+    }, started.message);
+    return undefined;
+  }
+  const executionId = started.body?.execution_id;
+
+  /**
+   * Every exit from here goes through `/lens-end`. `terminal: true` in its
+   * answer is the only thing that turns a retryable reason into `stop`: the
+   * budget belongs to the coordinator, and this writer never re-invokes a lens
+   * on its own.
+   */
+  const finish = async ({ outcome, reason, documentPath, documentSha256, headNow, extra = {}, message, exitCode = 1 }) => {
+    const ended = await client.lensEnd({
+      attempt_ref: attemptRef,
+      worker_key: file.worker_key,
+      lens: opts.lens,
+      execution_id: executionId,
+      outcome,
+      ...(reason === undefined ? {} : { reason }),
+      ...(documentPath === undefined ? {} : { document_path: documentPath, document_sha256: documentSha256 }),
+      ...(headNow === undefined ? {} : { head_now: headNow }),
+    });
+    if (!ended.ok) {
+      emit({ outcome: 'refused', reason: ended.code, execution_id: executionId, ...(ended.source === 'coordinator' ? { coordinator_code: ended.code } : {}) });
+      die(1, `the coordinator refused the lens result (${ended.code}): ${ended.message}`);
+      return undefined;
+    }
+    const terminal = ended.body?.terminal === true;
+    const line = emit({
+      outcome,
+      ...(reason === undefined ? {} : { reason }),
+      // The coordinator's exhaustion answer overrides the table: a third failed
+      // start has already ended the row, so there is nothing to retry into.
+      ...(terminal ? { retry: 'stop' } : {}),
+      execution_id: executionId,
+      ...(documentPath === undefined ? {} : { document: documentPath }),
+      ...(headNow === undefined ? {} : { head_now: headNow }),
+      ...(ended.body?.state === undefined ? {} : { state: ended.body.state }),
+      ...extra,
+    });
+    // Only a terminal FAILURE takes the ref file: `lens_done` is terminal for
+    // this lens and not for the attempt, and `post` still needs the key.
+    if (terminal && outcome !== 'ok') discardAttemptRefFile(resolve(opts.attemptRef), diag);
+    if (outcome !== 'ok') die(exitCode, message ?? `${reason}`);
+    return line;
+  };
+
+  let payload;
+  try {
+    payload = fetchCompare();
+  } catch (err) {
+    return finish({ outcome: 'failed', reason: 'gh-failure', message: `could not fetch the pinned compare: ${err.message}`, exitCode: 4 });
+  }
+  const disagreement = compareDisagreement(payload);
+  if (disagreement) {
+    // Nothing has been invoked yet, and nothing will be: the compare and the
+    // manifest describe different changes, so there is no pinned input.
+    const headNow = readHeadNow();
+    const moved = headNow !== undefined && headNow !== attemptRef.head_sha;
+    return finish({
+      outcome: 'refused',
+      reason: moved ? 'revision-mismatch' : 'input-mismatch',
+      headNow,
+      extra: { compare_missing: disagreement.missing, compare_extra: disagreement.extra },
+      message: `the pinned compare does not match the manifest (missing: ${disagreement.missing.join(', ') || 'none'}; extra: ${disagreement.extra.join(', ') || 'none'}); the model was not invoked.`,
+    });
+  }
+  const rendered = renderPinnedDiff(payload);
+  if (rendered.bytes > maxDiffBytes) {
+    return finish({
+      outcome: 'refused',
+      reason: 'diff-too-large',
+      extra: { patch_bytes: rendered.bytes, max_diff_bytes: maxDiffBytes },
+      message: `the pinned diff is ${rendered.bytes} bytes and the bound is ${maxDiffBytes}; the model was not invoked.`,
+    });
+  }
+
+  const prompt = buildReviewerPrompt({
+    pr: attemptRef.pr,
+    repo: attemptRef.repo,
+    prFilePaths: manifestPaths,
+    manifest,
+    pinned_diff: { head_sha: attemptRef.head_sha, base_sha: attemptRef.base_sha, text: rendered.text, not_reviewed: rendered.not_reviewed },
+  });
+  if (opts.promptOut) {
+    mkdirSync(dirname(promptPath), { recursive: true });
+    writeFileSync(promptPath, prompt, 'utf8');
+  }
+  const result = runLensModel({ lens: opts.lens, cwd, prompt, prFilePaths: manifestPaths, run, findCodexExe, now });
+  if (!result.ok) {
+    return finish({ outcome: 'failed', reason: result.reason, message: result.message, exitCode: result.reason === 'gh-failure' ? 4 : 3 });
+  }
+
+  const doc = result.doc;
+  doc.lens = opts.lens;
+  doc.model = result.model;
+  doc.reasoning = result.reasoning;
+  doc.wall_ms = result.wallMs;
+  doc.findings = doc.findings.map((finding) => ({ ...finding, lens: opts.lens }));
+  // The four stamps. `post` refuses on any disagreement between these, the
+  // AttemptRef, the marker and the head it re-reads.
+  doc.head_sha = attemptRef.head_sha;
+  doc.base_sha = attemptRef.base_sha;
+  doc.attempt = attemptRef.attempt;
+  doc.run_id = attemptRef.run_id;
+
+  const documentPath = opts.out ? resolve(opts.out) : join(dirname(resolve(opts.attemptRef)), `${opts.lens}.json`);
+  mkdirSync(dirname(documentPath), { recursive: true });
+  writeFileSync(documentPath, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+  const documentSha256 = createHash('sha256').update(readFileSync(documentPath)).digest('hex');
+  diag(`wrote          ${documentPath}`);
+  recordMeasurement({
+    measureLog: opts.measureLog,
+    cwd,
+    diag,
+    row: {
+      ts: new Date().toISOString(), repo: attemptRef.repo, pr: Number(attemptRef.pr), lens: opts.lens,
+      model: result.model, reasoning: result.reasoning, wall_ms: result.wallMs, ...countSeverities(doc.findings),
+      examined: doc.examined_paths.length, coverage: doc.coverage, attempt: attemptRef.attempt, run_id: attemptRef.run_id,
+    },
+  });
+  return finish({ outcome: 'ok', documentPath, documentSha256, extra: { document_sha256: documentSha256 } });
+}
+
+/**
+ * Append a measurement row when a log can be resolved.
+ *
+ * Best effort on the coordinated path: the scheduled half runs outside any
+ * workspace, and a missing measurement log must not turn a completed lens into
+ * a usage error.
+ */
+function recordMeasurement({ measureLog, cwd, diag, row }) {
+  const file = measureLog ? resolve(measureLog) : (() => {
+    const root = process.env.WORKIT_WORKSPACE_ROOT || findWorkspaceRoot(cwd);
+    return root ? join(root, ...MEASURE_SUBPATH) : null;
+  })();
+  if (!file) {
+    diag('measurement    skipped: no --measure-log and no workspace root');
+    return;
+  }
+  appendMeasurementRow(file, row);
+}
+
+/** Load one persisted findings document without exiting the process. */
+function loadDocumentSafely(path) {
+  if (!existsSync(path)) return { ok: false, problem: `findings file not found: ${path}` };
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    return { ok: false, problem: `findings file is not valid JSON: ${path} (${err.message})` };
+  }
+  const problems = validateFindingsShape(parsed);
+  if (problems.length > 0) return { ok: false, problem: `findings file has the wrong shape: ${path}\n  - ${problems.join('\n  - ')}` };
+  return { ok: true, doc: parsed };
+}
+
+/**
+ * `post --attempt-ref <file>` — the coordinated submission.
+ *
+ * Guard order is the contract (D5e): identity, then the head, then the stamps,
+ * then the required-lens set, then per-document coverage against the pinned
+ * manifest — all of it before `reserve-post`, so a deterministic contradiction
+ * costs zero POSTs. After the reservation this process sends the review itself
+ * and spawns nothing until `/resolve` has been called: the process that
+ * reserved has to be the process that sends, or a recovery pass cannot tell a
+ * dead sender from a live one.
+ */
+async function cmdPostCoordinated(opts, {
+  runGh = ghOrDie,
+  log = console.log,
+  die = fail,
+  diag = console.error,
+  env = process.env,
+  homeDir,
+  makeClient = createClient,
+  fetchImpl = fetch,
+  senderPid = process.pid,
+  timeoutMs = 15000,
+} = {}) {
+  const emit = (line) => emitOutcome(line, log);
+  const refuse = (reason, extra, message, code = 1) => {
+    emit({ outcome: 'refused', reason, ...extra });
+    die(code, message);
+  };
+  let file;
+  try {
+    file = readAttemptRefFile(opts.attemptRef);
+  } catch (err) {
+    die(2, `could not read the attempt-ref file: ${err.message}`);
+    return undefined;
+  }
+  const attemptRef = file.attempt_ref;
+  const resolved = resolveCoordinator({ env, homeDir, fileCoordinator: file.coordinator });
+  if (!resolved.ok) {
+    refuse(resolved.reason, { directory: resolved.directory }, resolved.message);
+    return undefined;
+  }
+  const client = makeClient({ coordinator: resolved.coordinator, token: resolved.token });
+  const refFile = resolve(opts.attemptRef);
+  const readHeadNow = () => {
+    try {
+      return String(runGh(['pr', 'view', String(attemptRef.pr), '--repo', attemptRef.repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd: opts.cwd })).trim();
+    } catch {
+      return undefined;
+    }
+  };
+
+  /** Writer-local stop refusal after claim: withdraw in this same invocation. */
+  const stop = async (reason, extra, message, headNow) => {
+    const head = headNow ?? (WITHDRAW_REASONS.has(reason) ? readHeadNow() : undefined);
+    if (WITHDRAW_REASONS.has(reason)) {
+      const withdrawn = await client.withdraw({
+        attempt_ref: attemptRef,
+        worker_key: file.worker_key,
+        reason,
+        ...(head === undefined ? {} : { head_now: head }),
+      });
+      if (!withdrawn.ok) {
+        emit({ outcome: 'refused', reason: withdrawn.code, withdraw_reason: reason, ...(withdrawn.source === 'coordinator' ? { coordinator_code: withdrawn.code } : {}) });
+        die(1, `${message}\nThe withdrawal itself was refused (${withdrawn.code}): ${withdrawn.message}`);
+        return undefined;
+      }
+      discardAttemptRefFile(refFile, diag);
+    }
+    emit({ outcome: 'refused', reason, ...(head === undefined ? {} : { head_now: head }), ...extra });
+    die(1, message);
+    return undefined;
+  };
+
+  if (opts.forcePost) return stop('force-post-refused', {}, '--force-post is not available on a coordinated attempt (MN9); the attempt was withdrawn. Nothing was posted.');
+  if (opts.singleLens) return stop('single-lens-refused', {}, '--single-lens is not available on a coordinated attempt: the lens set was fixed at claim. Nothing was posted.');
+
+  // 1. identity, with the credential this process is about to post with
+  const pinned = await client.readIdentity();
+  if (!pinned.ok) {
+    refuse(pinned.code, pinned.source === 'coordinator' ? { coordinator_code: pinned.code } : {}, pinned.message);
+    return undefined;
+  }
+  let login;
+  try {
+    login = String(runGh(['api', 'user', '-q', '.login'], { cwd: opts.cwd })).trim();
+  } catch (err) {
+    emit({ outcome: 'failed', reason: 'gh-failure' });
+    die(4, `gh api user failed: ${err?.stderr ? String(err.stderr).trim() : err.message}`);
+    return undefined;
+  }
+  if (login !== pinned.body?.login) {
+    return stop('identity-mismatch', { login, pinned_login: pinned.body?.login ?? null },
+      `this credential posts as ${login || '(nothing)'} and the coordinator has ${pinned.body?.login} pinned; the attempt was withdrawn and nothing was posted.`);
+  }
+
+  // 2. the head, re-read now
+  const headNow = readHeadNow();
+  if (headNow === undefined) {
+    emit({ outcome: 'failed', reason: 'gh-failure' });
+    die(4, `could not re-read the head of ${attemptRef.repo}#${attemptRef.pr}; nothing was posted.`);
+    return undefined;
+  }
+  if (headNow !== attemptRef.head_sha) {
+    return stop('revision-mismatch', { head_sha: attemptRef.head_sha },
+      `the head moved from ${attemptRef.head_sha.slice(0, 7)} to ${headNow.slice(0, 7)}; the findings describe the old head. Nothing was posted.`, headNow);
+  }
+
+  // 3. the row: the manifest to check against, and the documents to post
+  const attempt = await client.readAttempt(attemptRef);
+  if (!attempt.ok) {
+    refuse(attempt.code, attempt.source === 'coordinator' ? { coordinator_code: attempt.code } : {}, attempt.message);
+    return undefined;
+  }
+  const manifest = attempt.body?.manifest;
+  if (!manifest || !Array.isArray(manifest.files)) {
+    refuse('coordinator-unreachable', {}, `the coordinator answered without a manifest for ${attemptRef.repo}#${attemptRef.pr}; nothing was posted.`);
+    return undefined;
+  }
+  const manifestPaths = manifest.files.map((entry) => entry.filename);
+  const required = attempt.body?.required_lenses ?? file.required_lenses ?? [];
+  const lensState = attempt.body?.lens_state ?? {};
+  const documents = [];
+  for (const lens of Object.keys(lensState)) {
+    const path = lensState[lens]?.document_path;
+    if (!path) continue;
+    const loaded = loadDocumentSafely(resolve(path));
+    if (!loaded.ok) {
+      return stop('lens-set-mismatch', { lens }, `the ${lens} document the row points at could not be read, so the posted set cannot be the required set: ${loaded.problem}. Nothing was posted.`);
+    }
+    documents.push({ lens, path, doc: loaded.doc });
+  }
+
+  // 4. the stamped lens set must be the row's, exactly
+  const stampedLenses = [...new Set(documents.map((item) => item.doc.lens ?? item.lens))].sort();
+  const requiredSorted = [...required].sort();
+  if (stampedLenses.length !== requiredSorted.length || stampedLenses.some((lens, i) => lens !== requiredSorted[i])) {
+    return stop('lens-set-mismatch', { stamped_lenses: stampedLenses, required_lenses: requiredSorted },
+      `this attempt requires ${requiredSorted.join(' + ') || '(nothing)'} and the documents carry ${stampedLenses.join(' + ') || '(nothing)'}. Nothing was posted.`);
+  }
+
+  // 5. every stamp agrees with the AttemptRef and with the other document
+  for (const item of documents) {
+    for (const stamp of DOCUMENT_STAMPS) {
+      if (String(item.doc[stamp]) !== String(attemptRef[stamp])) {
+        return stop('revision-mismatch', { lens: item.lens, stamp, document_value: item.doc[stamp] ?? null, attempt_value: attemptRef[stamp] },
+          `the ${item.lens} document is stamped ${stamp}=${item.doc[stamp]} and this attempt is ${stamp}=${attemptRef[stamp]}. Nothing was posted.`, headNow);
+      }
+    }
+  }
+
+  // 6. the marker the review will carry, checked against the same stamps
+  const supersedes = attempt.body?.supersedes_review_id ?? null;
+  const markerFromDocuments = buildMarker({
+    repo: attemptRef.repo, pr: attemptRef.pr, head: documents[0]?.doc.head_sha, base: documents[0]?.doc.base_sha,
+    lenses: stampedLenses, run: documents[0]?.doc.run_id, attempt: documents[0]?.doc.attempt, policy: pluginVersion(), supersedes,
+  });
+  const markerFromRef = buildMarker({
+    repo: attemptRef.repo, pr: attemptRef.pr, head: attemptRef.head_sha, base: attemptRef.base_sha,
+    lenses: requiredSorted, run: attemptRef.run_id, attempt: attemptRef.attempt, policy: pluginVersion(), supersedes,
+  });
+  if (markerFromDocuments !== markerFromRef) {
+    return stop('revision-mismatch', { marker: markerFromDocuments }, `the marker built from the documents disagrees with the marker built from this attempt. Nothing was posted.`, headNow);
+  }
+
+  // 7. per-document coverage against the PINNED manifest — the check that
+  //    already existed, pointed at the manifest instead of a live listing.
+  for (const item of documents) {
+    const check = checkCoverage(item.doc.coverage, item.doc.examined_paths, manifestPaths);
+    if (!check.ok) {
+      return stop('coverage-mismatch', { lens: item.lens, coverage_reason: check.reason },
+        `the ${item.lens} document does not cover the pinned manifest: ${check.reason}. Nothing was posted.`);
+    }
+  }
+
+  // 8. anchoring, against the same pinned patches the lenses were shown
+  let comparePayload;
+  try {
+    comparePayload = JSON.parse(runGh(['api', `repos/${attemptRef.repo}/compare/${attemptRef.base_sha}...${attemptRef.head_sha}`], { cwd: opts.cwd }));
+  } catch (err) {
+    emit({ outcome: 'failed', reason: 'gh-failure' });
+    die(4, `could not fetch the pinned compare: ${err.message}. Nothing was posted.`);
+    return undefined;
+  }
+  const rendered = renderPinnedDiff(comparePayload);
+  const diffFiles = parseDiff(rendered.text);
+  const findings = documents.flatMap((item) => item.doc.findings.map((finding) => ({ ...finding, lens: finding.lens ?? item.doc.lens ?? item.lens })));
+  const { anchored, offDiffChanged, offDiffUnchanged, offLine } = partitionFindings(findings, diffFiles, manifestPaths);
+  const lensCounts = stampedLenses.map((lens) => {
+    const own = findings.filter((finding) => finding.lens === lens);
+    return {
+      lens,
+      P1: own.filter((finding) => finding.severity === 'P1').length,
+      P2: own.filter((finding) => finding.severity === 'P2').length,
+      P3: own.filter((finding) => finding.severity === 'P3').length,
+    };
+  });
+  const payload = buildReviewPayload({
+    summary: documents.map((item) => item.doc.summary).join('\n\n'),
+    coverage: `examined ${manifestPaths.length} of ${manifestPaths.length} changed files`,
+    anchored,
+    offDiffChanged,
+    offDiffUnchanged,
+    offLine,
+    coverageCheck: { ok: true, missing: [], extra: [], reason: '' },
+    warnings: rendered.not_reviewed.length > 0 ? [`not reviewed (no patch in the pinned compare): ${rendered.not_reviewed.join(', ')}`] : [],
+    lensCounts,
+  });
+  payload.commit_id = attemptRef.head_sha;
+  payload.body = `${payload.body}\n\n${markerFromRef}`;
+  diag(`repo           ${attemptRef.repo}`);
+  diag(`pr             #${attemptRef.pr}`);
+  diag(`head           ${attemptRef.head_sha.slice(0, 7)} (attempt ${attemptRef.attempt})`);
+  diag(`changed files  ${manifestPaths.length} from the pinned manifest (${diffFiles.size} with commentable lines)`);
+  diag(`findings       ${findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff`);
+
+  if (opts.dryRun) {
+    diag('--dry-run: nothing posted, nothing reserved.');
+    return emit({ outcome: 'ok', dry_run: true, review_body_bytes: Buffer.byteLength(payload.body, 'utf8'), comments: payload.comments.length });
+  }
+
+  // 9. the credential, read BEFORE the reservation: `gh auth token` is a child
+  //    process, and no process may be spawned between reserving and resolving.
+  let githubToken = env.GH_TOKEN ?? env.GITHUB_TOKEN;
+  if (!githubToken) {
+    try {
+      githubToken = String(runGh(['auth', 'token'], { cwd: opts.cwd })).trim();
+    } catch (err) {
+      emit({ outcome: 'failed', reason: 'gh-failure' });
+      die(4, `could not read a GitHub credential: ${err.message}. Nothing was posted.`);
+      return undefined;
+    }
+  }
+  if (!githubToken) {
+    emit({ outcome: 'failed', reason: 'gh-failure' });
+    die(4, 'gh auth token returned nothing; there is no credential to post with.');
+    return undefined;
+  }
+
+  // 10. reserve, send, resolve — one process, no spawn, no retry
+  const reserved = await client.reservePost({ attempt_ref: attemptRef, worker_key: file.worker_key, sender_pid: senderPid });
+  if (!reserved.ok) {
+    if (['sender-unverifiable', 'disabled', 'paused', 'attempt-ended'].includes(reserved.code)) discardAttemptRefFile(refFile, diag);
+    refuse(reserved.code, reserved.source === 'coordinator' ? { coordinator_code: reserved.code } : {}, reserved.message);
+    return undefined;
+  }
+  const postGeneration = reserved.body?.post_generation;
+  const url = reviewsUrl({ repo: attemptRef.repo, pr: attemptRef.pr, env });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  let error;
+  let bodyText;
+  try {
+    response = await fetchImpl(url, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${githubToken}`,
+        accept: 'application/vnd.github+json',
+        'content-type': 'application/json',
+        'user-agent': 'slim-review',
+      },
+      body: JSON.stringify(payload),
+      // A followed redirect can re-send a request the first connection already
+      // delivered. There is no retry here and no second attempt anywhere.
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    bodyText = await response.text();
+  } catch (err) {
+    error = err;
+  } finally {
+    clearTimeout(timer);
+  }
+  const classified = classifyPostOutcome({ response, error, bodyText });
+  diag(`submission     ${classified.outcome}${classified.detail ? ` (${classified.detail})` : ''}`);
+
+  const settled = await client.resolve({
+    attempt_ref: attemptRef,
+    worker_key: file.worker_key,
+    post_generation: postGeneration,
+    outcome: classified.wire,
+    ...(classified.review_id === undefined ? {} : { review_id: classified.review_id }),
+    ...(classified.reason === undefined ? {} : { reason: classified.detail ?? classified.reason }),
+    head_now: headNow,
+  });
+  if (!settled.ok) {
+    emit({
+      outcome: 'refused',
+      reason: settled.code,
+      post_generation: postGeneration,
+      submission: classified.outcome,
+      ...(classified.review_id === undefined ? {} : { review_id: classified.review_id }),
+      ...(settled.source === 'coordinator' ? { coordinator_code: settled.code } : {}),
+    });
+    die(1, `the review was ${classified.outcome} and the coordinator refused the resolution (${settled.code}): ${settled.message}`);
+    return undefined;
+  }
+  // The ref file is deleted only when the attempt has left the live set. It
+  // must survive `not-sent`, which returns the row to `lens_done` and needs the
+  // same key for the second submission.
+  const state = settled.body?.state;
+  const terminal = settled.body?.terminal === true
+    || ['posted', 'post_rejected', 'failed', 'replaced', 'superseded', 'withdrawn'].includes(state)
+    || (state === undefined && ['posted', 'post_rejected'].includes(classified.outcome));
+  if (terminal) discardAttemptRefFile(refFile, diag);
+  if (classified.outcome === 'posted') diag(`posted         ${classified.html_url ?? `review ${classified.review_id}`}`);
+  const line = emit({
+    outcome: classified.outcome,
+    ...(classified.reason === undefined ? {} : { reason: classified.reason }),
+    post_generation: postGeneration,
+    ...(classified.review_id === undefined ? {} : { review_id: classified.review_id }),
+    head_now: headNow,
+    ...(state === undefined ? {} : { state }),
+  });
+  if (classified.outcome !== 'posted') die(1, `review not posted: ${classified.outcome}${classified.detail ? ` (${classified.detail})` : ''}`);
+  return line;
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,7 +2552,7 @@ export async function cmdIdentity(opts, {
 // ---------------------------------------------------------------------------
 
 /** Commands that are about an installation or a login, never about one PR. */
-const NO_PR_COMMANDS = new Set(['managed', 'identity']);
+const NO_PR_COMMANDS = new Set(['managed', 'identity', 'recover']);
 
 const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
 
@@ -1068,11 +2572,35 @@ const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
            pins the posting login (from gh api user) at the coordinator, once,
            from the environment the service runs under. Takes no --pr
 
+On a managed repository (see below), the coordinated flow replaces steps 2 and 3:
+
+  manifest --pr <n> --repo owner/name
+           read-only: the pinned file list between two head reads, as
+           {manifest, base_sha}. The one manifest producer
+  claim    --pr <n> --repo owner/name [--supersede <review id> --reason "<why>"]
+           [--single-lens "<why>" --lens codex|astra] [--owner-label <label>]
+           [--attempt-ref-out <path>]
+           allocates one attempt for the current head and writes the attempt-ref
+           file (owner-only) whose path it prints
+  lens     --attempt-ref <file> --lens codex|astra [--out <findings.json>]
+           [--prompt-out <path>] [--dry-run]
+           one lens execution against the pinned diff. --out defaults to the
+           attempt's own directory
+  post     --attempt-ref <file> [--dry-run]
+           the coordinated submission: both documents, checked against the
+           pinned manifest, posted by this process
+  recognise --pr <n> --repo owner/name --head <sha>
+           [--run <uuid> --attempt <k> --post-attempted-at <iso>]
+           read-only: which reviews on this PR are already this identity's
+  recover  abandon|not-delivered|withdraw --attempt-ref <file> --reason "<why>"
+           [--force-unverified "<why>"]   the operator's recovery arcs
+
 Coordinated output:
-  managed and identity print exactly one JSON line on stdout
-  ({outcome, reason?, retry, …}) with diagnostics on stderr. Their exit codes
-  are for humans and non-contractual: 0 ok, 1 refused, 4 a gh call failed.
-  The standalone commands above print no such line.
+  managed, identity, manifest, claim, recognise, recover, and lens / post under
+  --attempt-ref print exactly one JSON line on stdout ({outcome, reason?, retry,
+  …}) with every diagnostic on stderr. Their exit codes are for humans and
+  non-contractual: 0 ok, 1 refused, 3 no usable handback, 4 a gh call failed.
+  The standalone commands above print no such line. Nothing retries itself.
 
 Managed directory (both files optional; absent token = standalone everywhere):
   %USERPROFILE%/.workit/pr-review/coordinator-token   (env PR_REVIEW_COORDINATOR_TOKEN wins)
@@ -1099,8 +2627,14 @@ function fail(code, msg) {
 }
 
 export function parseArgs(argv) {
-  const [cmd, ...rest] = argv;
+  const [cmd, ...args] = argv;
   const opts = { cmd };
+  // `recover` is the one command with a positional: the recovery arc it runs is
+  // not a flag, because each is a different endpoint with different evidence.
+  const rest = [...args];
+  if (cmd === 'recover' && rest.length > 0 && !rest[0].startsWith('--')) {
+    opts.recoverAction = rest.shift();
+  }
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     const next = () => {
@@ -1155,6 +2689,30 @@ export function parseArgs(argv) {
         opts.reason = v;
         break;
       }
+      case '--attempt-ref': opts.attemptRef = next(); break;
+      case '--post-attempted-at': opts.postAttemptedAt = next(); break;
+      case '--attempt-ref-out': opts.attemptRefOut = next(); break;
+      case '--owner-label': opts.ownerLabel = next(); break;
+      case '--head': opts.head = next(); break;
+      case '--run': opts.run = next(); break;
+      case '--attempt': {
+        const v = next();
+        if (!/^\d+$/.test(v)) fail(2, '--attempt must be a number');
+        opts.attempt = Number(v);
+        break;
+      }
+      case '--supersede': {
+        const v = next();
+        if (!/^\d+$/.test(v)) fail(2, '--supersede must be a numeric review id');
+        opts.supersede = v;
+        break;
+      }
+      case '--force-unverified': {
+        const v = next();
+        if (v.trim() === '') fail(2, '--force-unverified needs a non-empty reason');
+        opts.forceUnverified = v;
+        break;
+      }
       case '-h': case '--help': opts.help = true; break;
       default: fail(2, `unknown argument: ${a}\n\n${USAGE}`);
     }
@@ -1174,21 +2732,53 @@ function main(argv) {
   // a per-PR pin, which is not a thing.
   if (NO_PR_COMMANDS.has(opts.cmd)) {
     if (opts.pr !== undefined) fail(2, `${opts.cmd} takes no --pr`);
+  } else if (opts.attemptRef) {
+    // Under --attempt-ref the pull request is a field of the AttemptRef, and
+    // every call validates all six fields; a second, typed-in copy could only
+    // disagree with it.
+    if (opts.pr !== undefined) fail(2, `${opts.cmd} --attempt-ref takes no --pr: the attempt names its own pull request`);
   } else if (!opts.pr || !/^\d+$/.test(String(opts.pr))) {
     fail(2, '--pr <n> is required and must be a number');
   }
 
   switch (opts.cmd) {
     case 'post':
+      if (opts.attemptRef) {
+        // The documents come from the attempt's own row under --attempt-ref;
+        // a --findings pair would be a second, unpinned source for the same
+        // question, which is the thing the coordination exists to remove.
+        if (opts.findings) fail(2, 'post --attempt-ref takes no --findings: the documents come from the attempt');
+        return cmdPost(opts);
+      }
       if (!opts.repo) fail(2, 'post needs --repo owner/name');
       if (!opts.findings) fail(2, 'post needs --findings <file>');
       return cmdPost(opts);
     case 'lens':
-      if (!opts.repo) fail(2, 'lens needs --repo owner/name');
       if (!LENSES.has(opts.lens)) fail(2, `lens needs --lens ${LENS_LIST}`);
-      if (!opts.out) fail(2, 'lens needs --out <findings.json>');
       if (opts.reasoning && !['low', 'medium', 'high'].includes(opts.reasoning)) fail(2, 'lens --reasoning must be low, medium, or high');
+      if (opts.attemptRef) return cmdLens(opts);
+      if (!opts.repo) fail(2, 'lens needs --repo owner/name');
+      if (!opts.out) fail(2, 'lens needs --out <findings.json>');
       return cmdLens(opts);
+    case 'manifest':
+      if (!opts.repo) fail(2, 'manifest needs --repo owner/name');
+      return cmdManifest(opts);
+    case 'claim':
+      if (!opts.repo) fail(2, 'claim needs --repo owner/name');
+      if (opts.supersede !== undefined && !opts.reason) fail(2, 'claim --supersede needs --reason "<why>" — it is logged verbatim on the row');
+      if (opts.singleLens && opts.lens && !LENSES.has(opts.lens)) fail(2, `claim --lens must be one of ${LENS_LIST}`);
+      return cmdClaim(opts);
+    case 'recognise':
+      if (!opts.repo) fail(2, 'recognise needs --repo owner/name');
+      if (!opts.head) fail(2, 'recognise needs --head <sha>');
+      return cmdRecognise(opts);
+    case 'recover':
+      if (!['abandon', 'not-delivered', 'withdraw'].includes(opts.recoverAction)) {
+        fail(2, 'recover needs one of abandon, not-delivered, withdraw');
+      }
+      if (!opts.attemptRef) fail(2, 'recover needs --attempt-ref <file>');
+      if (!opts.reason) fail(2, 'recover needs --reason "<why>" — it is logged verbatim on the row');
+      return cmdRecover(opts);
     case 'threads':
       // Not cosmetic: `threads --pr 53 --unresolved` from the wrong cwd prints
       // "no unresolved review threads" — the merge-ready signal — about someone

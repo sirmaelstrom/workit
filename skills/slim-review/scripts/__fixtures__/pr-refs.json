@@ -1,0 +1,9 @@
+{
+  "$capture": "gh pr view 88 --repo sirmaelstrom/workit --json headRefOid,baseRefOid  — captured 2026-09-10 against the real endpoint, verbatim.",
+  "repo": "sirmaelstrom/workit",
+  "pr": 88,
+  "payload": {
+    "baseRefOid": "ebd6773514c1adc5a8059e7fbeec8c5305aba15e",
+    "headRefOid": "0e8e2ab10f01f181e8eef8c639e058c9760044f2"
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "$capture": "gh api --paginate repos/sirmaelstrom/workit/pulls/76/reviews --jq '.[] | {review_id: .id, author_login: .user.login, commit_id, submitted_at, state, body}'  — the entry shape and the first two ids are the capture's (2026-09-10). The bodies are this workshop's: a marker review, a legacy footer-only review by the same login on a later page, a review by another login, a review on a different head, and a review the coordinator reports replaced. A live capture cannot contain markers that do not exist yet.",
+  "repo": "sirmaelstrom/workit",
+  "pr": 88,
+  "head_sha": "0e8e2ab10f01f181e8eef8c639e058c9760044f2",
+  "other_head_sha": "77e1a4f0e0d9c8b7a6958473625140f9e8d7c6b5",
+  "service_login": "slim-review-service",
+  "run_id": "3f2b7c1e-8d4a-4f6b-9c2e-1a5d7e9b0c34",
+  "pages": [
+    [
+      {
+        "review_id": 5152010493,
+        "author_login": "slim-review-service",
+        "commit_id": "0e8e2ab10f01f181e8eef8c639e058c9760044f2",
+        "submitted_at": "2026-09-10T08:53:09Z",
+        "state": "COMMENTED",
+        "body": "Two lenses looked at this.\n\n---\n\n_Slim review · 1 anchored · 0 off-line · 0 not-anchorable · 0 off-diff · examined 8 of 8 changed files_\n\n<!-- slim-review repo=sirmaelstrom/workit pr=88 head=0e8e2ab10f01f181e8eef8c639e058c9760044f2 base=ebd6773514c1adc5a8059e7fbeec8c5305aba15e lenses=astra+codex run=3f2b7c1e-8d4a-4f6b-9c2e-1a5d7e9b0c34 attempt=1 policy=1.22.0 supersedes=- -->"
+      },
+      {
+        "review_id": 5152039575,
+        "author_login": "another-contributor",
+        "commit_id": "0e8e2ab10f01f181e8eef8c639e058c9760044f2",
+        "submitted_at": "2026-09-10T08:56:10Z",
+        "state": "COMMENTED",
+        "body": "Looks good to me."
+      }
+    ],
+    [
+      {
+        "review_id": 5152040001,
+        "author_login": "slim-review-service",
+        "commit_id": "0e8e2ab10f01f181e8eef8c639e058c9760044f2",
+        "submitted_at": "2026-09-10T09:02:44Z",
+        "state": "COMMENTED",
+        "body": "A legacy review, posted before the marker existed.\n\n---\n\n_Slim review · 0 anchored · 0 off-line · 0 not-anchorable · 0 off-diff · examined 8 of 8 changed files_"
+      },
+      {
+        "review_id": 5152040002,
+        "author_login": "slim-review-service",
+        "commit_id": "77e1a4f0e0d9c8b7a6958473625140f9e8d7c6b5",
+        "submitted_at": "2026-09-10T09:10:02Z",
+        "state": "COMMENTED",
+        "body": "An earlier head, and a different attempt.\n\n<!-- slim-review repo=sirmaelstrom/workit pr=88 head=77e1a4f0e0d9c8b7a6958473625140f9e8d7c6b5 base=ebd6773514c1adc5a8059e7fbeec8c5305aba15e lenses=astra+codex run=3f2b7c1e-8d4a-4f6b-9c2e-1a5d7e9b0c34 attempt=2 policy=1.22.0 supersedes=- -->"
+      },
+      {
+        "review_id": 5152040003,
+        "author_login": "slim-review-service",
+        "commit_id": "0e8e2ab10f01f181e8eef8c639e058c9760044f2",
+        "submitted_at": "2026-09-10T09:14:19Z",
+        "state": "COMMENTED",
+        "body": "Replaced by the operator.\n\n<!-- slim-review repo=sirmaelstrom/workit pr=88 head=0e8e2ab10f01f181e8eef8c639e058c9760044f2 base=ebd6773514c1adc5a8059e7fbeec8c5305aba15e lenses=astra+codex run=9d8c7b6a-5e4f-4a3b-8c2d-1e0f9a8b7c65 attempt=1 policy=1.21.15 supersedes=- -->"
+      }
+    ]
+  ]
+}

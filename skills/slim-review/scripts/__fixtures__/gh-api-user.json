@@ -1,0 +1,5 @@
+{
+  "$capture": "gh api user -q .login  — the command the writer runs before a claim and again before a post. The two logins here are placeholders rather than a capture of a real account: the value is compared against the coordinator's pinned login and nothing else, and a captured profile would put a real person's account and address in a public repository (M7).",
+  "service_login": "slim-review-service",
+  "other_login": "someone-else"
+}

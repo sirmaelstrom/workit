@@ -1,0 +1,19 @@
+{
+  "$capture": "gh api --paginate repos/sirmaelstrom/workit/pulls/88/files --jq '.[] | {filename, sha, status, has_patch: has(\"patch\")}'  — captured 2026-09-10 against the real endpoint. Split into two pages here so a reader that stops at the first page fails, and two entries were appended (docs/diagram.png, docs/moved.md) so the compare fixture beside this one can carry a binary and a patch-less entry against the same file set.",
+  "repo": "sirmaelstrom/workit",
+  "pr": 88,
+  "pages": [
+    [
+      { "filename": "skills/slim-review/SKILL.md", "sha": "a8fea7209d7167035e58c69cb76d78695c6da232", "status": "modified", "has_patch": true },
+      { "filename": "skills/slim-review/scripts/__fixtures__/d12-reason-table.json", "sha": "7866b5cf210cedcaf11892fdbd788a356536d1ee", "status": "added", "has_patch": true },
+      { "filename": "skills/slim-review/scripts/pr-review-coordinator.mjs", "sha": "668d83b67249beecbed722f06879f79674a5d071", "status": "added", "has_patch": true },
+      { "filename": "skills/slim-review/scripts/pr-review-managed.mjs", "sha": "037f9473faebf4fecf737be96cf5e56e7f1ecf5b", "status": "added", "has_patch": true }
+    ],
+    [
+      { "filename": "skills/slim-review/scripts/pr-review.mjs", "sha": "a3428c833005ed9decd553f5126e915ca757b6cd", "status": "modified", "has_patch": true },
+      { "filename": "skills/slim-review/scripts/pr-review.test.mjs", "sha": "57598f6a5f29852fd05391177e2eb7c7434163e9", "status": "modified", "has_patch": true },
+      { "filename": "docs/diagram.png", "sha": "1f0c9de1d0b1c5f5b3a4c9a7e2d6f8b0c1a2d3e4", "status": "modified", "has_patch": false },
+      { "filename": "docs/moved.md", "sha": "2e1d8cf2e1c2d6a6c4b5daf8e3e7a9c1d2b3e4f5", "status": "renamed", "has_patch": false }
+    ]
+  ]
+}
