@@ -52,10 +52,17 @@ export const CLIENT_REASONS = Object.freeze({
 /** AttemptRef — all six fields are validated on every call that carries one. */
 export const ATTEMPT_REF_FIELDS = Object.freeze(['repo', 'pr', 'head_sha', 'base_sha', 'attempt', 'run_id']);
 
-function refusal(code, { status, live, ended, message } = {}) {
+/**
+ * `source` says who named the code, which is not the same question as who
+ * answered: a 404 on the identity route is the coordinator's response but
+ * `identity-unset` is a client-side reason, and an HTML 502 is nobody's code at
+ * all. A caller that reports `coordinator_code` needs the distinction.
+ */
+function refusal(code, { status, live, ended, message, source = 'client' } = {}) {
   return {
     ok: false,
     code,
+    source,
     ...(live === undefined ? {} : { live }),
     ...(ended === undefined ? {} : { ended }),
     ...(status === undefined ? {} : { status }),
@@ -186,12 +193,14 @@ export function createClient({ coordinator, token } = {}) {
         live: parsed.live,
         ended: parsed.ended,
         message: typeof parsed.message === 'string' && parsed.message !== '' ? parsed.message : `${name}: ${code}`,
+        source: 'coordinator',
       });
     }
     if (response.status === 401) {
       return refusal(CLIENT_REASONS.unauthorized, {
         status: 401,
         message: `${name}: coordinator refused the token`,
+        source: 'coordinator',
       });
     }
     if (response.status === 404 && notFoundReason) {

@@ -43,6 +43,15 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
+import { createClient } from './pr-review-coordinator.mjs';
+import {
+  loadCoordinatorToken,
+  managedDirectory,
+  readManagedList,
+  resolveManaged,
+  MANAGED_MODES,
+} from './pr-review-managed.mjs';
+
 // ---------------------------------------------------------------------------
 // gh plumbing
 // ---------------------------------------------------------------------------
@@ -919,8 +928,127 @@ export function cmdLens(opts, { run = defaultRun, die = fail, log = console.log,
 }
 
 // ---------------------------------------------------------------------------
+// Coordinated subcommands
+//
+// `managed` and `identity` are read-only-or-operator commands about the
+// installation rather than about a pull request, and they are the first two
+// invocations to carry the coordinated output contract: exactly one JSON line
+// on stdout, every diagnostic on stderr. Standalone `lens` / `post` / `threads`
+// / `reply` emit no such line, and the characterisation suite asserts both
+// directions.
+//
+// Their exit integers are for humans and are not contractual — 0 when the
+// outcome is `ok`, 1 when it is `refused`, and 4 when a `gh` call failed, the
+// same 4 the rest of this script uses. The JSON line is the contract.
+// ---------------------------------------------------------------------------
+
+/** The one JSON line. `retry` is three-valued; nothing here is ever retryable. */
+function emitOutcome(line, log) {
+  log(JSON.stringify(line));
+  return line;
+}
+
+/**
+ * Recovery and identity calls are logged verbatim on the coordinator's row with
+ * who asked and why. The beat's recovery pass signs itself `beat`; this command
+ * only ever runs from an operator's hand.
+ */
+const IDENTITY_ACTOR = 'operator';
+
+/**
+ * `managed --repo <r>` — what does this installation resolve for one
+ * repository, and out of which directory?
+ *
+ * Read-only and side-effect free: the scheduled half runs it every tick and
+ * compares the answer with its own, and the activation preflight runs it from
+ * the service environment to catch a child process resolving a different
+ * profile than the interactive shell. The token is never part of the answer.
+ */
+export function cmdManaged(opts, { log = console.log, die = fail, env = process.env, homeDir } = {}) {
+  const resolved = resolveManaged({ repo: opts.repo, env, homeDir });
+  const refused = resolved.mode === MANAGED_MODES.configMissing;
+  emitOutcome({
+    outcome: refused ? 'refused' : 'ok',
+    ...(refused ? { reason: MANAGED_MODES.configMissing } : {}),
+    retry: 'stop',
+    mode: resolved.mode,
+    repo: opts.repo,
+    directory: resolved.directory,
+    ...(resolved.coordinator === undefined ? {} : { coordinator: resolved.coordinator }),
+    ...(resolved.repos === undefined ? {} : { repos: resolved.repos }),
+  }, log);
+  if (refused) {
+    die(1, `a coordinator token is present but ${join(resolved.directory, 'managed.json')} is missing or unreadable, so this repository cannot be classified. Nothing was posted.`);
+  }
+}
+
+/**
+ * `identity --pin --reason "<why>"` — pin the posting login at the coordinator.
+ *
+ * Run once by the operator, under the same environment the service uses, so the
+ * login the coordinator holds is the login the writer will actually post as.
+ * The writer compares the two before every post and fails closed; this is the
+ * only thing that writes the pinned value.
+ */
+export async function cmdIdentity(opts, {
+  // The raw `gh` on purpose, not `ghOrDie`: this path has to classify its own
+  // failure into the one JSON line rather than exit from underneath it.
+  runGh = gh,
+  log = console.log,
+  die = fail,
+  env = process.env,
+  homeDir,
+  makeClient = createClient,
+} = {}) {
+  const directory = managedDirectory({ homeDir });
+  const token = loadCoordinatorToken({ env, homeDir });
+  const list = readManagedList({ homeDir });
+  if (token === null || !list.ok) {
+    emitOutcome({ outcome: 'refused', reason: MANAGED_MODES.configMissing, retry: 'stop', directory }, log);
+    die(1, token === null
+      ? `no coordinator token in ${directory} and none in the environment; there is nothing to authenticate with.`
+      : `no readable managed.json in ${directory}; the coordinator URL comes from that file.`);
+    return;
+  }
+
+  let login;
+  try {
+    login = String(runGh(['api', 'user', '-q', '.login'], { cwd: opts.cwd })).trim();
+  } catch (err) {
+    const stderr = err?.stderr ? String(err.stderr).trim() : '';
+    // `gh-failure` is the reason table's name for a gh call that did not
+    // answer. Its `retry` value is the table's, not this path's judgement.
+    emitOutcome({ outcome: 'failed', reason: 'gh-failure', retry: 'lens-budget' }, log);
+    die(4, `gh api user failed${stderr ? `:\n${stderr}` : ''}`);
+    return;
+  }
+  if (login === '') {
+    emitOutcome({ outcome: 'failed', reason: 'gh-failure', retry: 'lens-budget' }, log);
+    die(4, 'gh api user returned an empty login; nothing was pinned.');
+    return;
+  }
+
+  const result = await makeClient({ coordinator: list.coordinator, token })
+    .identity({ login, actor: IDENTITY_ACTOR, reason: opts.reason });
+  if (!result.ok) {
+    emitOutcome({
+      outcome: 'refused',
+      reason: result.code,
+      retry: 'stop',
+      ...(result.source === 'coordinator' ? { coordinator_code: result.code } : {}),
+    }, log);
+    die(1, `the coordinator did not pin ${login}: ${result.message}`);
+    return;
+  }
+  emitOutcome({ outcome: 'ok', retry: 'stop', login, coordinator: list.coordinator }, log);
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
+
+/** Commands that are about an installation or a login, never about one PR. */
+const NO_PR_COMMANDS = new Set(['managed', 'identity']);
 
 const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
 
@@ -932,6 +1060,23 @@ const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
   threads  --pr <n> --repo owner/name [--unresolved]
   reply    --pr <n> --repo owner/name --comment-id <id> --body-file <file>
            [--verdict confirmed|refuted|note] [--measure-log <path>]
+  managed  --repo owner/name
+           read-only: prints how this installation resolves that repository —
+           standalone, managed, or managed-config-missing — with the directory
+           it read. Takes no --pr. Never prints the token
+  identity --pin --reason "<why>"
+           pins the posting login (from gh api user) at the coordinator, once,
+           from the environment the service runs under. Takes no --pr
+
+Coordinated output:
+  managed and identity print exactly one JSON line on stdout
+  ({outcome, reason?, retry, …}) with diagnostics on stderr. Their exit codes
+  are for humans and non-contractual: 0 ok, 1 refused, 4 a gh call failed.
+  The standalone commands above print no such line.
+
+Managed directory (both files optional; absent token = standalone everywhere):
+  %USERPROFILE%/.workit/pr-review/coordinator-token   (env PR_REVIEW_COORDINATOR_TOKEN wins)
+  %USERPROFILE%/.workit/pr-review/managed.json        { "coordinator": "...", "repos": ["owner/name"] }
 
 Common:
   --repo   required for every command — cwd resolution silently answers about a
@@ -1001,6 +1146,15 @@ export function parseArgs(argv) {
         break;
       }
       case '--unresolved': opts.unresolved = true; break;
+      case '--pin': opts.pin = true; break;
+      case '--reason': {
+        // Logged verbatim on the coordinator's row — an empty one records
+        // nothing about why the login changed.
+        const v = next();
+        if (v.trim() === '') fail(2, '--reason needs a non-empty value');
+        opts.reason = v;
+        break;
+      }
       case '-h': case '--help': opts.help = true; break;
       default: fail(2, `unknown argument: ${a}\n\n${USAGE}`);
     }
@@ -1014,7 +1168,15 @@ function main(argv) {
     console.log(USAGE);
     process.exit(opts.cmd ? 0 : 2);
   }
-  if (!opts.pr || !/^\d+$/.test(String(opts.pr))) fail(2, '--pr <n> is required and must be a number');
+  // Every command that asks about a pull request needs its number before
+  // anything else runs. The two that ask about the installation instead take no
+  // --pr at all: silently ignoring one would let `identity --pin --pr 5` read as
+  // a per-PR pin, which is not a thing.
+  if (NO_PR_COMMANDS.has(opts.cmd)) {
+    if (opts.pr !== undefined) fail(2, `${opts.cmd} takes no --pr`);
+  } else if (!opts.pr || !/^\d+$/.test(String(opts.pr))) {
+    fail(2, '--pr <n> is required and must be a number');
+  }
 
   switch (opts.cmd) {
     case 'post':
@@ -1039,11 +1201,22 @@ function main(argv) {
       if (!opts.bodyFile) fail(2, 'reply needs --body-file <file>');
       if (opts.verdict && !['confirmed', 'refuted', 'note'].includes(opts.verdict)) fail(2, 'reply --verdict must be confirmed, refuted, or note');
       return cmdReply(opts);
+    case 'managed':
+      if (!opts.repo) fail(2, 'managed needs --repo owner/name');
+      return cmdManaged(opts);
+    case 'identity':
+      if (!opts.pin) fail(2, 'identity needs --pin (its only mode)');
+      if (!opts.reason) fail(2, 'identity --pin needs --reason "<why>"');
+      return cmdIdentity(opts);
     default:
       fail(2, `unknown command: ${opts.cmd}\n\n${USAGE}`);
   }
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  main(process.argv.slice(2));
+  const running = main(process.argv.slice(2));
+  // The coordinated commands are async because the coordinator call is. A
+  // rejection here would otherwise be an unhandled one with no exit code of its
+  // own; the synchronous commands return nothing and are untouched.
+  if (running instanceof Promise) running.catch((err) => fail(1, err?.stack ?? String(err)));
 }

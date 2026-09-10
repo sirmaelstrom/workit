@@ -35,6 +35,8 @@ import {
   cmdThreads,
   cmdReply,
   cmdLens,
+  cmdManaged,
+  cmdIdentity,
   buildReviewerPrompt,
   defaultCodexExe,
 } from './pr-review.mjs';
@@ -1891,20 +1893,30 @@ async function closedPort() {
   return port;
 }
 
-/** A temp profile directory holding the two managed files, or neither. */
+/**
+ * A temp profile directory holding the two managed files, or neither. Takes a
+ * sync or an async callback: cleaning up while an awaited callback is still
+ * reading the fixture would delete the directory under the test.
+ */
 function withProfile({ token, managed }, fn) {
   const home = mkdtempSync(join(tmpdir(), 'slim-review-profile-'));
   const dir = join(home, '.workit', 'pr-review');
+  const cleanup = () => rmSync(home, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
   if (token !== undefined) writeFileSync(join(dir, 'coordinator-token'), token, 'utf8');
   if (managed !== undefined) {
     writeFileSync(join(dir, 'managed.json'), typeof managed === 'string' ? managed : JSON.stringify(managed), 'utf8');
   }
+  let result;
   try {
-    return fn(home, dir);
-  } finally {
-    rmSync(home, { recursive: true, force: true });
+    result = fn(home, dir);
+  } catch (err) {
+    cleanup();
+    throw err;
   }
+  if (result instanceof Promise) return result.finally(cleanup);
+  cleanup();
+  return result;
 }
 
 const MANAGED_JSON = { coordinator: 'http://127.0.0.1:3100', repos: ['owner/repo', 'owner/other'] };
@@ -2330,6 +2342,30 @@ test('loadCoordinatorToken prefers the environment, then the file, and never the
   });
 });
 
+test('the token file is read whatever its ACL says — the mode is observed, never gated on', (t) => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home, dir) => {
+    const tokenFile = join(dir, 'coordinator-token');
+    // The file's owner-only mode is instructed where it is provisioned, not
+    // here. This loader deliberately has no opinion about it: a resolver that
+    // refused an over-permissive file would fail closed on the one thing an
+    // operator can see and fix, and a token nobody can read is the same
+    // standalone answer as no token at all.
+    assert.equal(loadCoordinatorToken({ env: {}, homeDir: home }), FIXTURE_TOKEN);
+    assert.equal(resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode, MANAGED_MODES.managed);
+    let observed;
+    if (process.platform === 'win32') {
+      try {
+        observed = execFileSync('icacls', [tokenFile], { encoding: 'utf8', windowsHide: true }).trim();
+      } catch (err) {
+        observed = `icacls failed: ${err.message}`;
+      }
+    } else {
+      observed = `not observed on ${process.platform}`;
+    }
+    t.diagnostic(`token file ACL observation: ${observed.split(/\r?\n/).join(' | ')}`);
+  });
+});
+
 test('readManagedList reports the two files it read from the managed directory', () => {
   withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home, dir) => {
     const list = readManagedList({ homeDir: home });
@@ -2343,5 +2379,291 @@ test('readManagedList reports the two files it read from the managed directory',
 test('resolveManaged refuses to answer without a repository', () => {
   withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
     assert.throws(() => resolveManaged({ env: {}, homeDir: home }), /repo is required/);
+  });
+});
+
+// --- the `managed` and `identity` subcommands -----------------------------
+
+/**
+ * Spawn the CLI with a profile of our own. USERPROFILE and HOME are both set
+ * because `os.homedir()` reads the first on Windows and the second on POSIX,
+ * and any inherited coordinator token is dropped: the seam has to be the only
+ * thing the child can resolve from.
+ */
+function runCliIn({ args, home, cwd }) {
+  const env = { ...process.env, USERPROFILE: home, HOME: home };
+  delete env[TOKEN_ENV_VAR];
+  try {
+    const stdout = execFileSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env, cwd });
+    return { code: 0, stdout, stderr: '' };
+  } catch (err) {
+    return { code: err.status, stdout: String(err.stdout ?? ''), stderr: String(err.stderr ?? '') };
+  }
+}
+
+/** Exactly one JSON line on stdout is the coordinated contract. */
+function onlyOutcomeLine(stdout) {
+  const lines = stdout.split(/\r?\n/).filter((line) => line.trim() !== '');
+  assert.equal(lines.length, 1, `expected exactly one stdout line, got ${JSON.stringify(lines)}`);
+  return JSON.parse(lines[0]);
+}
+
+test('parseArgs takes --pin and a non-empty --reason', () => {
+  const opts = parseArgs(['identity', '--pin', '--reason', 'activation preflight']);
+  assert.equal(opts.pin, true);
+  assert.equal(opts.reason, 'activation preflight');
+  assert.equal(parseArgs(['managed', '--repo', 'o/r']).pin, undefined);
+  const r = runCli(['identity', '--pin', '--reason', '   ']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /--reason needs a non-empty value/);
+});
+
+test('managed and identity validate before doing anything, and take no --pr', () => {
+  const noRepo = runCli(['managed']);
+  assert.equal(noRepo.code, 2);
+  assert.match(noRepo.stderr, /managed needs --repo owner\/name/);
+
+  const withPr = runCli(['managed', '--repo', 'owner/repo', '--pr', '42']);
+  assert.equal(withPr.code, 2);
+  assert.match(withPr.stderr, /managed takes no --pr/);
+
+  const identityPr = runCli(['identity', '--pin', '--reason', 'why', '--pr', '42']);
+  assert.equal(identityPr.code, 2);
+  assert.match(identityPr.stderr, /identity takes no --pr/);
+
+  const noPin = runCli(['identity', '--reason', 'why']);
+  assert.equal(noPin.code, 2);
+  assert.match(noPin.stderr, /identity needs --pin/);
+
+  const noReason = runCli(['identity', '--pin']);
+  assert.equal(noReason.code, 2);
+  assert.match(noReason.stderr, /identity --pin needs --reason/);
+
+  // The pre-switch --pr requirement is untouched for every other command.
+  assert.equal(runCli(['post', '--pr', 'main', '--findings', 'x.json']).code, 2);
+  assert.match(runCli(['threads', '--repo', 'owner/repo']).stderr, /--pr <n> is required/);
+});
+
+test('managed (a): a listed repository resolves managed and the token never reaches stdout', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home, dir) => {
+    const r = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home });
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout.includes(FIXTURE_TOKEN), false, 'the token must never be printed');
+    assert.deepEqual(onlyOutcomeLine(r.stdout), {
+      outcome: 'ok',
+      retry: 'stop',
+      mode: 'managed',
+      repo: 'owner/repo',
+      directory: dir,
+      coordinator: 'http://127.0.0.1:3100',
+      repos: ['owner/repo', 'owner/other'],
+    });
+  });
+});
+
+test('managed (c): with no token the answer is standalone and names no coordinator', () => {
+  withProfile({ managed: MANAGED_JSON }, (home, dir) => {
+    const r = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home });
+    assert.equal(r.code, 0);
+    assert.deepEqual(onlyOutcomeLine(r.stdout), {
+      outcome: 'ok', retry: 'stop', mode: 'standalone', repo: 'owner/repo', directory: dir,
+    });
+  });
+});
+
+test('managed (d): a token with no list refuses managed-config-missing on stdout and exits nonzero', () => {
+  withProfile({ token: FIXTURE_TOKEN }, (home, dir) => {
+    const r = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home });
+    assert.equal(r.code, 1);
+    assert.deepEqual(onlyOutcomeLine(r.stdout), {
+      outcome: 'refused',
+      reason: 'managed-config-missing',
+      retry: 'stop',
+      mode: 'managed-config-missing',
+      repo: 'owner/repo',
+      directory: dir,
+    });
+    assert.match(r.stderr, /managed\.json is missing or unreadable/);
+    assert.equal(r.stderr.includes(FIXTURE_TOKEN), false);
+  });
+});
+
+test('managed (e): two different working directories give the same answer', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    const first = mkdtempSync(join(tmpdir(), 'slim-review-cli-a-'));
+    const second = mkdtempSync(join(tmpdir(), 'slim-review-cli-b-'));
+    try {
+      const fromFirst = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home, cwd: first });
+      const fromSecond = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home, cwd: second });
+      assert.equal(fromFirst.stdout, fromSecond.stdout, 'the managed answer must not depend on where it was run');
+      assert.equal(onlyOutcomeLine(fromFirst.stdout).mode, 'managed');
+      // And the profile seam is what decides: the same two directories with a
+      // profile that has no token answer standalone.
+      withProfile({}, (bareHome) => {
+        assert.equal(onlyOutcomeLine(runCliIn({ args: ['managed', '--repo', 'owner/repo'], home: bareHome, cwd: first }).stdout).mode, 'standalone');
+      });
+    } finally {
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+});
+
+test('identity --pin posts the gh login with its actor and reason', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: { login: 'service-login', set_at: '2026-09-10T00:00:00.000Z' } }), async ({ coordinator, seen }) => {
+    await withProfile({ token: FIXTURE_TOKEN, managed: { coordinator, repos: ['owner/repo'] } }, async (home) => {
+      const logs = [];
+      const ghCalls = [];
+      await cmdIdentity(
+        { pin: true, reason: 'activation preflight for 52fd1a6a' },
+        {
+          runGh: (args, opts) => { ghCalls.push({ args, opts }); return 'service-login\n'; },
+          log: (line) => logs.push(String(line)),
+          die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); },
+          env: {},
+          homeDir: home,
+        },
+      );
+      assert.deepEqual(ghCalls[0].args, ['api', 'user', '-q', '.login'], 'the login comes from the writer credential, never the coordinator');
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0].method, 'POST');
+      assert.equal(seen[0].path, '/api/pr-review/identity');
+      assert.deepEqual(seen[0].body, {
+        login: 'service-login',
+        actor: 'operator',
+        reason: 'activation preflight for 52fd1a6a',
+      });
+      assert.equal(seen[0].token, FIXTURE_TOKEN, 'the token authenticates the call and appears nowhere else');
+      assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+        { outcome: 'ok', retry: 'stop', login: 'service-login', coordinator },
+      ]);
+      assert.equal(logs.join('\n').includes(FIXTURE_TOKEN), false);
+    });
+  });
+});
+
+test('identity --pin surfaces a coordinator refusal as one JSON line and pins nothing', async () => {
+  await withFakeCoordinator(() => ({ status: 401, raw: 'Unauthorized' }), async ({ coordinator, seen }) => {
+    await withProfile({ token: FIXTURE_TOKEN, managed: { coordinator, repos: ['owner/repo'] } }, async (home) => {
+      const logs = [];
+      const deaths = [];
+      await cmdIdentity(
+        { pin: true, reason: 'wrong token' },
+        {
+          runGh: () => 'service-login\n',
+          log: (line) => logs.push(String(line)),
+          die: (code, message) => deaths.push({ code, message }),
+          env: {},
+          homeDir: home,
+        },
+      );
+      assert.equal(seen.length, 1, 'one call, no retry');
+      assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+        { outcome: 'refused', reason: 'unauthorized', retry: 'stop', coordinator_code: 'unauthorized' },
+      ]);
+      assert.equal(deaths.length, 1);
+      assert.equal(deaths[0].code, 1);
+    });
+  });
+});
+
+test('identity --pin reports an unreachable coordinator without a coordinator_code', async () => {
+  const port = await closedPort();
+  await withProfile({ token: FIXTURE_TOKEN, managed: { coordinator: `http://127.0.0.1:${port}`, repos: ['owner/repo'] } }, async (home) => {
+    const logs = [];
+    const deaths = [];
+    await cmdIdentity(
+      { pin: true, reason: 'coordinator down' },
+      {
+        runGh: () => 'service-login\n',
+        log: (line) => logs.push(String(line)),
+        die: (code, message) => deaths.push({ code, message }),
+        env: {},
+        homeDir: home,
+      },
+    );
+    assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+      { outcome: 'refused', reason: 'coordinator-unreachable', retry: 'stop' },
+    ]);
+    assert.equal(deaths[0].code, 1);
+  });
+});
+
+test('identity --pin refuses before gh when the managed directory is not provisioned', async () => {
+  await withProfile({}, async (home, dir) => {
+    const logs = [];
+    const deaths = [];
+    let ghCalls = 0;
+    await cmdIdentity(
+      { pin: true, reason: 'nothing provisioned' },
+      {
+        runGh: () => { ghCalls += 1; return 'service-login\n'; },
+        log: (line) => logs.push(String(line)),
+        die: (code, message) => deaths.push({ code, message }),
+        env: {},
+        homeDir: home,
+        makeClient: () => { throw new Error('no client may be built without a token'); },
+      },
+    );
+    assert.equal(ghCalls, 0, 'the refusal lands before any credential is read');
+    assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+      { outcome: 'refused', reason: 'managed-config-missing', retry: 'stop', directory: dir },
+    ]);
+    assert.equal(deaths[0].code, 1);
+  });
+  // A token but no list is the same refusal, from the other missing half.
+  await withProfile({ token: FIXTURE_TOKEN }, async (home) => {
+    const logs = [];
+    const deaths = [];
+    await cmdIdentity(
+      { pin: true, reason: 'no list' },
+      {
+        runGh: () => 'service-login\n',
+        log: (line) => logs.push(String(line)),
+        die: (code, message) => deaths.push({ code, message }),
+        env: {},
+        homeDir: home,
+        makeClient: () => { throw new Error('no client may be built without a coordinator URL'); },
+      },
+    );
+    assert.equal(JSON.parse(logs[0]).reason, 'managed-config-missing');
+    assert.equal(deaths[0].code, 1);
+  });
+});
+
+test('identity --pin classifies a failed gh credential read instead of exiting silently', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: {} }), async ({ coordinator, seen }) => {
+    await withProfile({ token: FIXTURE_TOKEN, managed: { coordinator, repos: ['owner/repo'] } }, async (home) => {
+      const logs = [];
+      const deaths = [];
+      await cmdIdentity(
+        { pin: true, reason: 'no credential' },
+        {
+          runGh: () => { const err = new Error('exit 1'); err.stderr = 'gh: authentication required'; throw err; },
+          log: (line) => logs.push(String(line)),
+          die: (code, message) => deaths.push({ code, message }),
+          env: {},
+          homeDir: home,
+        },
+      );
+      assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+        { outcome: 'failed', reason: 'gh-failure', retry: 'lens-budget' },
+      ]);
+      assert.equal(deaths[0].code, 4);
+      assert.match(deaths[0].message, /authentication required/);
+      assert.deepEqual(seen, [], 'nothing was pinned');
+    });
+  });
+});
+
+test('the coordinated subcommands print exactly one JSON line — the other half of the characterisation boundary', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    const managed = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home });
+    const line = onlyOutcomeLine(managed.stdout);
+    assert.ok('outcome' in line && 'retry' in line);
+    assert.ok(['stop', 'lens-budget', 'post-budget'].includes(line.retry));
+  });
+  withProfile({ token: FIXTURE_TOKEN }, (home) => {
+    onlyOutcomeLine(runCliIn({ args: ['managed', '--repo', 'owner/repo'], home }).stdout);
   });
 });

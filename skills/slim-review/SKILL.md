@@ -287,6 +287,69 @@ operator's merge call.
 
 ---
 
+## Managed repositories
+
+Everything above is the standalone loop: you run it, it posts, nothing else is
+involved. On an installation where reviews are also raised automatically, a
+repository can instead be **managed** — the review is allocated by a coordinator
+so two runs cannot post twice on the same commit. Which one applies is resolved
+from one directory, and from nothing else:
+
+```
+%USERPROFILE%/.workit/pr-review/coordinator-token   the coordinator token
+%USERPROFILE%/.workit/pr-review/managed.json        { "coordinator": "http://127.0.0.1:3100",
+                                                      "repos": ["owner/name"] }
+```
+
+The environment variable `PR_REVIEW_COORDINATOR_TOKEN` overrides the token file;
+an absent or empty file is no token at all. The four answers:
+
+| Token | List | Answer |
+|---|---|---|
+| absent | either | **standalone** everywhere — the loop above, unchanged |
+| present | absent or unreadable | **managed-config-missing** — the writer refuses rather than guess |
+| present | repository listed | **managed** — the coordinated path |
+| present | repository not listed | **standalone** |
+
+The directory is under the user profile on purpose. Resolving it from the
+repository or a workspace root would answer differently from a second clone or a
+worktree of the same repository, and the mistake it would make is the expensive
+one: posting a second review nobody coordinated. Ask what an installation
+resolves — read-only, and safe to run anywhere:
+
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" managed --repo <owner/name>
+```
+
+It prints one JSON line — `{outcome, retry, mode, repo, directory, coordinator?,
+repos?}` — with any diagnostic on stderr, and never the token. Run it from two
+different directories and the answer must be identical; if it is not, the
+resolution is coming from somewhere it should not.
+
+**Pinning the posting identity.** A managed installation records the login its
+reviews are posted under, so a review that appears under any other login is
+visible as one. The operator pins it once, from the same environment the
+automatic half runs in:
+
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" identity --pin --reason "<why>"
+```
+
+That reads the login from `gh api user` with the credential it is going to post
+with and records it at the coordinator with the actor and the reason. Neither
+subcommand takes `--pr`: one is about an installation, the other about a login.
+Both print exactly one JSON line on stdout, exit 0 when the outcome is `ok` and
+non-zero when it is `refused` — the JSON line is the contract, the exit integer
+is for you.
+
+Posting on a managed repository needs the service credential, and the
+coordinator is reachable on loopback only: a session on another host resolves
+`coordinator-unreachable` and posts nothing. Nothing retries itself. Every
+refusal above is final for that invocation — the retry, when there should be
+one, is a person's decision.
+
+---
+
 ## What this deliberately is not
 
 - **Not a council.** Two lenses, no synthesis, no challenge pass. If the two
