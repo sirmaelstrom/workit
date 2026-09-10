@@ -1,11 +1,26 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  createClient,
+  ATTEMPT_REF_FIELDS,
+  TOKEN_HEADER,
+  COORDINATOR_BASE_PATH,
+} from './pr-review-coordinator.mjs';
+import {
+  resolveManaged,
+  loadCoordinatorToken,
+  readManagedList,
+  managedDirectory,
+  MANAGED_MODES,
+  TOKEN_ENV_VAR,
+} from './pr-review-managed.mjs';
 import {
   parseDiff,
   countChangedFiles,
@@ -20,6 +35,8 @@ import {
   cmdThreads,
   cmdReply,
   cmdLens,
+  cmdManaged,
+  cmdIdentity,
   buildReviewerPrompt,
   defaultCodexExe,
 } from './pr-review.mjs';
@@ -1460,4 +1477,1193 @@ test('reply requires --repo', () => {
   const r = runCli(['reply', '--pr', '53', '--comment-id', '1', '--body-file', 'x.md']);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /reply needs --repo owner\/name/);
+});
+
+// ---------------------------------------------------------------------------
+// Characterisation baseline — standalone behaviour, pinned BEFORE the
+// coordinated work (quest 52fd1a6a, WP-02) touched pr-review.mjs.
+//
+// Baseline commit: pr-review.mjs as written at 632dfcd (last touched by
+// e4c614e) and unchanged through ebd6773, the commit this work forked from —
+// `git diff 632dfcd ebd6773 -- skills/slim-review/scripts/pr-review.mjs` is
+// empty, so "the 632dfcd baseline" and "the ebd6773 tree" name the same bytes.
+//
+// What these tests pin is STDOUT, not behaviour in general. Every standalone
+// invocation of `lens`, `post`, `threads`, `reply` and `lens --dry-run
+// --prompt-out`, with no coordinator token present, must keep producing exactly
+// these lines — and must emit no JSON outcome line, because the one-JSON-line
+// contract belongs to coordinated invocations only. Coordinated `lens` / `post`
+// land later; this block is the net that catches a standalone code path edited
+// instead of branched.
+//
+// Topology guard (M7 — this is a public repository): the gate
+// `git grep -n -E "<four host-topology alternatives>" skills/slim-review` was
+// empty on this tree, and was seen to bite before being trusted: a single line
+// carrying all four alternatives was appended to SKILL.md on a scratch branch,
+// the grep returned exactly one hit (`skills/slim-review/SKILL.md:349`), and the
+// line was reverted with `git checkout --`, after which the grep was empty
+// again (exit 1, no output). The four patterns are deliberately not reproduced
+// here: a source-text guard that quotes its own patterns matches itself.
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `fn` with no coordinator token in the environment and a profile directory
+ * that holds no managed configuration — the "no token present" precondition of
+ * the characterisation baseline. The managed resolver reads `os.homedir()`,
+ * which honours USERPROFILE on Windows and HOME on POSIX, so both are pointed
+ * at an empty temp directory and the test works on either platform.
+ */
+function withNoManagedConfig(fn) {
+  const home = mkdtempSync(join(tmpdir(), 'slim-review-home-'));
+  const saved = new Map();
+  for (const key of ['PR_REVIEW_COORDINATOR_TOKEN', 'USERPROFILE', 'HOME']) saved.set(key, process.env[key]);
+  process.env.USERPROFILE = home;
+  process.env.HOME = home;
+  delete process.env.PR_REVIEW_COORDINATOR_TOKEN;
+  try {
+    return fn(home);
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/** A standalone invocation must never print the coordinated one-line outcome. */
+function assertNoOutcomeLine(logs) {
+  for (const line of logs) {
+    for (const piece of String(line).split('\n')) {
+      const trimmed = piece.trim();
+      if (!trimmed.startsWith('{')) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
+      assert.ok(
+        !(parsed && typeof parsed === 'object' && 'outcome' in parsed),
+        `standalone stdout must carry no JSON outcome line, got: ${trimmed}`,
+      );
+    }
+  }
+}
+
+const CHAR_HEAD = '1111111111111111111111111111111111111111';
+const CHAR_PR_FILES = ['src/a.ts', 'src/b.ts', 'docs/bin.png'];
+
+function characterisationPost() {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-char-post-'));
+  const logs = [];
+  const posted = [];
+  const codex = join(dir, 'codex.json');
+  const astra = join(dir, 'astra.json');
+  writeFileSync(codex, JSON.stringify({
+    summary: 'codex summary',
+    coverage: 'examined 3 of 3 changed files',
+    examined_paths: CHAR_PR_FILES,
+    findings: [{ severity: 'P1', title: 't1', path: 'src/a.ts', line: 11, body: 'b1' }],
+    lens: 'codex',
+  }), 'utf8');
+  writeFileSync(astra, JSON.stringify({
+    summary: 'astra summary',
+    coverage: 'examined 3 of 3 changed files',
+    examined_paths: CHAR_PR_FILES,
+    findings: [
+      { severity: 'P2', title: 't2', path: 'src/a.ts', line: 99, body: 'b2' },
+      { severity: 'P3', title: 't3', path: 'docs/bin.png', line: 1, body: 'b3' },
+      { severity: 'P3', title: 't4', path: 'src/z.ts', line: 1, body: 'b4' },
+    ],
+    lens: 'astra',
+  }), 'utf8');
+  const runGh = (args, opts) => {
+    if (args[0] === 'pr' && args[1] === 'view') return `${CHAR_HEAD}\n`;
+    if (args[0] === 'pr' && args[1] === 'diff') return DIFF;
+    if (args[0] === 'api' && args[1] === '--paginate') return `${CHAR_PR_FILES.join('\n')}\n`;
+    if (args[0] === 'api' && args.includes('POST')) {
+      posted.push({ args, body: JSON.parse(opts.input) });
+      return JSON.stringify({ html_url: 'https://example.test/review/1' });
+    }
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  try {
+    withNoManagedConfig(() => cmdPost(
+      { pr: '42', repo: 'owner/repo', findings: [codex, astra] },
+      { runGh, die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(line) },
+    ));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return { logs, posted };
+}
+
+test('characterisation: standalone post prints the receipt exactly and posts one review', () => {
+  const { logs, posted } = characterisationPost();
+  assert.deepEqual(logs, [
+    'repo           owner/repo',
+    'pr             #42',
+    'head           1111111',
+    'changed files  3 from PR API (2 diff headers; 2 with commentable lines)',
+    'findings       4 → 1 anchored · 1 off-line · 1 not-anchorable · 1 off-diff',
+    'coverage       OK',
+    '  warning      diff shows 2 changed files, the PR API lists 3 — the diff and the authoritative file list disagree',
+    '  not-anchor   docs/bin.png:1 — changed by this PR, but not line-anchorable',
+    '  off-diff     src/z.ts:1 — not a file this PR changes',
+    '\nposted         https://example.test/review/1',
+  ]);
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].body.event, 'COMMENT');
+  assert.equal(posted[0].body.commit_id, CHAR_HEAD);
+  assert.deepEqual(posted[0].body.comments.map((c) => `${c.path}:${c.line}`), ['src/a.ts:11']);
+  assertNoOutcomeLine(logs);
+});
+
+function characterisationThreads({ unresolved = false } = {}) {
+  const logs = [];
+  const runGh = () => JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: [
+              thread({ isResolved: false }),
+              thread({
+                isOutdated: true,
+                path: 'src/b.ts',
+                line: 3,
+                comments: {
+                  nodes: [
+                    { databaseId: 2, author: { login: 'other' }, body: '\nfirst line\nsecond line' },
+                    { databaseId: 3, author: { login: 'someone' }, body: 'a reply' },
+                  ],
+                },
+              }),
+            ],
+          },
+        },
+      },
+    },
+  });
+  withNoManagedConfig(() => cmdThreads(
+    { pr: '53', repo: 'owner/repo', unresolved },
+    { runGh, die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(String(line)) },
+  ));
+  return logs;
+}
+
+test('characterisation: standalone threads prints one block per thread and the reply hint', () => {
+  const logs = characterisationThreads();
+  assert.deepEqual(logs, [
+    '2 of 2 thread(s)\n',
+    '#1  src/a.ts:11  [OPEN]  replies:0',
+    '   someone: a comment',
+    '',
+    '#2  src/b.ts:3  [resolved, outdated]  replies:1',
+    '   other: first line',
+    '',
+    'reply with:  node pr-review.mjs reply --pr 53 --repo owner/repo --comment-id <id> --body-file <file>',
+  ]);
+  assertNoOutcomeLine(logs);
+});
+
+test('characterisation: standalone threads --unresolved shows only the open one', () => {
+  const logs = characterisationThreads({ unresolved: true });
+  assert.deepEqual(logs, [
+    '1 of 2 thread(s) (unresolved)\n',
+    '#1  src/a.ts:11  [OPEN]  replies:0',
+    '   someone: a comment',
+    '',
+    'reply with:  node pr-review.mjs reply --pr 53 --repo owner/repo --comment-id <id> --body-file <file>',
+  ]);
+  assertNoOutcomeLine(logs);
+});
+
+test('characterisation: standalone reply posts one reply and records one verdict row', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-char-reply-'));
+  const bodyFile = join(dir, 'reply.md');
+  const measureLog = join(dir, 'measure.jsonl');
+  const logs = [];
+  const calls = [];
+  writeFileSync(bodyFile, 'Confirmed — fixed in abc1234.\n', 'utf8');
+  const runGh = (args, opts) => {
+    calls.push({ args, opts });
+    if (args[1] === 'api' || args[0] === 'api') {
+      if (args.includes('POST')) return JSON.stringify({ html_url: 'https://example.test/reply/1' });
+      return JSON.stringify({ body: '**lens:** codex\n\nthe original finding' });
+    }
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  try {
+    withNoManagedConfig(() => cmdReply(
+      { pr: '53', repo: 'owner/repo', commentId: '7', bodyFile, verdict: 'confirmed', measureLog },
+      { runGh, die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(String(line)) },
+    ));
+    assert.deepEqual(logs, ['replied        https://example.test/reply/1']);
+    const rows = readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].repo, 'owner/repo');
+    assert.equal(rows[0].pr, 53);
+    assert.equal(rows[0].comment_id, 7);
+    assert.equal(rows[0].lens, 'codex');
+    assert.equal(rows[0].verdict, 'confirmed');
+    assert.deepEqual(
+      calls.at(-1).args,
+      ['api', '--method', 'POST', 'repos/owner/repo/pulls/53/comments/7/replies', '--input', '-'],
+    );
+    assert.equal(JSON.parse(calls.at(-1).opts.input).body, 'Confirmed — fixed in abc1234.\n');
+    assertNoOutcomeLine(logs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('characterisation: standalone lens writes the stamped document and one measurement row', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-char-lens-'));
+  const out = join(dir, 'findings.json');
+  const measureLog = join(dir, 'measure.jsonl');
+  const cwd = join(dir, 'repo');
+  const logs = [];
+  let statusCalls = 0;
+  try {
+    withNoManagedConfig(() => cmdLens(
+      { pr: '42', repo: 'owner/repo', lens: 'codex', cwd, out, measureLog },
+      {
+        run: (program, args) => {
+          if (args[0] === 'api') return 'src/a.ts\n';
+          if (args.includes('status')) { statusCalls += 1; return ''; }
+          if (args[0] === 'exec') {
+            writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(VALID), 'utf8');
+            return 'codex stdout that must not be parsed';
+          }
+          throw new Error(`unexpected run: ${program} ${args.join(' ')}`);
+        },
+        findCodexExe: () => 'codex',
+        die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); },
+        log: (line) => logs.push(String(line)),
+        now: (() => { let clock = 100; return () => (clock += 25); })(),
+      },
+    ));
+    assert.equal(statusCalls, 2);
+    assert.deepEqual(logs, [`wrote          ${out}`]);
+    assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), {
+      ...VALID,
+      findings: VALID.findings.map((f) => ({ ...f, lens: 'codex' })),
+      lens: 'codex',
+      model: 'gpt-5.6-terra',
+      reasoning: 'high',
+      wall_ms: 25,
+    });
+    const rows = readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].lens, 'codex');
+    assert.equal(rows[0].model, 'gpt-5.6-terra');
+    assert.equal(rows[0].coverage, VALID.coverage);
+    assertNoOutcomeLine(logs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('characterisation: standalone lens --dry-run --prompt-out prints argv and path, writes no prompt, spawns nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-char-dry-'));
+  const promptOut = join(dir, 'prompt.txt');
+  const cwd = join(dir, 'repo');
+  const logs = [];
+  const runs = [];
+  try {
+    withNoManagedConfig(() => cmdLens(
+      { pr: '42', repo: 'owner/repo', lens: 'astra', cwd, out: join(dir, 'findings.json'), promptOut, dryRun: true },
+      {
+        run: (program, args) => { runs.push({ program, args }); return ''; },
+        findCodexExe: () => 'codex',
+        die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); },
+        log: (line) => logs.push(String(line)),
+      },
+    ));
+    // The dry-run returns before the prompt is rendered, so --prompt-out writes
+    // nothing on the standalone path. Pinned because it is the one place the
+    // coordinated path is specified to differ.
+    assert.equal(existsSync(promptOut), false, '--prompt-out must stay unwritten on the standalone dry-run');
+    assert.deepEqual(runs, [], 'a dry run spawns nothing at all');
+    assert.equal(logs.length, 2);
+    assert.equal(logs[1], `prompt path: ${resolve(promptOut)}`);
+    assert.deepEqual(JSON.parse(logs[0].replace(/^argv: /, '')), [
+      'exec', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort=low',
+      '--sandbox', 'danger-full-access', '--skip-git-repo-check', '-C', resolve(cwd),
+      '--output-schema', SCHEMA, '-o', '<temporary findings.json>', '-',
+    ]);
+    assertNoOutcomeLine(logs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('characterisation: no standalone invocation emits a JSON outcome line', () => {
+  assertNoOutcomeLine(characterisationPost().logs);
+  assertNoOutcomeLine(characterisationThreads());
+  assertNoOutcomeLine(characterisationThreads({ unresolved: true }));
+});
+
+// ---------------------------------------------------------------------------
+// Coordinator client and managed resolver (quest 52fd1a6a, WP-02)
+//
+// The fake coordinator is a plain node:http server on port 0 in this process.
+// Nothing here reaches the network, and no test posts to any pull request.
+// ---------------------------------------------------------------------------
+
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
+const D12_FIXTURE = join(SCRIPTS_DIR, '__fixtures__', 'd12-reason-table.json');
+// Low-entropy on purpose: a fixture token that looks like a real one is a
+// secret-scanner finding in a public repository.
+const FIXTURE_TOKEN = 'tok-tok-tok';
+
+/**
+ * Read the vendored D12 table.
+ *
+ * No `existsSync` guard, no conditional describe: when the fixture is missing
+ * this throws and every parity assertion fails. A parity test that skips
+ * itself reports a clean contract over zero input.
+ */
+function readD12Table() {
+  return JSON.parse(readFileSync(D12_FIXTURE, 'utf8'));
+}
+
+const REF = Object.freeze({
+  repo: 'owner/repo',
+  pr: 42,
+  head_sha: 'a'.repeat(40),
+  base_sha: 'b'.repeat(40),
+  attempt: 1,
+  run_id: '00000000-0000-4000-8000-000000000001',
+});
+
+async function withFakeCoordinator(respond, fn) {
+  const seen = [];
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const url = new URL(req.url, 'http://127.0.0.1');
+      let body;
+      try {
+        body = raw === '' ? undefined : JSON.parse(raw);
+      } catch {
+        body = { unparseable: raw };
+      }
+      const call = {
+        method: req.method,
+        path: url.pathname,
+        query: Object.fromEntries(url.searchParams),
+        token: req.headers[TOKEN_HEADER],
+        contentType: req.headers['content-type'],
+        raw,
+        body,
+      };
+      seen.push(call);
+      const answer = respond(call) ?? { status: 200, json: {} };
+      if (answer.raw !== undefined) {
+        res.writeHead(answer.status, { 'content-type': answer.contentType ?? 'text/html' });
+        res.end(answer.raw);
+        return;
+      }
+      res.writeHead(answer.status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(answer.json ?? {}));
+    });
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const { port } = server.address();
+  try {
+    return await fn({ coordinator: `http://127.0.0.1:${port}`, seen });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((done) => server.close(done));
+  }
+}
+
+/** Bind a server, take its port, close it — a port nothing is listening on. */
+async function closedPort() {
+  const server = createServer(() => {});
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const { port } = server.address();
+  server.closeAllConnections();
+  await new Promise((done) => server.close(done));
+  return port;
+}
+
+/**
+ * A temp profile directory holding the two managed files, or neither. Takes a
+ * sync or an async callback: cleaning up while an awaited callback is still
+ * reading the fixture would delete the directory under the test.
+ */
+function withProfile({ token, managed }, fn) {
+  const home = mkdtempSync(join(tmpdir(), 'slim-review-profile-'));
+  const dir = join(home, '.workit', 'pr-review');
+  const cleanup = () => rmSync(home, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  if (token !== undefined) writeFileSync(join(dir, 'coordinator-token'), token, 'utf8');
+  if (managed !== undefined) {
+    writeFileSync(join(dir, 'managed.json'), typeof managed === 'string' ? managed : JSON.stringify(managed), 'utf8');
+  }
+  let result;
+  try {
+    result = fn(home, dir);
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
+  if (result instanceof Promise) return result.finally(cleanup);
+  cleanup();
+  return result;
+}
+
+const MANAGED_JSON = { coordinator: 'http://127.0.0.1:3100', repos: ['owner/repo', 'owner/other'] };
+
+test('the vendored D12 reason table is present, closed, and internally consistent', () => {
+  const table = readD12Table();
+  assert.equal(table.decisions_revision, 'v5.1');
+  assert.equal(table.coordinator_codes.length, 19, 'the 18 refusal codes plus unauthorized');
+  assert.equal(new Set(table.coordinator_codes).size, 19, 'no duplicate codes');
+  assert.ok(table.coordinator_codes.includes('unauthorized'));
+  assert.ok(table.coordinator_codes.includes('attempt-ended'));
+  assert.ok(table.coordinator_codes.includes('lease-active'));
+  assert.ok(!table.coordinator_codes.includes('lens-exhausted'), 'removed in v5.1 — unreachable');
+  assert.ok(!table.reasons.some((row) => row.reason === 'takeover' || row.reason === 'exhausted'));
+  assert.deepEqual(table.retry_values, ['stop', 'lens-budget', 'post-budget']);
+  const byReason = new Map(table.reasons.map((row) => [row.reason, row]));
+  for (const code of table.coordinator_codes) {
+    const row = byReason.get(code);
+    assert.ok(row, `every coordinator code needs a reason row: ${code}`);
+    assert.ok(row.source.startsWith('coordinator'), `${code} must be sourced at the coordinator, got ${row.source}`);
+    assert.equal(row.retry, 'stop', `${code} is not retryable`);
+  }
+  for (const row of table.reasons) {
+    assert.ok(table.retry_values.includes(row.retry), `${row.reason} carries an unknown retry: ${row.retry}`);
+  }
+  // The four client-side reasons. Two are raised by this client, two by the
+  // resolver and the writer's URL-precedence check (WP-03/WP-04 surfaces).
+  assert.deepEqual(
+    table.reasons.filter((row) => row.source === 'client').map((row) => row.reason).sort(),
+    ['coordinator-unreachable', 'identity-unset', 'managed-config-missing', 'managed-resolver-disagreement'],
+  );
+});
+
+test('createClient round-trips every coordinator code with the same string', async () => {
+  const table = readD12Table();
+  await withFakeCoordinator(
+    (call) => {
+      const code = call.body?.owner_label;
+      return { status: code === 'unauthorized' ? 401 : 409, json: { code } };
+    },
+    async ({ coordinator, seen }) => {
+      for (const code of table.coordinator_codes) {
+        const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+        const result = await client.claim({
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+          worker_key: 'k', owner_label: code, manifest: { files: [] },
+        });
+        assert.equal(result.ok, false, `${code} must not read as success`);
+        assert.equal(result.code, code, 'the coordinator code travels verbatim');
+      }
+      assert.equal(seen.length, table.coordinator_codes.length, 'exactly one request per refusal — the client never retries');
+    },
+  );
+});
+
+test('createClient carries live and ended payloads off a refusal', async () => {
+  await withFakeCoordinator(
+    (call) => (call.path.endsWith('/claim')
+      ? { status: 409, json: { code: 'live-attempt', live: { attempt: 3, origin: 'beat' } } }
+      : { status: 409, json: { code: 'attempt-ended', ended: { state: 'failed', disposition: 'exhausted-lens-budget' } } }),
+    async ({ coordinator }) => {
+      const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+      const live = await client.claim({
+        repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+        worker_key: 'k', owner_label: 'session', manifest: { files: [] },
+      });
+      assert.equal(live.code, 'live-attempt');
+      assert.deepEqual(live.live, { attempt: 3, origin: 'beat' });
+      assert.equal('ended' in live, false);
+
+      const ended = await client.lensStart({ attempt_ref: REF, worker_key: 'k', lens: 'codex' });
+      assert.equal(ended.code, 'attempt-ended');
+      assert.deepEqual(ended.ended, { state: 'failed', disposition: 'exhausted-lens-budget' });
+    },
+  );
+});
+
+test('createClient sends the exact body and path for every endpoint', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: { ok: true } }), async ({ coordinator, seen }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    const cases = [
+      {
+        call: () => client.claim({
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+          worker_key: 'worker-key-value', owner_label: 'session', manifest: { files: [], head_before: REF.head_sha, head_after: REF.head_sha },
+          required_lenses: ['codex', 'astra'],
+        }),
+        method: 'POST',
+        path: '/claim',
+        body: {
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+          worker_key: 'worker-key-value', owner_label: 'session',
+          manifest: { files: [], head_before: REF.head_sha, head_after: REF.head_sha },
+          required_lenses: ['codex', 'astra'],
+        },
+      },
+      {
+        call: () => client.readAttempt(REF),
+        method: 'GET',
+        path: '/attempt',
+        query: { attempt_ref: JSON.stringify(REF) },
+      },
+      { call: () => client.readStatus({ repo: 'owner/repo', pr: 42 }), method: 'GET', path: '/status', query: { repo: 'owner/repo', pr: '42' } },
+      {
+        call: () => client.recogniseImport({
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, review_id: 987, author_login: 'service-login',
+          commit_id: REF.head_sha, listing_checked_at: '2026-09-10T00:00:00.000Z',
+        }),
+        method: 'POST',
+        path: '/recognise-import',
+        body: {
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, review_id: 987, author_login: 'service-login',
+          commit_id: REF.head_sha, listing_checked_at: '2026-09-10T00:00:00.000Z',
+        },
+      },
+      { call: () => client.readIdentity(), method: 'GET', path: '/identity', query: {} },
+      {
+        call: () => client.identity({ login: 'service-login', actor: 'operator', reason: 'activation preflight' }),
+        method: 'POST',
+        path: '/identity',
+        body: { login: 'service-login', actor: 'operator', reason: 'activation preflight' },
+      },
+      {
+        call: () => client.lensStart({ attempt_ref: REF, worker_key: 'worker-key-value', lens: 'codex' }),
+        method: 'POST',
+        path: '/lens-start',
+        body: { attempt_ref: REF, worker_key: 'worker-key-value', lens: 'codex' },
+      },
+      {
+        call: () => client.lensEnd({
+          attempt_ref: REF, worker_key: 'worker-key-value', lens: 'codex', execution_id: 'exec-1',
+          outcome: 'done', document_path: 'cache/codex.json', document_sha256: 'c'.repeat(64),
+        }),
+        method: 'POST',
+        path: '/lens-end',
+        body: {
+          attempt_ref: REF, worker_key: 'worker-key-value', lens: 'codex', execution_id: 'exec-1',
+          outcome: 'done', document_path: 'cache/codex.json', document_sha256: 'c'.repeat(64),
+        },
+      },
+      {
+        call: () => client.reservePost({ attempt_ref: REF, worker_key: 'worker-key-value', sender_pid: 4242 }),
+        method: 'POST',
+        path: '/reserve-post',
+        body: { attempt_ref: REF, worker_key: 'worker-key-value', sender_pid: 4242 },
+      },
+      {
+        call: () => client.resolve({ attempt_ref: REF, worker_key: 'worker-key-value', post_generation: 1, outcome: 'posted', review_id: 987 }),
+        method: 'POST',
+        path: '/resolve',
+        body: { attempt_ref: REF, worker_key: 'worker-key-value', post_generation: 1, outcome: 'posted', review_id: 987 },
+      },
+      {
+        call: () => client.withdraw({ attempt_ref: REF, worker_key: 'worker-key-value', reason: 'identity-mismatch', head_now: REF.head_sha }),
+        method: 'POST',
+        path: '/withdraw',
+        body: { attempt_ref: REF, worker_key: 'worker-key-value', reason: 'identity-mismatch', head_now: REF.head_sha },
+      },
+      {
+        call: () => client.recoverAbandon({ attempt_ref: REF, actor: 'beat', reason: 'lease expired' }),
+        method: 'POST',
+        path: '/recover/abandon',
+        body: { attempt_ref: REF, actor: 'beat', reason: 'lease expired' },
+      },
+      {
+        call: () => client.recoverGraceSweep({ attempt_ref: REF, actor: 'beat', reason: 'grace elapsed', post_generation: 1 }),
+        method: 'POST',
+        path: '/recover/grace-sweep',
+        body: { attempt_ref: REF, actor: 'beat', reason: 'grace elapsed', post_generation: 1 },
+      },
+      {
+        call: () => client.recoverDelivery({ attempt_ref: REF, actor: 'beat', reason: 'recogniser hit', review_id: 987, post_generation: 1 }),
+        method: 'POST',
+        path: '/recover/delivery',
+        body: { attempt_ref: REF, actor: 'beat', reason: 'recogniser hit', review_id: 987, post_generation: 1 },
+      },
+      {
+        call: () => client.recoverNotDelivered({
+          attempt_ref: REF, actor: 'operator', reason: 'listing clean past the floor',
+          post_generation: 1, listing_checked_at: '2026-09-10T02:00:00.000Z',
+        }),
+        method: 'POST',
+        path: '/recover/not-delivered',
+        body: {
+          attempt_ref: REF, actor: 'operator', reason: 'listing clean past the floor',
+          post_generation: 1, listing_checked_at: '2026-09-10T02:00:00.000Z',
+        },
+      },
+      {
+        call: () => client.recoverWithdraw({ attempt_ref: REF, actor: 'beat', reason: 'kill-switch' }),
+        method: 'POST',
+        path: '/recover/withdraw',
+        body: { attempt_ref: REF, actor: 'beat', reason: 'kill-switch' },
+      },
+    ];
+
+    for (const [index, spec] of cases.entries()) {
+      const result = await spec.call();
+      assert.equal(result.ok, true, `${spec.path} must read as success`);
+      const call = seen[index];
+      assert.equal(call.method, spec.method, `${spec.path} method`);
+      assert.equal(call.path, `${COORDINATOR_BASE_PATH}${spec.path}`, 'every route is mounted under the coordinator prefix');
+      assert.equal(call.token, FIXTURE_TOKEN, 'the token rides the header on every call');
+      if (spec.body === undefined) {
+        assert.equal(call.raw, '', `${spec.path} is a read and carries no body`);
+        assert.deepEqual(call.query, spec.query, `${spec.path} query`);
+      } else {
+        assert.deepEqual(call.body, spec.body, `${spec.path} body`);
+        assert.equal(call.contentType, 'application/json');
+      }
+    }
+    assert.equal(seen.length, cases.length, 'one request per call, no retries');
+  });
+});
+
+test('the client refuses a body field the wire contract does not define', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: {} }), async ({ coordinator, seen }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    // The v4.1 spelling of the reservation body. A field-by-field builder that
+    // dropped it silently would send `{attempt_ref, worker_key}` and be refused
+    // bad-request by a coordinator that never saw the pid. The throw is
+    // synchronous — the body is built before the request is issued — so a
+    // caller's typo never becomes a network round trip.
+    assert.throws(
+      () => client.reservePost({ attempt_ref: REF, worker_key: 'k', pid: 4242 }),
+      /unknown body field "pid"/,
+    );
+    assert.throws(() => client.reservePost({ attempt_ref: REF, worker_key: 'k' }), /sender_pid is required/);
+    assert.throws(
+      () => client.lensStart({ attempt_ref: { ...REF, run_id: undefined }, worker_key: 'k', lens: 'codex' }),
+      /attempt_ref\.run_id is required/,
+    );
+    assert.throws(() => client.readAttempt({ repo: 'owner/repo' }), /attempt_ref\.pr is required/);
+    assert.deepEqual(seen, [], 'nothing reaches the coordinator with a body it would refuse');
+  });
+});
+
+test('a connect failure is coordinator-unreachable, not an exception', async () => {
+  const port = await closedPort();
+  const client = createClient({ coordinator: `http://127.0.0.1:${port}`, token: FIXTURE_TOKEN });
+  const result = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'coordinator-unreachable');
+  assert.match(result.message, /did not reach the coordinator/);
+  assert.equal(result.message.includes(FIXTURE_TOKEN), false, 'no token in a message');
+});
+
+test('a 404 from the identity route is identity-unset, body or no body', async () => {
+  await withFakeCoordinator(
+    (call) => (call.method === 'GET'
+      ? { status: 404, raw: '', contentType: 'application/json' }
+      : { status: 404, json: { code: 'identity-unset' } }),
+    async ({ coordinator }) => {
+      const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+      const bodiless = await client.readIdentity();
+      assert.equal(bodiless.ok, false);
+      assert.equal(bodiless.code, 'identity-unset');
+      const withCode = await client.identity({ login: 'l', actor: 'operator', reason: 'r' });
+      assert.equal(withCode.code, 'identity-unset');
+    },
+  );
+});
+
+test('a 401 without a contract code is unauthorized', async () => {
+  await withFakeCoordinator(() => ({ status: 401, raw: 'Unauthorized' }), async ({ coordinator }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    const result = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+    assert.equal(result.code, 'unauthorized');
+    assert.equal(result.status, 401);
+  });
+});
+
+test('an error raised ahead of the route is coordinator-unreachable with its status, never a parse exception', async () => {
+  await withFakeCoordinator(
+    (call) => (call.path.endsWith('/claim')
+      ? { status: 413, raw: '<!DOCTYPE html><html><body>PayloadTooLargeError: request entity too large</body></html>' }
+      : { status: 502, raw: 'Bad Gateway' }),
+    async ({ coordinator }) => {
+      const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+      const tooLarge = await client.claim({
+        repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+        worker_key: 'k', owner_label: 'session', manifest: { files: [] },
+      });
+      assert.equal(tooLarge.ok, false);
+      assert.equal(tooLarge.code, 'coordinator-unreachable');
+      assert.match(tooLarge.message, /HTTP 413/);
+      const gateway = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+      assert.equal(gateway.code, 'coordinator-unreachable');
+      assert.match(gateway.message, /HTTP 502/);
+    },
+  );
+});
+
+test('a success whose body is not JSON is coordinator-unreachable, not a crash', async () => {
+  await withFakeCoordinator(() => ({ status: 200, raw: 'not json at all' }), async ({ coordinator }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    const result = await client.readIdentity();
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'coordinator-unreachable');
+  });
+});
+
+test('the client has no takeover, no retry budget, and never returns the token', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: { lease_until: 'later' } }), async ({ coordinator }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    const names = Object.keys(client).sort();
+    assert.deepEqual(names, [
+      'claim', 'identity', 'lensEnd', 'lensStart', 'readAttempt', 'readIdentity', 'readStatus',
+      'recogniseImport', 'recoverAbandon', 'recoverDelivery', 'recoverGraceSweep', 'recoverNotDelivered',
+      'recoverWithdraw', 'reservePost', 'resolve', 'withdraw',
+    ]);
+    assert.equal(names.some((name) => /takeover/i.test(name)), false, 'takeover was removed by ruling — /recover/abandon allocates nothing');
+    const result = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+    assert.equal(JSON.stringify(result).includes(FIXTURE_TOKEN), false);
+  });
+  const source = readFileSync(join(SCRIPTS_DIR, 'pr-review-coordinator.mjs'), 'utf8');
+  assert.doesNotMatch(source, /setTimeout|maxRetries|retryCount|attemptBudget/, 'no retry machinery in the client');
+});
+
+test('createClient fails closed without a coordinator or a token', () => {
+  assert.throws(() => createClient({ token: FIXTURE_TOKEN }), /coordinator must be a non-empty base URL/);
+  assert.throws(() => createClient({ coordinator: 'http://127.0.0.1:3100' }), /token must be a non-empty string/);
+  assert.throws(() => createClient({ coordinator: 'http://127.0.0.1:3100', token: '' }), /token must be a non-empty string/);
+  assert.deepEqual(ATTEMPT_REF_FIELDS, ['repo', 'pr', 'head_sha', 'base_sha', 'attempt', 'run_id']);
+});
+
+// --- the managed resolver, cases (a) through (e) --------------------------
+
+test('managed (a): a token and a listed repository resolve managed', () => {
+  withProfile({ token: `${FIXTURE_TOKEN}\n`, managed: MANAGED_JSON }, (home) => {
+    const result = resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home });
+    assert.equal(result.mode, MANAGED_MODES.managed);
+    assert.equal(result.coordinator, 'http://127.0.0.1:3100');
+    assert.deepEqual(result.repos, ['owner/repo', 'owner/other']);
+    assert.equal(result.directory, managedDirectory({ homeDir: home }));
+    assert.equal(JSON.stringify(result).includes(FIXTURE_TOKEN), false, 'the resolver result never carries the token');
+    assert.equal('token' in result, false);
+  });
+});
+
+test('managed (c): no token anywhere resolves standalone, list or no list', () => {
+  withProfile({ managed: MANAGED_JSON }, (home) => {
+    const result = resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home });
+    assert.equal(result.mode, MANAGED_MODES.standalone);
+    assert.equal(result.coordinator, undefined, 'a standalone answer names no coordinator');
+  });
+  withProfile({}, (home) => {
+    assert.equal(resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode, MANAGED_MODES.standalone);
+  });
+  // An empty token file is no token — not a token whose value is the empty string.
+  withProfile({ token: '   \n', managed: MANAGED_JSON }, (home) => {
+    assert.equal(resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode, MANAGED_MODES.standalone);
+  });
+});
+
+test('managed (d): a token with the list absent or unreadable is managed-config-missing, never standalone', () => {
+  // The fail-open defect this case exists to catch: with the token present and
+  // the list gone, guessing "standalone" posts an uncoordinated review.
+  withProfile({ token: FIXTURE_TOKEN }, (home) => {
+    assert.equal(resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode, MANAGED_MODES.configMissing);
+  });
+  for (const broken of ['{ not json', '[]', '{"repos": ["owner/repo"]}', '{"coordinator": "http://127.0.0.1:3100"}', '{"coordinator": "http://127.0.0.1:3100", "repos": [3]}']) {
+    withProfile({ token: FIXTURE_TOKEN, managed: broken }, (home) => {
+      assert.equal(
+        resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode,
+        MANAGED_MODES.configMissing,
+        `unreadable list must fail closed: ${broken}`,
+      );
+    });
+  }
+});
+
+test('managed: a token with the repository not listed resolves standalone', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    assert.equal(resolveManaged({ repo: 'someone/else', env: {}, homeDir: home }).mode, MANAGED_MODES.standalone);
+  });
+  // Case only differs — GitHub calls these the same repository, and answering
+  // standalone here would post the second review the coordinator exists to stop.
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    assert.equal(resolveManaged({ repo: 'Owner/Repo', env: {}, homeDir: home }).mode, MANAGED_MODES.managed);
+  });
+});
+
+test('managed (e): the answer does not depend on the working directory', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    const first = mkdtempSync(join(tmpdir(), 'slim-review-cwd-a-'));
+    const second = mkdtempSync(join(tmpdir(), 'slim-review-cwd-b-'));
+    const origin = process.cwd();
+    try {
+      process.chdir(first);
+      const fromFirst = resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home });
+      process.chdir(second);
+      const fromSecond = resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home });
+      assert.deepEqual(fromFirst, fromSecond);
+      assert.equal(fromFirst.mode, MANAGED_MODES.managed);
+    } finally {
+      process.chdir(origin);
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+  // The falsifier for the same claim at the source: the workspace-root helper
+  // resolves per checkout, so a resolver that reached for it would answer
+  // differently from a second clone of the same repository.
+  for (const module of ['pr-review-coordinator.mjs', 'pr-review-managed.mjs']) {
+    const source = readFileSync(join(SCRIPTS_DIR, module), 'utf8');
+    assert.doesNotMatch(source, /process\.cwd|findWorkspaceRoot|WORKIT_WORKSPACE_ROOT/, `${module} must not resolve from a checkout`);
+  }
+});
+
+test('loadCoordinatorToken prefers the environment, then the file, and never the empty string', () => {
+  withProfile({ token: `${FIXTURE_TOKEN}\n` }, (home) => {
+    assert.equal(loadCoordinatorToken({ env: {}, homeDir: home }), FIXTURE_TOKEN);
+    assert.equal(loadCoordinatorToken({ env: { [TOKEN_ENV_VAR]: 'from-env' }, homeDir: home }), 'from-env');
+    assert.equal(loadCoordinatorToken({ env: { [TOKEN_ENV_VAR]: '  ' }, homeDir: home }), FIXTURE_TOKEN, 'a blank override is not a token');
+  });
+  withProfile({ token: '' }, (home) => {
+    assert.equal(loadCoordinatorToken({ env: {}, homeDir: home }), null);
+  });
+  withProfile({}, (home) => {
+    assert.equal(loadCoordinatorToken({ env: {}, homeDir: home }), null);
+    assert.equal(loadCoordinatorToken({ env: { [TOKEN_ENV_VAR]: 'from-env' }, homeDir: home }), 'from-env');
+  });
+});
+
+test('the token file is read whatever its ACL says — the mode is observed, never gated on', (t) => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home, dir) => {
+    const tokenFile = join(dir, 'coordinator-token');
+    // The file's owner-only mode is instructed where it is provisioned, not
+    // here. This loader deliberately has no opinion about it: a resolver that
+    // refused an over-permissive file would fail closed on the one thing an
+    // operator can see and fix, and a token nobody can read is the same
+    // standalone answer as no token at all.
+    assert.equal(loadCoordinatorToken({ env: {}, homeDir: home }), FIXTURE_TOKEN);
+    assert.equal(resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode, MANAGED_MODES.managed);
+    let observed;
+    if (process.platform === 'win32') {
+      try {
+        observed = execFileSync('icacls', [tokenFile], { encoding: 'utf8', windowsHide: true }).trim();
+      } catch (err) {
+        observed = `icacls failed: ${err.message}`;
+      }
+    } else {
+      observed = `not observed on ${process.platform}`;
+    }
+    t.diagnostic(`token file ACL observation: ${observed.split(/\r?\n/).join(' | ')}`);
+  });
+});
+
+test('readManagedList reports the two files it read from the managed directory', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home, dir) => {
+    const list = readManagedList({ homeDir: home });
+    assert.equal(list.ok, true);
+    assert.equal(list.file, join(dir, 'managed.json'));
+    assert.equal(list.coordinator, MANAGED_JSON.coordinator);
+    assert.equal(managedDirectory({ homeDir: home }), dir);
+  });
+});
+
+test('resolveManaged refuses to answer without a repository', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    assert.throws(() => resolveManaged({ env: {}, homeDir: home }), /repo is required/);
+  });
+});
+
+// --- the `managed` and `identity` subcommands -----------------------------
+
+/**
+ * Spawn the CLI with a profile of our own. USERPROFILE and HOME are both set
+ * because `os.homedir()` reads the first on Windows and the second on POSIX,
+ * and any inherited coordinator token is dropped: the seam has to be the only
+ * thing the child can resolve from.
+ */
+function runCliIn({ args, home, cwd }) {
+  const env = { ...process.env, USERPROFILE: home, HOME: home };
+  delete env[TOKEN_ENV_VAR];
+  try {
+    const stdout = execFileSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env, cwd });
+    return { code: 0, stdout, stderr: '' };
+  } catch (err) {
+    return { code: err.status, stdout: String(err.stdout ?? ''), stderr: String(err.stderr ?? '') };
+  }
+}
+
+/** Exactly one JSON line on stdout is the coordinated contract. */
+function onlyOutcomeLine(stdout) {
+  const lines = stdout.split(/\r?\n/).filter((line) => line.trim() !== '');
+  assert.equal(lines.length, 1, `expected exactly one stdout line, got ${JSON.stringify(lines)}`);
+  return JSON.parse(lines[0]);
+}
+
+test('parseArgs takes --pin and a non-empty --reason', () => {
+  const opts = parseArgs(['identity', '--pin', '--reason', 'activation preflight']);
+  assert.equal(opts.pin, true);
+  assert.equal(opts.reason, 'activation preflight');
+  assert.equal(parseArgs(['managed', '--repo', 'o/r']).pin, undefined);
+  const r = runCli(['identity', '--pin', '--reason', '   ']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /--reason needs a non-empty value/);
+});
+
+test('managed and identity validate before doing anything, and take no --pr', () => {
+  const noRepo = runCli(['managed']);
+  assert.equal(noRepo.code, 2);
+  assert.match(noRepo.stderr, /managed needs --repo owner\/name/);
+
+  const withPr = runCli(['managed', '--repo', 'owner/repo', '--pr', '42']);
+  assert.equal(withPr.code, 2);
+  assert.match(withPr.stderr, /managed takes no --pr/);
+
+  const identityPr = runCli(['identity', '--pin', '--reason', 'why', '--pr', '42']);
+  assert.equal(identityPr.code, 2);
+  assert.match(identityPr.stderr, /identity takes no --pr/);
+
+  const noPin = runCli(['identity', '--reason', 'why']);
+  assert.equal(noPin.code, 2);
+  assert.match(noPin.stderr, /identity needs --pin/);
+
+  const noReason = runCli(['identity', '--pin']);
+  assert.equal(noReason.code, 2);
+  assert.match(noReason.stderr, /identity --pin needs --reason/);
+
+  // The pre-switch --pr requirement is untouched for every other command.
+  assert.equal(runCli(['post', '--pr', 'main', '--findings', 'x.json']).code, 2);
+  assert.match(runCli(['threads', '--repo', 'owner/repo']).stderr, /--pr <n> is required/);
+});
+
+test('managed (a): a listed repository resolves managed and the token never reaches stdout', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home, dir) => {
+    const r = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home });
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout.includes(FIXTURE_TOKEN), false, 'the token must never be printed');
+    assert.deepEqual(onlyOutcomeLine(r.stdout), {
+      outcome: 'ok',
+      retry: 'stop',
+      mode: 'managed',
+      repo: 'owner/repo',
+      directory: dir,
+      coordinator: 'http://127.0.0.1:3100',
+      repos: ['owner/repo', 'owner/other'],
+    });
+  });
+});
+
+test('managed (c): with no token the answer is standalone and names no coordinator', () => {
+  withProfile({ managed: MANAGED_JSON }, (home, dir) => {
+    const r = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home });
+    assert.equal(r.code, 0);
+    assert.deepEqual(onlyOutcomeLine(r.stdout), {
+      outcome: 'ok', retry: 'stop', mode: 'standalone', repo: 'owner/repo', directory: dir,
+    });
+  });
+});
+
+test('managed (d): a token with no list refuses managed-config-missing on stdout and exits nonzero', () => {
+  withProfile({ token: FIXTURE_TOKEN }, (home, dir) => {
+    const r = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home });
+    assert.equal(r.code, 1);
+    assert.deepEqual(onlyOutcomeLine(r.stdout), {
+      outcome: 'refused',
+      reason: 'managed-config-missing',
+      retry: 'stop',
+      mode: 'managed-config-missing',
+      repo: 'owner/repo',
+      directory: dir,
+    });
+    assert.match(r.stderr, /managed\.json is missing or unreadable/);
+    assert.equal(r.stderr.includes(FIXTURE_TOKEN), false);
+  });
+});
+
+test('managed (e): two different working directories give the same answer', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    const first = mkdtempSync(join(tmpdir(), 'slim-review-cli-a-'));
+    const second = mkdtempSync(join(tmpdir(), 'slim-review-cli-b-'));
+    try {
+      const fromFirst = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home, cwd: first });
+      const fromSecond = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home, cwd: second });
+      assert.equal(fromFirst.stdout, fromSecond.stdout, 'the managed answer must not depend on where it was run');
+      assert.equal(onlyOutcomeLine(fromFirst.stdout).mode, 'managed');
+      // And the profile seam is what decides: the same two directories with a
+      // profile that has no token answer standalone.
+      withProfile({}, (bareHome) => {
+        assert.equal(onlyOutcomeLine(runCliIn({ args: ['managed', '--repo', 'owner/repo'], home: bareHome, cwd: first }).stdout).mode, 'standalone');
+      });
+    } finally {
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+});
+
+test('identity --pin posts the gh login with its actor and reason', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: { login: 'service-login', set_at: '2026-09-10T00:00:00.000Z' } }), async ({ coordinator, seen }) => {
+    await withProfile({ token: FIXTURE_TOKEN, managed: { coordinator, repos: ['owner/repo'] } }, async (home) => {
+      const logs = [];
+      const ghCalls = [];
+      await cmdIdentity(
+        { pin: true, reason: 'activation preflight for 52fd1a6a' },
+        {
+          runGh: (args, opts) => { ghCalls.push({ args, opts }); return 'service-login\n'; },
+          log: (line) => logs.push(String(line)),
+          die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); },
+          env: {},
+          homeDir: home,
+        },
+      );
+      assert.deepEqual(ghCalls[0].args, ['api', 'user', '-q', '.login'], 'the login comes from the writer credential, never the coordinator');
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0].method, 'POST');
+      assert.equal(seen[0].path, '/api/pr-review/identity');
+      assert.deepEqual(seen[0].body, {
+        login: 'service-login',
+        actor: 'operator',
+        reason: 'activation preflight for 52fd1a6a',
+      });
+      assert.equal(seen[0].token, FIXTURE_TOKEN, 'the token authenticates the call and appears nowhere else');
+      assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+        { outcome: 'ok', retry: 'stop', login: 'service-login', coordinator },
+      ]);
+      assert.equal(logs.join('\n').includes(FIXTURE_TOKEN), false);
+    });
+  });
+});
+
+test('identity --pin surfaces a coordinator refusal as one JSON line and pins nothing', async () => {
+  await withFakeCoordinator(() => ({ status: 401, raw: 'Unauthorized' }), async ({ coordinator, seen }) => {
+    await withProfile({ token: FIXTURE_TOKEN, managed: { coordinator, repos: ['owner/repo'] } }, async (home) => {
+      const logs = [];
+      const deaths = [];
+      await cmdIdentity(
+        { pin: true, reason: 'wrong token' },
+        {
+          runGh: () => 'service-login\n',
+          log: (line) => logs.push(String(line)),
+          die: (code, message) => deaths.push({ code, message }),
+          env: {},
+          homeDir: home,
+        },
+      );
+      assert.equal(seen.length, 1, 'one call, no retry');
+      assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+        { outcome: 'refused', reason: 'unauthorized', retry: 'stop', coordinator_code: 'unauthorized' },
+      ]);
+      assert.equal(deaths.length, 1);
+      assert.equal(deaths[0].code, 1);
+    });
+  });
+});
+
+test('identity --pin reports an unreachable coordinator without a coordinator_code', async () => {
+  const port = await closedPort();
+  await withProfile({ token: FIXTURE_TOKEN, managed: { coordinator: `http://127.0.0.1:${port}`, repos: ['owner/repo'] } }, async (home) => {
+    const logs = [];
+    const deaths = [];
+    await cmdIdentity(
+      { pin: true, reason: 'coordinator down' },
+      {
+        runGh: () => 'service-login\n',
+        log: (line) => logs.push(String(line)),
+        die: (code, message) => deaths.push({ code, message }),
+        env: {},
+        homeDir: home,
+      },
+    );
+    assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+      { outcome: 'refused', reason: 'coordinator-unreachable', retry: 'stop' },
+    ]);
+    assert.equal(deaths[0].code, 1);
+  });
+});
+
+test('identity --pin refuses before gh when the managed directory is not provisioned', async () => {
+  await withProfile({}, async (home, dir) => {
+    const logs = [];
+    const deaths = [];
+    let ghCalls = 0;
+    await cmdIdentity(
+      { pin: true, reason: 'nothing provisioned' },
+      {
+        runGh: () => { ghCalls += 1; return 'service-login\n'; },
+        log: (line) => logs.push(String(line)),
+        die: (code, message) => deaths.push({ code, message }),
+        env: {},
+        homeDir: home,
+        makeClient: () => { throw new Error('no client may be built without a token'); },
+      },
+    );
+    assert.equal(ghCalls, 0, 'the refusal lands before any credential is read');
+    assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+      { outcome: 'refused', reason: 'managed-config-missing', retry: 'stop', directory: dir },
+    ]);
+    assert.equal(deaths[0].code, 1);
+  });
+  // A token but no list is the same refusal, from the other missing half.
+  await withProfile({ token: FIXTURE_TOKEN }, async (home) => {
+    const logs = [];
+    const deaths = [];
+    await cmdIdentity(
+      { pin: true, reason: 'no list' },
+      {
+        runGh: () => 'service-login\n',
+        log: (line) => logs.push(String(line)),
+        die: (code, message) => deaths.push({ code, message }),
+        env: {},
+        homeDir: home,
+        makeClient: () => { throw new Error('no client may be built without a coordinator URL'); },
+      },
+    );
+    assert.equal(JSON.parse(logs[0]).reason, 'managed-config-missing');
+    assert.equal(deaths[0].code, 1);
+  });
+});
+
+test('identity --pin classifies a failed gh credential read instead of exiting silently', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: {} }), async ({ coordinator, seen }) => {
+    await withProfile({ token: FIXTURE_TOKEN, managed: { coordinator, repos: ['owner/repo'] } }, async (home) => {
+      const logs = [];
+      const deaths = [];
+      await cmdIdentity(
+        { pin: true, reason: 'no credential' },
+        {
+          runGh: () => { const err = new Error('exit 1'); err.stderr = 'gh: authentication required'; throw err; },
+          log: (line) => logs.push(String(line)),
+          die: (code, message) => deaths.push({ code, message }),
+          env: {},
+          homeDir: home,
+        },
+      );
+      assert.deepEqual(logs.map((line) => JSON.parse(line)), [
+        { outcome: 'failed', reason: 'gh-failure', retry: 'lens-budget' },
+      ]);
+      assert.equal(deaths[0].code, 4);
+      assert.match(deaths[0].message, /authentication required/);
+      assert.deepEqual(seen, [], 'nothing was pinned');
+    });
+  });
+});
+
+test('the coordinated subcommands print exactly one JSON line — the other half of the characterisation boundary', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    const managed = runCliIn({ args: ['managed', '--repo', 'owner/repo'], home });
+    const line = onlyOutcomeLine(managed.stdout);
+    assert.ok('outcome' in line && 'retry' in line);
+    assert.ok(['stop', 'lens-budget', 'post-budget'].includes(line.retry));
+  });
+  withProfile({ token: FIXTURE_TOKEN }, (home) => {
+    onlyOutcomeLine(runCliIn({ args: ['managed', '--repo', 'owner/repo'], home }).stdout);
+  });
 });
