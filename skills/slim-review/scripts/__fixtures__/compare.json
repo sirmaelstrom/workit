@@ -1,0 +1,85 @@
+{
+  "$capture": "gh api repos/sirmaelstrom/workit/compare/ebd6773514c1adc5a8059e7fbeec8c5305aba15e...0e8e2ab10f01f181e8eef8c639e058c9760044f2  — captured 2026-09-10 against the real endpoint. The file set and the entry shapes are the capture's; each patch body was shortened to a few hunk lines so this fixture stays readable, one of them carries the sentinel line the rendered-prompt assertion looks for, and the last two entries are left without a patch (a binary file and a rename) to pin the not-reviewed disclosure. A live capture of an over-bound compare would be megabytes, so the byte-bound test scales one of these patches instead.",
+  "repo": "sirmaelstrom/workit",
+  "base_sha": "ebd6773514c1adc5a8059e7fbeec8c5305aba15e",
+  "head_sha": "0e8e2ab10f01f181e8eef8c639e058c9760044f2",
+  "sentinel": "+const SLIM_REVIEW_PINNED_SENTINEL = 'pinned-diff-sentinel-4f2a';",
+  "payload": {
+    "status": "ahead",
+    "ahead_by": 3,
+    "total_commits": 3,
+    "files": [
+      {
+        "filename": "skills/slim-review/SKILL.md",
+        "sha": "a8fea7209d7167035e58c69cb76d78695c6da232",
+        "status": "modified",
+        "additions": 63,
+        "deletions": 0,
+        "changes": 63,
+        "patch": "@@ -287,6 +287,9 @@ operator's merge call.\n \n ---\n \n+## Managed repositories\n+\n+Everything above is the standalone loop."
+      },
+      {
+        "filename": "skills/slim-review/scripts/__fixtures__/d12-reason-table.json",
+        "sha": "7866b5cf210cedcaf11892fdbd788a356536d1ee",
+        "status": "added",
+        "additions": 72,
+        "deletions": 0,
+        "changes": 72,
+        "patch": "@@ -0,0 +1,3 @@\n+{\n+  \"decisions_revision\": \"v5.1\"\n+}"
+      },
+      {
+        "filename": "skills/slim-review/scripts/pr-review-coordinator.mjs",
+        "sha": "668d83b67249beecbed722f06879f79674a5d071",
+        "status": "added",
+        "additions": 364,
+        "deletions": 0,
+        "changes": 364,
+        "patch": "@@ -0,0 +1,3 @@\n+const SLIM_REVIEW_PINNED_SENTINEL = 'pinned-diff-sentinel-4f2a';\n+export const COORDINATOR_BASE_PATH = '/api/pr-review';\n+export const TOKEN_HEADER = 'x-pr-review-token';"
+      },
+      {
+        "filename": "skills/slim-review/scripts/pr-review-managed.mjs",
+        "sha": "037f9473faebf4fecf737be96cf5e56e7f1ecf5b",
+        "status": "added",
+        "additions": 135,
+        "deletions": 0,
+        "changes": 135,
+        "patch": "@@ -0,0 +1,2 @@\n+export const MANAGED_DIR_SEGMENTS = Object.freeze(['.workit', 'pr-review']);\n+export const TOKEN_FILENAME = 'coordinator-token';"
+      },
+      {
+        "filename": "skills/slim-review/scripts/pr-review.mjs",
+        "sha": "a3428c833005ed9decd553f5126e915ca757b6cd",
+        "status": "modified",
+        "additions": 177,
+        "deletions": 2,
+        "changes": 179,
+        "patch": "@@ -43,6 +43,8 @@ import { pathToFileURL, fileURLToPath } from 'node:url';\n import { dirname, join, resolve } from 'node:path';\n \n+import { createClient } from './pr-review-coordinator.mjs';\n+"
+      },
+      {
+        "filename": "skills/slim-review/scripts/pr-review.test.mjs",
+        "sha": "57598f6a5f29852fd05391177e2eb7c7434163e9",
+        "status": "modified",
+        "additions": 1208,
+        "deletions": 1,
+        "changes": 1209,
+        "patch": "@@ -1,4 +1,6 @@\n import { test } from 'node:test';\n import assert from 'node:assert/strict';\n+import { createServer } from 'node:http';\n "
+      },
+      {
+        "filename": "docs/diagram.png",
+        "sha": "1f0c9de1d0b1c5f5b3a4c9a7e2d6f8b0c1a2d3e4",
+        "status": "modified",
+        "additions": 0,
+        "deletions": 0,
+        "changes": 0
+      },
+      {
+        "filename": "docs/moved.md",
+        "sha": "2e1d8cf2e1c2d6a6c4b5daf8e3e7a9c1d2b3e4f5",
+        "status": "renamed",
+        "additions": 0,
+        "deletions": 0,
+        "changes": 0,
+        "previous_filename": "docs/old.md"
+      }
+    ]
+  }
+}

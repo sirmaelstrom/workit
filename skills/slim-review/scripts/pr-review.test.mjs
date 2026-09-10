@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +26,7 @@ import {
   parseDiff,
   countChangedFiles,
   fetchPrFilePaths,
+  fetchPrFiles,
   gh,
   partitionFindings,
   checkCoverage,
@@ -37,9 +39,43 @@ import {
   cmdLens,
   cmdManaged,
   cmdIdentity,
+  cmdManifest,
+  cmdClaim,
+  cmdRecognise,
+  cmdRecover,
   buildReviewerPrompt,
   defaultCodexExe,
+  produceManifest,
+  renderPinnedDiff,
+  classifyPostOutcome,
+  classifyLensFailure,
+  writeAttemptRefFile,
+  readAttemptRefFile,
+  attemptRefPath,
+  readReviewListing,
+  githubApiBase,
+  reviewsUrl,
+  GITHUB_API_DEFAULT,
+  NOT_SENT_CODES,
+  MAX_DIFF_BYTES,
+  DOCUMENT_STAMPS,
+  loadFindings,
 } from './pr-review.mjs';
+import {
+  REASONS,
+  OUTCOMES,
+  RETRY_VALUES,
+  WITHDRAW_REASONS,
+  retryFor,
+  emitOutcome,
+} from './pr-review-outcomes.mjs';
+import {
+  buildMarker,
+  parseMarker,
+  recognise,
+  isDedupeHit,
+  deliveryKind,
+} from './pr-review-recognise.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
 const SCHEMA = join(dirname(fileURLToPath(import.meta.url)), '..', 'reference', 'findings.schema.json');
@@ -714,10 +750,12 @@ function runPostWithFakeGh({
     throw err;
   };
   try {
-    cmdPost(
+    // No coordinator token in the environment: this helper exercises the
+    // standalone path, and the managed gate must not answer for it.
+    withNoManagedConfig(() => cmdPost(
       { pr: '42', repo: 'owner/repo', findings, forcePost, dryRun, ...(singleLens ? { singleLens } : {}) },
       { runGh, die: die ?? throwingDie, log: (line) => logs.push(line) },
-    );
+    ));
   } catch (err) {
     error = err;
   } finally {
@@ -1010,7 +1048,7 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), codex
   const deaths = [];
   let statusCalls = 0;
   try {
-    cmdLens(
+    withNoManagedConfig(() => cmdLens(
       { pr: '42', repo: 'owner/repo', lens, cwd: 'C:/repo', out, measureLog },
       {
         run: (program, args, opts = {}) => {
@@ -1028,7 +1066,7 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), codex
         log: () => {},
         now: (() => { let clock = 100; return () => (clock += 25); })(),
       },
-    );
+    ));
     return {
       calls, deaths, outExists: existsSync(out), out: existsSync(out) ? JSON.parse(readFileSync(out, 'utf8')) : null,
       tempOut: calls.find(({ args }) => args[0] === 'exec')?.args.at(-2),
@@ -2665,5 +2703,1460 @@ test('the coordinated subcommands print exactly one JSON line — the other half
   });
   withProfile({ token: FIXTURE_TOKEN }, (home) => {
     onlyOutcomeLine(runCliIn({ args: ['managed', '--repo', 'owner/repo'], home }).stdout);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The coordinated writer (quest 52fd1a6a, WP-03)
+//
+// Everything below drives the real subcommands against a fake coordinator (a
+// node:http server in this process implementing §W.4 with the lane semantics)
+// and a fake GitHub endpoint that records every request it receives. Nothing
+// reaches the network, and no test posts to a pull request: `fetch` is pointed
+// at the fake through PR_REVIEW_GITHUB_API_BASE, and the one test about the
+// default base asserts the computed URL without sending anything.
+//
+// Fixtures carry their own capture command in a `$capture` header and are read
+// without an existsSync guard: a missing fixture fails the test that needs it
+// rather than skipping it into a clean-looking pass.
+// ---------------------------------------------------------------------------
+
+function readFixture(name) {
+  return JSON.parse(readFileSync(join(SCRIPTS_DIR, '__fixtures__', name), 'utf8'));
+}
+
+const FIXTURE_FILES = readFixture('pr-files.json');
+const FIXTURE_REFS = readFixture('pr-refs.json');
+const FIXTURE_COMPARE = readFixture('compare.json');
+const FIXTURE_REVIEWS = readFixture('review-listing.json');
+const FIXTURE_USER = readFixture('gh-api-user.json');
+const FIXTURE_POSTS = readFixture('review-post-responses.json');
+
+const PINNED_REPO = FIXTURE_FILES.repo;
+const PINNED_PR = FIXTURE_FILES.pr;
+const PINNED_HEAD = FIXTURE_REFS.payload.headRefOid;
+const PINNED_BASE = FIXTURE_REFS.payload.baseRefOid;
+const MOVED_HEAD = FIXTURE_REVIEWS.other_head_sha;
+const MANIFEST_FILES = FIXTURE_FILES.pages.flat();
+const MANIFEST_PATHS = MANIFEST_FILES.map((entry) => entry.filename);
+const SERVICE_LOGIN = FIXTURE_USER.service_login;
+const OTHER_LOGIN = FIXTURE_USER.other_login;
+const RUN_ID = FIXTURE_REVIEWS.run_id;
+const SENTINEL = FIXTURE_COMPARE.sentinel;
+const WORKER_KEY = 'worker-key-value';
+const REQUIRED_LENSES = ['astra', 'codex'];
+
+/**
+ * sha256 of `buildReviewerPrompt({pr: 42, repo: 'owner/repo', prFilePaths:
+ * ['src/a.ts', 'src/b.ts']})` rendered from the file this branch forked from
+ * (`git show 77e1a4f:…/pr-review.mjs`, itself unchanged since 632dfcd). It is
+ * re-derived from that commit, not copied from the current render.
+ */
+const STANDALONE_PROMPT_SHA256 = '363d938b7b506301ddb92d30aef811865dddb64069708d93f9c037ed59e0c0bb';
+
+const PINNED_REF = Object.freeze({
+  repo: PINNED_REPO,
+  pr: PINNED_PR,
+  head_sha: PINNED_HEAD,
+  base_sha: PINNED_BASE,
+  attempt: 1,
+  run_id: RUN_ID,
+});
+
+const PINNED_MANIFEST = Object.freeze({
+  files: MANIFEST_FILES,
+  head_before: PINNED_HEAD,
+  head_after: PINNED_HEAD,
+  captured_at: '2026-09-10T10:00:00.000Z',
+});
+
+/** The document a lens returns before this script stamps it. */
+function modelOutput({ paths = MANIFEST_PATHS, findings = [{ severity: 'P2', title: 'anchored', path: 'skills/slim-review/SKILL.md', line: 290, body: 'evidence' }] } = {}) {
+  return {
+    summary: 'a summary',
+    coverage: `examined ${paths.length} of ${paths.length} changed files`,
+    examined_paths: paths,
+    findings,
+  };
+}
+
+/** The document a coordinated lens has written: stamped, on disk. */
+function stampedDocument({ lens = 'codex', ref = PINNED_REF, paths = MANIFEST_PATHS, findings } = {}) {
+  return {
+    ...modelOutput({ paths, ...(findings ? { findings } : {}) }),
+    findings: (findings ?? modelOutput().findings).map((finding) => ({ ...finding, lens })),
+    lens,
+    model: lens === 'astra' ? 'gpt-6-astra' : 'gpt-5.6-terra',
+    reasoning: lens === 'astra' ? 'low' : 'high',
+    wall_ms: 25,
+    head_sha: ref.head_sha,
+    base_sha: ref.base_sha,
+    attempt: ref.attempt,
+    run_id: ref.run_id,
+  };
+}
+
+/**
+ * The process seams, recording every spawn into a shared event list.
+ *
+ * This is the seam the code actually calls — `runGh` for `post`, and the lens's
+ * injected `run` for everything it launches, including its own `gh` — so the
+ * reservation-window assertion is about launches that would really have
+ * happened, not about a mock nobody calls.
+ */
+function pinnedSeams({
+  events = [],
+  heads = null,
+  compare = FIXTURE_COMPARE.payload,
+  reviewPages = FIXTURE_REVIEWS.pages,
+  filePages = FIXTURE_FILES.pages,
+  login = SERVICE_LOGIN,
+  ghToken = 'gh-token-value',
+  fail: failures = {},
+  codex = () => JSON.stringify(modelOutput()),
+  status = ['', ''],
+} = {}) {
+  const headQueue = heads === null ? null : [...heads];
+  const calls = [];
+  const statusQueue = [...status];
+  const runGh = (args) => {
+    calls.push(args);
+    events.push({ kind: 'spawn', args });
+    const joined = args.join(' ');
+    for (const [needle, error] of Object.entries(failures)) {
+      if (joined.includes(needle)) throw new Error(error);
+    }
+    if (args[0] === 'pr' && args[1] === 'view') {
+      const head = headQueue === null ? PINNED_HEAD : (headQueue.length > 1 ? headQueue.shift() : headQueue[0]);
+      return args.includes('-q') ? `${head}\n` : `${JSON.stringify({ baseRefOid: PINNED_BASE, headRefOid: head })}\n`;
+    }
+    if (args[0] === 'auth' && args[1] === 'token') return `${ghToken}\n`;
+    if (args[0] === 'api' && args[1] === 'user') return `${login}\n`;
+    if (args[0] === 'api' && args[1] === '--paginate' && joined.includes('/files')) {
+      return `${filePages.flat().map((entry) => JSON.stringify(entry)).join('\n')}\n`;
+    }
+    if (args[0] === 'api' && args[1] === '--paginate' && joined.includes('/reviews')) {
+      return `${reviewPages.flat().map((entry) => JSON.stringify(entry)).join('\n')}\n`;
+    }
+    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(compare);
+    throw new Error(`unexpected gh call: ${joined}`);
+  };
+  const run = (program, args, opts = {}) => {
+    if (/^gh(\.exe)?$/.test(program)) return runGh(args, opts);
+    calls.push([program, ...args]);
+    events.push({ kind: 'spawn', args: [program, ...args] });
+    if (/^git(\.exe)?$/.test(program)) return statusQueue.length > 1 ? statusQueue.shift() : (statusQueue[0] ?? '');
+    if (args[0] === 'exec') {
+      const out = codex(args);
+      if (out !== null) writeFileSync(args[args.indexOf('-o') + 1], out, 'utf8');
+      return 'codex stdout that must not be parsed';
+    }
+    throw new Error(`unexpected spawn: ${program} ${args.join(' ')}`);
+  };
+  return { runGh, run, calls, events };
+}
+
+/** Reasons `/withdraw` must refuse: they belong to `lens-end` (D12 source split). */
+const WRITER_LENS_REASONS = REASONS.filter((row) => row.source === 'writer-lens').map((row) => row.reason);
+
+/**
+ * A fake coordinator implementing §W.4 with the lane semantics: three starts
+ * per lens counted per lens, `lens-end` as the sole exhaustion authority
+ * answering `terminal`, `reserve-post` only from `lens_done`, and `/withdraw`
+ * refusing every lens-end reason.
+ */
+function coordinatorFake({
+  identity = SERVICE_LOGIN,
+  requiredLenses = REQUIRED_LENSES,
+  manifest = PINNED_MANIFEST,
+  attemptRef = PINNED_REF,
+  attempts = [],
+  events = [],
+  forced = {},
+  maxStartsPerLens = 3,
+  maxPostStarts = 2,
+  state: initialState = 'claimed',
+} = {}) {
+  const row = {
+    state: initialState,
+    disposition: null,
+    lens_state: Object.fromEntries(requiredLenses.map((lens) => [lens, { status: 'pending', starts: 0 }])),
+    post_starts: 0,
+    post_attempted_at: null,
+    review_id: null,
+  };
+  const state = {
+    identity, row, requiredLenses, manifest, attemptRef, attempts, forced,
+    calls: [], claims: [], imports: [], withdrawals: [], resolves: [], reservations: [], recoveries: [],
+    executions: 0,
+  };
+  const refuse = (code, extra = {}) => ({ status: 409, json: { code, ...extra } });
+  const respond = (call) => {
+    const path = call.path.replace('/api/pr-review', '');
+    events.push({ kind: 'coordinator', path, method: call.method });
+    state.calls.push({ ...call, shortPath: path });
+    if (state.forced[path] !== undefined) {
+      const answer = state.forced[path];
+      return Array.isArray(answer) ? (answer.length > 1 ? answer.shift() : answer[0]) : answer;
+    }
+    const body = call.body ?? {};
+    switch (path) {
+      case '/identity':
+        if (call.method === 'POST') return { status: 200, json: { login: body.login } };
+        return state.identity === null
+          ? { status: 404, json: { code: 'identity-unset' } }
+          : { status: 200, json: { login: state.identity } };
+      case '/status':
+        return { status: 200, json: { observed_head: PINNED_HEAD, posted_head: null, posted_review_id: null, attempts: state.attempts } };
+      case '/claim':
+        state.claims.push(body);
+        return { status: 201, json: { attempt_ref: state.attemptRef, lease_until: '2026-09-10T11:00:00.000Z', required_lenses: state.requiredLenses } };
+      case '/recognise-import':
+        state.imports.push(body);
+        return { status: 200, json: { review_id: body.review_id, imported: true } };
+      case '/attempt':
+        return {
+          status: 200,
+          json: {
+            attempt_ref: state.attemptRef,
+            manifest: state.manifest,
+            required_lenses: state.requiredLenses,
+            lens_state: row.lens_state,
+            state: row.state,
+            disposition: row.disposition,
+            post_generation: row.post_starts,
+            post_attempted_at: row.post_attempted_at,
+            pinned_login: state.identity,
+            ended_at: null,
+          },
+        };
+      case '/lens-start': {
+        if (!state.requiredLenses.includes(body.lens)) return refuse('lens-not-required');
+        if (!['claimed', 'lens_running'].includes(row.state)) return refuse('bad-state', { state: row.state });
+        const lens = row.lens_state[body.lens];
+        if (lens.status === 'running') return refuse('lens-running');
+        if (lens.starts >= maxStartsPerLens) return refuse('bad-state', { state: row.state });
+        lens.starts += 1;
+        lens.status = 'running';
+        lens.execution_id = `exec-${++state.executions}`;
+        row.state = 'lens_running';
+        return { status: 200, json: { execution_id: lens.execution_id, starts: lens.starts } };
+      }
+      case '/lens-end': {
+        const lens = row.lens_state[body.lens];
+        if (!lens || lens.execution_id !== body.execution_id) return refuse('stale-execution');
+        const answer = (terminal, disposition) => {
+          if (terminal) {
+            row.state = disposition === 'head-moved' ? 'superseded' : 'failed';
+            row.disposition = disposition;
+          }
+          return { status: 200, json: { state: row.state, lens_status: lens.status, starts: lens.starts, terminal, ...(disposition ? { disposition } : {}) } };
+        };
+        if (body.outcome === 'ok') {
+          lens.status = 'done';
+          lens.document_path = body.document_path;
+          lens.document_sha256 = body.document_sha256;
+          if (state.requiredLenses.every((name) => row.lens_state[name].status === 'done')) row.state = 'lens_done';
+          else row.state = 'lens_running';
+          return { status: 200, json: { state: row.state, lens_status: 'done', starts: lens.starts, terminal: false } };
+        }
+        lens.status = 'failed';
+        lens.last_reason = body.reason;
+        if (body.reason === 'revision-mismatch') return answer(true, 'head-moved');
+        if (body.reason === 'input-mismatch') return answer(true, body.head_now && body.head_now !== state.attemptRef.head_sha ? 'head-moved' : 'input-mismatch');
+        if (['diff-too-large', 'provider-limit', 'lens-error', 'worktree-dirty'].includes(body.reason)) {
+          return answer(true, body.reason === 'worktree-dirty' ? 'integrity-violation' : body.reason);
+        }
+        // Retryable: the third failure is the one that ends the row.
+        if (lens.starts >= maxStartsPerLens) return answer(true, 'exhausted-lens-budget');
+        return { status: 200, json: { state: row.state, lens_status: 'failed', starts: lens.starts, terminal: false } };
+      }
+      case '/reserve-post': {
+        state.reservations.push(body);
+        if (row.state !== 'lens_done') return refuse('bad-state', { state: row.state });
+        row.post_starts += 1;
+        row.state = 'posting';
+        row.post_attempted_at = '2026-09-10T10:30:00.000Z';
+        return { status: 200, json: { post_generation: row.post_starts } };
+      }
+      case '/resolve': {
+        state.resolves.push(body);
+        if (body.post_generation !== row.post_starts) return refuse('stale-generation');
+        if (body.outcome === 'posted') {
+          row.state = 'posted';
+          row.review_id = body.review_id;
+          return { status: 200, json: { state: 'posted', terminal: true } };
+        }
+        if (body.outcome === 'post_rejected') {
+          row.state = 'post_rejected';
+          return { status: 200, json: { state: 'post_rejected', terminal: true } };
+        }
+        if (body.outcome === 'unresolved') {
+          row.state = 'delivery-unresolved';
+          return { status: 200, json: { state: 'delivery-unresolved', terminal: false } };
+        }
+        if (row.post_starts >= maxPostStarts) {
+          row.state = 'failed';
+          row.disposition = 'post-not-sent';
+          return { status: 200, json: { state: 'failed', disposition: 'post-not-sent', terminal: true } };
+        }
+        row.state = 'lens_done';
+        return { status: 200, json: { state: 'lens_done', terminal: false } };
+      }
+      case '/withdraw': {
+        state.withdrawals.push(body);
+        if (WRITER_LENS_REASONS.includes(body.reason)) return refuse('bad-request');
+        if (!['claimed', 'lens_running', 'lens_done'].includes(row.state)) return refuse('bad-state', { state: row.state });
+        const moved = body.reason === 'revision-mismatch' && body.head_now && body.head_now !== state.attemptRef.head_sha;
+        row.state = moved ? 'superseded' : 'withdrawn';
+        row.disposition = moved ? 'head-moved' : 'refused';
+        return { status: 200, json: { state: row.state, disposition: row.disposition } };
+      }
+      default:
+        if (path.startsWith('/recover/')) {
+          state.recoveries.push({ path, body });
+          return { status: 200, json: { state: 'withdrawn', disposition: path.split('/').pop() } };
+        }
+        return { status: 200, json: {} };
+    }
+  };
+  return { state, respond, row };
+}
+
+/**
+ * A coordinated installation: fake coordinator, a profile whose managed.json
+ * names it, and an attempt-ref file for the pinned attempt.
+ */
+async function withCoordinatedInstall(options, fn) {
+  const { fake = coordinatorFake(options?.fakeOptions ?? {}), attemptRef = PINNED_REF, requiredLenses = REQUIRED_LENSES, repos = [PINNED_REPO] } = options ?? {};
+  return withFakeCoordinator(fake.respond, async ({ coordinator, seen }) => withProfile(
+    { token: FIXTURE_TOKEN, managed: { coordinator, repos } },
+    async (home) => {
+      const refFile = join(home, 'attempt-ref.json');
+      writeFileSync(refFile, `${JSON.stringify({ attempt_ref: attemptRef, worker_key: WORKER_KEY, coordinator, required_lenses: requiredLenses }, null, 2)}\n`, 'utf8');
+      return fn({ coordinator, seen, home, refFile, fake, state: fake.state, row: fake.row });
+    },
+  ));
+}
+
+/** A fake GitHub API that records every request and answers from the fixtures. */
+async function withFakeGitHub(answer, fn) {
+  const requests = [];
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      requests.push({ method: req.method, url: req.url, body: raw === '' ? undefined : JSON.parse(raw), authorization: req.headers.authorization });
+      const reply = answer({ method: req.method, url: req.url, body: raw === '' ? undefined : JSON.parse(raw) }, requests.length);
+      if (reply === null) return; // never answers: the ambiguous-delivery case
+      res.writeHead(reply.status, { 'content-type': 'application/json', ...(reply.location ? { location: reply.location } : {}) });
+      res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body ?? {}));
+    });
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const { port } = server.address();
+  try {
+    return await fn({ origin: `http://127.0.0.1:${port}`, requests });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((done) => server.close(done));
+  }
+}
+
+/** Collect one coordinated invocation's stdout, stderr and exit. */
+function collector() {
+  const logs = [];
+  const diagnostics = [];
+  const deaths = [];
+  return {
+    logs,
+    diagnostics,
+    deaths,
+    deps: {
+      log: (line) => logs.push(String(line)),
+      diag: (line) => diagnostics.push(String(line)),
+      die: (code, message) => deaths.push({ code, message }),
+    },
+    line() {
+      assert.equal(logs.length, 1, `expected exactly one JSON outcome line, got ${JSON.stringify(logs)}`);
+      return JSON.parse(logs[0]);
+    },
+  };
+}
+
+// --- V12: the outcome contract is closed and identical on both sides -------
+
+test('pr-review-outcomes.mjs equals the vendored D12 table, and fails when it is absent', () => {
+  const table = readD12Table();
+  assert.deepEqual(REASONS.map((row) => ({ reason: row.reason, retry: row.retry, source: row.source })), table.reasons);
+  assert.deepEqual([...OUTCOMES], table.outcomes);
+  assert.deepEqual([...RETRY_VALUES], table.retry_values);
+  // The fixture is read without an existsSync guard, in both directions.
+  assert.throws(() => JSON.parse(readFileSync(join(SCRIPTS_DIR, '__fixtures__', 'not-a-fixture.json'), 'utf8')));
+});
+
+test('retry comes from the table, and a caller may override it only for a terminal lens-end', () => {
+  assert.equal(retryFor('spawn-error'), 'lens-budget');
+  assert.equal(retryFor('not-sent'), 'post-budget');
+  assert.equal(retryFor('provider-limit'), 'stop');
+  assert.equal(retryFor(undefined), 'stop');
+  assert.equal(retryFor('a-code-this-writer-does-not-know'), 'stop', 'an unknown refusal is never retried into');
+  const logs = [];
+  emitOutcome({ outcome: 'failed', reason: 'timeout' }, (line) => logs.push(line));
+  emitOutcome({ outcome: 'failed', reason: 'timeout', retry: 'stop' }, (line) => logs.push(line));
+  assert.equal(JSON.parse(logs[0]).retry, 'lens-budget');
+  assert.equal(JSON.parse(logs[1]).retry, 'stop', 'terminal from lens-end overrides the table');
+  assert.deepEqual(Object.keys(JSON.parse(logs[0])), ['outcome', 'reason', 'retry']);
+});
+
+test('every reason the writer can withdraw with is a writer reason, and no lens reason is', () => {
+  const table = readD12Table();
+  const bySource = new Map(table.reasons.map((row) => [row.reason, row.source]));
+  for (const reason of WITHDRAW_REASONS) {
+    assert.ok(bySource.get(reason)?.includes('writer'), `${reason} must be a writer-sourced reason`);
+    assert.notEqual(bySource.get(reason), 'writer-lens', `${reason} is a lens-end outcome, not a withdrawal`);
+  }
+  for (const row of table.reasons.filter((entry) => entry.source === 'writer-lens')) {
+    assert.equal(WITHDRAW_REASONS.has(row.reason), false, `${row.reason} must never be routed through /withdraw`);
+  }
+});
+
+// --- V4: both recognisers, marker or not ----------------------------------
+
+test('the marker round-trips through the one parser', () => {
+  const marker = buildMarker({
+    repo: PINNED_REPO, pr: PINNED_PR, head: PINNED_HEAD, base: PINNED_BASE,
+    lenses: ['astra', 'codex'], run: RUN_ID, attempt: 1, policy: '1.22.0', supersedes: null,
+  });
+  const parsed = parseMarker(`some body\n\n${marker}`);
+  assert.equal(parsed.repo, PINNED_REPO);
+  assert.equal(parsed.head, PINNED_HEAD);
+  assert.deepEqual(parsed.lenses, ['astra', 'codex']);
+  assert.equal(parsed.run, RUN_ID);
+  assert.equal(parsed.attempt, 1);
+  assert.equal(parsed.supersedes, null);
+  assert.equal(parseMarker('a review with no marker at all'), null);
+  // A standalone post writes `run=-`, which is an absent run, not the string.
+  assert.equal(parseMarker(buildMarker({ repo: 'o/r', pr: 1, head: 'h', base: 'b', lenses: [], run: null, attempt: null, policy: null, supersedes: null })).run, null);
+});
+
+test('the dedupe recogniser hits on a later page, on a marker-less review, and on neither a foreign author nor a replaced review', () => {
+  const reviews = FIXTURE_REVIEWS.pages.flat();
+  const found = recognise({ reviews, head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN, replacedReviewIds: [5152040003], listingCheckedAt: '2026-09-10T10:00:00.000Z' });
+  const ids = found.hits.filter((hit) => hit.kind === 'dedupe').map((hit) => hit.review_id);
+  assert.deepEqual(ids, [5152010493, 5152040001], 'the marker review and the legacy review on page two');
+  assert.equal(found.hits.every((hit) => hit.author_login === SERVICE_LOGIN), true, 'every hit carries the author /recognise-import requires');
+  assert.equal(found.listing_checked_at, '2026-09-10T10:00:00.000Z');
+  // A review on another head, another author's review, and the replaced one.
+  assert.equal(ids.includes(5152040002), false);
+  assert.equal(ids.includes(5152039575), false);
+  assert.equal(ids.includes(5152040003), false);
+  // The pre-v5 predicate — marker only — misses the legacy review entirely.
+  const markerOnly = reviews.filter((review) => parseMarker(review.body)?.head === PINNED_HEAD && review.author_login === SERVICE_LOGIN);
+  assert.equal(markerOnly.some((review) => review.review_id === 5152040001), false, 'the negative control: a marker-only recogniser would dispatch over the legacy review');
+});
+
+test('the delivery recogniser matches run + attempt exactly and reports probable for a marker-less later review', () => {
+  const reviews = FIXTURE_REVIEWS.pages.flat();
+  const exact = recognise({
+    reviews, serviceLogin: SERVICE_LOGIN, runId: RUN_ID, attempt: 1,
+    postAttemptedAt: '2026-09-10T08:00:00Z', listingCheckedAt: '2026-09-10T10:00:00.000Z',
+  });
+  const delivery = exact.hits.filter((hit) => hit.kind === 'delivery');
+  assert.deepEqual(delivery.map((hit) => hit.review_id), [5152010493]);
+  // The same run at attempt 2 is not this attempt's receipt.
+  assert.equal(exact.hits.some((hit) => hit.review_id === 5152040002 && hit.kind === 'delivery'), false);
+  // The marker-less review submitted after the attempt is evidence, not proof.
+  assert.deepEqual(exact.hits.filter((hit) => hit.kind === 'probable').map((hit) => hit.review_id), [5152040001]);
+  assert.equal(deliveryKind(reviews[1], { runId: RUN_ID, attempt: 1, serviceLogin: SERVICE_LOGIN, postAttemptedAt: '2026-09-10T08:00:00Z' }), null, 'another login is never a delivery');
+  assert.equal(isDedupeHit(reviews[1], { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false);
+});
+
+test('recognise reads the listing, excludes replaced reviews from GET /status, and prints one JSON line', async () => {
+  const fake = coordinatorFake({ attempts: [{ attempt: 1, state: 'replaced', review_id: 5152040003 }] });
+  await withCoordinatedInstall({ fake }, async ({ home, coordinator }) => {
+    const seams = pinnedSeams();
+    const out = collector();
+    await cmdRecognise(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), head: PINNED_HEAD, run: RUN_ID, attempt: 1, postAttemptedAt: '2026-09-10T08:00:00Z' },
+      { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home },
+    );
+    const line = out.line();
+    assert.equal(line.outcome, 'ok');
+    assert.equal(line.retry, 'stop');
+    assert.deepEqual(line.hits.filter((hit) => hit.kind === 'dedupe').map((hit) => hit.review_id), [5152010493, 5152040001]);
+    assert.deepEqual(line.hits.filter((hit) => hit.kind === 'delivery').map((hit) => hit.review_id), [5152010493]);
+    assert.deepEqual(line.hits.filter((hit) => hit.kind === 'probable').map((hit) => hit.review_id), [5152040001],
+      'probable needs the submission time, which the caller passes because /status does not carry one');
+    assert.ok(line.listing_checked_at);
+    assert.deepEqual(out.deaths, []);
+    assert.equal(coordinator.startsWith('http://127.0.0.1:'), true);
+  });
+});
+
+test('a listing that cannot be read is a classified gh-failure, not a silent clean listing', async () => {
+  await withCoordinatedInstall({}, async ({ home }) => {
+    const seams = pinnedSeams({ fail: { '/reviews': 'gh: server error' } });
+    const out = collector();
+    await cmdRecognise(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), head: PINNED_HEAD },
+      { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home },
+    );
+    assert.deepEqual(out.line(), { outcome: 'failed', reason: 'gh-failure', retry: 'lens-budget' });
+    assert.equal(out.deaths[0].code, 4);
+  });
+});
+
+test('recognise refuses identity-unset before it reads anything', async () => {
+  const fake = coordinatorFake({ identity: null });
+  await withCoordinatedInstall({ fake }, async ({ home }) => {
+    const seams = pinnedSeams();
+    const out = collector();
+    await cmdRecognise(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), head: PINNED_HEAD },
+      { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home },
+    );
+    assert.equal(out.line().reason, 'identity-unset');
+    assert.deepEqual(seams.calls, [], 'nothing was read from GitHub');
+  });
+});
+
+// --- V3: one pinned input, and incomplete input starts nothing -------------
+
+test('fetchPrFiles reads every page and projects the four fields the manifest binds to', () => {
+  const calls = [];
+  const files = fetchPrFiles(PINNED_REPO, PINNED_PR, undefined, (args) => {
+    calls.push(args);
+    return `${FIXTURE_FILES.pages.flat().map((entry) => JSON.stringify(entry)).join('\n')}\n`;
+  });
+  assert.deepEqual(calls[0].slice(0, 3), ['api', '--paginate', `repos/${PINNED_REPO}/pulls/${PINNED_PR}/files`]);
+  assert.equal(files.length, MANIFEST_FILES.length);
+  assert.deepEqual(files.map((entry) => entry.filename), MANIFEST_PATHS);
+  assert.deepEqual(files.at(-1), { filename: 'docs/moved.md', sha: '2e1d8cf2e1c2d6a6c4b5daf8e3e7a9c1d2b3e4f5', status: 'renamed', has_patch: false });
+  // The path-only wrapper's argv is unchanged — the characterisation suite pins it.
+  const pathCalls = [];
+  fetchPrFilePaths(PINNED_REPO, PINNED_PR, undefined, (args) => { pathCalls.push(args); return 'a.ts\n'; });
+  assert.deepEqual(pathCalls[0], ['api', '--paginate', `repos/${PINNED_REPO}/pulls/${PINNED_PR}/files`, '--jq', '.[].filename']);
+});
+
+test('produceManifest reads the head, the files, then the head again, and takes base_sha from that window', () => {
+  const seams = pinnedSeams();
+  const produced = produceManifest({ repo: PINNED_REPO, pr: PINNED_PR }, { runGh: seams.runGh, now: () => new Date('2026-09-10T10:00:00.000Z') });
+  assert.equal(produced.ok, true);
+  assert.equal(produced.head_sha, PINNED_HEAD);
+  assert.equal(produced.base_sha, PINNED_BASE);
+  assert.equal(produced.manifest.head_before, produced.manifest.head_after);
+  assert.deepEqual(produced.manifest.files.map((entry) => entry.filename), MANIFEST_PATHS);
+  const order = seams.calls.map((args) => (args[1] === 'view' ? 'head' : 'files'));
+  assert.deepEqual(order, ['head', 'files', 'head'], 'the file list is read between two head reads, and nowhere else');
+});
+
+test('a head that moves between the two reads produces no manifest at all', () => {
+  const seams = pinnedSeams({ heads: [PINNED_HEAD, MOVED_HEAD] });
+  const produced = produceManifest({ repo: PINNED_REPO, pr: PINNED_PR }, { runGh: seams.runGh });
+  assert.equal(produced.ok, false);
+  assert.equal(produced.reason, 'revision-mismatch');
+  assert.equal(produced.head_now, MOVED_HEAD);
+  assert.equal(produced.manifest, undefined);
+});
+
+test('an empty file list refuses empty-file-list — a PR that changes nothing is a fetch failure', () => {
+  const seams = pinnedSeams({ filePages: [[]] });
+  const produced = produceManifest({ repo: PINNED_REPO, pr: PINNED_PR }, { runGh: seams.runGh });
+  assert.equal(produced.ok, false);
+  assert.equal(produced.reason, 'empty-file-list');
+});
+
+test('the manifest subcommand prints one JSON line carrying the manifest and base_sha', () => {
+  const seams = pinnedSeams();
+  const out = collector();
+  cmdManifest({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...out.deps, runGh: seams.runGh });
+  const line = out.line();
+  assert.equal(line.outcome, 'ok');
+  assert.equal(line.retry, 'stop');
+  assert.equal(line.base_sha, PINNED_BASE);
+  assert.equal(line.file_count, MANIFEST_FILES.length);
+  assert.deepEqual(line.manifest.files.map((entry) => entry.filename), MANIFEST_PATHS);
+  assert.deepEqual(out.deaths, []);
+
+  const moved = collector();
+  cmdManifest({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...moved.deps, runGh: pinnedSeams({ heads: [PINNED_HEAD, MOVED_HEAD] }).runGh });
+  assert.equal(moved.line().reason, 'revision-mismatch');
+  assert.equal(moved.deaths[0].code, 1);
+
+  const broken = collector();
+  cmdManifest({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...broken.deps, runGh: pinnedSeams({ fail: { '/files': 'gh: not found' } }).runGh });
+  assert.deepEqual(broken.line(), { outcome: 'failed', reason: 'gh-failure', retry: 'lens-budget' });
+});
+
+test('the rendered coordinated prompt carries the sentinel patch line and no fetch instruction', () => {
+  const rendered = renderPinnedDiff(FIXTURE_COMPARE.payload);
+  const prompt = buildReviewerPrompt({
+    pr: PINNED_PR,
+    repo: PINNED_REPO,
+    prFilePaths: MANIFEST_PATHS,
+    manifest: PINNED_MANIFEST,
+    pinned_diff: { head_sha: PINNED_HEAD, base_sha: PINNED_BASE, text: rendered.text, not_reviewed: rendered.not_reviewed },
+  });
+  assert.ok(prompt.includes(SENTINEL), 'the sentinel patch line must reach the model');
+  assert.equal(prompt.includes('gh pr diff'), false, 'the fetch instruction is replaced, not kept alongside');
+  assert.ok(prompt.includes(`## Authoritative diff (pinned at \`${PINNED_HEAD}\`)`));
+  assert.ok(prompt.indexOf(SENTINEL) > prompt.indexOf('## Authoritative diff'), 'the sentinel lands inside the pinned section');
+  assert.ok(prompt.includes('docs/diagram.png (modified)'), 'a binary entry is disclosed as not reviewed');
+  assert.ok(prompt.includes('docs/moved.md (renamed)'));
+  // The standalone render is untouched by any of it.
+  const standalone = buildReviewerPrompt({ pr: PINNED_PR, repo: PINNED_REPO, prFilePaths: MANIFEST_PATHS });
+  assert.ok(standalone.includes(`gh pr diff ${PINNED_PR} --repo ${PINNED_REPO}`));
+  assert.equal(standalone.includes('Authoritative diff (pinned'), false);
+  assert.equal(standalone.includes(SENTINEL), false);
+});
+
+test('the standalone prompt is byte-identical to the baseline', () => {
+  // A digest, not an eyeball: the baseline prompt is what every standalone
+  // review has been graded against, and an accidental edit to it while adding
+  // the pinned section would change results nobody re-measured.
+  const prompt = buildReviewerPrompt({ pr: 42, repo: 'owner/repo', prFilePaths: ['src/a.ts', 'src/b.ts'] });
+  const digest = createHash('sha256').update(prompt, 'utf8').digest('hex');
+  assert.equal(digest, STANDALONE_PROMPT_SHA256, 'the standalone reviewer prompt changed');
+});
+
+test('renderPinnedDiff produces a diff parseDiff can anchor against, and counts only patch bytes', () => {
+  const rendered = renderPinnedDiff(FIXTURE_COMPARE.payload);
+  const files = parseDiff(rendered.text);
+  assert.ok(files.has('skills/slim-review/SKILL.md'));
+  assert.equal(files.get('skills/slim-review/SKILL.md').has(290), true, 'an added line inside the pinned hunk is commentable');
+  assert.equal(files.has('docs/diagram.png'), false, 'a binary entry has no commentable side');
+  assert.deepEqual(rendered.not_reviewed, ['docs/diagram.png (modified)', 'docs/moved.md (renamed)']);
+  const patchBytes = FIXTURE_COMPARE.payload.files
+    .filter((file) => typeof file.patch === 'string')
+    .reduce((total, file) => total + Buffer.byteLength(file.patch, 'utf8'), 0);
+  assert.equal(rendered.bytes, patchBytes);
+});
+
+test('a stamped document loads back through loadFindings and keeps its four stamps', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-stamped-'));
+  try {
+    const file = join(dir, 'codex.json');
+    const doc = stampedDocument({ lens: 'codex' });
+    writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+    assert.deepEqual(validateFindingsShape(doc), [], 'the widened allowlist admits the stamps');
+    const loaded = loadFindings(file);
+    for (const stamp of DOCUMENT_STAMPS) assert.equal(loaded[stamp], doc[stamp]);
+    // Still closed: an unknown key is still rejected, and a malformed stamp too.
+    assert.deepEqual(validateFindingsShape({ ...doc, sneaky: 1 }), ['top level has unknown property: sneaky']);
+    assert.deepEqual(validateFindingsShape({ ...doc, attempt: 0 }), ['attempt must be a positive integer']);
+    assert.deepEqual(validateFindingsShape({ ...doc, head_sha: '' }), ['head_sha must be a non-empty string']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- claim: identity, manifest, dedupe import, the attempt-ref file --------
+
+test('claim pins the attempt, writes an owner-only attempt-ref file, and prints its path', async (t) => {
+  const fake = coordinatorFake();
+  await withCoordinatedInstall({ fake }, async ({ home, coordinator }) => {
+    const seams = pinnedSeams({ reviewPages: [[]] });
+    const out = collector();
+    const refOut = join(home, 'attempts', 'claimed.json');
+    await cmdClaim(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), attemptRefOut: refOut },
+      { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home },
+    );
+    const line = out.line();
+    assert.equal(line.outcome, 'ok');
+    assert.equal(line.attempt_ref_file, refOut);
+    assert.deepEqual(line.required_lenses, REQUIRED_LENSES);
+    assert.equal(line.replayed, undefined);
+    const claimed = fake.state.claims[0];
+    assert.equal(claimed.repo, PINNED_REPO);
+    assert.equal(claimed.head_sha, PINNED_HEAD);
+    assert.equal(claimed.base_sha, PINNED_BASE);
+    assert.equal(claimed.manifest.files.length, MANIFEST_FILES.length);
+    assert.equal(claimed.worker_key.length, 64, 'a 256-bit key, minted here and hashed there');
+    assert.equal(claimed.owner_label, 'session');
+    const file = readAttemptRefFile(refOut);
+    assert.equal(file.worker_key, claimed.worker_key);
+    assert.equal(file.coordinator, coordinator);
+    assert.deepEqual(file.attempt_ref, PINNED_REF);
+    // M8: the mode is instructed at the write site and observed here.
+    const observed = out.diagnostics.find((entry) => entry.startsWith('acl'));
+    assert.ok(observed, 'the ACL observation is logged, never left to review');
+    t.diagnostic(`attempt-ref ACL: ${observed}`);
+    if (process.platform !== 'win32') {
+      assert.equal((statSync(refOut).mode & 0o777).toString(8), '600');
+    }
+  });
+});
+
+test('claim refuses identity-unset, and a mismatched credential, before any manifest is built', async () => {
+  const unset = coordinatorFake({ identity: null });
+  await withCoordinatedInstall({ fake: unset }, async ({ home }) => {
+    const seams = pinnedSeams();
+    const out = collector();
+    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home });
+    assert.equal(out.line().reason, 'identity-unset');
+    assert.deepEqual(seams.calls, [], 'nothing was read and nothing was claimed');
+    assert.deepEqual(unset.state.claims, []);
+  });
+  const pinned = coordinatorFake();
+  await withCoordinatedInstall({ fake: pinned }, async ({ home }) => {
+    const seams = pinnedSeams({ login: OTHER_LOGIN });
+    const out = collector();
+    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home });
+    assert.equal(out.line().reason, 'identity-mismatch');
+    assert.deepEqual(pinned.state.claims, [], 'a credential that would post as someone else never claims');
+    assert.equal(seams.calls.some((args) => args.join(' ').includes('/files')), false, 'and never builds a manifest');
+  });
+});
+
+test('claim imports a recognised review before claiming, and skips the recogniser under --supersede', async () => {
+  const fake = coordinatorFake();
+  await withCoordinatedInstall({ fake }, async ({ home }) => {
+    const out = collector();
+    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...out.deps, runGh: pinnedSeams().runGh, env: {}, homeDir: home });
+    assert.equal(fake.state.imports.length, 1);
+    assert.equal(fake.state.imports[0].review_id, 5152010493);
+    assert.equal(fake.state.imports[0].author_login, SERVICE_LOGIN);
+    assert.ok(fake.state.imports[0].listing_checked_at);
+  });
+  const superseding = coordinatorFake();
+  await withCoordinatedInstall({ fake: superseding }, async ({ home }) => {
+    const out = collector();
+    await cmdClaim(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), supersede: '5152010493', reason: 'the first review missed the guard' },
+      { ...out.deps, runGh: pinnedSeams().runGh, env: {}, homeDir: home },
+    );
+    assert.deepEqual(superseding.state.imports, [], 'an explicit supersede is the operator deciding; no dedupe runs');
+    assert.equal(superseding.state.claims[0].supersede_review_id, 5152010493);
+    assert.equal(superseding.state.claims[0].actor, 'operator');
+    assert.equal(superseding.state.claims[0].reason, 'the first review missed the guard');
+  });
+});
+
+test('claim reports a refusal with the ended row the operator is about to retry', async () => {
+  const ended = { attempt: 1, state: 'failed', disposition: 'exhausted-lens-budget', ended_at: '2026-09-10T09:00:00.000Z' };
+  const fake = coordinatorFake({ forced: { '/claim': { status: 409, json: { code: 'attempt-ended', ended } } } });
+  await withCoordinatedInstall({ fake }, async ({ home }) => {
+    const out = collector();
+    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...out.deps, runGh: pinnedSeams({ reviewPages: [[]] }).runGh, env: {}, homeDir: home });
+    const line = out.line();
+    assert.equal(line.reason, 'attempt-ended');
+    assert.equal(line.retry, 'stop');
+    assert.deepEqual(line.ended, ended);
+    assert.equal(line.coordinator_code, 'attempt-ended');
+    assert.ok(out.diagnostics.some((entry) => entry.includes('exhausted-lens-budget')), 'the ended row is shown on stderr');
+  });
+});
+
+// --- V11 / V3 controls: the coordinated lens ------------------------------
+
+/** Drive the real `lens --attempt-ref` with the fixture seams. */
+async function runCoordinatedLens({ refFile, home, lens = 'codex', seams, opts = {} }) {
+  const out = collector();
+  await cmdLens(
+    { attemptRef: refFile, lens, cwd: home, measureLog: join(home, 'measure.jsonl'), ...opts },
+    {
+      ...out.deps,
+      run: seams.run,
+      env: {},
+      homeDir: home,
+      findCodexExe: () => 'codex',
+      now: (() => { let clock = 100; return () => (clock += 25); })(),
+    },
+  );
+  return out;
+}
+
+test('a coordinated lens reviews the pinned diff and reports its document by path and digest', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const seams = pinnedSeams({ events });
+    const out = await runCoordinatedLens({ refFile, home, seams });
+    const line = out.line();
+    assert.equal(line.outcome, 'ok');
+    assert.equal(line.retry, 'stop');
+    assert.equal(line.execution_id, 'exec-1');
+    const documentPath = join(home, 'codex.json');
+    assert.equal(line.document, documentPath);
+    const doc = JSON.parse(readFileSync(documentPath, 'utf8'));
+    assert.equal(doc.head_sha, PINNED_HEAD);
+    assert.equal(doc.base_sha, PINNED_BASE);
+    assert.equal(doc.attempt, 1);
+    assert.equal(doc.run_id, RUN_ID);
+    assert.equal(doc.lens, 'codex');
+    assert.deepEqual(validateFindingsShape(doc), [], 'what the lens wrote, its own loader accepts');
+    const ended = fake.state.calls.find((call) => call.shortPath === '/lens-end');
+    assert.equal(ended.body.document_path, documentPath);
+    assert.equal(ended.body.document_sha256, createHash('sha256').update(readFileSync(documentPath)).digest('hex'));
+    assert.equal(ended.body.outcome, 'ok');
+    assert.equal(fake.row.lens_state.codex.status, 'done');
+    // The prompt the model was actually given carried the pinned patches.
+    const invocation = seams.calls.find((args) => args[1] === 'exec');
+    assert.ok(invocation, 'the model ran exactly once');
+    assert.equal(seams.calls.filter((args) => args[1] === 'exec').length, 1);
+    assert.deepEqual(out.deaths, []);
+    assert.equal(JSON.parse(readFileSync(join(home, 'measure.jsonl'), 'utf8').trim()).run_id, RUN_ID);
+    assert.ok(events.some((event) => event.kind === 'coordinator' && event.path === '/lens-start'));
+  });
+});
+
+test('lens --attempt-ref --dry-run --prompt-out renders from the pinned inputs and consumes no start', async () => {
+  const fake = coordinatorFake();
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const seams = pinnedSeams();
+    const promptOut = join(home, 'prompt.txt');
+    const out = await runCoordinatedLens({ refFile, home, seams, opts: { dryRun: true, promptOut } });
+    const line = out.line();
+    assert.equal(line.outcome, 'ok');
+    assert.equal(line.dry_run, true);
+    assert.equal(line.prompt_path, promptOut);
+    const rendered = readFileSync(promptOut, 'utf8');
+    assert.ok(rendered.includes(SENTINEL), 'the assertion is on the rendered file, never on the source');
+    assert.equal(rendered.includes('gh pr diff'), false);
+    assert.equal(fake.state.executions, 0, 'a preview must not spend a start the real run needs');
+    assert.equal(seams.calls.some((args) => args[1] === 'exec'), false, 'and must not invoke the model');
+    assert.equal(fake.state.calls.some((call) => call.shortPath === '/lens-start'), false);
+  });
+});
+
+test('control 1: a compare that disagrees with the manifest invokes the model zero times', async () => {
+  const fake = coordinatorFake();
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const truncated = { ...FIXTURE_COMPARE.payload, files: FIXTURE_COMPARE.payload.files.slice(0, 3) };
+    const seams = pinnedSeams({ compare: truncated });
+    const out = await runCoordinatedLens({ refFile, home, seams });
+    const line = out.line();
+    assert.equal(line.outcome, 'refused');
+    assert.equal(line.reason, 'input-mismatch');
+    assert.equal(line.retry, 'stop');
+    assert.deepEqual(line.compare_missing, MANIFEST_PATHS.slice(3));
+    assert.equal(seams.calls.filter((args) => args[1] === 'exec').length, 0, 'zero model invocations on a truncated compare');
+    const ended = fake.state.calls.find((call) => call.shortPath === '/lens-end');
+    assert.equal(ended.body.reason, 'input-mismatch');
+    assert.equal(fake.row.state, 'failed');
+    assert.equal(fake.row.disposition, 'input-mismatch');
+  });
+});
+
+test('the same disagreement with a moved head is a revision mismatch, not an input one', async () => {
+  const fake = coordinatorFake();
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const truncated = { ...FIXTURE_COMPARE.payload, files: FIXTURE_COMPARE.payload.files.slice(0, 3) };
+    const seams = pinnedSeams({ compare: truncated, heads: [MOVED_HEAD] });
+    const out = await runCoordinatedLens({ refFile, home, seams });
+    const line = out.line();
+    assert.equal(line.reason, 'revision-mismatch');
+    assert.equal(line.head_now, MOVED_HEAD);
+    assert.equal(fake.row.disposition, 'head-moved');
+    assert.equal(seams.calls.filter((args) => args[1] === 'exec').length, 0);
+  });
+});
+
+test('control 1: a compare over maxDiffBytes refuses diff-too-large with zero model invocations', async () => {
+  const fake = coordinatorFake();
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const huge = {
+      ...FIXTURE_COMPARE.payload,
+      files: FIXTURE_COMPARE.payload.files.map((file, index) => (
+        index === 0 ? { ...file, patch: `@@ -1,1 +1,1 @@\n+${'x'.repeat(MAX_DIFF_BYTES + 1)}` } : file
+      )),
+    };
+    const seams = pinnedSeams({ compare: huge });
+    const out = await runCoordinatedLens({ refFile, home, seams });
+    const line = out.line();
+    assert.equal(line.reason, 'diff-too-large');
+    assert.equal(line.retry, 'stop');
+    assert.ok(line.patch_bytes > MAX_DIFF_BYTES);
+    assert.equal(seams.calls.filter((args) => args[1] === 'exec').length, 0, 'the bound is checked before the model, not after');
+    assert.equal(fake.row.disposition, 'diff-too-large');
+  });
+});
+
+test('control 3: retryable lens failures carry lens-budget, the third is terminal, and the writer never retries itself', async () => {
+  const fake = coordinatorFake();
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const failures = [
+      () => { const err = new Error('spawn codex ENOENT'); err.code = 'ENOENT'; throw err; },
+      () => { const err = new Error('killed'); err.killed = true; throw err; },
+      () => 'this is not json',
+    ];
+    const reasons = [];
+    for (const codex of failures) {
+      const seams = pinnedSeams({ codex });
+      const out = await runCoordinatedLens({ refFile, home, seams });
+      const line = out.line();
+      reasons.push({ reason: line.reason, retry: line.retry });
+      assert.equal(seams.calls.filter((args) => args[1] === 'exec').length, 1, 'one invocation per invocation of this command — the beat drives retries');
+    }
+    assert.deepEqual(reasons, [
+      { reason: 'spawn-error', retry: 'lens-budget' },
+      { reason: 'timeout', retry: 'lens-budget' },
+      // The third failed lens-end ends the row, and terminal overrides the table.
+      { reason: 'malformed-output', retry: 'stop' },
+    ]);
+    assert.equal(fake.row.lens_state.codex.starts, 3);
+    assert.equal(fake.row.disposition, 'exhausted-lens-budget');
+    // The terminal end takes the attempt-ref file with it.
+    assert.equal(existsSync(refFile), false, 'an ended attempt keeps no key on disk');
+    // Restore it and force a fourth start anyway: the prior-state guard is what
+    // refuses it, which is why there is no `lens-exhausted` code to return.
+    writeFileSync(refFile, JSON.stringify({ attempt_ref: PINNED_REF, worker_key: WORKER_KEY, coordinator: readManagedList({ homeDir: home }).coordinator, required_lenses: REQUIRED_LENSES }), 'utf8');
+    const fourth = pinnedSeams();
+    const out = await runCoordinatedLens({ refFile, home, seams: fourth });
+    assert.equal(out.line().reason, 'bad-state');
+    assert.equal(fake.row.lens_state.codex.starts, 3, 'and no fourth start was counted');
+    assert.equal(fourth.calls.filter((args) => args[1] === 'exec').length, 0);
+  });
+});
+
+test('control 3: a provider limit and an unclassified exit both stop', async () => {
+  for (const [codex, reason] of [
+    [() => { const err = new Error('stream error'); err.stderr = 'You have hit your usage limit for this plan.'; throw err; }, 'provider-limit'],
+    [() => { throw new Error('something nobody has classified yet'); }, 'lens-error'],
+  ]) {
+    const fake = coordinatorFake();
+    // eslint-disable-next-line no-await-in-loop
+    await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+      const seams = pinnedSeams({ codex });
+      const out = await runCoordinatedLens({ refFile, home, seams });
+      const line = out.line();
+      assert.equal(line.reason, reason);
+      assert.equal(line.retry, 'stop', `${reason} is never retried into`);
+      assert.equal(fake.row.state, 'failed');
+    });
+  }
+});
+
+test('a reviewer that writes in the worktree fails the attempt after the model ran', async () => {
+  const fake = coordinatorFake();
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const seams = pinnedSeams({ status: ['', ' M src/a.ts\n'] });
+    const out = await runCoordinatedLens({ refFile, home, seams });
+    assert.equal(out.line().reason, 'worktree-dirty');
+    assert.equal(fake.row.disposition, 'integrity-violation');
+    assert.equal(existsSync(join(home, 'codex.json')), false, 'no document is kept from a run that misbehaved');
+  });
+});
+
+test('control 5: the partner lens keeps its document and its single start across a retry', async () => {
+  const fake = coordinatorFake();
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await runCoordinatedLens({ refFile, home, lens: 'astra', seams: pinnedSeams() });
+    const astraDocument = readFileSync(join(home, 'astra.json'), 'utf8');
+    assert.equal(fake.row.lens_state.astra.status, 'done');
+
+    await runCoordinatedLens({ refFile, home, seams: pinnedSeams({ codex: () => 'not json' }) });
+    await runCoordinatedLens({ refFile, home, seams: pinnedSeams() });
+
+    assert.equal(fake.row.lens_state.astra.starts, 1, 'the partner is never re-run');
+    assert.equal(fake.row.lens_state.codex.starts, 2);
+    assert.equal(readFileSync(join(home, 'astra.json'), 'utf8'), astraDocument, 'byte-identical before and after its partner retried');
+    assert.equal(fake.row.state, 'lens_done');
+  });
+});
+
+test('the four --attempt-ref refusals land before any spend, and withdraw the attempt', async () => {
+  const cases = [
+    { opts: { forcePost: true }, reason: 'force-post-refused' },
+    { opts: { singleLens: 'astra window closed' }, reason: 'single-lens-refused' },
+    { opts: {}, lens: 'opus', reason: 'lens-set-mismatch' },
+  ];
+  for (const item of cases) {
+    const fake = coordinatorFake();
+    // eslint-disable-next-line no-await-in-loop
+    await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+      const seams = pinnedSeams();
+      const out = await runCoordinatedLens({ refFile, home, seams, lens: item.lens ?? 'codex', opts: item.opts });
+      const line = out.line();
+      assert.equal(line.reason, item.reason);
+      assert.equal(line.retry, 'stop');
+      assert.equal(seams.calls.filter((args) => args[1] === 'exec').length, 0, 'nothing was spent');
+      assert.equal(fake.state.executions, 0);
+      assert.equal(fake.state.withdrawals.length, 1, `${item.reason} must withdraw the attempt it cannot use`);
+      assert.equal(fake.state.withdrawals[0].reason, item.reason);
+      assert.ok(fake.state.withdrawals[0].head_now, 'the withdrawal carries the head it saw');
+      assert.equal(fake.row.state, 'withdrawn');
+      assert.equal(existsSync(refFile), false, 'a withdrawn attempt takes its ref file with it');
+    });
+  }
+});
+
+test('a withdrawal the coordinator refuses still leaves exactly one JSON line', async () => {
+  const fake = coordinatorFake({ forced: { '/withdraw': { status: 409, json: { code: 'bad-state', state: 'posted' } } } });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const out = await runCoordinatedLens({ refFile, home, seams: pinnedSeams(), opts: { forcePost: true } });
+    const line = out.line();
+    assert.equal(line.reason, 'bad-state');
+    assert.equal(line.withdraw_reason, 'force-post-refused');
+    assert.equal(line.retry, 'stop');
+    assert.equal(out.deaths[0].code, 1);
+    assert.equal(existsSync(refFile), true, 'the ref file stays: the row was not retired');
+  });
+});
+
+test('a coordinator that disagrees with managed.json about its own URL refuses before anything', async () => {
+  const fake = coordinatorFake();
+  await withFakeCoordinator(fake.respond, async ({ coordinator }) => {
+    await withProfile({ token: FIXTURE_TOKEN, managed: { coordinator, repos: [PINNED_REPO] } }, async (home) => {
+      const refFile = join(home, 'attempt-ref.json');
+      writeFileSync(refFile, JSON.stringify({ attempt_ref: PINNED_REF, worker_key: WORKER_KEY, coordinator: 'http://127.0.0.1:65535', required_lenses: REQUIRED_LENSES }), 'utf8');
+      const seams = pinnedSeams();
+      const out = await runCoordinatedLens({ refFile, home, seams });
+      assert.equal(out.line().reason, 'managed-resolver-disagreement');
+      assert.deepEqual(fake.state.calls, [], 'neither URL is chosen');
+      assert.deepEqual(seams.calls, []);
+    });
+  });
+});
+
+// --- V17 / V5 / V10: the coordinated post ---------------------------------
+
+/** Drive both lenses so the row reaches `lens_done` with two documents. */
+async function bothLensesDone({ refFile, home, events, findings }) {
+  for (const lens of REQUIRED_LENSES) {
+    // eslint-disable-next-line no-await-in-loop
+    await runCoordinatedLens({
+      refFile,
+      home,
+      lens,
+      seams: pinnedSeams({ events, codex: () => JSON.stringify(modelOutput(findings ? { findings } : {})) }),
+    });
+  }
+}
+
+async function runCoordinatedPost({ refFile, home, origin, seams, opts = {}, deps = {} }) {
+  const out = collector();
+  await cmdPost(
+    { attemptRef: refFile, cwd: home, ...opts },
+    {
+      ...out.deps,
+      runGh: seams.runGh,
+      env: { PR_REVIEW_GITHUB_API_BASE: origin },
+      homeDir: home,
+      timeoutMs: 500,
+      ...deps,
+    },
+  );
+  return out;
+}
+
+test('the coordinated post reserves, sends in process, resolves, and spawns nothing in between', async (t) => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothLensesDone({ refFile, home, events });
+    assert.equal(fake.row.state, 'lens_done');
+    await withFakeGitHub((request) => {
+      events.push({ kind: 'github', url: request.url });
+      return { status: 201, body: FIXTURE_POSTS.created.body };
+    }, async ({ origin, requests }) => {
+      const seams = pinnedSeams({ events });
+      const out = await runCoordinatedPost({ refFile, home, origin, seams });
+      const line = out.line();
+      assert.equal(line.outcome, 'posted');
+      assert.equal(line.retry, 'stop');
+      assert.equal(line.review_id, FIXTURE_POSTS.created.body.id);
+      assert.equal(line.post_generation, 1);
+      assert.equal(line.head_now, PINNED_HEAD);
+
+      // exactly one request, carrying the pinned head and the marker
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].method, 'POST');
+      assert.equal(requests[0].url, `/repos/${PINNED_REPO}/pulls/${PINNED_PR}/reviews`);
+      assert.equal(requests[0].authorization, 'Bearer gh-token-value');
+      assert.equal(requests[0].body.commit_id, PINNED_HEAD);
+      assert.equal(requests[0].body.event, 'COMMENT');
+      const marker = parseMarker(requests[0].body.body);
+      assert.equal(marker.head, PINNED_HEAD);
+      assert.equal(marker.run, RUN_ID);
+      assert.equal(marker.attempt, 1);
+      assert.deepEqual(marker.lenses, REQUIRED_LENSES);
+      // Both lenses anchored the same line, and both comments are posted: the
+      // duplicate is the agreement signal, and each carries its own lens tag.
+      assert.deepEqual(requests[0].body.comments.map((comment) => `${comment.path}:${comment.line}`), ['skills/slim-review/SKILL.md:290', 'skills/slim-review/SKILL.md:290']);
+      assert.deepEqual(requests[0].body.comments.map((comment) => /\*\*lens:\*\* (\w+)/.exec(comment.body)[1]).sort(), REQUIRED_LENSES);
+
+      // the reservation body is exactly the three fields, and nothing was
+      // spawned between reserving and resolving
+      assert.deepEqual(Object.keys(fake.state.reservations[0]).sort(), ['attempt_ref', 'sender_pid', 'worker_key']);
+      assert.deepEqual(fake.state.reservations[0].attempt_ref, PINNED_REF);
+      assert.equal(fake.state.reservations[0].sender_pid, process.pid);
+      const reserveAt = events.findIndex((event) => event.kind === 'coordinator' && event.path === '/reserve-post');
+      const resolveAt = events.findIndex((event) => event.kind === 'coordinator' && event.path === '/resolve');
+      assert.ok(reserveAt >= 0 && resolveAt > reserveAt);
+      const window = events.slice(reserveAt + 1, resolveAt);
+      assert.deepEqual(window.filter((event) => event.kind === 'spawn'), [], 'no process may be spawned between reserve-post and resolve');
+      t.diagnostic(`reservation window: ${JSON.stringify(window)}`);
+      // the credential child ran, and ran before the reservation
+      const tokenAt = events.findIndex((event) => event.kind === 'spawn' && event.args[0] === 'auth');
+      assert.ok(tokenAt >= 0 && tokenAt < reserveAt, 'the gh auth token child exits before the reservation');
+
+      assert.equal(fake.row.state, 'posted');
+      assert.equal(existsSync(refFile), false, 'a posted attempt takes its ref file with it');
+    });
+  });
+});
+
+test('control 6: disagreeing stamps, a wrong lens set, and a coverage failure all refuse before reserve-post', async () => {
+  const cases = [
+    {
+      name: 'a document stamped for another attempt',
+      mutate: ({ home }) => {
+        const doc = JSON.parse(readFileSync(join(home, 'codex.json'), 'utf8'));
+        writeFileSync(join(home, 'codex.json'), JSON.stringify({ ...doc, attempt: 2 }), 'utf8');
+      },
+      reason: 'revision-mismatch',
+    },
+    {
+      name: 'a document stamped for another head',
+      mutate: ({ home }) => {
+        const doc = JSON.parse(readFileSync(join(home, 'astra.json'), 'utf8'));
+        writeFileSync(join(home, 'astra.json'), JSON.stringify({ ...doc, head_sha: MOVED_HEAD }), 'utf8');
+      },
+      reason: 'revision-mismatch',
+    },
+    {
+      name: 'a stamped lens set that is not the row\'s',
+      mutate: ({ row }) => {
+        delete row.lens_state.astra.document_path;
+      },
+      reason: 'lens-set-mismatch',
+    },
+    {
+      name: 'a document that does not cover the pinned manifest',
+      mutate: ({ home }) => {
+        const doc = JSON.parse(readFileSync(join(home, 'codex.json'), 'utf8'));
+        writeFileSync(join(home, 'codex.json'), JSON.stringify({ ...doc, examined_paths: MANIFEST_PATHS.slice(0, 2), coverage: 'examined 2 of 8 changed files' }), 'utf8');
+      },
+      reason: 'coverage-mismatch',
+    },
+  ];
+  for (const item of cases) {
+    const events = [];
+    const fake = coordinatorFake({ events });
+    // eslint-disable-next-line no-await-in-loop
+    await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+      await bothLensesDone({ refFile, home, events });
+      item.mutate({ home, row: fake.row });
+      await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+        const out = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events }) });
+        const line = out.line();
+        assert.equal(line.reason, item.reason, item.name);
+        assert.equal(line.retry, 'stop');
+        assert.deepEqual(requests, [], `${item.name}: the endpoint must record zero requests`);
+        assert.deepEqual(fake.state.reservations, [], `${item.name}: nothing was reserved`);
+        assert.equal(fake.state.withdrawals.at(-1)?.reason, item.reason, `${item.name}: the attempt is withdrawn, not left live`);
+        assert.equal(fake.row.state, 'withdrawn');
+      });
+    });
+  }
+});
+
+test('a credential that would post as another login withdraws before it reserves anything', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothLensesDone({ refFile, home, events });
+    await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+      const out = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events, login: OTHER_LOGIN }) });
+      const line = out.line();
+      assert.equal(line.reason, 'identity-mismatch');
+      assert.equal(line.login, OTHER_LOGIN);
+      assert.equal(line.pinned_login, SERVICE_LOGIN);
+      assert.deepEqual(requests, []);
+      assert.deepEqual(fake.state.reservations, []);
+      assert.equal(fake.state.withdrawals[0].reason, 'identity-mismatch');
+    });
+  });
+});
+
+test('a head that moved since the lenses ran withdraws with the head it saw', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothLensesDone({ refFile, home, events });
+    await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+      const out = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events, heads: [MOVED_HEAD] }) });
+      const line = out.line();
+      assert.equal(line.reason, 'revision-mismatch');
+      assert.equal(line.head_now, MOVED_HEAD);
+      assert.deepEqual(requests, []);
+      assert.equal(fake.state.withdrawals[0].head_now, MOVED_HEAD);
+      assert.equal(fake.row.state, 'superseded', 'a moved head is a superseded attempt, not a refused one');
+    });
+  });
+});
+
+test('the outcome classifier is a positive allowlist for not-sent and unresolved for everything else', () => {
+  for (const code of NOT_SENT_CODES) {
+    const error = Object.assign(new TypeError('fetch failed'), { cause: { code } });
+    assert.equal(classifyPostOutcome({ error }).outcome, 'not_sent', code);
+  }
+  const injected = ['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_REQ_CONTENT_LENGTH_MISMATCH', 'HPE_INVALID_CONSTANT'];
+  for (const code of injected) {
+    const error = Object.assign(new TypeError('fetch failed'), { cause: { code } });
+    assert.equal(classifyPostOutcome({ error }).outcome, 'unresolved', code);
+  }
+  assert.equal(classifyPostOutcome({ error: Object.assign(new Error('aborted'), { name: 'AbortError' }) }).outcome, 'unresolved');
+  assert.equal(classifyPostOutcome({ error: new AggregateError([new Error('a')], 'all failed') }).outcome, 'unresolved');
+  assert.equal(classifyPostOutcome({ error: new TypeError('fetch failed') }).outcome, 'unresolved', 'a missing cause code is not proof of anything');
+  const posted = classifyPostOutcome({ response: { status: 201 }, bodyText: JSON.stringify(FIXTURE_POSTS.created.body) });
+  assert.equal(posted.outcome, 'posted');
+  assert.equal(posted.review_id, FIXTURE_POSTS.created.body.id);
+  assert.equal(classifyPostOutcome({ response: { status: 201 }, bodyText: JSON.stringify(FIXTURE_POSTS.created_without_id.body) }).outcome, 'unresolved');
+  assert.equal(classifyPostOutcome({ response: { status: 201 }, bodyText: '<html>' }).outcome, 'unresolved');
+  for (const status of [401, 403, 404, 422]) {
+    assert.equal(classifyPostOutcome({ response: { status }, bodyText: JSON.stringify(FIXTURE_POSTS.unprocessable.body) }).outcome, 'post_rejected', String(status));
+  }
+  for (const status of [307, 308, 500, 502, 429]) {
+    assert.equal(classifyPostOutcome({ response: { status }, bodyText: '{}' }).outcome, 'unresolved', String(status));
+  }
+});
+
+test('a 422 is a definite rejection and a 307 is not, through the real transport', async () => {
+  for (const [fixture, outcome, reason] of [
+    [FIXTURE_POSTS.unprocessable, 'post_rejected', 'definite-rejection'],
+    [FIXTURE_POSTS.redirect, 'unresolved', 'delivery-unknown'],
+    [FIXTURE_POSTS.server_error, 'unresolved', 'delivery-unknown'],
+  ]) {
+    const events = [];
+    const fake = coordinatorFake({ events });
+    // eslint-disable-next-line no-await-in-loop
+    await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+      await bothLensesDone({ refFile, home, events });
+      await withFakeGitHub(() => ({ status: fixture.status, body: fixture.body, ...(fixture.location ? { location: fixture.location } : {}) }), async ({ origin, requests }) => {
+        const out = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events }) });
+        const line = out.line();
+        assert.equal(line.outcome, outcome, `HTTP ${fixture.status}`);
+        assert.equal(line.reason, reason);
+        assert.equal(requests.length, 1, 'one request, whatever the answer');
+        assert.equal(fake.state.resolves[0].outcome, outcome === 'post_rejected' ? 'post_rejected' : 'unresolved');
+      });
+    });
+  }
+});
+
+test('control 8: an answer that never comes is unresolved, and nothing re-sends it', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothLensesDone({ refFile, home, events });
+    await withFakeGitHub(() => null, async ({ origin, requests }) => {
+      const first = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events }) });
+      assert.equal(first.line().outcome, 'unresolved');
+      assert.equal(requests.length, 1);
+      assert.equal(fake.row.state, 'delivery-unresolved');
+      assert.equal(existsSync(refFile), true, 'the ref file survives an unknown outcome');
+
+      // A second invocation, and a third with a different sender pid standing
+      // in for a fresh writer process: both refuse, and neither sends.
+      const second = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events }) });
+      assert.equal(second.line().reason, 'bad-state');
+      const third = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events }), deps: { senderPid: process.pid + 1 } });
+      assert.equal(third.line().reason, 'bad-state');
+      assert.equal(requests.length, 1, 'an unknown outcome is never re-sent by any path');
+      assert.equal(fake.state.resolves.length, 1);
+    });
+  });
+});
+
+test('a proven not-sent keeps the ref file, and the second post authenticates with it', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothLensesDone({ refFile, home, events });
+    const dead = `http://127.0.0.1:${await closedPort()}`;
+    const first = await runCoordinatedPost({ refFile, home, origin: dead, seams: pinnedSeams({ events }) });
+    const line = first.line();
+    assert.equal(line.outcome, 'not_sent');
+    assert.equal(line.reason, 'not-sent');
+    assert.equal(line.retry, 'post-budget', 'the one reason in the table that is not stop');
+    assert.equal(fake.state.resolves[0].outcome, 'not-sent');
+    assert.equal(fake.row.state, 'lens_done', 'a connection that never opened returns the attempt');
+    assert.equal(existsSync(refFile), true, 'and keeps the key the second submission needs');
+
+    await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+      const second = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events }) });
+      const posted = second.line();
+      assert.equal(posted.outcome, 'posted');
+      assert.equal(posted.post_generation, 2, 'the second submission is a new generation');
+      assert.equal(requests.length, 1);
+      assert.equal(fake.state.reservations[1].worker_key, WORKER_KEY, 'read back out of the ref file that was kept');
+    });
+  });
+});
+
+test('the API base defaults to api.github.com when the variable is unset, without sending anything', () => {
+  assert.equal(githubApiBase({}), GITHUB_API_DEFAULT);
+  assert.equal(githubApiBase({ PR_REVIEW_GITHUB_API_BASE: '' }), GITHUB_API_DEFAULT);
+  assert.equal(reviewsUrl({ repo: PINNED_REPO, pr: PINNED_PR, env: {} }), `https://api.github.com/repos/${PINNED_REPO}/pulls/${PINNED_PR}/reviews`);
+  assert.equal(reviewsUrl({ repo: PINNED_REPO, pr: PINNED_PR, env: { PR_REVIEW_GITHUB_API_BASE: 'http://127.0.0.1:1/' } }), `http://127.0.0.1:1/repos/${PINNED_REPO}/pulls/${PINNED_PR}/reviews`);
+});
+
+// --- recover: the operator's arcs -----------------------------------------
+
+test('recover abandon and withdraw call their endpoint and retire the ref file', async () => {
+  for (const action of ['abandon', 'withdraw']) {
+    const fake = coordinatorFake();
+    // eslint-disable-next-line no-await-in-loop
+    await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+      const out = collector();
+      await cmdRecover(
+        { recoverAction: action, attemptRef: refFile, reason: 'the worker is gone' },
+        { ...out.deps, runGh: pinnedSeams().runGh, env: {}, homeDir: home },
+      );
+      const line = out.line();
+      assert.equal(line.outcome, 'ok');
+      assert.equal(line.recovered, action);
+      assert.equal(fake.state.recoveries[0].path, `/recover/${action}`);
+      assert.equal(fake.state.recoveries[0].body.actor, 'operator');
+      assert.equal(fake.state.recoveries[0].body.reason, 'the worker is gone');
+      assert.equal(existsSync(refFile), false);
+    });
+  }
+});
+
+test('recover not-delivered reads the listing itself and carries the generation from GET /attempt', async () => {
+  const fake = coordinatorFake();
+  fake.row.state = 'delivery-unresolved';
+  fake.row.post_starts = 1;
+  fake.row.post_attempted_at = '2026-09-10T10:30:00.000Z';
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const out = collector();
+    await cmdRecover(
+      { recoverAction: 'not-delivered', attemptRef: refFile, reason: 'listing clean past the floor' },
+      { ...out.deps, runGh: pinnedSeams({ reviewPages: [[]] }).runGh, env: {}, homeDir: home },
+    );
+    const line = out.line();
+    assert.equal(line.recovered, 'not-delivered');
+    assert.equal(line.post_generation, 1);
+    assert.ok(line.listing_checked_at);
+    const call = fake.state.recoveries.find((entry) => entry.path === '/recover/not-delivered');
+    assert.equal(call.body.post_generation, 1);
+    assert.equal(call.body.listing_checked_at, line.listing_checked_at);
+  });
+});
+
+test('recover not-delivered records the delivery instead when the listing shows the review', async () => {
+  const fake = coordinatorFake();
+  fake.row.state = 'delivery-unresolved';
+  fake.row.post_starts = 1;
+  fake.row.post_attempted_at = '2026-09-10T08:00:00.000Z';
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const out = collector();
+    await cmdRecover(
+      { recoverAction: 'not-delivered', attemptRef: refFile, reason: 'checking before releasing the head' },
+      { ...out.deps, runGh: pinnedSeams().runGh, env: {}, homeDir: home },
+    );
+    const line = out.line();
+    assert.equal(line.outcome, 'posted');
+    assert.equal(line.review_id, 5152010493);
+    assert.equal(fake.state.recoveries.at(-1).path, '/recover/delivery');
+    assert.equal(fake.state.recoveries.some((entry) => entry.path === '/recover/not-delivered'), false,
+      'a head whose review is on the pull request is never released as undelivered');
+  });
+});
+
+test('a coordinated command run as a real process prints one JSON line on stdout and its diagnostics on stderr', () => {
+  // Driven through a refusal that lands before any coordinator call, because a
+  // spawned child cannot be served by a fake coordinator living in this
+  // process: execFileSync blocks the very event loop that would answer it.
+  withProfile({ token: FIXTURE_TOKEN }, (home) => {
+    const refFile = join(home, 'attempt-ref.json');
+    writeFileSync(refFile, JSON.stringify({ attempt_ref: PINNED_REF, worker_key: WORKER_KEY, coordinator: 'http://127.0.0.1:3100', required_lenses: REQUIRED_LENSES }), 'utf8');
+    const result = runCliIn({ args: ['post', '--attempt-ref', refFile], home });
+    assert.equal(result.code, 1);
+    const line = onlyOutcomeLine(result.stdout);
+    assert.equal(line.reason, 'managed-config-missing');
+    assert.equal(line.retry, 'stop');
+    assert.equal(result.stdout.includes(FIXTURE_TOKEN), false, 'no token on stdout, ever');
+    assert.match(result.stderr, /managed\.json/, 'the diagnostic is on stderr, where it cannot break the contract');
+    // And the same invocation refuses a second, unpinned source of documents.
+    const withFindings = runCliIn({ args: ['post', '--attempt-ref', refFile, '--findings', 'x.json'], home });
+    assert.equal(withFindings.code, 2);
+    assert.match(withFindings.stderr, /takes no --findings/);
+    const withPr = runCliIn({ args: ['post', '--attempt-ref', refFile, '--pr', '1'], home });
+    assert.equal(withPr.code, 2);
+    assert.match(withPr.stderr, /takes no --pr/);
+  });
+});
+
+test('recover validates its arc, its ref file and its reason before doing anything', () => {
+  assert.match(runCli(['recover', '--attempt-ref', 'x.json', '--reason', 'y']).stderr, /recover needs one of abandon/);
+  assert.match(runCli(['recover', 'abandon', '--reason', 'y']).stderr, /recover needs --attempt-ref/);
+  assert.match(runCli(['recover', 'abandon', '--attempt-ref', 'x.json']).stderr, /recover needs --reason/);
+  assert.match(runCli(['recover', 'abandon', '--attempt-ref', 'x.json', '--reason', 'y', '--pr', '1']).stderr, /recover takes no --pr/);
+  assert.equal(parseArgs(['recover', 'abandon', '--attempt-ref', 'x.json', '--reason', 'y']).recoverAction, 'abandon');
+});
+
+// --- V14 / D14: the managed gate on the standalone verbs -------------------
+
+test('a standalone post or lens on a managed repository is a usage error naming claim', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: { coordinator: 'http://127.0.0.1:3100', repos: [PINNED_REPO] } }, (home) => {
+    const dir = mkdtempSync(join(tmpdir(), 'slim-review-gate-'));
+    try {
+      const findings = join(dir, 'codex.json');
+      writeFileSync(findings, JSON.stringify(stampedDocument({ lens: 'codex' })), 'utf8');
+      const posted = runCliIn({ args: ['post', '--pr', String(PINNED_PR), '--repo', PINNED_REPO, '--findings', findings, '--single-lens', 'testing the gate'], home });
+      assert.equal(posted.code, 2);
+      assert.match(posted.stderr, /managed repository/);
+      assert.match(posted.stderr, /claim --repo/);
+      assert.equal(posted.stdout.trim(), '', 'a usage error is not a coordinated outcome line');
+      const lensed = runCliIn({ args: ['lens', '--pr', String(PINNED_PR), '--repo', PINNED_REPO, '--lens', 'codex', '--out', join(dir, 'out.json')], home });
+      assert.equal(lensed.code, 2);
+      assert.match(lensed.stderr, /managed repository/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('a token with no readable list refuses managed-config-missing on stdout, on post as on identity', () => {
+  withProfile({ token: FIXTURE_TOKEN }, (home) => {
+    const dir = mkdtempSync(join(tmpdir(), 'slim-review-gate-'));
+    try {
+      const findings = join(dir, 'codex.json');
+      writeFileSync(findings, JSON.stringify(stampedDocument({ lens: 'codex' })), 'utf8');
+      const posted = runCliIn({ args: ['post', '--pr', String(PINNED_PR), '--repo', PINNED_REPO, '--findings', findings, '--single-lens', 'testing the gate'], home });
+      assert.equal(posted.code, 1);
+      const line = onlyOutcomeLine(posted.stdout);
+      assert.equal(line.reason, 'managed-config-missing');
+      assert.equal(line.retry, 'stop');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+test('the v3 shape is reproduced once: a spawned sender outlives its writer and posts twice', async () => {
+  // The falsifier, run against the fake endpoint so it is a measurement rather
+  // than a memory. In the v3 shape the review was sent by a `gh` CHILD, so a
+  // writer that died with the child still running could have its submission
+  // land after the head was released — and the retry then posts a second
+  // review. The v5 path above sends in process and spawns nothing inside the
+  // window, which is why its endpoint count is 1 and this one's is 2.
+  await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+    const url = `${origin}/repos/${PINNED_REPO}/pulls/${PINNED_PR}/reviews`;
+    const child = fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ event: 'COMMENT', body: 'the suspended child, resumed' }) });
+    // the writer "dies", the head is released, and a fresh attempt posts
+    await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ event: 'COMMENT', body: 'the replacement attempt' }) });
+    await child;
+    assert.equal(requests.length, 2, 'two reviews on one head — the outcome the in-process sender removes');
+  });
+});
+
+test('a claim on an unprovisioned installation refuses managed-config-missing and reaches nothing', async () => {
+  await withProfile({}, async (home) => {
+    const out = collector();
+    const seams = pinnedSeams();
+    await cmdClaim(
+      { repo: PINNED_REPO, pr: String(PINNED_PR) },
+      { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home, makeClient: () => { throw new Error('no client may be built'); } },
+    );
+    assert.equal(out.line().reason, 'managed-config-missing');
+    assert.deepEqual(seams.calls, []);
   });
 });

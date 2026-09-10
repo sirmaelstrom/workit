@@ -348,6 +348,102 @@ coordinator is reachable on loopback only: a session on another host resolves
 refusal above is final for that invocation — the retry, when there should be
 one, is a person's decision.
 
+### The coordinated loop
+
+On a managed repository, steps 2 and 3 change shape. The review is allocated
+first, and every later step is fenced against the revision that was allocated:
+
+```
+claim  →  lens --attempt-ref (once per lens)  →  post --attempt-ref
+```
+
+```bash
+# 1. allocate. Prints the attempt-ref file's path; that file holds the key for
+#    every later call, so it is written owner-only and never leaves this host.
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" claim --pr <n> --repo <owner/name>
+
+# 2. one invocation per required lens, against the diff pinned at claim time
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens --attempt-ref <file> --lens codex
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens --attempt-ref <file> --lens astra
+
+# 3. post both documents, checked against the pinned manifest
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post --attempt-ref <file>
+```
+
+`claim` reads the head, the file list, and the head again, and refuses
+`revision-mismatch` if they disagree — a file list that belongs to no single
+revision is not something to review. That list is the manifest, and it is what
+both lenses and the post are checked against afterwards, instead of three
+separate live listings that can disagree with each other.
+
+The coordinated `lens` inlines the pinned patches into the prompt and removes
+the instruction to fetch a diff, so the reviewer reads exactly the change that
+was allocated. `--dry-run --prompt-out <path>` writes that rendered prompt
+without spending a lens start. Surrounding source still comes from `--cwd`, and
+the prompt says so.
+
+`post --attempt-ref` re-reads the posting identity and the head, checks that
+both documents carry the same four stamps as the attempt, that their lens set is
+the set the attempt requires, and that each one covers the pinned manifest —
+then sends the review from its own process and records the outcome. Any
+disagreement is a refusal before anything is sent, and the attempt is withdrawn
+in the same invocation rather than left to expire.
+
+Every one of these commands prints one JSON line — `{outcome, reason?, retry,
+…}` — with diagnostics on stderr. `retry` has three values: `stop`,
+`lens-budget` (that lens may be invoked again — by whoever is driving, never by
+the writer itself), and `post-budget` (the submission provably never left this
+process).
+
+### Adjudicating a review that already exists
+
+Before it claims, `claim` looks for a review already posted under the pinned
+login on this head — with the marker the coordinated loop writes, or, for a
+legacy or hand-posted review, by its `commit_id`. A hit is recorded at the
+coordinator and the claim is refused: the head has been reviewed, and reviewing
+it again is a decision, not a default.
+
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" recognise --pr <n> --repo <owner/name> --head <sha>
+```
+
+Read-only. It prints every review on the pull request that the recognisers
+match, with the id, the author, and the marker if there is one. To review the
+head anyway, supersede the review you read there:
+
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" claim --pr <n> --repo <owner/name> \
+  --supersede <review id> --reason "<why the first review is not the answer>"
+```
+
+The superseded review stays on the pull request and is marked replaced; the new
+one names it. Adjudicating the review that is already there is usually cheaper
+than paying for a second one.
+
+### When an attempt ends without posting
+
+An attempt that fails — an exhausted lens budget, a refused guard, an expired
+lease, a paused reserve — is an **ended** attempt. Nothing re-runs it on its
+own: the head stays visible as needing attention until either the head moves or
+a person claims it again. That explicit `claim` is the retry, and it is the only
+one. If the ended attempt is still holding the head, retire it first:
+
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" recover abandon \
+  --attempt-ref <file> --reason "<why>"          # an expired lease
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" recover not-delivered \
+  --attempt-ref <file> --reason "<why>"          # a submission with no known outcome
+```
+
+`recover not-delivered` reads the review listing itself before it asks for
+anything: if the review is on the pull request after all, it records the
+delivery instead of releasing the head. A head released while a review is
+landing is how a pull request gets two of them.
+
+`manifest --pr <n> --repo <owner/name>` prints the same pinned file list as a
+JSON line without allocating anything. It exists so the scheduled half and this
+skill build the manifest with one implementation rather than two.
+
 ---
 
 ## What this deliberately is not
