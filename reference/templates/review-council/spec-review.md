@@ -6,17 +6,11 @@ You are **{{model_name}}**, reviewing the specification for "{{workshop_title}}"
 
 ## How This Specification Works
 
-The artifacts below follow a pipeline structure:
-
-- **problem-statement.md** — What problem is being solved and what success looks like
-- **decisions.md** — Architectural choices with reasoning (referenced as D1, D2, etc.)
-- **constraints.md** — Musts, must-nots, preferences, and escalation triggers (M1, MN1, P1, E1, etc.)
-- **_orchestrator.md** — Wave plan, package inventory, gate commands, and spec-level constraints that apply to ALL packages
-- **wp-*.md** — Individual work packages, each independently dispatchable to an agent
+The review-input inventory below names the files actually included. The required layout is defined in `artifact-layouts.json` beside this template, shared with the collector. Review the supplied decisions, verification, constraints, decomposition, orchestrator, and packages together.
 
 Each work package has: Precondition, Goal, Files, Verification, Failure Criteria, Boundary, and Commit message.
 
-Agents receive ONLY the orchestrator + their own work package file. They do NOT see other work packages. This means each WP must be self-contained — if it references something from another WP, that's a gap.
+Derive execution-agent attachments from this workshop's dispatch instructions. Check that each package has the information it needs through those declared attachments and prior-wave outputs; do not assume that every workshop uses the same attachment set.
 
 {{codebase_access}}
 

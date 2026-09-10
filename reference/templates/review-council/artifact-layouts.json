@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "workshop": {
+    "required": [
+      "problem-statement.md",
+      "decisions.md",
+      "verification.md",
+      "constraints.md",
+      "decomposition.md",
+      "work-packages/_orchestrator.md"
+    ],
+    "packagesDirectory": "work-packages",
+    "packagePattern": "^wp-.*\\.md$"
+  },
+  "lite": ["spec.md", "spec-lite.md"]
+}

@@ -23,6 +23,8 @@ Parse the `--depth` flag from arguments. If not specified, **auto-select using t
 
 **Produces:** Separate artifacts per stage (problem-statement.md, decisions.md, verification.md, constraints.md, decomposition.md, work-packages/), full refinement loop + council review.
 
+Before council dispatch, check the required review-input layout in `${CLAUDE_PLUGIN_ROOT}/reference/templates/review-council/artifact-layouts.json`. This is the collector's authoritative contract; changing the pipeline's required artifacts requires updating that contract in the same change. Incomplete deep workshops are not ready for full council review. Extra supporting material must be passed explicitly as `artifact_paths`; retained history is not automatically part of the current review.
+
 ### `--depth=lite` — Single compressed spec document
 
 **Auto-select when ALL of these are true:**
