@@ -1,11 +1,26 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  createClient,
+  ATTEMPT_REF_FIELDS,
+  TOKEN_HEADER,
+  COORDINATOR_BASE_PATH,
+} from './pr-review-coordinator.mjs';
+import {
+  resolveManaged,
+  loadCoordinatorToken,
+  readManagedList,
+  managedDirectory,
+  MANAGED_MODES,
+  TOKEN_ENV_VAR,
+} from './pr-review-managed.mjs';
 import {
   parseDiff,
   countChangedFiles,
@@ -1787,4 +1802,546 @@ test('characterisation: no standalone invocation emits a JSON outcome line', () 
   assertNoOutcomeLine(characterisationPost().logs);
   assertNoOutcomeLine(characterisationThreads());
   assertNoOutcomeLine(characterisationThreads({ unresolved: true }));
+});
+
+// ---------------------------------------------------------------------------
+// Coordinator client and managed resolver (quest 52fd1a6a, WP-02)
+//
+// The fake coordinator is a plain node:http server on port 0 in this process.
+// Nothing here reaches the network, and no test posts to any pull request.
+// ---------------------------------------------------------------------------
+
+const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
+const D12_FIXTURE = join(SCRIPTS_DIR, '__fixtures__', 'd12-reason-table.json');
+// Low-entropy on purpose: a fixture token that looks like a real one is a
+// secret-scanner finding in a public repository.
+const FIXTURE_TOKEN = 'tok-tok-tok';
+
+/**
+ * Read the vendored D12 table.
+ *
+ * No `existsSync` guard, no conditional describe: when the fixture is missing
+ * this throws and every parity assertion fails. A parity test that skips
+ * itself reports a clean contract over zero input.
+ */
+function readD12Table() {
+  return JSON.parse(readFileSync(D12_FIXTURE, 'utf8'));
+}
+
+const REF = Object.freeze({
+  repo: 'owner/repo',
+  pr: 42,
+  head_sha: 'a'.repeat(40),
+  base_sha: 'b'.repeat(40),
+  attempt: 1,
+  run_id: '00000000-0000-4000-8000-000000000001',
+});
+
+async function withFakeCoordinator(respond, fn) {
+  const seen = [];
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const url = new URL(req.url, 'http://127.0.0.1');
+      let body;
+      try {
+        body = raw === '' ? undefined : JSON.parse(raw);
+      } catch {
+        body = { unparseable: raw };
+      }
+      const call = {
+        method: req.method,
+        path: url.pathname,
+        query: Object.fromEntries(url.searchParams),
+        token: req.headers[TOKEN_HEADER],
+        contentType: req.headers['content-type'],
+        raw,
+        body,
+      };
+      seen.push(call);
+      const answer = respond(call) ?? { status: 200, json: {} };
+      if (answer.raw !== undefined) {
+        res.writeHead(answer.status, { 'content-type': answer.contentType ?? 'text/html' });
+        res.end(answer.raw);
+        return;
+      }
+      res.writeHead(answer.status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(answer.json ?? {}));
+    });
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const { port } = server.address();
+  try {
+    return await fn({ coordinator: `http://127.0.0.1:${port}`, seen });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((done) => server.close(done));
+  }
+}
+
+/** Bind a server, take its port, close it — a port nothing is listening on. */
+async function closedPort() {
+  const server = createServer(() => {});
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const { port } = server.address();
+  server.closeAllConnections();
+  await new Promise((done) => server.close(done));
+  return port;
+}
+
+/** A temp profile directory holding the two managed files, or neither. */
+function withProfile({ token, managed }, fn) {
+  const home = mkdtempSync(join(tmpdir(), 'slim-review-profile-'));
+  const dir = join(home, '.workit', 'pr-review');
+  mkdirSync(dir, { recursive: true });
+  if (token !== undefined) writeFileSync(join(dir, 'coordinator-token'), token, 'utf8');
+  if (managed !== undefined) {
+    writeFileSync(join(dir, 'managed.json'), typeof managed === 'string' ? managed : JSON.stringify(managed), 'utf8');
+  }
+  try {
+    return fn(home, dir);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+const MANAGED_JSON = { coordinator: 'http://127.0.0.1:3100', repos: ['owner/repo', 'owner/other'] };
+
+test('the vendored D12 reason table is present, closed, and internally consistent', () => {
+  const table = readD12Table();
+  assert.equal(table.decisions_revision, 'v5.1');
+  assert.equal(table.coordinator_codes.length, 19, 'the 18 refusal codes plus unauthorized');
+  assert.equal(new Set(table.coordinator_codes).size, 19, 'no duplicate codes');
+  assert.ok(table.coordinator_codes.includes('unauthorized'));
+  assert.ok(table.coordinator_codes.includes('attempt-ended'));
+  assert.ok(table.coordinator_codes.includes('lease-active'));
+  assert.ok(!table.coordinator_codes.includes('lens-exhausted'), 'removed in v5.1 — unreachable');
+  assert.ok(!table.reasons.some((row) => row.reason === 'takeover' || row.reason === 'exhausted'));
+  assert.deepEqual(table.retry_values, ['stop', 'lens-budget', 'post-budget']);
+  const byReason = new Map(table.reasons.map((row) => [row.reason, row]));
+  for (const code of table.coordinator_codes) {
+    const row = byReason.get(code);
+    assert.ok(row, `every coordinator code needs a reason row: ${code}`);
+    assert.ok(row.source.startsWith('coordinator'), `${code} must be sourced at the coordinator, got ${row.source}`);
+    assert.equal(row.retry, 'stop', `${code} is not retryable`);
+  }
+  for (const row of table.reasons) {
+    assert.ok(table.retry_values.includes(row.retry), `${row.reason} carries an unknown retry: ${row.retry}`);
+  }
+  // The four client-side reasons. Two are raised by this client, two by the
+  // resolver and the writer's URL-precedence check (WP-03/WP-04 surfaces).
+  assert.deepEqual(
+    table.reasons.filter((row) => row.source === 'client').map((row) => row.reason).sort(),
+    ['coordinator-unreachable', 'identity-unset', 'managed-config-missing', 'managed-resolver-disagreement'],
+  );
+});
+
+test('createClient round-trips every coordinator code with the same string', async () => {
+  const table = readD12Table();
+  await withFakeCoordinator(
+    (call) => {
+      const code = call.body?.owner_label;
+      return { status: code === 'unauthorized' ? 401 : 409, json: { code } };
+    },
+    async ({ coordinator, seen }) => {
+      for (const code of table.coordinator_codes) {
+        const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+        const result = await client.claim({
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+          worker_key: 'k', owner_label: code, manifest: { files: [] },
+        });
+        assert.equal(result.ok, false, `${code} must not read as success`);
+        assert.equal(result.code, code, 'the coordinator code travels verbatim');
+      }
+      assert.equal(seen.length, table.coordinator_codes.length, 'exactly one request per refusal — the client never retries');
+    },
+  );
+});
+
+test('createClient carries live and ended payloads off a refusal', async () => {
+  await withFakeCoordinator(
+    (call) => (call.path.endsWith('/claim')
+      ? { status: 409, json: { code: 'live-attempt', live: { attempt: 3, origin: 'beat' } } }
+      : { status: 409, json: { code: 'attempt-ended', ended: { state: 'failed', disposition: 'exhausted-lens-budget' } } }),
+    async ({ coordinator }) => {
+      const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+      const live = await client.claim({
+        repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+        worker_key: 'k', owner_label: 'session', manifest: { files: [] },
+      });
+      assert.equal(live.code, 'live-attempt');
+      assert.deepEqual(live.live, { attempt: 3, origin: 'beat' });
+      assert.equal('ended' in live, false);
+
+      const ended = await client.lensStart({ attempt_ref: REF, worker_key: 'k', lens: 'codex' });
+      assert.equal(ended.code, 'attempt-ended');
+      assert.deepEqual(ended.ended, { state: 'failed', disposition: 'exhausted-lens-budget' });
+    },
+  );
+});
+
+test('createClient sends the exact body and path for every endpoint', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: { ok: true } }), async ({ coordinator, seen }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    const cases = [
+      {
+        call: () => client.claim({
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+          worker_key: 'worker-key-value', owner_label: 'session', manifest: { files: [], head_before: REF.head_sha, head_after: REF.head_sha },
+          required_lenses: ['codex', 'astra'],
+        }),
+        method: 'POST',
+        path: '/claim',
+        body: {
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+          worker_key: 'worker-key-value', owner_label: 'session',
+          manifest: { files: [], head_before: REF.head_sha, head_after: REF.head_sha },
+          required_lenses: ['codex', 'astra'],
+        },
+      },
+      {
+        call: () => client.readAttempt(REF),
+        method: 'GET',
+        path: '/attempt',
+        query: { attempt_ref: JSON.stringify(REF) },
+      },
+      { call: () => client.readStatus({ repo: 'owner/repo', pr: 42 }), method: 'GET', path: '/status', query: { repo: 'owner/repo', pr: '42' } },
+      {
+        call: () => client.recogniseImport({
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, review_id: 987, author_login: 'service-login',
+          commit_id: REF.head_sha, listing_checked_at: '2026-09-10T00:00:00.000Z',
+        }),
+        method: 'POST',
+        path: '/recognise-import',
+        body: {
+          repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, review_id: 987, author_login: 'service-login',
+          commit_id: REF.head_sha, listing_checked_at: '2026-09-10T00:00:00.000Z',
+        },
+      },
+      { call: () => client.readIdentity(), method: 'GET', path: '/identity', query: {} },
+      {
+        call: () => client.identity({ login: 'service-login', actor: 'operator', reason: 'activation preflight' }),
+        method: 'POST',
+        path: '/identity',
+        body: { login: 'service-login', actor: 'operator', reason: 'activation preflight' },
+      },
+      {
+        call: () => client.lensStart({ attempt_ref: REF, worker_key: 'worker-key-value', lens: 'codex' }),
+        method: 'POST',
+        path: '/lens-start',
+        body: { attempt_ref: REF, worker_key: 'worker-key-value', lens: 'codex' },
+      },
+      {
+        call: () => client.lensEnd({
+          attempt_ref: REF, worker_key: 'worker-key-value', lens: 'codex', execution_id: 'exec-1',
+          outcome: 'done', document_path: 'cache/codex.json', document_sha256: 'c'.repeat(64),
+        }),
+        method: 'POST',
+        path: '/lens-end',
+        body: {
+          attempt_ref: REF, worker_key: 'worker-key-value', lens: 'codex', execution_id: 'exec-1',
+          outcome: 'done', document_path: 'cache/codex.json', document_sha256: 'c'.repeat(64),
+        },
+      },
+      {
+        call: () => client.reservePost({ attempt_ref: REF, worker_key: 'worker-key-value', sender_pid: 4242 }),
+        method: 'POST',
+        path: '/reserve-post',
+        body: { attempt_ref: REF, worker_key: 'worker-key-value', sender_pid: 4242 },
+      },
+      {
+        call: () => client.resolve({ attempt_ref: REF, worker_key: 'worker-key-value', post_generation: 1, outcome: 'posted', review_id: 987 }),
+        method: 'POST',
+        path: '/resolve',
+        body: { attempt_ref: REF, worker_key: 'worker-key-value', post_generation: 1, outcome: 'posted', review_id: 987 },
+      },
+      {
+        call: () => client.withdraw({ attempt_ref: REF, worker_key: 'worker-key-value', reason: 'identity-mismatch', head_now: REF.head_sha }),
+        method: 'POST',
+        path: '/withdraw',
+        body: { attempt_ref: REF, worker_key: 'worker-key-value', reason: 'identity-mismatch', head_now: REF.head_sha },
+      },
+      {
+        call: () => client.recoverAbandon({ attempt_ref: REF, actor: 'beat', reason: 'lease expired' }),
+        method: 'POST',
+        path: '/recover/abandon',
+        body: { attempt_ref: REF, actor: 'beat', reason: 'lease expired' },
+      },
+      {
+        call: () => client.recoverGraceSweep({ attempt_ref: REF, actor: 'beat', reason: 'grace elapsed', post_generation: 1 }),
+        method: 'POST',
+        path: '/recover/grace-sweep',
+        body: { attempt_ref: REF, actor: 'beat', reason: 'grace elapsed', post_generation: 1 },
+      },
+      {
+        call: () => client.recoverDelivery({ attempt_ref: REF, actor: 'beat', reason: 'recogniser hit', review_id: 987, post_generation: 1 }),
+        method: 'POST',
+        path: '/recover/delivery',
+        body: { attempt_ref: REF, actor: 'beat', reason: 'recogniser hit', review_id: 987, post_generation: 1 },
+      },
+      {
+        call: () => client.recoverNotDelivered({
+          attempt_ref: REF, actor: 'operator', reason: 'listing clean past the floor',
+          post_generation: 1, listing_checked_at: '2026-09-10T02:00:00.000Z',
+        }),
+        method: 'POST',
+        path: '/recover/not-delivered',
+        body: {
+          attempt_ref: REF, actor: 'operator', reason: 'listing clean past the floor',
+          post_generation: 1, listing_checked_at: '2026-09-10T02:00:00.000Z',
+        },
+      },
+      {
+        call: () => client.recoverWithdraw({ attempt_ref: REF, actor: 'beat', reason: 'kill-switch' }),
+        method: 'POST',
+        path: '/recover/withdraw',
+        body: { attempt_ref: REF, actor: 'beat', reason: 'kill-switch' },
+      },
+    ];
+
+    for (const [index, spec] of cases.entries()) {
+      const result = await spec.call();
+      assert.equal(result.ok, true, `${spec.path} must read as success`);
+      const call = seen[index];
+      assert.equal(call.method, spec.method, `${spec.path} method`);
+      assert.equal(call.path, `${COORDINATOR_BASE_PATH}${spec.path}`, 'every route is mounted under the coordinator prefix');
+      assert.equal(call.token, FIXTURE_TOKEN, 'the token rides the header on every call');
+      if (spec.body === undefined) {
+        assert.equal(call.raw, '', `${spec.path} is a read and carries no body`);
+        assert.deepEqual(call.query, spec.query, `${spec.path} query`);
+      } else {
+        assert.deepEqual(call.body, spec.body, `${spec.path} body`);
+        assert.equal(call.contentType, 'application/json');
+      }
+    }
+    assert.equal(seen.length, cases.length, 'one request per call, no retries');
+  });
+});
+
+test('the client refuses a body field the wire contract does not define', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: {} }), async ({ coordinator, seen }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    // The v4.1 spelling of the reservation body. A field-by-field builder that
+    // dropped it silently would send `{attempt_ref, worker_key}` and be refused
+    // bad-request by a coordinator that never saw the pid. The throw is
+    // synchronous — the body is built before the request is issued — so a
+    // caller's typo never becomes a network round trip.
+    assert.throws(
+      () => client.reservePost({ attempt_ref: REF, worker_key: 'k', pid: 4242 }),
+      /unknown body field "pid"/,
+    );
+    assert.throws(() => client.reservePost({ attempt_ref: REF, worker_key: 'k' }), /sender_pid is required/);
+    assert.throws(
+      () => client.lensStart({ attempt_ref: { ...REF, run_id: undefined }, worker_key: 'k', lens: 'codex' }),
+      /attempt_ref\.run_id is required/,
+    );
+    assert.throws(() => client.readAttempt({ repo: 'owner/repo' }), /attempt_ref\.pr is required/);
+    assert.deepEqual(seen, [], 'nothing reaches the coordinator with a body it would refuse');
+  });
+});
+
+test('a connect failure is coordinator-unreachable, not an exception', async () => {
+  const port = await closedPort();
+  const client = createClient({ coordinator: `http://127.0.0.1:${port}`, token: FIXTURE_TOKEN });
+  const result = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'coordinator-unreachable');
+  assert.match(result.message, /did not reach the coordinator/);
+  assert.equal(result.message.includes(FIXTURE_TOKEN), false, 'no token in a message');
+});
+
+test('a 404 from the identity route is identity-unset, body or no body', async () => {
+  await withFakeCoordinator(
+    (call) => (call.method === 'GET'
+      ? { status: 404, raw: '', contentType: 'application/json' }
+      : { status: 404, json: { code: 'identity-unset' } }),
+    async ({ coordinator }) => {
+      const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+      const bodiless = await client.readIdentity();
+      assert.equal(bodiless.ok, false);
+      assert.equal(bodiless.code, 'identity-unset');
+      const withCode = await client.identity({ login: 'l', actor: 'operator', reason: 'r' });
+      assert.equal(withCode.code, 'identity-unset');
+    },
+  );
+});
+
+test('a 401 without a contract code is unauthorized', async () => {
+  await withFakeCoordinator(() => ({ status: 401, raw: 'Unauthorized' }), async ({ coordinator }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    const result = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+    assert.equal(result.code, 'unauthorized');
+    assert.equal(result.status, 401);
+  });
+});
+
+test('an error raised ahead of the route is coordinator-unreachable with its status, never a parse exception', async () => {
+  await withFakeCoordinator(
+    (call) => (call.path.endsWith('/claim')
+      ? { status: 413, raw: '<!DOCTYPE html><html><body>PayloadTooLargeError: request entity too large</body></html>' }
+      : { status: 502, raw: 'Bad Gateway' }),
+    async ({ coordinator }) => {
+      const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+      const tooLarge = await client.claim({
+        repo: 'owner/repo', pr: 42, head_sha: REF.head_sha, base_sha: REF.base_sha,
+        worker_key: 'k', owner_label: 'session', manifest: { files: [] },
+      });
+      assert.equal(tooLarge.ok, false);
+      assert.equal(tooLarge.code, 'coordinator-unreachable');
+      assert.match(tooLarge.message, /HTTP 413/);
+      const gateway = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+      assert.equal(gateway.code, 'coordinator-unreachable');
+      assert.match(gateway.message, /HTTP 502/);
+    },
+  );
+});
+
+test('a success whose body is not JSON is coordinator-unreachable, not a crash', async () => {
+  await withFakeCoordinator(() => ({ status: 200, raw: 'not json at all' }), async ({ coordinator }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    const result = await client.readIdentity();
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'coordinator-unreachable');
+  });
+});
+
+test('the client has no takeover, no retry budget, and never returns the token', async () => {
+  await withFakeCoordinator(() => ({ status: 200, json: { lease_until: 'later' } }), async ({ coordinator }) => {
+    const client = createClient({ coordinator, token: FIXTURE_TOKEN });
+    const names = Object.keys(client).sort();
+    assert.deepEqual(names, [
+      'claim', 'identity', 'lensEnd', 'lensStart', 'readAttempt', 'readIdentity', 'readStatus',
+      'recogniseImport', 'recoverAbandon', 'recoverDelivery', 'recoverGraceSweep', 'recoverNotDelivered',
+      'recoverWithdraw', 'reservePost', 'resolve', 'withdraw',
+    ]);
+    assert.equal(names.some((name) => /takeover/i.test(name)), false, 'takeover was removed by ruling — /recover/abandon allocates nothing');
+    const result = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+    assert.equal(JSON.stringify(result).includes(FIXTURE_TOKEN), false);
+  });
+  const source = readFileSync(join(SCRIPTS_DIR, 'pr-review-coordinator.mjs'), 'utf8');
+  assert.doesNotMatch(source, /setTimeout|maxRetries|retryCount|attemptBudget/, 'no retry machinery in the client');
+});
+
+test('createClient fails closed without a coordinator or a token', () => {
+  assert.throws(() => createClient({ token: FIXTURE_TOKEN }), /coordinator must be a non-empty base URL/);
+  assert.throws(() => createClient({ coordinator: 'http://127.0.0.1:3100' }), /token must be a non-empty string/);
+  assert.throws(() => createClient({ coordinator: 'http://127.0.0.1:3100', token: '' }), /token must be a non-empty string/);
+  assert.deepEqual(ATTEMPT_REF_FIELDS, ['repo', 'pr', 'head_sha', 'base_sha', 'attempt', 'run_id']);
+});
+
+// --- the managed resolver, cases (a) through (e) --------------------------
+
+test('managed (a): a token and a listed repository resolve managed', () => {
+  withProfile({ token: `${FIXTURE_TOKEN}\n`, managed: MANAGED_JSON }, (home) => {
+    const result = resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home });
+    assert.equal(result.mode, MANAGED_MODES.managed);
+    assert.equal(result.coordinator, 'http://127.0.0.1:3100');
+    assert.deepEqual(result.repos, ['owner/repo', 'owner/other']);
+    assert.equal(result.directory, managedDirectory({ homeDir: home }));
+    assert.equal(JSON.stringify(result).includes(FIXTURE_TOKEN), false, 'the resolver result never carries the token');
+    assert.equal('token' in result, false);
+  });
+});
+
+test('managed (c): no token anywhere resolves standalone, list or no list', () => {
+  withProfile({ managed: MANAGED_JSON }, (home) => {
+    const result = resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home });
+    assert.equal(result.mode, MANAGED_MODES.standalone);
+    assert.equal(result.coordinator, undefined, 'a standalone answer names no coordinator');
+  });
+  withProfile({}, (home) => {
+    assert.equal(resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode, MANAGED_MODES.standalone);
+  });
+  // An empty token file is no token — not a token whose value is the empty string.
+  withProfile({ token: '   \n', managed: MANAGED_JSON }, (home) => {
+    assert.equal(resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode, MANAGED_MODES.standalone);
+  });
+});
+
+test('managed (d): a token with the list absent or unreadable is managed-config-missing, never standalone', () => {
+  // The fail-open defect this case exists to catch: with the token present and
+  // the list gone, guessing "standalone" posts an uncoordinated review.
+  withProfile({ token: FIXTURE_TOKEN }, (home) => {
+    assert.equal(resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode, MANAGED_MODES.configMissing);
+  });
+  for (const broken of ['{ not json', '[]', '{"repos": ["owner/repo"]}', '{"coordinator": "http://127.0.0.1:3100"}', '{"coordinator": "http://127.0.0.1:3100", "repos": [3]}']) {
+    withProfile({ token: FIXTURE_TOKEN, managed: broken }, (home) => {
+      assert.equal(
+        resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home }).mode,
+        MANAGED_MODES.configMissing,
+        `unreadable list must fail closed: ${broken}`,
+      );
+    });
+  }
+});
+
+test('managed: a token with the repository not listed resolves standalone', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    assert.equal(resolveManaged({ repo: 'someone/else', env: {}, homeDir: home }).mode, MANAGED_MODES.standalone);
+  });
+  // Case only differs — GitHub calls these the same repository, and answering
+  // standalone here would post the second review the coordinator exists to stop.
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    assert.equal(resolveManaged({ repo: 'Owner/Repo', env: {}, homeDir: home }).mode, MANAGED_MODES.managed);
+  });
+});
+
+test('managed (e): the answer does not depend on the working directory', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    const first = mkdtempSync(join(tmpdir(), 'slim-review-cwd-a-'));
+    const second = mkdtempSync(join(tmpdir(), 'slim-review-cwd-b-'));
+    const origin = process.cwd();
+    try {
+      process.chdir(first);
+      const fromFirst = resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home });
+      process.chdir(second);
+      const fromSecond = resolveManaged({ repo: 'owner/repo', env: {}, homeDir: home });
+      assert.deepEqual(fromFirst, fromSecond);
+      assert.equal(fromFirst.mode, MANAGED_MODES.managed);
+    } finally {
+      process.chdir(origin);
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+  // The falsifier for the same claim at the source: the workspace-root helper
+  // resolves per checkout, so a resolver that reached for it would answer
+  // differently from a second clone of the same repository.
+  for (const module of ['pr-review-coordinator.mjs', 'pr-review-managed.mjs']) {
+    const source = readFileSync(join(SCRIPTS_DIR, module), 'utf8');
+    assert.doesNotMatch(source, /process\.cwd|findWorkspaceRoot|WORKIT_WORKSPACE_ROOT/, `${module} must not resolve from a checkout`);
+  }
+});
+
+test('loadCoordinatorToken prefers the environment, then the file, and never the empty string', () => {
+  withProfile({ token: `${FIXTURE_TOKEN}\n` }, (home) => {
+    assert.equal(loadCoordinatorToken({ env: {}, homeDir: home }), FIXTURE_TOKEN);
+    assert.equal(loadCoordinatorToken({ env: { [TOKEN_ENV_VAR]: 'from-env' }, homeDir: home }), 'from-env');
+    assert.equal(loadCoordinatorToken({ env: { [TOKEN_ENV_VAR]: '  ' }, homeDir: home }), FIXTURE_TOKEN, 'a blank override is not a token');
+  });
+  withProfile({ token: '' }, (home) => {
+    assert.equal(loadCoordinatorToken({ env: {}, homeDir: home }), null);
+  });
+  withProfile({}, (home) => {
+    assert.equal(loadCoordinatorToken({ env: {}, homeDir: home }), null);
+    assert.equal(loadCoordinatorToken({ env: { [TOKEN_ENV_VAR]: 'from-env' }, homeDir: home }), 'from-env');
+  });
+});
+
+test('readManagedList reports the two files it read from the managed directory', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home, dir) => {
+    const list = readManagedList({ homeDir: home });
+    assert.equal(list.ok, true);
+    assert.equal(list.file, join(dir, 'managed.json'));
+    assert.equal(list.coordinator, MANAGED_JSON.coordinator);
+    assert.equal(managedDirectory({ homeDir: home }), dir);
+  });
+});
+
+test('resolveManaged refuses to answer without a repository', () => {
+  withProfile({ token: FIXTURE_TOKEN, managed: MANAGED_JSON }, (home) => {
+    assert.throws(() => resolveManaged({ env: {}, homeDir: home }), /repo is required/);
+  });
 });
