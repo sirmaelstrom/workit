@@ -1089,12 +1089,17 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
  * Bounds (decisions.md D3). `maxFiles` is bounded by the compare API's 300-file
  * ceiling — raising it past 300 turns every large PR into a compare that cannot
  * agree with the manifest, which is `input-mismatch`, not a bigger review.
- * `maxDiffBytes` is measured over the compare payload the lens has just fetched,
- * before the model is invoked: nothing earlier knows the byte count, because the
- * listing carries additions/deletions and the manifest carries `has_patch`.
+ *
+ * The byte bound is NOT here. It arrives on the `GET /attempt` row as
+ * `max_diff_bytes`, taken from the effective beat policy (`maxDiffBytes`) at
+ * read time (v5.2 §W.5.2 item 15): a second literal in this file would agree
+ * with the beat's until somebody lowered one of them, and then the writer would
+ * not have moved (P6). It is measured over the compare payload the lens has just
+ * fetched, before the model is invoked — nothing earlier knows the byte count,
+ * because the listing carries additions/deletions and the manifest carries
+ * `has_patch`.
  */
 export const MAX_FILES = 250;
-export const MAX_DIFF_BYTES = 1024 * 1024;
 
 /** The review POST target. The env override is the test seam for a fake endpoint. */
 export const GITHUB_API_DEFAULT = 'https://api.github.com';
@@ -2030,7 +2035,14 @@ async function cmdLensCoordinated(opts, {
     return undefined;
   }
   const manifestPaths = manifest.files.map((entry) => entry.filename);
-  const maxDiffBytes = attempt.body?.policy?.maxDiffBytes ?? MAX_DIFF_BYTES;
+  // The byte bound is the coordinator's, never a literal of ours (v5.2 §W.5.2
+  // item 15): an answer without it is a malformed coordinator answer, and gets
+  // the same treatment as an answer without a manifest — nothing is started.
+  const maxDiffBytes = attempt.body?.max_diff_bytes;
+  if (!Number.isInteger(maxDiffBytes) || maxDiffBytes <= 0) {
+    refuse('coordinator-unreachable', {}, `the coordinator answered without max_diff_bytes for ${attemptRef.repo}#${attemptRef.pr}; nothing was started.`);
+    return undefined;
+  }
   const fetchCompare = () => JSON.parse(runGh(['api', `repos/${attemptRef.repo}/compare/${attemptRef.base_sha}...${attemptRef.head_sha}`], { cwd }));
   const compareDisagreement = (payload) => {
     const compareSet = new Set((payload?.files ?? []).map((entry) => entry.filename));

@@ -84,7 +84,7 @@ const BY_REASON = new Map(REASONS.map((row) => [row.reason, row]));
 export const KNOWN_REASONS = Object.freeze(new Set(REASONS.map((row) => row.reason)));
 
 /**
- * The reasons `/withdraw` accepts (decisions.md v5.1 §W.4, verbatim).
+ * The reasons `/withdraw` accepts (decisions.md v5.2 §W.4, verbatim).
  *
  * A writer-local stop refusal raised after `claim` and before `reserve-post`
  * withdraws the attempt in the same invocation (D19); every other refusal

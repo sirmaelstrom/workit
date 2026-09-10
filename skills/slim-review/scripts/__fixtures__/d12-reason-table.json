@@ -1,8 +1,8 @@
 {
-  "$comment": "Vendored D12 reason table — decisions.md v5.1 §W.4 + D12. Both repositories carry a byte-identical copy (M2): Observatory asserts REFUSAL_CODES == coordinator_codes; workit asserts pr-review-outcomes.mjs == reasons and outcomes. Both tests FAIL (never skip) when this file is absent. `source` is a contract: `writer` reasons are raised before spend or before reserve-post and reported through /withdraw; `writer-lens` reasons are lens-end outcomes that /withdraw refuses bad-request (V12 asserts the split). Regenerate only by editing decisions.md first (M1) and re-recording its sha256 here.",
+  "$comment": "Vendored D12 reason table — decisions.md v5.2 §W.4 + D12 (v5.2 = the Wave 3→4 boundary pass, §W.5.2: sixteen measured clarifications and one added field, GET /attempt max_diff_bytes; the code and reason sets below are UNCHANGED from v5.1). Both repositories carry a byte-identical copy (M2): Observatory asserts REFUSAL_CODES == coordinator_codes; workit asserts pr-review-outcomes.mjs == reasons and outcomes. Both tests FAIL (never skip) when this file is absent. `source` is a contract: `writer` reasons are raised before spend or before reserve-post and reported through /withdraw; `writer-lens` reasons are lens-end outcomes that /withdraw refuses bad-request (V12 asserts the split). Regenerate only by editing decisions.md first (M1) and re-recording its sha256 here.",
   "source": "data/outputs/workshops/composed-pr-reviewer/decisions.md",
-  "decisions_revision": "v5.1",
-  "decisions_sha256": "48cb69b16961794f88d23352d053e441d69f65d6fade42c2da407d815b150a3f",
+  "decisions_revision": "v5.2",
+  "decisions_sha256": "8039413e70c7172fbfbe597418615469425fa175f0008817ad7c8f5ce33adb7c",
   "retry_values": ["stop", "lens-budget", "post-budget"],
   "outcomes": ["ok", "refused", "failed", "posted", "unresolved", "post_rejected", "not_sent"],
   "coordinator_codes": [
