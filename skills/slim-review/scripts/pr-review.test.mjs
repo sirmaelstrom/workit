@@ -1461,3 +1461,330 @@ test('reply requires --repo', () => {
   assert.equal(r.code, 2);
   assert.match(r.stderr, /reply needs --repo owner\/name/);
 });
+
+// ---------------------------------------------------------------------------
+// Characterisation baseline — standalone behaviour, pinned BEFORE the
+// coordinated work (quest 52fd1a6a, WP-02) touched pr-review.mjs.
+//
+// Baseline commit: pr-review.mjs as written at 632dfcd (last touched by
+// e4c614e) and unchanged through ebd6773, the commit this work forked from —
+// `git diff 632dfcd ebd6773 -- skills/slim-review/scripts/pr-review.mjs` is
+// empty, so "the 632dfcd baseline" and "the ebd6773 tree" name the same bytes.
+//
+// What these tests pin is STDOUT, not behaviour in general. Every standalone
+// invocation of `lens`, `post`, `threads`, `reply` and `lens --dry-run
+// --prompt-out`, with no coordinator token present, must keep producing exactly
+// these lines — and must emit no JSON outcome line, because the one-JSON-line
+// contract belongs to coordinated invocations only. Coordinated `lens` / `post`
+// land later; this block is the net that catches a standalone code path edited
+// instead of branched.
+//
+// Topology guard (M7 — this is a public repository): the gate
+// `git grep -n -E "<four host-topology alternatives>" skills/slim-review` was
+// empty on this tree, and was seen to bite before being trusted: a single line
+// carrying all four alternatives was appended to SKILL.md on a scratch branch,
+// the grep returned exactly one hit (`skills/slim-review/SKILL.md:349`), and the
+// line was reverted with `git checkout --`, after which the grep was empty
+// again (exit 1, no output). The four patterns are deliberately not reproduced
+// here: a source-text guard that quotes its own patterns matches itself.
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `fn` with no coordinator token in the environment and a profile directory
+ * that holds no managed configuration — the "no token present" precondition of
+ * the characterisation baseline. The managed resolver reads `os.homedir()`,
+ * which honours USERPROFILE on Windows and HOME on POSIX, so both are pointed
+ * at an empty temp directory and the test works on either platform.
+ */
+function withNoManagedConfig(fn) {
+  const home = mkdtempSync(join(tmpdir(), 'slim-review-home-'));
+  const saved = new Map();
+  for (const key of ['PR_REVIEW_COORDINATOR_TOKEN', 'USERPROFILE', 'HOME']) saved.set(key, process.env[key]);
+  process.env.USERPROFILE = home;
+  process.env.HOME = home;
+  delete process.env.PR_REVIEW_COORDINATOR_TOKEN;
+  try {
+    return fn(home);
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/** A standalone invocation must never print the coordinated one-line outcome. */
+function assertNoOutcomeLine(logs) {
+  for (const line of logs) {
+    for (const piece of String(line).split('\n')) {
+      const trimmed = piece.trim();
+      if (!trimmed.startsWith('{')) continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
+      assert.ok(
+        !(parsed && typeof parsed === 'object' && 'outcome' in parsed),
+        `standalone stdout must carry no JSON outcome line, got: ${trimmed}`,
+      );
+    }
+  }
+}
+
+const CHAR_HEAD = '1111111111111111111111111111111111111111';
+const CHAR_PR_FILES = ['src/a.ts', 'src/b.ts', 'docs/bin.png'];
+
+function characterisationPost() {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-char-post-'));
+  const logs = [];
+  const posted = [];
+  const codex = join(dir, 'codex.json');
+  const astra = join(dir, 'astra.json');
+  writeFileSync(codex, JSON.stringify({
+    summary: 'codex summary',
+    coverage: 'examined 3 of 3 changed files',
+    examined_paths: CHAR_PR_FILES,
+    findings: [{ severity: 'P1', title: 't1', path: 'src/a.ts', line: 11, body: 'b1' }],
+    lens: 'codex',
+  }), 'utf8');
+  writeFileSync(astra, JSON.stringify({
+    summary: 'astra summary',
+    coverage: 'examined 3 of 3 changed files',
+    examined_paths: CHAR_PR_FILES,
+    findings: [
+      { severity: 'P2', title: 't2', path: 'src/a.ts', line: 99, body: 'b2' },
+      { severity: 'P3', title: 't3', path: 'docs/bin.png', line: 1, body: 'b3' },
+      { severity: 'P3', title: 't4', path: 'src/z.ts', line: 1, body: 'b4' },
+    ],
+    lens: 'astra',
+  }), 'utf8');
+  const runGh = (args, opts) => {
+    if (args[0] === 'pr' && args[1] === 'view') return `${CHAR_HEAD}\n`;
+    if (args[0] === 'pr' && args[1] === 'diff') return DIFF;
+    if (args[0] === 'api' && args[1] === '--paginate') return `${CHAR_PR_FILES.join('\n')}\n`;
+    if (args[0] === 'api' && args.includes('POST')) {
+      posted.push({ args, body: JSON.parse(opts.input) });
+      return JSON.stringify({ html_url: 'https://example.test/review/1' });
+    }
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  try {
+    withNoManagedConfig(() => cmdPost(
+      { pr: '42', repo: 'owner/repo', findings: [codex, astra] },
+      { runGh, die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(line) },
+    ));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return { logs, posted };
+}
+
+test('characterisation: standalone post prints the receipt exactly and posts one review', () => {
+  const { logs, posted } = characterisationPost();
+  assert.deepEqual(logs, [
+    'repo           owner/repo',
+    'pr             #42',
+    'head           1111111',
+    'changed files  3 from PR API (2 diff headers; 2 with commentable lines)',
+    'findings       4 → 1 anchored · 1 off-line · 1 not-anchorable · 1 off-diff',
+    'coverage       OK',
+    '  warning      diff shows 2 changed files, the PR API lists 3 — the diff and the authoritative file list disagree',
+    '  not-anchor   docs/bin.png:1 — changed by this PR, but not line-anchorable',
+    '  off-diff     src/z.ts:1 — not a file this PR changes',
+    '\nposted         https://example.test/review/1',
+  ]);
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].body.event, 'COMMENT');
+  assert.equal(posted[0].body.commit_id, CHAR_HEAD);
+  assert.deepEqual(posted[0].body.comments.map((c) => `${c.path}:${c.line}`), ['src/a.ts:11']);
+  assertNoOutcomeLine(logs);
+});
+
+function characterisationThreads({ unresolved = false } = {}) {
+  const logs = [];
+  const runGh = () => JSON.stringify({
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: [
+              thread({ isResolved: false }),
+              thread({
+                isOutdated: true,
+                path: 'src/b.ts',
+                line: 3,
+                comments: {
+                  nodes: [
+                    { databaseId: 2, author: { login: 'other' }, body: '\nfirst line\nsecond line' },
+                    { databaseId: 3, author: { login: 'someone' }, body: 'a reply' },
+                  ],
+                },
+              }),
+            ],
+          },
+        },
+      },
+    },
+  });
+  withNoManagedConfig(() => cmdThreads(
+    { pr: '53', repo: 'owner/repo', unresolved },
+    { runGh, die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(String(line)) },
+  ));
+  return logs;
+}
+
+test('characterisation: standalone threads prints one block per thread and the reply hint', () => {
+  const logs = characterisationThreads();
+  assert.deepEqual(logs, [
+    '2 of 2 thread(s)\n',
+    '#1  src/a.ts:11  [OPEN]  replies:0',
+    '   someone: a comment',
+    '',
+    '#2  src/b.ts:3  [resolved, outdated]  replies:1',
+    '   other: first line',
+    '',
+    'reply with:  node pr-review.mjs reply --pr 53 --repo owner/repo --comment-id <id> --body-file <file>',
+  ]);
+  assertNoOutcomeLine(logs);
+});
+
+test('characterisation: standalone threads --unresolved shows only the open one', () => {
+  const logs = characterisationThreads({ unresolved: true });
+  assert.deepEqual(logs, [
+    '1 of 2 thread(s) (unresolved)\n',
+    '#1  src/a.ts:11  [OPEN]  replies:0',
+    '   someone: a comment',
+    '',
+    'reply with:  node pr-review.mjs reply --pr 53 --repo owner/repo --comment-id <id> --body-file <file>',
+  ]);
+  assertNoOutcomeLine(logs);
+});
+
+test('characterisation: standalone reply posts one reply and records one verdict row', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-char-reply-'));
+  const bodyFile = join(dir, 'reply.md');
+  const measureLog = join(dir, 'measure.jsonl');
+  const logs = [];
+  const calls = [];
+  writeFileSync(bodyFile, 'Confirmed — fixed in abc1234.\n', 'utf8');
+  const runGh = (args, opts) => {
+    calls.push({ args, opts });
+    if (args[1] === 'api' || args[0] === 'api') {
+      if (args.includes('POST')) return JSON.stringify({ html_url: 'https://example.test/reply/1' });
+      return JSON.stringify({ body: '**lens:** codex\n\nthe original finding' });
+    }
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  try {
+    withNoManagedConfig(() => cmdReply(
+      { pr: '53', repo: 'owner/repo', commentId: '7', bodyFile, verdict: 'confirmed', measureLog },
+      { runGh, die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(String(line)) },
+    ));
+    assert.deepEqual(logs, ['replied        https://example.test/reply/1']);
+    const rows = readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].repo, 'owner/repo');
+    assert.equal(rows[0].pr, 53);
+    assert.equal(rows[0].comment_id, 7);
+    assert.equal(rows[0].lens, 'codex');
+    assert.equal(rows[0].verdict, 'confirmed');
+    assert.deepEqual(
+      calls.at(-1).args,
+      ['api', '--method', 'POST', 'repos/owner/repo/pulls/53/comments/7/replies', '--input', '-'],
+    );
+    assert.equal(JSON.parse(calls.at(-1).opts.input).body, 'Confirmed — fixed in abc1234.\n');
+    assertNoOutcomeLine(logs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('characterisation: standalone lens writes the stamped document and one measurement row', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-char-lens-'));
+  const out = join(dir, 'findings.json');
+  const measureLog = join(dir, 'measure.jsonl');
+  const cwd = join(dir, 'repo');
+  const logs = [];
+  let statusCalls = 0;
+  try {
+    withNoManagedConfig(() => cmdLens(
+      { pr: '42', repo: 'owner/repo', lens: 'codex', cwd, out, measureLog },
+      {
+        run: (program, args) => {
+          if (args[0] === 'api') return 'src/a.ts\n';
+          if (args.includes('status')) { statusCalls += 1; return ''; }
+          if (args[0] === 'exec') {
+            writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(VALID), 'utf8');
+            return 'codex stdout that must not be parsed';
+          }
+          throw new Error(`unexpected run: ${program} ${args.join(' ')}`);
+        },
+        findCodexExe: () => 'codex',
+        die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); },
+        log: (line) => logs.push(String(line)),
+        now: (() => { let clock = 100; return () => (clock += 25); })(),
+      },
+    ));
+    assert.equal(statusCalls, 2);
+    assert.deepEqual(logs, [`wrote          ${out}`]);
+    assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), {
+      ...VALID,
+      findings: VALID.findings.map((f) => ({ ...f, lens: 'codex' })),
+      lens: 'codex',
+      model: 'gpt-5.6-terra',
+      reasoning: 'high',
+      wall_ms: 25,
+    });
+    const rows = readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].lens, 'codex');
+    assert.equal(rows[0].model, 'gpt-5.6-terra');
+    assert.equal(rows[0].coverage, VALID.coverage);
+    assertNoOutcomeLine(logs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('characterisation: standalone lens --dry-run --prompt-out prints argv and path, writes no prompt, spawns nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-char-dry-'));
+  const promptOut = join(dir, 'prompt.txt');
+  const cwd = join(dir, 'repo');
+  const logs = [];
+  const runs = [];
+  try {
+    withNoManagedConfig(() => cmdLens(
+      { pr: '42', repo: 'owner/repo', lens: 'astra', cwd, out: join(dir, 'findings.json'), promptOut, dryRun: true },
+      {
+        run: (program, args) => { runs.push({ program, args }); return ''; },
+        findCodexExe: () => 'codex',
+        die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); },
+        log: (line) => logs.push(String(line)),
+      },
+    ));
+    // The dry-run returns before the prompt is rendered, so --prompt-out writes
+    // nothing on the standalone path. Pinned because it is the one place the
+    // coordinated path is specified to differ.
+    assert.equal(existsSync(promptOut), false, '--prompt-out must stay unwritten on the standalone dry-run');
+    assert.deepEqual(runs, [], 'a dry run spawns nothing at all');
+    assert.equal(logs.length, 2);
+    assert.equal(logs[1], `prompt path: ${resolve(promptOut)}`);
+    assert.deepEqual(JSON.parse(logs[0].replace(/^argv: /, '')), [
+      'exec', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort=low',
+      '--sandbox', 'danger-full-access', '--skip-git-repo-check', '-C', resolve(cwd),
+      '--output-schema', SCHEMA, '-o', '<temporary findings.json>', '-',
+    ]);
+    assertNoOutcomeLine(logs);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('characterisation: no standalone invocation emits a JSON outcome line', () => {
+  assertNoOutcomeLine(characterisationPost().logs);
+  assertNoOutcomeLine(characterisationThreads());
+  assertNoOutcomeLine(characterisationThreads({ unresolved: true }));
+});
