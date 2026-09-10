@@ -57,7 +57,6 @@ import {
   reviewsUrl,
   GITHUB_API_DEFAULT,
   NOT_SENT_CODES,
-  MAX_DIFF_BYTES,
   DOCUMENT_STAMPS,
   loadFindings,
 } from './pr-review.mjs';
@@ -1961,7 +1960,7 @@ const MANAGED_JSON = { coordinator: 'http://127.0.0.1:3100', repos: ['owner/repo
 
 test('the vendored D12 reason table is present, closed, and internally consistent', () => {
   const table = readD12Table();
-  assert.equal(table.decisions_revision, 'v5.1');
+  assert.equal(table.decisions_revision, 'v5.2');
   assert.equal(table.coordinator_codes.length, 19, 'the 18 refusal codes plus unauthorized');
   assert.equal(new Set(table.coordinator_codes).size, 19, 'no duplicate codes');
   assert.ok(table.coordinator_codes.includes('unauthorized'));
@@ -2860,6 +2859,14 @@ function pinnedSeams({
 const WRITER_LENS_REASONS = REASONS.filter((row) => row.source === 'writer-lens').map((row) => row.reason);
 
 /**
+ * The byte bound the fake answers on `GET /attempt` unless a test says
+ * otherwise — the value the writer used to hold as its own literal, so the
+ * tests that predate v5.2 §W.5.2 item 15 measure exactly what they measured
+ * before. `maxDiffBytes: null` omits the field, which is a malformed answer.
+ */
+const FAKE_MAX_DIFF_BYTES = 1024 * 1024;
+
+/**
  * A fake coordinator implementing §W.4 with the lane semantics: three starts
  * per lens counted per lens, `lens-end` as the sole exhaustion authority
  * answering `terminal`, `reserve-post` only from `lens_done`, and `/withdraw`
@@ -2875,6 +2882,7 @@ function coordinatorFake({
   forced = {},
   maxStartsPerLens = 3,
   maxPostStarts = 2,
+  maxDiffBytes = FAKE_MAX_DIFF_BYTES,
   state: initialState = 'claimed',
 } = {}) {
   const row = {
@@ -2886,7 +2894,7 @@ function coordinatorFake({
     review_id: null,
   };
   const state = {
-    identity, row, requiredLenses, manifest, attemptRef, attempts, forced,
+    identity, row, requiredLenses, manifest, attemptRef, attempts, forced, maxDiffBytes,
     calls: [], claims: [], imports: [], withdrawals: [], resolves: [], reservations: [], recoveries: [],
     executions: 0,
   };
@@ -2920,6 +2928,9 @@ function coordinatorFake({
           json: {
             attempt_ref: state.attemptRef,
             manifest: state.manifest,
+            // v5.2 §W.5.2 item 15: the row carries the effective policy's byte
+            // bound, and the writer holds none of its own.
+            ...(state.maxDiffBytes === null ? {} : { max_diff_bytes: state.maxDiffBytes }),
             required_lenses: state.requiredLenses,
             lens_state: row.lens_state,
             state: row.state,
@@ -3561,7 +3572,7 @@ test('control 1: a compare over maxDiffBytes refuses diff-too-large with zero mo
     const huge = {
       ...FIXTURE_COMPARE.payload,
       files: FIXTURE_COMPARE.payload.files.map((file, index) => (
-        index === 0 ? { ...file, patch: `@@ -1,1 +1,1 @@\n+${'x'.repeat(MAX_DIFF_BYTES + 1)}` } : file
+        index === 0 ? { ...file, patch: `@@ -1,1 +1,1 @@\n+${'x'.repeat(FAKE_MAX_DIFF_BYTES + 1)}` } : file
       )),
     };
     const seams = pinnedSeams({ compare: huge });
@@ -3569,9 +3580,54 @@ test('control 1: a compare over maxDiffBytes refuses diff-too-large with zero mo
     const line = out.line();
     assert.equal(line.reason, 'diff-too-large');
     assert.equal(line.retry, 'stop');
-    assert.ok(line.patch_bytes > MAX_DIFF_BYTES);
+    assert.ok(line.patch_bytes > FAKE_MAX_DIFF_BYTES);
+    assert.equal(line.max_diff_bytes, FAKE_MAX_DIFF_BYTES, 'and reports the bound it was given');
     assert.equal(seams.calls.filter((args) => args[1] === 'exec').length, 0, 'the bound is checked before the model, not after');
     assert.equal(fake.row.disposition, 'diff-too-large');
+  });
+});
+
+// The P6 falsifier (v5.2 §W.5.2 item 15). Before the byte bound moved onto the
+// `GET /attempt` row, the writer's own 1 MiB literal and the beat's happened to
+// agree, so lowering the policy could not have moved the writer. A compare of a
+// few KB is far under that literal and far over this row's 4096: only a writer
+// reading the coordinator's value refuses it.
+test('the byte bound is the coordinator\'s: a 4096-byte row refuses a compare the old literal would have passed', async () => {
+  const fake = coordinatorFake({ maxDiffBytes: 4096 });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const fewKb = {
+      ...FIXTURE_COMPARE.payload,
+      files: FIXTURE_COMPARE.payload.files.map((file, index) => (
+        index === 0 ? { ...file, patch: `@@ -1,1 +1,1 @@\n+${'x'.repeat(8192)}` } : file
+      )),
+    };
+    const seams = pinnedSeams({ compare: fewKb });
+    const out = await runCoordinatedLens({ refFile, home, seams });
+    const line = out.line();
+    assert.equal(line.reason, 'diff-too-large');
+    assert.equal(line.retry, 'stop');
+    assert.equal(line.max_diff_bytes, 4096, 'the bound reported is the row\'s, not a literal');
+    assert.ok(line.patch_bytes > 4096 && line.patch_bytes < 1024 * 1024,
+      'a few KB: over the row\'s bound, under the 1 MiB literal the writer used to hold');
+    assert.equal(seams.calls.filter((args) => args[1] === 'exec').length, 0, 'zero model invocations');
+    assert.equal(fake.row.disposition, 'diff-too-large');
+  });
+});
+
+test('an attempt row without max_diff_bytes is a malformed coordinator answer: nothing is started', async () => {
+  const fake = coordinatorFake({ maxDiffBytes: null });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    const seams = pinnedSeams();
+    const out = await runCoordinatedLens({ refFile, home, seams });
+    const line = out.line();
+    assert.equal(line.outcome, 'refused');
+    assert.equal(line.reason, 'coordinator-unreachable');
+    assert.equal(line.retry, 'stop');
+    assert.equal(out.deaths[0].message,
+      `the coordinator answered without max_diff_bytes for ${PINNED_REPO}#${PINNED_PR}; nothing was started.`);
+    assert.deepEqual(fake.state.calls.map((call) => call.shortPath), ['/attempt'],
+      'no lens-start, no withdrawal — the answer was malformed before anything was owed');
+    assert.deepEqual(seams.calls, [], 'and no compare fetch and no model invocation');
   });
 });
 
