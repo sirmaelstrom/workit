@@ -1,8 +1,8 @@
 {
-  "$comment": "Vendored D12 reason table — decisions.md v5.2 §W.4 + D12 (v5.2 = the Wave 3→4 boundary pass, §W.5.2: sixteen measured clarifications and one added field, GET /attempt max_diff_bytes; the code and reason sets below are UNCHANGED from v5.1). Both repositories carry a byte-identical copy (M2): Observatory asserts REFUSAL_CODES == coordinator_codes; workit asserts pr-review-outcomes.mjs == reasons and outcomes. Both tests FAIL (never skip) when this file is absent. `source` is a contract: `writer` reasons are raised before spend or before reserve-post and reported through /withdraw; `writer-lens` reasons are lens-end outcomes that /withdraw refuses bad-request (V12 asserts the split). Regenerate only by editing decisions.md first (M1) and re-recording its sha256 here.",
+  "$comment": "Vendored D12 reason table — decisions.md v5.3 §W.4 + D12 (v5.3 = §W.5.3, the reviewOwnPrs policy flag for single-login installations after the WP-05 field observation; v5.2 = §W.5.2 + GET /attempt max_diff_bytes; the code and reason sets below are UNCHANGED since v5.1). Both repositories carry a byte-identical copy (M2): Observatory asserts REFUSAL_CODES == coordinator_codes; workit asserts pr-review-outcomes.mjs == reasons and outcomes. Both tests FAIL (never skip) when this file is absent. `source` is a contract: `writer` reasons are raised before spend or before reserve-post and reported through /withdraw; `writer-lens` reasons are lens-end outcomes that /withdraw refuses bad-request (V12 asserts the split). Regenerate only by editing decisions.md first (M1) and re-recording its sha256 here.",
   "source": "data/outputs/workshops/composed-pr-reviewer/decisions.md",
-  "decisions_revision": "v5.2",
-  "decisions_sha256": "8039413e70c7172fbfbe597418615469425fa175f0008817ad7c8f5ce33adb7c",
+  "decisions_revision": "v5.3",
+  "decisions_sha256": "e79fec38a894019fcf98fcfcb647c6e08a89e3dbf8cf8558fd919624fce9b961",
   "retry_values": ["stop", "lens-budget", "post-budget"],
   "outcomes": ["ok", "refused", "failed", "posted", "unresolved", "post_rejected", "not_sent"],
   "coordinator_codes": [
