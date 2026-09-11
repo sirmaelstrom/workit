@@ -1,6 +1,6 @@
 ---
 name: slim-review
-description: "Run the slim PR-review loop — delegate two external reviewers (Codex/Terra and GPT-6 Astra, both plan-covered) at a PR boundary, post both sets of findings as line-anchored GitHub review comments, then confirm or refute each one and reply on the thread. Trigger on '/slim-review', 'slim review', 'review this PR before merge', 'get a second pass on the PR', or at any PR boundary during a burn-down. This is the LIGHT tier: two lenses, no synthesis, posted to the PR. Use '/review' for the in-session multi-reviewer pipeline and the review-council for complex multi-component PRs."
+description: "Run the slim PR-review loop — two external reviewers (Terra and Astra, plan-covered) at a PR boundary, findings posted as line-anchored GitHub review comments, then confirm or refute each and reply. Trigger on '/slim-review', 'slim review', 'review this PR before merge', or at any PR boundary in a burn-down. The LIGHT tier: two lenses, no synthesis. NOT for converging a reviewed PR (babysit), in-session multi-reviewer passes ('/review'), or complex PRs (review-council)."
 ---
 
 # Slim PR Review — two external lenses, on the PR, adjudicated
