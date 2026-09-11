@@ -150,6 +150,16 @@ export function createClient({ coordinator, token } = {}) {
           [TOKEN_HEADER]: token,
           accept: 'application/json',
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          // `lens` blocks this event loop for minutes inside a synchronous
+          // reviewer spawn between `lens-start` and `lens-end`; the
+          // coordinator's 5s keep-alive closes the idle socket while that
+          // spawn runs. Undici's default pool then reuses the dead socket for
+          // `lens-end` and it dies `read ECONNRESET` (measured 4 of 4,
+          // 2026-09-11) — reported here as `coordinator-unreachable` with the
+          // attempt stuck in `lens_running`. One socket per call removes the
+          // reuse; undici honours this header (probe: with it, two calls open
+          // two connections instead of one).
+          connection: 'close',
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         // A coordinator on loopback never redirects; treating one as a
