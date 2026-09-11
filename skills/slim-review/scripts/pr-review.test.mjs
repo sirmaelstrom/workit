@@ -1960,7 +1960,7 @@ const MANAGED_JSON = { coordinator: 'http://127.0.0.1:3100', repos: ['owner/repo
 
 test('the vendored D12 reason table is present, closed, and internally consistent', () => {
   const table = readD12Table();
-  assert.equal(table.decisions_revision, 'v5.2');
+  assert.equal(table.decisions_revision, 'v5.3');
   assert.equal(table.coordinator_codes.length, 19, 'the 18 refusal codes plus unauthorized');
   assert.equal(new Set(table.coordinator_codes).size, 19, 'no duplicate codes');
   assert.ok(table.coordinator_codes.includes('unauthorized'));
