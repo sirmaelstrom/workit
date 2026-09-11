@@ -2201,6 +2201,44 @@ test('a connect failure is coordinator-unreachable, not an exception', async () 
   assert.equal(result.message.includes(FIXTURE_TOKEN), false, 'no token in a message');
 });
 
+test('every request sends connection: close, and two sequential calls use two sockets', async () => {
+  // `lens` holds the event loop for minutes between lens-start and lens-end
+  // (a synchronous reviewer spawn); the coordinator's keep-alive closes the
+  // idle socket meanwhile and undici's default pool reused it for lens-end,
+  // dying `read ECONNRESET` (measured 4 of 4, 2026-09-11). This is the
+  // negative control's positive half: run it against a client whose fetch
+  // omits `connection: 'close'` and the socket count below reads 1, not 2 —
+  // that failing assertion is pasted in the PR body that introduces this test.
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push({ connectionHeader: req.headers.connection, remotePort: req.socket.remotePort });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({}));
+  });
+  let connections = 0;
+  server.on('connection', () => { connections += 1; });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const { port } = server.address();
+  try {
+    const client = createClient({ coordinator: `http://127.0.0.1:${port}`, token: FIXTURE_TOKEN });
+    const first = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+    const second = await client.readStatus({ repo: 'owner/repo', pr: 42 });
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(seen.length, 2, 'both calls reached the server');
+    assert.equal(seen[0].connectionHeader, 'close', 'first request carries connection: close');
+    assert.equal(seen[1].connectionHeader, 'close', 'second request carries connection: close');
+    assert.equal(connections, 2, 'connection: close forces a fresh socket per call — a pooled reuse would read 1');
+    assert.notEqual(
+      seen[0].remotePort, seen[1].remotePort,
+      'the two requests arrived on two distinct client sockets, not a reused pooled one',
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((done) => server.close(done));
+  }
+});
+
 test('a 404 from the identity route is identity-unset, body or no body', async () => {
   await withFakeCoordinator(
     (call) => (call.method === 'GET'
