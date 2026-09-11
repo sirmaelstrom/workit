@@ -63,7 +63,22 @@ export const BLOCKED_REASONS = Object.freeze([
   'unresolved-threads',
   'coordinator-unreachable',
   'not-managed',
+  'checks-unavailable',
+  'threads-truncated',
 ]);
+
+/**
+ * The coordinator client answers `{ok:true, status, body}` or a refusal
+ * `{ok:false, reason, …}` — never the view itself. Unwrap, or throw the
+ * refusal so the observation records it (T1 on workit#93, Terra P1: the loop
+ * read `.attempts` off the envelope and never saw a posted review).
+ */
+export function unwrapClientResponse(r, what = 'readStatus') {
+  if (!r || typeof r !== 'object') throw new Error(`${what}: empty response`);
+  if (r.ok === false) throw new Error(`${what}: ${r.reason ?? 'refused'}${r.message ? ` — ${r.message}` : ''}`);
+  if (r.ok === true && 'body' in r) return r.body;
+  return r; // already a view (tests, or a future client that returns it bare)
+}
 
 const LIVE_STATES = new Set(['claimed', 'lens_running', 'lens_done', 'posting', 'delivery-unresolved']);
 const ENDED_STATES = new Set(['failed', 'withdrawn', 'superseded', 'post_rejected', 'replaced']);
@@ -72,23 +87,49 @@ const ENDED_STATES = new Set(['failed', 'withdrawn', 'superseded', 'post_rejecte
 // Observation
 // ---------------------------------------------------------------------------
 
+export const THREADS_PAGE = 100;
+export const COMMENTS_PAGE = 50;
+
 const THREADS_QUERY = `
-query($owner:String!, $name:String!, $pr:Int!) {
+query($owner:String!, $name:String!, $pr:Int!, $after:String) {
   repository(owner:$owner, name:$name) {
     pullRequest(number:$pr) {
-      reviewThreads(first:100) {
+      reviewThreads(first:${THREADS_PAGE}, after:$after) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           isResolved
           isOutdated
           path
           line
-          comments(first:50) { nodes { databaseId author { login } body createdAt } }
+          comments(first:${COMMENTS_PAGE}) { nodes { databaseId author { login } body createdAt } }
         }
       }
     }
   }
 }`;
+
+/**
+ * Every review thread, paginated. A thread whose comment page is full is
+ * reported as truncated — convergence is never decided over a listing that
+ * may be missing an open reply (T1 on workit#93: both lenses).
+ */
+export function fetchAllThreads({ repo, pr, cwd }, runGh) {
+  const [owner, name] = repo.split('/');
+  const nodes = [];
+  let after = null;
+  let truncated = false;
+  for (let page = 0; page < 50; page++) {
+    const args = ['api', 'graphql', '-f', `query=${THREADS_QUERY}`, '-F', `owner=${owner}`, '-F', `name=${name}`, '-F', `pr=${pr}`];
+    if (after) args.push('-F', `after=${after}`);
+    const conn = JSON.parse(runGh(args, { cwd })).data.repository.pullRequest.reviewThreads;
+    nodes.push(...(conn.nodes ?? []));
+    if (!conn.pageInfo?.hasNextPage) break;
+    after = conn.pageInfo.endCursor;
+  }
+  if (nodes.some((t) => (t.comments?.nodes?.length ?? 0) >= COMMENTS_PAGE)) truncated = true;
+  return { nodes, truncated };
+}
 
 const RESOLVE_MUTATION = `
 mutation($id:ID!) { resolveReviewThread(input:{threadId:$id}) { thread { id isResolved } } }`;
@@ -146,29 +187,34 @@ export async function observe({ repo, pr, cwd }, deps) {
   const headBefore = readHead();
   const [owner, name] = repo.split('/');
 
+  // `gh pr checks` exits non-zero when a check is FAILING and still prints
+  // the JSON; a run that printed nothing is a failed READ — fail closed as
+  // `unknown`, never as "no checks, therefore green" (T1 on workit#93).
   const checksRaw = deps.runGh(['pr', 'checks', String(pr), '--repo', repo, '--json', 'name,state,bucket'], { cwd, allowFailure: true });
-  let checksRows = [];
-  try { checksRows = JSON.parse(checksRaw || '[]'); } catch { checksRows = []; }
-  const checks = summariseChecks(Array.isArray(checksRows) ? checksRows : []);
+  let checks;
+  try {
+    const rows = JSON.parse(String(checksRaw ?? '').trim() || 'null');
+    checks = Array.isArray(rows) ? summariseChecks(rows) : { ...summariseChecks([]), unknown: true };
+  } catch {
+    checks = { ...summariseChecks([]), unknown: true };
+  }
 
-  const threadsRaw = deps.runGh(
-    ['api', 'graphql', '-f', `query=${THREADS_QUERY}`, '-F', `owner=${owner}`, '-F', `name=${name}`, '-F', `pr=${pr}`],
-    { cwd },
-  );
-  const threads = normaliseThreads(JSON.parse(threadsRaw).data.repository.pullRequest.reviewThreads.nodes ?? []);
+  const { nodes, truncated } = fetchAllThreads({ repo, pr, cwd }, deps.runGh);
+  const threads = normaliseThreads(nodes);
+  void owner; void name;
 
   let status = null;
   let health = null;
   let coordinatorError = null;
   try {
-    status = await deps.coordinator.readStatus({ repo, pr });
+    status = unwrapClientResponse(await deps.coordinator.readStatus({ repo, pr }), 'readStatus');
     health = await deps.coordinator.readHealth();
   } catch (err) {
     coordinatorError = err instanceof Error ? err.message : String(err);
   }
 
   const headAfter = readHead();
-  return { repo, pr, headBefore, headAfter, head: headAfter, checks, threads, status, health, coordinatorError, at: deps.now() };
+  return { repo, pr, headBefore, headAfter, head: headAfter, checks, threads, threadsTruncated: truncated, status, health, coordinatorError, at: deps.now() };
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +237,8 @@ function owedFor(reason, ctx, extra = {}) {
     case 'unresolved-threads': return `${extra.count ?? '?'} review thread(s) still open on head ${head} at the wall budget — adjudicate them (\`pr-babysit.mjs threads\` / \`adjudicate\`) and run again.`;
     case 'coordinator-unreachable': return `the coordinator could not be read (${extra.error ?? '?'}) — is Observatory up on loopback?`;
     case 'not-managed': return `${ctx.repo} is not a managed repository — use slim-review's standalone loop.`;
+    case 'checks-unavailable': return `the checks on head ${head} could not be read for the whole budget (gh pr checks printed nothing) — fix gh/auth and run again; a run cannot converge on checks it never saw.`;
+    case 'threads-truncated': return `a review thread on this PR has ${COMMENTS_PAGE}+ comments, past this loop's page size — adjudicate from the PR page; a truncated listing is never read as "all resolved".`;
     default: return 'a person decides.';
   }
 }
@@ -229,6 +277,11 @@ export function decide(obs, ctx) {
   const unresolved = obs.threads.filter((t) => !t.resolved);
 
   if (obs.checks.fail > 0) return { action: 'blocked', reason: 'ci-failed', owed: owedFor('ci-failed', c, { names: obs.checks.names.fail }) };
+  if (obs.threadsTruncated) return { action: 'blocked', reason: 'threads-truncated', owed: owedFor('threads-truncated', c) };
+  if (obs.checks.unknown) {
+    if (elapsedMin > bounds.maxWallMinutes) return { action: 'blocked', reason: 'checks-unavailable', owed: owedFor('checks-unavailable', c) };
+    return { action: 'wait', detail: 'checks could not be read (fail closed) — retrying' };
+  }
 
   if (elapsedMin > bounds.maxWallMinutes) {
     if (live?.state === 'delivery-unresolved') return { action: 'blocked', reason: 'delivery-unresolved', owed: owedFor('delivery-unresolved', c) };
@@ -284,16 +337,28 @@ export function saveState(path, state) {
   writeFileSync(path, JSON.stringify(state, null, 2) + '\n', 'utf8');
 }
 
-/** Spawn a writer verb and parse its one JSON line (the last non-empty stdout line). */
+/**
+ * Spawn a writer verb. Coordinated verbs emit one JSON line (the last
+ * non-empty stdout line); `reply` prints a human receipt line and exits 0 —
+ * so a zero exit with no JSON is `ok` and a non-zero exit is `failed`, whatever
+ * the last line says. The exit code is what a caller that resolves a thread
+ * afterwards must read (T1 on workit#93: both lenses, P1).
+ */
 export function spawnWriterDefault(args, { cwd }) {
   let stdout = '';
+  let exitCode = 0;
   try {
     stdout = execFileSync(process.execPath, [WRITER_SCRIPT, ...args], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true, stdio: ['ignore', 'pipe', 'inherit'] });
   } catch (err) {
     stdout = String(err?.stdout ?? '');
+    exitCode = typeof err?.status === 'number' ? err.status : 1;
   }
   const line = stdout.split(/\r?\n/).filter((l) => l.trim() !== '').pop() ?? '';
-  try { return JSON.parse(line); } catch { return { outcome: 'failed', reason: 'unparseable-writer-output', raw: line.slice(0, 300) }; }
+  let parsed = null;
+  try { parsed = JSON.parse(line); } catch { parsed = null; }
+  if (parsed && typeof parsed === 'object' && 'outcome' in parsed) return { ...parsed, exitCode };
+  if (exitCode === 0) return { outcome: 'ok', exitCode, raw: line.slice(0, 300) };
+  return { outcome: 'failed', reason: `writer-exit-${exitCode}`, exitCode, raw: line.slice(0, 300) };
 }
 
 /**
@@ -388,9 +453,11 @@ function finish(receipt, ctx, deps, obs) {
 
 export async function adjudicate({ repo, pr, cwd, commentId, verdict, bodyFile }, deps) {
   const reply = deps.spawnWriter(['reply', '--pr', String(pr), '--repo', repo, '--comment-id', String(commentId), '--body-file', bodyFile, '--verdict', verdict, '--cwd', cwd], { cwd });
-  const [owner, name] = repo.split('/');
-  const threadsRaw = deps.runGh(['api', 'graphql', '-f', `query=${THREADS_QUERY}`, '-F', `owner=${owner}`, '-F', `name=${name}`, '-F', `pr=${pr}`], { cwd });
-  const nodes = JSON.parse(threadsRaw).data.repository.pullRequest.reviewThreads.nodes ?? [];
+  // No verdict on the thread → no resolution. A resolved thread with no
+  // reply would read as adjudicated to the convergence check while carrying
+  // no verdict at all (T1 on workit#93, both lenses P1).
+  if (reply.outcome !== 'ok') return { outcome: 'failed', reason: 'reply-failed', commentId, verdict, replied: reply, resolved: false };
+  const { nodes } = fetchAllThreads({ repo, pr, cwd }, deps.runGh);
   const thread = nodes.find((t) => (t.comments?.nodes ?? []).some((c) => Number(c.databaseId) === Number(commentId)));
   if (!thread) return { outcome: 'failed', reason: 'thread-not-found', commentId };
   const res = deps.runGh(['api', 'graphql', '-f', `query=${RESOLVE_MUTATION}`, '-F', `id=${thread.id}`], { cwd });
@@ -434,6 +501,7 @@ function buildDeps(opts) {
   if (managed.mode === MANAGED_MODES.managed) {
     const client = createClient({ coordinator: managed.coordinator, token: loadCoordinatorToken() });
     coordinator = {
+      // the client answers an envelope; `observe` unwraps it (unwrapClientResponse)
       readStatus: (input) => client.readStatus(input),
       readHealth: async () => {
         const res = await fetch(`${managed.coordinator.replace(/\/+$/, '')}/api/health`, { headers: { connection: 'close' } });

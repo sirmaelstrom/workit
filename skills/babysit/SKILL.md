@@ -28,7 +28,7 @@ open thread, or a pending check never satisfies it.
 ## The loop
 
 ```bash
-SCRIPT="C:/Users/jmhea/.claude/plugins/cache/workit/workit/<version>/skills/babysit/scripts/pr-babysit.mjs"
+SCRIPT="${CLAUDE_SKILL_DIR}/scripts/pr-babysit.mjs"
 node "$SCRIPT" run --pr <n> --repo <owner/name> --cwd "<ABSOLUTE CHECKOUT OF THE PR HEAD>"
 ```
 

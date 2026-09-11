@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { decide, runLoop, summariseChecks, normaliseThreads, adjudicate, DEFAULT_BOUNDS, BLOCKED_REASONS } from './pr-babysit.mjs';
+import { decide, runLoop, summariseChecks, normaliseThreads, adjudicate, unwrapClientResponse, fetchAllThreads, DEFAULT_BOUNDS, BLOCKED_REASONS, COMMENTS_PAGE } from './pr-babysit.mjs';
 
 const H1 = 'aaaaaaa1111111111111111111111111111111111';
 const H2 = 'bbbbbbb2222222222222222222222222222222222';
@@ -164,6 +164,48 @@ test('every blocked reason the decision can emit is in the closed set', () => {
   assert.ok(seen.size >= 6);
 });
 
+test('T1 workit#93 — the coordinator client answers an ENVELOPE; the loop reads the view inside it, and a refusal is an error (the live run on obs#676 waited on a review it could not see)', () => {
+  assert.deepEqual(unwrapClientResponse({ ok: true, status: 200, body: { attempts: [1] } }), { attempts: [1] });
+  assert.deepEqual(unwrapClientResponse({ attempts: [] }), { attempts: [] });
+  assert.throws(() => unwrapClientResponse({ ok: false, reason: 'coordinator-unreachable', message: 'ECONNREFUSED' }), /coordinator-unreachable/);
+  assert.throws(() => unwrapClientResponse(null), /empty/);
+});
+
+test('T1 workit#93 — checks that could not be READ are unknown: wait, then blocked checks-unavailable; never "no checks, therefore green"', () => {
+  const unknown = { ...summariseChecks([]), unknown: true };
+  const d = decide(obs({ checks: unknown, status: { attempts: [posted()] }, threads: [thread(1, true)] }), ctx());
+  assert.equal(d.action, 'wait');
+  const late = decide(obs({ checks: unknown, status: { attempts: [posted()] }, at: T0 + 200 * MIN }), ctx());
+  assert.deepEqual([late.action, late.reason], ['blocked', 'checks-unavailable']);
+});
+
+test('T1 workit#93 — a truncated thread listing never converges', () => {
+  const d = decide(obs({ threadsTruncated: true, status: { attempts: [posted()] } }), ctx());
+  assert.deepEqual([d.action, d.reason], ['blocked', 'threads-truncated']);
+});
+
+test('T1 workit#93 — fetchAllThreads paginates and flags a thread whose comment page is full', () => {
+  const pages = [
+    { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [{ id: 'A', comments: { nodes: [] } }] },
+    { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ id: 'B', comments: { nodes: Array.from({ length: COMMENTS_PAGE }, (_, i) => ({ databaseId: i })) } }] },
+  ];
+  const calls = [];
+  const runGh = (args) => { calls.push(args); return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: pages.shift() } } } }); };
+  const r = fetchAllThreads({ repo: 'o/r', pr: 1, cwd: '.' }, runGh);
+  assert.deepEqual(r.nodes.map((n) => n.id), ['A', 'B']);
+  assert.equal(r.truncated, true);
+  assert.ok(calls[1].includes('after=c1'), 'second page carries the cursor');
+});
+
+test('T1 workit#93 — adjudicate does NOT resolve the thread when the verdict reply failed', async () => {
+  const { w, deps } = world({ threads: [openThread(5)] });
+  deps.spawnWriter = (args) => { w.writerCalls.push(args); return args[0] === 'reply' ? { outcome: 'failed', reason: 'writer-exit-4' } : { outcome: 'ok' }; };
+  const r = await adjudicate({ repo: 'o/r', pr: 1, cwd: '.', commentId: 5, verdict: 'refuted', bodyFile: 'x.md' }, deps);
+  assert.deepEqual([r.outcome, r.reason, r.resolved], ['failed', 'reply-failed', false]);
+  assert.equal(w.threads[0].isResolved, false);
+  assert.ok(!w.ghCalls.some((a) => a[3]?.includes('resolveReviewThread')), 'no resolve mutation was sent');
+});
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -199,7 +241,8 @@ function world(init = {}) {
   const deps = {
     managed: { mode: 'managed' },
     coordinator: {
-      readStatus: async () => ({ attempts: w.attempts.map((a) => ({ ...a })) }),
+      // the REAL client's shape: an envelope around the view (regression for the obs#676 live run)
+      readStatus: async () => ({ ok: true, status: 200, body: { attempts: w.attempts.map((a) => ({ ...a })), posted_head: null, posted_review_id: null } }),
       readHealth: async () => ({ ...w.health }),
     },
     runGh: (args) => {
@@ -212,7 +255,7 @@ function world(init = {}) {
         if (t) t.isResolved = true;
         return JSON.stringify({ data: { resolveReviewThread: { thread: { id, isResolved: true } } } });
       }
-      if (args[0] === 'api' && args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: w.threads } } } } });
+      if (args[0] === 'api' && args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: w.threads } } } } });
       throw new Error(`unexpected gh ${args.join(' ')}`);
     },
     spawnWriter: (args) => {
