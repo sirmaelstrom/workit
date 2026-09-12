@@ -2882,7 +2882,11 @@ function pinnedSeams({
     if (/^gh(\.exe)?$/.test(program)) return runGh(args, opts);
     calls.push([program, ...args]);
     events.push({ kind: 'spawn', args: [program, ...args] });
-    if (/^git(\.exe)?$/.test(program)) return statusQueue.length > 1 ? statusQueue.shift() : (statusQueue[0] ?? '');
+    if (/^git(\.exe)?$/.test(program)) {
+      if (args.includes('rev-parse')) return PINNED_HEAD;
+      if (args.includes('status')) return statusQueue.length > 1 ? statusQueue.shift() : (statusQueue[0] ?? '');
+      return '';
+    }
     if (args[0] === 'exec') {
       const out = codex(args);
       if (out !== null) writeFileSync(args[args.indexOf('-o') + 1], out, 'utf8');
@@ -3734,6 +3738,86 @@ test('a reviewer that writes in the worktree fails the attempt after the model r
     assert.equal(existsSync(join(home, 'codex.json')), false, 'no document is kept from a run that misbehaved');
   });
 });
+
+// Real git, fake model and coordinator: the caller is deliberately not the
+// repository being reviewed. Only the declared remote's transport is replaced.
+for (const scenario of ['caller-edit', 'reviewer-edit', 'reviewer-commit', 'fetch-failure', 'wrong-head']) {
+  test(`coordinated checkout isolation with real git: ${scenario}`, async () => {
+    const source = mkdtempSync(join(tmpdir(), 'review-source-'));
+    const git = process.platform === 'win32' ? 'git.exe' : 'git';
+    const gitRun = (args, cwd = source) => execFileSync(git, args, {
+      cwd, encoding: 'utf8', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let scratch;
+    try {
+      gitRun(['init']);
+      gitRun(['config', 'user.name', 'Review test']);
+      gitRun(['config', 'user.email', 'review@example.invalid']);
+      writeFileSync(join(source, 'context.txt'), 'pinned source\n');
+      gitRun(['add', '.']);
+      gitRun(['commit', '-m', 'pinned']);
+      const head = gitRun(['rev-parse', 'HEAD']).trim();
+      // The canonical clone now contains a different committed version.
+      writeFileSync(join(source, 'context.txt'), 'canonical newer source\n');
+      gitRun(['commit', '-am', 'newer']);
+      const canonicalHead = gitRun(['rev-parse', 'HEAD']).trim();
+      const ref = { ...PINNED_REF, head_sha: head };
+      const fake = coordinatorFake({ attemptRef: ref });
+      await withCoordinatedInstall({ fake, attemptRef: ref }, async ({ home, refFile }) => {
+        const baseSeams = pinnedSeams();
+        let modelCalls = 0;
+        const seams = { run(program, args, opts) {
+          if (/^git(\.exe)?$/.test(program)) {
+            if (args[0] === 'init') scratch = opts.cwd;
+            if (args.includes('fetch')) {
+              assert.ok(args.includes(`https://github.com/${PINNED_REPO}.git`));
+              assert.equal(args.at(-1), head, 'fetch the pinned SHA, never a mutable PR ref');
+              if (scenario === 'fetch-failure') throw new Error('remote unavailable');
+              return gitRun(args.map((arg) => arg === `https://github.com/${PINNED_REPO}.git` ? source : arg), opts.cwd);
+            }
+            if (scenario === 'wrong-head' && args.includes('rev-parse')) return canonicalHead;
+            return gitRun(args, opts.cwd);
+          }
+          if (args[0] === 'exec') {
+            modelCalls += 1;
+            assert.notEqual(opts.cwd, source);
+            assert.notEqual(opts.cwd, home);
+            assert.equal(args[args.indexOf('-C') + 1], opts.cwd);
+            assert.equal(readFileSync(join(opts.cwd, 'context.txt'), 'utf8').replaceAll('\r\n', '\n'), 'pinned source\n');
+            assert.equal(gitRun(['rev-parse', 'HEAD'], opts.cwd).trim(), head);
+            if (scenario === 'caller-edit') writeFileSync(join(source, 'context.txt'), 'interactive edit\n');
+            if (scenario === 'reviewer-edit') writeFileSync(join(opts.cwd, 'context.txt'), 'unauthorized edit\n');
+            if (scenario === 'reviewer-commit') {
+              writeFileSync(join(opts.cwd, 'context.txt'), 'unauthorized commit\n');
+              gitRun(['-c', 'user.name=Review test', '-c', 'user.email=review@example.invalid',
+                'commit', '-am', 'unauthorized'], opts.cwd);
+            }
+          }
+          return baseSeams.run(program, args, opts);
+        } };
+        const out = await runCoordinatedLens({ refFile, home, seams });
+        assert.equal(out.line().outcome, scenario === 'caller-edit' ? 'ok' : 'failed', JSON.stringify(out.deaths));
+        const ended = fake.state.calls.filter((call) => call.shortPath === '/lens-end');
+        assert.equal(ended.length, 1, 'even checkout setup failure reports its consumed execution');
+        if (scenario.startsWith('reviewer-')) {
+          assert.equal(out.line().reason, 'worktree-dirty', JSON.stringify(out.deaths));
+          assert.equal(fake.row.disposition, 'integrity-violation');
+        }
+        if (scenario === 'fetch-failure' || scenario === 'wrong-head') {
+          assert.equal(modelCalls, 0);
+          assert.equal(out.line().reason, 'lens-error');
+        } else assert.equal(modelCalls, 1);
+        assert.equal(existsSync(scratch), false, 'temporary repository and checkout cleaned on every outcome');
+        assert.equal(gitRun(['rev-parse', 'HEAD']).trim(), canonicalHead, 'canonical git state unchanged');
+        assert.equal(readFileSync(join(source, 'context.txt'), 'utf8'),
+          scenario === 'caller-edit' ? 'interactive edit\n' : 'canonical newer source\n');
+      });
+    } finally {
+      rmSync(source, { recursive: true, force: true });
+      if (scratch) rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+}
 
 test('control 5: the partner lens keeps its document and its single start across a retry', async () => {
   const fake = coordinatorFake();
