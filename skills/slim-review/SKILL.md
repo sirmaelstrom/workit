@@ -395,8 +395,8 @@ separate live listings that can disagree with each other.
 The coordinated `lens` inlines the pinned patches into the prompt and removes
 the instruction to fetch a diff, so the reviewer reads exactly the change that
 was allocated. `--dry-run --prompt-out <path>` writes that rendered prompt
-without spending a lens start. Surrounding source still comes from `--cwd`, and
-the prompt says so.
+without spending a lens start. Surrounding source comes from the temporary
+checkout at the pinned head, not the caller's `--cwd`.
 
 `post --attempt-ref` re-reads the posting identity and the head, checks that
 both documents carry the same four stamps as the attempt, that their lens set is

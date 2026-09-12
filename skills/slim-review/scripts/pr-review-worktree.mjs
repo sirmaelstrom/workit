@@ -35,6 +35,7 @@ export function createReviewWorktree({ repo, headSha, run, diag = console.error 
   };
   try {
     run(git, ['init', '--bare', gitDir], { cwd: root });
+    run(git, ['--git-dir', gitDir, 'remote', 'add', 'origin', `https://github.com/${repo}.git`], { cwd: root });
     run(git, ['--git-dir', gitDir, 'fetch', '--no-tags', '--depth=1',
       `https://github.com/${repo}.git`, headSha], { cwd: root });
     run(git, ['--git-dir', gitDir, 'worktree', 'add', '--detach', cwd, headSha], { cwd: root });

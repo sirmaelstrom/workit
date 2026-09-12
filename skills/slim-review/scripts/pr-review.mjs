@@ -827,7 +827,7 @@ export function buildReviewerPrompt({ pr, repo, prFilePaths, pinned_diff, manife
   const paths = prFilePaths ?? (manifest?.files ?? []).map((file) => file.filename);
   const diffInstruction = pinned_diff === undefined
     ? `Read the diff with \`gh pr diff ${pr} --repo ${repo}\`. Read surrounding source as needed to judge correctness.`
-    : 'Do not fetch the diff; review only the diff below. Read surrounding source as needed to judge correctness — it is read from the working directory, which can differ from the pinned revision below.';
+    : 'Do not fetch the diff; review only the diff below. Read surrounding source as needed to judge correctness. The writer runs you in an isolated checkout at the pinned head below, with no installed dependencies. Report checks that need missing dependencies as unverified; do not install them.';
   const pinnedSection = pinned_diff === undefined ? '' : [
     '',
     '',
