@@ -48,6 +48,7 @@ import { dirname, join, resolve } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 
 import { createClient } from './pr-review-coordinator.mjs';
+import { createReviewWorktree } from './pr-review-worktree.mjs';
 import {
   loadCoordinatorToken,
   managedDirectory,
@@ -2172,7 +2173,20 @@ async function cmdLensCoordinated(opts, {
     mkdirSync(dirname(promptPath), { recursive: true });
     writeFileSync(promptPath, prompt, 'utf8');
   }
-  const result = runLensModel({ lens: opts.lens, cwd, prompt, prFilePaths: manifestPaths, run, findCodexExe, now });
+  let checkout;
+  let result;
+  try {
+    checkout = createReviewWorktree({ repo: attemptRef.repo, headSha: attemptRef.head_sha, run, diag });
+    result = runLensModel({ lens: opts.lens, cwd: checkout.cwd, prompt, prFilePaths: manifestPaths, run, findCodexExe, now });
+    if (result.ok) {
+      try { checkout.assertHead(); }
+      catch (err) { result = { ok: false, reason: 'worktree-dirty', message: err.message }; }
+    }
+  } catch (err) {
+    result = { ok: false, reason: 'lens-error', message: `could not prepare or use the pinned review checkout: ${err.message}` };
+  } finally {
+    checkout?.cleanup();
+  }
   if (!result.ok) {
     return finish({ outcome: 'failed', reason: result.reason, message: result.message, exitCode: result.reason === 'gh-failure' ? 4 : 3 });
   }
