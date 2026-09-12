@@ -14,7 +14,7 @@ workit is **not** a purely personal toolkit anymore — it's a multi-consumer de
 
 ## Structure
 
-- `skills/<id>/SKILL.md` — one directory per skill; count them with `ls skills/*/SKILL.md`, never from a number restated here (this line and § What This Is both read "24" while the tree held 25 from 2026-08-19 to 2026-09-12). **Auto-discovered by directory scan** — Claude Code plugins do not need a `skills[]` list in `.claude-plugin/plugin.json`, so there's nothing to keep in sync there (`_shared/` is shared test/lint utilities, not a user-facing skill). Slash-command pipeline is **`/spec`** (the old `/workshop` command was renamed; `workshop` survives only as the artifact-directory noun, `{workspace}/data/outputs/workshops/{slug}/`).
+- `skills/<id>/SKILL.md` — one directory per skill; count them with `ls skills/*/SKILL.md`, never from a number restated here. **Auto-discovered by directory scan** — Claude Code plugins do not need a `skills[]` list in `.claude-plugin/plugin.json`, so there's nothing to keep in sync there (`_shared/` is shared test/lint utilities, not a user-facing skill). Slash-command pipeline is **`/spec`** (the old `/workshop` command was renamed; `workshop` survives only as the artifact-directory noun, `{workspace}/data/outputs/workshops/{slug}/`).
 - `reference/patterns/INDEX.md` — the pattern library index. `reference/{heuristics,templates,examples}/` — supporting material.
 - `README.md` — the skill catalog + install/conventions. `CONTRIBUTING.md` — dev workflow (tests, commit style, how skills are structured). `reference/README.md` — provenance/origin.
 
