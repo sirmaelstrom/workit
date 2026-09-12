@@ -9,6 +9,7 @@ all welcome.
 - **Requirements:** Node 24+ (the scripts use `node:` built-ins, including `node:sqlite`). No install step — there are no third-party dependencies.
 - **Run the tests:** `node --test` from the repo root. All tests must pass before a PR is merged; CI runs the same command plus a `gitleaks` secret scan.
 - **Skills** live under `skills/<id>/SKILL.md`; the methodology they draw on is in `reference/`.
+- **Releases:** update `.claude-plugin/plugin.json` and the matching entry in `.claude-plugin/marketplace.json` together. The test suite rejects mismatched versions.
 
 ## Commit messages
 
