@@ -289,6 +289,22 @@ operator's merge call.
 
 ## Managed repositories
 
+Coordinated `lens --attempt-ref` executions create a temporary detached
+worktree at the attempt's pinned head, fetched from its declared GitHub repo.
+The caller's `--cwd` is used for command context and measurement placement,
+not for the model's source reads or integrity checks. Each lens execution gets
+its own repository and checkout; edits in the interactive checkout cannot
+invalidate it. The writer checks HEAD before and after the review and still
+rejects reviewer edits. It removes the temporary checkout after success or
+failure, retaining findings outside it. A killed process can leave a temporary
+`workit-review-*` directory behind.
+
+These are source-only checkouts: no dependencies are installed or linked from
+the live workspace. Reviewers must report checks that need unavailable
+dependencies as unverified, as required by the artifact-evidence contract.
+Setup/fetch failure reports `lens-error` to the coordinator and runs no model.
+Dry runs create no checkout. Standalone lenses retain their explicit-cwd behavior.
+
 Everything above is the standalone loop: you run it, it posts, nothing else is
 involved. On an installation where reviews are also raised automatically, a
 repository can instead be **managed** — the review is allocated by a coordinator
@@ -379,8 +395,8 @@ separate live listings that can disagree with each other.
 The coordinated `lens` inlines the pinned patches into the prompt and removes
 the instruction to fetch a diff, so the reviewer reads exactly the change that
 was allocated. `--dry-run --prompt-out <path>` writes that rendered prompt
-without spending a lens start. Surrounding source still comes from `--cwd`, and
-the prompt says so.
+without spending a lens start. Surrounding source comes from the temporary
+checkout at the pinned head, not the caller's `--cwd`.
 
 `post --attempt-ref` re-reads the posting identity and the head, checks that
 both documents carry the same four stamps as the attempt, that their lens set is
