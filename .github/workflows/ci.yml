@@ -26,6 +26,22 @@ jobs:
       - name: Run test suite
         run: node --test
 
+  # The slim-review coordinator client guards a Windows-only Node/libuv exit
+  # assertion (workit#97): on Linux that guard passes vacuously, so it is
+  # skipped there by name and executed here. Public repo — standard runners
+  # bill nothing. Not a required check: the branch protection names the job
+  # above, and a Windows-runner outage must not block a docs PR.
+  test-windows:
+    name: Tests (node --test, windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Run test suite
+        run: node --test
+
   secret-scan:
     name: Secret scan (gitleaks)
     runs-on: ubuntu-latest

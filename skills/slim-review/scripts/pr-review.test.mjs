@@ -2264,7 +2264,12 @@ test('a 401 without a contract code is unauthorized', async () => {
   });
 });
 
-test('process.exit after three coordinator calls exits with that code, not a libuv assertion', async () => {
+test('process.exit after three coordinator calls exits with that code, not a libuv assertion', {
+  // A guard that cannot bite must say so rather than pass: the assertion is a
+  // Windows libuv path, and the fetch-based client never tripped it on Linux.
+  // CI runs this file on windows-latest as well (ci.yml `test-windows`).
+  skip: process.platform === 'win32' ? false : 'Windows-only libuv exit assertion; executed by the windows CI job',
+}, async () => {
   // Measured 2026-09-16 on `claim --supersede` (observatory#699 and #700): the
   // refusal printed, then `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING),
   // file src\win\async.c, line 76` and exit 127 — `process.exit` racing what a
@@ -3262,6 +3267,14 @@ test('a reply container — the empty-body review object GitHub mints per thread
   assert.equal(isDedupeHit(legacy, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), true);
   // Whitespace-only is still empty: GitHub normalises a body but a client may not.
   assert.equal(isDedupeHit({ ...asGitHubReturnsIt, body: ' \n' }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false);
+  // A bodyless APPROVED or CHANGES_REQUESTED by the posting identity is a
+  // review of the head, not a reply container (Astra, workit#97) — it must
+  // still suppress a second review; the empty body is not the discriminator
+  // on its own.
+  for (const state of ['APPROVED', 'CHANGES_REQUESTED']) {
+    assert.equal(isDedupeHit({ ...asGitHubReturnsIt, state }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), true, `${state} with no summary is a review`);
+  }
+  assert.equal(isDedupeHit({ ...asGitHubReturnsIt, state: 'APPROVED', commit_id: 'another-head' }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false, 'and only on this head');
 });
 
 test('the delivery recogniser matches run + attempt exactly and reports probable for a marker-less later review', () => {
