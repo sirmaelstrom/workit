@@ -36,6 +36,9 @@
  * instead of a classified refusal.
  */
 
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+
 /** Route prefix the coordinator is mounted under on the bridge. */
 export const COORDINATOR_BASE_PATH = '/api/pr-review';
 
@@ -133,6 +136,45 @@ export function createClient({ coordinator, token } = {}) {
   }
   const base = `${coordinator.replace(/\/+$/, '')}${COORDINATOR_BASE_PATH}`;
 
+  /**
+   * One request on one socket, and nothing left behind when it resolves.
+   *
+   * `node:http`, not `fetch`, on purpose. A process that has just awaited a
+   * `fetch` response cannot `process.exit` cleanly on Windows (Node 24.13.0):
+   * libuv asserts `!(handle->flags & UV_HANDLE_CLOSING)` in src/win/async.c:76
+   * and the process dies 127 — after the refusal was printed, so the exit code
+   * a caller read was the assertion's, not ours. Measured on `claim --supersede`
+   * (observatory#699 and #700, 2026-09-16); reproduced 3 of 3 with a loopback
+   * fetch followed by process.exit, still 3 of 3 after a 20 ms delay, clean 3
+   * of 3 with `node:http` and `agent: false`. Every coordinator call sits
+   * directly ahead of a possible `die`, so this is the one place to fix it.
+   *
+   * `agent: false` is also the one-socket-per-call discipline that the
+   * `connection: close` header bought under undici: `lens` blocks this event
+   * loop for minutes inside a synchronous reviewer spawn between `lens-start`
+   * and `lens-end`, the coordinator's 5 s keep-alive closes the idle socket
+   * meanwhile, and a pooled client reused the dead one for `lens-end` (`read
+   * ECONNRESET`, 4 of 4, 2026-09-11). The header is still sent so the server
+   * closes its half too.
+   *
+   * Redirects are never followed: a coordinator on loopback never redirects,
+   * and following one would re-send the token somewhere else. A 3xx is
+   * classified by the caller as a transport failure.
+   */
+  function send(url, { method, headers, body }) {
+    return new Promise((resolve, reject) => {
+      const requestFn = url.protocol === 'https:' ? httpsRequest : httpRequest;
+      const req = requestFn(url, { method, headers, agent: false }, (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('error', reject);
+        res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(chunks).toString('utf8') }));
+      });
+      req.on('error', reject);
+      req.end(body);
+    });
+  }
+
   async function request(name, method, path, { body, query, notFoundReason } = {}) {
     let url;
     try {
@@ -142,30 +184,18 @@ export function createClient({ coordinator, token } = {}) {
     }
     for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, String(value));
 
+    const encoded = body === undefined ? undefined : JSON.stringify(body);
     let response;
     try {
-      response = await fetch(url, {
+      response = await send(url, {
         method,
         headers: {
           [TOKEN_HEADER]: token,
           accept: 'application/json',
-          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-          // `lens` blocks this event loop for minutes inside a synchronous
-          // reviewer spawn between `lens-start` and `lens-end`; the
-          // coordinator's 5s keep-alive closes the idle socket while that
-          // spawn runs. Undici's default pool then reuses the dead socket for
-          // `lens-end` and it dies `read ECONNRESET` (measured 4 of 4,
-          // 2026-09-11) — reported here as `coordinator-unreachable` with the
-          // attempt stuck in `lens_running`. One socket per call removes the
-          // reuse; undici honours this header (probe: with it, two calls open
-          // two connections instead of one).
+          ...(encoded === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(encoded) }),
           connection: 'close',
         },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        // A coordinator on loopback never redirects; treating one as a
-        // transport failure keeps a misrouted call from being followed
-        // somewhere else with the token attached.
-        redirect: 'error',
+        body: encoded,
       });
     } catch (err) {
       return refusal(CLIENT_REASONS.unreachable, {
@@ -173,7 +203,14 @@ export function createClient({ coordinator, token } = {}) {
       });
     }
 
-    const text = await response.text();
+    if (response.status >= 300 && response.status < 400) {
+      return refusal(CLIENT_REASONS.unreachable, {
+        status: response.status,
+        message: `${name}: ${method} ${url.pathname} was redirected (HTTP ${response.status}); a loopback coordinator never redirects, and the token is not followed anywhere`,
+      });
+    }
+
+    const { text } = response;
     let parsed;
     let parseFailed = false;
     if (text.trim() !== '') {
@@ -184,7 +221,7 @@ export function createClient({ coordinator, token } = {}) {
       }
     }
 
-    if (response.ok) {
+    if (response.status >= 200 && response.status < 300) {
       if (parseFailed) {
         return refusal(CLIENT_REASONS.unreachable, {
           status: response.status,

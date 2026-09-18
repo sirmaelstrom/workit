@@ -415,9 +415,12 @@ process).
 
 Before it claims, `claim` looks for a review already posted under the pinned
 login on this head — with the marker the coordinated loop writes, or, for a
-legacy or hand-posted review, by its `commit_id`. A hit is recorded at the
-coordinator and the claim is refused: the head has been reviewed, and reviewing
-it again is a decision, not a default.
+legacy or hand-posted review that carries a body, by its `commit_id`. A hit is
+recorded at the coordinator and the claim is refused: the head has been
+reviewed, and reviewing it again is a decision, not a default. The empty-body
+review objects GitHub mints for every thread reply (your own `reply --verdict`
+adjudication included) are not reviews and never count — replying to the
+previous round's threads and then claiming the new head is the normal order.
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" recognise --pr <n> --repo <owner/name> --head <sha>

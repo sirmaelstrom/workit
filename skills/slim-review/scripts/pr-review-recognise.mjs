@@ -58,7 +58,8 @@ export function buildMarker({ repo, pr, head, base, lenses, run, attempt, policy
  *
  * A legacy review — posted before the marker existed — is not an error and not
  * a miss: the recognisers below fall back to `commit_id`, which GitHub records
- * for every review, so a marker-less review still suppresses a duplicate.
+ * for every review, so a marker-less review with a body still suppresses a
+ * duplicate. The fallback stops at an empty body: see `isReplyContainer`.
  */
 export function parseMarker(body) {
   const match = MARKER_RE.exec(String(body ?? ''));
@@ -91,6 +92,26 @@ function normalizeReview(review) {
 }
 
 /**
+ * A review object GitHub mints for a reply — not a review anyone wrote.
+ *
+ * Replying to a review thread (`reply --verdict`, or `gh api …/replies`)
+ * creates a COMMENTED review with an EMPTY body, stamped with the pull
+ * request's head at reply time as `commit_id`. Measured on
+ * heathdev-me/observatory#700 (2026-09-16): after round 2's three verdict
+ * replies, ids 5220415498 / 5220415873 / 5220416176 sat on head 07dce3c with
+ * body length 0, and the `commit_id` fallback read each as a posted review of
+ * that head — `claim` refused `already-posted` for the loop's own adjudication,
+ * and `--supersede` refused them too, because nothing had been posted. The
+ * same trap blocked round 3 on #699 the same day.
+ *
+ * A review a lens or a person wrote always carries a body, so an empty body is
+ * the discriminator. `state` is not: a legacy review is also COMMENTED.
+ */
+function isReplyContainer(item) {
+  return String(item.body).trim() === '';
+}
+
+/**
  * The dedupe predicate: a review by the pinned service login, on this head,
  * that has not been replaced.
  *
@@ -98,11 +119,15 @@ function normalizeReview(review) {
  * is what a legacy or hand-posted review has. Broadening rather than excluding
  * is deliberate: a missed hit posts a second review on a head, and an extra hit
  * only refuses a claim the operator can still make explicitly with `--supersede`.
+ * The one exclusion is the reply container above — an extra hit there refuses
+ * a claim that `--supersede` cannot make either, which is a dead end, not a
+ * decision.
  */
 export function isDedupeHit(review, { head, serviceLogin, replacedReviewIds = [] }) {
   const item = normalizeReview(review);
   if (item.author_login !== serviceLogin) return false;
   if (replacedReviewIds.some((id) => String(id) === String(item.review_id))) return false;
+  if (isReplyContainer(item)) return false;
   const marker = parseMarker(item.body);
   return marker?.head === head || item.commit_id === head;
 }
@@ -118,6 +143,9 @@ export function isDedupeHit(review, { head, serviceLogin, replacedReviewIds = []
 export function deliveryKind(review, { runId, attempt, serviceLogin, postAttemptedAt }) {
   const item = normalizeReview(review);
   if (item.author_login !== serviceLogin) return null;
+  // A submission that landed carries the body this process built; an empty
+  // body is a reply container and is evidence of nothing.
+  if (isReplyContainer(item)) return null;
   const marker = parseMarker(item.body);
   if (marker) {
     return marker.run === runId && Number(marker.attempt) === Number(attempt) ? 'delivery' : null;
