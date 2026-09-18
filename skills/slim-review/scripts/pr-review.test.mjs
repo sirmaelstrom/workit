@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -2264,6 +2264,45 @@ test('a 401 without a contract code is unauthorized', async () => {
   });
 });
 
+test('process.exit after three coordinator calls exits with that code, not a libuv assertion', {
+  // A guard that cannot bite must say so rather than pass: the assertion is a
+  // Windows libuv path, and the fetch-based client never tripped it on Linux.
+  // CI runs this file on windows-latest as well (ci.yml `test-windows`).
+  skip: process.platform === 'win32' ? false : 'Windows-only libuv exit assertion; executed by the windows CI job',
+}, async () => {
+  // Measured 2026-09-16 on `claim --supersede` (observatory#699 and #700): the
+  // refusal printed, then `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING),
+  // file src\win\async.c, line 76` and exit 127 — `process.exit` racing what a
+  // just-resolved `fetch` leaves behind (Windows, Node 24.13.0). The race needs
+  // THREE preceding fetches: a loopback probe asserted 0 of 3 at one and two
+  // calls and 3 of 3 at three and four, still 3 of 3 after a 20 ms delay, and
+  // never with `node:http` + agent:false. `claim` makes three or four
+  // (identity, status, import, claim) and then `die`s on a refusal — the
+  // measured crash; the one-call `recover` paths never did. So this drives the
+  // client module directly: three calls, then process.exit(1). The old client
+  // never asserted on Linux, so the guard bites on Windows only; its control —
+  // the fetch-based client under this same test → exit 127 with the assertion
+  // on stderr — is recorded in the PR that added it.
+  await withFakeCoordinator(() => ({ status: 200, json: { attempts: [] } }), async ({ coordinator, seen }) => {
+    const script = [
+      `import { createClient } from ${JSON.stringify(new URL('./pr-review-coordinator.mjs', import.meta.url).href)};`,
+      'const client = createClient({ coordinator: process.env.PROBE_COORDINATOR, token: "probe-token" });',
+      'for (let i = 0; i < 3; i++) await client.readStatus({ repo: "owner/repo", pr: 42 });',
+      'process.exit(1);',
+    ].join('\n');
+    // Spawned asynchronously: the fake coordinator lives in THIS process, and a
+    // synchronous spawn would block the loop that has to answer the child.
+    const r = await new Promise((done) => {
+      execFile(process.execPath, ['--input-type=module', '-e', script], {
+        encoding: 'utf8', env: { ...process.env, PROBE_COORDINATOR: coordinator }, timeout: 30_000,
+      }, (err, stdout, stderr) => done({ code: err ? err.code : 0, stderr: String(stderr ?? '') }));
+    });
+    assert.equal(seen.length, 3, 'all three calls reached the coordinator');
+    assert.doesNotMatch(r.stderr, /Assertion failed/, 'the process must not die in libuv on its way out');
+    assert.equal(r.code, 1, `the exit code is the one the script asked for: stderr=${r.stderr}`);
+  });
+});
+
 test('an error raised ahead of the route is coordinator-unreachable with its status, never a parse exception', async () => {
   await withFakeCoordinator(
     (call) => (call.path.endsWith('/claim')
@@ -2872,6 +2911,12 @@ function pinnedSeams({
     if (args[0] === 'api' && args[1] === '--paginate' && joined.includes('/files')) {
       return `${filePages.flat().map((entry) => JSON.stringify(entry)).join('\n')}\n`;
     }
+    if (args[0] === 'api' && /\/reviews\/\d+\/comments/.test(joined)) {
+      // The fixture's one empty COMMENTED review is a reply container: every
+      // comment on it answers another. Checked before the listing route,
+      // which this path would otherwise also match.
+      return 'true\n';
+    }
     if (args[0] === 'api' && args[1] === '--paginate' && joined.includes('/reviews')) {
       return `${reviewPages.flat().map((entry) => JSON.stringify(entry)).join('\n')}\n`;
     }
@@ -3208,6 +3253,63 @@ test('the dedupe recogniser hits on a later page, on a marker-less review, and o
   // The pre-v5 predicate — marker only — misses the legacy review entirely.
   const markerOnly = reviews.filter((review) => parseMarker(review.body)?.head === PINNED_HEAD && review.author_login === SERVICE_LOGIN);
   assert.equal(markerOnly.some((review) => review.review_id === 5152040001), false, 'the negative control: a marker-only recogniser would dispatch over the legacy review');
+});
+
+test('a reply container — the empty-body review object GitHub mints per thread reply — is neither a dedupe hit nor a probable delivery', () => {
+  // Modelled on heathdev-me/observatory#700 (2026-09-16): after round 2's
+  // `--verdict` replies, three such objects sat on head 07dce3c and `claim`
+  // refused `already-posted` for the loop's own adjudication.
+  const replyContainer = FIXTURE_REVIEWS.pages.flat().find((review) => review.review_id === 5152040004);
+  assert.equal(replyContainer.body, '');
+  assert.equal(replyContainer.commit_id, PINNED_HEAD, 'the trap: it carries the head as commit_id, exactly like a legacy review');
+  assert.equal(isDedupeHit(replyContainer, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false);
+  assert.equal(deliveryKind(replyContainer, { runId: RUN_ID, attempt: 1, serviceLogin: SERVICE_LOGIN, postAttemptedAt: '2026-09-10T08:00:00Z' }), null,
+    'submitted after the attempt, but an empty body could never be this process\'s submission');
+  // The real capture shape, not the fixture's projection: `id` + `user.login`.
+  const asGitHubReturnsIt = { id: 5220415498, user: { login: SERVICE_LOGIN }, commit_id: PINNED_HEAD, submitted_at: '2026-09-16T08:37:32Z', state: 'COMMENTED', body: '' };
+  assert.equal(isDedupeHit(asGitHubReturnsIt, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false);
+  // The positive control: the legacy review with a body on the same head still hits by commit_id.
+  const legacy = FIXTURE_REVIEWS.pages.flat().find((review) => review.review_id === 5152040001);
+  assert.equal(isDedupeHit(legacy, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), true);
+  // Whitespace-only is still empty: GitHub normalises a body but a client may not.
+  assert.equal(isDedupeHit({ ...asGitHubReturnsIt, body: ' \n' }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false);
+  // A bodyless APPROVED or CHANGES_REQUESTED by the posting identity is a
+  // review of the head, not a reply container (Astra, workit#97) — it must
+  // still suppress a second review; the empty body is not the discriminator
+  // on its own.
+  for (const state of ['APPROVED', 'CHANGES_REQUESTED']) {
+    assert.equal(isDedupeHit({ ...asGitHubReturnsIt, state }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), true, `${state} with no summary is a review`);
+  }
+  assert.equal(isDedupeHit({ ...asGitHubReturnsIt, state: 'APPROVED', commit_id: 'another-head' }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false, 'and only on this head');
+  // A hand review with inline comments and no summary has the SAME empty
+  // COMMENTED shape (Astra, workit#97 round 2). The listing reader settles it
+  // from the comments and marks the entry; a false mark means "a review".
+  assert.equal(isDedupeHit({ ...asGitHubReturnsIt, reply_container: false }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), true, 'inline-only hand review still dedupes');
+  assert.equal(isDedupeHit({ ...asGitHubReturnsIt, reply_container: true }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false);
+});
+
+test('readReviewListing asks the comments whether an empty COMMENTED review is a reply container, and only for those', () => {
+  const row = (review_id, state, body) => ({ review_id, author_login: SERVICE_LOGIN, commit_id: PINNED_HEAD, submitted_at: '2026-09-16T08:37:32Z', state, body });
+  const listing = [row(1, 'COMMENTED', ''), row(2, 'COMMENTED', ''), row(3, 'COMMENTED', 'a summary'), row(4, 'APPROVED', '')];
+  const calls = [];
+  const runGh = (args) => {
+    const joined = args.join(' ');
+    calls.push(joined);
+    // Measured shapes: obs#700 review 5220415498 (one comment, in_reply_to_id
+    // set) vs 5220352716 (three comments, all null).
+    if (/\/reviews\/1\/comments/.test(joined)) return 'true\n';
+    if (/\/reviews\/2\/comments/.test(joined)) return 'true\nfalse\n';
+    if (/\/reviews$/.test(args[2])) return `${listing.map((entry) => JSON.stringify(entry)).join('\n')}\n`;
+    throw new Error(`unexpected gh call: ${joined}`);
+  };
+  const out = readReviewListing({ repo: 'owner/repo', pr: 5, runGh });
+  assert.equal(out[0].reply_container, true, 'every comment a reply → container');
+  assert.equal(out[1].reply_container, false, 'one original comment → a review');
+  assert.equal(out[2].reply_container, undefined, 'a body needs no call');
+  assert.equal(out[3].reply_container, undefined, 'a bodyless APPROVED needs no call');
+  assert.equal(calls.filter((call) => call.includes('/comments')).length, 2, 'exactly the empty COMMENTED reviews cost a call');
+  assert.equal(isDedupeHit(out[0], { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false);
+  assert.equal(isDedupeHit(out[1], { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), true);
 });
 
 test('the delivery recogniser matches run + attempt exactly and reports probable for a marker-less later review', () => {
