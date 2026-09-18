@@ -1454,13 +1454,35 @@ function resolveCoordinator({ env, homeDir, fileCoordinator }) {
   return { ok: true, token, coordinator: fileCoordinator ?? list.coordinator, directory, repos: list.repos };
 }
 
-/** Read the PR's review listing, projected to the fields both recognisers read. */
+/**
+ * Read the PR's review listing, projected to the fields both recognisers read.
+ *
+ * An empty-body COMMENTED review is one of two things the listing cannot tell
+ * apart: the container GitHub mints for a thread reply (every comment on it
+ * answers another comment — `in_reply_to_id` set; measured on
+ * heathdev-me/observatory#700 review 5220415498 and on workit#97's own reply
+ * objects), or a hand review with inline comments and no summary (at least one
+ * original comment — `in_reply_to_id` null; Astra, workit#97 round 2). The
+ * review's own comments settle it, one call per such review, and the answer
+ * rides the entry as `reply_container` so the recogniser never guesses from
+ * the shape when the listing could ask.
+ */
 export function readReviewListing({ repo, pr, cwd, runGh = gh }) {
   const raw = runGh(
     ['api', '--paginate', `repos/${repo}/pulls/${pr}/reviews`, '--jq', '.[] | {review_id: .id, author_login: .user.login, commit_id, submitted_at, state, body}'],
     { cwd },
   );
-  return String(raw).split(/\r?\n/).filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
+  const reviews = String(raw).split(/\r?\n/).filter((line) => line.trim() !== '').map((line) => JSON.parse(line));
+  for (const review of reviews) {
+    if (String(review.body ?? '').trim() !== '' || review.state !== 'COMMENTED') continue;
+    const flags = String(runGh(
+      ['api', '--paginate', `repos/${repo}/pulls/${pr}/reviews/${review.review_id}/comments`, '--jq', '.[] | (.in_reply_to_id != null)'],
+      { cwd },
+    )).split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '');
+    // No comments at all is a container with nothing in it — still not a review.
+    review.reply_container = flags.every((flag) => flag === 'true');
+  }
+  return reviews;
 }
 
 /**

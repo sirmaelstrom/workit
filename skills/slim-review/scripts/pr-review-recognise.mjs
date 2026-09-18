@@ -89,6 +89,9 @@ function normalizeReview(review) {
     submitted_at: review.submitted_at ?? null,
     state: review.state ?? null,
     body: review.body ?? '',
+    // Set by `readReviewListing` from the review's own comments; absent on a
+    // listing that never asked.
+    reply_container: typeof review.reply_container === 'boolean' ? review.reply_container : null,
   };
 }
 
@@ -105,17 +108,19 @@ function normalizeReview(review) {
  * and `--supersede` refused them too, because nothing had been posted. The
  * same trap blocked round 3 on #699 the same day.
  *
- * A review a lens or a person WROTE always carries a body, so an empty body is
- * the first half of the discriminator. The second half is the state: a person
- * can submit an APPROVED or CHANGES_REQUESTED review with no summary at all
- * (Astra, workit#97), and that IS a review of the head by the posting identity
- * — it must keep suppressing a duplicate. Only the COMMENTED shape is what a
- * reply mints; `state` alone is not enough either, because a legacy review
- * with a body is COMMENTED too.
+ * Three tests, in order. A review with a body was written by someone. A
+ * bodyless APPROVED or CHANGES_REQUESTED was submitted by someone (Astra,
+ * workit#97 round 1) — both are reviews of the head by the posting identity and
+ * must keep suppressing a duplicate. What remains is the empty COMMENTED shape,
+ * which is ALSO what a hand review with inline comments and no summary looks
+ * like (Astra, round 2); `readReviewListing` settles that one from the
+ * review's comments and marks the entry `reply_container`. A listing that
+ * never asked leaves the mark null, and the shape decides — the measured case.
  */
 function isReplyContainer(item) {
   if (String(item.body).trim() !== '') return false;
-  return item.state !== 'APPROVED' && item.state !== 'CHANGES_REQUESTED';
+  if (item.state === 'APPROVED' || item.state === 'CHANGES_REQUESTED') return false;
+  return item.reply_container !== false;
 }
 
 /**

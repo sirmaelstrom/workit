@@ -2911,6 +2911,12 @@ function pinnedSeams({
     if (args[0] === 'api' && args[1] === '--paginate' && joined.includes('/files')) {
       return `${filePages.flat().map((entry) => JSON.stringify(entry)).join('\n')}\n`;
     }
+    if (args[0] === 'api' && /\/reviews\/\d+\/comments/.test(joined)) {
+      // The fixture's one empty COMMENTED review is a reply container: every
+      // comment on it answers another. Checked before the listing route,
+      // which this path would otherwise also match.
+      return 'true\n';
+    }
     if (args[0] === 'api' && args[1] === '--paginate' && joined.includes('/reviews')) {
       return `${reviewPages.flat().map((entry) => JSON.stringify(entry)).join('\n')}\n`;
     }
@@ -3275,6 +3281,35 @@ test('a reply container — the empty-body review object GitHub mints per thread
     assert.equal(isDedupeHit({ ...asGitHubReturnsIt, state }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), true, `${state} with no summary is a review`);
   }
   assert.equal(isDedupeHit({ ...asGitHubReturnsIt, state: 'APPROVED', commit_id: 'another-head' }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false, 'and only on this head');
+  // A hand review with inline comments and no summary has the SAME empty
+  // COMMENTED shape (Astra, workit#97 round 2). The listing reader settles it
+  // from the comments and marks the entry; a false mark means "a review".
+  assert.equal(isDedupeHit({ ...asGitHubReturnsIt, reply_container: false }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), true, 'inline-only hand review still dedupes');
+  assert.equal(isDedupeHit({ ...asGitHubReturnsIt, reply_container: true }, { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false);
+});
+
+test('readReviewListing asks the comments whether an empty COMMENTED review is a reply container, and only for those', () => {
+  const row = (review_id, state, body) => ({ review_id, author_login: SERVICE_LOGIN, commit_id: PINNED_HEAD, submitted_at: '2026-09-16T08:37:32Z', state, body });
+  const listing = [row(1, 'COMMENTED', ''), row(2, 'COMMENTED', ''), row(3, 'COMMENTED', 'a summary'), row(4, 'APPROVED', '')];
+  const calls = [];
+  const runGh = (args) => {
+    const joined = args.join(' ');
+    calls.push(joined);
+    // Measured shapes: obs#700 review 5220415498 (one comment, in_reply_to_id
+    // set) vs 5220352716 (three comments, all null).
+    if (/\/reviews\/1\/comments/.test(joined)) return 'true\n';
+    if (/\/reviews\/2\/comments/.test(joined)) return 'true\nfalse\n';
+    if (/\/reviews$/.test(args[2])) return `${listing.map((entry) => JSON.stringify(entry)).join('\n')}\n`;
+    throw new Error(`unexpected gh call: ${joined}`);
+  };
+  const out = readReviewListing({ repo: 'owner/repo', pr: 5, runGh });
+  assert.equal(out[0].reply_container, true, 'every comment a reply → container');
+  assert.equal(out[1].reply_container, false, 'one original comment → a review');
+  assert.equal(out[2].reply_container, undefined, 'a body needs no call');
+  assert.equal(out[3].reply_container, undefined, 'a bodyless APPROVED needs no call');
+  assert.equal(calls.filter((call) => call.includes('/comments')).length, 2, 'exactly the empty COMMENTED reviews cost a call');
+  assert.equal(isDedupeHit(out[0], { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), false);
+  assert.equal(isDedupeHit(out[1], { head: PINNED_HEAD, serviceLogin: SERVICE_LOGIN }), true);
 });
 
 test('the delivery recogniser matches run + attempt exactly and reports probable for a marker-less later review', () => {

@@ -1,5 +1,5 @@
 {
-  "$capture": "gh api --paginate repos/sirmaelstrom/workit/pulls/76/reviews --jq '.[] | {review_id: .id, author_login: .user.login, commit_id, submitted_at, state, body}'  — the entry shape and the first two ids are the capture's (2026-09-10). The bodies are this workshop's: a marker review, a legacy footer-only review by the same login on a later page, a review by another login, a review on a different head, a review the coordinator reports replaced, and (2026-09-16) a reply container — the empty-body COMMENTED review object GitHub mints for every reply posted to a thread, stamped with the head at reply time; modelled byte-for-byte on heathdev-me/observatory#700 ids 5220415498 / 5220415873 / 5220416176 (body length 0, state COMMENTED, commit_id = the head), which a commit_id-only recogniser read as posted reviews. A live capture cannot contain markers that do not exist yet.",
+  "$capture": "gh api --paginate repos/sirmaelstrom/workit/pulls/76/reviews --jq '.[] | {review_id: .id, author_login: .user.login, commit_id, submitted_at, state, body}'  — the entry shape and the first two ids are the capture's (2026-09-10). The bodies are this workshop's: a marker review, a legacy footer-only review by the same login on a later page, a review by another login, a review on a different head, a review the coordinator reports replaced, and (2026-09-16) a reply container — the empty-body COMMENTED review object GitHub mints for every reply posted to a thread, stamped with the head at reply time; modelled byte-for-byte on heathdev-me/observatory#700 ids 5220415498 / 5220415873 / 5220416176 (body length 0, state COMMENTED, commit_id = the head), which a commit_id-only recogniser read as posted reviews; its `reply_container` flag is what readReviewListing adds after asking the review's comments (every one carried in_reply_to_id on the capture). A live capture cannot contain markers that do not exist yet.",
   "repo": "sirmaelstrom/workit",
   "pr": 88,
   "head_sha": "0e8e2ab10f01f181e8eef8c639e058c9760044f2",
@@ -56,7 +56,8 @@
         "commit_id": "0e8e2ab10f01f181e8eef8c639e058c9760044f2",
         "submitted_at": "2026-09-10T09:20:31Z",
         "state": "COMMENTED",
-        "body": ""
+        "body": "",
+        "reply_container": true
       }
     ]
   ]
