@@ -1,6 +1,6 @@
 ---
 name: codex-delegate
-description: "Offload a bounded whole-repo audit, broad search, bulk extraction, or repetitive mechanical edit to a plan-covered CLI agent (codex exec — Terra by default, Luna for enumeration, Astra only on explicit opt-in for verdict-critical single arms) instead of reading every file yourself. Use BEFORE you open ~10 files to produce one short answer, even if nobody says 'delegate' or 'offload'. Not for PR review (use slim-review), work needing this session's decisions, or edits to a repo you are mid-edit on."
+description: "Use when offloading a bounded audit, broad search, extraction, or mechanical edit to a plan-covered CLI agent. Trigger on 'delegate' or 'offload'. Not for PR review (use slim-review), work needing this session's decisions, or a repo you are mid-editing."
 ---
 
 # Model-Aware Delegate — Route Leaf Work Off the Expensive Channel
