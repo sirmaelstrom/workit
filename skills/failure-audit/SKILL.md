@@ -1,6 +1,6 @@
 ---
 name: failure-audit
-description: "Run a delta failure-mode audit over agent-session transcripts archived since the last run — slice new sessions into digests, fan out calibrated auditor waves, aggregate, run the standing comparisons (guard treatment check, model drift, new labels). Trigger on '/failure-audit', 'failure audit', 'audit the new transcripts', 'delta audit'. Operator-pulled SPOT-CHECK only: scanners cover the watched-class rates continuously, so pull the fleet only when something semantic surfaces. Never schedule this."
+description: "Use when auditing newly archived agent-session transcripts for delta failure modes. Trigger on '/failure-audit', 'failure audit', 'audit the new transcripts', 'delta audit'. NOT for scheduled runs or continuous scanning; use operator-pulled spot checks."
 ---
 
 # Failure audit — delta-run cadence over archived transcripts
