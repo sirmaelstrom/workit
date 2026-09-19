@@ -9,7 +9,7 @@ Long-running Claude work needs a deterministic rotation carrier rather than a ha
 ## Scope rulings
 
 - `retire self` is supported: it writes its receipt before sending `/exit`.
-- A successor closes a caller only after it is gone and `process-info` shows no Claude process. The final message comes from the marker-gated Stop hook, not scrollback.
+- A successor closes a caller only after `done` or `agent_not_found` and a parseable `process-info.foreground_processes` array shows no Claude process. Idle is never gone; an absent or unreadable process list fails closed. The final message comes from the marker-gated Stop hook, not scrollback.
 - `tokens.context` comes from `herdr pane get`; absent means `null`, never `0`.
 - The context threshold N is measured per model elsewhere; this carrier records the value.
 - Claude-to-Claude `delegate` is out of scope. In-turn work uses the Agent tool.
@@ -21,7 +21,7 @@ Long-running Claude work needs a deterministic rotation carrier rather than a ha
 |---|---|---|---|
 | `spawn` | explicit `--name`, `--model`, `--effort`; optional cwd, source pane, direction, fresh/fork, chrome, timeout | split a no-focus pane; start Claude with explicit permission/model/effort; wait briefly for session publication; verify the launched argv; restore caller focus | name, pane, session id, model, effort, mode, argv verification, parent pane, start time |
 | `brief` | target, absolute `--file`; optional wait/timeout | sends exactly `Read <path> and execute it exactly.` through herdr argv | target, file, accepted, observed state |
-| `watch` | target, repeated terminal states, timeout | herdr agent wait; on blocked reads the dialog | state; gone accepts done-with-record or agent-not-found |
+| `watch` | target, repeated terminal states, timeout | herdr agent wait; on blocked reads the dialog | state; gone accepts done-with-record or agent-not-found, never idle |
 | `retire` | self, parent, name, or pane; exit/close/exit+close | sends `/exit` through the executor; close waits for gone, parses the resume banner, and refuses a live process | target, mode, resume id or null, closed, final path or null |
 | `chain` | handoff, successor name, model, effort; optional fork/cwd/direction/chrome | reads caller session/context/model; spawn; require successor idle; brief; receipt; retire caller unless opted out | chain id, caller and successor identity, context, models, model-change flag, handoff, timestamp |
 | `status` | optional chain id / last | reads chain rows for a landing receipt | matching rows |
@@ -33,10 +33,10 @@ Default sidecar: `<workspace>/data/outputs/projects/agentic-practice-transfer/se
 1. Self retirement and chaining require `HERDR_ENV=1` and `HERDR_PANE_ID`; invalid input fails before herdr.
 2. Spawn model and effort are mandatory launch flags; they are never inherited. `dontAsk` is refused before a call.
 3. Context is read, not invented: absent is null.
-4. A pane with a Claude process is never closed.
-5. Gone has two successful shapes: done-with-record or agent-not-found.
+4. A pane with a Claude process is never closed. `process-info` must expose `foreground_processes`; absent or malformed JSON is live until proved otherwise.
+5. Gone has two successful shapes: done-with-record or agent-not-found; idle is never gone.
 6. Resume ids are parsed only from `Resume this session with: ... claude --resume <uuid>`; a missing banner warns by yielding null but does not block a clean close.
-7. Self retirement writes the row first and sends `/exit` last; self close is invalid.
+7. Self retirement writes the row first and sends `/exit` last; self close is invalid. `--capture-final` gets the caller session id from `agent get <HERDR_PANE_ID>` first, then the sidecar; no id is a usage refusal.
 8. A successor that is not ready leaves the caller and successor in place, returns exit 4, and records `successor-not-ready`.
 9. Public artifacts contain no host topology; all paths come from environment or arguments.
 10. Herdr commands use the executor (`execFileSync` underneath), never a shell string.

@@ -9,7 +9,17 @@ import { pathToFileURL } from 'node:url';
 
 import { execute, EXIT_CODES } from './lane.mjs';
 
-const EXIT = EXIT_CODES;
+const EXIT = Object.freeze({
+  ok: EXIT_CODES.ok,
+  error: EXIT_CODES.error,
+  usage: EXIT_CODES.usage,
+  blocked: EXIT_CODES.blocked,
+  timeout: EXIT_CODES.timeout,
+  checkFailed: EXIT_CODES.artifactCheckFailed,
+});
+for (const [name, code] of Object.entries(EXIT)) {
+  if (!Number.isInteger(code)) throw new Error(`lane EXIT_CODES.${name} is not a number`);
+}
 const VERBS = new Set(['spawn', 'brief', 'watch', 'retire', 'chain', 'status']);
 const LOG_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 'sessions'];
 const LOG_NAME = 'session-log.jsonl';
@@ -120,18 +130,36 @@ function contextOf(raw) {
   if (context === undefined || context === null || context === '') return null;
   const number = Number(context); return Number.isFinite(number) ? number : null;
 }
-function hasClaude(raw) {
+function foregroundProcesses(raw) {
   const info = resultOf(raw);
-  const processValues = deep(info, ['processes', 'process_info', 'processInfo']);
-  if (Array.isArray(processValues)) return processValues.some((item) => /claude/i.test(JSON.stringify(item)));
-  // A launch argv legitimately contains `--model claude-*`; that is not a
-  // live Claude process. The text fallback is deliberately an exact process
-  // line for older herdr output, while structured process records stay broad.
-  return /(?:^|\r?\n)\s*(?:[^\s]*[\\/])?claude(?:\.exe)?\s*$/im.test(String(info ?? raw));
+  const processInfo = info?.process_info ?? info?.processInfo;
+  return Array.isArray(processInfo?.foreground_processes) ? processInfo.foreground_processes : null;
+}
+function processName(process) {
+  const candidate = process?.name ?? String(process?.argv0 ?? '').split(/[\\/]/).at(-1);
+  return typeof candidate === 'string' ? candidate : null;
+}
+function hasClaude(raw) {
+  const processes = foregroundProcesses(raw);
+  // process-info is the only close guard. An unreadable or changed envelope is
+  // not evidence that a pane is clean, so it deliberately fails closed.
+  if (!processes) return true;
+  return processes.some((process) => {
+    const name = processName(process);
+    return !name || /^claude(?:\.exe)?$/i.test(name);
+  });
 }
 function processModel(raw) {
-  const match = /--model\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(String(raw));
-  return match?.[1] ?? match?.[2] ?? match?.[3] ?? null;
+  const processes = foregroundProcesses(raw);
+  if (!processes) return null;
+  for (const process of processes) {
+    const argv = Array.isArray(process?.argv) ? process.argv : [];
+    for (let index = 0; index < argv.length; index++) {
+      if (argv[index] === '--model' && typeof argv[index + 1] === 'string') return argv[index + 1];
+      if (typeof argv[index] === 'string' && argv[index].startsWith('--model=')) return argv[index].slice('--model='.length) || null;
+    }
+  }
+  return null;
 }
 function inHerdr(deps) {
   if (deps.env.HERDR_ENV !== '1' || !deps.env.HERDR_PANE_ID) usage('this verb requires HERDR_ENV=1 and HERDR_PANE_ID');
@@ -146,6 +174,15 @@ function loadState(deps, log) {
 }
 function saveState(deps, log, state) { deps.mkdir(dirname(statePath(log))); deps.write(statePath(log), `${JSON.stringify(state, null, 2)}\n`); }
 function appendRow(deps, log, row) { deps.mkdir(dirname(log)); deps.append(log, `${JSON.stringify(row)}\n`); }
+function finalStateRoot(deps) { return deps.env.WORKIT_SESSION_CHAIN_DIR ?? join(deps.env.HOME ?? deps.env.USERPROFILE ?? '.', '.workit', 'session-chain'); }
+function prepareFinalCapture(deps, id) {
+  if (!id) usage('capture-final needs the caller session id from herdr agent get');
+  const root = finalStateRoot(deps);
+  const marker = join(root, 'final-pending', id);
+  deps.mkdir(dirname(marker));
+  deps.write(marker, 'pending\n');
+  return join(root, 'final', `${id}.md`);
+}
 function resolveTarget(opts, state, target) {
   if (target === 'parent') {
     const current = Object.values(state.sessions).find((item) => item.pane === opts.currentPane);
@@ -169,7 +206,7 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
   const from = opts.from === 'current' || opts.current ? callerPane : (opts.from ?? callerPane);
   const direction = opts.direction ?? 'down';
   if (!['down', 'right'].includes(direction)) usage('--direction must be down or right');
-  const timeout = positive(opts.timeout, '--timeout', 90_000);
+  const timeout = positive(opts.readinessTimeout ?? opts.timeout, opts.readinessTimeout !== undefined ? '--successor-timeout' : '--timeout', 90_000);
   const split = ['pane', 'split', from, '--direction', direction, '--no-focus'];
   if (opts.cwd) split.push('--cwd', resolve(opts.cwd));
   const splitOut = callOrFail(deps, split);
@@ -180,7 +217,7 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
   if ((opts.mode ?? 'fresh') === 'fork') agentArgs.push('--resume', opts.fromSession, '--fork-session');
   agentArgs.push(...opts.nativeArgs);
   callOrFail(deps, ['agent', 'start', opts.name, '--kind', 'claude', '--pane', pane, '--timeout', String(timeout), '--', ...agentArgs]);
-  const deadline = deps.now() + 15_000;
+  const deadline = deps.now() + timeout;
   let status = null; let session = null;
   do {
     const gotten = call(deps, ['agent', 'get', opts.name]);
@@ -189,7 +226,7 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
     await deps.sleep(100);
   } while (true);
   const process = callOrFail(deps, ['pane', 'process-info', '--pane', pane]);
-  const argvVerified = new RegExp(`--model\\s+(?:["']?${opts.model.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']?)`).test(process);
+  const argvVerified = processModel(process) === opts.model;
   if (!argvVerified) throw new SessionError(EXIT.checkFailed, `pane ${pane} argv does not contain requested model ${opts.model}`);
   // Start normally focuses the new pane. Restore the conductor even when this
   // build is running a composed chain.
@@ -222,7 +259,9 @@ async function watch(opts, deps, state) {
   const until = opts.until?.length ? opts.until : ['idle', 'done', 'blocked'];
   if (until.some((value) => !['idle', 'done', 'blocked', 'gone'].includes(value))) usage('watch --until must be idle, done, blocked, or gone');
   const timeout = positive(opts.timeout, '--timeout');
-  const requested = until.filter((value) => value !== 'gone');
+  const requested = until.includes('gone')
+    ? [...new Set([...until.filter((value) => value !== 'gone'), 'done'])]
+    : until;
   const result = call(deps, ['agent', 'wait', target.target, ...requested.flatMap((value) => ['--until', value]), '--timeout', String(timeout)]);
   const missing = /agent_not_found/i.test(`${result.stdout}\n${result.stderr}`);
   if (until.includes('gone') && (missing || (result.code === 0 && agentState(result.stdout) === 'done'))) return { state: 'gone', target: target.target };
@@ -240,6 +279,7 @@ async function watch(opts, deps, state) {
 
 async function closeTarget(deps, target, timeout) {
   const watched = await watch({ positional: [target.target], until: ['gone'], timeout: String(timeout), verb: 'watch' }, deps, { sessions: {} });
+  if (watched.state !== 'gone') throw new SessionError(EXIT.blocked, `target is not gone: ${target.target}`);
   const paneText = callOrFail(deps, ['pane', 'read', target.pane, '--source', 'recent-unwrapped', '--lines', '40']);
   const match = /Resume this session with:\s*\r?\n\s*claude --resume ([0-9a-f-]{36})/i.exec(paneText);
   const deadline = deps.now() + timeout;
@@ -278,11 +318,13 @@ async function chain(opts, deps, state) {
   if (!isAbsolute(opts.handoff) || !deps.exists(handoff)) usage(`handoff file does not exist: ${handoff}`);
   const caller = callOrFail(deps, ['agent', 'get', callerPane]);
   const callerSession = sessionId(caller);
+  if (opts.captureFinal && !callerSession) usage('capture-final needs the caller session id from herdr agent get');
   const pane = callOrFail(deps, ['pane', 'get', callerPane]);
   const callerContext = contextOf(pane);
   const callerProcess = callOrFail(deps, ['pane', 'process-info', '--pane', callerPane]);
   const callerModel = processModel(callerProcess);
-  const spawned = await spawn({ ...opts, from: callerPane, timeout: opts.successorTimeout ?? opts.timeout }, deps, state, { chain: true });
+  const successorTimeout = positive(opts.successorTimeout, '--successor-timeout', 90_000);
+  const spawned = await spawn({ ...opts, from: callerPane, readinessTimeout: successorTimeout }, deps, state, { chain: true });
   const chainId = `${callerSession ?? callerPane}:${spawned.record.sessionId ?? spawned.record.pane}:${deps.timestamp()}`;
   if (!spawned.ready) {
     return { exit: EXIT.timeout, output: { chainId, outcome: 'successor-not-ready', successorPane: spawned.record.pane, nextStep: 'inspect the successor pane; caller remains active' }, row: { chainId, outcome: 'successor-not-ready', callerPane, callerSession, successorPane: spawned.record.pane } };
@@ -292,7 +334,7 @@ async function chain(opts, deps, state) {
   const row = { chainId, callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane, successorSession: spawned.record.sessionId, successorModel: opts.model, modelChanged, handoff, ts: deps.timestamp() };
   state.chains.push(row); saveState(deps, opts.log, state);
   const output = { ...row, accepted: delivered.accepted, nextStep: `run session status --last, then cite chain ${chainId} in the landing receipt`, ...(modelChanged ? { warning: 'model changed: the brief must carry the merge/deploy-authority clause' } : {}) };
-  return { self: !opts.noRetire, target: { target: callerPane, pane: callerPane, sessionId: callerSession }, row, output };
+  return { self: !opts.noRetire, captureSession: opts.captureFinal ? callerSession : null, target: { target: callerPane, pane: callerPane, sessionId: callerSession }, row, output };
 }
 
 function status(opts, deps) {
@@ -330,9 +372,9 @@ export async function runSession(argv, overrides = {}) {
         const session = Object.values(state.sessions).find((item) => item.pane === opts.currentPane);
         let finalMessagePath = null;
         if (opts.captureFinal) {
-          const root = deps.env.WORKIT_SESSION_CHAIN_DIR ?? join(deps.env.HOME ?? deps.env.USERPROFILE ?? '.', '.workit', 'session-chain');
-          const id = session?.sessionId;
-          if (id) { const marker = join(root, 'final-pending', id); deps.mkdir(dirname(marker)); deps.write(marker, 'pending\n'); finalMessagePath = join(root, 'final', `${id}.md`); }
+          const current = call(deps, ['agent', 'get', opts.currentPane]);
+          const id = (current.code === 0 ? sessionId(current.stdout) : null) ?? session?.sessionId ?? null;
+          finalMessagePath = prepareFinalCapture(deps, id);
         }
         const output = { target: opts.currentPane, mode: 'exit', resumeId: null, closed: false, finalMessagePath, notice: 'this must be your last tool call' };
         const row = { ...base, ...output, state: 'retiring' };
@@ -344,6 +386,11 @@ export async function runSession(argv, overrides = {}) {
     } else if (opts.verb === 'chain') {
       const chained = await chain(opts, deps, state);
       if (chained.self) {
+        if (chained.captureSession) {
+          const finalMessagePath = prepareFinalCapture(deps, chained.captureSession);
+          chained.output.finalMessagePath = finalMessagePath;
+          chained.row.finalMessagePath = finalMessagePath;
+        }
         const committed = { ...base, ...chained.row, state: 'chained' };
         appendRow(deps, opts.log, committed);
         const sent = call(deps, ['agent', 'prompt', chained.target.target, '/exit']);

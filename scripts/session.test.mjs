@@ -25,23 +25,38 @@ function callsFor(f, verb) { return f.calls.filter((call) => call.args[0] === ve
 function state(f) { return JSON.parse(readFileSync(`${f.log}.state.json`, 'utf8')); }
 function row(f) { return JSON.parse(readFileSync(f.log, 'utf8').trim().split(/\r?\n/).at(-1)); }
 
-function successHerdr({ callerModel = 'claude-fable-5-1', context = '65', successorSession = '22222222-2222-4222-8222-222222222222', successorModel = 'claude-opus-5' } = {}) {
+const herdrShapes = {
+  envelope: (command, result, type = command.replace(/:/g, '_')) => JSON.stringify({ id: `cli:${command}`, result, type }),
+  agentGet: ({ pane = 'pane:successor', state = 'idle', session = '22222222-2222-4222-8222-222222222222' } = {}) => herdrShapes.envelope('agent:get', { agent_status: state, agent_session: session ? { value: session } : null, pane_id: pane }),
+  agentWait: (state = 'done') => herdrShapes.envelope('agent:wait', { agent_status: state }),
+  paneGet: (context = '65') => herdrShapes.envelope('pane:get', { pane: { tokens: context === undefined ? {} : { context } } }),
+  processInfo: (processes) => herdrShapes.envelope('pane:process_info', { process_info: { foreground_process_group_id: 0, foreground_processes: processes, pane_id: 'pane:fixture', shell_pid: 1 } }),
+  process: ({ name = 'pwsh.exe', argv = [], argv0 = `<path>/${name}` } = {}) => ({ name, argv0, argv, cmdline: argv.join(' '), cwd: '<cwd>', pid: 2 }),
+  paneSplit: () => herdrShapes.envelope('pane:split', { pane_id: 'pane:successor' }),
+  prompt: () => herdrShapes.envelope('agent:prompt', { accepted: true, agent_status: 'working' }),
+  empty: (command) => herdrShapes.envelope(command, {}),
+};
+
+function successHerdr({ callerModel = 'claude-fable-5-1', context = '65', successorSession = '22222222-2222-4222-8222-222222222222', successorModel = 'claude-opus-5', processes = null } = {}) {
   return (_program, args) => {
     const key = `${args[0]} ${args[1]}`;
-    if (key === 'pane split') return { code: 0, stdout: '{"result":{"pane_id":"pane:successor"}}', stderr: '' };
-    if (key === 'agent start' || key === 'agent focus') return { code: 0, stdout: '{"result":{}}', stderr: '' };
+    if (key === 'pane split') return { code: 0, stdout: herdrShapes.paneSplit(), stderr: '' };
+    if (key === 'agent start' || key === 'agent focus') return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
     if (key === 'agent get') {
       const caller = args[2] === 'pane:caller';
       const id = caller ? '11111111-1111-4111-8111-111111111111' : successorSession;
-      return { code: 0, stdout: JSON.stringify({ result: { state: 'idle', agent_session: { value: id } } }), stderr: '' };
+      return { code: 0, stdout: herdrShapes.agentGet({ pane: args[2], session: id }), stderr: '' };
     }
-    if (key === 'pane get') return { code: 0, stdout: JSON.stringify({ result: { tokens: { context } } }), stderr: '' };
-    if (key === 'pane process-info') return { code: 0, stdout: args.at(-1) === 'pane:caller' ? `--model ${callerModel}` : `--model ${successorModel}`, stderr: '' };
-    if (key === 'agent prompt') return { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' };
-    if (key === 'agent wait') return { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' };
+    if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(context), stderr: '' };
+    if (key === 'pane process-info') {
+      const model = args.at(-1) === 'pane:caller' ? callerModel : successorModel;
+      return { code: 0, stdout: herdrShapes.processInfo(processes ?? [herdrShapes.process({ argv: [`<path>/claude.exe`, '--model', model], argv0: '<path>/claude.exe', name: 'claude.exe' })]), stderr: '' };
+    }
+    if (key === 'agent prompt') return { code: 0, stdout: herdrShapes.prompt(), stderr: '' };
+    if (key === 'agent wait') return { code: 0, stdout: herdrShapes.agentWait(), stderr: '' };
     if (key === 'pane read') return { code: 0, stdout: 'Resume this session with:\nclaude --resume 33333333-3333-4333-8333-333333333333', stderr: '' };
-    if (key === 'pane close') return { code: 0, stdout: '{"result":{}}', stderr: '' };
-    return { code: 0, stdout: '{"result":{}}', stderr: '' };
+    if (key === 'pane close') return { code: 0, stdout: herdrShapes.empty('pane:close'), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
   };
 }
 
@@ -66,13 +81,18 @@ test('S2: model and effort are mandatory', async (t) => {
   ], { exec: fork.exec, env: env() });
   assert.equal(launched.exit, 0);
   assert.ok(fork.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start').args.includes('--fork-session'));
+  const rejected = fixture(t); rejected.handler = successHerdr({ processes: [herdrShapes.process()] });
+  const rejectedLaunch = await runSession(['spawn', '--name', 'rejected', '--model', 'claude-opus-5', '--effort', 'high', '--log', rejected.log], { exec: rejected.exec, env: env() });
+  assert.equal(rejectedLaunch.exit, 5); assert.equal(row(rejected).state, 'failed');
 });
 
 test('S3: successor-not-ready never retires', async (t) => {
   const f = fixture(t); const file = handoff(f); let now = 0;
   f.handler = successHerdr({ successorSession: null });
-  const failed = await runSession(['chain', '--handoff', file, '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--successor-timeout', '1', '--log', f.log], { exec: f.exec, env: env(), now: () => (now += 16_000), sleep: async () => {} });
+  const failed = await runSession(['chain', '--handoff', file, '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--successor-timeout', '90000', '--log', f.log], { exec: f.exec, env: env(), now: () => (now += 90_001), sleep: async () => {} });
   assert.equal(failed.exit, 4); assert.equal(row(f).outcome, 'successor-not-ready');
+  const start = f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start').args;
+  assert.equal(start[start.indexOf('--timeout') + 1], '90000');
   assert.equal(f.calls.some((call) => call.args.includes('/exit')), false);
   const positive = fixture(t); const positiveFile = handoff(positive); positive.handler = successHerdr();
   await runSession(['chain', '--handoff', positiveFile, '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--log', positive.log], { exec: positive.exec, env: env() });
@@ -83,16 +103,25 @@ test('S4: a live agent blocks close', async (t) => {
   const f = fixture(t); let now = 0;
   writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old', sessionId: '44444444-4444-4444-8444-444444444444' } }, chains: [] }), 'utf8');
   f.handler = (_program, args) => {
-    if (`${args[0]} ${args[1]}` === 'agent wait') return { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' };
+    if (`${args[0]} ${args[1]}` === 'agent wait') return { code: 0, stdout: herdrShapes.agentWait('done'), stderr: '' };
     if (`${args[0]} ${args[1]}` === 'pane read') return { code: 0, stdout: '', stderr: '' };
-    if (`${args[0]} ${args[1]}` === 'pane process-info') return { code: 0, stdout: 'claude.exe', stderr: '' };
-    return { code: 0, stdout: '{"result":{}}', stderr: '' };
+    if (`${args[0]} ${args[1]}` === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'claude.exe', argv0: '<path>/claude.exe' })]), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty('fixture'), stderr: '' };
   };
   const blocked = await runSession(['retire', 'old', '--mode', 'close', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => (now += 2), sleep: async () => {} });
   assert.equal(blocked.exit, 3); assert.equal(callsFor(f, 'pane').some((call) => call.args[1] === 'close'), false);
-  const positive = fixture(t); writeFileSync(`${positive.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); positive.handler = successHerdr();
+  const positive = fixture(t); writeFileSync(`${positive.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); positive.handler = successHerdr({ processes: [herdrShapes.process({ name: 'pwsh.exe' })] });
   await runSession(['retire', 'old', '--mode', 'close', '--log', positive.log], { exec: positive.exec });
   assert.equal(callsFor(positive, 'pane').some((call) => call.args[1] === 'close'), true, 'positive close proves the negative control can observe closure');
+  const unknown = fixture(t); writeFileSync(`${unknown.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8');
+  unknown.handler = (_program, args) => {
+    if (`${args[0]} ${args[1]}` === 'agent wait') return { code: 0, stdout: herdrShapes.agentWait('done'), stderr: '' };
+    if (`${args[0]} ${args[1]}` === 'pane read') return { code: 0, stdout: '', stderr: '' };
+    if (`${args[0]} ${args[1]}` === 'pane process-info') return { code: 0, stdout: '{not-json', stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty('fixture'), stderr: '' };
+  };
+  const failClosed = await runSession(['retire', 'old', '--mode', 'close', '--timeout', '1', '--log', unknown.log], { exec: unknown.exec, now: () => (now += 2), sleep: async () => {} });
+  assert.equal(failClosed.exit, 3); assert.equal(callsFor(unknown, 'pane').some((call) => call.args[1] === 'close'), false);
 });
 
 test('S5: gone has two shapes', async (t) => {
@@ -100,13 +129,22 @@ test('S5: gone has two shapes', async (t) => {
   assert.equal((await runSession(['watch', 'old', '--until', 'gone', '--timeout', '1', '--log', done.log], { exec: done.exec })).exit, 0);
   const missing = fixture(t); missing.handler = () => ({ code: 1, stdout: '', stderr: 'agent_not_found' });
   assert.equal((await runSession(['watch', 'old', '--until', 'gone', '--timeout', '1', '--log', missing.log], { exec: missing.exec })).exit, 0);
+  const idle = fixture(t); idle.handler = (_program, args) => `${args[0]} ${args[1]}` === 'agent wait'
+    ? { code: 0, stdout: herdrShapes.agentWait('idle'), stderr: '' }
+    : { code: 0, stdout: herdrShapes.empty('fixture'), stderr: '' };
+  const idleWatch = await runSession(['watch', 'old', '--until', 'gone', '--timeout', '1', '--log', idle.log], { exec: idle.exec });
+  assert.equal(idleWatch.output.state, 'idle'); assert.equal(idleWatch.output.state === 'gone', false);
+  const close = fixture(t); writeFileSync(`${close.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); close.handler = idle.handler;
+  const notGone = await runSession(['retire', 'old', '--mode', 'close', '--timeout', '1', '--log', close.log], { exec: close.exec });
+  assert.equal(notGone.exit, 3); assert.equal(callsFor(close, 'pane').some((call) => call.args[1] === 'close'), false);
+  assert.deepEqual(idle.calls[0].args.slice(0, 6), ['agent', 'wait', 'old', '--until', 'done', '--timeout']);
 });
 
 test('S6: resume id is parsed, never invented', async (t) => {
-  const withBanner = fixture(t); writeFileSync(`${withBanner.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); withBanner.handler = successHerdr();
+  const withBanner = fixture(t); writeFileSync(`${withBanner.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); withBanner.handler = successHerdr({ processes: [herdrShapes.process({ name: 'pwsh.exe' })] });
   const parsed = await runSession(['retire', 'old', '--mode', 'close', '--log', withBanner.log], { exec: withBanner.exec });
   assert.equal(parsed.output.resumeId, '33333333-3333-4333-8333-333333333333');
-  const absent = fixture(t); writeFileSync(`${absent.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); absent.handler = (_program, args) => `${args[0]} ${args[1]}` === 'pane read' ? { code: 0, stdout: 'banner absent', stderr: '' } : successHerdr()(_program, args);
+  const absent = fixture(t); writeFileSync(`${absent.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); absent.handler = (_program, args) => `${args[0]} ${args[1]}` === 'pane read' ? { code: 0, stdout: 'banner absent', stderr: '' } : successHerdr({ processes: [herdrShapes.process({ name: 'pwsh.exe' })] })(_program, args);
   const clean = await runSession(['retire', 'old', '--mode', 'close', '--log', absent.log], { exec: absent.exec });
   assert.equal(clean.exit, 0); assert.equal(clean.output.resumeId, null);
 });
@@ -121,13 +159,14 @@ test('S7: context is null when absent', async (t) => {
 });
 
 test('S8: chain happy path is ordered and receipted', async (t) => {
-  const f = fixture(t); const file = handoff(f); f.handler = successHerdr();
-  const result = await runSession(['chain', '--handoff', file, '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--log', f.log], { exec: f.exec, env: env() });
+  const f = fixture(t); const file = handoff(f); const root = join(f.dir, 'capture'); f.handler = successHerdr();
+  const result = await runSession(['chain', '--handoff', file, '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--capture-final', '--log', f.log], { exec: f.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: root }) });
   assert.equal(result.exit, 0);
   const labels = f.calls.map((call) => `${call.args[0]} ${call.args[1]}`);
   for (const label of ['pane split', 'agent start', 'agent get', 'pane process-info', 'agent prompt']) assert.ok(labels.includes(label));
   assert.ok(f.calls.findIndex((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && !call.args.includes('/exit')) < f.calls.findIndex((call) => call.args.includes('/exit')));
   for (const key of ['chainId', 'callerPane', 'callerSession', 'callerContext', 'callerModel', 'successorPane', 'successorSession', 'successorModel', 'modelChanged', 'handoff', 'ts']) assert.notEqual(result.output[key], undefined);
+  assert.equal(existsSync(join(root, 'final-pending', '11111111-1111-4111-8111-111111111111')), true);
 });
 
 test('S9: a model change is flagged', async (t) => {
@@ -139,7 +178,7 @@ test('S9: a model change is flagged', async (t) => {
   assert.equal(no.output.modelChanged, false);
 });
 
-test('S10: the Stop capture is marker-gated', (t) => {
+test('S10: the Stop capture is marker-gated', async (t) => {
   const f = fixture(t); const root = join(f.dir, 'capture'); const id = '55555555-5555-4555-8555-555555555555'; const marker = join(root, 'final-pending', id);
   mkdirSync(join(root, 'final-pending'), { recursive: true });
   writeFileSync(marker, 'pending\n', { encoding: 'utf8', flag: 'w' });
@@ -147,4 +186,11 @@ test('S10: the Stop capture is marker-gated', (t) => {
   assert.equal(captured.captured, true); assert.equal(readFileSync(join(root, 'final', `${id}.md`), 'utf8'), 'final words'); assert.equal(existsSync(marker), false);
   const other = runStopCapture({ session_id: '66666666-6666-4666-8666-666666666666', last_assistant_message: 'must not write' }, { env: { WORKIT_SESSION_CHAIN_DIR: root } });
   assert.equal(other.captured, false); assert.equal(existsSync(join(root, 'final', '66666666-6666-4666-8666-666666666666.md')), false);
+  const self = fixture(t); const selfRoot = join(self.dir, 'self-capture'); self.handler = (_program, args) => {
+    if (`${args[0]} ${args[1]}` === 'agent get') return { code: 0, stdout: herdrShapes.agentGet({ pane: 'pane:caller', session: id }), stderr: '' };
+    if (`${args[0]} ${args[1]}` === 'agent prompt') return { code: 0, stdout: herdrShapes.prompt(), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty('fixture'), stderr: '' };
+  };
+  const retired = await runSession(['retire', 'self', '--mode', 'exit', '--capture-final', '--log', self.log], { exec: self.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: selfRoot }) });
+  assert.equal(retired.exit, 0); assert.equal(existsSync(join(selfRoot, 'final-pending', id)), true);
 });
