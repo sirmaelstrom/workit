@@ -3847,6 +3847,8 @@ for (const scenario of ['caller-edit', 'reviewer-edit', 'reviewer-commit', 'fetc
   test(`coordinated checkout isolation with real git: ${scenario}`, async () => {
     const source = mkdtempSync(join(tmpdir(), 'review-source-'));
     const git = process.platform === 'win32' ? 'git.exe' : 'git';
+    const savedReviewRemoteBase = process.env.PR_REVIEW_REMOTE_BASE;
+    delete process.env.PR_REVIEW_REMOTE_BASE;
     const gitRun = (args, cwd = source) => execFileSync(git, args, {
       cwd, encoding: 'utf8', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -3915,6 +3917,8 @@ for (const scenario of ['caller-edit', 'reviewer-edit', 'reviewer-commit', 'fetc
           scenario === 'caller-edit' ? 'interactive edit\n' : 'canonical newer source\n');
       });
     } finally {
+      if (savedReviewRemoteBase === undefined) delete process.env.PR_REVIEW_REMOTE_BASE;
+      else process.env.PR_REVIEW_REMOTE_BASE = savedReviewRemoteBase;
       rmSync(source, { recursive: true, force: true });
       if (scratch) rmSync(scratch, { recursive: true, force: true });
     }

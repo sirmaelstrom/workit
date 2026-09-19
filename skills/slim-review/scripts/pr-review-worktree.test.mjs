@@ -39,9 +39,11 @@ test('R1: default remote base is GitHub without executing git', () => {
   const checkout = createReviewWorktree({ repo: REPO, headSha: HEAD, run, diag: () => {}, env: {} });
   try {
     const expected = `${REVIEW_REMOTE_BASE_DEFAULT}/${REPO}.git`;
+    const createdGitDir = calls.find(({ args }) => args[0] === 'init' && args[1] === '--bare').args.at(-1);
     assert.equal(reviewRemoteBase({}), REVIEW_REMOTE_BASE_DEFAULT);
     assert.deepEqual(remoteArguments(calls), [expected, expected]);
-    assert.ok(calls.every(({ program }) => program === GIT), 'the fake run recorded requests but executed nothing');
+    assert.ok(calls.every(({ program }) => program === GIT), 'the helper selects the platform git executable');
+    assert.equal(existsSync(createdGitDir), false, 'the recording fake never creates the bare repository');
   } finally {
     checkout.cleanup();
   }
