@@ -3,16 +3,29 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 /**
+ * The remote base for pinned review checkouts. Leave this unset in production;
+ * tests may point it at a filesystem directory holding <owner>/<repo>.git bare
+ * repositories.
+ */
+export const REVIEW_REMOTE_BASE_DEFAULT = 'https://github.com';
+export function reviewRemoteBase(env = process.env) {
+  const raw = env?.PR_REVIEW_REMOTE_BASE;
+  return typeof raw === 'string' && raw.trim() !== '' ? raw.trim().replace(/\/+$/, '') : REVIEW_REMOTE_BASE_DEFAULT;
+}
+
+/**
  * A coordinated lens reads the repository and head named by its AttemptRef.
  * Never borrow the caller's checkout: the scheduler can run in a different
  * repository, and an interactive session can edit it during the review.
  *
  * Each execution owns a temporary bare repository and detached worktree.
- * Fetching from the declared GitHub repository also avoids borrowing mutable
- * refs, hooks, config, or dependency junctions from the live checkout. This is
- * source isolation, not a sandbox. No dependencies are installed or linked.
+ * Fetching from the declared repository avoids borrowing mutable refs, hooks,
+ * config, or dependency junctions from the live checkout. The remote base may
+ * be a filesystem directory holding <owner>/<repo>.git bare repositories for
+ * hermetic tests; production leaves it unset. This is source isolation, not a
+ * sandbox. No dependencies are installed or linked.
  */
-export function createReviewWorktree({ repo, headSha, run, diag = console.error }) {
+export function createReviewWorktree({ repo, headSha, run, diag = console.error, env = process.env }) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)
       || !/^[a-f0-9]{40}$/i.test(headSha)) {
     throw new Error('review checkout requires a GitHub owner/repo and full commit SHA');
@@ -21,6 +34,7 @@ export function createReviewWorktree({ repo, headSha, run, diag = console.error 
   const gitDir = join(root, 'repository.git');
   const cwd = join(root, 'checkout');
   const git = process.platform === 'win32' ? 'git.exe' : 'git';
+  const remote = `${reviewRemoteBase(env)}/${repo}.git`;
   const cleanup = () => {
     // Only this mkdtemp-owned directory is removed. There are no junctions to
     // canonical dependencies or a shared git common directory to unregister.
@@ -35,9 +49,9 @@ export function createReviewWorktree({ repo, headSha, run, diag = console.error 
   };
   try {
     run(git, ['init', '--bare', gitDir], { cwd: root });
-    run(git, ['--git-dir', gitDir, 'remote', 'add', 'origin', `https://github.com/${repo}.git`], { cwd: root });
+    run(git, ['--git-dir', gitDir, 'remote', 'add', 'origin', remote], { cwd: root });
     run(git, ['--git-dir', gitDir, 'fetch', '--no-tags', '--depth=1',
-      `https://github.com/${repo}.git`, headSha], { cwd: root });
+      remote, headSha], { cwd: root });
     run(git, ['--git-dir', gitDir, 'worktree', 'add', '--detach', cwd, headSha], { cwd: root });
     assertHead();
     return { cwd, assertHead, cleanup };
