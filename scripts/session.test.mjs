@@ -65,6 +65,9 @@ test('S1: dontAsk is refused before herdr is invoked', async (t) => {
   const result = await runSession(['spawn', '--name', 'x', '--model', 'claude-opus-5', '--effort', 'high', '--log', f.log, '--', '--permission-mode', 'dontAsk'], { exec: f.exec, env: env() });
   assert.equal(result.exit, 2);
   assert.equal(f.calls.length, 0);
+  const equals = fixture(t);
+  const equalsResult = await runSession(['spawn', '--name', 'x', '--model', 'claude-opus-5', '--effort', 'high', '--log', equals.log, '--', '--permission-mode=dontAsk'], { exec: equals.exec, env: env() });
+  assert.equal(equalsResult.exit, 2); assert.equal(equals.calls.length, 0);
 });
 
 test('S2: model and effort are mandatory', async (t) => {
@@ -83,7 +86,11 @@ test('S2: model and effort are mandatory', async (t) => {
   assert.ok(fork.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start').args.includes('--fork-session'));
   const rejected = fixture(t); rejected.handler = successHerdr({ processes: [herdrShapes.process()] });
   const rejectedLaunch = await runSession(['spawn', '--name', 'rejected', '--model', 'claude-opus-5', '--effort', 'high', '--log', rejected.log], { exec: rejected.exec, env: env() });
-  assert.equal(rejectedLaunch.exit, 5); assert.equal(row(rejected).state, 'failed');
+  assert.equal(rejectedLaunch.exit, 5); assert.equal(row(rejected).state, 'failed'); assert.equal(row(rejected).pane, 'pane:successor');
+  assert.equal(rejected.calls.some((call) => call.args[0] === 'agent' && call.args[1] === 'focus' && call.args[2] === 'pane:caller'), true);
+  const overriddenModel = fixture(t);
+  const overriddenResult = await runSession(['spawn', '--name', 'x', '--model', 'claude-opus-5', '--effort', 'high', '--log', overriddenModel.log, '--', '--model=claude-fable-5-1'], { exec: overriddenModel.exec, env: env() });
+  assert.equal(overriddenResult.exit, 2); assert.equal(overriddenModel.calls.length, 0);
 });
 
 test('S3: successor-not-ready never retires', async (t) => {
@@ -91,6 +98,7 @@ test('S3: successor-not-ready never retires', async (t) => {
   f.handler = successHerdr({ successorSession: null });
   const failed = await runSession(['chain', '--handoff', file, '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--successor-timeout', '90000', '--log', f.log], { exec: f.exec, env: env(), now: () => (now += 90_001), sleep: async () => {} });
   assert.equal(failed.exit, 4); assert.equal(row(f).outcome, 'successor-not-ready');
+  assert.equal(row(f).callerContext, 65); assert.equal(row(f).callerModel, 'claude-fable-5-1');
   const start = f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start').args;
   assert.equal(start[start.indexOf('--timeout') + 1], '90000');
   assert.equal(f.calls.some((call) => call.args.includes('/exit')), false);
@@ -127,17 +135,21 @@ test('S4: a live agent blocks close', async (t) => {
 test('S5: gone has two shapes', async (t) => {
   const done = fixture(t); done.handler = successHerdr();
   assert.equal((await runSession(['watch', 'old', '--until', 'gone', '--timeout', '1', '--log', done.log], { exec: done.exec })).exit, 0);
-  const missing = fixture(t); missing.handler = () => ({ code: 1, stdout: '', stderr: 'agent_not_found' });
+  const missing = fixture(t); missing.handler = (_program, args) => `${args[0]} ${args[1]}` === 'agent get'
+    ? { code: 0, stdout: herdrShapes.agentGet({ pane: 'pane:old' }), stderr: '' }
+    : ({ code: 1, stdout: '', stderr: 'agent_not_found' });
   assert.equal((await runSession(['watch', 'old', '--until', 'gone', '--timeout', '1', '--log', missing.log], { exec: missing.exec })).exit, 0);
-  const idle = fixture(t); idle.handler = (_program, args) => `${args[0]} ${args[1]}` === 'agent wait'
-    ? { code: 0, stdout: herdrShapes.agentWait('idle'), stderr: '' }
-    : { code: 0, stdout: herdrShapes.empty('fixture'), stderr: '' };
+  const idle = fixture(t); idle.handler = (_program, args) => `${args[0]} ${args[1]}` === 'agent get'
+    ? { code: 0, stdout: herdrShapes.agentGet({ pane: 'pane:old' }), stderr: '' }
+    : (`${args[0]} ${args[1]}` === 'agent wait'
+      ? { code: 0, stdout: herdrShapes.agentWait('idle'), stderr: '' }
+      : { code: 0, stdout: herdrShapes.empty('fixture'), stderr: '' });
   const idleWatch = await runSession(['watch', 'old', '--until', 'gone', '--timeout', '1', '--log', idle.log], { exec: idle.exec });
   assert.equal(idleWatch.output.state, 'idle'); assert.equal(idleWatch.output.state === 'gone', false);
   const close = fixture(t); writeFileSync(`${close.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); close.handler = idle.handler;
   const notGone = await runSession(['retire', 'old', '--mode', 'close', '--timeout', '1', '--log', close.log], { exec: close.exec });
   assert.equal(notGone.exit, 3); assert.equal(callsFor(close, 'pane').some((call) => call.args[1] === 'close'), false);
-  assert.deepEqual(idle.calls[0].args.slice(0, 6), ['agent', 'wait', 'old', '--until', 'done', '--timeout']);
+  assert.deepEqual(idle.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'wait').args.slice(0, 6), ['agent', 'wait', 'old', '--until', 'done', '--timeout']);
 });
 
 test('S6: resume id is parsed, never invented', async (t) => {
@@ -147,6 +159,18 @@ test('S6: resume id is parsed, never invented', async (t) => {
   const absent = fixture(t); writeFileSync(`${absent.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); absent.handler = (_program, args) => `${args[0]} ${args[1]}` === 'pane read' ? { code: 0, stdout: 'banner absent', stderr: '' } : successHerdr({ processes: [herdrShapes.process({ name: 'pwsh.exe' })] })(_program, args);
   const clean = await runSession(['retire', 'old', '--mode', 'close', '--log', absent.log], { exec: absent.exec });
   assert.equal(clean.exit, 0); assert.equal(clean.output.resumeId, null);
+  const named = fixture(t); let processReads = 0; let paneReads = 0;
+  named.handler = (_program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'agent get') return { code: 0, stdout: herdrShapes.agentGet({ pane: 'pane:named', session: '77777777-7777-4777-8777-777777777777' }), stderr: '' };
+    if (key === 'agent wait') return { code: 0, stdout: herdrShapes.agentWait('done'), stderr: '' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: processReads++ === 0 ? 'claude.exe' : 'pwsh.exe', argv0: '<path>/claude.exe' })]), stderr: '' };
+    if (key === 'pane read') return { code: 0, stdout: paneReads++ === 0 ? 'not ready' : 'Resume this session with:\nclaude --resume 88888888-8888-4888-8888-888888888888', stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty('fixture'), stderr: '' };
+  };
+  const delayed = await runSession(['retire', 'stranger', '--mode', 'close', '--timeout', '100', '--log', named.log], { exec: named.exec, sleep: async () => {} });
+  assert.equal(delayed.exit, 0); assert.equal(delayed.output.resumeId, '88888888-8888-4888-8888-888888888888');
+  assert.equal(named.calls.find((call) => call.args[0] === 'pane' && call.args[1] === 'close').args[2], 'pane:named');
 });
 
 test('S7: context is null when absent', async (t) => {
@@ -167,6 +191,9 @@ test('S8: chain happy path is ordered and receipted', async (t) => {
   assert.ok(f.calls.findIndex((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && !call.args.includes('/exit')) < f.calls.findIndex((call) => call.args.includes('/exit')));
   for (const key of ['chainId', 'callerPane', 'callerSession', 'callerContext', 'callerModel', 'successorPane', 'successorSession', 'successorModel', 'modelChanged', 'handoff', 'ts']) assert.notEqual(result.output[key], undefined);
   assert.equal(existsSync(join(root, 'final-pending', '11111111-1111-4111-8111-111111111111')), true);
+  const invalid = fixture(t); const invalidFile = handoff(invalid);
+  const noRetireCapture = await runSession(['chain', '--handoff', invalidFile, '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--capture-final', '--no-retire', '--log', invalid.log], { exec: invalid.exec, env: env() });
+  assert.equal(noRetireCapture.exit, 2); assert.equal(invalid.calls.length, 0);
 });
 
 test('S9: a model change is flagged', async (t) => {
@@ -186,6 +213,9 @@ test('S10: the Stop capture is marker-gated', async (t) => {
   assert.equal(captured.captured, true); assert.equal(readFileSync(join(root, 'final', `${id}.md`), 'utf8'), 'final words'); assert.equal(existsSync(marker), false);
   const other = runStopCapture({ session_id: '66666666-6666-4666-8666-666666666666', last_assistant_message: 'must not write' }, { env: { WORKIT_SESSION_CHAIN_DIR: root } });
   assert.equal(other.captured, false); assert.equal(existsSync(join(root, 'final', '66666666-6666-4666-8666-666666666666.md')), false);
+  const emptyId = '77777777-7777-4777-8777-777777777777'; const emptyMarker = join(root, 'final-pending', emptyId); writeFileSync(emptyMarker, 'pending\n', 'utf8');
+  const empty = runStopCapture({ session_id: emptyId }, { env: { WORKIT_SESSION_CHAIN_DIR: root } });
+  assert.deepEqual(empty, { captured: false, reason: 'no-last_assistant_message' }); assert.equal(existsSync(emptyMarker), true);
   const self = fixture(t); const selfRoot = join(self.dir, 'self-capture'); self.handler = (_program, args) => {
     if (`${args[0]} ${args[1]}` === 'agent get') return { code: 0, stdout: herdrShapes.agentGet({ pane: 'pane:caller', session: id }), stderr: '' };
     if (`${args[0]} ${args[1]}` === 'agent prompt') return { code: 0, stdout: herdrShapes.prompt(), stderr: '' };

@@ -14,9 +14,11 @@ export function runStopCapture(payload, overrides = {}) {
   const root = deps.env.WORKIT_SESSION_CHAIN_DIR ?? join(deps.env.HOME ?? deps.env.USERPROFILE ?? '.', '.workit', 'session-chain');
   const marker = join(root, 'final-pending', id);
   if (!deps.exists(marker)) return { captured: false };
+  const message = payload.last_assistant_message;
+  if (typeof message !== 'string' || message.length === 0) return { captured: false, reason: 'no-last_assistant_message' };
   const final = join(root, 'final', `${id}.md`);
   deps.mkdir(dirname(final));
-  deps.write(final, String(payload.last_assistant_message ?? ''));
+  deps.write(final, message);
   deps.remove(marker);
   return { captured: true, path: final };
 }

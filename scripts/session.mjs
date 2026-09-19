@@ -76,6 +76,7 @@ function parseArgs(argv) {
     if (token.startsWith('-')) usage(`unknown argument: ${token}`);
     opts.positional.push(token);
   }
+  if (opts.verb === 'chain' && opts.captureFinal && opts.noRetire) usage('--capture-final requires an exiting caller; remove --no-retire');
   return opts;
 }
 
@@ -183,7 +184,7 @@ function prepareFinalCapture(deps, id) {
   deps.write(marker, 'pending\n');
   return join(root, 'final', `${id}.md`);
 }
-function resolveTarget(opts, state, target) {
+async function resolveTarget(opts, state, target, deps) {
   if (target === 'parent') {
     const current = Object.values(state.sessions).find((item) => item.pane === opts.currentPane);
     if (!current?.spawnedBy) usage('parent is not recorded for this session');
@@ -191,15 +192,34 @@ function resolveTarget(opts, state, target) {
   }
   if (target === 'self') return { name: null, pane: opts.currentPane, sessionId: null, target: opts.currentPane };
   const record = state.sessions[target] ?? Object.values(state.sessions).find((item) => item.pane === target);
-  return { name: record?.name ?? target, pane: record?.pane ?? target, sessionId: record?.sessionId ?? null, target: record?.name ?? target };
+  if (record) return { name: record.name ?? target, pane: record.pane, sessionId: record.sessionId ?? null, target: record.name ?? target };
+  const fetched = call(deps, ['agent', 'get', target]);
+  const pane = fetched.code === 0 ? paneId(fetched.stdout) : null;
+  if (!pane) usage(`target ${target} has no sidecar pane and herdr agent get did not return pane_id`);
+  return { name: target, pane, sessionId: fetched.code === 0 ? sessionId(fetched.stdout) : null, target };
 }
-function nativeHasDontAsk(args) { return args.some((arg) => String(arg).toLowerCase() === 'dontask') || args.some((arg, index) => arg === '--permission-mode' && String(args[index + 1]).toLowerCase() === 'dontask'); }
+function normalizeNativeArgs(args) {
+  const normalized = [];
+  for (const arg of args) {
+    const match = /^(--(?:permission-mode|model))=(.*)$/.exec(String(arg));
+    if (match) normalized.push(match[1], match[2]);
+    else normalized.push(arg);
+  }
+  return normalized;
+}
+function nativeOption(args, flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : undefined; }
+function nativeHasDontAsk(args) { return String(nativeOption(args, '--permission-mode') ?? '').toLowerCase() === 'dontask'; }
 
 async function spawn(opts, deps, state, { chain = false } = {}) {
-  if (nativeHasDontAsk(opts.nativeArgs) || String(opts.permissionMode ?? '').toLowerCase() === 'dontask') usage('dontAsk is refused before herdr is invoked');
+  const nativeArgs = normalizeNativeArgs(opts.nativeArgs);
+  const nativePermission = nativeOption(nativeArgs, '--permission-mode');
+  const nativeModel = nativeOption(nativeArgs, '--model');
+  if (nativeHasDontAsk(nativeArgs) || String(opts.permissionMode ?? '').toLowerCase() === 'dontask') usage('dontAsk is refused before herdr is invoked');
   const callerPane = inHerdr(deps);
   required(opts, 'name', 'model', 'effort');
   if (opts.permissionMode && opts.permissionMode !== 'bypassPermissions') usage('--permission-mode must be bypassPermissions');
+  if (nativePermission && nativePermission !== 'bypassPermissions') usage('native --permission-mode must be bypassPermissions');
+  if (nativeModel && nativeModel !== opts.model) usage('native --model must match --model');
   if (opts.cwd && !isAbsolute(opts.cwd)) usage('--cwd must be absolute');
   if (opts.mode && !['fresh', 'fork'].includes(opts.mode)) usage('--mode must be fresh or fork');
   if ((opts.mode ?? 'fresh') === 'fork' && !opts.fromSession) usage('fork mode needs --from-session');
@@ -215,34 +235,38 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
   const agentArgs = ['--permission-mode', opts.permissionMode ?? 'bypassPermissions', '--model', opts.model, '--effort', opts.effort];
   if (opts.chrome) agentArgs.push('--chrome');
   if ((opts.mode ?? 'fresh') === 'fork') agentArgs.push('--resume', opts.fromSession, '--fork-session');
-  agentArgs.push(...opts.nativeArgs);
-  callOrFail(deps, ['agent', 'start', opts.name, '--kind', 'claude', '--pane', pane, '--timeout', String(timeout), '--', ...agentArgs]);
-  const deadline = deps.now() + timeout;
-  let status = null; let session = null;
-  do {
-    const gotten = call(deps, ['agent', 'get', opts.name]);
-    if (gotten.code === 0) { status = agentState(gotten.stdout); session = sessionId(gotten.stdout); if (session && (!chain || status === 'idle')) break; }
-    if (deps.now() >= deadline) break;
-    await deps.sleep(100);
-  } while (true);
-  const process = callOrFail(deps, ['pane', 'process-info', '--pane', pane]);
-  const argvVerified = processModel(process) === opts.model;
-  if (!argvVerified) throw new SessionError(EXIT.checkFailed, `pane ${pane} argv does not contain requested model ${opts.model}`);
-  // Start normally focuses the new pane. Restore the conductor even when this
-  // build is running a composed chain.
-  call(deps, ['agent', 'focus', callerPane]);
-  const record = { name: opts.name, pane, sessionId: session, model: opts.model, effort: opts.effort, mode: opts.mode ?? 'fresh', argvVerified, spawnedBy: from, startedAt: deps.timestamp() };
-  state.sessions[opts.name] = record;
-  saveState(deps, opts.log, state);
-  return { record, ready: Boolean(session) && (!chain || status === 'idle') };
+  agentArgs.push(...nativeArgs);
+  try {
+    callOrFail(deps, ['agent', 'start', opts.name, '--kind', 'claude', '--pane', pane, '--timeout', String(timeout), '--', ...agentArgs]);
+    const deadline = deps.now() + timeout;
+    let status = null; let session = null;
+    do {
+      const gotten = call(deps, ['agent', 'get', opts.name]);
+      if (gotten.code === 0) { status = agentState(gotten.stdout); session = sessionId(gotten.stdout); if (session && (!chain || status === 'idle')) break; }
+      if (deps.now() >= deadline) break;
+      await deps.sleep(100);
+    } while (true);
+    const record = { name: opts.name, pane, sessionId: session, model: opts.model, effort: opts.effort, mode: opts.mode ?? 'fresh', argvVerified: false, spawnedBy: from, startedAt: deps.timestamp() };
+    state.sessions[opts.name] = record;
+    saveState(deps, opts.log, state);
+    const process = callOrFail(deps, ['pane', 'process-info', '--pane', pane]);
+    record.argvVerified = processModel(process) === opts.model;
+    if (!record.argvVerified) throw new SessionError(EXIT.checkFailed, `pane ${pane} argv does not contain requested model ${opts.model}`, { pane });
+    saveState(deps, opts.log, state);
+    return { record, ready: Boolean(session) && (!chain || status === 'idle') };
+  } finally {
+    // Agent start has no --no-focus. The caller remains the interaction owner
+    // even when argv verification rejects an already-running successor.
+    call(deps, ['agent', 'focus', callerPane]);
+  }
 }
 
-function brief(opts, deps, state) {
+async function brief(opts, deps, state) {
   if (opts.positional.length !== 1) usage('brief needs one target');
   required(opts, 'file');
   const file = resolve(opts.file);
   if (!isAbsolute(opts.file) || !deps.exists(file)) usage(`brief file does not exist: ${file}`);
-  const target = resolveTarget(opts, state, opts.positional[0]);
+  const target = await resolveTarget(opts, state, opts.positional[0], deps);
   const found = call(deps, ['agent', 'get', target.target]);
   if (found.code !== 0 || agentState(found.stdout) === 'blocked') throw new SessionError(EXIT.blocked, `target is blocked or unavailable: ${target.target}`);
   const args = ['agent', 'prompt', target.target, `Read ${file} and execute it exactly.`];
@@ -255,7 +279,7 @@ function brief(opts, deps, state) {
 
 async function watch(opts, deps, state) {
   if (opts.positional.length !== 1) usage('watch needs one target');
-  const target = resolveTarget(opts, state, opts.positional[0]);
+  const target = opts.resolvedTarget ?? await resolveTarget(opts, state, opts.positional[0], deps);
   const until = opts.until?.length ? opts.until : ['idle', 'done', 'blocked'];
   if (until.some((value) => !['idle', 'done', 'blocked', 'gone'].includes(value))) usage('watch --until must be idle, done, blocked, or gone');
   const timeout = positive(opts.timeout, '--timeout');
@@ -278,14 +302,19 @@ async function watch(opts, deps, state) {
 }
 
 async function closeTarget(deps, target, timeout) {
-  const watched = await watch({ positional: [target.target], until: ['gone'], timeout: String(timeout), verb: 'watch' }, deps, { sessions: {} });
+  const watched = await watch({ positional: [target.target], until: ['gone'], timeout: String(timeout), verb: 'watch', resolvedTarget: target }, deps, { sessions: {} });
   if (watched.state !== 'gone') throw new SessionError(EXIT.blocked, `target is not gone: ${target.target}`);
-  const paneText = callOrFail(deps, ['pane', 'read', target.pane, '--source', 'recent-unwrapped', '--lines', '40']);
-  const match = /Resume this session with:\s*\r?\n\s*claude --resume ([0-9a-f-]{36})/i.exec(paneText);
   const deadline = deps.now() + timeout;
   do {
     const info = callOrFail(deps, ['pane', 'process-info', '--pane', target.pane]);
     if (!hasClaude(info)) {
+      let paneText = callOrFail(deps, ['pane', 'read', target.pane, '--source', 'recent-unwrapped', '--lines', '40']);
+      let match = /Resume this session with:\s*\r?\n\s*claude --resume ([0-9a-f-]{36})/i.exec(paneText);
+      if (!match) {
+        await deps.sleep(100);
+        paneText = callOrFail(deps, ['pane', 'read', target.pane, '--source', 'recent-unwrapped', '--lines', '40']);
+        match = /Resume this session with:\s*\r?\n\s*claude --resume ([0-9a-f-]{36})/i.exec(paneText);
+      }
       callOrFail(deps, ['pane', 'close', target.pane]);
       return { ...watched, resumeId: match?.[1] ?? null, closed: true };
     }
@@ -301,7 +330,7 @@ async function retire(opts, deps, state) {
   if (!['exit', 'close', 'exit+close'].includes(opts.mode)) usage('--mode must be exit, close, or exit+close');
   const self = opts.positional[0] === 'self';
   if (self || opts.positional[0] === 'parent') opts.currentPane = inHerdr(deps);
-  const target = resolveTarget(opts, state, opts.positional[0]);
+  const target = await resolveTarget(opts, state, opts.positional[0], deps);
   if (self && opts.mode !== 'exit') usage('retire self only supports --mode exit');
   const timeout = positive(opts.timeout, '--timeout', 60_000);
   if (self) return { self, target, timeout };
@@ -327,9 +356,9 @@ async function chain(opts, deps, state) {
   const spawned = await spawn({ ...opts, from: callerPane, readinessTimeout: successorTimeout }, deps, state, { chain: true });
   const chainId = `${callerSession ?? callerPane}:${spawned.record.sessionId ?? spawned.record.pane}:${deps.timestamp()}`;
   if (!spawned.ready) {
-    return { exit: EXIT.timeout, output: { chainId, outcome: 'successor-not-ready', successorPane: spawned.record.pane, nextStep: 'inspect the successor pane; caller remains active' }, row: { chainId, outcome: 'successor-not-ready', callerPane, callerSession, successorPane: spawned.record.pane } };
+    return { exit: EXIT.timeout, output: { chainId, outcome: 'successor-not-ready', callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane, nextStep: 'inspect the successor pane; caller remains active' }, row: { chainId, outcome: 'successor-not-ready', callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane } };
   }
-  const delivered = brief({ verb: 'brief', positional: [opts.name], file: handoff, wait: true, timeout: opts.successorTimeout }, deps, state);
+  const delivered = await brief({ verb: 'brief', positional: [opts.name], file: handoff, wait: true, timeout: opts.successorTimeout }, deps, state);
   const modelChanged = callerModel !== null && callerModel !== opts.model;
   const row = { chainId, callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane, successorSession: spawned.record.sessionId, successorModel: opts.model, modelChanged, handoff, ts: deps.timestamp() };
   state.chains.push(row); saveState(deps, opts.log, state);
@@ -364,7 +393,7 @@ export async function runSession(argv, overrides = {}) {
   try {
     const state = loadState(deps, opts.log);
     if (opts.verb === 'spawn') { const spawned = await spawn(opts, deps, state); result = { output: spawned.record, row: spawned.record }; }
-    else if (opts.verb === 'brief') { const output = brief(opts, deps, state); result = { output, row: output }; }
+    else if (opts.verb === 'brief') { const output = await brief(opts, deps, state); result = { output, row: output }; }
     else if (opts.verb === 'watch') { const output = await watch(opts, deps, state); result = { output, row: output }; }
     else if (opts.verb === 'retire') {
       const retired = await retire(opts, deps, state);
@@ -398,7 +427,7 @@ export async function runSession(argv, overrides = {}) {
       }
       result = { exit: chained.exit, output: chained.output, row: chained.row };
     } else if (opts.verb === 'status') { const output = status(opts, deps); result = { output, row: { state: 'reported' } }; }
-  } catch (error) { result = { exit: error instanceof SessionError ? error.code : EXIT.error, output: { error: error.message, ...(error.details ?? {}) }, row: { state: 'failed' } }; }
+  } catch (error) { result = { exit: error instanceof SessionError ? error.code : EXIT.error, output: { error: error.message, ...(error.details ?? {}) }, row: { state: 'failed', ...(error.details ?? {}) } }; }
   const exit = result.exit ?? EXIT.ok;
   const row = { ...base, ...(result.row ?? {}), exit, error: result.output?.error ?? null, waitMs: deps.now() - started };
   appendRow(deps, opts.log, row);
