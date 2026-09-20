@@ -31,7 +31,7 @@ export const USAGE_TEXT = `session <verb> [options] — one Claude-session lifec
          [--permission-mode bypassPermissions] [--timeout <ms>] [-- <native args>]
   brief  <name|pane> --file <abs> [--wait] [--timeout <ms>]
   watch  <name|pane> [--until idle|done|blocked|gone]... --timeout <ms>
-  retire <self|parent|name|pane> --mode exit|close|exit+close [--timeout <ms>] [--capture-final]
+  retire <self|parent|name|pane> --mode exit|close|exit+close [--timeout <ms>] [--dialog-after-ms <ms>] [--capture-final]
   chain  --handoff <abs> --model <id> --effort <lvl> --name <successor> [--no-retire]
   status [--chain <id>] [--last]
 
@@ -59,7 +59,7 @@ function parseArgs(argv) {
   const values = new Set([
     '--name', '--model', '--effort', '--cwd', '--from', '--direction', '--mode', '--from-session',
     '--permission-mode', '--timeout', '--file', '--log', '--workspace-root', '--handoff', '--chain',
-    '--successor-timeout',
+    '--successor-timeout', '--dialog-after-ms',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -162,6 +162,13 @@ function processModel(raw) {
   }
   return null;
 }
+function processPid(raw) {
+  const processes = foregroundProcesses(raw);
+  if (!processes) return null;
+  const claude = processes.find((process) => /^claude(?:\.exe)?$/i.test(processName(process) ?? ''));
+  const pid = Number(claude?.pid);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
 function inHerdr(deps) {
   if (deps.env.HERDR_ENV !== '1' || !deps.env.HERDR_PANE_ID) usage('this verb requires HERDR_ENV=1 and HERDR_PANE_ID');
   return deps.env.HERDR_PANE_ID;
@@ -184,6 +191,15 @@ function prepareFinalCapture(deps, id) {
   deps.write(marker, 'pending\n');
   return join(root, 'final', `${id}.md`);
 }
+function finalMessagePath(deps, state, target) {
+  const session = target.sessionId
+    ?? Object.values(state.sessions).find((item) => item.pane === target.pane)?.sessionId
+    ?? [...state.chains].reverse().find((item) => item.callerPane === target.pane)?.callerSession
+    ?? null;
+  if (!session) return null;
+  const path = join(finalStateRoot(deps), 'final', `${session}.md`);
+  return deps.exists(path) ? path : null;
+}
 async function resolveTarget(opts, state, target, deps) {
   if (target === 'parent') {
     const current = Object.values(state.sessions).find((item) => item.pane === opts.currentPane);
@@ -193,10 +209,35 @@ async function resolveTarget(opts, state, target, deps) {
   if (target === 'self') return { name: null, pane: opts.currentPane, sessionId: null, target: opts.currentPane };
   const record = state.sessions[target] ?? Object.values(state.sessions).find((item) => item.pane === target);
   if (record) return { name: record.name ?? target, pane: record.pane, sessionId: record.sessionId ?? null, target: record.name ?? target };
+  if (target.startsWith('pane:') || /^w[0-9A-Za-z]+:p\d+$/.test(target)) {
+    const pane = call(deps, ['pane', 'get', target]);
+    if (pane.code !== 0) usage(`pane_not_found: ${target}`);
+    const agents = callOrFail(deps, ['agent', 'list']);
+    const owner = agentOwningPane(agents, target);
+    if (!owner) return { name: null, pane: target, sessionId: null, target, resolvedFrom: 'herdr', goneAgent: true };
+    return { name: owner, pane: target, sessionId: null, target: owner, resolvedFrom: 'herdr' };
+  }
   const fetched = call(deps, ['agent', 'get', target]);
   const pane = fetched.code === 0 ? paneId(fetched.stdout) : null;
   if (!pane) usage(`target ${target} has no sidecar pane and herdr agent get did not return pane_id`);
   return { name: target, pane, sessionId: fetched.code === 0 ? sessionId(fetched.stdout) : null, target };
+}
+function agentOwningPane(raw, pane) {
+  const search = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) { const found = search(item); if (found) return found; }
+      return null;
+    }
+    if (!value || typeof value !== 'object') return null;
+    const paneId = value.pane_id ?? value.paneId ?? (typeof value.pane === 'string' ? value.pane : value.pane?.id ?? value.pane?.pane_id);
+    if (paneId === pane) {
+      const name = value.name ?? value.agent_name ?? value.agentName ?? value.id;
+      return typeof name === 'string' ? name : null;
+    }
+    for (const child of Object.values(value)) { const found = search(child); if (found) return found; }
+    return null;
+  };
+  return search(resultOf(raw));
 }
 function normalizeNativeArgs(args) {
   const normalized = [];
@@ -301,9 +342,67 @@ async function watch(opts, deps, state) {
   return { state: stateAfter, target: target.target };
 }
 
-async function closeTarget(deps, target, timeout) {
-  const watched = await watch({ positional: [target.target], until: ['gone'], timeout: String(timeout), verb: 'watch', resolvedTarget: target }, deps, { sessions: {} });
-  if (watched.state !== 'gone') throw new SessionError(EXIT.blocked, `target is not gone: ${target.target}`);
+function exitDialog(text) {
+  return /Background work is running/i.test(text) && /Enter to confirm/i.test(text);
+}
+function childProcesses(deps, pid) {
+  if (!pid) return { children: null, error: 'claude.exe pid was unavailable from process-info' };
+  const command = `Get-CimInstance Win32_Process | Where-Object ParentProcessId -eq ${pid} | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress`;
+  const result = deps.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command]);
+  if ((result?.code ?? result?.exitCode ?? 0) !== 0) return { children: null, error: String(result?.stderr ?? '').trim() || `PowerShell exited ${(result?.code ?? result?.exitCode ?? 1)}` };
+  const stdout = String(result?.stdout ?? '');
+  if (!stdout.trim()) return { children: [], error: null };
+  const value = parsed(stdout);
+  if (value === null) return { children: null, error: 'PowerShell returned invalid child-process JSON' };
+  return { children: Array.isArray(value) ? value : [value], error: null };
+}
+function onlyMcpChildren(children) {
+  return Array.isArray(children) && children.length > 0 && children.every((child) => /run-.*-mcp\.js/i.test(String(child?.CommandLine ?? child?.commandLine ?? child?.argv ?? '')));
+}
+function waitForGone(deps, target, timeout) {
+  const result = call(deps, ['agent', 'wait', target.target, '--until', 'done', '--timeout', String(timeout)]);
+  const missing = /agent_not_found/i.test(`${result.stdout}\n${result.stderr}`);
+  if (missing || (result.code === 0 && agentState(result.stdout) === 'done')) return { state: 'gone', target: target.target };
+  if (result.code !== 0 && /timeout/i.test(`${result.stdout}\n${result.stderr}`)) return { state: 'timeout', target: target.target };
+  if (result.code !== 0) throw new SessionError(EXIT.error, `herdr agent wait failed: ${(result.stderr || result.stdout).trim()}`);
+  return { state: agentState(result.stdout) ?? 'unknown', target: target.target };
+}
+function requireGone(watched) {
+  if (watched.state === 'gone') return watched;
+  if (watched.state === 'timeout') throw new SessionError(EXIT.timeout, `watch timed out for ${watched.target}`);
+  throw new SessionError(EXIT.blocked, `target is not gone: ${watched.target}`);
+}
+async function waitForClose(deps, target, timeout, dialogAfter) {
+  if (target.goneAgent) return { state: 'gone', target: target.target, dialogAnswered: false };
+  const deadline = deps.now() + timeout;
+  do {
+    const remaining = Math.max(1, deadline - deps.now());
+    const waited = waitForGone(deps, target, Math.min(dialogAfter, remaining));
+    if (waited.state === 'gone') return { ...waited, dialogAnswered: false };
+    const paneText = callOrFail(deps, ['pane', 'read', target.pane, '--source', 'recent-unwrapped', '--lines', '40']);
+    if (!exitDialog(paneText)) {
+      if (waited.state !== 'timeout') return { ...requireGone(waited), dialogAnswered: false };
+      if (deps.now() < deadline) continue;
+      return { ...requireGone(waited), dialogAnswered: false };
+    }
+    const process = callOrFail(deps, ['pane', 'process-info', '--pane', target.pane]);
+    const listed = childProcesses(deps, processPid(process));
+    if (listed.error || listed.children.length === 0) throw new SessionError(EXIT.blocked, `Claude exit dialog children could not be listed for ${target.pane}`, { dialog: 'children-unknown', childrenError: listed.error ?? 'PowerShell returned no child processes' });
+    if (!onlyMcpChildren(listed.children)) {
+      const argv = listed.children.map((child) => child?.CommandLine ?? child?.commandLine ?? child?.argv ?? null);
+      throw new SessionError(EXIT.blocked, `Claude exit dialog has a live background process in ${target.pane}`, { dialog: 'background-process-live', argv });
+    }
+    callOrFail(deps, ['pane', 'send-keys', target.pane, 'enter']);
+    const afterAnswer = Math.max(1, deadline - deps.now());
+    return { ...requireGone(waitForGone(deps, target, afterAnswer)), dialogAnswered: true };
+  } while (deps.now() < deadline);
+  throw new SessionError(EXIT.timeout, `watch timed out for ${target.target}`);
+}
+
+async function closeTarget(deps, target, timeout, dialogAfter) {
+  const watched = target.goneAgent
+    ? { state: 'gone', target: target.target, dialogAnswered: false }
+    : await waitForClose(deps, target, timeout, dialogAfter);
   const deadline = deps.now() + timeout;
   do {
     const info = callOrFail(deps, ['pane', 'process-info', '--pane', target.pane]);
@@ -333,11 +432,13 @@ async function retire(opts, deps, state) {
   const target = await resolveTarget(opts, state, opts.positional[0], deps);
   if (self && opts.mode !== 'exit') usage('retire self only supports --mode exit');
   const timeout = positive(opts.timeout, '--timeout', 60_000);
+  const dialogAfter = positive(opts.dialogAfterMs, '--dialog-after-ms', 15_000);
   if (self) return { self, target, timeout };
   let resumeId = null; let closed = false;
   if (opts.mode === 'exit' || opts.mode === 'exit+close') callOrFail(deps, ['agent', 'prompt', target.target, '/exit']);
-  if (opts.mode === 'close' || opts.mode === 'exit+close') ({ resumeId, closed } = await closeTarget(deps, target, timeout));
-  return { target: target.target, mode: opts.mode, resumeId, closed, finalMessagePath: null };
+  let dialogAnswered = false;
+  if (opts.mode === 'close' || opts.mode === 'exit+close') ({ resumeId, closed, dialogAnswered } = await closeTarget(deps, target, timeout, dialogAfter));
+  return { target: target.target, mode: opts.mode, resumeId, closed, dialogAnswered, resolvedFrom: target.resolvedFrom ?? null, finalMessagePath: finalMessagePath(deps, state, target) };
 }
 
 async function chain(opts, deps, state) {
