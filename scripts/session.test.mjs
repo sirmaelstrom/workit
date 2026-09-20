@@ -247,7 +247,7 @@ test('R1: retire refuses the exit dialog when a non-MCP background child remains
 });
 
 test('R1: prose containing Background is not the exit dialog', async (t) => {
-  const f = fixture(t);
+  const f = fixture(t); let now = 0;
   writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8');
   f.handler = (program, args) => {
     const key = `${args[0]} ${args[1]}`;
@@ -257,7 +257,7 @@ test('R1: prose containing Background is not the exit dialog', async (t) => {
     if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'claude.exe', pid: 44 })]), stderr: '' };
     return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
   };
-  const result = await runSession(['retire', 'old', '--mode', 'close', '--log', f.log], { exec: f.exec });
+  const result = await runSession(['retire', 'old', '--mode', 'close', '--timeout', '60000', '--dialog-after-ms', '15000', '--log', f.log], { exec: f.exec, now: () => (now += 15_000) });
   assert.equal(result.exit, 4); assert.equal(callsFor(f, 'pane').some((call) => call.args[1] === 'send-keys'), false);
 });
 
@@ -269,7 +269,7 @@ test('R2: an unrecorded, ownerless pane closes from Herdr resolution', async (t)
     if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents: [] }), stderr: '' };
     return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
   };
-  const result = await runSession(['retire', 'pane:raw', '--mode', 'close', '--log', f.log], { exec: f.exec });
+  const result = await runSession(['retire', 'wF:p13', '--mode', 'close', '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 0); assert.equal(result.output.resolvedFrom, 'herdr'); assert.equal(result.output.closed, true); assert.equal(row(f).resolvedFrom, 'herdr');
   assert.equal(callsFor(f, 'pane').filter((call) => call.args[1] === 'close').length, 1);
 });
@@ -279,7 +279,7 @@ test('R2: a missing raw pane reports pane_not_found', async (t) => {
   f.handler = (_program, args) => `${args[0]} ${args[1]}` === 'pane get'
     ? { code: 1, stdout: '', stderr: 'pane_not_found' }
     : { code: 0, stdout: herdrShapes.empty('fixture'), stderr: '' };
-  const result = await runSession(['retire', 'pane:missing', '--mode', 'close', '--log', f.log], { exec: f.exec });
+  const result = await runSession(['retire', 'wZ:p9', '--mode', 'close', '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 2); assert.match(result.output.error, /pane_not_found/);
 });
 
@@ -290,6 +290,37 @@ test('R3: retire reports the final message file captured for its session', async
   f.handler = successHerdr({ processes: [herdrShapes.process({ name: 'pwsh.exe' })] });
   const result = await runSession(['retire', 'old', '--mode', 'close', '--log', f.log], { exec: f.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: root }) });
   assert.equal(result.exit, 0); assert.equal(result.output.finalMessagePath, final);
+});
+
+test('F2: plain no-dialog timeout windows keep waiting until the full close deadline', async (t) => {
+  const f = fixture(t); let waits = 0; let now = 0;
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8');
+  f.handler = (_program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'agent wait') return waits++ < 2 ? { code: 1, stdout: '', stderr: 'timeout' } : { code: 1, stdout: '', stderr: 'agent_not_found' };
+    if (key === 'pane read') return { code: 0, stdout: 'ordinary final transcript; no exit dialog', stderr: '' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'pwsh.exe' })]), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const result = await runSession(['retire', 'old', '--mode', 'close', '--timeout', '60000', '--dialog-after-ms', '1000', '--log', f.log], { exec: f.exec, now: () => (now += 1000) });
+  assert.equal(result.exit, 0); assert.equal(result.output.dialogAnswered, false); assert.equal(waits, 3);
+  assert.equal(callsFor(f, 'pane').some((call) => call.args[1] === 'send-keys'), false);
+});
+
+test('F3: a failed child listing is reported as unknown, not a live background process', async (t) => {
+  const f = fixture(t);
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8');
+  f.handler = (program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (program === 'powershell.exe') return { code: 1, stdout: '', stderr: 'Access denied' };
+    if (key === 'agent wait') return { code: 1, stdout: '', stderr: 'timeout' };
+    if (key === 'pane read') return { code: 0, stdout: rotation4ExitDialog, stderr: '' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'claude.exe', pid: 45 })]), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const result = await runSession(['retire', 'old', '--mode', 'close', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 4); assert.equal(result.output.dialog, 'children-unknown'); assert.equal(result.output.childrenError, 'Access denied');
+  assert.equal(callsFor(f, 'pane').some((call) => call.args[1] === 'send-keys'), false);
 });
 
 test('S10: the Stop capture is marker-gated', async (t) => {
