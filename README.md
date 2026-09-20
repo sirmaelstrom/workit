@@ -40,13 +40,15 @@ Grouped by what they're for:
 | `pickup` | Resume the current project's top roadmap quest from the Spine — resume note + cartridge artifacts, claim the quest on the board, then continue. |
 | `commit-msg` | Commit via a file (`git commit -F`) so shell-active content — backticks, links, quotes — lands verbatim instead of breaking under HEREDOC parsing. |
 | `codex-delegate` | Route token-hungry grunt work (repo audits, large-doc extraction, broad scans) to `codex exec` with a self-contained prompt and a distilled-only handback, keeping bulk tokens out of the conductor's context. |
+| `session-chain` | Rotate a long-running Claude session into a fresh one without a hand-built pane split: `scripts/session.mjs` spawns a successor in a herdr pane, briefs it from a handoff file, waits for it to be ready, then retires the caller — and `retire --mode close` answers Claude Code's "background work is running" exit dialog itself once it has proven every child process is an MCP server. Every step lands as a JSONL sidecar row the successor cites in its first receipt. |
 | `wizard` | Generate an interactive bash wizard that walks a human through steps only they can perform — opens each URL, captures values, writes `.env`/GitHub secrets, confirms every stage. Ported from [Matt Pocock's wizard](https://github.com/mattpocock/skills/tree/main/skills/engineering/wizard); library Windows-verified under Git Bash. |
 
 ### Review & repair
 | Skill | What it does |
 |-------|--------------|
 | `review` | Adaptive multi-reviewer pipeline over a PR, branch, working tree, file, or plan. |
-| `slim-review` | The light tier: one external reviewer at a PR boundary, posted as line-anchored GitHub review comments, then confirmed or refuted thread by thread. Cheap enough to run on every PR. |
+| `slim-review` | The light tier: two external reviewers at a PR boundary, findings posted as line-anchored GitHub review comments, then confirmed or refuted thread by thread. No synthesis pass — cheap enough to run on every PR. |
+| `babysit` | Converge a PR's paired review under bounds: claim the head, judge each finding, fix, push, repeat until a clean pass with threads resolved and CI green — or exit blocked naming what is owed. Never merges. |
 | `improve-architecture` | Find code smells and make a codebase more agent-friendly and testable. |
 | `diagnose` | Force environmental / process / config / code-path hypotheses into an explicit verification flow before editing. |
 | `blast-radius` | Pre-ship impact analysis: find what a change breaks beyond the diff, then prove the one fact it's safe because of by running real code — anything below that rung is marked unproven. Ported from [pstack's blast-radius](https://github.com/cursor/plugins/tree/main/pstack/skills/blast-radius). |
@@ -86,6 +88,7 @@ This is a personal plugin, so a few skills assume my environment:
 - **`skills.db`.** `audit-skills` and `eval-loop` read/write a local SQLite inventory seeded by `scripts/init-skills-db.mjs` (uses Node's native `node:sqlite`, so Node 24+). The DB is git-ignored.
 - **Optional integrations.** `eval-loop`'s automation scripts can post to a Discord webhook (`DISCORD_WEBHOOK_URL`) and mirror results to a ledger endpoint (`LEDGER_URL`). Both are off unless you set those env vars.
 - **External CLIs on `PATH`.** The automation skills shell out to other tools: `parallel-explore`, `eval-loop`, and `audit-skills` invoke the [`claude`](https://docs.claude.com/en/docs/claude-code) CLI, and `eval-loop`'s nightly automation optionally calls `bws` (the Bitwarden Secrets CLI) to resolve `DISCORD_WEBHOOK_SECRET`. The specification, review, and markdown skills work without either.
+- **herdr.** `session-chain` (`scripts/session.mjs`) and `codex-delegate`'s lane runner (`scripts/lane.mjs`) drive the `herdr` terminal multiplexer for agent panes — spawning, briefing, watching, and retiring sessions through its CLI. Without herdr on `PATH` those two scripts have nothing to drive; every other skill is unaffected. The Stop hook that captures a retiring session's final message ships as `scripts/session-stop-capture.mjs`, but registering it is your own Claude Code hook configuration, not the plugin's. Binding behavior: [`reference/patterns/session-chain.md`](./reference/patterns/session-chain.md).
 - **Other env knobs (all optional).** Beyond the two above, the `eval-loop` scripts read `DISCORD_WEBHOOK_SECRET`, `LEDGER_USER_ID`, `EVAL_PLUGINS`, `EVAL_TZ`, `EVAL_PROJECT_ROOT`, `EVAL_SKILL_FILE`, and `EVAL_SUITE_FILE` — knobs for the nightly automation, none required for interactive use.
 
 ## License
