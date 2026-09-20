@@ -229,7 +229,7 @@ function agentOwningPane(raw, pane) {
       return null;
     }
     if (!value || typeof value !== 'object') return null;
-    const paneId = value.pane_id ?? value.paneId ?? value.pane?.id ?? value.pane?.pane_id;
+    const paneId = value.pane_id ?? value.paneId ?? (typeof value.pane === 'string' ? value.pane : value.pane?.id ?? value.pane?.pane_id);
     if (paneId === pane) {
       const name = value.name ?? value.agent_name ?? value.agentName ?? value.id;
       return typeof name === 'string' ? name : null;
@@ -357,7 +357,7 @@ function childProcesses(deps, pid) {
   return { children: Array.isArray(value) ? value : [value], error: null };
 }
 function onlyMcpChildren(children) {
-  return Array.isArray(children) && children.every((child) => /run-.*-mcp\.js/i.test(String(child?.CommandLine ?? child?.commandLine ?? child?.argv ?? '')));
+  return Array.isArray(children) && children.length > 0 && children.every((child) => /run-.*-mcp\.js/i.test(String(child?.CommandLine ?? child?.commandLine ?? child?.argv ?? '')));
 }
 function waitForGone(deps, target, timeout) {
   const result = call(deps, ['agent', 'wait', target.target, '--until', 'done', '--timeout', String(timeout)]);
@@ -387,10 +387,10 @@ async function waitForClose(deps, target, timeout, dialogAfter) {
     }
     const process = callOrFail(deps, ['pane', 'process-info', '--pane', target.pane]);
     const listed = childProcesses(deps, processPid(process));
-    if (listed.error) throw new SessionError(EXIT.timeout, `Claude exit dialog children could not be listed for ${target.pane}`, { dialog: 'children-unknown', childrenError: listed.error });
+    if (listed.error || listed.children.length === 0) throw new SessionError(EXIT.blocked, `Claude exit dialog children could not be listed for ${target.pane}`, { dialog: 'children-unknown', childrenError: listed.error ?? 'PowerShell returned no child processes' });
     if (!onlyMcpChildren(listed.children)) {
       const argv = listed.children.map((child) => child?.CommandLine ?? child?.commandLine ?? child?.argv ?? null);
-      throw new SessionError(EXIT.timeout, `Claude exit dialog has a live background process in ${target.pane}`, { dialog: 'background-process-live', argv });
+      throw new SessionError(EXIT.blocked, `Claude exit dialog has a live background process in ${target.pane}`, { dialog: 'background-process-live', argv });
     }
     callOrFail(deps, ['pane', 'send-keys', target.pane, 'enter']);
     const afterAnswer = Math.max(1, deadline - deps.now());
@@ -400,11 +400,9 @@ async function waitForClose(deps, target, timeout, dialogAfter) {
 }
 
 async function closeTarget(deps, target, timeout, dialogAfter) {
-  if (target.goneAgent) {
-    callOrFail(deps, ['pane', 'close', target.pane]);
-    return { state: 'gone', target: target.target, resumeId: null, closed: true, dialogAnswered: false };
-  }
-  const watched = await waitForClose(deps, target, timeout, dialogAfter);
+  const watched = target.goneAgent
+    ? { state: 'gone', target: target.target, dialogAnswered: false }
+    : await waitForClose(deps, target, timeout, dialogAfter);
   const deadline = deps.now() + timeout;
   do {
     const info = callOrFail(deps, ['pane', 'process-info', '--pane', target.pane]);

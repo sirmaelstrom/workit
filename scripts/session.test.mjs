@@ -242,7 +242,7 @@ test('R1: retire refuses the exit dialog when a non-MCP background child remains
     return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
   };
   const result = await runSession(['retire', 'old', '--mode', 'close', '--log', f.log], { exec: f.exec });
-  assert.equal(result.exit, 4); assert.equal(result.output.dialog, 'background-process-live'); assert.deepEqual(result.output.argv, ['node scripts/lane.mjs wait caller']);
+  assert.equal(result.exit, 3); assert.equal(result.output.dialog, 'background-process-live'); assert.deepEqual(result.output.argv, ['node scripts/lane.mjs wait caller']);
   assert.equal(callsFor(f, 'pane').some((call) => call.args[1] === 'send-keys'), false);
 });
 
@@ -267,10 +267,12 @@ test('R2: an unrecorded, ownerless pane closes from Herdr resolution', async (t)
     const key = `${args[0]} ${args[1]}`;
     if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(), stderr: '' };
     if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents: [] }), stderr: '' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'pwsh.exe' })]), stderr: '' };
+    if (key === 'pane read') return { code: 0, stdout: 'Resume this session with:\nclaude --resume 44444444-4444-4444-8444-444444444444', stderr: '' };
     return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
   };
   const result = await runSession(['retire', 'wF:p13', '--mode', 'close', '--log', f.log], { exec: f.exec });
-  assert.equal(result.exit, 0); assert.equal(result.output.resolvedFrom, 'herdr'); assert.equal(result.output.closed, true); assert.equal(row(f).resolvedFrom, 'herdr');
+  assert.equal(result.exit, 0); assert.equal(result.output.resolvedFrom, 'herdr'); assert.equal(result.output.resumeId, '44444444-4444-4444-8444-444444444444'); assert.equal(result.output.closed, true); assert.equal(row(f).resolvedFrom, 'herdr');
   assert.equal(callsFor(f, 'pane').filter((call) => call.args[1] === 'close').length, 1);
 });
 
@@ -319,8 +321,53 @@ test('F3: a failed child listing is reported as unknown, not a live background p
     return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
   };
   const result = await runSession(['retire', 'old', '--mode', 'close', '--log', f.log], { exec: f.exec });
-  assert.equal(result.exit, 4); assert.equal(result.output.dialog, 'children-unknown'); assert.equal(result.output.childrenError, 'Access denied');
+  assert.equal(result.exit, 3); assert.equal(result.output.dialog, 'children-unknown'); assert.equal(result.output.childrenError, 'Access denied');
   assert.equal(callsFor(f, 'pane').some((call) => call.args[1] === 'send-keys'), false);
+});
+
+test('P1: an ownerless raw pane with live Claude still fails the close guard', async (t) => {
+  const f = fixture(t); let now = 0;
+  f.handler = (_program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(), stderr: '' };
+    if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents: [] }), stderr: '' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'claude.exe' })]), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const result = await runSession(['retire', 'wF:p13', '--mode', 'close', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => (now += 2), sleep: async () => {} });
+  assert.equal(result.exit, 3); assert.equal(callsFor(f, 'pane').some((call) => call.args[1] === 'close'), false);
+});
+
+test('P1: a string pane field resolves an agent owner instead of treating it as gone', async (t) => {
+  const f = fixture(t);
+  f.handler = (_program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(), stderr: '' };
+    if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents: [{ name: 'caller', pane: 'wF:p13' }] }), stderr: '' };
+    if (key === 'agent wait') return { code: 1, stdout: '', stderr: 'agent_not_found' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'pwsh.exe' })]), stderr: '' };
+    if (key === 'pane read') return { code: 0, stdout: 'banner absent', stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const result = await runSession(['retire', 'wF:p13', '--mode', 'close', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 0); assert.equal(result.output.target, 'caller'); assert.equal(result.output.resolvedFrom, 'herdr');
+  assert.equal(f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'wait').args[2], 'caller');
+});
+
+test('P2: a blank child listing is unknown and never sends Enter', async (t) => {
+  const f = fixture(t);
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8');
+  f.handler = (program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (program === 'powershell.exe') return { code: 0, stdout: '', stderr: '' };
+    if (key === 'agent wait') return { code: 1, stdout: '', stderr: 'timeout' };
+    if (key === 'pane read') return { code: 0, stdout: rotation4ExitDialog, stderr: '' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'claude.exe', pid: 46 })]), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const result = await runSession(['retire', 'old', '--mode', 'close', '--log', f.log], { exec: f.exec });
+  assert.equal(callsFor(f, 'pane').some((call) => call.args[1] === 'send-keys'), false);
+  assert.equal(result.exit, 3); assert.equal(result.output.dialog, 'children-unknown');
 });
 
 test('S10: the Stop capture is marker-gated', async (t) => {
