@@ -41,4 +41,9 @@ needs_input.
 
 `chain` / `retire self` must be your LAST tool call — make no tool call after it; write your final message and stop.
 
+When `retire --mode close` reaches Claude Code's "Background work is running" exit dialog, it waits
+`--dialog-after-ms` (15,000 by default), proves every direct child of claude.exe is a `run-*-mcp.js`
+server, and answers Enter itself. A live non-MCP child is never approved: it returns
+`dialog: "background-process-live"` with its argv so a person can decide.
+
 Fork mode and Stop-hook ordering are unit-tested, not yet live-proven. The hook is shipped as `${CLAUDE_PLUGIN_ROOT}/scripts/session-stop-capture.mjs`, but its registration belongs to the private operator configuration.
