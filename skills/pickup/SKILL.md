@@ -124,7 +124,14 @@ pre-validated at submit — an unresolvable artifact rejects the whole receipt w
 a per-artifact fix hint and nothing is persisted, so fix and resubmit rather than
 dropping the needle. Stopped because you are blocked rather than done? Use
 `outcome: "needs_input"` with the exact blocking question — the quest then
-surfaces blocked-waiting instead of looking abandoned.
+surfaces blocked-waiting instead of looking abandoned. When the question is a
+CHOICE, pass `ask.options` too — one entry per choice with a letter key
+(`a`..`f`), a short label, and a ONE-LINE consequence, plus `allowFreeText`
+when a typed answer is also acceptable; the Dogan's WAITING card renders those
+as buttons the operator presses with no agent running, and the press writes an
+`answered` receipt that supersedes the ask (quest 9a1ce903). On re-entry, the
+go is read from `spine_quest`'s `latestReceipt.answer` (`key` / `text`), never
+assumed from the quest having returned to the frontier.
 
 Work-state and attention are orthogonal: `dismissed` is not `done`, and a quest
 you finished is not closed until `workState` says so.
