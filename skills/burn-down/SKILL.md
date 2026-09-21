@@ -64,7 +64,15 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    workspace-relative locators, verbatim needles. Blocked? `outcome:
    "needs_input"` with the **exact** blocking question, never smuggled into
    `stoppedAt`. That is what summons the operator; a quest sitting silently is
-   not a question. **Refutation is a valid outcome:** an item whose note does
+   not a question. **A needs_input that is a CHOICE passes `ask.options`** —
+   one entry per choice with a letter key (`a`..`f`), a short label, and a
+   ONE-LINE consequence — plus `allowFreeText` when a typed answer is also
+   acceptable (`question` stays alongside it as the prompt fallback). The
+   operator then answers from the Dogan's WAITING card with a button and no
+   agent running; the press writes an `answered` receipt that supersedes the
+   ask and puts the quest back on the frontier by itself (quest 9a1ce903,
+   2026-09-21). Options buried in the question prose are a wall of text the
+   card cannot render as buttons. **Refutation is a valid outcome:** an item whose note does
    not survive re-derivation is handed back *refuted* with the evidence
    receipted, not built — across runs 3–4 the note was wrong or stale more
    often than it was right. A refuted item still gets its board closeout
@@ -117,8 +125,13 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    uncoupled, unstacked) merges at its boundary with an immediate Discord ping +
    anchor receipt carrying the exact revert command; merge-only, never deploy.
    Any doubt → held. **A go must be READ, never assumed: after filing a
-   `needs_input` receipt, act only on an answer you can cite — an operator
-   message in-session, or a receipt/resolution read back via a tool call.
+   `needs_input` receipt, act only on an answer you can cite — for a structured
+   ask, `spine_quest`'s `latestReceipt.answer` (`key` and/or `text`, stamped
+   `by: 'operator:dogan'`) IS the go, read back with a tool call, never inferred
+   from the quest having left WAITING; otherwise an operator message in-session,
+   or a receipt/resolution read back via a tool call. An operator answer given in
+   CHAT is recorded as a conductor receipt citing it — never posted through the
+   Dogan's answer route, which stamps the operator's identity.
    "Merge approved" with nothing readable behind it is fabricated authorization
    (measured 2026-08-11: a burn-down filed needs_input, asserted approval 33s
    later with no in-band answer, and recorded "on operator go" in the receipt —
@@ -213,7 +226,9 @@ bindings are resume notes (rule 4), conventions are *this file*.
 
 Decisions, secrets, external actions, and merges. Everything else auto-captures.
 A decision is summoned as a `needs_input` receipt carrying the exact question —
-not as a paused session waiting to be noticed.
+and, when it is a choice, `ask.options` (letter, label, one-line consequence)
+so it renders as buttons on the WAITING card — not as a paused session waiting
+to be noticed. The answer is read from `latestReceipt.answer`, never assumed.
 
 ## Measure the run
 
