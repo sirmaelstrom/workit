@@ -2769,6 +2769,10 @@ export function parseArgs(argv) {
 }
 
 function main(argv) {
+  if (argv.length === 1 && (argv[0] === '-h' || argv[0] === '--help')) {
+    console.log(USAGE);
+    return;
+  }
   const opts = parseArgs(argv);
   if (opts.help || !opts.cmd) {
     console.log(USAGE);

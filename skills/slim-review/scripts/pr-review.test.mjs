@@ -1429,6 +1429,13 @@ function runCli(args) {
   }
 }
 
+test('bare --help prints usage without requiring a PR', () => {
+  const r = runCli(['--help']);
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /pr-review\.mjs — mechanical half of the slim PR-review loop/);
+  assert.equal(r.stderr, '');
+});
+
 test('a missing findings file exits 3 — "did not run", never a clean review', () => {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-'));
   try {
