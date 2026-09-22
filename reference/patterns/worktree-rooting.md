@@ -95,6 +95,14 @@ Then spawn a plain agent pointed at the absolute worktree path — with the STEP
 
 Do **not** reintroduce a `WorktreeCreate` hook: that hook *replaces* worktree creation and kills every harness isolation spawn. Policy stands: no hook; orchestrators create worktrees explicitly.
 
+**The tool that brings the hook back: worktrunk's Claude Code plugin.** `wt config plugins claude install` installs three hooks:
+- a `WorktreeCreate` hook and a `WorktreeRemove` hook, which route harness `isolation: "worktree"` through `wt switch --create`;
+- a `PermissionRequest` hook that auto-approves a session entering a worktree of its own repo at worktrunk's worktree path.
+
+Installing it for the `wt list` dashboard silently re-enables the mechanism this section rules out. Routing through `wt` does not fix the underlying defect either: harness isolation creates the worktree from the *session's* repo, which is wrong for a sibling target (see Resolution above). The `PermissionRequest` hook also removes a confirmation gate. Keep the plugin uninstalled.
+
+The dashboard's activity markers (🤖 / 💬 in `wt list`) are only `git config worktrunk.state.<branch>.marker`. A lane helper can set and clear that key at start and stop in three lines, with no plugin and no hand-over of worktree lifecycle.
+
 ## STEP-0: Assert Identity Before Any Edit
 
 The first action in any repo-targeted workspace — before the first edit, in every spawned-agent prompt:
