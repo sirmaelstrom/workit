@@ -223,14 +223,19 @@ export function countChangedFiles(diffText) {
 // ---------------------------------------------------------------------------
 
 const SEVERITIES = new Set(['P1', 'P2', 'P3']);
-// Lens → model + default effort. `codex` (Terra) and `astra` both ride the
-// codex-cli harness; `opus` rides `claude -p`. Astra joined 2026-09-09 as the
-// default PAIR partner (operator ruling, quest bcc11983): on observatory#620
-// Terra@high and Astra@low each found a real defect the other missed, neither
-// produced a false finding, and Astra was better calibrated on severity at half
-// the input — so the loop runs both and posts the union.
+// Lens → model + default effort. `codex` and `astra` both ride the codex-cli
+// harness; `opus` rides `claude -p`. Astra joined 2026-09-09 as the default
+// PAIR partner (operator ruling, quest bcc11983): on observatory#620 Terra@high
+// and Astra@low each found a real defect the other missed, neither produced a
+// false finding, and Astra was better calibrated on severity at half the input
+// — so the loop runs both and posts the union. The `codex` lens moved from
+// GPT-5.6 Terra to GPT-6 Sol on 2026-09-23 (operator ruling, quest 458d87c9):
+// replayed on the same #620 prompt, Sol@high found all three known defects
+// with no false finding, the only arm of the three to do so. The lens NAME
+// stays `codex` — it is the seat, and posted reviews and the measurement log
+// key on it.
 const LENS_MODELS = {
-  codex: { model: 'gpt-5.6-terra', reasoning: 'high' },
+  codex: { model: 'gpt-6-sol', reasoning: 'high' },
   astra: { model: 'gpt-6-astra', reasoning: 'low' },
   opus: { model: 'opus', reasoning: 'low' },
 };
@@ -2660,7 +2665,7 @@ Common:
   --cwd    directory to run gh from (default: process cwd)
 
 Lens safety:
-  --lens         codex (Terra), astra (GPT-6 Astra), or opus; run one lens per
+  --lens         codex (GPT-6 Sol), astra (GPT-6 Astra), or opus; run one lens per
                  invocation, never the PR authoring model — the default loop
                  runs codex AND astra and posts both handbacks
   --reasoning    defaults to high for codex, low for astra and opus

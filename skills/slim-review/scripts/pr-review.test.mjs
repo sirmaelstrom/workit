@@ -1078,13 +1078,13 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), codex
 
 class DieSentinel extends Error {}
 
-test('lens codex reads its -o findings file, builds the Terra argv, and sends every authoritative path on stdin', () => {
+test('lens codex reads its -o findings file, builds the GPT-6 Sol argv, and sends every authoritative path on stdin', () => {
   const fromFile = JSON.stringify({ ...VALID, summary: 'read from codex -o file' });
   const { calls, deaths, out } = runLensWithFake({ codexOutput: fromFile });
   assert.deepEqual(deaths, []);
   const call = calls.find(({ args }) => args[0] === 'exec');
   assert.ok(call);
-  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-5.6-terra');
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6-sol');
   assert.ok(call.args.includes('model_reasoning_effort=high'));
   assert.ok(call.args.includes('--sandbox'));
   assert.ok(call.args.includes('danger-full-access'));
@@ -1269,7 +1269,7 @@ test('lens stamps document/findings and appends one per-lens measurement row', (
   const { deaths, out, rows } = runLensWithFake({ result: JSON.stringify({ ...VALID, findings: [finding({ severity: 'P2' })] }) });
   assert.deepEqual(deaths, []);
   assert.equal(out.lens, 'codex');
-  assert.equal(out.model, 'gpt-5.6-terra');
+  assert.equal(out.model, 'gpt-6-sol');
   assert.equal(out.reasoning, 'high');
   assert.equal(out.wall_ms, 25);
   assert.equal(out.findings[0].lens, 'codex');
@@ -1795,14 +1795,14 @@ test('characterisation: standalone lens writes the stamped document and one meas
       ...VALID,
       findings: VALID.findings.map((f) => ({ ...f, lens: 'codex' })),
       lens: 'codex',
-      model: 'gpt-5.6-terra',
+      model: 'gpt-6-sol',
       reasoning: 'high',
       wall_ms: 25,
     });
     const rows = readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].lens, 'codex');
-    assert.equal(rows[0].model, 'gpt-5.6-terra');
+    assert.equal(rows[0].model, 'gpt-6-sol');
     assert.equal(rows[0].coverage, VALID.coverage);
     assertNoOutcomeLine(logs);
   } finally {

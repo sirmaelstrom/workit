@@ -98,7 +98,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      green build. This tier exists so the policy is credible — it is the
      deliberate, named exception to `slim-review`'s every-PR-boundary default.
    - **T1 — `slim-review`.** The default for any code diff (two external
-     lenses at the PR boundary — Terra and Astra, both posted, since 2026-09-09).
+     lenses at the PR boundary, both posted, since 2026-09-09 — GPT-6 Sol and
+     Astra since 2026-09-23; Terra held the first seat before that).
    - **T2 — full council.** Fired when the change **touches a contract or an
      invariant**, or **adds tests that claim to prove something**. T1 asks
      whether the diff is correct; T2 asks whether it was *permitted* — the
