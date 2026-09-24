@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 
 import {
-  EXIT_CODES, PLAN_REFUSAL_PATTERNS, paneAtPrompt, panePromptSignature, runLane, scrapePlanMeter,
+  EXIT_CODES, PLAN_REFUSAL_PATTERNS, codexPromptDelivery, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -49,6 +49,29 @@ function fakeExists(present = () => true) {
 // pane's own prompt signature (A3). Every start-driving fixture therefore opens
 // with a shell read.
 const SHELL_READ = { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' };
+
+// Codex TUI frames, trimmed from a live capture on codex 0.156.1 (2026-09-24,
+// quest 7e1fecf7). A fresh codex prompt reads the pane before sending (loaded?)
+// and after (delivered?).
+const CODEX_HEADER = (model) => [
+  '╭──────────────────────────────────────────────╮',
+  '│ >_ OpenAI Codex (v0.156.1)                   │',
+  `│ model:     ${model}   /model to change │`,
+  '│ directory: X:\\fixture\\lane                 │',
+  '╰──────────────────────────────────────────────╯',
+];
+const CODEX_FOOTER_LINE = '  GPT-6-Sol high · Context 100% left · weekly 26% left · main · X:\\fixture\\lane';
+const CODEX_LOADING_READ = { code: 0, stdout: [...CODEX_HEADER('loading'), '', '› Ask Codex to do anything'].join('\n'), stderr: '' };
+const CODEX_READY_READ = { code: 0, stdout: [...CODEX_HEADER('GPT-6-Sol high'), '', '› Ask Codex to do anything', '', CODEX_FOOTER_LINE].join('\n'), stderr: '' };
+const codexDeliveredRead = (promptFile) => ({
+  code: 0,
+  stdout: [...CODEX_HEADER('GPT-6-Sol high'), '', `› Read ${promptFile} and execute it exactly.`, '', 'Working (0s • esc to interrupt)', '', '› Ask Codex to do anything', '', CODEX_FOOTER_LINE].join('\n'),
+  stderr: '',
+});
+
+function promptCall(f) {
+  return f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'prompt');
+}
 
 function agentStartCall(f) {
   return f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
@@ -136,13 +159,15 @@ test('WP-1: prompt sends only the absolute prompt-file instruction', async (t) =
   seedLane(f);
   f.responses.push(
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    CODEX_READY_READ,
     { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
-    { code: 0, stdout: 'working', stderr: '' },
+    codexDeliveredRead(resolve(prompt)),
   );
   const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 0);
-  assert.deepEqual(f.calls[1].args, ['agent', 'prompt', 'lane-a', `Read ${resolve(prompt)} and execute it exactly.`, '--wait', '--until', 'working']);
-  assert.doesNotMatch(f.calls[1].args.join(' '), /shell-active/);
+  assert.deepEqual(promptCall(f).args, ['agent', 'prompt', 'lane-a', `Read ${resolve(prompt)} and execute it exactly.`, '--wait', '--until', 'working']);
+  assert.doesNotMatch(promptCall(f).args.join(' '), /shell-active/);
+  assert.equal(result.output.delivery, 'delivered');
 });
 
 test('WP-1: prompt refuses a missing file before herdr is invoked', async (t) => {
@@ -1160,6 +1185,7 @@ test('AM7b / U5: a held lock is retried, then released', async (t) => {
   const sleeps = [];
   f.responses.push(
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    CODEX_READY_READ,
     { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
     { code: 0, stdout: 'working', stderr: '' },
   );
@@ -1761,6 +1787,7 @@ test('A2-9 / U10: a stale lock is reclaimed with a warning instead of wedging ev
   let attempts = 0;
   f.responses.push(
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    CODEX_READY_READ,
     { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
     { code: 0, stdout: 'working', stderr: '' },
   );
@@ -2393,6 +2420,7 @@ test('c952d41e DO 5 and 9: working prompts queue directly; a retained composer i
   const composer = `› Read ${resolve(prompt)} and execute it exactly.`;
   g.responses.push(
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    CODEX_READY_READ,
     { code: 1, stdout: '', stderr: '{"error":{"code":"agent_prompt_stalled"}}' },
     { code: 0, stdout: '{}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
@@ -2475,6 +2503,7 @@ test('amend 1 P1 and P4c/P4d: footer composer is retried; banner fires while mod
   const wire = `› Read ${resolve(file)} and execute it exactly.`;
   p.responses.push(
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    CODEX_READY_READ,
     { code: 0, stdout: '{"result":{"accepted":true,"state":"done"}}', stderr: '' },
     { code: 0, stdout: `${wire}\ngpt-5.6-terra high · Context 62% left`, stderr: '' },
     { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"working"}]}}', stderr: '' },
@@ -2588,6 +2617,7 @@ test('amend 2: a prompt error whose text says timeout does not authorize Enter',
   const f = fixture(t); const prompt = join(f.dir, 'prompt.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f);
   f.responses.push(
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    CODEX_READY_READ,
     { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found","message":"timeout mentioned here"}}' },
   );
   const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec });
@@ -2679,4 +2709,134 @@ test('amend 2 P7c: a reclaimed lock survives the original holder release', async
   const reclaimerResult = await reclaimer;
   assert.equal(reclaimerResult.exit, 1);
   assert.equal(lock, null);
+});
+
+// --- quest 7e1fecf7: a codex prompt waits out the TUI's loading window and is
+// read back. W5 (2026-09-22): `prompt` reported accepted/working while a loading
+// Codex TUI dropped the text, and the following `wait` returned `done` at once.
+
+test('7e1fecf7: the loading and delivery classifiers read the captured frame shapes', () => {
+  assert.equal(codexTuiLoading(CODEX_LOADING_READ.stdout), true, 'header still says model: loading');
+  assert.equal(codexTuiLoading([...CODEX_HEADER('GPT-6-Sol high'), '', '› Ask Codex to do anything'].join('\n')), true, 'banner drawn, footer not yet');
+  assert.equal(codexTuiLoading(CODEX_READY_READ.stdout), false);
+  assert.equal(codexTuiLoading('PS X:\\fixture\\lane>'), false, 'not a Codex pane: nothing to wait for');
+
+  const file = 'X:\\fixture\\lanes\\brief.md';
+  assert.equal(codexPromptDelivery(codexDeliveredRead(file).stdout, 'brief.md'), 'delivered');
+  assert.equal(codexPromptDelivery(CODEX_READY_READ.stdout, 'brief.md'), 'missing', 'W5 shape: empty composer, no echo, no working line');
+  const typedOnly = [...CODEX_HEADER('GPT-6-Sol high'), '', `› Read ${file} and execute it exactly.`, '', CODEX_FOOTER_LINE].join('\n');
+  assert.equal(codexPromptDelivery(typedOnly, 'brief.md'), 'missing', 'text sitting in the live composer is not delivered');
+  assert.equal(codexPromptDelivery('working', 'brief.md'), 'unknown', 'a pane that is not a Codex TUI cannot be judged');
+
+  // workit#107 review (astra): a long prompt wraps, so the composer is more than one line.
+  const wrapped = [...CODEX_HEADER('GPT-6-Sol high'), '', `› Read ${file} and execute`, '  it exactly.', '', CODEX_FOOTER_LINE].join('\n');
+  assert.equal(codexPromptDelivery(wrapped, 'brief.md'), 'missing', 'a wrapped, unsubmitted composer is not delivered');
+
+  // workit#107 review (codex + astra): an echo or working line from an EARLIER turn is not proof.
+  const history = [...CODEX_HEADER('GPT-6-Sol high'), '', `› Read ${file} and execute it exactly.`, '', '• Task completed.', '', '› Ask Codex to do anything', '', CODEX_FOOTER_LINE].join('\n');
+  assert.equal(codexPromptDelivery(history, 'brief.md', history), 'missing', 'the same old echo before and after is a dropped re-prompt');
+  const staleWorking = [...CODEX_HEADER('GPT-6-Sol high'), '', 'Working (9s • esc to interrupt)', '', '› Ask Codex to do anything', '', CODEX_FOOTER_LINE].join('\n');
+  assert.equal(codexPromptDelivery(staleWorking, 'other.md', staleWorking), 'missing', 'a working line already on screen is not this submission');
+  const reprompted = history.replace('› Ask Codex to do anything', `› Read ${file} and execute it exactly.\n\nWorking (0s • esc to interrupt)\n\n› Ask Codex to do anything`);
+  assert.equal(codexPromptDelivery(reprompted, 'brief.md', history), 'delivered', 'a NEW echo and working line are');
+
+  // workit#107 review (codex): readiness is positive — an unpainted or shell pane is not ready.
+  assert.equal(codexTuiReady(CODEX_READY_READ.stdout), true);
+  assert.equal(codexTuiReady(''), false);
+  assert.equal(codexTuiReady(SHELL_READ.stdout), false);
+  assert.equal(codexTuiReady(CODEX_LOADING_READ.stdout), false);
+});
+
+test('7e1fecf7: a pane still showing the shell before the first paint is waited out', async (t) => {
+  const f = fixture(t); const prompt = join(f.dir, 'brief.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"idle"}]}}', stderr: '' },
+    SHELL_READ, { code: 0, stdout: '', stderr: '' }, CODEX_READY_READ,
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    codexDeliveredRead(resolve(prompt)),
+  );
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.exit, 0);
+  const promptIndex = f.calls.indexOf(promptCall(f));
+  assert.equal(f.calls.slice(0, promptIndex).filter((call) => call.args[0] === 'pane' && call.args[1] === 'read').length, 3,
+    'mutation control: accepting "not loading" sends on the shell frame');
+});
+
+test('7e1fecf7: a refused re-send is an error, not an unverified success', async (t) => {
+  const f = fixture(t); const prompt = join(f.dir, 'brief.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f); let clock = 0;
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"idle"}]}}', stderr: '' },
+    CODEX_READY_READ,
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    CODEX_READY_READ, CODEX_READY_READ, CODEX_READY_READ,
+    CODEX_READY_READ,
+    { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' },
+    { code: 1, stdout: '', stderr: 'read failed' },
+  );
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec, now: () => (clock += 2_000), sleep: async () => {} });
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /herdr agent prompt failed/);
+});
+
+test('7e1fecf7: a loading codex TUI is waited out before the prompt is sent', async (t) => {
+  const f = fixture(t); const prompt = join(f.dir, 'brief.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f);
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"idle"}]}}', stderr: '' },
+    CODEX_LOADING_READ, CODEX_LOADING_READ, CODEX_READY_READ,
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    codexDeliveredRead(resolve(prompt)),
+  );
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.exit, 0);
+  const promptIndex = f.calls.indexOf(promptCall(f));
+  assert.equal(f.calls.slice(0, promptIndex).filter((call) => call.args[0] === 'pane' && call.args[1] === 'read').length, 3,
+    'mutation control: sending before the header names the model puts the prompt call ahead of the reads');
+  assert.equal(result.output.delivery, 'delivered');
+  assert.equal(result.output.resent, false);
+});
+
+test('7e1fecf7: a prompt the TUI dropped is re-sent once, then read back delivered', async (t) => {
+  const f = fixture(t); const prompt = join(f.dir, 'brief.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f); let clock = 0;
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"idle"}]}}', stderr: '' },
+    CODEX_READY_READ,
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    CODEX_READY_READ, CODEX_READY_READ, CODEX_READY_READ,
+    CODEX_READY_READ,
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    codexDeliveredRead(resolve(prompt)),
+  );
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec, now: () => (clock += 2_000), sleep: async () => {} });
+  assert.equal(result.exit, 0);
+  assert.equal(f.calls.filter((call) => call.args[0] === 'agent' && call.args[1] === 'prompt').length, 2);
+  assert.equal(result.output.resent, true);
+  assert.equal(result.output.delivery, 'delivered');
+});
+
+test('7e1fecf7: a prompt still missing after one re-send is an error, never accepted', async (t) => {
+  const f = fixture(t); const prompt = join(f.dir, 'brief.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f); let clock = 0;
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"idle"}]}}', stderr: '' },
+    CODEX_READY_READ,
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    CODEX_READY_READ, CODEX_READY_READ, CODEX_READY_READ, // read-back: still the empty composer
+    CODEX_READY_READ, // loaded again before the re-send
+    { code: 0, stdout: '{"result":{"accepted":true,"state":"working"}}', stderr: '' },
+    CODEX_READY_READ, CODEX_READY_READ, CODEX_READY_READ, // read-back after the re-send: still missing
+  );
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec, now: () => (clock += 2_000), sleep: async () => {} });
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /prompt not delivered to lane-a/);
+});
+
+test('7e1fecf7: a TUI that never finishes loading refuses to send', async (t) => {
+  const f = fixture(t); const prompt = join(f.dir, 'brief.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f); let clock = 0;
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"idle"}]}}', stderr: '' },
+    ...Array.from({ length: 40 }, () => CODEX_LOADING_READ),
+  );
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec, now: () => (clock += 5_000), sleep: async () => {} });
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /was not ready after/);
+  assert.equal(promptCall(f), undefined, 'nothing is typed into a loading TUI');
 });
