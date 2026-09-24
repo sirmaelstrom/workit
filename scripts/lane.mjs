@@ -549,6 +549,63 @@ function paneIsCodexReady(text, options) {
   return hasExecutable && paneAtPrompt(text, options);
 }
 
+// A Codex TUI still loading its session. Measured on codex 0.156.1 (2026-09-24,
+// quest 7e1fecf7): the composer placeholder is drawn ~0.4 s after launch while the
+// header still reads `model: loading`; the footer appears ~1.4 s in, still loading;
+// the header names the model at ~2.1 s. A prompt sent into that window can be
+// dropped by the redraw — W5 (2026-09-22) saw the banner drawn twice, an empty
+// composer and `Context 100% left`, while herdr reported the agent `working`.
+const CODEX_LOADING = /^│?\s*(?:model|directory):\s+loading\b/i;
+const CODEX_BANNER = /OpenAI Codex \(v/;
+const CODEX_FOOTER = /Context \d+% left/i;
+// Loading took ~2.1 s on a warm box; the budget is for a cold start. The echo
+// appeared ~1.3 s after Enter.
+const CODEX_LOAD_TIMEOUT_MS = 60_000;
+const CODEX_DELIVERY_TIMEOUT_MS = 5_000;
+
+export function codexTuiLoading(text) {
+  const lines = paneLines(text);
+  if (lines.some((line) => CODEX_LOADING.test(line))) return true;
+  return lines.some((line) => CODEX_BANNER.test(line)) && !lines.some((line) => CODEX_FOOTER.test(line));
+}
+
+// Whether a submitted prompt reached the Codex session. After Enter the transcript
+// echoes the prompt ABOVE a `Working (… esc to interrupt)` line and the composer
+// returns to its placeholder (measured, same run). The context meter is no signal:
+// it stays at 100% until the reply completes. The last two lines are the live
+// composer and footer, so a match there is text typed but not submitted.
+// `unknown` = the pane does not look like a Codex TUI at all; the caller must not
+// treat that as a failed delivery.
+export function codexPromptDelivery(text, needle) {
+  const lines = paneLines(text);
+  if (!lines.some((line) => CODEX_BANNER.test(line) || CODEX_FOOTER.test(line) || /Ask Codex/i.test(line))) return 'unknown';
+  if (lines.some((line) => /esc to interrupt/i.test(line))) return 'delivered';
+  return lines.slice(0, -2).some((line) => line.includes(needle)) ? 'delivered' : 'missing';
+}
+
+async function waitForCodexLoaded(deps, pane, timeoutMs) {
+  const deadline = deps.now() + timeoutMs;
+  do {
+    const snapshot = readPane(deps, pane);
+    if (snapshot.code !== 0 || !codexTuiLoading(snapshot.stdout)) return;
+    await deps.sleep(250);
+  } while (deps.now() < deadline);
+  throw new LaneError(EXIT.ERROR, `codex TUI in pane ${pane} was still loading after ${timeoutMs} ms; prompt not sent`);
+}
+
+async function readCodexDelivery(deps, pane, needle, timeoutMs) {
+  const deadline = deps.now() + timeoutMs;
+  let verdict = 'unknown';
+  do {
+    const snapshot = readPane(deps, pane);
+    if (snapshot.code !== 0) return 'unknown';
+    verdict = codexPromptDelivery(snapshot.stdout, needle);
+    if (verdict !== 'missing') return verdict;
+    await deps.sleep(250);
+  } while (deps.now() < deadline);
+  return verdict;
+}
+
 function readPane(deps, pane) {
   return call(deps, 'herdr', ['pane', 'read', pane, '--source', 'detection', '--lines', '40']);
 }
@@ -966,6 +1023,11 @@ async function promptLane(opts, deps, state) {
       composerCleared = true;
     }
   }
+  // A fresh (not queued) prompt to a codex lane waits out the TUI's loading
+  // window first; herdr's own state is no guard here — it read the loading
+  // redraw as `working` (W5, quest 7e1fecf7).
+  const verifyCodex = !queued && lane.kind === 'codex' && Boolean(lane.pane) && opts.verb === 'prompt';
+  if (verifyCodex) await waitForCodexLoaded(deps, lane.pane, CODEX_LOAD_TIMEOUT_MS);
   const promptArgs = ['agent', 'prompt', opts.name, wire, ...(queued ? [] : ['--wait', '--until', 'working'])];
   let sent = call(deps, 'herdr', promptArgs);
   let enterRetries = 0;
@@ -994,12 +1056,27 @@ async function promptLane(opts, deps, state) {
     stateAfter = reread?.state ?? stateAfter;
     if (composerStalled()) throw new LaneError(EXIT.ERROR, `composer not submitted for ${opts.name} after Enter retry`);
   }
+  // Read the pane back: `accepted` from herdr means the text was typed, not that
+  // the session received it. One re-send after the TUI settles; a second miss is
+  // an error, never a silent `accepted: true` on a lane that never started.
+  let delivery = verifyCodex ? await readCodexDelivery(deps, lane.pane, basename(file), CODEX_DELIVERY_TIMEOUT_MS) : 'unverified';
+  let resent = false;
+  if (delivery === 'missing') {
+    await waitForCodexLoaded(deps, lane.pane, CODEX_LOAD_TIMEOUT_MS);
+    sent = call(deps, 'herdr', promptArgs);
+    resent = true;
+    delivery = await readCodexDelivery(deps, lane.pane, basename(file), CODEX_DELIVERY_TIMEOUT_MS);
+    if (delivery === 'missing') {
+      throw new LaneError(EXIT.ERROR, `prompt not delivered to ${opts.name}: no echo of ${basename(file)} and no working line after one re-send`);
+    }
+  }
+  if (delivery === 'unknown') delivery = 'unverified';
   await mergeState(deps, opts.log, state, (draft) => {
     draft.lanes[opts.name] = { ...(draft.lanes[opts.name] ?? lane), promptFile: file };
   });
   return {
-    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, composerCleared, stateAfter },
-    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries, composerCleared },
+    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, composerCleared, stateAfter, delivery, resent },
+    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries, composerCleared, delivery, resent },
   };
 }
 
