@@ -569,37 +569,62 @@ export function codexTuiLoading(text) {
   return lines.some((line) => CODEX_BANNER.test(line)) && !lines.some((line) => CODEX_FOOTER.test(line));
 }
 
-// Whether a submitted prompt reached the Codex session. After Enter the transcript
-// echoes the prompt ABOVE a `Working (… esc to interrupt)` line and the composer
-// returns to its placeholder (measured, same run). The context meter is no signal:
-// it stays at 100% until the reply completes. The last two lines are the live
-// composer and footer, so a match there is text typed but not submitted.
-// `unknown` = the pane does not look like a Codex TUI at all; the caller must not
-// treat that as a failed delivery.
-export function codexPromptDelivery(text, needle) {
-  const lines = paneLines(text);
-  if (!lines.some((line) => CODEX_BANNER.test(line) || CODEX_FOOTER.test(line) || /Ask Codex/i.test(line))) return 'unknown';
-  if (lines.some((line) => /esc to interrupt/i.test(line))) return 'delivered';
-  return lines.slice(0, -2).some((line) => line.includes(needle)) ? 'delivered' : 'missing';
+// POSITIVE readiness: a Codex frame with its footer drawn and nothing loading. "Not
+// loading" is not enough — an empty pane, or the shell prompt before the first paint,
+// is not loading either (workit#107 review, codex).
+export function codexTuiReady(text) {
+  return paneLines(text).some((line) => CODEX_FOOTER.test(line)) && !codexTuiLoading(text);
 }
 
-async function waitForCodexLoaded(deps, pane, timeoutMs) {
+// The live composer starts at the LAST column-zero `›` line; a long prompt wraps, so
+// everything from there down (continuation lines, footer) is composer, not transcript
+// (workit#107 review, astra). Transcript echoes of earlier prompts sit above it.
+function codexTranscript(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) if (lines[i].startsWith('›')) return lines.slice(0, i);
+  return lines;
+}
+
+function codexEvidence(text, needle) {
+  const lines = paneLines(text);
+  return {
+    echoes: codexTranscript(lines).filter((line) => line.includes(needle)).length,
+    working: lines.filter((line) => /esc to interrupt/i.test(line)).length,
+  };
+}
+
+// Whether THIS submission reached the Codex session. After Enter the transcript
+// echoes the prompt above a `Working (… esc to interrupt)` line and the composer
+// returns to its placeholder (measured, same run). The context meter is no signal:
+// it stays at 100% until the reply completes. Evidence is counted against the
+// pre-send frame, so an echo or working line left by an EARLIER turn is not proof
+// (workit#107 review, codex + astra). `unknown` = the pane does not look like a
+// Codex TUI at all; the caller must not treat that as a failed delivery.
+export function codexPromptDelivery(text, needle, before = null) {
+  const lines = paneLines(text);
+  if (!lines.some((line) => CODEX_BANNER.test(line) || CODEX_FOOTER.test(line) || /Ask Codex/i.test(line))) return 'unknown';
+  const now = codexEvidence(text, needle);
+  const then = before === null ? { echoes: 0, working: 0 } : codexEvidence(before, needle);
+  return now.working > then.working || now.echoes > then.echoes ? 'delivered' : 'missing';
+}
+
+// Returns the ready frame: it is the pre-send evidence baseline.
+async function waitForCodexReady(deps, pane, timeoutMs) {
   const deadline = deps.now() + timeoutMs;
   do {
     const snapshot = readPane(deps, pane);
-    if (snapshot.code !== 0 || !codexTuiLoading(snapshot.stdout)) return;
+    if (snapshot.code === 0 && codexTuiReady(snapshot.stdout)) return snapshot.stdout;
     await deps.sleep(250);
   } while (deps.now() < deadline);
-  throw new LaneError(EXIT.ERROR, `codex TUI in pane ${pane} was still loading after ${timeoutMs} ms; prompt not sent`);
+  throw new LaneError(EXIT.ERROR, `codex TUI in pane ${pane} was not ready after ${timeoutMs} ms (still loading, not yet painted, or unreadable); prompt not sent`);
 }
 
-async function readCodexDelivery(deps, pane, needle, timeoutMs) {
+async function readCodexDelivery(deps, pane, needle, before, timeoutMs) {
   const deadline = deps.now() + timeoutMs;
   let verdict = 'unknown';
   do {
     const snapshot = readPane(deps, pane);
     if (snapshot.code !== 0) return 'unknown';
-    verdict = codexPromptDelivery(snapshot.stdout, needle);
+    verdict = codexPromptDelivery(snapshot.stdout, needle, before);
     if (verdict !== 'missing') return verdict;
     await deps.sleep(250);
   } while (deps.now() < deadline);
@@ -1027,15 +1052,18 @@ async function promptLane(opts, deps, state) {
   // window first; herdr's own state is no guard here — it read the loading
   // redraw as `working` (W5, quest 7e1fecf7).
   const verifyCodex = !queued && lane.kind === 'codex' && Boolean(lane.pane) && opts.verb === 'prompt';
-  if (verifyCodex) await waitForCodexLoaded(deps, lane.pane, CODEX_LOAD_TIMEOUT_MS);
+  let readyFrame = verifyCodex ? await waitForCodexReady(deps, lane.pane, CODEX_LOAD_TIMEOUT_MS) : null;
   const promptArgs = ['agent', 'prompt', opts.name, wire, ...(queued ? [] : ['--wait', '--until', 'working'])];
+  const failIfRefused = (result) => {
+    if (result.code !== 0 && !isTimeoutFailure(result)) {
+      const detail = result.stderr.trim() || result.stdout.trim();
+      throw new LaneError(EXIT.ERROR, `herdr agent prompt failed${detail ? `: ${detail}` : ''}`);
+    }
+  };
   let sent = call(deps, 'herdr', promptArgs);
   let enterRetries = 0;
   let stateAfter = queued ? 'working' : responseState(sent.stdout, initial.state ?? 'working');
-  if (sent.code !== 0 && !isTimeoutFailure(sent)) {
-    const detail = sent.stderr.trim() || sent.stdout.trim();
-    throw new LaneError(EXIT.ERROR, `herdr agent prompt failed${detail ? `: ${detail}` : ''}`);
-  }
+  failIfRefused(sent);
   if (sent.code !== 0) {
     call(deps, 'herdr', ['agent', 'send-keys', opts.name, 'enter']);
     enterRetries++;
@@ -1059,13 +1087,16 @@ async function promptLane(opts, deps, state) {
   // Read the pane back: `accepted` from herdr means the text was typed, not that
   // the session received it. One re-send after the TUI settles; a second miss is
   // an error, never a silent `accepted: true` on a lane that never started.
-  let delivery = verifyCodex ? await readCodexDelivery(deps, lane.pane, basename(file), CODEX_DELIVERY_TIMEOUT_MS) : 'unverified';
+  let delivery = verifyCodex ? await readCodexDelivery(deps, lane.pane, basename(file), readyFrame, CODEX_DELIVERY_TIMEOUT_MS) : 'unverified';
   let resent = false;
   if (delivery === 'missing') {
-    await waitForCodexLoaded(deps, lane.pane, CODEX_LOAD_TIMEOUT_MS);
+    readyFrame = await waitForCodexReady(deps, lane.pane, CODEX_LOAD_TIMEOUT_MS);
     sent = call(deps, 'herdr', promptArgs);
     resent = true;
-    delivery = await readCodexDelivery(deps, lane.pane, basename(file), CODEX_DELIVERY_TIMEOUT_MS);
+    // The re-send gets the first send's refusal check (workit#107 review, astra):
+    // a failed re-send must not fall through to `unverified` and exit 0.
+    failIfRefused(sent);
+    delivery = await readCodexDelivery(deps, lane.pane, basename(file), readyFrame, CODEX_DELIVERY_TIMEOUT_MS);
     if (delivery === 'missing') {
       throw new LaneError(EXIT.ERROR, `prompt not delivered to ${opts.name}: no echo of ${basename(file)} and no working line after one re-send`);
     }
