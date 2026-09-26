@@ -3195,6 +3195,26 @@ test('207dbaf1 amend-1 / item 5: letters identify options — stem plus options 
   assert.deepEqual(needs('(a) Is this right? — yes', '#### Needs conductor'), []);
 });
 
+test('78d4dfd9 amend 2: an ask carries at most six options and no letter twice; --expect-report fails on either', async (t) => {
+  const needs = (body) => reportShapeProblems(`## Needs conductor\n\n${body}\n\n${DEBRIEF_NONE.slice(DEBRIEF_NONE.indexOf('## Debrief'))}`);
+  const seven = 'Which base?\n\n(a) A\n(b) B\n(c) C\n(d) D\n(e) E\n(f) F\n(a) G';
+  const sevenProblems = needs(seven);
+  assert.ok(sevenProblems.some((problem) => /line 5: the ask has 7 lettered options; an ask carries at most six/.test(problem)), sevenProblems.join('\n'));
+  assert.ok(sevenProblems.some((problem) => /line 5: the ask repeats option \(a\) 2 times/.test(problem)), sevenProblems.join('\n'));
+  const duplicate = needs('Keep or drop?\n- (a) Keep\n- (b) Drop\n- (b) Drop harder');
+  assert.deepEqual(duplicate, ['## Needs conductor line 4: the ask repeats option (b) 2 times; letters identify options within one ask']);
+  assert.deepEqual(needs('Which base?\n(a) A\n(b) B\n(c) C\n(d) D\n(e) E\n(f) F'), [], 'six options pass');
+  assert.deepEqual(needs('First?\n(a) A\n(b) B\n\nSecond?\n(a) C\n(b) D'), [], 'a stem between two runs starts a new ask');
+  assert.deepEqual(needs('(a) The fork:\n    which one?\n(b) Or neither\n(c) Or both'), [], 'an indented continuation stays inside the ask');
+
+  const f = fixture(t);
+  seedLane(f);
+  const report = reportFile(f, `## Needs conductor\n\n${seven}\n\n${DEBRIEF_NONE.slice(DEBRIEF_NONE.indexOf('## Debrief'))}`);
+  const red = await runLane(['check', 'lane-a', '--expect-report', report, '--log', f.log], { exec: f.exec });
+  assert.equal(red.exit, 5);
+  assert.match(red.output.failedExpectation, /the ask has 7 lettered options/);
+});
+
 test('207dbaf1 amend-1 / item 6: a fence closer carries only whitespace; ```markdown inside a fence is content', () => {
   const quoted = ['## Outcome', '', '```', '```markdown', DEBRIEF_NONE, '```', ''].join('\n');
   assert.ok(reportShapeProblems(quoted).includes('## Debrief is missing'), 'the whole Debrief is quoted code');

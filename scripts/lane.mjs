@@ -54,7 +54,7 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            | --expect-report <path>
            --expect-report and --expect-pr (on the PR body) require ## Debrief with
            both headings, and every question under ## Needs conductor in a lettered
-           ask (a)…(f).
+           ask (a)…(f): at most six options per ask, no letter twice.
   resume   <name> [--timeout <ms>] [--plan-floor <pct>]
            Waits --until idle --until done, never bare; honours --plan-floor.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
@@ -1474,9 +1474,25 @@ function carriesQuestion(line) {
 
 // An ask is a lettered item `(a) …?`, or a question stem whose next non-blank
 // line starts a lettered item. Anything else carrying a `?` is a bare question.
+// The lettered items in one unbroken run are one ask's options: at most six,
+// no letter twice. A line that is neither an item nor indented under one ends
+// the run.
 function askProblems(section, label) {
   const problems = [];
   let itemIndent = null;
+  let run = null;
+  const closeRun = () => {
+    if (!run) return;
+    if (run.letters.length > 6) {
+      problems.push(`${label} line ${run.line}: the ask has ${run.letters.length} lettered options; an ask carries at most six, (a)…(f)`);
+    }
+    const repeated = [...new Set(run.letters.filter((letter, i) => run.letters.indexOf(letter) !== i))];
+    for (const letter of repeated) {
+      const count = run.letters.filter((candidate) => candidate === letter).length;
+      problems.push(`${label} line ${run.line}: the ask repeats option (${letter}) ${count} times; letters identify options within one ask`);
+    }
+    run = null;
+  };
   section.forEach((line, index) => {
     if (!line.text.trim()) return;
     const indent = /^\s*/.exec(line.text)[0].replace(/\t/g, '    ').length;
@@ -1484,6 +1500,8 @@ function askProblems(section, label) {
     if (letter !== null) {
       if (ASK_LETTER.test(letter)) {
         itemIndent = indent;
+        run ??= { line: line.number, letters: [] };
+        run.letters.push(letter);
         return;
       }
       itemIndent = null;
@@ -1493,11 +1511,13 @@ function askProblems(section, label) {
     }
     if (itemIndent !== null && indent > itemIndent) return;
     itemIndent = null;
+    closeRun();
     if (!carriesQuestion(line)) return;
     const next = section.slice(index + 1).find((candidate) => candidate.text.trim());
     if (ASK_LETTER.test(letterOf(next) ?? '')) return;
     problems.push(`${label} line ${line.number} is a question outside a lettered ask (a)…(f): ${line.text.trim()}`);
   });
+  closeRun();
   return problems;
 }
 
