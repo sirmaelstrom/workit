@@ -41,11 +41,19 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Codex has no default MCP startup timeout. Opt in with the timeout/server
            pair; a caller-supplied mcp_servers.<server>.startup_timeout_sec wins.
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
+           [--amendment (--ruling-receipt <uuid> --quest <id> | --no-ruling)]
+           An amendment states whether it acts on an operator ruling. A named
+           receipt must resolve through WORKIT_RECEIPT_RESOLVER to an answered
+           receipt on that quest; with no resolver configured it is refused.
   wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
            Naming any state adds blocked; a bare wait forwards none (herdr's
            default already matches idle|done|blocked).
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
+           | --expect-report <path>
+           --expect-report and --expect-pr (on the PR body) require ## Debrief with
+           both headings, and every question under ## Needs conductor in a lettered
+           ask (a)…(f).
   resume   <name> [--timeout <ms>] [--plan-floor <pct>]
            Waits --until idle --until done, never bare; honours --plan-floor.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
@@ -211,12 +219,13 @@ function parseArgs(argv) {
     throw new LaneError(EXIT.USAGE, `expected one verb: ${[...VERBS].join(', ')}`, { usage: USAGE_TEXT });
   }
   const opts = { verb, positional: [], agentArgs: [] };
-  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode']);
+  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode', '--amendment', '--no-ruling']);
   const repeatableFlags = new Set(['--root', '--until']);
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
-    '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--to', '--log',
+    '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--expect-report', '--to', '--log',
     '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex', '--mcp-startup-timeout', '--mcp-startup-server',
+    '--ruling-receipt', '--quest',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -1020,11 +1029,77 @@ async function startLane(opts, deps, state) {
   }
 }
 
+const RECEIPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const QUEST_REF = /^[0-9a-f-]{6,}$/i;
+
+// The resolver is the operator's, never a default: this repo is public and the
+// receipt store is one operator's database. It is either a JSON argv array, with
+// `{id}` substituted in any element (appended as the last argument if none has
+// it), or a bare program path that gets the id as its one argument. No shell
+// parses it, and the id is a validated uuid before it reaches the argv.
+function resolverArgv(spec, id) {
+  const trimmed = String(spec).trim();
+  if (!trimmed.startsWith('[')) return [trimmed, id];
+  const argv = parseJson(trimmed);
+  if (!Array.isArray(argv) || argv.length === 0 || !argv.every((part) => typeof part === 'string' && part !== '')) {
+    usage('WORKIT_RECEIPT_RESOLVER is neither a program path nor a JSON array of non-empty strings');
+  }
+  const placeholder = argv.some((part) => part.includes('{id}'));
+  const filled = argv.map((part) => part.split('{id}').join(id));
+  return placeholder ? filled : [...filled, id];
+}
+
+// An amendment says, in the command, whether it acts on an operator ruling. A
+// ruling it names must resolve to an `answered` receipt on the named quest; with
+// no resolver there is nothing to resolve against, so the send is refused.
+// Every refusal here happens before the first herdr call.
+function rulingGate(opts, deps) {
+  const named = opts.rulingReceipt !== undefined || opts.quest !== undefined;
+  if (!opts.amendment) {
+    if (named || opts.noRuling) usage('--ruling-receipt, --quest and --no-ruling belong to an amendment prompt; add --amendment');
+    return null;
+  }
+  if (opts.noRuling) {
+    if (named) usage('--no-ruling declares that no operator ruling is acted on; drop --ruling-receipt/--quest or drop --no-ruling');
+    return { ruling: 'none' };
+  }
+  if (opts.rulingReceipt === undefined) usage('prompt --amendment needs --ruling-receipt <uuid> --quest <id>, or --no-ruling');
+  if (opts.quest === undefined) usage('prompt --amendment --ruling-receipt needs --quest <id>');
+  if (!RECEIPT_ID.test(opts.rulingReceipt)) usage(`--ruling-receipt must be a full receipt uuid, got ${JSON.stringify(opts.rulingReceipt)}`);
+  if (!QUEST_REF.test(opts.quest)) usage(`--quest must be a quest uuid or a prefix of at least 6 characters, got ${JSON.stringify(opts.quest)}`);
+  const spec = deps.env.WORKIT_RECEIPT_RESOLVER;
+  if (!spec || !String(spec).trim()) {
+    usage('--ruling-receipt needs WORKIT_RECEIPT_RESOLVER to resolve it; none is configured, so the amendment is refused');
+  }
+  const [program, ...args] = resolverArgv(spec, opts.rulingReceipt.toLowerCase());
+  const resolved = call(deps, program, args);
+  if (resolved.code !== 0) {
+    const detail = resolved.stderr.trim() || resolved.stdout.trim();
+    throw new LaneError(EXIT.ERROR, `receipt resolver failed (exit ${resolved.code})${detail ? `: ${detail}` : ''}; the amendment was not sent`);
+  }
+  const text = resolved.stdout.trim();
+  if (!text || text === 'null') usage(`ruling receipt ${opts.rulingReceipt} was not found by the resolver`);
+  const receipt = parseJson(text);
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
+    throw new LaneError(EXIT.ERROR, `receipt resolver printed something that is not one receipt JSON object: ${text.slice(0, 200)}`);
+  }
+  const id = String(receipt.id ?? '').toLowerCase();
+  const questId = String(receipt.questId ?? receipt.quest_id ?? '').toLowerCase();
+  const outcome = String(receipt.outcome ?? '');
+  if (id !== opts.rulingReceipt.toLowerCase()) usage(`the resolver returned receipt ${id || '<no id>'}, not ${opts.rulingReceipt}`);
+  if (!questId.startsWith(opts.quest.toLowerCase())) {
+    usage(`ruling receipt ${opts.rulingReceipt} belongs to quest ${questId || '<none>'}, not ${opts.quest}`);
+  }
+  if (outcome !== 'answered') usage(`ruling receipt ${opts.rulingReceipt} has outcome ${JSON.stringify(outcome)}, not "answered"`);
+  return { ruling: 'receipt', receipt: id, quest: questId };
+}
+
 async function promptLane(opts, deps, state) {
   required(opts, 'file');
   if (!opts.name) usage('prompt needs <name>');
   const file = resolve(opts.file);
   if (!deps.exists(file)) usage(`prompt file does not exist: ${file}`);
+  const ruling = rulingGate(opts, deps);
   const wire = `Read ${file} and execute it exactly.`;
   const lane = state.lanes[opts.name] ?? {};
   const initial = agentState(deps, opts.name);
@@ -1105,9 +1180,10 @@ async function promptLane(opts, deps, state) {
   await mergeState(deps, opts.log, state, (draft) => {
     draft.lanes[opts.name] = { ...(draft.lanes[opts.name] ?? lane), promptFile: file };
   });
+  const rulingRecord = ruling ? { amendment: true, ruling: ruling.ruling === 'none' ? 'none' : ruling.receipt } : {};
   return {
-    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, composerCleared, stateAfter, delivery, resent },
-    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries, composerCleared, delivery, resent },
+    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, composerCleared, stateAfter, delivery, resent, ...rulingRecord },
+    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries, composerCleared, delivery, resent, ...rulingRecord },
   };
 }
 
@@ -1257,10 +1333,105 @@ function parseFileExpectation(value, lanePath) {
   return { path, needle };
 }
 
+// The lane contract's § Finish headings, verbatim. A report or PR body passes
+// only with `## Debrief` carrying both, each with a body ("None" is a body).
+export const DEBRIEF_HEADINGS = Object.freeze([
+  'Forks I decided that the brief did not settle',
+  'Claims no control measures',
+]);
+// A lettered ask item: `(a)`…`(f)` at the start of the line, after an optional
+// list marker or bold opener.
+const LETTERED_ASK = /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\([a-f]\)/;
+const ENDS_IN_QUESTION = /\?[\s*_`"')\]]*$/;
+
+function markdownHeading(line) {
+  if (line.fenced) return null;
+  const match = /^(#{1,6})\s+(.*?)\s*$/.exec(line.text);
+  return match ? { level: match[1].length, title: match[2] } : null;
+}
+
+// Every line, with fenced-code lines marked so a heading or a question quoted
+// inside a code block is never read as the report's own.
+function markdownLines(text) {
+  let fence = null;
+  return String(text).split(/\r?\n/).map((raw, index) => {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(raw);
+    let fenced = fence !== null;
+    if (marker && (fence === null || (marker[1][0] === fence[0] && marker[1].length >= fence.length))) {
+      fence = fence === null ? marker[1] : null;
+      fenced = true;
+    }
+    return { number: index + 1, text: raw, fenced };
+  });
+}
+
+function sectionEnd(lines, start, level) {
+  for (let i = start + 1; i < lines.length; i++) {
+    const heading = markdownHeading(lines[i]);
+    if (heading && heading.level <= level) return i;
+  }
+  return lines.length;
+}
+
+function unletteredQuestions(section) {
+  const found = [];
+  let itemIndent = null;
+  for (const line of section) {
+    if (!line.text.trim()) continue;
+    const indent = /^\s*/.exec(line.text)[0].replace(/\t/g, '    ').length;
+    if (!line.fenced && LETTERED_ASK.test(line.text.trim())) {
+      itemIndent = indent;
+      continue;
+    }
+    if (itemIndent !== null && indent > itemIndent) continue;
+    itemIndent = null;
+    if (!line.fenced && ENDS_IN_QUESTION.test(line.text.trim())) found.push(line);
+  }
+  return found;
+}
+
+// The report shape the lane contract requires, as a list of what is missing.
+// Empty means the shape holds. A question phrased without `?` is not seen.
+export function reportShapeProblems(text) {
+  const lines = markdownLines(text);
+  const problems = [];
+  const debrief = lines.findIndex((line) => {
+    const heading = markdownHeading(line);
+    return heading?.level === 2 && heading.title === 'Debrief';
+  });
+  if (debrief < 0) {
+    problems.push('## Debrief is missing');
+  } else {
+    const section = lines.slice(debrief + 1, sectionEnd(lines, debrief, 2));
+    for (const title of DEBRIEF_HEADINGS) {
+      const at = section.findIndex((line) => {
+        const heading = markdownHeading(line);
+        return heading?.level === 3 && heading.title === title;
+      });
+      if (at < 0) {
+        problems.push(`## Debrief is missing ### ${title}`);
+        continue;
+      }
+      const body = section.slice(at + 1, sectionEnd(section, at, 3)).filter((line) => line.text.trim());
+      if (body.length === 0) problems.push(`### ${title} has no body (write None if there is nothing to list)`);
+    }
+  }
+  lines.forEach((line, index) => {
+    const heading = markdownHeading(line);
+    if (!heading || heading.level < 2 || heading.level > 4 || !/^Needs conductor\b/i.test(heading.title)) return;
+    for (const ask of unletteredQuestions(lines.slice(index + 1, sectionEnd(lines, index, heading.level)))) {
+      problems.push(`${'#'.repeat(heading.level)} ${heading.title} line ${ask.number} is a question outside a lettered ask (a)…(f): ${ask.text.trim()}`);
+    }
+  });
+  return problems;
+}
+
 async function checkLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
-  const expectations = [opts.expectCommit ? 'commit' : null, opts.expectFile ? 'file' : null, opts.expectPr ? 'pr' : null].filter(Boolean);
-  if (expectations.length !== 1) usage('check needs exactly one of --expect-commit, --expect-file, or --expect-pr');
+  const expectations = [
+    opts.expectCommit ? 'commit' : null, opts.expectFile ? 'file' : null, opts.expectPr ? 'pr' : null, opts.expectReport ? 'report' : null,
+  ].filter(Boolean);
+  if (expectations.length !== 1) usage('check needs exactly one of --expect-commit, --expect-file, --expect-pr, or --expect-report');
   let failedExpectation = null;
   let evidence = null;
 
@@ -1282,6 +1453,16 @@ async function checkLane(opts, deps, state) {
     } else if (expected.needle !== null && !deps.read(expected.path).includes(expected.needle)) {
       failedExpectation = `--expect-file: ${expected.path} does not contain ${JSON.stringify(expected.needle)}`;
     }
+  } else if (opts.expectReport) {
+    const path = isAbsolute(opts.expectReport) ? resolve(opts.expectReport) : resolve(lane.path ?? process.cwd(), opts.expectReport);
+    evidence = { path };
+    if (!deps.exists(path)) {
+      failedExpectation = `--expect-report: report does not exist: ${path}`;
+    } else {
+      const problems = reportShapeProblems(deps.read(path));
+      evidence = { path, problems };
+      if (problems.length > 0) failedExpectation = `--expect-report ${path}: ${problems.join('; ')}`;
+    }
   } else {
     if (!/^\d+$/.test(String(opts.expectPr))) usage('--expect-pr must be a PR number');
     if (!lane.branch) usage(`lane ${opts.name} has no branch metadata`);
@@ -1291,7 +1472,9 @@ async function checkLane(opts, deps, state) {
     if (!lane.path) {
       throw new LaneError(EXIT.ERROR, `lane ${opts.name} has no worktree path; gh would answer about the conductor's own repo`);
     }
-    const viewed = call(deps, 'gh', ['pr', 'view', String(opts.expectPr), '--json', 'headRefName,state'], { cwd: lane.path ?? undefined });
+    // The body rides the same call: the contract requires ## Debrief in the PR
+    // body as well as in the report.
+    const viewed = call(deps, 'gh', ['pr', 'view', String(opts.expectPr), '--json', 'headRefName,state,body'], { cwd: lane.path ?? undefined });
     if (viewed.code !== 0) {
       // "No such PR" is a failed expectation (5). Anything else — a missing gh,
       // a missing repo, expired auth, no network, a rate limit — is
@@ -1308,13 +1491,16 @@ async function checkLane(opts, deps, state) {
       }
     } else {
       const doc = parseJson(viewed.stdout);
-      evidence = doc;
+      const bodyProblems = reportShapeProblems(typeof doc?.body === 'string' ? doc.body : '');
+      evidence = { headRefName: doc?.headRefName ?? null, state: doc?.state ?? null, bodyProblems };
       const prStatus = String(doc?.state ?? '').toUpperCase();
       if (doc?.headRefName !== lane.branch) {
         failedExpectation = `--expect-pr ${opts.expectPr}: head must equal ${lane.branch}, got ${doc?.headRefName ?? 'unknown'}`;
       } else if (!['OPEN', 'MERGED'].includes(prStatus)) {
         // A closed PR is abandoned work wearing the right head ref.
         failedExpectation = `--expect-pr ${opts.expectPr}: the PR is ${prStatus.toLowerCase() || 'in an unknown state'}, which is not a completion verdict`;
+      } else if (bodyProblems.length > 0) {
+        failedExpectation = `--expect-pr ${opts.expectPr}: PR body: ${bodyProblems.join('; ')}`;
       }
     }
   }

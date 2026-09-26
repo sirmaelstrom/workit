@@ -6,7 +6,7 @@
 ## The rules
 
 1. **The board is canonical for all per-quest work-state.** The doc has no status column, ever (retro §1 row 3b; unchanged from protocol v2).
-2. **One row per stop in the run log.** Fielded table: `date | item | event | pointers | teach →`. Event vocabulary: `pickup / PR / review / closed / blocked / dropped / amended / run opened / run closed`.
+2. **One row per stop in the run log.** Fielded table: `date | item | event | pointers | teach →`. Event vocabulary: `pickup / PR / review / closed / blocked / dropped / amended / run opened / run closed`. Rows are added only with `scripts/run-log.mjs append --doc <abs> --item … --event … --pointers … --teach …`: it takes the `date` cell from the clock at write time (UTC, `YYYY-MM-DDTHH:MM:SSZ`; no flag sets it), refuses an event outside this vocabulary, and splices the row in as the table's last row without touching any other line. `scripts/run-log.mjs lint --doc <abs>` exits 5 naming each row whose stamp is later than now, earlier than the row above it, unparseable, or later than the commit that introduced it, and on a table with no rows.
 3. **The second-sentence rule.** If a log entry wants a second sentence, the substance belongs elsewhere — file it at write time and point:
    - cross-project generalization → **auto-memory** (one-fact file + index line; normal intake bar applies — this is already the push channel that reaches every joining CLI session)
    - item-scoped fact, or a ruling that binds a later item → **that item's quest** (resume note or receipt — burn-down standing rule: bindings land at ruling time)
