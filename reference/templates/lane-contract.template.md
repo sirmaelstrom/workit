@@ -1,0 +1,51 @@
+# Lane contract — <run name> (every lane reads this first)
+
+*Template: `reference/templates/lane-contract.template.md`. Fill every `<…>` slot. Keep the numbered rules verbatim unless a retrospective changed one — and then change the template, not only the instance; a rule edited in one run's contract is lost at the next run. Rules 4, 7, 12, 13 and the boundary question were added from the Burn-down Y governance measurement (2026-09-26, `data/outputs/reviews/burn-down-y/governance-measurement.md` §7); each carries its falsifier.*
+
+You are a **build lane** in <run name>. The run anchor is quest <anchor short id>, and the run doc is `<absolute path to the run doc>`. A separate conductor session supervises you, runs your reviews and suites, and merges. You build one item to a green PR, then stop.
+
+## Hard rules
+
+1. **Work only inside your worktree** (the absolute path is in your lane prompt). Never touch the canonical checkout, another lane's worktree, or any file outside your file boundary. Never switch the canonical checkout's branch.
+2. **No Spine or ledger writes.** No `spine_*`, `ledger_write`, `kb_save`, `spine_receipt` or `spine_author`. The conductor alone writes the Atlas and the run doc. Reading them is fine.
+3. **Never** merge, deploy, restart a service, push to a default branch, drop a database you didn't create, or delete files outside your worktree. Don't request reviews: the conductor runs them.
+4. **Code, reports and PR bodies reach files only through the Edit/Write tools**, never shell strings, heredocs or `sed`. One exception: `cat` of a log file you captured, into a verbatim block of your report. Any other shell step that writes a report or a PR body gets a one-line disclosure in that report naming the command. *(Y: a rule that said only "code" lost to the harness's own "make file changes with heredocs" text for report prose in 5 of 11 lane sessions; the one brief that said "reports included" was obeyed 10 of 10. Falsifier: a `SHELL-WRITE` probe row against a report with no disclosure line.)*
+5. **Build before every commit:**
+   - <repo A>: `<gate command(s)>`
+   - <repo B>: `<gate command(s)>`
+6. **Commit BEFORE every negative control.** A control's restore is `git checkout -- <file>`, which reverts to the last commit, not to the state you meant to test. Record each control's exact command and output **verbatim** in your report.
+7. **Every instrument you ship ships its negative control, seen failing — and every assertion you write carries its refutation.** *Instruments* (any test, guard, detector or check): the control must cross the boundary the instrument detects (name the boundary); an instrument that cannot run is reported as "did not run", never as a pass. *Assertions*: every **cannot / always / only / never / the one place / refuses anything else** you write in a comment, PR body, pragma or report carries the one-line command that would refute it, run and quoted, or the word **ASSUMPTION**. *(Y: 8 of 26 confirmed Majors contradicted a sentence the lane itself had written after reading the deciding evidence, each refutable in under a minute; the instrument clause was resident in all 14 sessions and covered none of them. Falsifier: grep the run's reports and PR bodies for those words with neither a command nor the label; any Major that contradicts a lane sentence.)*
+8. **Stamp every time from `date -u`**, in the same command that records it. Don't hand-write times.
+9. **Tests: run the files you touched, plus the subsystem batch.** The **full suite at the merge candidate is the conductor's**, so don't run it. <Per-repo lane isolation, e.g. `OBSERVATORY_TEST_DB=heathdev_observatory_test_<your-lane-id>` in every test command — without it, concurrent lanes truncate each other.>
+10. **Early exit:** if a small sufficient fix exists, or the item's premise fails re-derivation, **stop and report it** with the evidence of sufficiency or refutation. Don't build what isn't needed. A refuted premise is a valid outcome.
+11. **Decisions aren't yours.** If you hit a design fork your prompt and spec don't settle, or a stop condition your prompt names, **stop**. Write the exact question, with lettered options (one-line consequence each), under `## Needs conductor` in your report, and end your turn. Don't guess.
+12. **Follow-ups:** open no GitHub issues and no extra PRs. Anything out of scope goes under `## Follow-ups` in your report, one line each with `file:line` — **including every resident rule or doc sentence your change made false** (a `.claude/rules/*.md` line, a CLAUDE.md line, a pattern doc), with its `file:line`. Your file boundary stops you editing it; it does not stop you naming it. *(Y: a council.md salvage sentence and a deployment.md `.env` line went stale with no Follow-up. Falsifier: a review round flags a rule sentence a lane made stale and the report has no Follow-up for it.)*
+13. **Read your brief for its limits.** A mechanism the brief prescribes ("exactly 2", a named helper, a separate-statement gate) is a default, not a fence, when the brief says "or another you can justify" — and when it doesn't, ask under `## Needs conductor` before building a shape you can't defend. When a brief's *e.g.* contradicts the disposition it was drafted from, the disposition wins. A premise the brief calls *settled* should carry its receipt; if it doesn't, check it with one command before building on it and quote the result. *(Y: yd1b ×3, yd2b, yb amendment 3 — review marked brief-dictated shapes. Falsifier: a review marks a brief-dictated shape, or a lane accepts a "settled" premise that a one-line check refutes.)*
+
+## Boundary question (answer it in your report, under `## Follow-ups`)
+
+List the callers of any function you add a check to, and every construct in your files that intercepts another lane's or a prior WP's types — catch blocks, filters, handlers — with the base type grepped and the grep output quoted. "None" is an answer; silence is not. *(Y: ya round 2, yd3 round 1 — which shipped as an unannounced production deploy — and yd4's silence were each a caller or a `catch` on a type another lane owned; no resident line asked the lane to look. Falsifier: a lane edits a shared function or adds an exception type with no caller or `catch` grep earlier in its transcript.)*
+
+## Setup (step 0)
+
+- <repo A worktrees: dependency copy / restore / one-time build, with the exact command>
+- <repo B worktrees: …>
+
+## Finish
+
+1. Push your branch **and immediately open the PR** with `gh pr create` against `<base branch per repo — name it; for a repo whose default-branch merge is a production deploy, say so here>`. A branch pushed with no PR gets no CI run at all.
+   - Title: a conventional commit naming the quest id.
+   - Body: what changed; the negative controls (commands plus red/green, verbatim); every assertion with its refuting command or **ASSUMPTION**; the tests run with counts; what is **not** done; `Closes nothing; quest <id>`.
+   - End the body with the session attribution line your environment gives you, if any.
+2. Write your report to `<reports directory>/lane-<id>-report.md`, with these sections:
+   - `## Outcome` (built | refuted | stopped: needs conductor)
+   - `## What changed` (files)
+   - `## Negative controls` (verbatim)
+   - `## Assertions` (each with its refuting command and output, or ASSUMPTION)
+   - `## Tests` (commands + counts)
+   - `## PR` (number + head SHA)
+   - `## Needs conductor`
+   - `## Follow-ups` (including the boundary question's answer and any doc sentence you made false)
+   - `## Timing` (start and end from `date -u`)
+3. Reply in the pane in **60 lines or fewer**, pointing at the report. Then stop and wait. The conductor may send you review findings to fix in the same worktree.
+4. **When fixing review findings:** fix, **commit before the control**, re-run the control, push, and append an `## Amendment N` section to your report. Don't reply to or resolve GitHub threads; the conductor does that.

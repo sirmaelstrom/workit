@@ -165,11 +165,11 @@ silently skipping files and citing at least one directory that does not exist.
 
 ### Standing prompt clauses (every delegated or lane prompt)
 
-Two clauses ride every prompt this skill, a burn-down lane, or a fan-out sends. Both are
-cost controls: the first stops a leaf from grinding through options 2–17 when option 1 was
-right and cheap (a bounded audit arm costs ~8% of a Codex 5-hour window, and a mid-run
+Three clauses ride every prompt this skill, a burn-down lane, or a fan-out sends. The first
+two are cost controls: the first stops a leaf from grinding through options 2–17 when option
+1 was right and cheap (a bounded audit arm costs ~8% of a Codex 5-hour window, and a mid-run
 limit hit is `turn.failed` with no handback); the second stops it from filing follow-ups
-into the repo's issue tracker.
+into the repo's issue tracker. The third is a coverage question.
 
 **Early exit.** Pick the shape by the prompt's verb and paste it verbatim:
 
@@ -191,6 +191,15 @@ outside their brief when the prompt left this unsaid — "do not merge" constrai
 the tracker (auto-memory `lane-prompt-must-name-where-followups-go`). The conductor
 harvests follow-ups to the Spine; a lane that files one anyway gets it closed with a
 comment pointing at the quest.
+
+**Boundary question.**
+`Under ## Follow-ups, list the callers of any function you add a check to, and every construct in your files that intercepts another lane's or a prior WP's types (catch blocks, filters, handlers), with the base type grepped and the grep output quoted. "None" is an answer; silence is not.`
+Measured in Burn-down Y (governance measurement §3.4, 2026-09-26): three cross-lane Majors —
+ya round 2, yd3 round 1 (which shipped as an unannounced production deploy), yd4's silence —
+were each a caller or a `catch` on a type another lane owned, and no resident line had asked
+the lane to look. A question makes the looking visible: a lane with nothing to list writes
+"none" and the reviewer knows it looked. Falsifier: a lane edits a shared function or adds
+an exception type with no caller or `catch` grep earlier in its transcript. (Quest e06b24a5.)
 
 ### Reading the result
 

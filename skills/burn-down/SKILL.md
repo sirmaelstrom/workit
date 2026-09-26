@@ -114,7 +114,11 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    held three times), and **a round that produced nontrivial amendments has
    not converged until something checks the amendments** — cheapest forms: run
    the suite in the mode the feature adds, or a challenge grounded against the
-   *amended* tree (ruling 9, held twice).
+   *amended* tree (ruling 9, held twice). The amendment brief itself states the
+   limit of what it dictates — a prescribed mechanism carries "or another you
+   can justify", the disposition outranks the brief's example, a "settled"
+   premise carries its receipt (`reference/patterns/lane-supervision.md` →
+   *Amendment briefs*; Y governance measurement §7 #8).
 4. **Land it.** Before the PR boundary, an item whose change touches a
    contract, wire format, or shared surface can take a `blast-radius` pass —
    pre-ship impact analysis that hands review its proven safety fact instead of
@@ -201,7 +205,13 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    mutation-testing lens have deliberately broken. **Span the regime.** The
    control must cross the boundary the instrument is meant to detect; name that
    boundary and show the crossing. Rule, both measured receipts, and the
-   calibration recipe: `reference/patterns/negative-control.md`.
+   calibration recipe: `reference/patterns/negative-control.md`. **Assertions
+   too:** every *cannot / always / only / never / the one place* written in a
+   comment, PR body, pragma or report carries the one-line command that would
+   refute it, run and quoted, or the word ASSUMPTION — Y: 8 of 26 confirmed
+   Majors contradicted a sentence the lane itself had written, with this rule's
+   instrument clause resident and unconsumed in all 14 sessions. Lanes get both
+   clauses from `reference/templates/lane-contract.template.md` rule 7.
 
 ## Stopping
 
