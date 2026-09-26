@@ -7,7 +7,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEBRIEF_HEADINGS, EXIT_CODES, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  DEBRIEF_HEADINGS, EXIT_CODES, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
   reportShapeProblems, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -2554,7 +2554,7 @@ test('4aa9b174: a dialog still drawn after the answer is exit 3 with the pane ta
   for (let i = 0; i < 100; i++) f.responses.push(FOLDER_TRUST_READ);
   const result = await startClaude(f, { now: () => (clock += 1_000) });
   assert.equal(result.exit, 3);
-  assert.match(result.output.error, /folder-trust dialog in pane w1:p2 was answered with Down\+Enter but no Claude composer appeared within 15000 ms/);
+  assert.match(result.output.error, /folder-trust dialog in pane w1:p2 was answered with Down\+Enter but no Claude mode line was drawn last within 15000 ms/);
   assert.match(result.output.dialog, /Enter to confirm/);
 });
 
@@ -2566,10 +2566,10 @@ test('4aa9b174 amend 2: an empty frame after the answer is not readiness; it tim
   const result = await startClaude(f, { now: () => (clock += 1_000) });
   assert.equal(result.exit, 3, JSON.stringify(result.output));
   assert.equal(result.row.folderTrusted, undefined);
-  assert.match(result.output.error, /no Claude composer appeared/);
+  assert.match(result.output.error, /no Claude mode line was drawn last/);
 });
 
-test('4aa9b174 amend 2: an empty redraw frame then the composer is success', async (t) => {
+test('4aa9b174 amend 2: an empty redraw frame, a composer without its mode line, then the full frame is success', async (t) => {
   const f = fixture(t);
   let clock = 0;
   f.responses.push(
@@ -2577,22 +2577,24 @@ test('4aa9b174 amend 2: an empty redraw frame then the composer is success', asy
     { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
     { code: 0, stdout: '', stderr: '' },
     { code: 0, stdout: ['─────────────────', '❯ Try "how does <filepath> work?"', '─────────────────'].join('\n'), stderr: '' },
+    CLAUDE_COMPOSER_READ,
     { code: 0, stdout: '{"result":{}}', stderr: '' },
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
   );
   const result = await startClaude(f, { now: () => (clock += 100) });
   assert.equal(result.exit, 0, JSON.stringify(result.output));
   assert.equal(result.output.folderTrusted, true);
-  assert.equal(f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'read').length, 4, 'shell, dialog, empty, composer');
+  assert.equal(f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'read').length, 5, 'shell, dialog, empty, composer only, full frame');
 });
 
-test('4aa9b174 amend 2: claudeTuiReady needs a framed composer or the mode line', () => {
+test('4aa9b174 amend 2/4: claudeTuiReady needs the mode line as the last non-blank line', () => {
   assert.equal(claudeTuiReady(''), false, 'an empty frame');
   assert.equal(claudeTuiReady(FOLDER_TRUST_READ.stdout), false, 'the dialog itself');
-  assert.equal(claudeTuiReady(FOLDER_TRUST_READ.stdout.replace(' Enter to confirm · Esc to cancel', '')), false, 'the dialog with its footer gone: its ❯ option line is not under a rule');
+  assert.equal(claudeTuiReady(FOLDER_TRUST_READ.stdout.replace(' Enter to confirm · Esc to cancel', '')), false, 'the dialog with its footer gone');
   assert.equal(claudeTuiReady('~ home ~\n❯ claude --model opus'), false, 'a starship shell prompt is not a composer');
   assert.equal(claudeTuiReady(CLAUDE_COMPOSER_READ.stdout), true, 'the measured trusted screen');
-  assert.equal(claudeTuiReady('─────────────────\n❯\n─────────────────'), true, 'an empty composer between rules');
+  // Changed meaning in amendment 4: a composer is never a substitute for the mode line.
+  assert.equal(claudeTuiReady('─────────────────\n❯\n─────────────────'), false, 'a composer between rules without its mode line');
   assert.equal(claudeTuiReady('  ⏵⏵ bypass permissions on (shift+tab to cycle)'), true, 'the mode line alone');
 });
 
@@ -2616,8 +2618,33 @@ test('4aa9b174 amend 3: readiness is judged on the current frame, not on scrollb
   assert.equal(claudeTuiReady(TRUSTED_SCREEN), true, 'the measured trusted screen');
   assert.equal(claudeTuiReady(`${TRUSTED_SCREEN}\n\n\n   \n`), true, 'the trusted screen followed by blank lines');
   assert.equal(claudeTuiReady('some scrollback\n  ⏸ manual mode on · ← for agents'), true, 'the mode line alone as the last line');
-  assert.equal(claudeTuiReady('─────────────────\n❯ Try "x"\n─────────────────\n  statusline'), true, 'the composer frame with one line under it');
+  assert.equal(claudeTuiReady('─────────────────\n❯ Try "x"\n─────────────────\n  statusline'), false, 'a composer frame without its mode line (changed meaning, amendment 4)');
   assert.equal(claudeTuiReady('─────────────────\n❯ Try "x"\n─────────────────\na\nb\nc'), false, 'a composer frame ending more than three lines up is scrollback');
+});
+
+test('4aa9b174 amend 4: the reviewers\' composer shapes are not ready', () => {
+  assert.equal(claudeTuiReady('─────────────────\n❯\n─────────────────\n❯ Continue setup\nPress return'), false, 'astra: an old composer above a setup prompt');
+  assert.equal(claudeTuiReady('─────────────────\n❯\n─────────────────\nNew startup prompt'), false, 'codex: an old composer above one new line');
+});
+
+test('4aa9b174 amend 4: the folder-trust dialog counts only as the current frame', async (t) => {
+  const staleDialog = `${FOLDER_TRUST_READ.stdout}\nAnother startup prompt\n❯ Continue setup\nPress return`;
+  assert.equal(folderTrustDialog(staleDialog), false, 'the reviewer\'s shape: a stale dialog above a different prompt');
+  assert.equal(folderTrustDialog(FOLDER_TRUST_READ.stdout), true, 'the measured dialog alone');
+  assert.equal(folderTrustDialog(`${FOLDER_TRUST_READ.stdout}\n\n  \n`), true, 'the measured dialog followed by blank lines');
+  // The question line sits 6th from the bottom. Wrapping it (the rest of the
+  // question moves down a line) plus five lines puts "Quick safety check" 12th;
+  // plus six, 13th.
+  const wrapped = (extra) => FOLDER_TRUST_READ.stdout.replace(' Quick safety check: Is this', ` Quick safety check:\n${Array.from({ length: extra }, (_, i) => i + 1).join('\n')}\n Is this`);
+  const tall = wrapped(6);
+  assert.equal(folderTrustDialog(wrapped(5)), true, '12th from the bottom is inside the block');
+  assert.equal(folderTrustDialog(tall), false, 'the question more than 12 lines above the footer is outside the block');
+
+  const f = fixture(t);
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, { code: 0, stdout: staleDialog, stderr: '' });
+  const result = await startClaude(f);
+  assert.equal(result.exit, 1);
+  assert.deepEqual(sendKeys(f), [], 'no keys go to a prompt that is not the dialog');
 });
 
 test('4aa9b174: the exported pattern pair matches the measured dialog', () => {

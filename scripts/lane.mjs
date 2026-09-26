@@ -104,18 +104,15 @@ export const FOLDER_TRUST_PATTERNS = Object.freeze([
 const FOLDER_TRUST_CURSOR_ON_NO = /^❯\s*No, exit\b/;
 const FOLDER_TRUST_FOOTER = /Enter to confirm/i;
 const FOLDER_TRUST_KEYS = Object.freeze(['Down', 'Enter']);
-// The trusted screen, read the same run, ends in five non-blank lines: rule,
-// `❯ Try "how does <filepath> work?"`, rule, a statusline, and the mode line
-// `⏸ manual mode on · ← for agents` last. The composer counts only between two
-// rules, so a shell prompt that starts with `❯` (starship) and the dialog's own
-// `❯` option lines are not read as Claude. The other mode-line shapes are the
-// LIVE_TUI ones.
-const CLAUDE_RULE = /^[─━]{6,}$/;
-const CLAUDE_COMPOSER = /^❯(?:\s|$)/;
+// The dialog is 9 non-blank lines from its top rule to its footer, as read;
+// 3 more cover the question wrapping in a narrower pane. Only this block,
+// ending at the pane's last non-blank line, is the current dialog.
+const FOLDER_TRUST_BLOCK_LINES = 12;
+// The trusted screen, read the same run, ends in the mode line
+// `⏸ manual mode on · ← for agents`, drawn below the composer and a
+// statusline. Claude Code draws it last, so a mode line anywhere else is an
+// older frame with something newer under it. The other shapes are LIVE_TUI's.
 const CLAUDE_MODE_LINE = /←\s*for agents|shift\+tab to cycle|⏵⏵/i;
-// How far from the bottom the composer's closing rule may sit: the statusline
-// and the mode line after it, as measured. Anything higher is scrollback.
-const CLAUDE_COMPOSER_TAIL = 3;
 const FOLDER_TRUST_TIMEOUT_MS = 15_000;
 // The sweep delegate's location is resolved, never hardcoded: this file ships in
 // a public repo, and one operator's drive layout is not a default. Order:
@@ -472,32 +469,24 @@ function startupBlocked(result) {
   return /agent_not_ready|blocked during startup/i.test(`${result.stderr}\n${result.stdout}`);
 }
 
-// The dialog as measured: both patterns in the pane's tail and the cursor on
-// No. Any other shape is left alone, because Down+Enter on a dialog that
-// changed could select "No, exit".
-function folderTrustDialog(text) {
-  const lines = paneLines(text).slice(-16);
-  return FOLDER_TRUST_PATTERNS.every((pattern) => lines.some((line) => pattern.test(line)))
-    && lines.some((line) => FOLDER_TRUST_CURSOR_ON_NO.test(line));
+// The dialog as measured, and only as the CURRENT frame: a pane read carries
+// scrollback, so the footer must be the last non-blank line, and both patterns
+// and the cursor on No must sit in the block it closes. Any other shape is left
+// alone, because Down+Enter on a dialog that changed could select "No, exit".
+export function folderTrustDialog(text) {
+  const lines = paneLines(text);
+  if (!FOLDER_TRUST_FOOTER.test(lines.at(-1) ?? '')) return false;
+  const block = lines.slice(-FOLDER_TRUST_BLOCK_LINES);
+  return FOLDER_TRUST_PATTERNS.every((pattern) => block.some((line) => pattern.test(line)))
+    && block.some((line) => FOLDER_TRUST_CURSOR_ON_NO.test(line));
 }
 
-// Positive readiness after the answer, judged on the CURRENT frame only: a
-// pane read carries scrollback, and a reused pane can hold an older Claude
-// frame above whatever is drawn now. Ready is the mode line as the last
-// non-blank line, or a composer between two rules whose closing rule is within
-// the last CLAUDE_COMPOSER_TAIL lines with no mode line after it except as the
-// last line. An empty or unrecognised frame, as during a redraw, is not ready.
+// Positive readiness after the answer: the mode line is the last non-blank
+// line. Nothing above it is read, so an older Claude frame in scrollback, the
+// dialog, an empty redraw frame or a newer startup prompt is not ready; a
+// frame caught before the mode line is drawn waits for the next poll.
 export function claudeTuiReady(text) {
-  const lines = paneLines(text);
-  if (lines.length === 0) return false;
-  if (CLAUDE_MODE_LINE.test(lines.at(-1))) return true;
-  for (let close = lines.length - 1; close >= Math.max(2, lines.length - CLAUDE_COMPOSER_TAIL); close--) {
-    if (!CLAUDE_RULE.test(lines[close]) || !CLAUDE_COMPOSER.test(lines[close - 1]) || !CLAUDE_RULE.test(lines[close - 2])) continue;
-    // A mode line below the frame but above the bottom belongs to an older
-    // frame with something newer drawn under it.
-    return !lines.slice(close + 1, -1).some((line) => CLAUDE_MODE_LINE.test(line));
-  }
-  return false;
+  return CLAUDE_MODE_LINE.test(paneLines(text).at(-1) ?? '');
 }
 
 // Answers the folder-trust dialog in `pane` and waits for a Claude frame;
@@ -517,7 +506,7 @@ async function answerFolderTrust(deps, pane) {
       if (claudeTuiReady(last)) return true;
     }
   } while (deps.now() < deadline);
-  throw new LaneError(EXIT.BLOCKED, `folder-trust dialog in pane ${pane} was answered with ${FOLDER_TRUST_KEYS.join('+')} but no Claude composer appeared within ${FOLDER_TRUST_TIMEOUT_MS} ms`, {
+  throw new LaneError(EXIT.BLOCKED, `folder-trust dialog in pane ${pane} was answered with ${FOLDER_TRUST_KEYS.join('+')} but no Claude mode line was drawn last within ${FOLDER_TRUST_TIMEOUT_MS} ms`, {
     dialog: paneLines(last).slice(-12).join('\n'),
   });
 }
