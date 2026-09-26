@@ -18,7 +18,7 @@ You are a **build lane** in <run name>. The run anchor is quest <anchor short id
 8. **Stamp every time from `date -u`**, in the same command that records it. Don't hand-write times.
 9. **Tests: run the files you touched, plus the subsystem batch.** The **full suite at the merge candidate is the conductor's**, so don't run it. <Per-repo lane isolation, e.g. `OBSERVATORY_TEST_DB=heathdev_observatory_test_<your-lane-id>` in every test command — without it, concurrent lanes truncate each other.>
 10. **Early exit:** if a small sufficient fix exists, or the item's premise fails re-derivation, **stop and report it** with the evidence of sufficiency or refutation. Don't build what isn't needed. A refuted premise is a valid outcome.
-11. **Decisions aren't yours.** If you hit a design fork your prompt and spec don't settle, or a stop condition your prompt names, **stop**. Write the exact question, with lettered options (one-line consequence each), under `## Needs conductor` in your report, and end your turn. Don't guess.
+11. **Decisions aren't yours.** If you hit a design fork your prompt and spec don't settle, or a stop condition your prompt names, **stop**. Write the exact question, with lettered options (one-line consequence each), under `## Needs conductor` in your report, and end your turn. Don't guess. **A question is never a "non-blocking" item:** anything you need read or answered is a lettered ask `(a)/(b)/…` under `## Needs conductor`; a decision you already made and want ratified goes under `## Ratify`, in a separate list, so the two are never confused.
 12. **Follow-ups:** open no GitHub issues and no extra PRs. Anything out of scope goes under `## Follow-ups` in your report, one line each with `file:line` — **including every resident rule or doc sentence your change made false** (a `.claude/rules/*.md` line, a CLAUDE.md line, a pattern doc), with its `file:line`. Your file boundary stops you editing it; it does not stop you naming it. *(Y: a council.md salvage sentence and a deployment.md `.env` line went stale with no Follow-up. Falsifier: a review round flags a rule sentence a lane made stale and the report has no Follow-up for it.)*
 13. **Read your brief for its limits.** A mechanism the brief prescribes ("exactly 2", a named helper, a separate-statement gate) is a default, not a fence, when the brief says "or another you can justify" — and when it doesn't, ask under `## Needs conductor` before building a shape you can't defend. When a brief's *e.g.* contradicts the disposition it was drafted from, the disposition wins. A premise the brief calls *settled* should carry its receipt; if it doesn't, check it with one command before building on it and quote the result. *(Y: yd1b ×3, yd2b, yb amendment 3 — review marked brief-dictated shapes. Falsifier: a review marks a brief-dictated shape, or a lane accepts a "settled" premise that a one-line check refutes.)*
 
@@ -30,6 +30,7 @@ List the callers of any function you add a check to, and every construct in your
 
 - <repo A worktrees: dependency copy / restore / one-time build, with the exact command>
 - <repo B worktrees: …>
+- **Long foreground batches go to the background from the start** — a full suite, a corpus walk, a container build, anything that can outlive the tool timeout runs with `run_in_background` (or in the pane) and you read its captured output afterwards; state the per-run cost in your report.
 
 ## Finish
 
@@ -44,7 +45,11 @@ List the callers of any function you add a check to, and every construct in your
    - `## Assertions` (each with its refuting command and output, or ASSUMPTION)
    - `## Tests` (commands + counts)
    - `## PR` (number + head SHA)
-   - `## Needs conductor`
+   - `## Needs conductor` (lettered asks only) and `## Ratify` (decisions you made that you want confirmed)
+   - `## Debrief` — two headings, both required, "None" is an answer and a missing heading is not:
+     - `### Forks I decided that the brief did not settle` — each fork as one line: the choice, the alternative you did not take, and what would show you chose wrong.
+     - `### Claims no control measures` — every sentence in your diff, comments, PR body or report that asserts a boundary ("only", "every caller", "cannot", "is clear") and has neither a quoted refuting command nor an **ASSUMPTION** label.
+     Put the same section in the PR body.
    - `## Follow-ups` (including the boundary question's answer and any doc sentence you made false)
    - `## Timing` (start and end from `date -u`)
 3. Reply in the pane in **60 lines or fewer**, pointing at the report. Then stop and wait. The conductor may send you review findings to fix in the same worktree.
