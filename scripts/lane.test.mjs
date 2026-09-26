@@ -898,6 +898,27 @@ test('Q-3: lane stop fails when agent list still contains the lane', async (t) =
   assert.match(result.output.error, /lane-a is still listed 10000 ms after the pane prompt returned/);
 });
 
+test('0d44bab7 amend 4: the late-prompt path re-reads the listing too and stops late once the agent drops out', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: 'PS X:\\fixture\\lane>' });
+  const listed = { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","agent":"claude","agent_status":"done"}]}}', stderr: '' };
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    // The prompt wait sees no prompt before its 1 ms deadline.
+    { code: 0, stdout: 'still exiting', stderr: '' },
+    // The late read: the pane is at the shell, the listing lags two reads.
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
+    listed, listed,
+    { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+  );
+  let clock = 0;
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.promptCheck, 'late');
+  assert.equal(result.output.agentListPolls, 3);
+  assert.equal(result.row.agentListPolls, 3);
+});
+
 test('0d44bab7: a stop whose first agent list still names the exited agent re-reads it and succeeds (za, zb, zf)', async (t) => {
   const f = fixture(t);
   seedLane(f, { kind: 'claude' });

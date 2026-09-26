@@ -1825,6 +1825,20 @@ function agentState(deps, name) {
 // that lag.
 const STOP_UNLIST_WINDOW_MS = 10_000;
 
+// Re-reads `herdr agent list` until `name` drops out or `windowMs` passes; a
+// failed or agent-less listing ends it at once. The caller judges the result.
+async function pollUntilUnlisted(deps, name, windowMs) {
+  const deadline = deps.now() + windowMs;
+  let polls = 0;
+  for (;;) {
+    const listing = call(deps, 'herdr', ['agent', 'list']);
+    polls++;
+    const names = listing.code === 0 ? listedAgentNames(listing.stdout) : null;
+    if (!names || !names.includes(name) || deps.now() >= deadline) return { listing, names, polls };
+    await deps.sleep(250);
+  }
+}
+
 async function stopLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   if (!lane.pane) usage(`lane ${opts.name} has no pane metadata`);
@@ -1849,8 +1863,6 @@ async function stopLane(opts, deps, state) {
     // failure; the agent listing is the deciding signal.
     await deps.sleep(5_000);
     const latePane = readPane(deps, lane.pane);
-    const lateListing = call(deps, 'herdr', ['agent', 'list']);
-    const lateNames = lateListing.code === 0 ? listedAgentNames(lateListing.stdout) : null;
     const lateText = latePane.code === 0 ? responseText(latePane.stdout) : '';
     const lateLines = paneLines(lateText);
     const liveTui = LIVE_TUI.some((pattern) => lateLines.slice(-2).some((line) => pattern.test(line)));
@@ -1859,15 +1871,22 @@ async function stopLane(opts, deps, state) {
       patterns: promptPatterns(opts, deps),
     });
     const exitBanner = !liveTui && lateLines.slice(-3).some((line) => /^(?:goodbye|codex\s+(?:exited|closed))/i.test(line));
+    // The same listing lag as the normal path: with the pane showing an exit
+    // (or unreadable), the listing gets the same window; a live TUI gets one read.
+    const exitSeen = !liveTui && (latePrompt || exitBanner || latePane.code !== 0);
+    const late = await pollUntilUnlisted(deps, opts.name, exitSeen ? STOP_UNLIST_WINDOW_MS : 0);
+    const lateListing = late.listing;
+    const lateNames = late.names;
+    const latePolls = late.polls > 1 ? { agentListPolls: late.polls } : {};
     if (lateListing.code === 0 && Array.isArray(lateNames) && !lateNames.includes(opts.name) && latePane.code !== 0) {
       deps.warn(`lane: stop pane re-read failed after ${opts.name} disappeared; accepting unread exit`);
-      return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'unread' }, row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'unread' } };
+      return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'unread', ...latePolls }, row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'unread', ...latePolls } };
     }
     if (Array.isArray(lateNames) && !lateNames.includes(opts.name) && (latePrompt || exitBanner)) {
       return {
         exit: EXIT.OK,
-        output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'late' },
-        row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'late' },
+        output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'late', ...latePolls },
+        row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'late', ...latePolls },
       };
     }
     if (Array.isArray(lateNames) && lateNames.includes(opts.name)) {
@@ -1878,19 +1897,11 @@ async function stopLane(opts, deps, state) {
   // herdr drops an exited agent from `agent list` a beat after the pane's
   // prompt returns, so one read at the prompt races it; the listing is
   // re-read until the agent is gone or the window closes.
-  const deadline = deps.now() + STOP_UNLIST_WINDOW_MS;
-  let agentListPolls = 0;
-  for (;;) {
-    const listing = call(deps, 'herdr', ['agent', 'list']);
-    agentListPolls++;
-    if (listing.code !== 0) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${listing.stderr.trim() || listing.stdout.trim()}`);
-    const names = listedAgentNames(listing.stdout);
-    if (!names) throw new LaneError(EXIT.ERROR, 'stop agent list check failed: response did not contain agents');
-    if (!names.includes(opts.name)) break;
-    if (deps.now() >= deadline) {
-      throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed ${STOP_UNLIST_WINDOW_MS} ms after the pane prompt returned`);
-    }
-    await deps.sleep(250);
+  const { listing, names, polls: agentListPolls } = await pollUntilUnlisted(deps, opts.name, STOP_UNLIST_WINDOW_MS);
+  if (listing.code !== 0) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${listing.stderr.trim() || listing.stdout.trim()}`);
+  if (!names) throw new LaneError(EXIT.ERROR, 'stop agent list check failed: response did not contain agents');
+  if (names.includes(opts.name)) {
+    throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed ${STOP_UNLIST_WINDOW_MS} ms after the pane prompt returned`);
   }
   const polls = agentListPolls > 1 ? { agentListPolls } : {};
   return {
