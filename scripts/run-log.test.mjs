@@ -157,6 +157,16 @@ test('207dbaf1: lint names an event outside the vocabulary', async (t) => {
   assert.match(result.output.problems[0].reason, /event "chain to launcher" is outside the vocabulary/);
 });
 
+test('18707177: a conductor rotation is its own event: append takes it and lint accepts the row', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:00:00Z')]);
+  const appended = await append(path, { item: 'run', event: 'rotated', pointers: 'chain 45317509; caller context 68 %' }, { now: () => T0 });
+  assert.equal(appended.exit, 0, JSON.stringify(appended.output));
+  assert.equal(appended.output.row, '| 2026-09-26T16:00:00Z | run | rotated | chain 45317509; caller context 68 % | — |');
+  const linted = await lint(path, { now: () => T0 });
+  assert.equal(linted.exit, 0, JSON.stringify(linted.output));
+  assert.equal(linted.output.rowsChecked, 2);
+});
+
 test('207dbaf1: a lint that saw zero rows says so and is not clean', async (t) => {
   const { path } = doc(t, []);
   const result = await lint(path, { now: () => T0 });

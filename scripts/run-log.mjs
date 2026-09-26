@@ -23,7 +23,7 @@ export const RUN_LOG_EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, lin
 
 // reference/templates/run-log.md rule 2, verbatim; run-log.test.mjs holds the
 // two in step.
-export const EVENTS = Object.freeze(['pickup', 'PR', 'review', 'closed', 'refuted', 'blocked', 'dropped', 'amended', 'run opened', 'run closed']);
+export const EVENTS = Object.freeze(['pickup', 'PR', 'review', 'closed', 'refuted', 'blocked', 'dropped', 'amended', 'run opened', 'rotated', 'run closed']);
 
 export const USAGE_TEXT = `run-log <verb> [options] — one run-doc operation per invocation, JSON on stdout.
 
