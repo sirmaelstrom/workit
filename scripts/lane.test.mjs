@@ -889,11 +889,32 @@ test('Q-3: lane stop fails when agent list still contains the lane', async (t) =
     { code: 0, stdout: '{}', stderr: '' },
     { code: 0, stdout: '{}', stderr: '' },
     { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
-    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a"}]}}', stderr: '' },
   );
-  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  // Listed on every read: the window closes and the stop fails.
+  for (let i = 0; i < 100; i++) f.responses.push({ code: 0, stdout: '{"result":{"agents":[{"name":"lane-a"}]}}', stderr: '' });
+  let clock = 0;
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
   assert.equal(result.exit, 1);
-  assert.match(result.output.error, /still listed|agent list/i);
+  assert.match(result.output.error, /lane-a is still listed 10000 ms after the pane prompt returned/);
+});
+
+test('0d44bab7: a stop whose first agent list still names the exited agent re-reads it and succeeds (za, zb, zf)', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: SHELL_READ.stdout, stderr: '' },
+    // Measured: the prompt is back while herdr still lists the agent; the next read drops it.
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","agent":"claude","agent_status":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+  );
+  let clock = 0;
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.agentListed, false);
+  assert.equal(result.output.agentListPolls, 2);
+  assert.equal(result.row.agentListPolls, 2);
+  assert.equal(f.calls.filter((call) => call.args[0] === 'agent' && call.args[1] === 'list').length, 2);
 });
 
 test('Q-9: lane stop uses the measured claude /exit sequence', async (t) => {

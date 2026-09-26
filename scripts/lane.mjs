@@ -1781,6 +1781,12 @@ function agentState(deps, name) {
   return { agent, state: String(agent.state ?? agent.status ?? 'unknown').toLowerCase() };
 }
 
+// Measured 2026-09-26 21:30Z and 21:31Z (a Haiku agent after one turn, then
+// the stop's `/exit`): the shell prompt was back 1.8 s in with the agent still
+// listed, and it was unlisted by 2.4 s, both times. The window is a few times
+// that lag.
+const STOP_UNLIST_WINDOW_MS = 10_000;
+
 async function stopLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   if (!lane.pane) usage(`lane ${opts.name} has no pane metadata`);
@@ -1831,12 +1837,29 @@ async function stopLane(opts, deps, state) {
     }
     throw new LaneError(EXIT.ERROR, `stop pane prompt check failed: ${error.message}`);
   }
-  const listing = call(deps, 'herdr', ['agent', 'list']);
-  if (listing.code !== 0) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${listing.stderr.trim() || listing.stdout.trim()}`);
-  const names = listedAgentNames(listing.stdout);
-  if (!names) throw new LaneError(EXIT.ERROR, 'stop agent list check failed: response did not contain agents');
-  if (names.some((name) => name === opts.name)) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed`);
-  return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: true, agentListed: false }, row: laneInstrumentation(opts.name, lane, 'stopped') };
+  // herdr drops an exited agent from `agent list` a beat after the pane's
+  // prompt returns, so one read at the prompt races it; the listing is
+  // re-read until the agent is gone or the window closes.
+  const deadline = deps.now() + STOP_UNLIST_WINDOW_MS;
+  let agentListPolls = 0;
+  for (;;) {
+    const listing = call(deps, 'herdr', ['agent', 'list']);
+    agentListPolls++;
+    if (listing.code !== 0) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${listing.stderr.trim() || listing.stdout.trim()}`);
+    const names = listedAgentNames(listing.stdout);
+    if (!names) throw new LaneError(EXIT.ERROR, 'stop agent list check failed: response did not contain agents');
+    if (!names.includes(opts.name)) break;
+    if (deps.now() >= deadline) {
+      throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed ${STOP_UNLIST_WINDOW_MS} ms after the pane prompt returned`);
+    }
+    await deps.sleep(250);
+  }
+  const polls = agentListPolls > 1 ? { agentListPolls } : {};
+  return {
+    exit: EXIT.OK,
+    output: { state: 'stopped', panePrompt: true, agentListed: false, ...polls },
+    row: { ...laneInstrumentation(opts.name, lane, 'stopped'), ...polls },
+  };
 }
 
 // A root is a LANE root when everything under it is a lane by construction —
