@@ -7,7 +7,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEBRIEF_HEADINGS, EXIT_CODES, PLAN_REFUSAL_PATTERNS, codexPromptDelivery, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  DEBRIEF_HEADINGS, EXIT_CODES, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
   reportShapeProblems, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -889,11 +889,53 @@ test('Q-3: lane stop fails when agent list still contains the lane', async (t) =
     { code: 0, stdout: '{}', stderr: '' },
     { code: 0, stdout: '{}', stderr: '' },
     { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
-    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a"}]}}', stderr: '' },
   );
-  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  // Listed on every read: the window closes and the stop fails.
+  for (let i = 0; i < 100; i++) f.responses.push({ code: 0, stdout: '{"result":{"agents":[{"name":"lane-a"}]}}', stderr: '' });
+  let clock = 0;
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
   assert.equal(result.exit, 1);
-  assert.match(result.output.error, /still listed|agent list/i);
+  assert.match(result.output.error, /lane-a is still listed 10000 ms after the pane prompt returned/);
+});
+
+test('0d44bab7 amend 4: the late-prompt path re-reads the listing too and stops late once the agent drops out', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: 'PS X:\\fixture\\lane>' });
+  const listed = { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","agent":"claude","agent_status":"done"}]}}', stderr: '' };
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    // The prompt wait sees no prompt before its 1 ms deadline.
+    { code: 0, stdout: 'still exiting', stderr: '' },
+    // The late read: the pane is at the shell, the listing lags two reads.
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
+    listed, listed,
+    { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+  );
+  let clock = 0;
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.promptCheck, 'late');
+  assert.equal(result.output.agentListPolls, 3);
+  assert.equal(result.row.agentListPolls, 3);
+});
+
+test('0d44bab7: a stop whose first agent list still names the exited agent re-reads it and succeeds (za, zb, zf)', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: SHELL_READ.stdout, stderr: '' },
+    // Measured: the prompt is back while herdr still lists the agent; the next read drops it.
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","agent":"claude","agent_status":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+  );
+  let clock = 0;
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.agentListed, false);
+  assert.equal(result.output.agentListPolls, 2);
+  assert.equal(result.row.agentListPolls, 2);
+  assert.equal(f.calls.filter((call) => call.args[0] === 'agent' && call.args[1] === 'list').length, 2);
 });
 
 test('Q-9: lane stop uses the measured claude /exit sequence', async (t) => {
@@ -2466,6 +2508,171 @@ test('c952d41e DO 8: a hooks-trust dialog sends t then esc and is logged', async
   assert.deepEqual(f.calls.filter((call) => call.args[1] === 'send-keys').map((call) => call.args[3]), ['t', 'esc']);
 });
 
+// ── 4aa9b174: Claude Code's folder-trust dialog blocks `herdr agent start` ──
+
+// herdr's refusal and the dialog, as read on 2026-09-26 (lane-log row for zd at
+// 18:02:20Z; a scratch pane at 21:27Z read with --source detection).
+const AGENT_NOT_READY = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_ready","message":"agent lane-a is blocked during startup and is not ready for prompts"},"id":"cli:agent:start"}' };
+const FOLDER_TRUST_READ = { code: 0, stdout: [
+  '─────────────────────────────────────────────',
+  ' Accessing workspace:', '',
+  ' X:\\fixture\\lane', '',
+  ' Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what\'s in this folder first.', '',
+  ' Claude Code\'ll be able to read, edit, and execute files here.', '',
+  ' Security guide', '',
+  ' ❯ No, exit',
+  '   Yes, I trust this folder', '',
+  ' Enter to confirm · Esc to cancel',
+].join('\n'), stderr: '' };
+const CLAUDE_COMPOSER_READ = { code: 0, stdout: ['─────────────────', '❯ Try "how does <filepath> work?"', '─────────────────', '  ⏸ manual mode on · ← for agents'].join('\n'), stderr: '' };
+const startClaude = (f, deps = {}) => runLane(
+  ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+  { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {}, ...deps },
+);
+const sendKeys = (f) => f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'send-keys').map((call) => call.args.slice(2));
+
+test('4aa9b174: a folder-trust dialog at start is answered Down then Enter, logged, and the lane recorded', async (t) => {
+  const f = fixture(t);
+  f.responses.push(
+    SHELL_READ, AGENT_NOT_READY, FOLDER_TRUST_READ,
+    { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
+    CLAUDE_COMPOSER_READ,
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await startClaude(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(sendKeys(f), [['w1:p2', 'Down'], ['w1:p2', 'Enter']]);
+  assert.equal(result.row.folderTrusted, true);
+  assert.equal(result.output.folderTrusted, true);
+  assert.equal(result.output.agent, 'lane-a');
+  assert.equal(readState(f).lanes['lane-a'].pane, 'w1:p2', 'the answered lane has pane metadata');
+});
+
+test('4aa9b174: agent_not_ready without the dialog sends nothing and the start fails as before', async (t) => {
+  const f = fixture(t);
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, { code: 0, stdout: 'Some other dialog\n❯ 1. Continue\n  2. Quit', stderr: '' });
+  const result = await startClaude(f);
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /herdr agent start failed: .*blocked during startup/);
+  assert.deepEqual(sendKeys(f), []);
+  assert.equal(result.row.folderTrusted, undefined);
+});
+
+test('4aa9b174: the dialog with the cursor already moved is not answered blind', async (t) => {
+  const f = fixture(t);
+  const moved = { ...FOLDER_TRUST_READ, stdout: FOLDER_TRUST_READ.stdout.replace(' ❯ No, exit', '   No, exit').replace('   Yes, I trust', ' ❯ Yes, I trust') };
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, moved);
+  const result = await startClaude(f);
+  assert.equal(result.exit, 1);
+  assert.deepEqual(sendKeys(f), []);
+});
+
+test('4aa9b174: a dialog still drawn after the answer is exit 3 with the pane tail', async (t) => {
+  const f = fixture(t);
+  let clock = 0;
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, FOLDER_TRUST_READ, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' });
+  for (let i = 0; i < 100; i++) f.responses.push(FOLDER_TRUST_READ);
+  const result = await startClaude(f, { now: () => (clock += 1_000) });
+  assert.equal(result.exit, 3);
+  assert.match(result.output.error, /folder-trust dialog in pane w1:p2 was answered with Down\+Enter but no Claude mode line was drawn last within 15000 ms/);
+  assert.match(result.output.dialog, /Enter to confirm/);
+});
+
+test('4aa9b174 amend 2: an empty frame after the answer is not readiness; it times out to exit 3', async (t) => {
+  const f = fixture(t);
+  let clock = 0;
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, FOLDER_TRUST_READ, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' });
+  for (let i = 0; i < 100; i++) f.responses.push({ code: 0, stdout: '', stderr: '' });
+  const result = await startClaude(f, { now: () => (clock += 1_000) });
+  assert.equal(result.exit, 3, JSON.stringify(result.output));
+  assert.equal(result.row.folderTrusted, undefined);
+  assert.match(result.output.error, /no Claude mode line was drawn last/);
+});
+
+test('4aa9b174 amend 2: an empty redraw frame, a composer without its mode line, then the full frame is success', async (t) => {
+  const f = fixture(t);
+  let clock = 0;
+  f.responses.push(
+    SHELL_READ, AGENT_NOT_READY, FOLDER_TRUST_READ,
+    { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '', stderr: '' },
+    { code: 0, stdout: ['─────────────────', '❯ Try "how does <filepath> work?"', '─────────────────'].join('\n'), stderr: '' },
+    CLAUDE_COMPOSER_READ,
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await startClaude(f, { now: () => (clock += 100) });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.folderTrusted, true);
+  assert.equal(f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'read').length, 5, 'shell, dialog, empty, composer only, full frame');
+});
+
+test('4aa9b174 amend 2/4: claudeTuiReady needs the mode line as the last non-blank line', () => {
+  assert.equal(claudeTuiReady(''), false, 'an empty frame');
+  assert.equal(claudeTuiReady(FOLDER_TRUST_READ.stdout), false, 'the dialog itself');
+  assert.equal(claudeTuiReady(FOLDER_TRUST_READ.stdout.replace(' Enter to confirm · Esc to cancel', '')), false, 'the dialog with its footer gone');
+  assert.equal(claudeTuiReady('~ home ~\n❯ claude --model opus'), false, 'a starship shell prompt is not a composer');
+  assert.equal(claudeTuiReady(CLAUDE_COMPOSER_READ.stdout), true, 'the measured trusted screen');
+  // Changed meaning in amendment 4: a composer is never a substitute for the mode line.
+  assert.equal(claudeTuiReady('─────────────────\n❯\n─────────────────'), false, 'a composer between rules without its mode line');
+  assert.equal(claudeTuiReady('  ⏵⏵ bypass permissions on (shift+tab to cycle)'), true, 'the mode line alone');
+});
+
+// The trusted screen as read at 2026-09-26 21:25:51Z (the statusline is this
+// box's own; any line there counts the same).
+const TRUSTED_SCREEN = [
+  '~  home / AppData / Local / Temp / aa1-foldertrust-20260926T212518Z ~ claude --model claude-haiku-4-5-20251001',
+  '', '', '',
+  '─────────────────────────────────────────────',
+  '❯ Try "how does <filepath> work?"',
+  '─────────────────────────────────────────────',
+  '  ⚡ Haiku 4.5 │ aa1-foldertrust-20260926T212518Z │ ░░░░░░░░░░ 0% │ $0.00',
+  '  ⏸ manual mode on · ← for agents',
+].join('\n');
+
+test('4aa9b174 amend 3: readiness is judged on the current frame, not on scrollback', () => {
+  const staleThenPrompt = [...TRUSTED_SCREEN.split('\n'), 'Another startup prompt', '❯ Continue setup', 'Press return'].join('\n');
+  assert.equal(claudeTuiReady(staleThenPrompt), false, 'the reviewer\'s shape: an old frame above a new startup prompt');
+  assert.equal(claudeTuiReady('Another startup prompt\n❯ Continue setup\nPress return'), false, 'the new prompt alone');
+  assert.equal(claudeTuiReady(`${TRUSTED_SCREEN}\nPress return`), false, 'one new line under an old frame: its mode line is no longer last');
+  assert.equal(claudeTuiReady(TRUSTED_SCREEN), true, 'the measured trusted screen');
+  assert.equal(claudeTuiReady(`${TRUSTED_SCREEN}\n\n\n   \n`), true, 'the trusted screen followed by blank lines');
+  assert.equal(claudeTuiReady('some scrollback\n  ⏸ manual mode on · ← for agents'), true, 'the mode line alone as the last line');
+  assert.equal(claudeTuiReady('─────────────────\n❯ Try "x"\n─────────────────\n  statusline'), false, 'a composer frame without its mode line (changed meaning, amendment 4)');
+  assert.equal(claudeTuiReady('─────────────────\n❯ Try "x"\n─────────────────\na\nb\nc'), false, 'a composer frame ending more than three lines up is scrollback');
+});
+
+test('4aa9b174 amend 4: the reviewers\' composer shapes are not ready', () => {
+  assert.equal(claudeTuiReady('─────────────────\n❯\n─────────────────\n❯ Continue setup\nPress return'), false, 'astra: an old composer above a setup prompt');
+  assert.equal(claudeTuiReady('─────────────────\n❯\n─────────────────\nNew startup prompt'), false, 'codex: an old composer above one new line');
+});
+
+test('4aa9b174 amend 4: the folder-trust dialog counts only as the current frame', async (t) => {
+  const staleDialog = `${FOLDER_TRUST_READ.stdout}\nAnother startup prompt\n❯ Continue setup\nPress return`;
+  assert.equal(folderTrustDialog(staleDialog), false, 'the reviewer\'s shape: a stale dialog above a different prompt');
+  assert.equal(folderTrustDialog(FOLDER_TRUST_READ.stdout), true, 'the measured dialog alone');
+  assert.equal(folderTrustDialog(`${FOLDER_TRUST_READ.stdout}\n\n  \n`), true, 'the measured dialog followed by blank lines');
+  // The question line sits 6th from the bottom. Wrapping it (the rest of the
+  // question moves down a line) plus five lines puts "Quick safety check" 12th;
+  // plus six, 13th.
+  const wrapped = (extra) => FOLDER_TRUST_READ.stdout.replace(' Quick safety check: Is this', ` Quick safety check:\n${Array.from({ length: extra }, (_, i) => i + 1).join('\n')}\n Is this`);
+  const tall = wrapped(6);
+  assert.equal(folderTrustDialog(wrapped(5)), true, '12th from the bottom is inside the block');
+  assert.equal(folderTrustDialog(tall), false, 'the question more than 12 lines above the footer is outside the block');
+
+  const f = fixture(t);
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, { code: 0, stdout: staleDialog, stderr: '' });
+  const result = await startClaude(f);
+  assert.equal(result.exit, 1);
+  assert.deepEqual(sendKeys(f), [], 'no keys go to a prompt that is not the dialog');
+});
+
+test('4aa9b174: the exported pattern pair matches the measured dialog', () => {
+  assert.equal(FOLDER_TRUST_PATTERNS.length, 2);
+  assert.ok(FOLDER_TRUST_PATTERNS.every((pattern) => FOLDER_TRUST_READ.stdout.split('\n').some((line) => pattern.test(line))));
+});
+
 test('c952d41e DO 11: plan refusal requires a Codex banner or numbered modal plus low meter or settled state', async (t) => {
   const compiler = fixture(t); seedLane(compiler); let clock = 0;
   compiler.responses.push(
@@ -3096,6 +3303,26 @@ test('207dbaf1 amend-1 / item 5: letters identify options — stem plus options 
   assert.deepEqual(needs('Use `x?y` as the query string.'), [], 'a ? inside a code span is not a question');
   assert.equal(needs('Is this right?', '#### Needs conductor').length, 1, 'a level-four Needs conductor is checked');
   assert.deepEqual(needs('(a) Is this right? — yes', '#### Needs conductor'), []);
+});
+
+test('78d4dfd9 amend 2: an ask carries at most six options and no letter twice; --expect-report fails on either', async (t) => {
+  const needs = (body) => reportShapeProblems(`## Needs conductor\n\n${body}\n\n${DEBRIEF_NONE.slice(DEBRIEF_NONE.indexOf('## Debrief'))}`);
+  const seven = 'Which base?\n\n(a) A\n(b) B\n(c) C\n(d) D\n(e) E\n(f) F\n(a) G';
+  const sevenProblems = needs(seven);
+  assert.ok(sevenProblems.some((problem) => /line 5: the ask has 7 lettered options; an ask carries at most six/.test(problem)), sevenProblems.join('\n'));
+  assert.ok(sevenProblems.some((problem) => /line 5: the ask repeats option \(a\) 2 times/.test(problem)), sevenProblems.join('\n'));
+  const duplicate = needs('Keep or drop?\n- (a) Keep\n- (b) Drop\n- (b) Drop harder');
+  assert.deepEqual(duplicate, ['## Needs conductor line 4: the ask repeats option (b) 2 times; letters identify options within one ask']);
+  assert.deepEqual(needs('Which base?\n(a) A\n(b) B\n(c) C\n(d) D\n(e) E\n(f) F'), [], 'six options pass');
+  assert.deepEqual(needs('First?\n(a) A\n(b) B\n\nSecond?\n(a) C\n(b) D'), [], 'a stem between two runs starts a new ask');
+  assert.deepEqual(needs('(a) The fork:\n    which one?\n(b) Or neither\n(c) Or both'), [], 'an indented continuation stays inside the ask');
+
+  const f = fixture(t);
+  seedLane(f);
+  const report = reportFile(f, `## Needs conductor\n\n${seven}\n\n${DEBRIEF_NONE.slice(DEBRIEF_NONE.indexOf('## Debrief'))}`);
+  const red = await runLane(['check', 'lane-a', '--expect-report', report, '--log', f.log], { exec: f.exec });
+  assert.equal(red.exit, 5);
+  assert.match(red.output.failedExpectation, /the ask has 7 lettered options/);
 });
 
 test('207dbaf1 amend-1 / item 6: a fence closer carries only whitespace; ```markdown inside a fence is content', () => {

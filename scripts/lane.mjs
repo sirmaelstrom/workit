@@ -54,7 +54,7 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            | --expect-report <path>
            --expect-report and --expect-pr (on the PR body) require ## Debrief with
            both headings, and every question under ## Needs conductor in a lettered
-           ask (a)…(f).
+           ask (a)…(f): at most six options per ask, no letter twice.
   resume   <name> [--timeout <ms>] [--plan-floor <pct>]
            Waits --until idle --until done, never bare; honours --plan-floor.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
@@ -75,7 +75,7 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
                 signature; default shapes are the last resort.
   start serializes for about 120s per --log sidecar (not across different logs),
         splits a busy pane once, and logs waitedForStartLockMs, paneSplitFrom,
-        hooksTrusted, queued, enterRetries, composerCleared, promptCheck,
+        hooksTrusted, folderTrusted, queued, enterRetries, composerCleared, promptCheck,
         ghost, and refusalShape.`;
 // Seeded only from a captured refusal, never an invented one. This string was
 // read off lane O's pane at 2026-09-01 22:12Z; herdr reported that agent as
@@ -90,6 +90,30 @@ export const HOOKS_TRUST_PATTERNS = Object.freeze([
   /hooks need review/i,
   /press t to trust/i,
 ]);
+// Claude Code's folder-trust dialog on a directory it has never opened, read off
+// a scratch pane at 2026-09-26 21:25Z (claude --model claude-haiku-4-5-20251001
+// in a fresh %TEMP% dir). `herdr agent start` fails on it with agent_not_ready.
+// The options draw as `❯ No, exit` then `Yes, I trust this folder`, cursor on
+// No; Down then Enter selects trust and the composer follows. The first pattern
+// is the opening words of the question, which a narrow pane still keeps on
+// one line.
+export const FOLDER_TRUST_PATTERNS = Object.freeze([
+  /Quick safety check/i,
+  /Yes, I trust this folder/i,
+]);
+const FOLDER_TRUST_CURSOR_ON_NO = /^❯\s*No, exit\b/;
+const FOLDER_TRUST_FOOTER = /Enter to confirm/i;
+const FOLDER_TRUST_KEYS = Object.freeze(['Down', 'Enter']);
+// The dialog is 9 non-blank lines from its top rule to its footer, as read;
+// 3 more cover the question wrapping in a narrower pane. Only this block,
+// ending at the pane's last non-blank line, is the current dialog.
+const FOLDER_TRUST_BLOCK_LINES = 12;
+// The trusted screen, read the same run, ends in the mode line
+// `⏸ manual mode on · ← for agents`, drawn below the composer and a
+// statusline. Claude Code draws it last, so a mode line anywhere else is an
+// older frame with something newer under it. The other shapes are LIVE_TUI's.
+const CLAUDE_MODE_LINE = /←\s*for agents|shift\+tab to cycle|⏵⏵/i;
+const FOLDER_TRUST_TIMEOUT_MS = 15_000;
 // The sweep delegate's location is resolved, never hardcoded: this file ships in
 // a public repo, and one operator's drive layout is not a default. Order:
 // HERDR_LANES_SCRIPT, then <workspace-root>/infrastructure/herdr-lanes.ps1
@@ -439,6 +463,52 @@ function hasMcpStartupTimeoutConfig(args) {
 
 function startCollision(result) {
   return /agent_pane_busy/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+function startupBlocked(result) {
+  return /agent_not_ready|blocked during startup/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+// The dialog as measured, and only as the CURRENT frame: a pane read carries
+// scrollback, so the footer must be the last non-blank line, and both patterns
+// and the cursor on No must sit in the block it closes. Any other shape is left
+// alone, because Down+Enter on a dialog that changed could select "No, exit".
+export function folderTrustDialog(text) {
+  const lines = paneLines(text);
+  if (!FOLDER_TRUST_FOOTER.test(lines.at(-1) ?? '')) return false;
+  const block = lines.slice(-FOLDER_TRUST_BLOCK_LINES);
+  return FOLDER_TRUST_PATTERNS.every((pattern) => block.some((line) => pattern.test(line)))
+    && block.some((line) => FOLDER_TRUST_CURSOR_ON_NO.test(line));
+}
+
+// Positive readiness after the answer: the mode line is the last non-blank
+// line. Nothing above it is read, so an older Claude frame in scrollback, the
+// dialog, an empty redraw frame or a newer startup prompt is not ready; a
+// frame caught before the mode line is drawn waits for the next poll.
+export function claudeTuiReady(text) {
+  return CLAUDE_MODE_LINE.test(paneLines(text).at(-1) ?? '');
+}
+
+// Answers the folder-trust dialog in `pane` and waits for a Claude frame;
+// returns false, having sent nothing, when the pane does not show the dialog.
+// No Claude frame by the deadline is exit 3 with the pane's tail.
+async function answerFolderTrust(deps, pane) {
+  const snapshot = readPane(deps, pane);
+  if (snapshot.code !== 0 || !folderTrustDialog(snapshot.stdout)) return false;
+  for (const key of FOLDER_TRUST_KEYS) callOrFail(deps, 'herdr', ['pane', 'send-keys', pane, key]);
+  const deadline = deps.now() + FOLDER_TRUST_TIMEOUT_MS;
+  let last = snapshot.stdout;
+  do {
+    await deps.sleep(250);
+    const after = readPane(deps, pane);
+    if (after.code === 0) {
+      last = after.stdout;
+      if (claudeTuiReady(last)) return true;
+    }
+  } while (deps.now() < deadline);
+  throw new LaneError(EXIT.BLOCKED, `folder-trust dialog in pane ${pane} was answered with ${FOLDER_TRUST_KEYS.join('+')} but no Claude mode line was drawn last within ${FOLDER_TRUST_TIMEOUT_MS} ms`, {
+    dialog: paneLines(last).slice(-12).join('\n'),
+  });
 }
 
 function bareShellWithoutAgent(deps, pane, promptOptions = {}) {
@@ -928,6 +998,7 @@ async function startLane(opts, deps, state) {
     let paneSplitFrom = null;
     let promptSignature = null;
     let raw = null;
+    let folderTrusted = false;
     for (let attempt = 0; attempt < 2; attempt++) {
       refreshLock(deps, `${opts.log}.start.lock`, startLockContent);
       promptSignature = await capturePromptSignature(deps, pane, { patterns });
@@ -937,6 +1008,13 @@ async function startLane(opts, deps, state) {
       const started = call(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', pane, '--', ...native]);
       if (started.code === 0) {
         raw = started.stdout;
+        break;
+      }
+      // herdr registers the agent before it reports agent_not_ready, so once
+      // the dialog is answered the agent is live in this pane.
+      if (opts.kind === 'claude' && startupBlocked(started) && await answerFolderTrust(deps, pane)) {
+        folderTrusted = true;
+        raw = '';
         break;
       }
       const recoverable = startCollision(started) || (isTimeoutFailure(started) && bareShellWithoutAgent(deps, pane, { signature: promptSignature, patterns }));
@@ -1014,6 +1092,7 @@ async function startLane(opts, deps, state) {
       ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
       ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
       ...(hooksTrusted ? { hooksTrusted: true } : {}),
+      ...(folderTrusted ? { folderTrusted: true } : {}),
       ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
     },
     row: {
@@ -1025,6 +1104,7 @@ async function startLane(opts, deps, state) {
       ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
       ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
       ...(hooksTrusted ? { hooksTrusted: true } : {}),
+      ...(folderTrusted ? { folderTrusted: true } : {}),
       warning: warnings.length > 0 ? warnings.join('; ') : null,
     },
     };
@@ -1412,9 +1492,25 @@ function carriesQuestion(line) {
 
 // An ask is a lettered item `(a) …?`, or a question stem whose next non-blank
 // line starts a lettered item. Anything else carrying a `?` is a bare question.
+// The lettered items in one unbroken run are one ask's options: at most six,
+// no letter twice. A line that is neither an item nor indented under one ends
+// the run.
 function askProblems(section, label) {
   const problems = [];
   let itemIndent = null;
+  let run = null;
+  const closeRun = () => {
+    if (!run) return;
+    if (run.letters.length > 6) {
+      problems.push(`${label} line ${run.line}: the ask has ${run.letters.length} lettered options; an ask carries at most six, (a)…(f)`);
+    }
+    const repeated = [...new Set(run.letters.filter((letter, i) => run.letters.indexOf(letter) !== i))];
+    for (const letter of repeated) {
+      const count = run.letters.filter((candidate) => candidate === letter).length;
+      problems.push(`${label} line ${run.line}: the ask repeats option (${letter}) ${count} times; letters identify options within one ask`);
+    }
+    run = null;
+  };
   section.forEach((line, index) => {
     if (!line.text.trim()) return;
     const indent = /^\s*/.exec(line.text)[0].replace(/\t/g, '    ').length;
@@ -1422,6 +1518,8 @@ function askProblems(section, label) {
     if (letter !== null) {
       if (ASK_LETTER.test(letter)) {
         itemIndent = indent;
+        run ??= { line: line.number, letters: [] };
+        run.letters.push(letter);
         return;
       }
       itemIndent = null;
@@ -1431,11 +1529,13 @@ function askProblems(section, label) {
     }
     if (itemIndent !== null && indent > itemIndent) return;
     itemIndent = null;
+    closeRun();
     if (!carriesQuestion(line)) return;
     const next = section.slice(index + 1).find((candidate) => candidate.text.trim());
     if (ASK_LETTER.test(letterOf(next) ?? '')) return;
     problems.push(`${label} line ${line.number} is a question outside a lettered ask (a)…(f): ${line.text.trim()}`);
   });
+  closeRun();
   return problems;
 }
 
@@ -1719,6 +1819,26 @@ function agentState(deps, name) {
   return { agent, state: String(agent.state ?? agent.status ?? 'unknown').toLowerCase() };
 }
 
+// Measured 2026-09-26 21:30Z and 21:31Z (a Haiku agent after one turn, then
+// the stop's `/exit`): the shell prompt was back 1.8 s in with the agent still
+// listed, and it was unlisted by 2.4 s, both times. The window is a few times
+// that lag.
+const STOP_UNLIST_WINDOW_MS = 10_000;
+
+// Re-reads `herdr agent list` until `name` drops out or `windowMs` passes; a
+// failed or agent-less listing ends it at once. The caller judges the result.
+async function pollUntilUnlisted(deps, name, windowMs) {
+  const deadline = deps.now() + windowMs;
+  let polls = 0;
+  for (;;) {
+    const listing = call(deps, 'herdr', ['agent', 'list']);
+    polls++;
+    const names = listing.code === 0 ? listedAgentNames(listing.stdout) : null;
+    if (!names || !names.includes(name) || deps.now() >= deadline) return { listing, names, polls };
+    await deps.sleep(250);
+  }
+}
+
 async function stopLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   if (!lane.pane) usage(`lane ${opts.name} has no pane metadata`);
@@ -1743,8 +1863,6 @@ async function stopLane(opts, deps, state) {
     // failure; the agent listing is the deciding signal.
     await deps.sleep(5_000);
     const latePane = readPane(deps, lane.pane);
-    const lateListing = call(deps, 'herdr', ['agent', 'list']);
-    const lateNames = lateListing.code === 0 ? listedAgentNames(lateListing.stdout) : null;
     const lateText = latePane.code === 0 ? responseText(latePane.stdout) : '';
     const lateLines = paneLines(lateText);
     const liveTui = LIVE_TUI.some((pattern) => lateLines.slice(-2).some((line) => pattern.test(line)));
@@ -1753,15 +1871,22 @@ async function stopLane(opts, deps, state) {
       patterns: promptPatterns(opts, deps),
     });
     const exitBanner = !liveTui && lateLines.slice(-3).some((line) => /^(?:goodbye|codex\s+(?:exited|closed))/i.test(line));
+    // The same listing lag as the normal path: with the pane showing an exit
+    // (or unreadable), the listing gets the same window; a live TUI gets one read.
+    const exitSeen = !liveTui && (latePrompt || exitBanner || latePane.code !== 0);
+    const late = await pollUntilUnlisted(deps, opts.name, exitSeen ? STOP_UNLIST_WINDOW_MS : 0);
+    const lateListing = late.listing;
+    const lateNames = late.names;
+    const latePolls = late.polls > 1 ? { agentListPolls: late.polls } : {};
     if (lateListing.code === 0 && Array.isArray(lateNames) && !lateNames.includes(opts.name) && latePane.code !== 0) {
       deps.warn(`lane: stop pane re-read failed after ${opts.name} disappeared; accepting unread exit`);
-      return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'unread' }, row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'unread' } };
+      return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'unread', ...latePolls }, row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'unread', ...latePolls } };
     }
     if (Array.isArray(lateNames) && !lateNames.includes(opts.name) && (latePrompt || exitBanner)) {
       return {
         exit: EXIT.OK,
-        output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'late' },
-        row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'late' },
+        output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'late', ...latePolls },
+        row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'late', ...latePolls },
       };
     }
     if (Array.isArray(lateNames) && lateNames.includes(opts.name)) {
@@ -1769,12 +1894,21 @@ async function stopLane(opts, deps, state) {
     }
     throw new LaneError(EXIT.ERROR, `stop pane prompt check failed: ${error.message}`);
   }
-  const listing = call(deps, 'herdr', ['agent', 'list']);
+  // herdr drops an exited agent from `agent list` a beat after the pane's
+  // prompt returns, so one read at the prompt races it; the listing is
+  // re-read until the agent is gone or the window closes.
+  const { listing, names, polls: agentListPolls } = await pollUntilUnlisted(deps, opts.name, STOP_UNLIST_WINDOW_MS);
   if (listing.code !== 0) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${listing.stderr.trim() || listing.stdout.trim()}`);
-  const names = listedAgentNames(listing.stdout);
   if (!names) throw new LaneError(EXIT.ERROR, 'stop agent list check failed: response did not contain agents');
-  if (names.some((name) => name === opts.name)) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed`);
-  return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: true, agentListed: false }, row: laneInstrumentation(opts.name, lane, 'stopped') };
+  if (names.includes(opts.name)) {
+    throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed ${STOP_UNLIST_WINDOW_MS} ms after the pane prompt returned`);
+  }
+  const polls = agentListPolls > 1 ? { agentListPolls } : {};
+  return {
+    exit: EXIT.OK,
+    output: { state: 'stopped', panePrompt: true, agentListed: false, ...polls },
+    row: { ...laneInstrumentation(opts.name, lane, 'stopped'), ...polls },
+  };
 }
 
 // A root is a LANE root when everything under it is a lane by construction —
