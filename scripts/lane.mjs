@@ -75,7 +75,7 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
                 signature; default shapes are the last resort.
   start serializes for about 120s per --log sidecar (not across different logs),
         splits a busy pane once, and logs waitedForStartLockMs, paneSplitFrom,
-        hooksTrusted, queued, enterRetries, composerCleared, promptCheck,
+        hooksTrusted, folderTrusted, queued, enterRetries, composerCleared, promptCheck,
         ghost, and refusalShape.`;
 // Seeded only from a captured refusal, never an invented one. This string was
 // read off lane O's pane at 2026-09-01 22:12Z; herdr reported that agent as
@@ -90,6 +90,21 @@ export const HOOKS_TRUST_PATTERNS = Object.freeze([
   /hooks need review/i,
   /press t to trust/i,
 ]);
+// Claude Code's folder-trust dialog on a directory it has never opened, read off
+// a scratch pane at 2026-09-26 21:25Z (claude --model claude-haiku-4-5-20251001
+// in a fresh %TEMP% dir). `herdr agent start` fails on it with agent_not_ready.
+// The options draw as `❯ No, exit` then `Yes, I trust this folder`, cursor on
+// No; Down then Enter selects trust and the composer follows. The first pattern
+// is the opening words of the question, which a narrow pane still keeps on
+// one line.
+export const FOLDER_TRUST_PATTERNS = Object.freeze([
+  /Quick safety check/i,
+  /Yes, I trust this folder/i,
+]);
+const FOLDER_TRUST_CURSOR_ON_NO = /^❯\s*No, exit\b/;
+const FOLDER_TRUST_FOOTER = /Enter to confirm/i;
+const FOLDER_TRUST_KEYS = Object.freeze(['Down', 'Enter']);
+const FOLDER_TRUST_TIMEOUT_MS = 15_000;
 // The sweep delegate's location is resolved, never hardcoded: this file ships in
 // a public repo, and one operator's drive layout is not a default. Order:
 // HERDR_LANES_SCRIPT, then <workspace-root>/infrastructure/herdr-lanes.ps1
@@ -439,6 +454,43 @@ function hasMcpStartupTimeoutConfig(args) {
 
 function startCollision(result) {
   return /agent_pane_busy/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+function startupBlocked(result) {
+  return /agent_not_ready|blocked during startup/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+// The dialog as measured: both patterns in the pane's tail and the cursor on
+// No. Any other shape is left alone, because Down+Enter on a dialog that
+// changed could select "No, exit".
+function folderTrustDialog(text) {
+  const lines = paneLines(text).slice(-16);
+  return FOLDER_TRUST_PATTERNS.every((pattern) => lines.some((line) => pattern.test(line)))
+    && lines.some((line) => FOLDER_TRUST_CURSOR_ON_NO.test(line));
+}
+
+// Answers the folder-trust dialog in `pane` and waits for it to close; returns
+// false, having sent nothing, when the pane does not show it. A dialog still
+// drawn at the deadline is exit 3 with the pane's tail.
+async function answerFolderTrust(deps, pane) {
+  const snapshot = readPane(deps, pane);
+  if (snapshot.code !== 0 || !folderTrustDialog(snapshot.stdout)) return false;
+  for (const key of FOLDER_TRUST_KEYS) callOrFail(deps, 'herdr', ['pane', 'send-keys', pane, key]);
+  const deadline = deps.now() + FOLDER_TRUST_TIMEOUT_MS;
+  let last = snapshot.stdout;
+  do {
+    await deps.sleep(250);
+    const after = readPane(deps, pane);
+    if (after.code === 0) {
+      last = after.stdout;
+      // The dialog's own last line is its footer; once the last line is
+      // anything else, the dialog is gone even if its frame is in scrollback.
+      if (!FOLDER_TRUST_FOOTER.test(paneLines(last).at(-1) ?? '')) return true;
+    }
+  } while (deps.now() < deadline);
+  throw new LaneError(EXIT.BLOCKED, `folder-trust dialog in pane ${pane} was answered with ${FOLDER_TRUST_KEYS.join('+')} but is still drawn after ${FOLDER_TRUST_TIMEOUT_MS} ms`, {
+    dialog: paneLines(last).slice(-12).join('\n'),
+  });
 }
 
 function bareShellWithoutAgent(deps, pane, promptOptions = {}) {
@@ -928,6 +980,7 @@ async function startLane(opts, deps, state) {
     let paneSplitFrom = null;
     let promptSignature = null;
     let raw = null;
+    let folderTrusted = false;
     for (let attempt = 0; attempt < 2; attempt++) {
       refreshLock(deps, `${opts.log}.start.lock`, startLockContent);
       promptSignature = await capturePromptSignature(deps, pane, { patterns });
@@ -937,6 +990,13 @@ async function startLane(opts, deps, state) {
       const started = call(deps, 'herdr', ['agent', 'start', opts.name, '--kind', opts.kind, '--pane', pane, '--', ...native]);
       if (started.code === 0) {
         raw = started.stdout;
+        break;
+      }
+      // herdr registers the agent before it reports agent_not_ready, so once
+      // the dialog is answered the agent is live in this pane.
+      if (opts.kind === 'claude' && startupBlocked(started) && await answerFolderTrust(deps, pane)) {
+        folderTrusted = true;
+        raw = '';
         break;
       }
       const recoverable = startCollision(started) || (isTimeoutFailure(started) && bareShellWithoutAgent(deps, pane, { signature: promptSignature, patterns }));
@@ -1014,6 +1074,7 @@ async function startLane(opts, deps, state) {
       ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
       ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
       ...(hooksTrusted ? { hooksTrusted: true } : {}),
+      ...(folderTrusted ? { folderTrusted: true } : {}),
       ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
     },
     row: {
@@ -1025,6 +1086,7 @@ async function startLane(opts, deps, state) {
       ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
       ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
       ...(hooksTrusted ? { hooksTrusted: true } : {}),
+      ...(folderTrusted ? { folderTrusted: true } : {}),
       warning: warnings.length > 0 ? warnings.join('; ') : null,
     },
     };

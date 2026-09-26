@@ -7,7 +7,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEBRIEF_HEADINGS, EXIT_CODES, PLAN_REFUSAL_PATTERNS, codexPromptDelivery, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  DEBRIEF_HEADINGS, EXIT_CODES, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, codexPromptDelivery, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
   reportShapeProblems, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -2464,6 +2464,82 @@ test('c952d41e DO 8: a hooks-trust dialog sends t then esc and is logged', async
   });
   assert.equal(result.row.hooksTrusted, true);
   assert.deepEqual(f.calls.filter((call) => call.args[1] === 'send-keys').map((call) => call.args[3]), ['t', 'esc']);
+});
+
+// ── 4aa9b174: Claude Code's folder-trust dialog blocks `herdr agent start` ──
+
+// herdr's refusal and the dialog, as read on 2026-09-26 (lane-log row for zd at
+// 18:02:20Z; a scratch pane at 21:27Z read with --source detection).
+const AGENT_NOT_READY = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_ready","message":"agent lane-a is blocked during startup and is not ready for prompts"},"id":"cli:agent:start"}' };
+const FOLDER_TRUST_READ = { code: 0, stdout: [
+  '─────────────────────────────────────────────',
+  ' Accessing workspace:', '',
+  ' X:\\fixture\\lane', '',
+  ' Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what\'s in this folder first.', '',
+  ' Claude Code\'ll be able to read, edit, and execute files here.', '',
+  ' Security guide', '',
+  ' ❯ No, exit',
+  '   Yes, I trust this folder', '',
+  ' Enter to confirm · Esc to cancel',
+].join('\n'), stderr: '' };
+const CLAUDE_COMPOSER_READ = { code: 0, stdout: ['─────────────────', '❯ Try "how does <filepath> work?"', '─────────────────', '  ⏸ manual mode on · ← for agents'].join('\n'), stderr: '' };
+const startClaude = (f, deps = {}) => runLane(
+  ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+  { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {}, ...deps },
+);
+const sendKeys = (f) => f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'send-keys').map((call) => call.args.slice(2));
+
+test('4aa9b174: a folder-trust dialog at start is answered Down then Enter, logged, and the lane recorded', async (t) => {
+  const f = fixture(t);
+  f.responses.push(
+    SHELL_READ, AGENT_NOT_READY, FOLDER_TRUST_READ,
+    { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
+    CLAUDE_COMPOSER_READ,
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await startClaude(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(sendKeys(f), [['w1:p2', 'Down'], ['w1:p2', 'Enter']]);
+  assert.equal(result.row.folderTrusted, true);
+  assert.equal(result.output.folderTrusted, true);
+  assert.equal(result.output.agent, 'lane-a');
+  assert.equal(readState(f).lanes['lane-a'].pane, 'w1:p2', 'the answered lane has pane metadata');
+});
+
+test('4aa9b174: agent_not_ready without the dialog sends nothing and the start fails as before', async (t) => {
+  const f = fixture(t);
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, { code: 0, stdout: 'Some other dialog\n❯ 1. Continue\n  2. Quit', stderr: '' });
+  const result = await startClaude(f);
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /herdr agent start failed: .*blocked during startup/);
+  assert.deepEqual(sendKeys(f), []);
+  assert.equal(result.row.folderTrusted, undefined);
+});
+
+test('4aa9b174: the dialog with the cursor already moved is not answered blind', async (t) => {
+  const f = fixture(t);
+  const moved = { ...FOLDER_TRUST_READ, stdout: FOLDER_TRUST_READ.stdout.replace(' ❯ No, exit', '   No, exit').replace('   Yes, I trust', ' ❯ Yes, I trust') };
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, moved);
+  const result = await startClaude(f);
+  assert.equal(result.exit, 1);
+  assert.deepEqual(sendKeys(f), []);
+});
+
+test('4aa9b174: a dialog still drawn after the answer is exit 3 with the pane tail', async (t) => {
+  const f = fixture(t);
+  let clock = 0;
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, FOLDER_TRUST_READ, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' });
+  for (let i = 0; i < 100; i++) f.responses.push(FOLDER_TRUST_READ);
+  const result = await startClaude(f, { now: () => (clock += 1_000) });
+  assert.equal(result.exit, 3);
+  assert.match(result.output.error, /folder-trust dialog in pane w1:p2 was answered with Down\+Enter but is still drawn/);
+  assert.match(result.output.dialog, /Enter to confirm/);
+});
+
+test('4aa9b174: the exported pattern pair matches the measured dialog', () => {
+  assert.equal(FOLDER_TRUST_PATTERNS.length, 2);
+  assert.ok(FOLDER_TRUST_PATTERNS.every((pattern) => FOLDER_TRUST_READ.stdout.split('\n').some((line) => pattern.test(line))));
 });
 
 test('c952d41e DO 11: plan refusal requires a Codex banner or numbered modal plus low meter or settled state', async (t) => {
