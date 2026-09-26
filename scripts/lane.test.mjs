@@ -7,7 +7,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEBRIEF_HEADINGS, EXIT_CODES, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, codexPromptDelivery, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  DEBRIEF_HEADINGS, EXIT_CODES, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
   reportShapeProblems, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -2554,8 +2554,46 @@ test('4aa9b174: a dialog still drawn after the answer is exit 3 with the pane ta
   for (let i = 0; i < 100; i++) f.responses.push(FOLDER_TRUST_READ);
   const result = await startClaude(f, { now: () => (clock += 1_000) });
   assert.equal(result.exit, 3);
-  assert.match(result.output.error, /folder-trust dialog in pane w1:p2 was answered with Down\+Enter but is still drawn/);
+  assert.match(result.output.error, /folder-trust dialog in pane w1:p2 was answered with Down\+Enter but no Claude composer appeared within 15000 ms/);
   assert.match(result.output.dialog, /Enter to confirm/);
+});
+
+test('4aa9b174 amend 2: an empty frame after the answer is not readiness; it times out to exit 3', async (t) => {
+  const f = fixture(t);
+  let clock = 0;
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, FOLDER_TRUST_READ, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' });
+  for (let i = 0; i < 100; i++) f.responses.push({ code: 0, stdout: '', stderr: '' });
+  const result = await startClaude(f, { now: () => (clock += 1_000) });
+  assert.equal(result.exit, 3, JSON.stringify(result.output));
+  assert.equal(result.row.folderTrusted, undefined);
+  assert.match(result.output.error, /no Claude composer appeared/);
+});
+
+test('4aa9b174 amend 2: an empty redraw frame then the composer is success', async (t) => {
+  const f = fixture(t);
+  let clock = 0;
+  f.responses.push(
+    SHELL_READ, AGENT_NOT_READY, FOLDER_TRUST_READ,
+    { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '', stderr: '' },
+    { code: 0, stdout: ['─────────────────', '❯ Try "how does <filepath> work?"', '─────────────────'].join('\n'), stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await startClaude(f, { now: () => (clock += 100) });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.folderTrusted, true);
+  assert.equal(f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'read').length, 4, 'shell, dialog, empty, composer');
+});
+
+test('4aa9b174 amend 2: claudeTuiReady needs a framed composer or the mode line', () => {
+  assert.equal(claudeTuiReady(''), false, 'an empty frame');
+  assert.equal(claudeTuiReady(FOLDER_TRUST_READ.stdout), false, 'the dialog itself');
+  assert.equal(claudeTuiReady(FOLDER_TRUST_READ.stdout.replace(' Enter to confirm · Esc to cancel', '')), false, 'the dialog with its footer gone: its ❯ option line is not under a rule');
+  assert.equal(claudeTuiReady('~ home ~\n❯ claude --model opus'), false, 'a starship shell prompt is not a composer');
+  assert.equal(claudeTuiReady(CLAUDE_COMPOSER_READ.stdout), true, 'the measured trusted screen');
+  assert.equal(claudeTuiReady('─────────────────\n❯'), true, 'an empty composer under a rule');
+  assert.equal(claudeTuiReady('  ⏵⏵ bypass permissions on (shift+tab to cycle)'), true, 'the mode line alone');
 });
 
 test('4aa9b174: the exported pattern pair matches the measured dialog', () => {

@@ -104,6 +104,15 @@ export const FOLDER_TRUST_PATTERNS = Object.freeze([
 const FOLDER_TRUST_CURSOR_ON_NO = /^❯\s*No, exit\b/;
 const FOLDER_TRUST_FOOTER = /Enter to confirm/i;
 const FOLDER_TRUST_KEYS = Object.freeze(['Down', 'Enter']);
+// The trusted screen, read the same run: the composer `❯ Try "how does
+// <filepath> work?"` framed by rules above and below, then the mode line
+// `⏸ manual mode on · ← for agents`. The composer counts only under a rule, so
+// a shell prompt that starts with `❯` (starship) and the dialog's own `❯`
+// option lines are not read as Claude. The other mode-line shapes are the
+// LIVE_TUI ones.
+const CLAUDE_RULE = /^[─━]{6,}$/;
+const CLAUDE_COMPOSER = /^❯(?:\s|$)/;
+const CLAUDE_MODE_LINE = /←\s*for agents|shift\+tab to cycle|⏵⏵/i;
 const FOLDER_TRUST_TIMEOUT_MS = 15_000;
 // The sweep delegate's location is resolved, never hardcoded: this file ships in
 // a public repo, and one operator's drive layout is not a default. Order:
@@ -469,9 +478,19 @@ function folderTrustDialog(text) {
     && lines.some((line) => FOLDER_TRUST_CURSOR_ON_NO.test(line));
 }
 
-// Answers the folder-trust dialog in `pane` and waits for it to close; returns
-// false, having sent nothing, when the pane does not show it. A dialog still
-// drawn at the deadline is exit 3 with the pane's tail.
+// Positive readiness after the answer: the dialog's footer is no longer the
+// pane's last line (its frame may linger in scrollback), and a Claude frame is
+// drawn. An empty or unrecognised frame, as during a redraw, is not ready.
+export function claudeTuiReady(text) {
+  const lines = paneLines(text);
+  if (lines.length === 0 || FOLDER_TRUST_FOOTER.test(lines.at(-1))) return false;
+  const framedComposer = lines.some((line, i) => CLAUDE_COMPOSER.test(line) && i > 0 && CLAUDE_RULE.test(lines[i - 1]));
+  return framedComposer || lines.some((line) => CLAUDE_MODE_LINE.test(line));
+}
+
+// Answers the folder-trust dialog in `pane` and waits for a Claude frame;
+// returns false, having sent nothing, when the pane does not show the dialog.
+// No Claude frame by the deadline is exit 3 with the pane's tail.
 async function answerFolderTrust(deps, pane) {
   const snapshot = readPane(deps, pane);
   if (snapshot.code !== 0 || !folderTrustDialog(snapshot.stdout)) return false;
@@ -483,12 +502,10 @@ async function answerFolderTrust(deps, pane) {
     const after = readPane(deps, pane);
     if (after.code === 0) {
       last = after.stdout;
-      // The dialog's own last line is its footer; once the last line is
-      // anything else, the dialog is gone even if its frame is in scrollback.
-      if (!FOLDER_TRUST_FOOTER.test(paneLines(last).at(-1) ?? '')) return true;
+      if (claudeTuiReady(last)) return true;
     }
   } while (deps.now() < deadline);
-  throw new LaneError(EXIT.BLOCKED, `folder-trust dialog in pane ${pane} was answered with ${FOLDER_TRUST_KEYS.join('+')} but is still drawn after ${FOLDER_TRUST_TIMEOUT_MS} ms`, {
+  throw new LaneError(EXIT.BLOCKED, `folder-trust dialog in pane ${pane} was answered with ${FOLDER_TRUST_KEYS.join('+')} but no Claude composer appeared within ${FOLDER_TRUST_TIMEOUT_MS} ms`, {
     dialog: paneLines(last).slice(-12).join('\n'),
   });
 }
