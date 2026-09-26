@@ -4,8 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 
+import { fileURLToPath } from 'node:url';
+
 import {
-  EXIT_CODES, PLAN_REFUSAL_PATTERNS, codexPromptDelivery, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature, runLane, scrapePlanMeter,
+  DEBRIEF_HEADINGS, EXIT_CODES, PLAN_REFUSAL_PATTERNS, codexPromptDelivery, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  reportShapeProblems, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -89,12 +92,22 @@ function seedLane(f, lane = {}) {
         branch: 'feat/lane-a',
         base: 'main',
         path: f.dir,
-        promptFile: join(f.dir, 'prompt.md'),
+        // No promptFile: a lane with one has been prompted, and every later
+        // prompt is an amendment (207dbaf1). Tests that replay one seed it.
         ...lane,
       },
     },
   }), 'utf8');
 }
+
+// The smallest report shape the contract accepts: both Debrief headings with a
+// "None" body, and no question under Needs conductor.
+const DEBRIEF_NONE = [
+  '## Needs conductor', '', 'None.', '',
+  '## Debrief', '',
+  '### Forks I decided that the brief did not settle', '', 'None.', '',
+  '### Claims no control measures', '', 'None.', '',
+].join('\n');
 
 test('WP-1: dontAsk is refused before herdr is invoked', async (t) => {
   const f = fixture(t);
@@ -297,7 +310,7 @@ test('WP-2: PR check verifies the PR head equals the lane branch', async (t) => 
   f.responses.push({ code: 0, stdout: '{"headRefName":"other-branch","state":"OPEN"}', stderr: '' });
   const result = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 5);
-  assert.deepEqual(f.calls[0].args, ['pr', 'view', '42', '--json', 'headRefName,state']);
+  assert.deepEqual(f.calls[0].args, ['pr', 'view', '42', '--json', 'headRefName,state,body']);
   assert.match(result.output.failedExpectation, /head.*feat\/lane-a/);
 });
 
@@ -1321,7 +1334,7 @@ test('AM14: a closed PR is not a completion verdict', async (t) => {
   assert.equal(closed.exit, 5);
   assert.match(closed.output.failedExpectation, /closed/i);
 
-  f.responses.push({ code: 0, stdout: '{"headRefName":"feat/lane-a","state":"MERGED"}', stderr: '' });
+  f.responses.push({ code: 0, stdout: JSON.stringify({ headRefName: 'feat/lane-a', state: 'MERGED', body: DEBRIEF_NONE }), stderr: '' });
   const merged = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
   assert.equal(merged.exit, 0, 'a merged PR is the work landing, not a failure');
 });
@@ -2429,7 +2442,8 @@ test('c952d41e DO 5 and 9: working prompts queue directly; a retained composer i
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
     { code: 0, stdout: composer, stderr: '' },
   );
-  const failed = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', g.log], { exec: g.exec });
+  // The lane was prompted before, so this re-send is an amendment and declares so.
+  const failed = await runLane(['prompt', 'lane-a', '--file', prompt, '--no-ruling', '--log', g.log], { exec: g.exec });
   assert.equal(failed.exit, 1);
   assert.match(failed.output.error, /composer not submitted/);
   assert.equal(g.calls.filter((call) => call.args[1] === 'send-keys').length, 2, 'stalled wait and retained composer each retry Enter once');
@@ -2839,4 +2853,283 @@ test('7e1fecf7: a TUI that never finishes loading refuses to send', async (t) =>
   assert.equal(result.exit, 1);
   assert.match(result.output.error, /was not ready after/);
   assert.equal(promptCall(f), undefined, 'nothing is typed into a loading TUI');
+});
+
+// ── 207dbaf1: report shape (Debrief + lettered asks) and the amendment ruling gate ──
+
+const TEMPLATE = fileURLToPath(new URL('../reference/templates/lane-contract.template.md', import.meta.url));
+
+function reportFile(f, text) {
+  const path = join(f.dir, 'lane-report.md');
+  writeFileSync(path, text, 'utf8');
+  return path;
+}
+
+test('207dbaf1: the Debrief headings are the lane-contract template\'s own strings', () => {
+  const template = readFileSync(TEMPLATE, 'utf8');
+  assert.match(template, /`## Debrief`/);
+  for (const heading of DEBRIEF_HEADINGS) assert.ok(template.includes(`\`### ${heading}\``), `template names ### ${heading}`);
+});
+
+test('207dbaf1 / C3: --expect-report exits 5 naming a missing Debrief heading; None bodies pass', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  const missing = reportFile(f, DEBRIEF_NONE.replace('### Claims no control measures', '### Claims'));
+  const red = await runLane(['check', 'lane-a', '--expect-report', missing, '--log', f.log], { exec: f.exec });
+  assert.equal(red.exit, 5);
+  assert.match(red.output.failedExpectation, /missing ### Claims no control measures/);
+
+  const clean = reportFile(f, DEBRIEF_NONE);
+  const green = await runLane(['check', 'lane-a', '--expect-report', clean, '--log', f.log], { exec: f.exec });
+  assert.equal(green.exit, 0, JSON.stringify(green.output));
+  assert.deepEqual(green.output.evidence.problems, []);
+  assert.equal(f.calls.length, 0, 'a report check calls nothing');
+});
+
+test('207dbaf1: --expect-report refuses a missing Debrief, an empty body, and a missing file', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  assert.deepEqual(reportShapeProblems('## Outcome\n\nbuilt\n'), ['## Debrief is missing']);
+  const empty = DEBRIEF_NONE.replace('### Forks I decided that the brief did not settle\n\nNone.', '### Forks I decided that the brief did not settle\n');
+  assert.match(reportShapeProblems(empty).join('\n'), /Forks I decided that the brief did not settle has no body/);
+  const gone = await runLane(['check', 'lane-a', '--expect-report', join(f.dir, 'nope.md'), '--log', f.log], { exec: f.exec });
+  assert.equal(gone.exit, 5);
+  assert.match(gone.output.failedExpectation, /does not exist/);
+});
+
+test('207dbaf1: a Debrief quoted inside a code fence is not the report\'s Debrief', () => {
+  const quoted = ['## Negative controls', '', '```', DEBRIEF_NONE, '```', ''].join('\n');
+  assert.ok(reportShapeProblems(quoted).includes('## Debrief is missing'));
+  // A body that is only a fenced block is still a body.
+  const fencedBody = DEBRIEF_NONE.replace('### Claims no control measures\n\nNone.', '### Claims no control measures\n\n```\nnone measured\n```');
+  assert.deepEqual(reportShapeProblems(fencedBody), []);
+});
+
+test('207dbaf1: --expect-report is exclusive with the other expectations', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  const path = reportFile(f, DEBRIEF_NONE);
+  const result = await runLane(['check', 'lane-a', '--expect-report', path, '--expect-file', path, '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 2);
+  assert.match(result.output.error, /exactly one of/);
+});
+
+test('207dbaf1 / C4: a bare question under Needs conductor exits 5 naming the line; a lettered one passes', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  const bare = reportFile(f, DEBRIEF_NONE.replace('None.\n\n## Debrief', 'Should I also handle X?\n\n## Debrief'));
+  const red = await runLane(['check', 'lane-a', '--expect-report', bare, '--log', f.log], { exec: f.exec });
+  assert.equal(red.exit, 5);
+  assert.match(red.output.failedExpectation, /## Needs conductor line 3 is a question outside a lettered ask \(a\)…\(f\): Should I also handle X\?/);
+
+  const lettered = reportFile(f, DEBRIEF_NONE.replace('None.\n\n## Debrief', '(a) Should I also handle X? — consequence\n\n## Debrief'));
+  assert.equal((await runLane(['check', 'lane-a', '--expect-report', lettered, '--log', f.log], { exec: f.exec })).exit, 0);
+  assert.equal((await runLane(['check', 'lane-a', '--expect-report', reportFile(f, DEBRIEF_NONE), '--log', f.log], { exec: f.exec })).exit, 0);
+});
+
+test('207dbaf1: lettered-ask shapes — list markers, bold, indented continuation, fences, amendment subsections', () => {
+  const needs = (body, heading = '## Needs conductor') => reportShapeProblems(`${heading}\n\n${body}\n\n${DEBRIEF_NONE.slice(DEBRIEF_NONE.indexOf('## Debrief'))}`);
+  assert.deepEqual(needs('- (a) Keep the guard? — cheap\n- (b) Drop it? — faster'), []);
+  assert.deepEqual(needs('**(c)** Which base type? — consequence'), []);
+  assert.deepEqual(needs('(a) The fork:\n    which base do you want?\n(b) Or neither'), [], 'a line indented under an item belongs to it');
+  assert.deepEqual(needs('```\nwhy?\n```'), [], 'a quoted question in a fence is not an ask');
+  assert.equal(needs('(a) One.\nAnd what about Y?').length, 1, 'an unindented line after an item leaves it');
+  assert.equal(needs('**Can I merge?**').length, 1, 'trailing emphasis does not hide the ?');
+  assert.equal(needs('(g) Beyond f?').length, 1, 'only (a)…(f) are lettered asks');
+  assert.equal(needs('Please confirm the base type').length, 0, 'a question phrased without ? is out of scope');
+  assert.equal(needs('Is this right?', '### Needs conductor').length, 1, 'an amendment\'s ### Needs conductor is checked too');
+});
+
+test('207dbaf1 / C3: --expect-pr applies the same Debrief check to the PR body through gh', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  const pr = (body) => ({ code: 0, stdout: JSON.stringify({ headRefName: 'feat/lane-a', state: 'OPEN', body }), stderr: '' });
+  f.responses.push(pr(DEBRIEF_NONE.replace('### Claims no control measures', '### Claims')));
+  const red = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  assert.equal(red.exit, 5);
+  assert.match(red.output.failedExpectation, /^--expect-pr 42: PR body: ## Debrief is missing ### Claims no control measures/);
+  assert.deepEqual(f.calls[0].args, ['pr', 'view', '42', '--json', 'headRefName,state,body']);
+
+  f.responses.push(pr(DEBRIEF_NONE.replace('None.\n\n## Debrief', 'Merge now?\n\n## Debrief')));
+  const ask = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  assert.equal(ask.exit, 5);
+  assert.match(ask.output.failedExpectation, /PR body: .*Merge now\?/);
+
+  f.responses.push(pr(DEBRIEF_NONE));
+  const green = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  assert.equal(green.exit, 0, JSON.stringify(green.output));
+});
+
+const RECEIPT = '0b1c2d3e-4f50-4617-8293-a4b5c6d7e8f9';
+const QUEST = '207dbaf1-1111-4222-8333-444455556666';
+const OTHER_QUEST = '98ef6261-1111-4222-8333-444455556666';
+const AGENT_IDLE = { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"idle"}]}}', stderr: '' };
+const PROMPT_WORKING = { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' };
+
+function amendmentFixture(t) {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'amend-1.md');
+  writeFileSync(prompt, 'fix the review findings', 'utf8');
+  // A claude lane: the codex load/read-back choreography is not what this gate is about.
+  seedLane(f, { kind: 'claude', model: 'opus', promptFile: prompt });
+  const receipt = (fields) => ({ code: 0, stdout: `${JSON.stringify({ id: RECEIPT, questId: QUEST, outcome: 'answered', ...fields })}\n`, stderr: '' });
+  const resolver = JSON.stringify(['resolve-receipt', '--id', '{id}']);
+  const run = (extra, env = { WORKIT_RECEIPT_RESOLVER: resolver }) => runLane(['prompt', 'lane-a', '--file', prompt, '--amendment', ...extra, '--log', f.log], { exec: f.exec, env });
+  return { f, prompt, receipt, run };
+}
+
+test('207dbaf1 / C5: an amendment with neither --ruling-receipt nor --no-ruling is refused before herdr', async (t) => {
+  const { f, run } = amendmentFixture(t);
+  const result = await run([]);
+  assert.equal(result.exit, 2);
+  assert.match(result.output.error, /--ruling-receipt <uuid> --quest <id>, or --no-ruling/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('207dbaf1 / C5: a paused receipt, or an answered one on another quest, is refused; nothing reaches herdr', async (t) => {
+  const { f, receipt, run } = amendmentFixture(t);
+  f.responses.push(receipt({ outcome: 'paused' }));
+  const paused = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST.slice(0, 8)]);
+  assert.equal(paused.exit, 2);
+  assert.match(paused.output.error, /outcome "paused", not "answered"/);
+
+  f.responses.push(receipt({ questId: OTHER_QUEST }));
+  const elsewhere = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST.slice(0, 8)]);
+  assert.equal(elsewhere.exit, 2);
+  assert.match(elsewhere.output.error, /belongs to quest 98ef6261/);
+  assert.equal(f.calls.every((call) => call.program === 'resolve-receipt'), true, 'only the resolver ran');
+});
+
+test('207dbaf1 / C5: an answered receipt on the named quest sends, and the row records the ruling', async (t) => {
+  const { f, prompt, receipt, run } = amendmentFixture(t);
+  f.responses.push(receipt({}), AGENT_IDLE, PROMPT_WORKING);
+  const result = await run(['--ruling-receipt', RECEIPT.toUpperCase(), '--quest', QUEST.slice(0, 6)]);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(f.calls[0], { program: 'resolve-receipt', args: ['--id', RECEIPT], options: {} });
+  assert.deepEqual(promptCall(f).args, ['agent', 'prompt', 'lane-a', `Read ${resolve(prompt)} and execute it exactly.`, '--wait', '--until', 'working']);
+  assert.equal(result.row.ruling, RECEIPT);
+  assert.equal(result.row.amendment, true);
+});
+
+test('207dbaf1 / C5: --ruling-receipt with no resolver configured is refused, never skipped', async (t) => {
+  const { f, run } = amendmentFixture(t);
+  for (const env of [{}, { WORKIT_RECEIPT_RESOLVER: '   ' }]) {
+    const result = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], env);
+    assert.equal(result.exit, 2);
+    assert.match(result.output.error, /WORKIT_RECEIPT_RESOLVER.*none is configured/);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test('207dbaf1: --no-ruling sends and is recorded; ruling flags without --amendment are refused', async (t) => {
+  const { f, prompt, run } = amendmentFixture(t);
+  f.responses.push(AGENT_IDLE, PROMPT_WORKING);
+  const declared = await run(['--no-ruling']);
+  assert.equal(declared.exit, 0, JSON.stringify(declared.output));
+  assert.equal(declared.row.ruling, 'none');
+  assert.equal(f.calls.some((call) => call.program === 'resolve-receipt'), false);
+
+  const both = await run(['--no-ruling', '--ruling-receipt', RECEIPT, '--quest', QUEST]);
+  assert.equal(both.exit, 2);
+
+  // A first prompt is not an amendment: ruling flags on it are refused.
+  const g = fixture(t);
+  seedLane(g, { kind: 'claude', model: 'opus' });
+  const stray = await runLane(['prompt', 'lane-a', '--file', prompt, '--no-ruling', '--log', g.log], { exec: g.exec, env: {} });
+  assert.equal(stray.exit, 2);
+  assert.match(stray.output.error, /first prompt, which is not an amendment/);
+  assert.equal(g.calls.length, 0);
+});
+
+test('207dbaf1 amend-1 / A2: a second prompt without --amendment is still an amendment and is refused undeclared', async (t) => {
+  const { f, prompt } = amendmentFixture(t);
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec, env: {} });
+  assert.equal(result.exit, 2);
+  assert.match(result.output.error, /already has a prompt .* so this one is an amendment: it needs --ruling-receipt <uuid> --quest <id>, or --no-ruling/);
+  assert.equal(f.calls.length, 0, 'nothing reaches herdr');
+
+  f.responses.push(AGENT_IDLE, PROMPT_WORKING);
+  const declared = await runLane(['prompt', 'lane-a', '--file', prompt, '--no-ruling', '--log', f.log], { exec: f.exec, env: {} });
+  assert.equal(declared.exit, 0, JSON.stringify(declared.output));
+  assert.equal(declared.row.ruling, 'none');
+});
+
+test('207dbaf1 amend-1: ruling flags on any verb other than prompt are refused', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  for (const argv of [
+    ['check', 'lane-a', '--expect-commit', '--amendment'],
+    ['wait', 'lane-a', '--timeout', '10', '--no-ruling'],
+    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--ruling-receipt', RECEIPT, '--quest', QUEST],
+    ['stop', 'lane-a', '--quest', QUEST],
+  ]) {
+    const result = await runLane([...argv, '--log', f.log], { exec: f.exec });
+    assert.equal(result.exit, 2, argv.join(' '));
+    assert.match(result.output.error, new RegExp(`belong to the prompt verb, not ${argv[0]}`));
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test('207dbaf1 amend-1: a resolver that reports a later receipt on the quest refuses a stale ruling', async (t) => {
+  const { f, receipt, run } = amendmentFixture(t);
+  f.responses.push(receipt({ latestReceiptId: '11111111-2222-4333-8444-555566667777' }));
+  const stale = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST]);
+  assert.equal(stale.exit, 2);
+  assert.match(stale.output.error, /is not the latest receipt on quest .* a later stop superseded it/);
+
+  f.responses.push(receipt({ latest_receipt_id: RECEIPT.toUpperCase() }), AGENT_IDLE, PROMPT_WORKING);
+  const fresh = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST]);
+  assert.equal(fresh.exit, 0, JSON.stringify(fresh.output));
+});
+
+test('207dbaf1 amend-1 / item 5: letters identify options — stem plus options passes; a bare ? anywhere fails', () => {
+  const needs = (body, heading = '## Needs conductor') => reportShapeProblems(`${heading}\n\n${body}\n\n${DEBRIEF_NONE.slice(DEBRIEF_NONE.indexOf('## Debrief'))}`);
+  assert.deepEqual(needs('Which base type should the new exception extend?\n\n(a) Error — every catch sees it\n(b) LaneError — only the verb catch does'), [], 'a stem whose next line is an option');
+  assert.deepEqual(needs('- Which base?\n- (a) Error\n- (b) LaneError'), [], 'stem and options as list items');
+  for (const bare of ['Should I also handle X? - consequence: one more file', 'Merge now? (CI is green)', 'Merge now? It is green.']) {
+    const problems = needs(bare);
+    assert.equal(problems.length, 1, bare);
+    assert.match(problems[0], /is a question outside a lettered ask/);
+  }
+  assert.match(needs('(g) Beyond f?')[0], /starts \(g\), which is not a lettered ask: an ask carries at most six options/);
+  assert.match(needs('(A) Upper case?').join('\n'), /starts \(A\), which is not a lettered ask: letters are lowercase \(a\)…\(f\)/);
+  assert.deepEqual(needs('Use `x?y` as the query string.'), [], 'a ? inside a code span is not a question');
+  assert.equal(needs('Is this right?', '#### Needs conductor').length, 1, 'a level-four Needs conductor is checked');
+  assert.deepEqual(needs('(a) Is this right? — yes', '#### Needs conductor'), []);
+});
+
+test('207dbaf1 amend-1 / item 6: a fence closer carries only whitespace; ```markdown inside a fence is content', () => {
+  const quoted = ['## Outcome', '', '```', '```markdown', DEBRIEF_NONE, '```', ''].join('\n');
+  assert.ok(reportShapeProblems(quoted).includes('## Debrief is missing'), 'the whole Debrief is quoted code');
+});
+
+test('207dbaf1 amend-1 / item 7: a Debrief subsection whose only body is a heading has no body', () => {
+  const headingOnly = DEBRIEF_NONE.replace('### Claims no control measures\n\nNone.', '### Claims no control measures\n\n#### Nothing here');
+  assert.match(reportShapeProblems(headingOnly).join('\n'), /### Claims no control measures has no body/);
+});
+
+test('207dbaf1: resolver shapes and failures — trailing id, snake_case quest_id, not found, wrong id, crash, bad input', async (t) => {
+  const { f, receipt, run } = amendmentFixture(t);
+  const bare = { WORKIT_RECEIPT_RESOLVER: 'resolve-receipt' };
+  f.responses.push({ code: 0, stdout: JSON.stringify({ id: RECEIPT, quest_id: QUEST, outcome: 'answered' }), stderr: '' }, AGENT_IDLE, PROMPT_WORKING);
+  const snake = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], bare);
+  assert.equal(snake.exit, 0, JSON.stringify(snake.output));
+  assert.deepEqual(f.calls[0].args, [RECEIPT], 'a bare program gets the id as its one argument');
+
+  f.responses.push({ code: 0, stdout: '\n', stderr: '' });
+  assert.match((await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], bare)).output.error, /was not found/);
+  f.responses.push(receipt({ id: '00000000-0000-4000-8000-000000000000' }));
+  assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], bare)).exit, 2, 'a different receipt is not this one');
+  f.responses.push({ code: 1, stdout: '', stderr: 'docker: daemon not running' });
+  const crashed = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], bare);
+  assert.equal(crashed.exit, 1, 'a resolver that cannot answer is infrastructure');
+  assert.match(crashed.output.error, /not sent/);
+  f.responses.push({ code: 0, stdout: 'ERROR: relation "quest_receipts" does not exist', stderr: '' });
+  assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], bare)).exit, 1);
+
+  const before = f.calls.length;
+  assert.equal((await run(['--ruling-receipt', 'fbe36d6d', '--quest', QUEST], bare)).exit, 2, 'a receipt prefix is not a receipt id');
+  assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', '207db'], bare)).exit, 2, 'a quest prefix needs 6 characters');
+  assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], { WORKIT_RECEIPT_RESOLVER: '["", "x"]' })).exit, 2);
+  assert.equal(f.calls.length, before, 'input refusals run nothing');
 });

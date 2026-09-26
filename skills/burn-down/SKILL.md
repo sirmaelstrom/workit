@@ -118,7 +118,11 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    limit of what it dictates — a prescribed mechanism carries "or another you
    can justify", the disposition outranks the brief's example, a "settled"
    premise carries its receipt (`reference/patterns/lane-supervision.md` →
-   *Amendment briefs*; Y governance measurement §7 #8).
+   *Amendment briefs*; Y governance measurement §7 #8). Send it with
+   `lane.mjs prompt <lane> --file <brief> --ruling-receipt <uuid> --quest <id>`
+   when it acts on an operator answer, or `--no-ruling` when it acts on none (a
+   review-round fix). Every prompt after a lane's first is an amendment, and
+   the helper refuses one that declares neither.
 4. **Land it.** Before the PR boundary, an item whose change touches a
    contract, wire format, or shared surface can take a `blast-radius` pass —
    pre-ship impact analysis that hands review its proven safety fact instead of
@@ -153,11 +157,17 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    step for 45 minutes. A gate on a remote oracle is three-valued (tree / runner
    / oracle); a red that is the oracle's is a rerun, never a tree finding.
 5. **Log one row to the run doc per stop — on every exit, not only landings.**
-   Landed, refuted, blocked, and dropped all get their row (the template's
-   event vocabulary names them); a blocked item exits at step 2 and still owes
+   Landed (`closed`), refuted, blocked, and dropped all get their row (the
+   template's event vocabulary names them); a blocked item exits at step 2 and still owes
    its row before you move on. Append-only, never rewrite. **Every row's
-   timestamp is measured, not written:** run `date -u` at the moment of the row
-   and paste its output. Three consecutive sessions (I, J, M — 2026-09-04/05)
+   timestamp is measured, not written:** add the row with
+   `node ${CLAUDE_PLUGIN_ROOT}/scripts/run-log.mjs append --doc <abs> --item …
+   --event … --pointers … --teach …`, which stamps it from the clock at write
+   time and refuses an event outside the template's vocabulary; no flag sets the
+   stamp. Never add a row with Edit. Run `run-log.mjs lint --doc <abs>` before
+   every handoff and at run close; it exits 5 naming each future, out-of-order,
+   unparseable or post-commit stamp, each malformed row, and each event outside
+   the vocabulary. Three consecutive sessions (I, J, M — 2026-09-04/05)
    hand-wrote stamps 60–70 minutes ahead of the ledger's own clock, and the
    overnight friction memo re-reported it each morning; a row whose time the
    deploy receipt contradicts is a row nobody can trust.
