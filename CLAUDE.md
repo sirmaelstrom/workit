@@ -26,6 +26,8 @@ This repo is part of Justin's workspace cognitive infrastructure (KB / context-l
 
 **Default: branch → PR → green checks → merge** (self-merge OK, zero approvals required). Direct-to-main is allowed only when **all** of these hold: the operator explicitly said "ship it"/"land it", the diff is single-concern and docs/skill-sized, and it touches none of CI config, auth, marketplace/install semantics, or behavior defaults that propagate to other machines. Main is protected (PR + `Tests (node --test)` + `Secret scan (gitleaks)`); a direct push from an admin token *bypasses* those gates — don't pattern-match on past direct commits as permission.
 
+**Evidence goes in the commit, not the file.** Templates, patterns, skills and this file state the rule. The run it came from, the lane that failed, the quest id, the date and the falsifier go in the commit message and the PR body, in full, so `git log -L` on a rule's line reaches its evidence in one step and the file a lane reads at every launch stays short. No "(measured 2026-…, quest …)" suffixes on rule sentences; a header line saying where evidence lives is the whole provenance a file needs.
+
 ## Tests
 
 Skill scripts carry their own `tests/` (Node's built-in test runner). See `CONTRIBUTING.md` for the exact commands before committing changes to any `scripts/*.mjs`.
