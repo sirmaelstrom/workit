@@ -92,7 +92,8 @@ function seedLane(f, lane = {}) {
         branch: 'feat/lane-a',
         base: 'main',
         path: f.dir,
-        promptFile: join(f.dir, 'prompt.md'),
+        // No promptFile: a lane with one has been prompted, and every later
+        // prompt is an amendment (207dbaf1). Tests that replay one seed it.
         ...lane,
       },
     },
@@ -2441,7 +2442,8 @@ test('c952d41e DO 5 and 9: working prompts queue directly; a retained composer i
     { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
     { code: 0, stdout: composer, stderr: '' },
   );
-  const failed = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', g.log], { exec: g.exec });
+  // The lane was prompted before, so this re-send is an amendment and declares so.
+  const failed = await runLane(['prompt', 'lane-a', '--file', prompt, '--no-ruling', '--log', g.log], { exec: g.exec });
   assert.equal(failed.exit, 1);
   assert.match(failed.output.error, /composer not submitted/);
   assert.equal(g.calls.filter((call) => call.args[1] === 'send-keys').length, 2, 'stalled wait and retained composer each retry Enter once');
@@ -3029,9 +3031,81 @@ test('207dbaf1: --no-ruling sends and is recorded; ruling flags without --amendm
 
   const both = await run(['--no-ruling', '--ruling-receipt', RECEIPT, '--quest', QUEST]);
   assert.equal(both.exit, 2);
-  const stray = await runLane(['prompt', 'lane-a', '--file', prompt, '--no-ruling', '--log', f.log], { exec: f.exec, env: {} });
+
+  // A first prompt is not an amendment: ruling flags on it are refused.
+  const g = fixture(t);
+  seedLane(g, { kind: 'claude', model: 'opus' });
+  const stray = await runLane(['prompt', 'lane-a', '--file', prompt, '--no-ruling', '--log', g.log], { exec: g.exec, env: {} });
   assert.equal(stray.exit, 2);
-  assert.match(stray.output.error, /add --amendment/);
+  assert.match(stray.output.error, /first prompt, which is not an amendment/);
+  assert.equal(g.calls.length, 0);
+});
+
+test('207dbaf1 amend-1 / A2: a second prompt without --amendment is still an amendment and is refused undeclared', async (t) => {
+  const { f, prompt } = amendmentFixture(t);
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec, env: {} });
+  assert.equal(result.exit, 2);
+  assert.match(result.output.error, /already has a prompt .* so this one is an amendment: it needs --ruling-receipt <uuid> --quest <id>, or --no-ruling/);
+  assert.equal(f.calls.length, 0, 'nothing reaches herdr');
+
+  f.responses.push(AGENT_IDLE, PROMPT_WORKING);
+  const declared = await runLane(['prompt', 'lane-a', '--file', prompt, '--no-ruling', '--log', f.log], { exec: f.exec, env: {} });
+  assert.equal(declared.exit, 0, JSON.stringify(declared.output));
+  assert.equal(declared.row.ruling, 'none');
+});
+
+test('207dbaf1 amend-1: ruling flags on any verb other than prompt are refused', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  for (const argv of [
+    ['check', 'lane-a', '--expect-commit', '--amendment'],
+    ['wait', 'lane-a', '--timeout', '10', '--no-ruling'],
+    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--ruling-receipt', RECEIPT, '--quest', QUEST],
+    ['stop', 'lane-a', '--quest', QUEST],
+  ]) {
+    const result = await runLane([...argv, '--log', f.log], { exec: f.exec });
+    assert.equal(result.exit, 2, argv.join(' '));
+    assert.match(result.output.error, new RegExp(`belong to the prompt verb, not ${argv[0]}`));
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test('207dbaf1 amend-1: a resolver that reports a later receipt on the quest refuses a stale ruling', async (t) => {
+  const { f, receipt, run } = amendmentFixture(t);
+  f.responses.push(receipt({ latestReceiptId: '11111111-2222-4333-8444-555566667777' }));
+  const stale = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST]);
+  assert.equal(stale.exit, 2);
+  assert.match(stale.output.error, /is not the latest receipt on quest .* a later stop superseded it/);
+
+  f.responses.push(receipt({ latest_receipt_id: RECEIPT.toUpperCase() }), AGENT_IDLE, PROMPT_WORKING);
+  const fresh = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST]);
+  assert.equal(fresh.exit, 0, JSON.stringify(fresh.output));
+});
+
+test('207dbaf1 amend-1 / item 5: letters identify options — stem plus options passes; a bare ? anywhere fails', () => {
+  const needs = (body, heading = '## Needs conductor') => reportShapeProblems(`${heading}\n\n${body}\n\n${DEBRIEF_NONE.slice(DEBRIEF_NONE.indexOf('## Debrief'))}`);
+  assert.deepEqual(needs('Which base type should the new exception extend?\n\n(a) Error — every catch sees it\n(b) LaneError — only the verb catch does'), [], 'a stem whose next line is an option');
+  assert.deepEqual(needs('- Which base?\n- (a) Error\n- (b) LaneError'), [], 'stem and options as list items');
+  for (const bare of ['Should I also handle X? - consequence: one more file', 'Merge now? (CI is green)', 'Merge now? It is green.']) {
+    const problems = needs(bare);
+    assert.equal(problems.length, 1, bare);
+    assert.match(problems[0], /is a question outside a lettered ask/);
+  }
+  assert.match(needs('(g) Beyond f?')[0], /starts \(g\), which is not a lettered ask: an ask carries at most six options/);
+  assert.match(needs('(A) Upper case?').join('\n'), /starts \(A\), which is not a lettered ask: letters are lowercase \(a\)…\(f\)/);
+  assert.deepEqual(needs('Use `x?y` as the query string.'), [], 'a ? inside a code span is not a question');
+  assert.equal(needs('Is this right?', '#### Needs conductor').length, 1, 'a level-four Needs conductor is checked');
+  assert.deepEqual(needs('(a) Is this right? — yes', '#### Needs conductor'), []);
+});
+
+test('207dbaf1 amend-1 / item 6: a fence closer carries only whitespace; ```markdown inside a fence is content', () => {
+  const quoted = ['## Outcome', '', '```', '```markdown', DEBRIEF_NONE, '```', ''].join('\n');
+  assert.ok(reportShapeProblems(quoted).includes('## Debrief is missing'), 'the whole Debrief is quoted code');
+});
+
+test('207dbaf1 amend-1 / item 7: a Debrief subsection whose only body is a heading has no body', () => {
+  const headingOnly = DEBRIEF_NONE.replace('### Claims no control measures\n\nNone.', '### Claims no control measures\n\n#### Nothing here');
+  assert.match(reportShapeProblems(headingOnly).join('\n'), /### Claims no control measures has no body/);
 });
 
 test('207dbaf1: resolver shapes and failures — trailing id, snake_case quest_id, not found, wrong id, crash, bad input', async (t) => {

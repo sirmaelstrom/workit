@@ -42,9 +42,10 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            pair; a caller-supplied mcp_servers.<server>.startup_timeout_sec wins.
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
            [--amendment (--ruling-receipt <uuid> --quest <id> | --no-ruling)]
-           An amendment states whether it acts on an operator ruling. A named
-           receipt must resolve through WORKIT_RECEIPT_RESOLVER to an answered
-           receipt on that quest; with no resolver configured it is refused.
+           Any prompt after the lane's first is an amendment, --amendment or not,
+           and states whether it acts on an operator ruling. A named receipt must
+           resolve through WORKIT_RECEIPT_RESOLVER to an answered receipt on that
+           quest; with no resolver configured it is refused.
   wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
            Naming any state adds blocked; a bare wait forwards none (herdr's
@@ -257,6 +258,9 @@ function parseArgs(argv) {
   }
   opts.name = opts.positional[0] ?? null;
   if (opts.positional.length > 1) usage(`unexpected argument: ${opts.positional[1]}`);
+  if (verb !== 'prompt' && (opts.amendment || opts.noRuling || opts.rulingReceipt !== undefined || opts.quest !== undefined)) {
+    usage(`--amendment, --ruling-receipt, --quest and --no-ruling belong to the prompt verb, not ${verb}`);
+  }
   // Refused here, for every verb: a prompt pattern that cannot compile is a
   // typo the operator wants told about, not a setting to fall back from.
   if (opts.promptRegex !== undefined) {
@@ -1049,21 +1053,31 @@ function resolverArgv(spec, id) {
   return placeholder ? filled : [...filled, id];
 }
 
-// An amendment says, in the command, whether it acts on an operator ruling. A
-// ruling it names must resolve to an `answered` receipt on the named quest; with
-// no resolver there is nothing to resolve against, so the send is refused.
-// Every refusal here happens before the first herdr call.
-function rulingGate(opts, deps) {
+// An amendment says, in the command, whether it acts on an operator ruling. Any
+// prompt after the lane's first (the sidecar's `promptFile`, written by this verb
+// on every send) is an amendment whether or not `--amendment` is passed. A ruling
+// it names must resolve to an `answered` receipt on the named quest; with no
+// resolver there is nothing to resolve against, so the send is refused. Every
+// refusal here happens before the first herdr call. `fallback` replays the
+// lane's own last prompt, so it is not gated.
+function rulingGate(opts, deps, lane) {
+  if (opts.verb !== 'prompt') return null;
   const named = opts.rulingReceipt !== undefined || opts.quest !== undefined;
-  if (!opts.amendment) {
-    if (named || opts.noRuling) usage('--ruling-receipt, --quest and --no-ruling belong to an amendment prompt; add --amendment');
+  if (!opts.amendment && !lane.promptFile) {
+    if (named || opts.noRuling) {
+      usage(`this is lane ${opts.name}'s first prompt, which is not an amendment; --ruling-receipt, --quest and --no-ruling apply to a later prompt (or pass --amendment)`);
+    }
     return null;
   }
   if (opts.noRuling) {
     if (named) usage('--no-ruling declares that no operator ruling is acted on; drop --ruling-receipt/--quest or drop --no-ruling');
     return { ruling: 'none' };
   }
-  if (opts.rulingReceipt === undefined) usage('prompt --amendment needs --ruling-receipt <uuid> --quest <id>, or --no-ruling');
+  if (opts.rulingReceipt === undefined) {
+    usage(opts.amendment
+      ? 'prompt --amendment needs --ruling-receipt <uuid> --quest <id>, or --no-ruling'
+      : `lane ${opts.name} already has a prompt (${lane.promptFile}), so this one is an amendment: it needs --ruling-receipt <uuid> --quest <id>, or --no-ruling`);
+  }
   if (opts.quest === undefined) usage('prompt --amendment --ruling-receipt needs --quest <id>');
   if (!RECEIPT_ID.test(opts.rulingReceipt)) usage(`--ruling-receipt must be a full receipt uuid, got ${JSON.stringify(opts.rulingReceipt)}`);
   if (!QUEST_REF.test(opts.quest)) usage(`--quest must be a quest uuid or a prefix of at least 6 characters, got ${JSON.stringify(opts.quest)}`);
@@ -1091,6 +1105,12 @@ function rulingGate(opts, deps) {
     usage(`ruling receipt ${opts.rulingReceipt} belongs to quest ${questId || '<none>'}, not ${opts.quest}`);
   }
   if (outcome !== 'answered') usage(`ruling receipt ${opts.rulingReceipt} has outcome ${JSON.stringify(outcome)}, not "answered"`);
+  // Freshness is the resolver's to report: without `latestReceiptId` the gate
+  // proves an answered receipt exists on the quest, not that it is the latest.
+  const latest = receipt.latestReceiptId ?? receipt.latest_receipt_id ?? null;
+  if (latest !== null && String(latest).toLowerCase() !== id) {
+    usage(`ruling receipt ${id} is not the latest receipt on quest ${questId} (latest: ${latest}); a later stop superseded it`);
+  }
   return { ruling: 'receipt', receipt: id, quest: questId };
 }
 
@@ -1099,9 +1119,9 @@ async function promptLane(opts, deps, state) {
   if (!opts.name) usage('prompt needs <name>');
   const file = resolve(opts.file);
   if (!deps.exists(file)) usage(`prompt file does not exist: ${file}`);
-  const ruling = rulingGate(opts, deps);
-  const wire = `Read ${file} and execute it exactly.`;
   const lane = state.lanes[opts.name] ?? {};
+  const ruling = rulingGate(opts, deps, lane);
+  const wire = `Read ${file} and execute it exactly.`;
   const initial = agentState(deps, opts.name);
   if (!initial) throw new LaneError(EXIT.ERROR, `prompt agent state check failed: ${opts.name} is not listed`);
   const queued = initial.state === 'working';
@@ -1339,10 +1359,11 @@ export const DEBRIEF_HEADINGS = Object.freeze([
   'Forks I decided that the brief did not settle',
   'Claims no control measures',
 ]);
-// A lettered ask item: `(a)`…`(f)` at the start of the line, after an optional
-// list marker or bold opener.
-const LETTERED_ASK = /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\([a-f]\)/;
-const ENDS_IN_QUESTION = /\?[\s*_`"')\]]*$/;
+// A letter marker at the start of a line, after an optional list marker or bold
+// opener. Letters identify options, and `(a)`…`(f)` is the cap: six is
+// spine_receipt's `ask.options` maximum.
+const LETTER_MARKER = /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\(([A-Za-z])\)/;
+const ASK_LETTER = /^[a-f]$/;
 
 function markdownHeading(line) {
   if (line.fenced) return null;
@@ -1355,10 +1376,15 @@ function markdownHeading(line) {
 function markdownLines(text) {
   let fence = null;
   return String(text).split(/\r?\n/).map((raw, index) => {
-    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(raw);
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
     let fenced = fence !== null;
-    if (marker && (fence === null || (marker[1][0] === fence[0] && marker[1].length >= fence.length))) {
-      fence = fence === null ? marker[1] : null;
+    if (marker && fence === null) {
+      fence = marker[1];
+      fenced = true;
+    } else if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && marker[2].trim() === '') {
+      // A closer carries nothing but whitespace after its marker; ```markdown
+      // inside an open fence is content.
+      fence = null;
       fenced = true;
     }
     return { number: index + 1, text: raw, fenced };
@@ -1373,21 +1399,44 @@ function sectionEnd(lines, start, level) {
   return lines.length;
 }
 
-function unletteredQuestions(section) {
-  const found = [];
+function letterOf(line) {
+  if (!line || line.fenced) return null;
+  const match = LETTER_MARKER.exec(line.text.trim());
+  return match ? match[1] : null;
+}
+
+// A `?` anywhere on the line counts, except inside a code span.
+function carriesQuestion(line) {
+  return !line.fenced && line.text.replace(/`[^`]*`/g, '').includes('?');
+}
+
+// An ask is a lettered item `(a) …?`, or a question stem whose next non-blank
+// line starts a lettered item. Anything else carrying a `?` is a bare question.
+function askProblems(section, label) {
+  const problems = [];
   let itemIndent = null;
-  for (const line of section) {
-    if (!line.text.trim()) continue;
+  section.forEach((line, index) => {
+    if (!line.text.trim()) return;
     const indent = /^\s*/.exec(line.text)[0].replace(/\t/g, '    ').length;
-    if (!line.fenced && LETTERED_ASK.test(line.text.trim())) {
-      itemIndent = indent;
-      continue;
+    const letter = letterOf(line);
+    if (letter !== null) {
+      if (ASK_LETTER.test(letter)) {
+        itemIndent = indent;
+        return;
+      }
+      itemIndent = null;
+      const why = /[A-Z]/.test(letter) ? 'letters are lowercase (a)…(f)' : 'an ask carries at most six options, (a)…(f)';
+      problems.push(`${label} line ${line.number} starts (${letter}), which is not a lettered ask: ${why}: ${line.text.trim()}`);
+      return;
     }
-    if (itemIndent !== null && indent > itemIndent) continue;
+    if (itemIndent !== null && indent > itemIndent) return;
     itemIndent = null;
-    if (!line.fenced && ENDS_IN_QUESTION.test(line.text.trim())) found.push(line);
-  }
-  return found;
+    if (!carriesQuestion(line)) return;
+    const next = section.slice(index + 1).find((candidate) => candidate.text.trim());
+    if (ASK_LETTER.test(letterOf(next) ?? '')) return;
+    problems.push(`${label} line ${line.number} is a question outside a lettered ask (a)…(f): ${line.text.trim()}`);
+  });
+  return problems;
 }
 
 // The report shape the lane contract requires, as a list of what is missing.
@@ -1412,16 +1461,16 @@ export function reportShapeProblems(text) {
         problems.push(`## Debrief is missing ### ${title}`);
         continue;
       }
-      const body = section.slice(at + 1, sectionEnd(section, at, 3)).filter((line) => line.text.trim());
+      // A heading is not a body: the subsection needs one content line of its own.
+      const body = section.slice(at + 1, sectionEnd(section, at, 3)).filter((line) => line.text.trim() && !markdownHeading(line));
       if (body.length === 0) problems.push(`### ${title} has no body (write None if there is nothing to list)`);
     }
   }
   lines.forEach((line, index) => {
     const heading = markdownHeading(line);
     if (!heading || heading.level < 2 || heading.level > 4 || !/^Needs conductor\b/i.test(heading.title)) return;
-    for (const ask of unletteredQuestions(lines.slice(index + 1, sectionEnd(lines, index, heading.level)))) {
-      problems.push(`${'#'.repeat(heading.level)} ${heading.title} line ${ask.number} is a question outside a lettered ask (a)…(f): ${ask.text.trim()}`);
-    }
+    const label = `${'#'.repeat(heading.level)} ${heading.title}`;
+    problems.push(...askProblems(lines.slice(index + 1, sectionEnd(lines, index, heading.level)), label));
   });
   return problems;
 }

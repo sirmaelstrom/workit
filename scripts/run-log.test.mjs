@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -178,7 +178,7 @@ function git(dir, args, env = {}) {
   });
 }
 
-test('207dbaf1: lint compares a committed row\'s stamp with the commit that introduced it', async (t) => {
+test('207dbaf1: lint compares a committed row\'s stamp with the commit that last changed it', async (t) => {
   const { dir, path } = doc(t, [row('2026-09-01T12:00:00Z'), row('2026-09-02T12:00:00Z', 'PR', 'Q-after-commit')]);
   git(dir, ['init', '-q']);
   git(dir, ['add', '--', 'burn-down-session-q.md']);
@@ -191,7 +191,7 @@ test('207dbaf1: lint compares a committed row\'s stamp with the commit that intr
   assert.equal(red.exit, 5, JSON.stringify(red.output));
   assert.equal(red.output.problems.length, 1);
   assert.equal(red.output.problems[0].line, 10);
-  assert.match(red.output.problems[0].reason, /later than commit [0-9a-f]{7} that introduced the row \(2026-09-02T00:00:00Z\)/);
+  assert.match(red.output.problems[0].reason, /later than commit [0-9a-f]{7} that last changed the row \(2026-09-02T00:00:00Z\)/);
 
   // A row not yet committed has no commit to compare against, so only (i)–(iii) apply.
   await append(path, {}, { now: () => T0, exec: execute });
@@ -203,6 +203,85 @@ test('207dbaf1: lint compares a committed row\'s stamp with the commit that intr
   writeFileSync(untracked, readFileSync(path, 'utf8'), 'utf8');
   const skipped = await lint(untracked, { now: () => T0 + 1_000, exec: execute });
   assert.equal(skipped.output.git, 'untracked');
+});
+
+test('207dbaf1 amend-1 / item 1: a refuted item has its own event', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:00:00Z')]);
+  assert.equal((await append(path, { event: 'refuted' }, { now: () => T0 })).exit, 0);
+  assert.equal((await lint(path, { now: () => T0 })).exit, 0);
+});
+
+test('207dbaf1 amend-1 / item 3: a row without its outer pipes is a malformed row, never the table\'s end', async (t) => {
+  const hidden = [row('2026-09-26T15:00:00Z'), row(formatStamp(T0 + HOUR), 'PR', 'Q-hidden').slice(1), row(formatStamp(T0 + 2 * HOUR), 'review', 'Q-after')];
+  const { path } = doc(t, hidden);
+  const red = await lint(path, { now: () => T0 });
+  assert.equal(red.exit, 5);
+  assert.equal(red.output.rowsChecked, 3, 'every line of the table is counted');
+  assert.deepEqual(red.output.problems.map((problem) => problem.line), [10, 11]);
+  assert.match(red.output.problems[0].reason, /row does not parse: row is not a \| … \| table line with both outer pipes/);
+  assert.match(red.output.problems[1].reason, /later than the lint's clock/);
+
+  const before = readFileSync(path, 'utf8');
+  const refused = await append(path, {}, { now: () => T0 });
+  assert.equal(refused.exit, 5);
+  assert.match(refused.output.error, /malformed rows, so its last row is unknown; nothing was written: line 10/);
+  assert.equal(readFileSync(path, 'utf8'), before);
+});
+
+test('207dbaf1 amend-1 / item 8: a header or separator that is not the five template columns is exit 5 naming the header', async (t) => {
+  const two = doc(t, ['| 2026-09-26T15:00:00Z | x |'], { head: ['# Q', '', '## Run log', '| date | item |', '|---|---|'] });
+  const before = readFileSync(two.path, 'utf8');
+  const refused = await append(two.path, {}, { now: () => T0 });
+  assert.equal(refused.exit, 5);
+  assert.match(refused.output.error, /the ## Run log header \(line 4\) is not \| date \| item \| event \| pointers \| teach → \|: \| date \| item \|/);
+  assert.equal(readFileSync(two.path, 'utf8'), before, 'nothing written');
+  assert.equal((await lint(two.path, { now: () => T0 })).exit, 5);
+
+  const shortSeparator = doc(t, [row('2026-09-26T15:00:00Z')], { head: ['# Q', '', '## Run log', HEAD.at(-2), '|---|---|'] });
+  assert.match((await lint(shortSeparator.path, { now: () => T0 })).output.error, /not followed by a five-column \|---\| separator/);
+});
+
+test('207dbaf1 amend-1 / item 9: append refuses to build on a last row stamped later than now', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:00:00Z'), row('2026-09-26T16:30:00Z', 'PR', 'Q-projected')]);
+  const before = readFileSync(path, 'utf8');
+  const refused = await append(path, {}, { now: () => T0 });
+  assert.equal(refused.exit, 5);
+  assert.match(refused.output.error, /the last row \(line 10, 2026-09-26T16:30:00Z\) is stamped later than now \(2026-09-26T16:00:00Z\).*Q-projected/);
+  assert.equal(readFileSync(path, 'utf8'), before);
+
+  const later = await lint(path, { now: () => T0 + 2 * HOUR });
+  assert.equal(later.exit, 0, 'once the clock passes it the row is only a projection nobody can see, which is why append refuses at write time');
+});
+
+test('207dbaf1 amend-1: the order message names both rows', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:30:00Z'), row('2026-09-26T15:10:00Z')]);
+  const result = await lint(path, { now: () => T0 });
+  assert.match(result.output.problems[0].reason, /lines 9 and 10 are out of order, and either may be the wrong one/);
+});
+
+test('207dbaf1 amend-1 / item 4: a held append lock is exit 1 naming its holder; a stale one is reclaimed; the lock is released', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:00:00Z')]);
+  const before = readFileSync(path, 'utf8');
+  writeFileSync(`${path}.lock`, '{"pid":4242,"at":"2026-09-26T15:59:50Z"}', 'utf8');
+  const held = await append(path, {}, { now: () => Date.now() });
+  assert.equal(held.exit, 1);
+  assert.match(held.output.error, /another append holds .*\.lock \(\{"pid":4242/);
+  assert.equal(readFileSync(path, 'utf8'), before, 'nothing written');
+
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(`${path}.lock`, old, old);
+  const reclaimed = await append(path, {}, { now: () => Date.now() });
+  assert.equal(reclaimed.exit, 0, JSON.stringify(reclaimed.output));
+  assert.equal(existsSync(`${path}.lock`), false, 'released after the append');
+
+  const failing = await append(path, {}, { now: () => Date.now(), write: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }); } });
+  assert.equal(failing.exit, 1);
+  assert.equal(existsSync(`${path}.lock`), false, 'released when the write fails too');
+});
+
+test('207dbaf1 amend-1 / item 6: a fence closer carries only whitespace', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:00:00Z'), '```'], { head: ['# Q', '```', '```markdown', ...HEAD.slice(-3)] });
+  assert.match((await append(path)).output.error, /no ## Run log section/, '```markdown inside an open fence is content, not a closer');
 });
 
 test('207dbaf1: stamps are strict ISO 8601 UTC seconds', () => {
