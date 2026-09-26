@@ -2592,8 +2592,32 @@ test('4aa9b174 amend 2: claudeTuiReady needs a framed composer or the mode line'
   assert.equal(claudeTuiReady(FOLDER_TRUST_READ.stdout.replace(' Enter to confirm · Esc to cancel', '')), false, 'the dialog with its footer gone: its ❯ option line is not under a rule');
   assert.equal(claudeTuiReady('~ home ~\n❯ claude --model opus'), false, 'a starship shell prompt is not a composer');
   assert.equal(claudeTuiReady(CLAUDE_COMPOSER_READ.stdout), true, 'the measured trusted screen');
-  assert.equal(claudeTuiReady('─────────────────\n❯'), true, 'an empty composer under a rule');
+  assert.equal(claudeTuiReady('─────────────────\n❯\n─────────────────'), true, 'an empty composer between rules');
   assert.equal(claudeTuiReady('  ⏵⏵ bypass permissions on (shift+tab to cycle)'), true, 'the mode line alone');
+});
+
+// The trusted screen as read at 2026-09-26 21:25:51Z (the statusline is this
+// box's own; any line there counts the same).
+const TRUSTED_SCREEN = [
+  '~  home / AppData / Local / Temp / aa1-foldertrust-20260926T212518Z ~ claude --model claude-haiku-4-5-20251001',
+  '', '', '',
+  '─────────────────────────────────────────────',
+  '❯ Try "how does <filepath> work?"',
+  '─────────────────────────────────────────────',
+  '  ⚡ Haiku 4.5 │ aa1-foldertrust-20260926T212518Z │ ░░░░░░░░░░ 0% │ $0.00',
+  '  ⏸ manual mode on · ← for agents',
+].join('\n');
+
+test('4aa9b174 amend 3: readiness is judged on the current frame, not on scrollback', () => {
+  const staleThenPrompt = [...TRUSTED_SCREEN.split('\n'), 'Another startup prompt', '❯ Continue setup', 'Press return'].join('\n');
+  assert.equal(claudeTuiReady(staleThenPrompt), false, 'the reviewer\'s shape: an old frame above a new startup prompt');
+  assert.equal(claudeTuiReady('Another startup prompt\n❯ Continue setup\nPress return'), false, 'the new prompt alone');
+  assert.equal(claudeTuiReady(`${TRUSTED_SCREEN}\nPress return`), false, 'one new line under an old frame: its mode line is no longer last');
+  assert.equal(claudeTuiReady(TRUSTED_SCREEN), true, 'the measured trusted screen');
+  assert.equal(claudeTuiReady(`${TRUSTED_SCREEN}\n\n\n   \n`), true, 'the trusted screen followed by blank lines');
+  assert.equal(claudeTuiReady('some scrollback\n  ⏸ manual mode on · ← for agents'), true, 'the mode line alone as the last line');
+  assert.equal(claudeTuiReady('─────────────────\n❯ Try "x"\n─────────────────\n  statusline'), true, 'the composer frame with one line under it');
+  assert.equal(claudeTuiReady('─────────────────\n❯ Try "x"\n─────────────────\na\nb\nc'), false, 'a composer frame ending more than three lines up is scrollback');
 });
 
 test('4aa9b174: the exported pattern pair matches the measured dialog', () => {
