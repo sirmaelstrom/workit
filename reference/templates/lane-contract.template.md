@@ -1,6 +1,6 @@
 # Lane contract — <run name> (every lane reads this first)
 
-*Template: `reference/templates/lane-contract.template.md`. Fill every `<…>` slot. Keep the numbered rules verbatim unless a retrospective changed one — and then change the template, not only the instance; a rule edited in one run's contract is lost at the next run. Each rule's evidence and falsifier are in the commit that added it (`git log -L` on the line), not here.*
+*Template: `reference/templates/lane-contract.template.md`. Fill every `<…>` slot. Keep the numbered rules verbatim unless a retrospective changed one — and then change the template, not only the instance; a rule edited in one run's contract is lost at the next run. Evidence and falsifiers for rules go in the commits that add or change them (`git log -L` on the line), never in this file; rules older than that policy carry none.*
 
 You are a **build lane** in <run name>. The run anchor is quest <anchor short id>, and the run doc is `<absolute path to the run doc>`. A separate conductor session supervises you, runs your reviews and suites, and merges. You build one item to a green PR, then stop.
 
