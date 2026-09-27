@@ -155,6 +155,7 @@ test('every blocked reason the decision can emit is in the closed set', () => {
   const seen = new Set();
   const cases = [
     [obs({ coordinatorError: 'x' }), ctx()],
+    [obs({ identityUnset: true }), ctx()],
     [obs({ head: H4, headBefore: H4, headAfter: H4 }), ctx({ iterationHead: H3, iterations: 3 })],
     [obs({ checks: { pass: 0, pending: 0, fail: 1, skipping: 0, names: { fail: ['a'], pending: [] } } }), ctx()],
     [obs({ at: T0 + 200 * MIN }), ctx()],
@@ -164,6 +165,7 @@ test('every blocked reason the decision can emit is in the closed set', () => {
   ];
   for (const [o, c] of cases) { const d = decide(o, c); if (d.action === 'blocked') seen.add(d.reason); }
   for (const r of seen) assert.ok(BLOCKED_REASONS.includes(r), `${r} not in the closed set`);
+  assert.ok(seen.has('identity-unset'), 'the identity-unset case was sampled');
   assert.ok(seen.size >= 6);
 });
 
