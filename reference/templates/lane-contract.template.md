@@ -66,6 +66,8 @@ List the callers of any function you add a check to, and every construct in your
    |---|---|---|---|
    | `<id>` | fixed / refuted / judgment | the control's red line, the quoted observation, or why nothing can settle it | `<sha>` or — |
 
+   **A guard thread is the conductor's, never yours.** A comment tagged `**lens:** guard` is the writer's test-weakening check: your PR deleted, skipped or loosened a test. Its row's verdict reads `conductor`, never `fixed`. Put in the evidence the reason the removal is legitimate, or the commit that restores the test. The conductor gives the verdict; the writer refuses `--adjudicator lane` on it.
+
    After the table, the amendment's own Debrief uses **headings**, not bold paragraphs: `### Forks I decided that the brief did not settle` and `### Claims no control measures` (or `####` under the `## Amendment N` heading). The reviewers' uncertainty extractor matches headings only, so a bold-paragraph Debrief never reaches them.
 
    The conductor re-reads only your refutations. When it records your verdicts, `fixed` becomes `reply --verdict confirmed --adjudicator lane`, `refuted` becomes `refuted`, and `judgment` becomes `judgment`. If the conductor overturns a refutation, the finding reopens: you fix it with a control like any other fix, and its row records `--adjudicator conductor`. A nontrivial amendment then gets one delta-only review pass (the amendment diff only) and no third round, so fix the delta pass's findings the same way; a fix made after that pass is checked by its control alone. Don't reply to or resolve GitHub threads; the conductor does that.

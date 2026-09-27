@@ -5203,3 +5203,212 @@ test('reply validates --verdict judgment, --adjudicator, and refuses row fields 
   assert.equal(orphan.code, 2);
   assert.match(orphan.stderr, /pass --verdict too/);
 });
+
+// --- the test-weakening guard, end to end through post and reply ------------
+
+/**
+ * The PR diff: `src/a.test.mjs` loses two assertions, `assert.equal(a, 1)` at
+ * base line 2 (an earlier round) and `assert.equal(b, 2)` at base line 9.
+ */
+const GUARD_DIFF = [
+  'diff --git a/src/a.ts b/src/a.ts',
+  '--- a/src/a.ts',
+  '+++ b/src/a.ts',
+  '@@ -10,2 +10,2 @@',
+  ' const keep = 1;',
+  '-const gone = 2;',
+  '+const added = 2;',
+  'diff --git a/src/a.test.mjs b/src/a.test.mjs',
+  '--- a/src/a.test.mjs',
+  '+++ b/src/a.test.mjs',
+  '@@ -1,4 +1,3 @@',
+  " test('a', () => {",
+  '-  assert.equal(a, 1);',
+  '   run();',
+  ' });',
+  '@@ -8,4 +7,3 @@',
+  " test('b', () => {",
+  '-  assert.equal(b, 2);',
+  '   run();',
+  ' });',
+].join('\n');
+const GUARD_FILES = ['src/a.ts', 'src/a.test.mjs'];
+/** The amendment removed only `assert.equal(b, 2)`, at its own line 7. */
+const GUARD_AMENDMENT = Object.freeze({
+  status: 'ahead',
+  ...LINEAR,
+  files: [{ filename: 'src/a.test.mjs', status: 'modified', patch: "@@ -6,4 +6,3 @@\n test('b', () => {\n-  assert.equal(b, 2);\n   run();\n });" }],
+});
+
+function runGuardPost({ since } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-guard-post-'));
+  const logs = [];
+  const posted = [];
+  try {
+    const paths = since ? ['src/a.test.mjs'] : GUARD_FILES;
+    const files = ['codex', 'astra'].map((lens) => {
+      const path = join(dir, `${lens}.json`);
+      writeFileSync(path, JSON.stringify({
+        summary: `${lens} summary`,
+        coverage: `examined ${paths.length} of ${paths.length} changed files`,
+        examined_paths: paths,
+        findings: [],
+        lens,
+        ...(since ? { since_sha: since, head_sha: DELTA_HEAD } : {}),
+      }), 'utf8');
+      return path;
+    });
+    const runGh = (args, opts) => {
+      if (args[0] === 'pr' && args[1] === 'view') return `${DELTA_HEAD}\n`;
+      if (args[0] === 'pr' && args[1] === 'diff') return GUARD_DIFF;
+      if (args[0] === 'api' && args[1] === '--paginate') return `${GUARD_FILES.join('\n')}\n`;
+      if (args[0] === 'api' && String(args[1]).includes('/compare/')) return JSON.stringify(GUARD_AMENDMENT);
+      if (args.includes('POST')) { posted.push(JSON.parse(opts.input)); return JSON.stringify({ html_url: 'https://example.test/review' }); }
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+    withNoManagedConfig(() => cmdPost({ pr: '42', repo: 'owner/repo', findings: files }, {
+      runGh, die: (code, message) => { throw Object.assign(new Error(message), { code }); }, log: (line) => logs.push(line),
+    }));
+    return { logs, posted };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const guardComments = (payload) => payload.comments.filter((comment) => /^\*\*lens:\*\* guard\n/.test(comment.body));
+
+test('guard, standalone full post: a removed assertion becomes one inline guard thread, tagged, on the old side', () => {
+  const { logs, posted } = runGuardPost();
+  assert.equal(posted.length, 1);
+  const guard = guardComments(posted[0]);
+  assert.equal(guard.length, 1, 'one thread per weakened file');
+  assert.deepEqual({ path: guard[0].path, side: guard[0].side, line: guard[0].line }, { path: 'src/a.test.mjs', side: 'LEFT', line: 2 });
+  assert.ok(guard[0].body.includes('assert.equal(a, 1);') && guard[0].body.includes('assert.equal(b, 2);'), 'a full review lists every removal in the file');
+  assert.equal(guard[0].body.includes('**scope:** delta'), false);
+  assert.match(posted[0].body, /### Test-weakening check/);
+  assert.ok(logs.includes('guard          1 test file(s) weakened → 1 thread(s) for the conductor'));
+});
+
+test('guard, standalone delta post: only the amendment\'s removal is reported, anchored by its text on the PR diff', () => {
+  const { posted } = runGuardPost({ since: SINCE });
+  const guard = guardComments(posted[0]);
+  assert.equal(guard.length, 1);
+  assert.deepEqual({ path: guard[0].path, side: guard[0].side, line: guard[0].line }, { path: 'src/a.test.mjs', side: 'LEFT', line: 9 });
+  assert.ok(guard[0].body.includes('assert.equal(b, 2);'));
+  assert.equal(guard[0].body.includes('assert.equal(a, 1);'), false, 'an earlier round\'s removal is not the amendment\'s');
+  assert.match(guard[0].body, /^\*\*lens:\*\* guard\n\n\*\*scope:\*\* delta\n/);
+});
+
+/** The pinned compare with its test-file patch now removing an assertion at base line 3. */
+function weakenedCompare() {
+  const payload = structuredClone(FIXTURE_COMPARE.payload);
+  const file = payload.files.find((entry) => entry.filename === 'skills/slim-review/scripts/pr-review.test.mjs');
+  file.patch = "@@ -1,4 +1,4 @@\n import { test } from 'node:test';\n import assert from 'node:assert/strict';\n-  assert.equal(result.exit, 2);\n+import { createServer } from 'node:http';\n ";
+  return payload;
+}
+
+test('guard, coordinated full post: the removed assertion rides the same single POST as a guard thread; the lens set is untouched', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothLensesDone({ refFile, home, events });
+    await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+      const out = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events, compare: weakenedCompare() }) });
+      assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
+      assert.equal(requests.length, 1);
+      const guard = guardComments(requests[0].body);
+      assert.equal(guard.length, 1);
+      assert.deepEqual({ path: guard[0].path, side: guard[0].side, line: guard[0].line }, { path: 'skills/slim-review/scripts/pr-review.test.mjs', side: 'LEFT', line: 3 });
+      assert.deepEqual(parseMarker(requests[0].body.body).lenses, REQUIRED_LENSES, 'the marker names the lenses, never the guard');
+      assert.ok(out.diagnostics.includes('guard          1 test file(s) weakened → 1 thread(s) for the conductor'));
+    });
+  });
+});
+
+test('guard, coordinated delta post: only the amendment\'s removal is reported, tagged delta', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  const testFile = 'skills/slim-review/scripts/pr-review.test.mjs';
+  const amendment = {
+    ...COORDINATED_AMENDMENT,
+    files: [
+      ...COORDINATED_AMENDMENT.files,
+      { filename: testFile, status: 'modified', patch: "@@ -5,3 +5,2 @@\n import assert from 'node:assert/strict';\n-  assert.equal(result.exit, 2);\n " },
+    ],
+  };
+  const pinned = weakenedCompare();
+  pinned.files.find((entry) => entry.filename === testFile).patch += "\n@@ -40,3 +40,2 @@\n ctx\n-  assert.equal(other, 1);\n ctx";
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    for (const lens of REQUIRED_LENSES) {
+      // eslint-disable-next-line no-await-in-loop
+      const ran = await runCoordinatedLens({
+        refFile,
+        home,
+        lens,
+        seams: amendmentSeams(pinnedSeams({ events, codex: () => JSON.stringify(modelOutput({ paths: [DELTA_FILE, testFile], findings: [] })) }), amendment),
+        opts: { since: SINCE },
+      });
+      assert.equal(ran.line().outcome, 'ok', JSON.stringify(ran.deaths));
+    }
+    await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+      const out = await runCoordinatedPost({ refFile, home, origin, seams: amendmentSeams(pinnedSeams({ events, compare: pinned }), amendment) });
+      assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
+      const guard = guardComments(requests[0].body);
+      assert.equal(guard.length, 1);
+      assert.deepEqual({ side: guard[0].side, line: guard[0].line }, { side: 'LEFT', line: 3 }, 'anchored by text on the pinned PR diff');
+      assert.match(guard[0].body, /\*\*scope:\*\* delta/);
+      assert.equal(guard[0].body.includes('assert.equal(other, 1);'), false, 'a PR-diff removal the amendment did not make is not reported');
+    });
+  });
+});
+
+function replyToGuard({ adjudicator, body = '**lens:** guard\n\n**Test-weakening check: `src/a.test.mjs`**\n\n- ...' }) {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-guard-reply-'));
+  const calls = [];
+  try {
+    const bodyFile = join(dir, 'reply.md');
+    const measureLog = join(dir, 'measure.jsonl');
+    writeFileSync(bodyFile, 'the removal is legitimate: the function it tested was deleted in this PR', 'utf8');
+    let error;
+    try {
+      cmdReply(
+        { pr: '42', repo: 'owner/repo', commentId: '99', bodyFile, verdict: 'refuted', measureLog, ...(adjudicator ? { adjudicator } : {}) },
+        {
+          runGh: (args) => {
+            calls.push(args);
+            return args.includes('POST') ? JSON.stringify({ html_url: 'https://example.test/reply' }) : JSON.stringify({ body, original_commit_id: POSTED_HEAD });
+          },
+          die: (code, message) => { throw Object.assign(new Error(message), { code }); },
+          log: () => {},
+        },
+      );
+    } catch (err) {
+      error = err;
+    }
+    const rows = existsSync(measureLog) ? readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).map(JSON.parse) : [];
+    return { error, rows, posts: calls.filter((args) => args.includes('POST')) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('guard adjudicator: the lane, or no adjudicator, cannot give a guard thread its verdict; nothing is posted or logged', () => {
+  for (const adjudicator of ['lane', undefined]) {
+    const { error, rows, posts } = replyToGuard({ adjudicator });
+    assert.equal(error?.code, 2, `adjudicator ${adjudicator}`);
+    assert.match(error.message, /test-weakening guard thread/);
+    assert.deepEqual(posts, [], 'no reply posted');
+    assert.deepEqual(rows, [], 'no verdict row');
+  }
+});
+
+test('guard adjudicator: the conductor can, and the row says lens guard; a lens comment still accepts the lane', () => {
+  const guard = replyToGuard({ adjudicator: 'conductor' });
+  assert.equal(guard.error, undefined);
+  assert.equal(guard.posts.length, 1);
+  assert.deepEqual({ lens: guard.rows[0].lens, adjudicator: guard.rows[0].adjudicator, verdict: guard.rows[0].verdict, scope: guard.rows[0].scope }, { lens: 'guard', adjudicator: 'conductor', verdict: 'refuted', scope: 'full' });
+  const lensComment = replyToGuard({ adjudicator: 'lane', body: '**lens:** codex\n\n**[P2] t**\n\nb' });
+  assert.equal(lensComment.error, undefined);
+  assert.equal(lensComment.rows[0].lens, 'codex');
+  assert.equal(lensComment.rows[0].adjudicator, 'lane');
+});
