@@ -121,7 +121,9 @@ measurement row is written, attributed to that comment's lens) and then
 verb is the only thing that sets it. The verdicts and who passes which
 `--adjudicator` follow slim-review's verdict table (§ 4 Adjudicate). A
 `judgment` thread is replied to and resolved like any other: the verdict is the
-record, and the receipt lists it. A confirmed finding is fixed on the branch
+record, and the receipt lists it. A relative `--body-file` is resolved against
+your working directory, not the checkout. A missing one exits 4 before anything
+is replied. A confirmed finding is fixed on the branch
 and pushed. The loop sees the new head as the next iteration and claims the
 review its round is owed: a delta after a full review, nothing after a delta.
 Verify against the code, not the claim. The reviewer had the diff and one pass;
@@ -151,8 +153,12 @@ Plan/cost stop is the coordinator's own: a claim refused `paused` or
 `ci-failed` · `head-moved-limit` · `wall-time` · `plan-paused` · `disabled` ·
 `delivery-unresolved` · `integrity-violation` · `unresolved-threads` ·
 `coordinator-unreachable` · `not-managed` · `checks-unavailable` ·
-`threads-truncated` · `amendment-not-descendant`. Each carries an `owed`
-sentence.
+`threads-truncated` · `amendment-not-descendant` · `identity-unset`. Each
+carries an `owed` sentence. `identity-unset` means the coordinator answered
+but has no posting identity pinned. The operator pins one with
+`pr-review.mjs identity --pin --reason "<why>"` (slim-review § Managed
+repositories). `coordinator-unreachable` means the coordinator couldn't be
+read at all.
 
 ## What it never does
 
