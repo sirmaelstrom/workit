@@ -252,7 +252,8 @@ function world(init = {}) {
     if (i === j) return { status: 'identical', ahead_by: 0, files: [], commits: [] };
     if (j < i) return { status: 'behind', ahead_by: 0, files: [], commits: [] };
     const commits = w.history.slice(i + 1, j + 1).map((sha) => ({ sha, parents: [{ sha: 'p' }] }));
-    return { status: 'ahead', ahead_by: j - i, total_commits: j - i, files: [{ filename: 'a.ts' }], commits };
+    const payload = { status: 'ahead', ahead_by: j - i, total_commits: j - i, files: [{ filename: 'a.ts' }], commits };
+    return w.onCompare ? w.onCompare(payload, from, to) : payload;
   };
   const deps = {
     managed: { mode: 'managed' },
@@ -264,7 +265,7 @@ function world(init = {}) {
     },
     runGh: (args) => {
       w.ghCalls.push(args);
-      if (args[0] === 'pr' && args[1] === 'view') return `${w.head}\n`;
+      if (args[0] === 'pr' && args[1] === 'view') { if (w.headReads?.length) w.head = w.headReads.shift(); return `${w.head}\n`; }
       if (args[0] === 'pr' && args[1] === 'checks') return JSON.stringify(w.checks);
       if (args[0] === 'api' && args[1] === '--paginate' && /\/pulls\/\d+\/reviews$/.test(args[2])) return w.reviews.map((r) => JSON.stringify(r)).join('\n');
       const cmp = args[0] === 'api' && /\/compare\/([0-9a-f]+)\.\.\.([0-9a-f]+)$/.exec(args[1] ?? '');
@@ -630,4 +631,72 @@ test('the posting identity is required: without it the head is never read as unr
   const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'coordinator-unreachable']);
   assert.equal(w.writerCalls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Amendment 1 (T1 round one on workit#116)
+// ---------------------------------------------------------------------------
+
+const postDelta = (over = {}) => world({ head: H3, reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: H2, since: H1 })], ...over });
+
+test('T1 workit#116 (4116626534 i) — a post-delta tail with a merge from base, or a commit list too short to rule one out, blocks amendment-not-descendant; ancestry alone never converges it', async () => {
+  const merged = postDelta({ onCompare: (p) => ({ ...p, commits: p.commits.map((c) => ({ ...c, parents: [{ sha: 'p' }, { sha: 'base' }] })) }) });
+  const rm = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, merged.deps);
+  assert.deepEqual([rm.outcome, rm.reason], ['blocked', 'amendment-not-descendant']);
+  assert.match(rm.owed, /merge commit/);
+  assert.equal(merged.w.writerCalls.length, 0);
+
+  const partial = postDelta({ onCompare: (p) => ({ ...p, total_commits: 300 }) });
+  const rp = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, partial.deps);
+  assert.deepEqual([rp.outcome, rp.reason], ['blocked', 'amendment-not-descendant']);
+  assert.match(rp.owed, /cannot be ruled out/);
+});
+
+test('T1 workit#116 (4116626534 i) — an ahead tail that changes no file (an empty commit to re-run CI) still converges on the tail', async () => {
+  const empty = postDelta({ onCompare: (p) => ({ ...p, files: [] }) });
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, empty.deps);
+  assert.deepEqual([r.outcome, r.unreviewed_tail], ['converged', 'bbbbbbb...ccccccc']);
+});
+
+test('T1 workit#116 (4116626540) — --skip-delta is dropped when the head moves during the first read; the head that arrives is owed its delta', async () => {
+  const lines = [];
+  const state = stateFile();
+  // the first observation reads H2 before and H3 after
+  const { w, deps } = fullReviewedOnH1({ headReads: [H2, H3] });
+  deps.log = (l) => lines.push(l);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, skipDelta: 'judged on H2', bounds: { pollSeconds: 1 } }, deps);
+  assert.equal(r.delta_skipped, undefined);
+  assert.deepEqual(lensCalls(w).map(sinceOf), [H1, H1], 'H3 got its delta pass');
+  assert.equal(JSON.parse(readFileSync(state, 'utf8')).deltaSkipped, null);
+  assert.ok(lines.some((l) => /--skip-delta dropped/.test(l)), lines.join('\n'));
+});
+
+test('T1 workit#116 (4116626543) — the context file is persisted: a resumed delta run without --context-file still passes it; a new flag replaces it; --fresh drops it', async () => {
+  const { w, deps } = world({ findingsOnPost: (ww) => (ww.head === H1 ? [openThread(61)] : []) });
+  const state = stateFile();
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, contextFile: '/abs/round-one.md', bounds: { pollSeconds: 1 } }, deps);
+  assert.equal(JSON.parse(readFileSync(state, 'utf8')).contextFile, '/abs/round-one.md');
+  await adjudicate({ repo: 'o/r', pr: 1, cwd: '.', commentId: 61, verdict: 'confirmed', bodyFile: 'x.md', statePath: state }, deps);
+  w.head = H2;
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, bounds: { pollSeconds: 1 } }, deps);
+  const calls = lensCalls(w);
+  assert.deepEqual(calls.map(sinceOf), [null, null, H1, H1]);
+  assert.ok(calls.every((c) => c[c.indexOf('--context-file') + 1] === '/abs/round-one.md'), 'the resumed delta pass carries the round-one context');
+  assert.equal(JSON.parse(readFileSync(state, 'utf8')).contextFile, '/abs/round-one.md');
+
+  const replaced = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, contextFile: '/abs/round-two.md', bounds: { pollSeconds: 1 } }, deps);
+  assert.equal(replaced.outcome, 'converged');
+  assert.equal(JSON.parse(readFileSync(state, 'utf8')).contextFile, '/abs/round-two.md');
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, resume: false, bounds: { pollSeconds: 1 } }, deps);
+  assert.equal(JSON.parse(readFileSync(state, 'utf8')).contextFile, null);
+});
+
+test('T1 workit#116 (4116626543) — run checks a context file taken from the state file before anything runs (exit 4)', () => {
+  const script = join(dirname(fileURLToPath(import.meta.url)), 'pr-babysit.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'babysit-cli-'));
+  const state = join(dir, 'state.json');
+  writeFileSync(state, JSON.stringify({ contextFile: join(dir, 'gone.md') }));
+  const r = spawnSync(process.execPath, [script, 'run', '--pr', '1', '--repo', 'o/r', '--cwd', dir, '--state', state], { encoding: 'utf8' });
+  assert.equal(r.status, 4, r.stderr);
+  assert.match(r.stderr, /--context-file \(from the state file\) could not be read/);
 });

@@ -13,8 +13,9 @@
  * The review rounds are capped (quest 329cba0d, slim-review § 4): one full
  * review, then one delta pass (`lens --since <full head>`) on the next head,
  * then no third review. A head after the delta pass converges on its checks
- * and resolved threads alone when the last reviewed head is its ancestor, and
- * the receipt names the `unreviewed_tail`. The rounds are read from the PR's
+ * and resolved threads alone when the last reviewed head is its ancestor with
+ * no merge from the base branch between, and the receipt names the
+ * `unreviewed_tail`. The rounds are read from the PR's
  * posted review markers, not from the state file, so a review posted by the
  * beat or by hand counts.
  *
@@ -244,7 +245,7 @@ export async function observe({ repo, pr, cwd }, deps) {
     const last = reviews[reviews.length - 1];
     if (last && last.head !== headBefore) {
       const payload = JSON.parse(deps.runGh(['api', `repos/${repo}/compare/${last.head}...${headBefore}`], { cwd }));
-      tail = { from: last.head, to: headBefore, status: payload?.status ?? null, aheadBy: payload?.ahead_by ?? null, problem: amendmentProblem(payload, last.head, headBefore) };
+      tail = { from: last.head, to: headBefore, status: payload?.status ?? null, aheadBy: payload?.ahead_by ?? null, files: Array.isArray(payload?.files) ? payload.files.length : null, problem: amendmentProblem(payload, last.head, headBefore) };
     }
   }
 
@@ -371,6 +372,13 @@ export function decide(obs, ctx) {
     if (!tail || tail.from !== round.last.head || tail.to !== obs.head || tail.status !== 'ahead') {
       return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: round.last.head, problem: `compare status ${tail?.status ?? 'missing'}` }) };
     }
+    // Ancestry is not enough: after a merge from the base branch (or a commit
+    // list too short to rule one out) the conductor decides how the head is
+    // reviewed (slim-review § 4). An ahead tail that changes no file — an
+    // empty commit to re-run CI — is the one problem that still converges.
+    if (tail.problem && tail.files !== 0) {
+      return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: round.last.head, problem: tail.problem }) };
+    }
     if (unresolved.length > 0) return { action: 'adjudicate', detail: `${unresolved.length} open thread(s)`, threads: unresolved, reviewId: round.last.review_id };
     if (obs.checks.pending > 0) return { action: 'wait', detail: `checks pending: ${obs.checks.names.pending.join(', ')}` };
     return {
@@ -490,9 +498,11 @@ export async function runLoop(opts, deps) {
     deltaSkipped: prior?.deltaSkipped ?? null,
     // verdicts already given, not a bound: `--fresh` keeps them
     judgmentNotes: stored?.judgmentNotes ?? [],
+    // the author's uncertainty follows the PR into round two unless replaced
+    contextFile: opts.contextFile ?? prior?.contextFile ?? null,
   };
   const log = deps.log ?? (() => {});
-  const persist = () => saveState(statePath, { iterationHead: ctx.iterationHead, iterations: ctx.iterations, startedAt: ctx.startedAt, claimsOnHead: ctx.claimsOnHead, deltaSkipped: ctx.deltaSkipped, judgmentNotes: ctx.judgmentNotes });
+  const persist = () => saveState(statePath, { iterationHead: ctx.iterationHead, iterations: ctx.iterations, startedAt: ctx.startedAt, claimsOnHead: ctx.claimsOnHead, deltaSkipped: ctx.deltaSkipped, judgmentNotes: ctx.judgmentNotes, contextFile: ctx.contextFile });
 
   const managed = deps.managed ?? { mode: MANAGED_MODES.managed };
   if (managed.mode !== MANAGED_MODES.managed) {
@@ -505,9 +515,11 @@ export async function runLoop(opts, deps) {
     if (ctx.iterationHead === null) { ctx.iterationHead = obs.head; ctx.iterations = 1; persist(); }
     if (first && opts.skipDelta) {
       // The session that pushed the amendment judged it trivial; the judgment
-      // covers this head only, and a later head is owed its delta again.
+      // covers this head only, and a later head is owed its delta again. A head
+      // that moved during this first read is not the head that was judged.
       const round = reviewRound(obs.reviews ?? [], obs.head).round;
-      if (round === 'delta') { ctx.deltaSkipped = { head: obs.head, reason: opts.skipDelta }; persist(); }
+      if (obs.headBefore !== obs.headAfter) log(`[babysit] --skip-delta dropped: the head moved ${obs.headBefore.slice(0, 7)} → ${obs.headAfter.slice(0, 7)} during the first read; run again on the head you judged`);
+      else if (round === 'delta') { ctx.deltaSkipped = { head: obs.head, reason: opts.skipDelta }; persist(); }
       else log(`[babysit] --skip-delta ignored: head ${obs.head.slice(0, 7)} is in round '${round}', not the delta round`);
     }
     first = false;
@@ -541,7 +553,7 @@ export async function runLoop(opts, deps) {
       case 'claim': {
         ctx.claimsOnHead[obs.head] = (ctx.claimsOnHead[obs.head] ?? 0) + 1;
         persist();
-        const r = await runAttempt({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, since: d.since, contextFile: opts.contextFile }, deps);
+        const r = await runAttempt({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, since: d.since, contextFile: ctx.contextFile }, deps);
         log(`[babysit] ${d.since ? `delta attempt (since ${d.since.slice(0, 7)})` : 'attempt'} on ${obs.head.slice(0, 7)}: ${r.ok ? `posted review ${r.review_id}` : `${r.phase} → ${r.reason}`}`);
         if (!r.ok && r.phase === 'claim' && (r.reason === 'paused' || r.reason === 'disabled')) {
           return finish({ outcome: 'blocked', reason: r.reason === 'paused' ? 'plan-paused' : 'disabled', owed: owedFor(r.reason === 'paused' ? 'plan-paused' : 'disabled', { ...ctx, head: obs.head }), head: obs.head }, ctx, deps, obs);
@@ -671,14 +683,20 @@ async function main() {
   }
   if (!opts.pr || !opts.repo || !opts.cwd) { console.error('--pr, --repo and --cwd are required'); process.exit(4); }
   if (opts.skipDelta !== undefined && String(opts.skipDelta).trim() === '') { console.error('--skip-delta needs a reason: it is written to the state file and the receipt'); process.exit(4); }
-  if (opts.contextFile !== undefined) {
+  // A resumed run reuses the context file the state file carries (runLoop does
+  // the same fallback), so that path is checked here too.
+  const storedContext = opts.verb === 'run' && opts.contextFile === undefined && opts.resume !== false
+    ? loadState(opts.statePath ?? defaultStatePath(opts.repo, opts.pr))?.contextFile ?? undefined
+    : undefined;
+  if (opts.contextFile !== undefined || storedContext !== undefined) {
     // The writer refuses an unreadable or empty file only after the claim, and
     // that refusal leaves a live attempt the loop would wait on. Check it here.
     // Absolute, because the writer runs with --cwd as its working directory.
-    opts.contextFile = resolve(opts.contextFile);
+    const label = storedContext !== undefined ? '--context-file (from the state file)' : '--context-file';
+    opts.contextFile = resolve(opts.contextFile ?? storedContext);
     let text = '';
-    try { text = readFileSync(opts.contextFile, 'utf8'); } catch (err) { console.error(`--context-file could not be read: ${err.message}`); process.exit(4); }
-    if (text.trim() === '') { console.error(`--context-file is empty: ${opts.contextFile}`); process.exit(4); }
+    try { text = readFileSync(opts.contextFile, 'utf8'); } catch (err) { console.error(`${label} could not be read: ${err.message}`); process.exit(4); }
+    if (text.trim() === '') { console.error(`${label} is empty: ${opts.contextFile}`); process.exit(4); }
   }
   const deps = buildDeps(opts);
   const bounds = {

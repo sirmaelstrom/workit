@@ -25,7 +25,11 @@ only"): at most **two reviews per PR**, one full and one delta.
    attempt-ref, so they review only the amendment.
 3. **No third review.** The head moved after a posted delta review: no claim.
    The head converges on its checks and resolved threads, provided the last
-   reviewed head is its ancestor. The receipt names what only controls checked.
+   reviewed head is its ancestor with no merge from the base branch in
+   between. The receipt names what only controls checked. Babysit does not
+   verify that a post-delta fix's control was seen failing; that evidence
+   lives in the lane report, and the receipt's tail tells the merge call what
+   it covers.
 
 The rounds come from the **markers of the reviews posted on the PR** (read with
 slim-review's one marker parser), not from this skill's state file. A review
@@ -55,7 +59,10 @@ For the PR's **current head** `H`, either:
 - **a reviewed head.** The coordinator holds a **posted** paired attempt on `H`
   (lenses codex + astra), **or**
 - **the tail after the cap.** `H` is past round two (or its delta was skipped,
-  below), and the last posted review's head is an ancestor of `H`. The receipt
+  below), and the last posted review's head is an ancestor of `H`. The tail
+  has no merge commit, and its commit list is complete. Either problem is
+  `amendment-not-descendant`, and the conductor decides. A tail that changes
+  no file, such as an empty commit to re-run CI, still converges. The receipt
   carries `unreviewed_tail`;
 
 and in both cases, all at once:
@@ -128,8 +135,8 @@ you have the repo and the intent.
 | `--poll-seconds` | 60 | never faster |
 | `--session-claims` | 1 | session claims per head (retry authority, spec D4); `0` = never retry an ended automatic attempt |
 | `--claim` | `session` | `session`: claim the head yourself now; `beat`: wait for the automatic attempt (≈15–30 min per head). Round one only |
-| `--context-file` | — | the `pr-review.mjs uncertainty` output, passed to both lenses in both rounds; checked readable and non-empty before anything runs |
-| `--skip-delta` | — | `"<reason>"`: you judged this head's amendment trivial, so no delta is claimed; the head converges on the tail. It covers the current head only. The reason goes into the state file and the receipt's `delta_skipped`. You pushed the fix, so the judgment is yours to make; babysit can't make it |
+| `--context-file` | — | the `pr-review.mjs uncertainty` output, passed to both lenses in both rounds; checked readable and non-empty before anything runs. It is kept in the state file, so a re-run without the flag reuses it; a new flag replaces it, and `--fresh` drops it |
+| `--skip-delta` | — | `"<reason>"`: you judged this head's amendment trivial, so no delta is claimed; the head converges on the tail. It covers the current head only, and it is dropped (and logged) if the head moves during the first read. The reason goes into the state file and the receipt's `delta_skipped`. You pushed the fix, so the judgment is yours to make; babysit can't make it |
 | `--fresh` | — | ignore the state file (a new run, new bounds); `judgment` ids are kept |
 
 The review cap has no flag. Two reviews per PR is a T1 ruling, not a tunable.
