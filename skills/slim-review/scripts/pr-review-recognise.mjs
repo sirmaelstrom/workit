@@ -27,7 +27,7 @@
 const MARKER_RE = /<!--\s*slim-review\s+([^>]*?)\s*-->/;
 
 /** Fields the marker carries, in the order it writes them. */
-export const MARKER_FIELDS = Object.freeze(['repo', 'pr', 'head', 'base', 'lenses', 'run', 'attempt', 'policy', 'supersedes']);
+export const MARKER_FIELDS = Object.freeze(['repo', 'pr', 'head', 'base', 'lenses', 'run', 'attempt', 'policy', 'supersedes', 'since']);
 
 /** `-` is the marker's "absent" value: a standalone post has no run id. */
 const ABSENT = '-';
@@ -36,9 +36,12 @@ const ABSENT = '-';
  * Render the marker for one posted review.
  *
  * Every value is written even when it is absent, so a reader can tell a field
- * that was empty from a field a different writer never wrote.
+ * that was empty from a field a different writer never wrote. The one
+ * exception is `since`, written only by an amendment check: its absence means
+ * a full review, which is also what every marker written before it existed
+ * describes, so full-review markers stay byte-identical.
  */
-export function buildMarker({ repo, pr, head, base, lenses, run, attempt, policy, supersedes }) {
+export function buildMarker({ repo, pr, head, base, lenses, run, attempt, policy, supersedes, since }) {
   const pairs = [
     `repo=${repo}`,
     `pr=${pr}`,
@@ -49,6 +52,7 @@ export function buildMarker({ repo, pr, head, base, lenses, run, attempt, policy
     `attempt=${attempt ?? ABSENT}`,
     `policy=${policy ?? ABSENT}`,
     `supersedes=${supersedes ?? ABSENT}`,
+    ...(since ? [`since=${since}`] : []),
   ];
   return `<!-- slim-review ${pairs.join(' ')} -->`;
 }

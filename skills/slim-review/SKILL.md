@@ -55,8 +55,10 @@ mkdir -p "$REVIEW_DIR"
 ## 2. Elicit
 
 Run the lens verb. It builds the grounded prompt itself from the authoritative
-PR file list, requires the reviewer to read `gh pr diff <n> --repo <owner/name>`,
-and rejects prose or incomplete handbacks.
+PR file list and rejects prose or incomplete handbacks. For a full review it
+tells the reviewer to read `gh pr diff <n> --repo <owner/name>`. An amendment
+check (`--since`, §4) and a coordinated `--attempt-ref` run inline their diff
+instead.
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens \
@@ -74,6 +76,17 @@ overrides the per-lens JSONL destination; `--dry-run` prints the resolved argv
 and prompt path without running a reviewer. Use `--prompt-out <path>` when you
 need to retain that exact grounded prompt for inspection.
 
+Why two: on observatory#620 (2026-09-09, paired on a byte-identical prompt)
+Terra@high and Astra@low each found a real defect the other missed, neither
+produced a false finding, and Astra was better calibrated on severity — Terra
+graded a deliberate two-fetch startup window as P1 — at half the input, 6× less
+output and a third of the wall clock. Both arms together did not move the plan
+meter one integer point (`astra-diff-review-measurement.md`). The `codex` seat
+then moved to GPT-6 Sol (2026-09-23, quest `458d87c9`): replayed on the same
+prompt it found all three known defects with no false finding, the only arm of
+the three to do so (`gpt6-sol-role-mapping/measurement.md`). Two lenses is the
+ceiling; three is a council.
+
 ### The author's uncertainty goes to both reviewers
 
 When the PR comes from a lane with a report, extract the report's uncertainty
@@ -87,24 +100,24 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" uncertainty \
 
 `uncertainty` copies four things verbatim: `### Claims no control measures`,
 `### Forks I decided that the brief did not settle`, `## Follow-ups`, and every
-other line containing `ASSUMPTION`. It copies nothing else. The outcome, the
+other line containing `ASSUMPTION`. It matches those headings at any level;
+sections inside an `## Amendment N` keep that heading as a label, so a reviewer
+knows which round a line is from. It copies nothing else. The outcome, the
 controls, the tests and the receipted assertions stay out, because a reviewer
-told what passed has been told where not to look. A report with none of those
-sections is exit 3: an empty uncertainty block is a finding about the report.
-The lens inlines the block under **"The author says these were not checked"**,
-framed as places to look and not claims to trust. Both lens paths do this,
-standalone and `--attempt-ref`.
+told what passed has been told where not to look. That keeps whole confidence
+sections out, not every confident sentence: Follow-ups are copied verbatim, and
+a Follow-up can state a receipt. A report with none of those sections is exit
+3, because an empty uncertainty block is a finding about the report. Headings are the
+contract: a Debrief written as bold paragraphs is not matched. The lens inlines
+the block under **"The author says these were not checked"**, framed as places
+to look and not claims to trust. Both lens paths do this, standalone and
+`--attempt-ref`.
 
-Why two: on observatory#620 (2026-09-09, paired on a byte-identical prompt)
-Terra@high and Astra@low each found a real defect the other missed, neither
-produced a false finding, and Astra was better calibrated on severity — Terra
-graded a deliberate two-fetch startup window as P1 — at half the input, 6× less
-output and a third of the wall clock. Both arms together did not move the plan
-meter one integer point (`astra-diff-review-measurement.md`). The `codex` seat
-then moved to GPT-6 Sol (2026-09-23, quest `458d87c9`): replayed on the same
-prompt it found all three known defects with no false finding, the only arm of
-the three to do so (`gpt6-sol-role-mapping/measurement.md`). Two lenses is the
-ceiling; three is a council.
+`--lens opus` takes its prompt as one command-line argument (`claude -p`
+documents no prompt file). A prompt the OS would refuse, about 32K characters on
+Windows, is refused before anything runs: exit 5 standalone, or a
+`diff-too-large` line before any lens start under `--attempt-ref`. Run codex or
+astra, which read the prompt on stdin, or narrow the input.
 
 ### Reviewer ≠ author
 
@@ -305,9 +318,24 @@ comment id (verdict, evidence, commit), per the lane contract.
 
 **The conductor re-reads only the refutations.** Author bias hides in a
 refutation, so the conductor checks each quoted observation against the code.
-A fix needs no second look, because its control is the evidence.
+A fix needs no second look, because its control is the evidence. When the
+conductor overturns a refutation, the finding reopens: the lane fixes it with a
+control seen failing, the same as any other fix. That late fix gets no extra
+review round, and its control is the check.
 
-Then reply on each thread with the verdict and who reached it:
+Then reply on each thread with the verdict and who reached it. The lane's words
+map onto `reply` like this:
+
+| Lane verdict | `reply --verdict` | `--adjudicator` |
+|---|---|---|
+| fixed | `confirmed` | `lane` |
+| refuted, upheld by the conductor | `refuted` | `lane` (the lane's verdict stood) |
+| refuted, overturned by the conductor, then fixed | `confirmed` | `conductor` |
+| judgment | `judgment` | `lane`, or whoever reached it |
+
+Use `note` for a comment that needs no defect verdict at all, such as a finding
+owed elsewhere or answered by the conductor. With this mapping the log counts
+lane refutations and conductor overturns separately.
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" reply \
@@ -351,17 +379,39 @@ The lens inlines the compare `<reviewed head>...<PR head>`, lists only its
 files, and tells the reviewer this is an amendment check: the rest of the
 repository is readable context, and findings anchor inside the amendment.
 Coverage is held to the amendment's files. `post` checks each handback against
-the same compare, anchors comments on the PR diff, tags each one
-`**scope:** delta`, and refuses a mix of full and delta handbacks (exit 5) or a
-head that moved after the delta lens ran (exit 6). `--since` takes a sha. It
-refuses with exit 5 when that sha is not an ancestor of the PR head, so amend
-with commits on top of the reviewed head. After a rebase, the conductor decides
-how that head gets reviewed. Under `--attempt-ref` the same flag keeps the
-attempt's claim, base and manifest unchanged and reviews the amendment inside
-it.
+the same compare. A delta finding must sit on an amendment line, meaning a line
+added or shown as context in that compare's patches. A finding outside the
+amendment is **excluded**: listed once under "Excluded: outside the amendment" in
+the review body, not posted inline, and not counted as a delta finding.
+Findings inside the amendment anchor on the PR diff and are tagged
+`**scope:** delta`, and the review's marker gains `since=<sha>`. `post` refuses a
+mix of full and delta handbacks (exit 5) and a head that moved after the delta
+lens ran (exit 6).
+
+`--since` takes a sha, the head round one reviewed. It refuses in these cases:
+- that sha is not an ancestor of the PR head;
+- the range contains a merge commit, since merging the base branch in brings
+  changes nobody amended;
+- the compare's commit list is incomplete;
+- the sha sits on the base branch, for example an old sha, where the "amendment"
+  would span the whole PR.
+
+Standalone, each refusal is exit 5. Under `--attempt-ref` it is an
+`input-mismatch` line with exit 1, raised before any lens start, so the attempt
+stays live for a corrected call. Amend with commits on top of the reviewed head.
+After a rebase or a merge from the base branch, the conductor decides how that
+head gets reviewed. Under `--attempt-ref` the same flag keeps the attempt's
+claim, base and manifest unchanged and reviews the amendment inside it.
 
 Fix the delta pass's findings with controls, and the PR goes to the merge
-call. There is no third review.
+call. There is no third review: a fix made after the delta pass is checked by
+its seen-failing control, and that is the amendment check at that point.
+
+**Who follows the cap today.** The cap binds manual T1, meaning this skill run by
+a session or conductor. The automated callers still run a full paired review
+on every new head: `babysit` (up to three heads) and Observatory's pr-review
+beat. Migrating them is a follow-up, not part of this skill (lane cr report,
+quest 329cba0d, `## Follow-ups`).
 
 When every thread has a verdict and CI is green, the PR is ready for the
 operator's merge call.

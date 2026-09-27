@@ -66,4 +66,6 @@ List the callers of any function you add a check to, and every construct in your
    |---|---|---|---|
    | `<id>` | fixed / refuted / judgment | the control's red line, the quoted observation, or why nothing can settle it | `<sha>` or — |
 
-   The conductor re-reads only your refutations. A nontrivial amendment then gets one delta-only review pass (the amendment diff only) and no third round, so fix the delta pass's findings the same way. Don't reply to or resolve GitHub threads; the conductor does that.
+   After the table, the amendment's own Debrief uses **headings**, not bold paragraphs: `### Forks I decided that the brief did not settle` and `### Claims no control measures` (or `####` under the `## Amendment N` heading). The reviewers' uncertainty extractor matches headings only, so a bold-paragraph Debrief never reaches them.
+
+   The conductor re-reads only your refutations. When it records your verdicts, `fixed` becomes `reply --verdict confirmed --adjudicator lane`, `refuted` becomes `refuted`, and `judgment` becomes `judgment`. If the conductor overturns a refutation, the finding reopens: you fix it with a control like any other fix, and its row records `--adjudicator conductor`. A nontrivial amendment then gets one delta-only review pass (the amendment diff only) and no third round, so fix the delta pass's findings the same way; a fix made after that pass is checked by its control alone. Don't reply to or resolve GitHub threads; the conductor does that.

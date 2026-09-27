@@ -105,7 +105,11 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      (fix with a control, refute with a quoted observation, or `judgment`), and
      the conductor re-reads only the refutations; after a nontrivial amendment,
      one delta-only pass per lens (`lens --since <reviewed head>`). There is no
-     second full-PR review and no third round at T1.
+     second full-PR review and no third round at T1; a fix made after the delta
+     pass is checked by its seen-failing control. The cap binds manual T1 today:
+     `babysit` and Observatory's pr-review beat still run a full paired review
+     on every new head until their migration lands (lane cr report, quest
+     329cba0d, Follow-ups).
    - **T2 — full council.** Fired when the change **touches a contract or an
      invariant**, or **adds tests that claim to prove something**. T1 asks
      whether the diff is correct; T2 asks whether it was *permitted* — the

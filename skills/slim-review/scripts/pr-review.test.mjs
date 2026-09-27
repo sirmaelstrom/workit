@@ -66,6 +66,7 @@ import {
   AUTHOR_CONTEXT_HEADING,
   amendmentProblem,
   readPostedFinding,
+  commandLineProblem,
 } from './pr-review.mjs';
 import {
   REASONS,
@@ -4547,6 +4548,10 @@ test('control (a): the extractor copies the uncertainty sections verbatim and le
   for (const leak of ['OUTCOME-CONFIDENCE', 'RECEIPTED-CONFIDENCE', '## Timing', '## Outcome']) {
     assert.equal(rendered.text.includes(leak), false, `no ${leak}`);
   }
+  // m6: the amendment's sections carry their round, once, as a label.
+  assert.equal(rendered.text.split('\n').filter((line) => line === '## Amendment 1').length, 1);
+  assert.ok(rendered.text.indexOf('## Amendment 1') < rendered.text.indexOf('AMEND-FORK-SENTINEL'));
+  assert.ok(rendered.text.indexOf('## Amendment 1') > rendered.text.indexOf('FOLLOWUP-SENTINEL'), 'round one\'s sections are not labelled');
   // The fenced `#` line did not end the Follow-ups section.
   const followUps = extracted.sections.find((section) => section.heading === 'Follow-ups').text;
   assert.ok(followUps.includes('$ git grep -n foo'));
@@ -4593,13 +4598,16 @@ const AUTHOR_SENTINEL = 'author-uncertainty-sentinel-7c1e';
 const FIVE_FILES = ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts'];
 const SINCE = 'abcdef0123456789abcdef0123456789abcdef01';
 const DELTA_HEAD = '2222222222222222222222222222222222222222';
+const DELTA_BASE = '5555555555555555555555555555555555555555';
+const LINEAR = Object.freeze({ total_commits: 1, commits: [{ sha: 'c1', parents: [{ sha: 'p1' }] }] });
 const AMENDMENT = Object.freeze({
   status: 'ahead',
+  ...LINEAR,
   files: [{ filename: 'src/c.ts', status: 'modified', patch: '@@ -1,2 +1,3 @@\n keep\n+AMENDED-LINE-SENTINEL\n tail' }],
 });
 
 /** Drive the standalone lens with a fake runner; returns the model's stdin as delivered. */
-function runStandaloneLens({ since, contextFile, examined = ['src/c.ts'], amendment = AMENDMENT } = {}) {
+function runStandaloneLens({ since, contextFile, examined = ['src/c.ts'], amendment = AMENDMENT, sinceOnBase = { status: 'diverged' } } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-capped-lens-'));
   const out = join(dir, 'findings.json');
   const measureLog = join(dir, 'measure.jsonl');
@@ -4611,8 +4619,9 @@ function runStandaloneLens({ since, contextFile, examined = ['src/c.ts'], amendm
       {
         run: (program, args, opts = {}) => {
           calls.push({ program, args, opts });
-          if (args[0] === 'pr' && args[1] === 'view') return `${DELTA_HEAD}\n`;
+          if (args[0] === 'pr' && args[1] === 'view') return args.includes('-q') ? `${DELTA_HEAD}\n` : JSON.stringify({ headRefOid: DELTA_HEAD, baseRefOid: DELTA_BASE });
           if (args[0] === 'api' && args[1] === '--paginate') return `${FIVE_FILES.join('\n')}\n`;
+          if (args[0] === 'api' && String(args[1]).includes(`/compare/${DELTA_BASE}...`)) return JSON.stringify(sinceOnBase);
           if (args[0] === 'api' && String(args[1]).includes('/compare/')) return JSON.stringify(amendment);
           if (args.includes('status')) return '';
           if (args[0] === 'exec') {
@@ -4698,6 +4707,11 @@ test('control (c), standalone: --since reviews only the amendment and holds cove
   const allFive = runStandaloneLens({ since: SINCE, examined: FIVE_FILES });
   assert.equal(allFive.deaths[0]?.code, 3, 'examining all five fails the amendment\'s coverage');
   assert.match(allFive.deaths[0].message, /coverage check failed/);
+  // m3: the diagnostic names the ground truth it checked, not "the PR API".
+  assert.match(allFive.deaths[0].message, /do not match the amendment compare/);
+  assert.match(allFive.deaths[0].message, /the amendment compare has 1/);
+  assert.equal(allFive.deaths[0].message.includes('PR API'), false);
+  assert.match(delta.prompt, /`examined 1 of 1 amendment files`/);
 });
 
 test('--since refuses an amendment that is not a descendant, or is empty, and runs no model', () => {
@@ -4714,6 +4728,47 @@ test('--since refuses an amendment that is not a descendant, or is empty, and ru
   assert.equal(amendmentProblem(AMENDMENT, SINCE, DELTA_HEAD), null);
 });
 
+test('m7 ancestry: a linear amendment runs; a merge in the range, an old since, or an incomplete commit list refuses', () => {
+  // (a) linear amendment: reviewed.
+  const linear = runStandaloneLens({ since: SINCE });
+  assert.deepEqual(linear.deaths, []);
+  assert.ok(linear.prompt.includes('AMENDED-LINE-SENTINEL'));
+  // (b) the lane merged main in on top of the reviewed head: still `ahead`,
+  //     but the range carries upstream changes nobody amended.
+  const merged = runStandaloneLens({
+    since: SINCE,
+    amendment: { ...AMENDMENT, total_commits: 2, commits: [{ sha: 'c1', parents: [{ sha: 'p1' }] }, { sha: 'feedbee', parents: [{ sha: 'c1' }, { sha: 'mainTip' }] }] },
+  });
+  assert.equal(merged.deaths[0]?.code, 5);
+  assert.match(merged.deaths[0].message, /contains a merge commit \(feedbee\)/);
+  // (c) an old `since` on the base branch: `<since>...<head>` is the whole PR
+  //     (or more) under an amendment label.
+  for (const status of ['behind', 'identical']) {
+    const old = runStandaloneLens({ since: SINCE, sinceOnBase: { status } });
+    assert.equal(old.deaths[0]?.code, 5, status);
+    assert.match(old.deaths[0].message, /is on the base branch/);
+    assert.equal(old.calls.some(({ args }) => args[0] === 'exec'), false);
+  }
+  // A commit list the compare truncated, or none at all, cannot rule a merge out.
+  assert.match(amendmentProblem({ ...AMENDMENT, total_commits: 300 }, SINCE, DELTA_HEAD), /cannot be ruled out/);
+  assert.match(amendmentProblem({ status: 'ahead', files: AMENDMENT.files }, SINCE, DELTA_HEAD), /no commit list/);
+});
+
+test('M2: commandLineProblem bounds the Windows command line and the POSIX single argument', () => {
+  assert.equal(commandLineProblem('claude.exe', ['-p', 'x'.repeat(30000)], { platform: 'win32' }), null);
+  assert.match(commandLineProblem('claude.exe', ['-p', 'x'.repeat(33000)], { platform: 'win32' }), /Windows caps it at 32767/);
+  // Quotes and backslashes are escaped on Windows, so they count twice.
+  assert.match(commandLineProblem('claude.exe', ['"'.repeat(17000)], { platform: 'win32' }), /Windows caps/);
+  assert.equal(commandLineProblem('claude', ['x'.repeat(100000)], { platform: 'linux' }), null);
+  assert.match(commandLineProblem('claude', ['x'.repeat(140000)], { platform: 'linux' }), /single argument/);
+});
+
+test('since_sha in a findings document must be a sha, as --since must', () => {
+  assert.deepEqual(validateFindingsShape({ ...VALID, since_sha: SINCE }), []);
+  assert.deepEqual(validateFindingsShape({ ...VALID, since_sha: 'main' }), ['since_sha must be a commit sha (7-40 hex characters)']);
+  assert.deepEqual(validateFindingsShape({ ...VALID, since_sha: '../../x' }), ['since_sha must be a commit sha (7-40 hex characters)']);
+});
+
 test('parseArgs takes --since as a sha only, and the new reply and lens flags', () => {
   assert.equal(parseArgs(['lens', '--since', 'abc1234']).since, 'abc1234');
   const bad = runCli(['lens', '--pr', '1', '--repo', 'o/r', '--lens', 'codex', '--out', 'x.json', '--since', 'main']);
@@ -4726,12 +4781,16 @@ test('parseArgs takes --since as a sha only, and the new reply and lens flags', 
 // --- --context-file and --since on the coordinated lens and post ----------
 
 /** Seams that answer the amendment compare and record every model stdin. */
-function amendmentSeams(base, amendment) {
+function amendmentSeams(base, amendment, { sinceOnBase = { status: 'diverged' } } = {}) {
   const inputs = [];
   const runGh = (args, opts) => {
     if (args[0] === 'api' && args.join(' ').includes(`/compare/${SINCE}...`)) {
       base.calls.push(args);
       return JSON.stringify(amendment);
+    }
+    if (args[0] === 'api' && args.join(' ').includes(`/compare/${PINNED_BASE}...${SINCE}`)) {
+      base.calls.push(args);
+      return JSON.stringify(sinceOnBase);
     }
     return base.runGh(args, opts);
   };
@@ -4744,9 +4803,16 @@ function amendmentSeams(base, amendment) {
 }
 
 const DELTA_FILE = 'skills/slim-review/SKILL.md';
+/**
+ * The amendment adds SKILL.md:290 only. The pinned PR diff also makes
+ * SKILL.md:287-289 and 291-295 commentable, and every other manifest file's
+ * hunk — PR lines the amendment did not touch.
+ */
 const COORDINATED_AMENDMENT = Object.freeze({
   status: 'ahead',
-  files: FIXTURE_COMPARE.payload.files.filter((file) => file.filename === DELTA_FILE),
+  total_commits: 1,
+  commits: [{ sha: 'c1', parents: [{ sha: 'p1' }] }],
+  files: [{ filename: DELTA_FILE, status: 'modified', patch: '@@ -289,0 +290,1 @@\n+## Managed repositories' }],
 });
 
 test('control (b), coordinated: the author context reaches the model\'s stdin, outside the pinned diff', async () => {
@@ -4795,17 +4861,48 @@ test('control (c), coordinated: --since keeps the claim, reviews the amendment, 
 });
 
 /** Both required lenses as amendment checks, so the row reaches lens_done. */
-async function bothDeltaLensesDone({ refFile, home, events }) {
+async function bothDeltaLensesDone({ refFile, home, events, findings }) {
   for (const lens of REQUIRED_LENSES) {
     // eslint-disable-next-line no-await-in-loop
     await runCoordinatedLens({
       refFile,
       home,
       lens,
-      seams: amendmentSeams(pinnedSeams({ events, codex: () => JSON.stringify(modelOutput({ paths: [DELTA_FILE] })) }), COORDINATED_AMENDMENT),
+      seams: amendmentSeams(pinnedSeams({ events, codex: () => JSON.stringify(modelOutput({ paths: [DELTA_FILE], ...(findings ? { findings } : {}) })) }), COORDINATED_AMENDMENT),
       opts: { since: SINCE },
     });
   }
+}
+
+for (const [name, outside] of [
+  ['(i) an unchanged file that is in the PR diff', { path: 'skills/slim-review/scripts/pr-review.mjs', line: 43 }],
+  ['(ii) an unchanged hunk of an amended file', { path: DELTA_FILE, line: 287 }],
+]) {
+  test(`M1 control ${name}: a coordinated delta finding outside the amendment is excluded, not posted or counted`, async () => {
+    const events = [];
+    const fake = coordinatorFake({ events });
+    await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+      await bothDeltaLensesDone({
+        refFile,
+        home,
+        events,
+        findings: [
+          { severity: 'P2', title: 'inside', path: DELTA_FILE, line: 290, body: 'evidence' },
+          { severity: 'P1', title: 'outside', body: 'fresh sample', ...outside },
+        ],
+      });
+      await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+        const out = await runCoordinatedPost({ refFile, home, origin, seams: amendmentSeams(pinnedSeams({ events }), COORDINATED_AMENDMENT) });
+        assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
+        const body = requests[0].body;
+        assert.deepEqual(body.comments.map((comment) => `${comment.path}:${comment.line}`), [`${DELTA_FILE}:290`, `${DELTA_FILE}:290`], 'only in-amendment findings post inline');
+        assert.match(body.body, /### Excluded: outside the amendment/);
+        assert.ok(body.body.includes(`\`${outside.path}:${outside.line}\``));
+        assert.match(body.body, /codex: 0 P1 \/ 1 P2 \/ 0 P3/, 'an excluded finding is never counted');
+        assert.match(body.body, /2 excluded \(outside the amendment\)/);
+      });
+    });
+  });
 }
 
 test('a coordinated post of two amendment checks holds coverage to the amendment and tags every comment delta', async () => {
@@ -4843,6 +4940,50 @@ test('a coordinated post of a full and an amendment document refuses revision-mi
   });
 });
 
+test('m2 control: a coordinated --since that is not an amendment refuses before lensStart and spends no start', async () => {
+  for (const [name, amendment, options, pattern] of [
+    ['not a descendant', { ...COORDINATED_AMENDMENT, status: 'diverged' }, {}, /not an ancestor/],
+    ['a merge in the range', { ...COORDINATED_AMENDMENT, commits: [{ sha: 'feedbee', parents: [{ sha: 'a' }, { sha: 'b' }] }] }, {}, /merge commit/],
+    ['an old since on the base branch', COORDINATED_AMENDMENT, { sinceOnBase: { status: 'behind' } }, /on the base branch/],
+  ]) {
+    const fake = coordinatorFake();
+    // eslint-disable-next-line no-await-in-loop
+    await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+      const seams = amendmentSeams(pinnedSeams(), amendment, options);
+      const out = await runCoordinatedLens({ refFile, home, seams, opts: { since: SINCE } });
+      const line = out.line();
+      assert.equal(line.outcome, 'refused', name);
+      assert.equal(line.reason, 'input-mismatch', name);
+      assert.equal(out.deaths[0]?.code, 1, name);
+      assert.match(out.deaths[0].message, pattern, name);
+      assert.match(out.deaths[0].message, /no lens start was spent/, name);
+      assert.equal(fake.state.calls.some((call) => call.shortPath === '/lens-start'), false, `${name}: no start was spent`);
+      assert.equal(fake.state.executions, 0, name);
+      assert.equal(seams.inputs.length, 0, `${name}: the model was not invoked`);
+      assert.ok(existsSync(refFile), `${name}: the attempt stays live for a corrected invocation`);
+    });
+  }
+});
+
+test('m5: a coordinated amendment check stamps since into the marker; a full review\'s marker is unchanged', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothDeltaLensesDone({ refFile, home, events });
+    await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+      const out = await runCoordinatedPost({ refFile, home, origin, seams: amendmentSeams(pinnedSeams({ events }), COORDINATED_AMENDMENT) });
+      assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
+      const marker = parseMarker(requests[0].body.body);
+      assert.equal(marker.since, SINCE);
+      assert.equal(marker.head, PINNED_HEAD, 'dedupe and delivery still read head, run and attempt');
+      assert.equal(marker.run, RUN_ID);
+    });
+  });
+  const fields = { repo: 'o/r', pr: 1, head: 'h', base: 'b', lenses: ['astra', 'codex'], run: null, attempt: null, policy: null, supersedes: null };
+  assert.equal(buildMarker(fields), '<!-- slim-review repo=o/r pr=1 head=h base=b lenses=astra+codex run=- attempt=- policy=- supersedes=- -->', 'a full review writes no since token');
+  assert.equal(parseMarker(buildMarker(fields)).since, undefined);
+});
+
 // --- the standalone post of an amendment check ------------------------------
 
 function runDeltaPost({ docs, head = DELTA_HEAD }) {
@@ -4860,7 +5001,15 @@ function runDeltaPost({ docs, head = DELTA_HEAD }) {
       if (args[0] === 'pr' && args[1] === 'diff') return DIFF;
       if (args[0] === 'api' && args[1] === '--paginate') return 'src/a.ts\nsrc/b.ts\n';
       if (args[0] === 'api' && String(args[1]).includes('/compare/')) {
-        return JSON.stringify({ status: 'ahead', files: [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -10,4 +10,5 @@\n const keep = 1;' }] });
+        // The amendment touches src/a.ts lines 10 (context) and 11 (added)
+        // only. The PR diff (DIFF) also makes src/a.ts:12-13 and src/b.ts:1-2
+        // commentable: those are PR lines the amendment did not touch.
+        return JSON.stringify({
+          status: 'ahead',
+          total_commits: 1,
+          commits: [{ sha: 'c1', parents: [{ sha: 'p1' }] }],
+          files: [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -10,2 +10,2 @@\n const keep = 1;\n-const gone = 2;\n+const added = 2;' }],
+        });
       }
       if (args.includes('POST')) { posted.push(JSON.parse(opts.input)); return JSON.stringify({ html_url: 'https://example.test/review' }); }
       throw new Error(`unexpected gh call: ${args.join(' ')}`);
@@ -4901,6 +5050,32 @@ test('standalone post accepts two amendment checks: coverage against the amendme
   assert.ok(logs.some((line) => line.startsWith('scope          amendment abcdef0...2222222, 1 file(s)')));
   assert.ok(logs.includes('coverage       OK'));
 });
+
+/** One delta handback per lens: the in-amendment finding at src/a.ts:11 plus `outside`. */
+function deltaPostWithOutside(outside) {
+  const findings = [
+    { severity: 'P2', title: 'inside', path: 'src/a.ts', line: 11, body: 'b' },
+    { severity: 'P1', title: 'outside', body: 'fresh sample over unchanged code', ...outside },
+  ];
+  return runDeltaPost({ docs: [deltaDoc('codex', { findings }), deltaDoc('astra', { findings: [] })] });
+}
+
+for (const [name, outside] of [
+  ['(i) an unchanged file that is in the PR diff', { path: 'src/b.ts', line: 1 }],
+  ['(ii) an unchanged hunk of an amended file', { path: 'src/a.ts', line: 13 }],
+]) {
+  test(`M1 control ${name}: a standalone delta finding outside the amendment is excluded, not posted or counted`, () => {
+    const { logs, posted, error } = deltaPostWithOutside(outside);
+    assert.equal(error, undefined);
+    assert.equal(posted.length, 1);
+    assert.deepEqual(posted[0].comments.map((comment) => `${comment.path}:${comment.line}`), ['src/a.ts:11'], 'only the in-amendment finding is posted inline');
+    assert.match(posted[0].body, /### Excluded: outside the amendment/);
+    assert.ok(posted[0].body.includes(`\`${outside.path}:${outside.line}\``), 'the excluded finding is listed once, by locator');
+    assert.match(posted[0].body, /codex: 0 P1 \/ 1 P2 \/ 0 P3/, 'an excluded finding is never counted as a delta finding');
+    assert.match(posted[0].body, /1 excluded \(outside the amendment\)/);
+    assert.ok(logs.includes(`  excluded     ${outside.path}:${outside.line} — outside the amendment`));
+  });
+}
 
 test('standalone post refuses mixed scopes (exit 5) and an amendment checked at another head (exit 6)', () => {
   const mixed = runDeltaPost({ docs: [deltaDoc('codex'), { ...deltaDoc('astra'), since_sha: undefined, head_sha: undefined }] });
@@ -4959,6 +5134,47 @@ test('control (d): today\'s callers — --verdict confirmed with no --adjudicato
   assert.equal('dup_of' in row, false);
   // A comment this loop did not post: no lens, no severity, no scope.
   assert.deepEqual(readPostedFinding({ body: 'a human says hi', commit_id: POSTED_HEAD }), { lens: null, head: POSTED_HEAD, severity: null, scope: null });
+});
+
+test('M2 control: an opus prompt too long for one command-line argument is refused before any model spawn', () => {
+  // 140,000 characters: past Windows' 32,767-character command line and past
+  // Linux's 131,072-byte single-argument ceiling, so the refusal is platform-free.
+  withContextFile(`### Claims no control measures\n${'x'.repeat(140000)}\n`, (contextFile) => {
+    const dir = mkdtempSync(join(tmpdir(), 'slim-review-opus-argv-'));
+    const spawned = [];
+    const deaths = [];
+    try {
+      withNoManagedConfig(() => cmdLens(
+        { pr: '42', repo: 'owner/repo', lens: 'opus', cwd: dir, out: join(dir, 'f.json'), measureLog: join(dir, 'm.jsonl'), contextFile },
+        {
+          run: (program, args) => {
+            if (args[0] === 'api') return 'src/a.ts\n';
+            if (args.includes('status')) return '';
+            spawned.push({ program, args });
+            return JSON.stringify({ result: JSON.stringify(VALID) });
+          },
+          die: (code, message) => deaths.push({ code, message }),
+          log: () => {},
+        },
+      ));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    assert.deepEqual(spawned, [], 'the claude lens was never spawned');
+    assert.equal(deaths[0]?.code, 5);
+    assert.match(deaths[0].message, /command line/);
+  });
+});
+
+test('m1 control: scope and lens are read from the generated prefix only, never from finding prose', () => {
+  const full = readPostedFinding({ body: '**lens:** codex\n\n**[P2] tag parsing**\n\nThe delta path writes **scope:** delta and **lens:** opus into each comment.', original_commit_id: POSTED_HEAD });
+  assert.deepEqual({ lens: full.lens, scope: full.scope, severity: full.severity }, { lens: 'codex', scope: 'full', severity: 'P2' });
+  const fenced = readPostedFinding({ body: '**lens:** astra\n\n**[P3] t**\n\n```\n**scope:** delta\n```' });
+  assert.equal(fenced.scope, 'full');
+  const human = readPostedFinding({ body: 'I think the **lens:** codex comment and its **[P1]** are wrong' });
+  assert.deepEqual({ lens: human.lens, scope: human.scope, severity: human.severity }, { lens: null, scope: null, severity: null });
+  const delta = readPostedFinding({ body: '**lens:** codex\n\n**scope:** delta\n\n**[P1] t**\n\nb' });
+  assert.deepEqual({ lens: delta.lens, scope: delta.scope, severity: delta.severity }, { lens: 'codex', scope: 'delta', severity: 'P1' });
 });
 
 test('reply validates --verdict judgment, --adjudicator, and refuses row fields without a verdict', () => {

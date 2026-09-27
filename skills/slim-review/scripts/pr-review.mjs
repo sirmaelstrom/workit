@@ -265,6 +265,9 @@ const DOCUMENT_KEYS = new Set([
   'summary', 'coverage', 'examined_paths', 'findings', 'lens', 'model', 'reasoning', 'wall_ms',
   'head_sha', 'base_sha', 'attempt', 'run_id', 'since_sha',
 ]);
+/** A commit sha as `--since` and `since_sha` accept it. */
+const SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
+
 /** The four revision stamps, in the order `lens --attempt-ref` writes them. */
 export const DOCUMENT_STAMPS = Object.freeze(['head_sha', 'base_sha', 'attempt', 'run_id']);
 
@@ -310,6 +313,11 @@ export function validateFindingsShape(doc) {
     }
   }
   if (doc.attempt !== undefined && (!Number.isInteger(doc.attempt) || doc.attempt < 1)) problems.push('attempt must be a positive integer');
+  // `post` interpolates it into a compare API path, so it gets the same shape
+  // rule as `--since`.
+  if (typeof doc.since_sha === 'string' && doc.since_sha.trim() !== '' && !SHA_PATTERN.test(doc.since_sha)) {
+    problems.push('since_sha must be a commit sha (7-40 hex characters)');
+  }
   if (typeof doc.summary !== 'string' || doc.summary.trim() === '') {
     problems.push('summary must be a non-empty string');
   }
@@ -408,7 +416,7 @@ export function partitionFindings(findings, diffFiles, prFilePaths = []) {
  * the files, so a silently partial review is indistinguishable from a thorough
  * one unless something compares the claim to ground truth.
  */
-export function checkCoverage(coverage, examinedPaths, prFilePaths) {
+export function checkCoverage(coverage, examinedPaths, prFilePaths, source = 'the PR API') {
   const m = /examined\s+(\d+)\s+of\s+(\d+)/i.exec(String(coverage));
 
   const examinedSet = new Set(examinedPaths.map(normalizePath));
@@ -424,7 +432,7 @@ export function checkCoverage(coverage, examinedPaths, prFilePaths) {
     const examined = Number(m[1]);
     const claimedTotal = Number(m[2]);
     if (claimedTotal !== prSet.size) {
-      countReason = `reviewer claims ${claimedTotal} changed files, the PR API has ${prSet.size}`;
+      countReason = `reviewer claims ${claimedTotal} changed files, ${source} has ${prSet.size}`;
       countContradiction = true;
     } else if (examined !== claimedTotal) {
       countReason = `reviewer examined ${examined} of ${claimedTotal} changed files — the review is partial`;
@@ -448,7 +456,7 @@ export function checkCoverage(coverage, examinedPaths, prFilePaths) {
     missing.length > 0 ? `missing: ${missing.join(', ')}` : null,
     extra.length > 0 ? `extra: ${extra.join(', ')}` : null,
   ].filter(Boolean);
-  const reason = [`examined_paths do not match the PR API (${pathReasons.join('; ')})`];
+  const reason = [`examined_paths do not match ${source} (${pathReasons.join('; ')})`];
   if (countReason) reason.push(`Secondary count check: ${countReason}`);
   return { ok: false, reason: reason.join('. '), missing, extra, countReason };
 }
@@ -483,6 +491,9 @@ export function buildReviewPayload({
   coverageCheck,
   warnings = [],
   lensCounts = [],
+  // Present only on an amendment check: findings outside the amendment's lines.
+  // Listed once so the sample is not lost, never posted inline, never counted.
+  excluded,
 }) {
   const sections = [summary.trim()];
 
@@ -511,11 +522,19 @@ export function buildReviewPayload({
     sections.push(lines.join('\n'));
   }
 
+  if (excluded?.length > 0) {
+    const lines = ['', '---', '', '### Excluded: outside the amendment', '', 'These findings sit on lines this round\'s amendment did not touch. They are not delta findings: not posted inline and not counted above.', ''];
+    for (const f of excluded) {
+      lines.push(`- \`${f.path}:${f.line}\` — outside the amendment.`, '', renderFinding({ ...f, scope: undefined }), '');
+    }
+    sections.push(lines.join('\n'));
+  }
+
   const footer = [
     '',
     '---',
     '',
-    `_Slim review · ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff · ${coverage.trim()}_`,
+    `_Slim review · ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff${excluded === undefined ? '' : ` · ${excluded.length} excluded (outside the amendment)`} · ${coverage.trim()}_`,
   ];
   if (!coverageCheck.ok) {
     footer.push('', `> ⚠️ **Coverage check failed:** ${coverageCheck.reason}`);
@@ -622,9 +641,11 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   }
   // Coverage ground truth is the diff the reviewer was shown: the whole PR, or
   // for an amendment check the compare `<since>...<head>` its lens inlined.
-  // Anchoring stays on the PR diff either way — a review comment can only sit on
-  // a line of the pull request, and an amendment line is one.
+  // An amendment finding must sit on an amendment line (added or context in
+  // that compare's patches) — anything else is excluded before anchoring, and
+  // anchoring then stays on the PR diff, the only lines a comment can sit on.
   let coveragePaths = prFilePaths;
+  let excluded;
   if (since) {
     const compare = JSON.parse(runGh(['api', `repos/${repo}/compare/${since}...${reviewedHead}`], { cwd: opts.cwd }));
     const problem = amendmentProblem(compare, since, reviewedHead);
@@ -633,6 +654,9 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
       return;
     }
     coveragePaths = compare.files.map((file) => file.filename);
+    const split = splitByAmendment(doc.findings, amendmentLineSet(compare));
+    doc.findings = split.inside;
+    excluded = split.excluded;
     doc.summary = `**Amendment check:** this round reviewed only \`${since.slice(0, 7)}...${reviewedHead.slice(0, 7)}\` (${coveragePaths.length} file${coveragePaths.length === 1 ? '' : 's'}); the rest of the PR was reviewed in an earlier round.\n\n${doc.summary}`;
   }
   // The receipt summarizes the normalized union, but the guard is deliberately
@@ -645,7 +669,8 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   // A completed union follows automatically from completed individual sets, and
   // its former count comparison could only reject separator variants falsely.
   // Keep every handback fail-closed against the authoritative PR API instead.
-  const individualCoverageChecks = docs.map((item) => checkCoverage(item.coverage, item.examined_paths, coveragePaths));
+  const coverageSource = since ? 'the amendment compare' : undefined;
+  const individualCoverageChecks = docs.map((item) => checkCoverage(item.coverage, item.examined_paths, coveragePaths, coverageSource));
   const individualFailures = individualCoverageChecks
     .map((check, i) => check.ok ? null : `findings file ${findingFiles[i]}: ${check.reason}`)
     .filter(Boolean);
@@ -691,6 +716,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
     coverageCheck,
     warnings,
     lensCounts,
+    excluded,
   });
   payload.commit_id = reviewedHead;
 
@@ -711,6 +737,9 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   }
   for (const f of offDiffUnchanged) {
     log(`  off-diff     ${f.path}:${f.line} — not a file this PR changes`);
+  }
+  for (const f of excluded ?? []) {
+    log(`  excluded     ${f.path}:${f.line} — outside the amendment`);
   }
 
   if (!coverageCheck.ok && !opts.forcePost) {
@@ -863,26 +892,40 @@ export const ADJUDICATORS = Object.freeze(['lane', 'conductor', 'operator']);
  * What a verdict row needs from the comment it judges, read back from the
  * posted comment itself (`renderFinding` wrote it).
  *
+ * Everything is read from the generated prefix only: the leading tag lines
+ * (`**lens:** <lens>`, `**scope:** delta`) and the `**[P<n>] title**` line
+ * after them. The finding's own prose is never read, because a finding may
+ * quote a tag — a review of this very script does.
+ *
  * - `head`: `original_commit_id`, the commit the review was posted on. GitHub
  *   moves `commit_id` as the PR advances; the original stays where the finding
  *   was made.
- * - `severity`: the `**[P<n>]` title prefix, or null when there is none (a
+ * - `severity`: the `[P<n>]` on the title line, or null when there is none (a
  *   human's comment).
- * - `scope`: `delta` when the comment carries the `**scope:** delta` tag that
+ * - `scope`: `delta` when the prefix carries the `**scope:** delta` tag that
  *   `post` stamps on an amendment check; `full` for any other lens-tagged
- *   comment, because a delta review is the only kind that writes the tag; null
- *   for a comment this loop did not post.
+ *   comment; null for a comment this loop did not post.
  */
 export function readPostedFinding(comment) {
-  const body = String(comment?.body ?? '');
-  const lens = new RegExp(`\\*\\*lens:\\*\\*\\s*(${LENS_LIST})\\b`, 'i').exec(body)?.[1]?.toLowerCase() ?? null;
-  const severity = /\*\*\[(P[123])\]/.exec(body)?.[1] ?? null;
-  const tagged = /\*\*scope:\*\*\s*(delta|full)\b/i.exec(body)?.[1]?.toLowerCase();
+  const tags = {};
+  let severity = null;
+  for (const line of String(comment?.body ?? '').split(/\r?\n/)) {
+    if (line.trim() === '') continue;
+    const tag = /^\*\*(lens|scope):\*\*\s*(\S+)\s*$/i.exec(line);
+    if (tag) {
+      tags[tag[1].toLowerCase()] ??= tag[2].toLowerCase();
+      continue;
+    }
+    severity = /^\*\*\[(P[123])\]/.exec(line)?.[1] ?? null;
+    break;
+  }
+  const lens = LENSES.has(tags.lens) ? tags.lens : null;
+  const scope = tags.scope === 'delta' || tags.scope === 'full' ? tags.scope : null;
   return {
     lens,
     head: comment?.original_commit_id ?? comment?.commit_id ?? null,
     severity,
-    scope: tagged ?? (lens ? 'full' : null),
+    scope: scope ?? (lens ? 'full' : null),
   };
 }
 
@@ -1006,7 +1049,7 @@ Report only correctness defects that matter after merge: wrong reachable behavio
 
 Use severity P1 (blocks merge), P2 (should be resolved), or P3 (advisory). Each finding needs a changed repository-relative \`path\`, an anchorable post-change \`line\` where possible, and evidence in \`body\`.
 
-Return ONLY JSON matching the schema. \`coverage\` is exactly \`examined ${prFilePaths.length} of ${prFilePaths.length} changed files\`; \`examined_paths\` echoes the authoritative list entries you examined verbatim.
+Return ONLY JSON matching the schema. \`coverage\` is exactly \`examined ${prFilePaths.length} of ${prFilePaths.length} ${listName === 'PR' ? 'changed' : listName} files\`; \`examined_paths\` echoes the authoritative list entries you examined verbatim.
 
 Cite repo-relative paths exactly as they appear in the authoritative ${listName} file list.`;
 }
@@ -1153,7 +1196,7 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
   const promptPath = opts.promptOut ? resolve(opts.promptOut) : join(tmpdir(), `slim-review-${opts.lens}-${opts.pr}-prompt.txt`);
   const lensArgv = (tempOut) => isCodexLens(opts.lens)
     ? ['exec', '--model', model, '-c', `model_reasoning_effort=${reasoning}`, '--sandbox', 'danger-full-access', '--skip-git-repo-check', '-C', cwd, '--output-schema', SCHEMA_PATH, '-o', tempOut, '-']
-    : ['-p', '--model', model, '--effort', reasoning, '--permission-mode', 'bypassPermissions', '--disallowedTools', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', '--output-format', 'json', '--json-schema', readFileSync(SCHEMA_PATH, 'utf8')];
+    : claudeLensArgv(model, reasoning);
 
   if (opts.dryRun) {
     log(`argv: ${JSON.stringify(lensArgv('<temporary findings.json>'))}`);
@@ -1174,9 +1217,14 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
   let amendmentRefusal;
   try {
     if (opts.since) {
-      const head = String(ghRun(['pr', 'view', String(opts.pr), '--repo', repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd })).trim();
+      const refs = JSON.parse(ghRun(['pr', 'view', String(opts.pr), '--repo', repo, '--json', 'headRefOid,baseRefOid'], { cwd }));
+      const head = String(refs.headRefOid).trim();
       const compare = JSON.parse(ghRun(['api', `repos/${repo}/compare/${opts.since}...${head}`], { cwd }));
       amendmentRefusal = amendmentProblem(compare, opts.since, head);
+      if (!amendmentRefusal) {
+        const onBase = JSON.parse(ghRun(['api', `repos/${repo}/compare/${refs.baseRefOid}...${opts.since}`], { cwd }));
+        amendmentRefusal = sinceOnBaseProblem(onBase, opts.since);
+      }
       if (!amendmentRefusal) {
         const rendered = renderPinnedDiff(compare);
         amendment = { since: opts.since, head_sha: head, text: rendered.text, not_reviewed: rendered.not_reviewed };
@@ -1211,11 +1259,17 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     mkdirSync(dirname(promptPath), { recursive: true });
     writeFileSync(promptPath, prompt, 'utf8');
   }
+  const tooLong = claudePromptProblem(opts.lens, prompt, reasoning);
+  if (tooLong) {
+    rmSync(tempDir, { recursive: true, force: true });
+    die(5, `${tooLong}. The reviewer was not run.`);
+    return;
+  }
 
   let raw;
   let wallMs;
   try {
-    const program = isCodexLens(opts.lens) ? findCodexExe() : (process.platform === 'win32' ? 'claude.exe' : 'claude');
+    const program = isCodexLens(opts.lens) ? findCodexExe() : claudeProgram();
     const before = new Set(String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }))
       .split(/\r?\n/).filter(Boolean));
     const started = now();
@@ -1243,7 +1297,7 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     if (problems.length > 0) {
       throw new LensOutputError(`reviewer output has the wrong shape:\n  - ${problems.join('\n  - ')}`);
     }
-    const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
+    const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths, amendment ? 'the amendment compare' : undefined);
     if (!coverageCheck.ok) {
       throw new LensOutputError(`reviewer output coverage check failed: ${coverageCheck.reason}`);
     }
@@ -1496,7 +1550,94 @@ export function amendmentProblem(payload, since, head) {
   const files = Array.isArray(payload.files) ? payload.files : [];
   if (files.length === 0) return `the amendment ${at} lists no changed files`;
   if (files.length >= COMPARE_FILE_CAP) return `the amendment ${at} lists ${files.length} files, the compare API's cap, so the list may be truncated; the conductor decides how this head is reviewed`;
+  // A merge in the range (the lane merged the base branch in, or GitHub's
+  // "Update branch") brings upstream changes nobody amended into the diff.
+  // The commit list must be complete to say there is none.
+  if (!Array.isArray(payload.commits)) return `the amendment compare ${at} carries no commit list, so a merge in the range cannot be ruled out`;
+  if (Number.isInteger(payload.total_commits) && payload.total_commits > payload.commits.length) {
+    return `the amendment ${at} has ${payload.total_commits} commits and the compare listed ${payload.commits.length}, so a merge in the range cannot be ruled out; the conductor decides how this head is reviewed`;
+  }
+  const merge = payload.commits.find((commit) => (commit?.parents?.length ?? 0) > 1);
+  if (merge) {
+    return `the amendment ${at} contains a merge commit (${String(merge.sha).slice(0, 7)}), so its diff carries changes nobody amended; amend without merging the base branch in, or the conductor decides how this head is reviewed`;
+  }
   return null;
+}
+
+/**
+ * Why `since` is not a point on the PR branch, or null. `basePayload` is the
+ * compare `<base tip>...<since>`. A `since` that is the base tip or behind it
+ * lies on the base branch, and `<since>...<head>` then spans the whole PR (or
+ * more) under an amendment label. `ahead` and `diverged` are both a PR commit.
+ */
+export function sinceOnBaseProblem(basePayload, since) {
+  const status = basePayload?.status;
+  if (status === 'identical' || status === 'behind') {
+    return `${String(since).slice(0, 7)} is on the base branch (compare base...since: ${status}), not a reviewed head of this PR; pass the head round one reviewed`;
+  }
+  if (status !== 'ahead' && status !== 'diverged') return `the compare base...${String(since).slice(0, 7)} answered status ${status ?? 'missing'}; cannot tell whether it is a PR commit`;
+  return null;
+}
+
+/**
+ * The lines an amendment finding may sit on: every added and context line in
+ * the amendment's patches, by the same rules `parseDiff` applies to the PR.
+ * A delta finding outside this set is a fresh sample over code the amendment
+ * did not touch, whatever the PR diff says about anchoring it.
+ */
+export function amendmentLineSet(amendmentPayload) {
+  return parseDiff(renderPinnedDiff(amendmentPayload).text);
+}
+
+export function splitByAmendment(findings, lineSet) {
+  const inside = [];
+  const excluded = [];
+  for (const finding of findings) {
+    const lines = lineSet.get(normalizePath(finding.path));
+    (lines?.has(finding.line) ? inside : excluded).push(finding);
+  }
+  return { inside, excluded };
+}
+
+/** Windows' CreateProcess command-line ceiling, in characters. */
+export const WINDOWS_COMMAND_LINE_LIMIT = 32767;
+/** Linux's single-argument ceiling (MAX_ARG_STRLEN), in bytes. */
+export const POSIX_ARGUMENT_LIMIT = 131072;
+
+/**
+ * Would this argv fail to launch? On Windows the estimate over-counts: every
+ * argument is taken as quoted, and every quote and backslash as escaped.
+ */
+export function commandLineProblem(program, args, { platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    const length = [program, ...args].reduce((total, arg) => total + String(arg).length + 3 + (String(arg).match(/["\\]/g)?.length ?? 0), 0);
+    return length > WINDOWS_COMMAND_LINE_LIMIT
+      ? `the command line would be up to ${length} characters and Windows caps it at ${WINDOWS_COMMAND_LINE_LIMIT}`
+      : null;
+  }
+  const longest = Math.max(0, ...args.map((arg) => Buffer.byteLength(String(arg), 'utf8')));
+  return longest >= POSIX_ARGUMENT_LIMIT
+    ? `one command-line argument would be ${longest} bytes and the kernel caps a single argument below ${POSIX_ARGUMENT_LIMIT}`
+    : null;
+}
+
+/** The claude-kind lens argv, prompt excluded: `claude -p` takes the prompt positionally. */
+function claudeLensArgv(model, reasoning) {
+  return ['-p', '--model', model, '--effort', reasoning, '--permission-mode', 'bypassPermissions', '--disallowedTools', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', '--output-format', 'json', '--json-schema', readFileSync(SCHEMA_PATH, 'utf8')];
+}
+
+const claudeProgram = () => (process.platform === 'win32' ? 'claude.exe' : 'claude');
+
+/**
+ * Refuse a claude-kind prompt the OS would reject at spawn. `claude -p` reads
+ * its prompt from argv: its help documents no prompt file, and the stdin probe
+ * recorded at the spawn site returned a stale placeholder. So a large amendment
+ * or uncertainty block is refused here, before any spend, not at CreateProcess.
+ */
+function claudePromptProblem(lens, prompt, reasoning = LENS_MODELS[lens].reasoning) {
+  if (isCodexLens(lens)) return null;
+  const problem = commandLineProblem(claudeProgram(), [...claudeLensArgv(LENS_MODELS[lens].model, reasoning), prompt]);
+  return problem ? `${problem}; the ${lens} lens takes its prompt as one command-line argument. Run codex or astra (stdin), or narrow the input` : null;
 }
 
 // --- the review POST -------------------------------------------------------
@@ -2125,14 +2266,14 @@ export function classifyLensFailure(err) {
  * lens reasons, because the caller has to tell the coordinator which of them
  * happened and the coordinator decides whether another start is allowed.
  */
-function runLensModel({ lens, cwd, prompt, prFilePaths, run, findCodexExe, now }) {
+function runLensModel({ lens, cwd, prompt, prFilePaths, coverageSource, run, findCodexExe, now }) {
   const reasoning = LENS_MODELS[lens].reasoning;
   const model = LENS_MODELS[lens].model;
   const tempDir = mkdtempSync(join(tmpdir(), 'slim-review-lens-'));
   const tempOut = join(tempDir, 'findings.json');
   const argv = isCodexLens(lens)
     ? ['exec', '--model', model, '-c', `model_reasoning_effort=${reasoning}`, '--sandbox', 'danger-full-access', '--skip-git-repo-check', '-C', cwd, '--output-schema', SCHEMA_PATH, '-o', tempOut, '-']
-    : ['-p', '--model', model, '--effort', reasoning, '--permission-mode', 'bypassPermissions', '--disallowedTools', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', '--output-format', 'json', '--json-schema', readFileSync(SCHEMA_PATH, 'utf8')];
+    : claudeLensArgv(model, reasoning);
   try {
     let program;
     try {
@@ -2175,7 +2316,7 @@ function runLensModel({ lens, cwd, prompt, prFilePaths, run, findCodexExe, now }
     if (problems.length > 0) {
       return { ok: false, reason: 'malformed-output', message: `reviewer output has the wrong shape:\n  - ${problems.join('\n  - ')}` };
     }
-    const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths);
+    const coverageCheck = checkCoverage(doc.coverage, doc.examined_paths, prFilePaths, coverageSource);
     if (!coverageCheck.ok) {
       // An incomplete review is an incomplete handback, not a verdict: D5(c)
       // classes it with malformed output, and the coordinator's per-lens count
@@ -2349,26 +2490,45 @@ async function cmdLensCoordinated(opts, {
     };
   };
 
+  // GET-only preparation, before any start. A wrong --since, an unreadable
+  // compare, or a prompt the OS would refuse at spawn costs no lens start: each
+  // is refused here with one JSON line (exit 1, or 4 for a gh failure) and the
+  // attempt stays live for a corrected invocation. The manifest and byte checks
+  // stay after the start, where `/lens-end` reports them.
+  let payload;
+  let amendmentPayload;
+  let sinceOnBase;
+  try {
+    payload = fetchCompare();
+    if (since) {
+      amendmentPayload = fetchAmendment();
+      sinceOnBase = JSON.parse(runGh(['api', `repos/${attemptRef.repo}/compare/${attemptRef.base_sha}...${since}`], { cwd }));
+    }
+  } catch (err) {
+    emit({ outcome: 'failed', reason: 'gh-failure', ...(opts.dryRun ? { dry_run: true } : {}) });
+    die(4, `could not fetch the ${since ? 'pinned or amendment' : 'pinned'} compare: ${err.message}. No lens start was spent.`);
+    return undefined;
+  }
+  const amendmentRefusal = since
+    ? (amendmentProblem(amendmentPayload, since, attemptRef.head_sha) ?? sinceOnBaseProblem(sinceOnBase, since))
+    : null;
+  if (amendmentRefusal) {
+    emit({ outcome: 'refused', reason: 'input-mismatch', since, ...(opts.dryRun ? { dry_run: true } : {}) });
+    die(1, `${amendmentRefusal}; the model was not invoked and no lens start was spent.`);
+    return undefined;
+  }
+  const input = reviewInput(payload, amendmentPayload);
+  const tooLong = claudePromptProblem(opts.lens, input.prompt);
+  if (tooLong) {
+    emit({ outcome: 'refused', reason: 'diff-too-large', prompt_chars: input.prompt.length, ...(opts.dryRun ? { dry_run: true } : {}) });
+    die(1, `${tooLong}; the model was not invoked and no lens start was spent.`);
+    return undefined;
+  }
+
   // The dry run renders from the same pinned inputs and stops before anything
   // mutating: a start consumed by a preview is a start the real run cannot have.
   if (opts.dryRun) {
-    let payload;
-    let amendmentPayload;
-    try {
-      payload = fetchCompare();
-      if (since) amendmentPayload = fetchAmendment();
-    } catch (err) {
-      emit({ outcome: 'failed', reason: 'gh-failure' });
-      die(4, `could not fetch the pinned compare: ${err.message}`);
-      return undefined;
-    }
-    const problem = since ? amendmentProblem(amendmentPayload, since, attemptRef.head_sha) : null;
-    if (problem) {
-      emit({ outcome: 'refused', reason: 'input-mismatch', dry_run: true });
-      die(1, `${problem}; nothing was rendered.`);
-      return undefined;
-    }
-    const { prompt } = reviewInput(payload, amendmentPayload);
+    const { prompt } = input;
     if (opts.promptOut) {
       mkdirSync(dirname(promptPath), { recursive: true });
       writeFileSync(promptPath, prompt, 'utf8');
@@ -2429,12 +2589,6 @@ async function cmdLensCoordinated(opts, {
     return line;
   };
 
-  let payload;
-  try {
-    payload = fetchCompare();
-  } catch (err) {
-    return finish({ outcome: 'failed', reason: 'gh-failure', message: `could not fetch the pinned compare: ${err.message}`, exitCode: 4 });
-  }
   const disagreement = compareDisagreement(payload);
   if (disagreement) {
     // Nothing has been invoked yet, and nothing will be: the compare and the
@@ -2449,19 +2603,6 @@ async function cmdLensCoordinated(opts, {
       message: `the pinned compare does not match the manifest (missing: ${disagreement.missing.join(', ') || 'none'}; extra: ${disagreement.extra.join(', ') || 'none'}); the model was not invoked.`,
     });
   }
-  let amendmentPayload;
-  if (since) {
-    try {
-      amendmentPayload = fetchAmendment();
-    } catch (err) {
-      return finish({ outcome: 'failed', reason: 'gh-failure', message: `could not fetch the amendment compare: ${err.message}`, exitCode: 4 });
-    }
-    const problem = amendmentProblem(amendmentPayload, since, attemptRef.head_sha);
-    if (problem) {
-      return finish({ outcome: 'refused', reason: 'input-mismatch', extra: { since }, message: `${problem}; the model was not invoked.` });
-    }
-  }
-  const input = reviewInput(payload, amendmentPayload);
   if (input.bytes > maxDiffBytes) {
     return finish({
       outcome: 'refused',
@@ -2480,7 +2621,7 @@ async function cmdLensCoordinated(opts, {
   let result;
   try {
     checkout = createReviewWorktree({ repo: attemptRef.repo, headSha: attemptRef.head_sha, run, diag });
-    result = runLensModel({ lens: opts.lens, cwd: checkout.cwd, prompt, prFilePaths: input.paths, run, findCodexExe, now });
+    result = runLensModel({ lens: opts.lens, cwd: checkout.cwd, prompt, prFilePaths: input.paths, coverageSource: since ? 'the amendment compare' : undefined, run, findCodexExe, now });
     if (result.ok) {
       try { checkout.assertHead(); }
       catch (err) { result = { ok: false, reason: 'worktree-dirty', message: err.message }; }
@@ -2710,21 +2851,7 @@ async function cmdPostCoordinated(opts, {
     }
   }
 
-  // 6. the marker the review will carry, checked against the same stamps
-  const supersedes = attempt.body?.supersedes_review_id ?? null;
-  const markerFromDocuments = buildMarker({
-    repo: attemptRef.repo, pr: attemptRef.pr, head: documents[0]?.doc.head_sha, base: documents[0]?.doc.base_sha,
-    lenses: stampedLenses, run: documents[0]?.doc.run_id, attempt: documents[0]?.doc.attempt, policy: pluginVersion(), supersedes,
-  });
-  const markerFromRef = buildMarker({
-    repo: attemptRef.repo, pr: attemptRef.pr, head: attemptRef.head_sha, base: attemptRef.base_sha,
-    lenses: requiredSorted, run: attemptRef.run_id, attempt: attemptRef.attempt, policy: pluginVersion(), supersedes,
-  });
-  if (markerFromDocuments !== markerFromRef) {
-    return stop('revision-mismatch', { marker: markerFromDocuments }, `the marker built from the documents disagrees with the marker built from this attempt. Nothing was posted.`, headNow);
-  }
-
-  // 6b. one scope per review: both documents full, or both the same amendment
+  // 6. one scope per review: both documents full, or both the same amendment
   const sinceValues = [...new Set(documents.map((item) => item.doc.since_sha ?? null))];
   if (sinceValues.length > 1) {
     return stop('revision-mismatch', { since_values: sinceValues },
@@ -2732,13 +2859,31 @@ async function cmdPostCoordinated(opts, {
   }
   const since = sinceValues[0];
 
+  // 6b. the marker the review will carry, checked against the same stamps. An
+  //     amendment check adds `since`, so a marker reader can tell it reviewed
+  //     `<since>...<head>` and not `<base>...<head>`.
+  const supersedes = attempt.body?.supersedes_review_id ?? null;
+  const markerFromDocuments = buildMarker({
+    repo: attemptRef.repo, pr: attemptRef.pr, head: documents[0]?.doc.head_sha, base: documents[0]?.doc.base_sha,
+    lenses: stampedLenses, run: documents[0]?.doc.run_id, attempt: documents[0]?.doc.attempt, policy: pluginVersion(), supersedes,
+    since: documents[0]?.doc.since_sha,
+  });
+  const markerFromRef = buildMarker({
+    repo: attemptRef.repo, pr: attemptRef.pr, head: attemptRef.head_sha, base: attemptRef.base_sha,
+    lenses: requiredSorted, run: attemptRef.run_id, attempt: attemptRef.attempt, policy: pluginVersion(), supersedes,
+    since,
+  });
+  if (markerFromDocuments !== markerFromRef) {
+    return stop('revision-mismatch', { marker: markerFromDocuments }, `the marker built from the documents disagrees with the marker built from this attempt. Nothing was posted.`, headNow);
+  }
+
   // 7. per-document coverage against the PINNED manifest — the check that
   //    already existed, pointed at the manifest instead of a live listing. An
   //    amendment check is held to the amendment's files instead, from the same
   //    `<since>...<pinned head>` compare its lens was shown.
   let coveragePaths = manifestPaths;
+  let amendmentPayload;
   if (since) {
-    let amendmentPayload;
     try {
       amendmentPayload = JSON.parse(runGh(['api', `repos/${attemptRef.repo}/compare/${since}...${attemptRef.head_sha}`], { cwd: opts.cwd }));
     } catch (err) {
@@ -2753,7 +2898,7 @@ async function cmdPostCoordinated(opts, {
     coveragePaths = amendmentPayload.files.map((entry) => entry.filename);
   }
   for (const item of documents) {
-    const check = checkCoverage(item.doc.coverage, item.doc.examined_paths, coveragePaths);
+    const check = checkCoverage(item.doc.coverage, item.doc.examined_paths, coveragePaths, since ? 'the amendment compare' : undefined);
     if (!check.ok) {
       return stop('coverage-mismatch', { lens: item.lens, coverage_reason: check.reason },
         `the ${item.lens} document does not cover the ${since ? 'amendment' : 'pinned manifest'}: ${check.reason}. Nothing was posted.`);
@@ -2771,11 +2916,16 @@ async function cmdPostCoordinated(opts, {
   }
   const rendered = renderPinnedDiff(comparePayload);
   const diffFiles = parseDiff(rendered.text);
-  const findings = documents.flatMap((item) => item.doc.findings.map((finding) => ({
+  const allFindings = documents.flatMap((item) => item.doc.findings.map((finding) => ({
     ...finding,
     lens: finding.lens ?? item.doc.lens ?? item.lens,
     ...(since ? { scope: 'delta' } : {}),
   })));
+  // An amendment finding must sit on an amendment line; the rest are excluded
+  // before anchoring (see the standalone post for the same rule).
+  const { inside: findings, excluded } = since
+    ? splitByAmendment(allFindings, amendmentLineSet(amendmentPayload))
+    : { inside: allFindings, excluded: undefined };
   const { anchored, offDiffChanged, offDiffUnchanged, offLine } = partitionFindings(findings, diffFiles, manifestPaths);
   const lensCounts = stampedLenses.map((lens) => {
     const own = findings.filter((finding) => finding.lens === lens);
@@ -2799,6 +2949,7 @@ async function cmdPostCoordinated(opts, {
     coverageCheck: { ok: true, missing: [], extra: [], reason: '' },
     warnings: rendered.not_reviewed.length > 0 ? [`not reviewed (no patch in the pinned compare): ${rendered.not_reviewed.join(', ')}`] : [],
     lensCounts,
+    excluded,
   });
   payload.commit_id = attemptRef.head_sha;
   payload.body = `${payload.body}\n\n${markerFromRef}`;
@@ -2807,6 +2958,7 @@ async function cmdPostCoordinated(opts, {
   diag(`head           ${attemptRef.head_sha.slice(0, 7)} (attempt ${attemptRef.attempt})`);
   diag(`changed files  ${manifestPaths.length} from the pinned manifest (${diffFiles.size} with commentable lines)`);
   diag(`findings       ${findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff`);
+  for (const f of excluded ?? []) diag(`  excluded     ${f.path}:${f.line} — outside the amendment`);
 
   if (opts.dryRun) {
     diag('--dry-run: nothing posted, nothing reserved.');
@@ -2933,9 +3085,12 @@ export const UNCERTAINTY_HEADINGS = Object.freeze([
  * A matched section runs from its heading to the next heading at the same or
  * a higher level, so `### Claims…` stops at `## Follow-ups` and `## Follow-ups`
  * stops at `## Timing`. An `## Amendment N` with its own `#### Claims…` is
- * matched again, in document order. Lines inside code fences are never read as
- * headings. Outside the copied sections, every line containing `ASSUMPTION` is
- * kept on its own. Nothing else is copied.
+ * matched again, in document order, and remembers that heading line as its
+ * `amendment` so the rendered block says which round a line came from. Lines
+ * inside code fences are never read as headings. Outside the copied sections,
+ * every line containing `ASSUMPTION` is kept on its own. Nothing else is
+ * copied. Headings are the contract: a Debrief written as bold paragraphs is
+ * not matched (the lane-contract template requires headings).
  */
 export function extractUncertainty(markdown) {
   const wanted = new Set(UNCERTAINTY_HEADINGS);
@@ -2943,10 +3098,11 @@ export function extractUncertainty(markdown) {
   const assumptionLines = [];
   let current = null;
   let fence = null;
+  let amendment = null;
   const close = () => {
     if (!current) return;
     while (current.lines.length > 1 && current.lines.at(-1).trim() === '') current.lines.pop();
-    sections.push({ heading: current.heading, level: current.level, text: current.lines.join('\n') });
+    sections.push({ heading: current.heading, level: current.level, text: current.lines.join('\n'), amendment: current.amendment });
     current = null;
   };
   for (const line of String(markdown).split(/\r?\n/)) {
@@ -2960,8 +3116,9 @@ export function extractUncertainty(markdown) {
       if (heading) {
         const level = heading[1].length;
         if (current && level <= current.level) close();
+        if (level <= 2) amendment = /^Amendment\b/i.test(heading[2].trim()) ? line.trim() : null;
         if (!current && wanted.has(heading[2].trim())) {
-          current = { heading: heading[2].trim(), level, lines: [line] };
+          current = { heading: heading[2].trim(), level, lines: [line], amendment };
           continue;
         }
       }
@@ -2990,7 +3147,13 @@ export function renderUncertainty({ sections, assumptionLines }, source) {
     return { ok: false, problem: `${source} carries the uncertainty headings with nothing under them. "None" is an answer; a blank section is not.` };
   }
   const parts = [`<!-- Extracted verbatim by \`pr-review.mjs uncertainty\` from ${source}: the author's uncertainty sections only. -->`];
-  for (const section of sections) parts.push(section.text);
+  let labelled = null;
+  for (const section of sections) {
+    // The enclosing `## Amendment N` heading, once per amendment, as a label.
+    if (section.amendment && section.amendment !== labelled) parts.push(section.amendment);
+    labelled = section.amendment;
+    parts.push(section.text);
+  }
   if (assumptionLines.length > 0) parts.push([ASSUMPTION_LINES_HEADING, '', ...assumptionLines].join('\n'));
   return { ok: true, text: `${parts.join('\n\n')}\n` };
 }
@@ -3033,7 +3196,10 @@ const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
            [--prompt-out <path>] [--measure-log <path>] [--dry-run]
            [--context-file <uncertainty.md>]   inlined under "The author says these were not checked"
            [--since <reviewed head sha>]       amendment check: review only <sha>...<PR head>,
-                                               coverage held to that diff's files
+                                               coverage held to that diff's files. Exit 5 when
+                                               <sha> is not an ancestor, is on the base branch,
+                                               or the range holds a merge commit
+           exit 5 also when an opus prompt would not fit on one command line
   post     --pr <n> --repo owner/name --findings <file> --findings <file> [--dry-run] [--force-post]
            [--single-lens "<reason>"]   posting one lens is exit 7 unless the reason is given (it is stamped into the review)
   threads  --pr <n> --repo owner/name [--unresolved]
@@ -3159,7 +3325,7 @@ export function parseArgs(argv) {
         // A commit sha, never a ref name: a branch name would move under the
         // check, and the amendment it named would no longer be the one reviewed.
         const v = next();
-        if (!/^[0-9a-f]{7,40}$/i.test(v)) fail(2, `--since must be a commit sha (7-40 hex characters), got: ${JSON.stringify(v)}`);
+        if (!SHA_PATTERN.test(v)) fail(2, `--since must be a commit sha (7-40 hex characters), got: ${JSON.stringify(v)}`);
         opts.since = v;
         break;
       }
