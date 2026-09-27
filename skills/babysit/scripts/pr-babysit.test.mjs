@@ -10,7 +10,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { decide, runLoop, summariseChecks, normaliseThreads, adjudicate, unwrapClientResponse, fetchAllThreads, reviewRound, DEFAULT_BOUNDS, BLOCKED_REASONS, COMMENTS_PAGE } from './pr-babysit.mjs';
 import { buildMarker } from '../../slim-review/scripts/pr-review-recognise.mjs';
 
@@ -600,6 +602,23 @@ test('reviews per PR are capped at 2 by construction: full on H1, fix H2 → del
   assert.deepEqual([r.outcome, r.unreviewed_tail, r.iterations], ['converged', 'bbbbbbb...ccccccc', 3]);
   assert.equal(w.writerCalls.filter((c) => c[0] === 'claim').length, 2);
   assert.deepEqual(w.reviews.map((x) => /since=/.test(x.body) ? 'delta' : 'full'), ['full', 'delta']);
+});
+
+test('run refuses an unreadable or empty --context-file and an empty --skip-delta reason before anything runs (exit 4)', () => {
+  const script = join(dirname(fileURLToPath(import.meta.url)), 'pr-babysit.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'babysit-cli-'));
+  const empty = join(dir, 'empty.md');
+  writeFileSync(empty, '  \n');
+  const runCli = (extra) => spawnSync(process.execPath, [script, 'run', '--pr', '1', '--repo', 'o/r', '--cwd', dir, ...extra], { encoding: 'utf8' });
+  const missing = runCli(['--context-file', join(dir, 'nope.md')]);
+  assert.equal(missing.status, 4, missing.stderr);
+  assert.match(missing.stderr, /--context-file could not be read/);
+  const blank = runCli(['--context-file', empty]);
+  assert.equal(blank.status, 4, blank.stderr);
+  assert.match(blank.stderr, /--context-file is empty/);
+  const noReason = runCli(['--skip-delta', ' ']);
+  assert.equal(noReason.status, 4, noReason.stderr);
+  assert.match(noReason.stderr, /--skip-delta needs a reason/);
 });
 
 test('the posting identity is required: without it the head is never read as unreviewed (blocked coordinator-unreachable, no claim)', async () => {
