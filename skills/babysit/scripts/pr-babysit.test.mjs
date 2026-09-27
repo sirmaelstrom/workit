@@ -586,6 +586,9 @@ test('verdict fields: adjudicate --verdict judgment --adjudicator lane spawns re
   assert.deepEqual(JSON.parse(readFileSync(state, 'utf8')).judgmentNotes, ['41']);
   const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual([r.outcome, r.judgment_notes], ['converged', ['41']]);
+  // --fresh resets the bounds, not the verdicts already given
+  const fresh = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, resume: false, bounds: { pollSeconds: 1 } }, deps);
+  assert.deepEqual(fresh.judgment_notes, ['41']);
 });
 
 test('reviews per PR are capped at 2 by construction: full on H1, fix H2 → delta, fix H3 → converged with no claim; two claims in all', async () => {
