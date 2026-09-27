@@ -82,6 +82,7 @@ import {
   recognise,
   isDedupeHit,
   deliveryKind,
+  postedReviewScope,
 } from './pr-review-recognise.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
@@ -3252,6 +3253,18 @@ test('the marker round-trips through the one parser', () => {
   assert.equal(parseMarker('a review with no marker at all'), null);
   // A standalone post writes `run=-`, which is an absent run, not the string.
   assert.equal(parseMarker(buildMarker({ repo: 'o/r', pr: 1, head: 'h', base: 'b', lenses: [], run: null, attempt: null, policy: null, supersedes: null })).run, null);
+});
+
+test('postedReviewScope: since= is a delta, no since= or a legacy marker-less body is full; a foreign author, a replaced review and a reply container are no round', () => {
+  const base = { review_id: 1, author_login: SERVICE_LOGIN, commit_id: PINNED_HEAD, state: 'COMMENTED' };
+  const marker = (since) => buildMarker({ repo: PINNED_REPO, pr: PINNED_PR, head: PINNED_HEAD, base: PINNED_BASE, lenses: ['codex', 'astra'], run: RUN_ID, attempt: 1, policy: null, supersedes: null, since });
+  const opts = { serviceLogin: SERVICE_LOGIN, replacedReviewIds: [9] };
+  assert.deepEqual(postedReviewScope({ ...base, body: marker() }, opts), { review_id: 1, head: PINNED_HEAD, scope: 'full', since: null });
+  assert.deepEqual(postedReviewScope({ ...base, body: marker('abc1234') }, opts), { review_id: 1, head: PINNED_HEAD, scope: 'delta', since: 'abc1234' });
+  assert.deepEqual(postedReviewScope({ ...base, body: 'legacy review, no marker' }, opts), { review_id: 1, head: PINNED_HEAD, scope: 'full', since: null });
+  assert.equal(postedReviewScope({ ...base, author_login: 'someone', body: marker() }, opts), null);
+  assert.equal(postedReviewScope({ ...base, review_id: 9, body: marker() }, opts), null);
+  assert.equal(postedReviewScope({ ...base, body: '', reply_container: true }, opts), null);
 });
 
 test('the dedupe recogniser hits on a later page, on a marker-less review, and on neither a foreign author nor a replaced review', () => {

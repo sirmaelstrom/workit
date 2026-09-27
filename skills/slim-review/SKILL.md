@@ -407,11 +407,12 @@ Fix the delta pass's findings with controls, and the PR goes to the merge
 call. There is no third review: a fix made after the delta pass is checked by
 its seen-failing control, and that is the amendment check at that point.
 
-**Who follows the cap today.** The cap binds manual T1, meaning this skill run by
-a session or conductor. The automated callers still run a full paired review
-on every new head: `babysit` (up to three heads) and Observatory's pr-review
-beat. Migrating them is a follow-up, not part of this skill (lane cr report,
-quest 329cba0d, `## Follow-ups`).
+**Who follows the cap today.** Manual T1 follows it (this skill run by a
+session or conductor), and so does `babysit`. Babysit reads the rounds from the
+posted reviews' markers, claims round two as a delta pass, and claims nothing
+after a delta. Observatory's pr-review beat does not follow it yet: it still
+runs a full paired review on every new head it picks up. Migrating the beat is
+a follow-up, not part of this skill.
 
 When every thread has a verdict and CI is green, the PR is ready for the
 operator's merge call.

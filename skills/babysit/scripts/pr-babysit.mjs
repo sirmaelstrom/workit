@@ -10,6 +10,15 @@
  *               ∧ every check on that head pass/skipping
  *               ∧ the head did not move while the loop read it
  *
+ * The review rounds are capped (quest 329cba0d, slim-review § 4): one full
+ * review, then one delta pass (`lens --since <full head>`) on the next head,
+ * then no third review. A head after the delta pass converges on its checks
+ * and resolved threads alone when the last reviewed head is its ancestor with
+ * no merge from the base branch between, and the receipt names the
+ * `unreviewed_tail`. The rounds are read from the PR's
+ * posted review markers, not from the state file, so a review posted by the
+ * beat or by hand counts.
+ *
  * Everything else is `wait`, `claim` (at most one session claim per head —
  * D4), `adjudicate` (your turn: judge the open threads, push fixes, run
  * again), `new-head` (an iteration), or `blocked` with a reason from a closed
@@ -18,10 +27,12 @@
  * Verbs:
  *   run        --pr <n> --repo <owner/name> --cwd <checkout> [--claim session|beat]
  *              [--max-heads 3] [--max-wall-minutes 90] [--poll-seconds 60]
- *              [--session-claims 1] [--state <file>]
+ *              [--session-claims 1] [--state <file>] [--context-file <uncertainty.md>]
+ *              [--skip-delta "<reason>"]
  *   status     --pr --repo --cwd            one observation + decision, no waiting
  *   threads    --pr --repo --cwd [--json]   every review thread (resolved or not)
- *   adjudicate --pr --repo --cwd --comment-id <id> --verdict confirmed|refuted|note --body-file <f>
+ *   adjudicate --pr --repo --cwd --comment-id <id> --verdict confirmed|refuted|note|judgment --body-file <f>
+ *              [--adjudicator lane|conductor|operator]
  *              reply through the writer (T1 measurement row) and RESOLVE the thread
  *
  * Exit: 0 converged · 2 blocked · 3 adjudicate (your turn) · 4 usage / gh failure.
@@ -35,6 +46,8 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createClient } from '../../slim-review/scripts/pr-review-coordinator.mjs';
 import { loadCoordinatorToken, resolveManaged, MANAGED_MODES } from '../../slim-review/scripts/pr-review-managed.mjs';
+import { postedReviewScope } from '../../slim-review/scripts/pr-review-recognise.mjs';
+import { amendmentProblem, readReviewListing } from '../../slim-review/scripts/pr-review.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const WRITER_SCRIPT = resolve(HERE, '..', '..', 'slim-review', 'scripts', 'pr-review.mjs');
@@ -65,6 +78,7 @@ export const BLOCKED_REASONS = Object.freeze([
   'not-managed',
   'checks-unavailable',
   'threads-truncated',
+  'amendment-not-descendant',
 ]);
 
 /**
@@ -205,16 +219,50 @@ export async function observe({ repo, pr, cwd }, deps) {
 
   let status = null;
   let health = null;
+  let identity = null;
   let coordinatorError = null;
   try {
     status = unwrapClientResponse(await deps.coordinator.readStatus({ repo, pr }), 'readStatus');
     health = await deps.coordinator.readHealth();
+    // The posting identity decides which listed reviews are rounds. Without it
+    // every review would be filtered out and the head would read as never
+    // reviewed, which is the direction that claims a second full review.
+    identity = unwrapClientResponse(await deps.coordinator.readIdentity(), 'readIdentity');
+    if (!identity?.login) throw new Error('readIdentity: no pinned login');
   } catch (err) {
     coordinatorError = err instanceof Error ? err.message : String(err);
   }
 
+  // The rounds come from the posted reviews' markers: the coordinator's status
+  // rows carry no scope, and a state file knows only this loop's own claims.
+  let reviews = [];
+  let tail = null;
+  if (!coordinatorError) {
+    const replacedReviewIds = (status?.attempts ?? []).filter((a) => a.state === 'replaced').map((a) => a.review_id).filter((id) => id !== null && id !== undefined);
+    reviews = readReviewListing({ repo, pr, cwd, runGh: deps.runGh })
+      .map((r) => postedReviewScope(r, { serviceLogin: identity.login, replacedReviewIds }))
+      .filter(Boolean);
+    const last = reviews[reviews.length - 1];
+    if (last && last.head !== headBefore) {
+      const payload = JSON.parse(deps.runGh(['api', `repos/${repo}/compare/${last.head}...${headBefore}`], { cwd }));
+      const commits = Array.isArray(payload?.commits) ? payload.commits : null;
+      tail = {
+        from: last.head,
+        to: headBefore,
+        status: payload?.status ?? null,
+        aheadBy: payload?.ahead_by ?? null,
+        files: Array.isArray(payload?.files) ? payload.files.length : null,
+        // read here, not from `problem`: amendmentProblem answers "no changed
+        // files" before it looks at merges or the commit list
+        merge: commits ? commits.some((cm) => (cm?.parents?.length ?? 0) > 1) : null,
+        commitsComplete: commits !== null && !(Number.isInteger(payload?.total_commits) && payload.total_commits > commits.length),
+        problem: amendmentProblem(payload, last.head, headBefore),
+      };
+    }
+  }
+
   const headAfter = readHead();
-  return { repo, pr, headBefore, headAfter, head: headAfter, checks, threads, threadsTruncated: truncated, status, health, coordinatorError, at: deps.now() };
+  return { repo, pr, headBefore, headAfter, head: headAfter, checks, threads, threadsTruncated: truncated, status, health, coordinatorError, reviews, tail, at: deps.now() };
 }
 
 // ---------------------------------------------------------------------------
@@ -239,15 +287,39 @@ function owedFor(reason, ctx, extra = {}) {
     case 'not-managed': return `${ctx.repo} is not a managed repository — use slim-review's standalone loop.`;
     case 'checks-unavailable': return `the checks on head ${head} could not be read for the whole budget (gh pr checks printed nothing) — fix gh/auth and run again; a run cannot converge on checks it never saw.`;
     case 'threads-truncated': return `a review thread on this PR has ${COMMENTS_PAGE}+ comments, past this loop's page size — adjudicate from the PR page; a truncated listing is never read as "all resolved".`;
+    case 'amendment-not-descendant': return `there is no amendment diff from the last reviewed head ${(extra.from ?? '').slice(0, 7)} to head ${head} (${extra.problem ?? 'refused'}) — the conductor decides how this head is reviewed; this loop never claims a second full review.${extra.attemptRefFile ? ` The delta attempt stays live for that call: run its lenses without --since (\`pr-review.mjs lens --attempt-ref ${extra.attemptRefFile}\`), or \`pr-review.mjs recover withdraw --attempt-ref ${extra.attemptRefFile} --reason "<why>"\`.` : ''}`;
     default: return 'a person decides.';
   }
 }
 
 /**
+ * Which review round the current head is in, from the posted reviews in
+ * listing order (`postedReviewScope` entries). Pure.
+ *
+ *   full      no review yet — claim a full paired review
+ *   reviewed  the last review is on this head — the existing path decides
+ *   delta     a full review, no delta after it — claim a delta since its head
+ *   capped    a delta after the last full review — no claim; converge on the tail
+ *
+ * Counting from the LAST full review means a full review the conductor ran
+ * after a refused delta opens a fresh pair; nothing this loop claims does.
+ */
+export function reviewRound(reviews, head) {
+  if (reviews.length === 0) return { round: 'full' };
+  const last = reviews[reviews.length - 1];
+  if (last.head === head) return { round: 'reviewed', last };
+  let fullAt = -1;
+  for (let i = reviews.length - 1; i >= 0; i--) if (reviews[i].scope === 'full') { fullAt = i; break; }
+  // a delta with no full review before it cannot open round two again
+  if (fullAt === -1 || reviews.slice(fullAt + 1).some((r) => r.scope === 'delta')) return { round: 'capped', last };
+  return { round: 'delta', since: reviews[fullAt].head, last };
+}
+
+/**
  * The decision, given one observation and the loop's context. Pure.
  *
- * ctx: { repo, iterationHead, iterations, startedAt, claimsOnHead: {head: n}, bounds }
- * → { action: 'converged'|'wait'|'claim'|'adjudicate'|'new-head'|'blocked', reason?, owed?, detail? }
+ * ctx: { repo, iterationHead, iterations, startedAt, claimsOnHead: {head: n}, bounds, deltaSkipped?: {head, reason} }
+ * → { action: 'converged'|'wait'|'claim'|'adjudicate'|'new-head'|'blocked', reason?, owed?, detail?, since? }
  */
 export function decide(obs, ctx) {
   const bounds = ctx.bounds;
@@ -301,7 +373,47 @@ export function decide(obs, ctx) {
     return { action: 'wait', detail: `attempt ${live.attempt} ${live.state}` };
   }
 
-  // No posted, no live attempt on this head.
+  // No posted, no live attempt on this head. The cap decides whether a claim
+  // is owed at all, and at what scope.
+  const round = reviewRound(obs.reviews ?? [], obs.head);
+  const skipped = round.round === 'delta' && ctx.deltaSkipped?.head === obs.head ? ctx.deltaSkipped.reason : null;
+  if (round.round === 'capped' || skipped) {
+    // No third review (and no delta for a skipped amendment): the head
+    // converges on controls alone, and only on top of what was reviewed.
+    const tail = obs.tail;
+    if (!tail || tail.from !== round.last.head || tail.to !== obs.head || tail.status !== 'ahead') {
+      return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: round.last.head, problem: `compare status ${tail?.status ?? 'missing'}` }) };
+    }
+    // Ancestry is not enough: after a merge from the base branch (or a commit
+    // list too short to rule one out) the conductor decides how the head is
+    // reviewed (slim-review § 4). An ahead tail that changes no file — an
+    // empty commit to re-run CI — still converges, but only with no merge
+    // commit and a complete commit list: a merge from base can leave the tree
+    // unchanged when equivalent changes already landed.
+    const emptyTail = tail.files === 0 && tail.merge === false && tail.commitsComplete === true;
+    if (tail.problem && !emptyTail) {
+      return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: round.last.head, problem: tail.problem }) };
+    }
+    if (unresolved.length > 0) return { action: 'adjudicate', detail: `${unresolved.length} open thread(s)`, threads: unresolved, reviewId: round.last.review_id };
+    if (obs.checks.pending > 0) return { action: 'wait', detail: `checks pending: ${obs.checks.names.pending.join(', ')}` };
+    return {
+      action: 'converged',
+      reviewId: round.last.review_id,
+      attempt: null,
+      unreviewedTail: `${tail.from.slice(0, 7)}...${tail.to.slice(0, 7)}`,
+      unreviewedCommits: tail.aheadBy,
+      ...(skipped ? { deltaSkipped: skipped } : {}),
+    };
+  }
+  const since = round.round === 'delta' ? round.since : undefined;
+  if (since) {
+    // Pre-checked with the writer's own rule, so a rebase costs no claim; the
+    // writer's refusal of the same `--since` is handled by the driver.
+    const problem = !obs.tail || obs.tail.from !== since || obs.tail.to !== obs.head ? 'no amendment compare was read' : obs.tail.problem;
+    if (problem) return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: since, problem }) };
+  }
+  const claim = (detail) => ({ action: 'claim', detail, ...(since ? { since } : {}) });
+
   if (obs.health && obs.health.enabled === false) return { action: 'blocked', reason: 'disabled', owed: owedFor('disabled', c) };
   if (obs.health && obs.health.paused === true) return { action: 'blocked', reason: 'plan-paused', owed: owedFor('plan-paused', c, { pauseReason: obs.health.pauseReason }) };
 
@@ -313,11 +425,13 @@ export function decide(obs, ctx) {
       const reason = last.disposition === 'integrity-violation' ? 'integrity-violation' : 'attempt-failed';
       return { action: 'blocked', reason, owed: owedFor(reason, c, { attempt: last.attempt, state: last.state, disposition: last.disposition }) };
     }
-    return { action: 'claim', detail: `attempt ${last.attempt} ended ${last.state}/${last.disposition ?? '?'} — one session claim allowed` };
+    return claim(`attempt ${last.attempt} ended ${last.state}/${last.disposition ?? '?'} — one session claim allowed`);
   }
-  if (bounds.claim === 'beat') return { action: 'wait', detail: 'waiting for the beat to claim this head' };
+  // The beat cannot run a delta pass yet, so round two is always a session claim.
+  if (bounds.claim === 'beat' && !since) return { action: 'wait', detail: 'waiting for the beat to claim this head' };
   if (claimsUsed >= bounds.sessionClaimsPerHead) return { action: 'wait', detail: 'session claim already made on this head; waiting for its attempt to appear' };
-  return { action: 'claim', detail: 'no attempt on this head — session claim' };
+  if (since) return claim(`round two: delta since ${since.slice(0, 7)} — session claim${bounds.claim === 'beat' ? ' (--claim beat does not apply: the beat cannot run a delta pass yet)' : ''}`);
+  return claim('no attempt on this head — session claim');
 }
 
 // ---------------------------------------------------------------------------
@@ -363,17 +477,20 @@ export function spawnWriterDefault(args, { cwd }) {
 
 /**
  * Claim the current head and run both lenses and the post through the writer.
- * Returns { ok, refused?, reason?, review_id? }. Never retries; a lens that
- * answers `retry: lens-budget` is left to the next observation (the attempt
- * row says what happened).
+ * `since` makes both lens calls a delta pass under the same attempt-ref;
+ * `contextFile` (the `pr-review.mjs uncertainty` output) goes to both lenses
+ * in either round. Returns { ok, refused?, reason?, review_id? }. Never
+ * retries; a lens that answers `retry: lens-budget` is left to the next
+ * observation (the attempt row says what happened).
  */
-export async function runAttempt({ repo, pr, cwd }, deps) {
+export async function runAttempt({ repo, pr, cwd, since, contextFile }, deps) {
   const claim = deps.spawnWriter(['claim', '--pr', String(pr), '--repo', repo, '--cwd', cwd], { cwd });
   if (claim.outcome !== 'ok') return { ok: false, phase: 'claim', reason: claim.reason ?? claim.outcome, coordinator_code: claim.coordinator_code };
   const ref = claim.attempt_ref_file;
+  const lensExtra = [...(since ? ['--since', since] : []), ...(contextFile ? ['--context-file', contextFile] : [])];
   for (const lens of REQUIRED_LENSES) {
-    const r = deps.spawnWriter(['lens', '--attempt-ref', ref, '--lens', lens, '--cwd', cwd], { cwd });
-    if (r.outcome !== 'ok') return { ok: false, phase: `lens:${lens}`, reason: r.reason ?? r.outcome, retry: r.retry };
+    const r = deps.spawnWriter(['lens', '--attempt-ref', ref, '--lens', lens, '--cwd', cwd, ...lensExtra], { cwd });
+    if (r.outcome !== 'ok') return { ok: false, phase: `lens:${lens}`, reason: r.reason ?? r.outcome, retry: r.retry, since: r.since, attempt_ref_file: ref };
   }
   const post = deps.spawnWriter(['post', '--attempt-ref', ref, '--cwd', cwd], { cwd });
   if (post.outcome !== 'posted') return { ok: false, phase: 'post', reason: post.reason ?? post.outcome };
@@ -383,7 +500,8 @@ export async function runAttempt({ repo, pr, cwd }, deps) {
 export async function runLoop(opts, deps) {
   const bounds = { ...DEFAULT_BOUNDS, ...(opts.bounds ?? {}) };
   const statePath = opts.statePath ?? defaultStatePath(opts.repo, opts.pr);
-  const prior = opts.resume === false ? null : loadState(statePath);
+  const stored = loadState(statePath);
+  const prior = opts.resume === false ? null : stored;
   const ctx = {
     repo: opts.repo,
     pr: opts.pr,
@@ -392,25 +510,50 @@ export async function runLoop(opts, deps) {
     iterations: prior?.iterations ?? 0,
     startedAt: prior?.startedAt ?? deps.now(),
     claimsOnHead: prior?.claimsOnHead ?? {},
+    deltaSkipped: prior?.deltaSkipped ?? null,
+    // verdicts already given, not a bound: `--fresh` keeps them
+    judgmentNotes: stored?.judgmentNotes ?? [],
+    // the author's uncertainty follows the PR into round two unless replaced
+    contextFile: opts.contextFile ?? prior?.contextFile ?? null,
   };
   const log = deps.log ?? (() => {});
-  const persist = () => saveState(statePath, { iterationHead: ctx.iterationHead, iterations: ctx.iterations, startedAt: ctx.startedAt, claimsOnHead: ctx.claimsOnHead });
+  const persist = () => saveState(statePath, { iterationHead: ctx.iterationHead, iterations: ctx.iterations, startedAt: ctx.startedAt, claimsOnHead: ctx.claimsOnHead, deltaSkipped: ctx.deltaSkipped, judgmentNotes: ctx.judgmentNotes, contextFile: ctx.contextFile });
 
   const managed = deps.managed ?? { mode: MANAGED_MODES.managed };
   if (managed.mode !== MANAGED_MODES.managed) {
     return finish({ outcome: 'blocked', reason: 'not-managed', owed: owedFor('not-managed', { repo: opts.repo, bounds }) }, ctx, deps, null);
   }
 
+  let first = true;
   for (;;) {
     const obs = await observe({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd }, deps);
     if (ctx.iterationHead === null) { ctx.iterationHead = obs.head; ctx.iterations = 1; persist(); }
+    if (first && opts.skipDelta) {
+      // The session that pushed the amendment judged it trivial; the judgment
+      // covers this head only, and a later head is owed its delta again. A head
+      // that moved during this first read is not the head that was judged.
+      const round = reviewRound(obs.reviews ?? [], obs.head).round;
+      if (obs.headBefore !== obs.headAfter) log(`[babysit] --skip-delta dropped: the head moved ${obs.headBefore.slice(0, 7)} → ${obs.headAfter.slice(0, 7)} during the first read; run again on the head you judged`);
+      else if (round === 'delta') { ctx.deltaSkipped = { head: obs.head, reason: opts.skipDelta }; persist(); }
+      else log(`[babysit] --skip-delta ignored: head ${obs.head.slice(0, 7)} is in round '${round}', not the delta round`);
+    }
+    first = false;
     const d = decide(obs, ctx);
     log(`[babysit] head ${obs.head.slice(0, 7)} it ${ctx.iterations}/${bounds.maxHeads} · ${d.action}${d.reason ? ` (${d.reason})` : ''}${d.detail ? ` — ${d.detail}` : ''}`);
 
     switch (d.action) {
       case 'converged':
         persist();
-        return finish({ outcome: 'converged', head: obs.head, review_id: d.reviewId, attempt: d.attempt, checks: obs.checks }, ctx, deps, obs);
+        return finish({
+          outcome: 'converged',
+          head: obs.head,
+          review_id: d.reviewId,
+          attempt: d.attempt,
+          checks: obs.checks,
+          ...(d.unreviewedTail ? { unreviewed_tail: d.unreviewedTail, unreviewed_commits: d.unreviewedCommits } : {}),
+          ...(d.deltaSkipped ? { delta_skipped: d.deltaSkipped } : {}),
+          judgment_notes: ctx.judgmentNotes,
+        }, ctx, deps, obs);
       case 'blocked':
         persist();
         return finish({ outcome: 'blocked', reason: d.reason, owed: d.owed, head: obs.head }, ctx, deps, obs);
@@ -425,10 +568,16 @@ export async function runLoop(opts, deps) {
       case 'claim': {
         ctx.claimsOnHead[obs.head] = (ctx.claimsOnHead[obs.head] ?? 0) + 1;
         persist();
-        const r = await runAttempt({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd }, deps);
-        log(`[babysit] attempt on ${obs.head.slice(0, 7)}: ${r.ok ? `posted review ${r.review_id}` : `${r.phase} → ${r.reason}`}`);
+        const r = await runAttempt({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, since: d.since, contextFile: ctx.contextFile }, deps);
+        log(`[babysit] ${d.since ? `delta attempt (since ${d.since.slice(0, 7)})` : 'attempt'} on ${obs.head.slice(0, 7)}: ${r.ok ? `posted review ${r.review_id}` : `${r.phase} → ${r.reason}`}`);
         if (!r.ok && r.phase === 'claim' && (r.reason === 'paused' || r.reason === 'disabled')) {
           return finish({ outcome: 'blocked', reason: r.reason === 'paused' ? 'plan-paused' : 'disabled', owed: owedFor(r.reason === 'paused' ? 'plan-paused' : 'disabled', { ...ctx, head: obs.head }), head: obs.head }, ctx, deps, obs);
+        }
+        // The writer refused `--since` before any lens start (a rebase, a merge
+        // from base, a sha on the base branch). A block, never a full review:
+        // the attempt stays live for the conductor's call, per the writer.
+        if (!r.ok && d.since && r.phase.startsWith('lens:') && r.reason === 'input-mismatch' && r.since) {
+          return finish({ outcome: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', { ...ctx, head: obs.head }, { from: d.since, problem: 'the writer refused --since', attemptRefFile: r.attempt_ref_file }), head: obs.head }, ctx, deps, obs);
         }
         continue; // the next observation reads the attempt row
       }
@@ -451,8 +600,8 @@ function finish(receipt, ctx, deps, obs) {
 // Adjudicate: reply through the writer (T1 measurement row) and resolve the thread
 // ---------------------------------------------------------------------------
 
-export async function adjudicate({ repo, pr, cwd, commentId, verdict, bodyFile }, deps) {
-  const reply = deps.spawnWriter(['reply', '--pr', String(pr), '--repo', repo, '--comment-id', String(commentId), '--body-file', bodyFile, '--verdict', verdict, '--cwd', cwd], { cwd });
+export async function adjudicate({ repo, pr, cwd, commentId, verdict, bodyFile, adjudicator, statePath }, deps) {
+  const reply = deps.spawnWriter(['reply', '--pr', String(pr), '--repo', repo, '--comment-id', String(commentId), '--body-file', bodyFile, '--verdict', verdict, ...(adjudicator ? ['--adjudicator', adjudicator] : []), '--cwd', cwd], { cwd });
   // No verdict on the thread → no resolution. A resolved thread with no
   // reply would read as adjudicated to the convergence check while carrying
   // no verdict at all (T1 on workit#93, both lenses P1).
@@ -462,6 +611,15 @@ export async function adjudicate({ repo, pr, cwd, commentId, verdict, bodyFile }
   if (!thread) return { outcome: 'failed', reason: 'thread-not-found', commentId };
   const res = deps.runGh(['api', 'graphql', '-f', `query=${RESOLVE_MUTATION}`, '-F', `id=${thread.id}`], { cwd });
   const resolved = JSON.parse(res)?.data?.resolveReviewThread?.thread?.isResolved === true;
+  // A judgment thread is resolved like any other; the verdict is the record,
+  // and the converged receipt lists it for the operator's merge call.
+  if (resolved && verdict === 'judgment') {
+    const path = statePath ?? defaultStatePath(repo, pr);
+    const state = loadState(path) ?? {};
+    const notes = new Set((state.judgmentNotes ?? []).map(String));
+    notes.add(String(commentId));
+    saveState(path, { ...state, judgmentNotes: [...notes] });
+  }
   return { outcome: resolved ? 'ok' : 'failed', commentId, threadId: thread.id, verdict, resolved, replied: reply };
 }
 
@@ -488,6 +646,9 @@ function parseArgs(argv) {
       case '--comment-id': opts.commentId = next(); break;
       case '--verdict': opts.verdict = next(); break;
       case '--body-file': opts.bodyFile = next(); break;
+      case '--adjudicator': opts.adjudicator = next(); break;
+      case '--context-file': opts.contextFile = next(); break;
+      case '--skip-delta': opts.skipDelta = next(); break;
       case '--json': opts.json = true; break;
       default: throw new Error(`unknown argument ${a}`);
     }
@@ -503,6 +664,7 @@ function buildDeps(opts) {
     coordinator = {
       // the client answers an envelope; `observe` unwraps it (unwrapClientResponse)
       readStatus: (input) => client.readStatus(input),
+      readIdentity: () => client.readIdentity(),
       readHealth: async () => {
         const res = await fetch(`${managed.coordinator.replace(/\/+$/, '')}/api/health`, { headers: { connection: 'close' } });
         if (!res.ok) throw new Error(`/api/health ${res.status}`);
@@ -535,6 +697,22 @@ async function main() {
     process.exit(4);
   }
   if (!opts.pr || !opts.repo || !opts.cwd) { console.error('--pr, --repo and --cwd are required'); process.exit(4); }
+  if (opts.skipDelta !== undefined && String(opts.skipDelta).trim() === '') { console.error('--skip-delta needs a reason: it is written to the state file and the receipt'); process.exit(4); }
+  // A resumed run reuses the context file the state file carries (runLoop does
+  // the same fallback), so that path is checked here too.
+  const storedContext = opts.verb === 'run' && opts.contextFile === undefined && opts.resume !== false
+    ? loadState(opts.statePath ?? defaultStatePath(opts.repo, opts.pr))?.contextFile ?? undefined
+    : undefined;
+  if (opts.contextFile !== undefined || storedContext !== undefined) {
+    // The writer refuses an unreadable or empty file only after the claim, and
+    // that refusal leaves a live attempt the loop would wait on. Check it here.
+    // Absolute, because the writer runs with --cwd as its working directory.
+    const label = storedContext !== undefined ? '--context-file (from the state file)' : '--context-file';
+    opts.contextFile = resolve(opts.contextFile ?? storedContext);
+    let text = '';
+    try { text = readFileSync(opts.contextFile, 'utf8'); } catch (err) { console.error(`${label} could not be read: ${err.message}`); process.exit(4); }
+    if (text.trim() === '') { console.error(`${label} is empty: ${opts.contextFile}`); process.exit(4); }
+  }
   const deps = buildDeps(opts);
   const bounds = {
     ...(opts.claim ? { claim: opts.claim } : {}),
@@ -560,8 +738,8 @@ async function main() {
     if (deps.managed.mode !== MANAGED_MODES.managed) { console.log(JSON.stringify({ outcome: 'blocked', reason: 'not-managed' })); process.exit(2); }
     const obs = await observe(opts, deps);
     const state = loadState(opts.statePath ?? defaultStatePath(opts.repo, opts.pr));
-    const ctx = { repo: opts.repo, pr: opts.pr, bounds: { ...DEFAULT_BOUNDS, ...bounds }, iterationHead: state?.iterationHead ?? obs.head, iterations: state?.iterations ?? 1, startedAt: state?.startedAt ?? obs.at, claimsOnHead: state?.claimsOnHead ?? {} };
-    console.log(JSON.stringify({ head: obs.head, checks: obs.checks, threads: obs.threads.length, unresolved: obs.threads.filter((t) => !t.resolved).length, attemptsOnHead: (obs.status?.attempts ?? []).filter((a) => a.head_sha === obs.head), health: obs.health, decision: decide(obs, ctx) }, null, 2));
+    const ctx = { repo: opts.repo, pr: opts.pr, bounds: { ...DEFAULT_BOUNDS, ...bounds }, iterationHead: state?.iterationHead ?? obs.head, iterations: state?.iterations ?? 1, startedAt: state?.startedAt ?? obs.at, claimsOnHead: state?.claimsOnHead ?? {}, deltaSkipped: state?.deltaSkipped ?? null };
+    console.log(JSON.stringify({ head: obs.head, checks: obs.checks, threads: obs.threads.length, unresolved: obs.threads.filter((t) => !t.resolved).length, attemptsOnHead: (obs.status?.attempts ?? []).filter((a) => a.head_sha === obs.head), reviews: obs.reviews, round: reviewRound(obs.reviews ?? [], obs.head).round, tail: obs.tail, health: obs.health, decision: decide(obs, ctx) }, null, 2));
     return;
   }
   const receipt = await runLoop({ ...opts, bounds }, deps);
