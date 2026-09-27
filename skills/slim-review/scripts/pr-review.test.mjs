@@ -5162,7 +5162,8 @@ test('M2 control: an opus prompt too long for one command-line argument is refus
     }
     assert.deepEqual(spawned, [], 'the claude lens was never spawned');
     assert.equal(deaths[0]?.code, 5);
-    assert.match(deaths[0].message, /command line/);
+    // Windows says "command line", POSIX "command-line argument".
+    assert.match(deaths[0].message, /command[ -]line/);
   });
 });
 
