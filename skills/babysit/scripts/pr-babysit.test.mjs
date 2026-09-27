@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { decide, runLoop, summariseChecks, normaliseThreads, adjudicate, unwrapClientResponse, fetchAllThreads, reviewRound, DEFAULT_BOUNDS, BLOCKED_REASONS, COMMENTS_PAGE } from './pr-babysit.mjs';
+import { decide, runLoop, summariseChecks, normaliseThreads, adjudicate, adjudicateVerb, unwrapClientResponse, fetchAllThreads, reviewRound, DEFAULT_BOUNDS, BLOCKED_REASONS, COMMENTS_PAGE } from './pr-babysit.mjs';
 import { buildMarker } from '../../slim-review/scripts/pr-review-recognise.mjs';
 
 const H1 = 'aaaaaaa1111111111111111111111111111111111';
@@ -625,12 +625,61 @@ test('run refuses an unreadable or empty --context-file and an empty --skip-delt
   assert.match(noReason.stderr, /--skip-delta needs a reason/);
 });
 
-test('the posting identity is required: without it the head is never read as unreviewed (blocked coordinator-unreachable, no claim)', async () => {
-  const { w, deps } = fullReviewedOnH1();
-  deps.coordinator.readIdentity = async () => ({ ok: false, reason: 'identity-unset' });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
-  assert.deepEqual([r.outcome, r.reason], ['blocked', 'coordinator-unreachable']);
-  assert.equal(w.writerCalls.length, 0);
+test('the posting identity is required: without it the head is never read as unreviewed — both shapes of "none pinned" block identity-unset, and nothing is claimed', async () => {
+  const shapes = {
+    // the client's own refusal for a 404 on /identity (pr-review-coordinator.mjs refusal())
+    'client refusal': async () => ({ ok: false, code: 'identity-unset', source: 'client', status: 404, message: 'readIdentity: identity-unset' }),
+    'answer with no login': async () => ({ ok: true, status: 200, body: {} }),
+  };
+  for (const [name, readIdentity] of Object.entries(shapes)) {
+    const { w, deps } = fullReviewedOnH1();
+    deps.coordinator.readIdentity = readIdentity;
+    const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+    assert.deepEqual([r.outcome, r.reason], ['blocked', 'identity-unset'], name);
+    assert.match(r.owed, /identity --pin --reason/, name);
+    assert.equal(w.writerCalls.length, 0, name);
+  }
+});
+
+test('identity-unset never over-matches: a network error, another refusal code, or a message that merely mentions identity-unset stays coordinator-unreachable', async () => {
+  const cases = {
+    'readIdentity network error': (deps) => { deps.coordinator.readIdentity = async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:3100'); }; },
+    'readIdentity unreachable refusal': (deps) => { deps.coordinator.readIdentity = async () => ({ ok: false, code: 'coordinator-unreachable', source: 'client', message: 'readIdentity: coordinator-unreachable' }); },
+    'readIdentity other code, identity-unset in the message': (deps) => { deps.coordinator.readIdentity = async () => ({ ok: false, code: 'unauthorized', source: 'coordinator', status: 401, message: 'identity-unset? no: the token was refused' }); },
+    'readStatus network error': (deps) => { deps.coordinator.readStatus = async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:3100'); }; },
+  };
+  for (const [name, arrange] of Object.entries(cases)) {
+    const { w, deps } = fullReviewedOnH1();
+    arrange(deps);
+    const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+    assert.deepEqual([r.outcome, r.reason], ['blocked', 'coordinator-unreachable'], name);
+    assert.equal(w.writerCalls.length, 0, name);
+  }
+});
+
+test('adjudicate --body-file: a relative path reaches reply as an absolute path resolved against the caller\'s cwd; a missing one is exit 4 before any spawn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'babysit-body-'));
+  writeFileSync(join(dir, 'reply-5.md'), 'refuted: the guard at x.ts:3');
+  const { w, deps } = world({ threads: [openThread(5)] });
+  const v = await adjudicateVerb({ repo: 'o/r', pr: 1, cwd: '/some/checkout', commentId: 5, verdict: 'refuted', bodyFile: 'reply-5.md', statePath: stateFile() }, deps, { cwd: dir });
+  assert.equal(v.exitCode, 0);
+  const reply = w.writerCalls.find((c) => c[0] === 'reply');
+  assert.equal(reply[reply.indexOf('--body-file') + 1], join(dir, 'reply-5.md'));
+
+  const missing = world({ threads: [openThread(6)] });
+  const m = await adjudicateVerb({ repo: 'o/r', pr: 1, cwd: '/some/checkout', commentId: 6, verdict: 'note', bodyFile: 'nope.md', statePath: stateFile() }, missing.deps, { cwd: dir });
+  assert.equal(m.exitCode, 4);
+  assert.match(m.error, /--body-file not found/);
+  assert.equal(missing.w.writerCalls.length, 0);
+  assert.equal(missing.w.ghCalls.length, 0);
+});
+
+test('the adjudicate CLI refuses a missing --body-file with exit 4 and says so', () => {
+  const script = join(dirname(fileURLToPath(import.meta.url)), 'pr-babysit.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'babysit-cli-'));
+  const r = spawnSync(process.execPath, [script, 'adjudicate', '--pr', '1', '--repo', 'o/r', '--cwd', dir, '--comment-id', '5', '--verdict', 'note', '--body-file', 'nope.md'], { encoding: 'utf8', cwd: dir });
+  assert.equal(r.status, 4, r.stderr);
+  assert.match(r.stderr, /--body-file not found: .*nope\.md/);
 });
 
 // ---------------------------------------------------------------------------

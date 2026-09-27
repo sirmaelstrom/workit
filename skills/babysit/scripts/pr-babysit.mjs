@@ -40,11 +40,11 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
-import { createClient } from '../../slim-review/scripts/pr-review-coordinator.mjs';
+import { createClient, CLIENT_REASONS } from '../../slim-review/scripts/pr-review-coordinator.mjs';
 import { loadCoordinatorToken, resolveManaged, MANAGED_MODES } from '../../slim-review/scripts/pr-review-managed.mjs';
 import { postedReviewScope } from '../../slim-review/scripts/pr-review-recognise.mjs';
 import { amendmentProblem, readReviewListing } from '../../slim-review/scripts/pr-review.mjs';
@@ -79,6 +79,7 @@ export const BLOCKED_REASONS = Object.freeze([
   'checks-unavailable',
   'threads-truncated',
   'amendment-not-descendant',
+  'identity-unset',
 ]);
 
 /**
@@ -220,15 +221,22 @@ export async function observe({ repo, pr, cwd }, deps) {
   let status = null;
   let health = null;
   let identity = null;
+  let identityUnset = false;
   let coordinatorError = null;
   try {
     status = unwrapClientResponse(await deps.coordinator.readStatus({ repo, pr }), 'readStatus');
     health = await deps.coordinator.readHealth();
     // The posting identity decides which listed reviews are rounds. Without it
     // every review would be filtered out and the head would read as never
-    // reviewed, which is the direction that claims a second full review.
-    identity = unwrapClientResponse(await deps.coordinator.readIdentity(), 'readIdentity');
-    if (!identity?.login) throw new Error('readIdentity: no pinned login');
+    // reviewed, which is the direction that claims a second full review. The
+    // coordinator answering "none pinned" (the client's identity-unset code,
+    // or a body with no login) is its own block; anything else is unreachable.
+    const answer = await deps.coordinator.readIdentity();
+    if (answer?.ok === false && answer.code === CLIENT_REASONS.identityUnset) identityUnset = true;
+    else {
+      identity = unwrapClientResponse(answer, 'readIdentity');
+      if (!identity?.login) identityUnset = true;
+    }
   } catch (err) {
     coordinatorError = err instanceof Error ? err.message : String(err);
   }
@@ -237,7 +245,7 @@ export async function observe({ repo, pr, cwd }, deps) {
   // rows carry no scope, and a state file knows only this loop's own claims.
   let reviews = [];
   let tail = null;
-  if (!coordinatorError) {
+  if (!coordinatorError && !identityUnset) {
     const replacedReviewIds = (status?.attempts ?? []).filter((a) => a.state === 'replaced').map((a) => a.review_id).filter((id) => id !== null && id !== undefined);
     reviews = readReviewListing({ repo, pr, cwd, runGh: deps.runGh })
       .map((r) => postedReviewScope(r, { serviceLogin: identity.login, replacedReviewIds }))
@@ -262,7 +270,7 @@ export async function observe({ repo, pr, cwd }, deps) {
   }
 
   const headAfter = readHead();
-  return { repo, pr, headBefore, headAfter, head: headAfter, checks, threads, threadsTruncated: truncated, status, health, coordinatorError, reviews, tail, at: deps.now() };
+  return { repo, pr, headBefore, headAfter, head: headAfter, checks, threads, threadsTruncated: truncated, status, health, coordinatorError, identityUnset, reviews, tail, at: deps.now() };
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +292,7 @@ function owedFor(reason, ctx, extra = {}) {
     case 'integrity-violation': return `a lens on head ${head} reported worktree-dirty — the reviewer's checkout was edited during the run; keep the canonical checkout clean and run again (one session claim allowed).`;
     case 'unresolved-threads': return `${extra.count ?? '?'} review thread(s) still open on head ${head} at the wall budget — adjudicate them (\`pr-babysit.mjs threads\` / \`adjudicate\`) and run again.`;
     case 'coordinator-unreachable': return `the coordinator could not be read (${extra.error ?? '?'}) — is Observatory up on loopback?`;
+    case 'identity-unset': return `the coordinator answered but has no posting identity pinned, so this loop cannot tell which posted reviews are rounds and will not claim — the operator pins it with \`pr-review.mjs identity --pin --reason "<why>"\` (slim-review SKILL § Managed repositories), then run again.`;
     case 'not-managed': return `${ctx.repo} is not a managed repository — use slim-review's standalone loop.`;
     case 'checks-unavailable': return `the checks on head ${head} could not be read for the whole budget (gh pr checks printed nothing) — fix gh/auth and run again; a run cannot converge on checks it never saw.`;
     case 'threads-truncated': return `a review thread on this PR has ${COMMENTS_PAGE}+ comments, past this loop's page size — adjudicate from the PR page; a truncated listing is never read as "all resolved".`;
@@ -327,6 +336,7 @@ export function decide(obs, ctx) {
   const c = { ...ctx, head: obs.head };
 
   if (obs.coordinatorError) return { action: 'blocked', reason: 'coordinator-unreachable', owed: owedFor('coordinator-unreachable', c, { error: obs.coordinatorError }) };
+  if (obs.identityUnset) return { action: 'blocked', reason: 'identity-unset', owed: owedFor('identity-unset', c) };
   if (obs.headBefore !== obs.headAfter) return { action: 'wait', detail: 'head moved during the read' };
 
   if (obs.head !== ctx.iterationHead) {
@@ -623,6 +633,21 @@ export async function adjudicate({ repo, pr, cwd, commentId, verdict, bodyFile, 
   return { outcome: resolved ? 'ok' : 'failed', commentId, threadId: thread.id, verdict, resolved, replied: reply };
 }
 
+/**
+ * The `adjudicate` verb as the CLI runs it. The writer's `reply` runs with the
+ * checkout as its working directory, so a relative --body-file is made
+ * absolute against the caller's cwd here, and a missing one is refused
+ * (exit 4) before anything is replied.
+ */
+export async function adjudicateVerb(opts, deps, { cwd = process.cwd() } = {}) {
+  const bodyFile = resolve(cwd, opts.bodyFile);
+  let isFile = false;
+  try { isFile = statSync(bodyFile).isFile(); } catch { isFile = false; }
+  if (!isFile) return { exitCode: 4, error: `--body-file not found: ${bodyFile} (from ${opts.bodyFile}, resolved against ${cwd}); nothing was replied` };
+  const result = await adjudicate({ ...opts, bodyFile }, deps);
+  return { exitCode: result.outcome === 'ok' ? 0 : 4, result };
+}
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -730,9 +755,10 @@ async function main() {
   }
   if (opts.verb === 'adjudicate') {
     if (!opts.commentId || !opts.verdict || !opts.bodyFile) { console.error('adjudicate needs --comment-id, --verdict and --body-file'); process.exit(4); }
-    const r = await adjudicate(opts, deps);
-    console.log(JSON.stringify(r));
-    process.exit(r.outcome === 'ok' ? 0 : 4);
+    const v = await adjudicateVerb(opts, deps);
+    if (v.error) { console.error(v.error); process.exit(v.exitCode); }
+    console.log(JSON.stringify(v.result));
+    process.exit(v.exitCode);
   }
   if (opts.verb === 'status') {
     if (deps.managed.mode !== MANAGED_MODES.managed) { console.log(JSON.stringify({ outcome: 'blocked', reason: 'not-managed' })); process.exit(2); }
