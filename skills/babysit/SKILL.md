@@ -62,7 +62,8 @@ For the PR's **current head** `H`, either:
   below), and the last posted review's head is an ancestor of `H`. The tail
   has no merge commit, and its commit list is complete. Either problem is
   `amendment-not-descendant`, and the conductor decides. A tail that changes
-  no file, such as an empty commit to re-run CI, still converges. The receipt
+  no file, such as an empty commit to re-run CI, still converges, but only
+  with no merge commit and a complete commit list. The receipt
   carries `unreviewed_tail`;
 
 and in both cases, all at once:

@@ -658,6 +658,20 @@ test('T1 workit#116 (4116626534 i) — an ahead tail that changes no file (an em
   assert.deepEqual([r.outcome, r.unreviewed_tail], ['converged', 'bbbbbbb...ccccccc']);
 });
 
+test('T1 workit#116 delta (4116653420, 4116653423) — a zero-file tail is exempt only with no merge commit and a complete commit list', async () => {
+  const cases = {
+    'a merge commit': (p) => ({ ...p, files: [], commits: p.commits.map((c) => ({ ...c, parents: [{ sha: 'p' }, { sha: 'base' }] })) }),
+    'an incomplete commit list': (p) => ({ ...p, files: [], total_commits: 300 }),
+    'no commit list': (p) => ({ ...p, files: [], commits: undefined }),
+  };
+  for (const [name, onCompare] of Object.entries(cases)) {
+    const { w, deps } = postDelta({ onCompare });
+    const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+    assert.deepEqual([r.outcome, r.reason], ['blocked', 'amendment-not-descendant'], name);
+    assert.equal(w.writerCalls.length, 0, name);
+  }
+});
+
 test('T1 workit#116 (4116626540) — --skip-delta is dropped when the head moves during the first read; the head that arrives is owed its delta', async () => {
   const lines = [];
   const state = stateFile();

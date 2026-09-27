@@ -245,7 +245,19 @@ export async function observe({ repo, pr, cwd }, deps) {
     const last = reviews[reviews.length - 1];
     if (last && last.head !== headBefore) {
       const payload = JSON.parse(deps.runGh(['api', `repos/${repo}/compare/${last.head}...${headBefore}`], { cwd }));
-      tail = { from: last.head, to: headBefore, status: payload?.status ?? null, aheadBy: payload?.ahead_by ?? null, files: Array.isArray(payload?.files) ? payload.files.length : null, problem: amendmentProblem(payload, last.head, headBefore) };
+      const commits = Array.isArray(payload?.commits) ? payload.commits : null;
+      tail = {
+        from: last.head,
+        to: headBefore,
+        status: payload?.status ?? null,
+        aheadBy: payload?.ahead_by ?? null,
+        files: Array.isArray(payload?.files) ? payload.files.length : null,
+        // read here, not from `problem`: amendmentProblem answers "no changed
+        // files" before it looks at merges or the commit list
+        merge: commits ? commits.some((cm) => (cm?.parents?.length ?? 0) > 1) : null,
+        commitsComplete: commits !== null && !(Number.isInteger(payload?.total_commits) && payload.total_commits > commits.length),
+        problem: amendmentProblem(payload, last.head, headBefore),
+      };
     }
   }
 
@@ -375,8 +387,11 @@ export function decide(obs, ctx) {
     // Ancestry is not enough: after a merge from the base branch (or a commit
     // list too short to rule one out) the conductor decides how the head is
     // reviewed (slim-review § 4). An ahead tail that changes no file — an
-    // empty commit to re-run CI — is the one problem that still converges.
-    if (tail.problem && tail.files !== 0) {
+    // empty commit to re-run CI — still converges, but only with no merge
+    // commit and a complete commit list: a merge from base can leave the tree
+    // unchanged when equivalent changes already landed.
+    const emptyTail = tail.files === 0 && tail.merge === false && tail.commitsComplete === true;
+    if (tail.problem && !emptyTail) {
       return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: round.last.head, problem: tail.problem }) };
     }
     if (unresolved.length > 0) return { action: 'adjudicate', detail: `${unresolved.length} open thread(s)`, threads: unresolved, reviewId: round.last.review_id };
