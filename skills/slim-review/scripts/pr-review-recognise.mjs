@@ -149,6 +149,29 @@ export function isDedupeHit(review, { head, serviceLogin, replacedReviewIds = []
 }
 
 /**
+ * What one posted review covered, for a caller that caps review rounds, or
+ * null when the entry is not a review by the posting identity (another author,
+ * a replaced review, a reply container — the same exclusions as dedupe).
+ *
+ *   { review_id, head, scope: 'full' | 'delta', since }
+ *
+ * A marker with `since=` is a delta; a marker without it is a full review, and
+ * so is a legacy marker-less review with a body, whose head is its
+ * `commit_id` — the same reading `isDedupeHit` gives the head.
+ */
+export function postedReviewScope(review, { serviceLogin, replacedReviewIds = [] }) {
+  const item = normalizeReview(review);
+  if (item.author_login !== serviceLogin) return null;
+  if (replacedReviewIds.some((id) => String(id) === String(item.review_id))) return null;
+  if (isReplyContainer(item)) return null;
+  const marker = parseMarker(item.body);
+  const head = marker?.head ?? item.commit_id;
+  if (!head) return null;
+  const since = marker?.since ?? null;
+  return { review_id: item.review_id, head, scope: since ? 'delta' : 'full', since };
+}
+
+/**
  * The delivery predicate. Exactly two answers matter:
  *
  *   'delivery'  the marker names this run and this attempt — the submission
