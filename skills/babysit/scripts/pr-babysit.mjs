@@ -84,13 +84,14 @@ export const BLOCKED_REASONS = Object.freeze([
 
 /**
  * The coordinator client answers `{ok:true, status, body}` or a refusal
- * `{ok:false, reason, …}` — never the view itself. Unwrap, or throw the
- * refusal so the observation records it (T1 on workit#93, Terra P1: the loop
- * read `.attempts` off the envelope and never saw a posted review).
+ * `{ok:false, code, source, …, message}` — never the view itself. Unwrap, or
+ * throw the refusal, naming its code, so the observation records it (T1 on
+ * workit#93, Terra P1: the loop read `.attempts` off the envelope and never
+ * saw a posted review).
  */
 export function unwrapClientResponse(r, what = 'readStatus') {
   if (!r || typeof r !== 'object') throw new Error(`${what}: empty response`);
-  if (r.ok === false) throw new Error(`${what}: ${r.reason ?? 'refused'}${r.message ? ` — ${r.message}` : ''}`);
+  if (r.ok === false) throw new Error(`${what}: ${r.code ?? r.reason ?? 'refused'}${r.message ? ` — ${r.message}` : ''}`);
   if (r.ok === true && 'body' in r) return r.body;
   return r; // already a view (tests, or a future client that returns it bare)
 }

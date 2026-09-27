@@ -170,8 +170,22 @@ test('every blocked reason the decision can emit is in the closed set', () => {
 test('T1 workit#93 — the coordinator client answers an ENVELOPE; the loop reads the view inside it, and a refusal is an error (the live run on obs#676 waited on a review it could not see)', () => {
   assert.deepEqual(unwrapClientResponse({ ok: true, status: 200, body: { attempts: [1] } }), { attempts: [1] });
   assert.deepEqual(unwrapClientResponse({ attempts: [] }), { attempts: [] });
-  assert.throws(() => unwrapClientResponse({ ok: false, reason: 'coordinator-unreachable', message: 'ECONNREFUSED' }), /coordinator-unreachable/);
+  // the client's real refusal shape (pr-review-coordinator.mjs refusal()): the code is `code`
+  assert.throws(() => unwrapClientResponse({ ok: false, code: 'coordinator-unreachable', source: 'client', message: 'ECONNREFUSED' }), /^Error: readStatus: coordinator-unreachable — ECONNREFUSED$/);
+  // a `reason` is still named when there is no `code`, and 'refused' only when there is neither
+  assert.throws(() => unwrapClientResponse({ ok: false, reason: 'paused' }), /^Error: readStatus: paused$/);
+  assert.throws(() => unwrapClientResponse({ ok: false }), /^Error: readStatus: refused$/);
   assert.throws(() => unwrapClientResponse(null), /empty/);
+});
+
+test('a real-shaped readStatus refusal names its code in the coordinator-unreachable owed text, not "refused"', async () => {
+  const { w, deps } = world();
+  deps.coordinator.readStatus = async () => ({ ok: false, code: 'unauthorized', source: 'coordinator', status: 401, message: 'coordinator refused the token' });
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  assert.deepEqual([r.outcome, r.reason], ['blocked', 'coordinator-unreachable']);
+  assert.match(r.owed, /readStatus: unauthorized — coordinator refused the token/);
+  assert.doesNotMatch(r.owed, /refused —/);
+  assert.equal(w.writerCalls.length, 0);
 });
 
 test('T1 workit#93 — checks that could not be READ are unknown: wait, then blocked checks-unavailable; never "no checks, therefore green"', () => {
