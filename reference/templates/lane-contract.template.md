@@ -37,6 +37,7 @@ List the callers of any function you add a check to, and every construct in your
 1. Push your branch **and immediately open the PR** with `gh pr create` against `<base branch per repo — name it; for a repo whose default-branch merge is a production deploy, say so here>`. A branch pushed with no PR gets no CI run at all.
    - Title: a conventional commit naming the quest id.
    - Body: what changed; the negative controls (commands plus red/green, verbatim); every assertion with its refuting command or **ASSUMPTION**; the tests run with counts; what is **not** done; `Closes nothing; quest <id>`.
+   - **A fix PR** — one that repairs a defect an earlier PR shipped — carries one line in its body: `Escape: introduced by <repo>#<n>; review saw it | missed it | unreviewed`. Pick one of the three. Write it at fix time, from what you know of that PR's review threads; never reconstruct it later from blame.
    - End the body with the session attribution line your environment gives you, if any.
    - The conductor runs `lane check <lane> --expect-pr <n>` on it: the check fails unless the PR's head is your branch, the PR is open or merged, and the body passes the same shape check as the report (step 2).
 2. Write your report to `<reports directory>/lane-<id>-report.md`, with these sections. The conductor runs `lane check <lane> --expect-report <path>` on it, which fails on a missing `## Debrief` heading, a missing or empty `###` sub-heading under it, any question under `## Needs conductor` that is not a lettered ask `(a)`…`(f)`, and any ask with more than six options or a letter used twice:
@@ -54,4 +55,17 @@ List the callers of any function you add a check to, and every construct in your
    - `## Follow-ups` (including the boundary question's answer and any doc sentence you made false)
    - `## Timing` (start and end from `date -u`)
 3. Reply in the pane in **60 lines or fewer**, pointing at the report. Then stop and wait. The conductor may send you review findings to fix in the same worktree.
-4. **When fixing review findings:** fix, **commit before the control**, re-run the control, push, and append an `## Amendment N` section to your report. Don't reply to or resolve GitHub threads; the conductor does that.
+4. **When the conductor sends review findings, you adjudicate them, all in one batch.** Each finding gets exactly one verdict:
+   - **fixed**: fix it, **commit before the control**, and see the control fail with the fix reverted;
+   - **refuted**: quote the observation that refutes it (the guard, the caller, a command and its output);
+   - **judgment**: nothing you can run settles it, so it stays a PR note for the operator.
+
+   Push, then append an `## Amendment N` section to your report. It opens with a table, one row per review comment id:
+
+   | Comment | Verdict | Evidence | Commit |
+   |---|---|---|---|
+   | `<id>` | fixed / refuted / judgment | the control's red line, the quoted observation, or why nothing can settle it | `<sha>` or — |
+
+   After the table, the amendment's own Debrief uses **headings**, not bold paragraphs: `### Forks I decided that the brief did not settle` and `### Claims no control measures` (or `####` under the `## Amendment N` heading). The reviewers' uncertainty extractor matches headings only, so a bold-paragraph Debrief never reaches them.
+
+   The conductor re-reads only your refutations. When it records your verdicts, `fixed` becomes `reply --verdict confirmed --adjudicator lane`, `refuted` becomes `refuted`, and `judgment` becomes `judgment`. If the conductor overturns a refutation, the finding reopens: you fix it with a control like any other fix, and its row records `--adjudicator conductor`. A nontrivial amendment then gets one delta-only review pass (the amendment diff only) and no third round, so fix the delta pass's findings the same way; a fix made after that pass is checked by its control alone. Don't reply to or resolve GitHub threads; the conductor does that.
