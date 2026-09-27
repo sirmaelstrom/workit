@@ -99,7 +99,13 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      deliberate, named exception to `slim-review`'s every-PR-boundary default.
    - **T1 — `slim-review`.** The default for any code diff (two external
      lenses at the PR boundary, both posted, since 2026-09-09 — GPT-6 Sol and
-     Astra since 2026-09-23; Terra held the first seat before that).
+     Astra since 2026-09-23; Terra held the first seat before that). **Capped:**
+     one paired review of the whole PR, with the lane report's uncertainty
+     passed to both lenses; the lane adjudicates every finding in one batch
+     (fix with a control, refute with a quoted observation, or `judgment`), and
+     the conductor re-reads only the refutations; after a nontrivial amendment,
+     one delta-only pass per lens (`lens --since <reviewed head>`). There is no
+     second full-PR review and no third round at T1.
    - **T2 — full council.** Fired when the change **touches a contract or an
      invariant**, or **adds tests that claim to prove something**. T1 asks
      whether the diff is correct; T2 asks whether it was *permitted* — the
@@ -112,9 +118,11 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    Two rules with receipts: **never downgrade a fired T2 trigger** (the one
    measured downgrade would have cost 10 confirmed defects — run-4 ruling 8,
    held three times), and **a round that produced nontrivial amendments has
-   not converged until something checks the amendments** — cheapest forms: run
-   the suite in the mode the feature adds, or a challenge grounded against the
-   *amended* tree (ruling 9, held twice). The amendment brief itself states the
+   not converged until something checks the amendments** — cheapest forms: at
+   T1, the delta lens (`slim-review` `lens --since <reviewed head>`, one pass
+   per lens over the amendment only); otherwise run the suite in the mode the
+   feature adds, or a challenge grounded against the *amended* tree (ruling 9,
+   held twice). The amendment brief itself states the
    limit of what it dictates — a prescribed mechanism carries "or another you
    can justify", the disposition outranks the brief's example, a "settled"
    premise carries its receipt (`reference/patterns/lane-supervision.md` →

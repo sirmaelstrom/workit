@@ -44,7 +44,7 @@ import {
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 
 import { createClient } from './pr-review-coordinator.mjs';
@@ -253,13 +253,17 @@ const FINDING_KEYS = new Set(['severity', 'title', 'path', 'line', 'body', 'lens
  * unknown property: head_sha". They stay optional: a standalone document has
  * none of them and is unchanged.
  *
+ * `since_sha` marks a delta document: `lens --since <sha>` reviewed only the
+ * amendment `<sha>...<head>`, and `post` checks that document's coverage
+ * against the amendment's file set instead of the whole PR's.
+ *
  * `findings.schema.json` is NOT widened — it governs what the model returns
  * through `--output-schema`, and the stamps (like `lens` / `model` / `wall_ms`
  * before them) are added by this script afterwards.
  */
 const DOCUMENT_KEYS = new Set([
   'summary', 'coverage', 'examined_paths', 'findings', 'lens', 'model', 'reasoning', 'wall_ms',
-  'head_sha', 'base_sha', 'attempt', 'run_id',
+  'head_sha', 'base_sha', 'attempt', 'run_id', 'since_sha',
 ]);
 /** The four revision stamps, in the order `lens --attempt-ref` writes them. */
 export const DOCUMENT_STAMPS = Object.freeze(['head_sha', 'base_sha', 'attempt', 'run_id']);
@@ -300,7 +304,7 @@ export function validateFindingsShape(doc) {
   if (doc.wall_ms !== undefined && (!Number.isInteger(doc.wall_ms) || doc.wall_ms < 0)) problems.push('wall_ms must be a non-negative integer');
   // The revision stamps: optional, but a present one that is empty or the wrong
   // type is worse than an absent one — `post` compares them to the AttemptRef.
-  for (const key of ['head_sha', 'base_sha', 'run_id']) {
+  for (const key of ['head_sha', 'base_sha', 'run_id', 'since_sha']) {
     if (doc[key] !== undefined && (typeof doc[key] !== 'string' || doc[key].trim() === '')) {
       problems.push(`${key} must be a non-empty string`);
     }
@@ -453,8 +457,13 @@ export function checkCoverage(coverage, examinedPaths, prFilePaths) {
 // Review payload
 // ---------------------------------------------------------------------------
 
+/**
+ * One finding as posted. `reply` parses this back: the lens tag, the delta
+ * scope tag and the `[P<n>]` severity are what a verdict row records, so a
+ * change to this shape is a change to the measurement log.
+ */
 function renderFinding(f) {
-  return `${f.lens ? `**lens:** ${f.lens}\n\n` : ''}**[${f.severity}] ${f.title}**\n\n${f.body}`;
+  return `${f.lens ? `**lens:** ${f.lens}\n\n` : ''}${f.scope === 'delta' ? '**scope:** delta\n\n' : ''}**[${f.severity}] ${f.title}**\n\n${f.body}`;
 }
 
 /**
@@ -562,6 +571,15 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
     die(7, `the slim-review loop posts two lenses (codex + astra); this post carries ${carried}. Run the second lens and pass both --findings files, or pass --single-lens "<why the pair could not run>" to post one and stamp the reason into the review body. Nothing was posted.`);
     return;
   }
+  // One review is one scope. A full handback and an amendment check (or two
+  // checks from different bases) describe different diffs, and one coverage
+  // footer cannot be true of both.
+  const scopes = [...new Set(docs.map((item) => item.since_sha ?? null))];
+  if (scopes.length > 1) {
+    die(5, `the handbacks mix scopes (${scopes.map((since) => since ? `amendment since ${since.slice(0, 7)}` : 'full PR').join(' + ')}); post one scope at a time. Nothing was posted.`);
+    return;
+  }
+  const since = scopes[0];
   const doc = {
     summary: docs.map((item) => item.summary).join('\n\n'),
     coverage: '',
@@ -575,11 +593,20 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
     findings: docs.flatMap((item) => item.findings.map((finding) => ({
       ...finding,
       lens: finding.lens ?? item.lens,
+      ...(since ? { scope: 'delta' } : {}),
     }))),
   };
   const repo = resolveRepo(opts.repo, opts.cwd);
 
   const reviewedHead = runGh(['pr', 'view', String(opts.pr), '--repo', repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd: opts.cwd }).trim();
+  // An amendment check was computed against the head its lens saw. A head that
+  // moved since then makes `<since>...<head>` a different diff from the one the
+  // reviewer read — the same staleness exit 6 means below.
+  const staleDelta = since ? docs.find((item) => item.head_sha !== reviewedHead) : undefined;
+  if (staleDelta) {
+    die(6, `the amendment check was run at ${String(staleDelta.head_sha ?? '(no head stamp)').slice(0, 7)} and the PR head is now ${reviewedHead.slice(0, 7)}; re-run the delta lenses against the new head. Nothing was posted.`);
+    return;
+  }
   const diffText = runGh(['pr', 'diff', String(opts.pr), '--repo', repo], { cwd: opts.cwd });
   const diffFiles = parseDiff(diffText);
   const diffHeaderCount = countChangedFiles(diffText);
@@ -593,17 +620,32 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
     // here would run checkCoverage over an empty set, get ok:true, and post.
     return;
   }
+  // Coverage ground truth is the diff the reviewer was shown: the whole PR, or
+  // for an amendment check the compare `<since>...<head>` its lens inlined.
+  // Anchoring stays on the PR diff either way — a review comment can only sit on
+  // a line of the pull request, and an amendment line is one.
+  let coveragePaths = prFilePaths;
+  if (since) {
+    const compare = JSON.parse(runGh(['api', `repos/${repo}/compare/${since}...${reviewedHead}`], { cwd: opts.cwd }));
+    const problem = amendmentProblem(compare, since, reviewedHead);
+    if (problem) {
+      die(5, `${problem}. Nothing was posted.`);
+      return;
+    }
+    coveragePaths = compare.files.map((file) => file.filename);
+    doc.summary = `**Amendment check:** this round reviewed only \`${since.slice(0, 7)}...${reviewedHead.slice(0, 7)}\` (${coveragePaths.length} file${coveragePaths.length === 1 ? '' : 's'}); the rest of the PR was reviewed in an earlier round.\n\n${doc.summary}`;
+  }
   // The receipt summarizes the normalized union, but the guard is deliberately
   // per-handback: a union cannot prove each independent reviewer covered the PR.
   doc.coverage = docs.length === 1
     ? docs[0].coverage
-    : `examined ${doc.examined_paths.length} of ${prFilePaths.length} changed files`;
+    : `examined ${doc.examined_paths.length} of ${coveragePaths.length} ${since ? 'amendment' : 'changed'} files`;
   const { anchored, offDiffChanged, offDiffUnchanged, offLine } =
     partitionFindings(doc.findings, diffFiles, prFilePaths);
   // A completed union follows automatically from completed individual sets, and
   // its former count comparison could only reject separator variants falsely.
   // Keep every handback fail-closed against the authoritative PR API instead.
-  const individualCoverageChecks = docs.map((item) => checkCoverage(item.coverage, item.examined_paths, prFilePaths));
+  const individualCoverageChecks = docs.map((item) => checkCoverage(item.coverage, item.examined_paths, coveragePaths));
   const individualFailures = individualCoverageChecks
     .map((check, i) => check.ok ? null : `findings file ${findingFiles[i]}: ${check.reason}`)
     .filter(Boolean);
@@ -658,6 +700,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   log(`pr             #${opts.pr}`);
   log(`head           ${reviewedHead.slice(0, 7)}`);
   log(`changed files  ${prFilePaths.length} from PR API (${diffHeaderCount} diff headers; ${diffFiles.size} with commentable lines)`);
+  if (since) log(`scope          amendment ${since.slice(0, 7)}...${reviewedHead.slice(0, 7)}, ${coveragePaths.length} file(s) — coverage is checked against these`);
   log(`findings       ${doc.findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff`);
   log(`coverage       ${coverageCheck.ok ? `OK${coverageCheck.countReason ? ` — Secondary count check: ${coverageCheck.countReason}` : ''}` : `FAILED — ${coverageCheck.reason}`}`);
   for (const w of warnings) {
@@ -781,13 +824,13 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log 
   const measureLog = opts.verdict ? resolveMeasureLog(opts.measureLog, opts.cwd, die) : null;
   if (opts.verdict && !measureLog) return;
 
-  let lens = null;
+  let judged = null;
   if (opts.verdict) {
     const original = JSON.parse(runGh(
       ['api', `repos/${repo}/pulls/comments/${opts.commentId}`],
       { cwd: opts.cwd },
     ));
-    lens = new RegExp(`\\*\\*lens:\\*\\*\\s*(${LENS_LIST})\\b`, 'i').exec(String(original.body ?? ''))?.[1]?.toLowerCase() ?? null;
+    judged = readPostedFinding(original);
   }
 
   const res = runGh(
@@ -804,9 +847,43 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log 
   log(`replied        ${JSON.parse(res).html_url}`);
   if (opts.verdict) {
     appendMeasurementRow(measureLog, {
-      ts: new Date().toISOString(), repo, pr: Number(opts.pr), comment_id: Number(opts.commentId), lens, verdict: opts.verdict,
+      ts: new Date().toISOString(), repo, pr: Number(opts.pr), comment_id: Number(opts.commentId), lens: judged.lens, verdict: opts.verdict,
+      head: judged.head, severity: judged.severity, scope: judged.scope,
+      adjudicator: opts.adjudicator ?? null,
+      ...(opts.dupOf === undefined ? {} : { dup_of: Number(opts.dupOf) }),
     });
   }
+}
+
+/** Verdicts a reply may record. `judgment`: no run can settle it; it stays a PR note. */
+export const VERDICTS = Object.freeze(['confirmed', 'refuted', 'note', 'judgment']);
+export const ADJUDICATORS = Object.freeze(['lane', 'conductor', 'operator']);
+
+/**
+ * What a verdict row needs from the comment it judges, read back from the
+ * posted comment itself (`renderFinding` wrote it).
+ *
+ * - `head`: `original_commit_id`, the commit the review was posted on. GitHub
+ *   moves `commit_id` as the PR advances; the original stays where the finding
+ *   was made.
+ * - `severity`: the `**[P<n>]` title prefix, or null when there is none (a
+ *   human's comment).
+ * - `scope`: `delta` when the comment carries the `**scope:** delta` tag that
+ *   `post` stamps on an amendment check; `full` for any other lens-tagged
+ *   comment, because a delta review is the only kind that writes the tag; null
+ *   for a comment this loop did not post.
+ */
+export function readPostedFinding(comment) {
+  const body = String(comment?.body ?? '');
+  const lens = new RegExp(`\\*\\*lens:\\*\\*\\s*(${LENS_LIST})\\b`, 'i').exec(body)?.[1]?.toLowerCase() ?? null;
+  const severity = /\*\*\[(P[123])\]/.exec(body)?.[1] ?? null;
+  const tagged = /\*\*scope:\*\*\s*(delta|full)\b/i.exec(body)?.[1]?.toLowerCase();
+  return {
+    lens,
+    head: comment?.original_commit_id ?? comment?.commit_id ?? null,
+    severity,
+    scope: tagged ?? (lens ? 'full' : null),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -827,28 +904,91 @@ const MEASURE_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transf
  * post reading three separate live listings can otherwise review three different
  * things. The sentinel assertion in the tests runs on the RENDERED prompt — a
  * grep of this source would match the source, not the delivery.
+ *
+ * Two optional inserts, each absent from the render when not supplied, so the
+ * baseline digest still pins the default:
+ *
+ * - `amendment` ({since, head_sha, text, not_reviewed}) turns the review into
+ *   an amendment check. The inlined diff is `<since>...<head>`, the file list
+ *   is the amendment's, and the reviewer is told the rest of the repository is
+ *   context and findings anchor inside the amendment. `isolated` adds the
+ *   pinned-checkout sentence the coordinated path needs.
+ * - `author_context` is the lane report's uncertainty block (`uncertainty`
+ *   subcommand), fenced under one fixed heading and framed as places to look.
  */
-export function buildReviewerPrompt({ pr, repo, prFilePaths, pinned_diff, manifest }) {
+export function buildReviewerPrompt({ pr, repo, prFilePaths, pinned_diff, manifest, amendment, isolated = pinned_diff !== undefined, author_context }) {
   const paths = prFilePaths ?? (manifest?.files ?? []).map((file) => file.filename);
-  const diffInstruction = pinned_diff === undefined
-    ? `Read the diff with \`gh pr diff ${pr} --repo ${repo}\`. Read surrounding source as needed to judge correctness.`
-    : 'Do not fetch the diff; review only the diff below. Read surrounding source as needed to judge correctness. The writer runs you in an isolated checkout at the pinned head below, with no installed dependencies. Report checks that need missing dependencies as unverified; do not install them.';
-  const pinnedSection = pinned_diff === undefined ? '' : [
-    '',
-    '',
-    `## Authoritative diff (pinned at \`${pinned_diff.head_sha}\`)`,
-    '',
-    `Captured from \`${pinned_diff.base_sha}...${pinned_diff.head_sha}\`. This is the whole change under review.`,
-    ...(pinned_diff.not_reviewed?.length > 0
-      ? ['', `Not reviewed (no patch in the pinned compare — binary, or a change with no text side): ${pinned_diff.not_reviewed.join(', ')}.`]
-      : []),
-    '',
-    pinned_diff.text,
-  ].join('\n');
-  return buildPromptText({ pr, repo, prFilePaths: paths, diffInstruction, pinnedSection });
+  const isolatedSentence = ' The writer runs you in an isolated checkout at the pinned head below, with no installed dependencies. Report checks that need missing dependencies as unverified; do not install them.';
+  let diffInstruction;
+  let pinnedSection;
+  if (amendment !== undefined) {
+    diffInstruction = `This is an amendment check. An earlier round reviewed this pull request in full; this round reviews only the change from \`${amendment.since}\` to \`${amendment.head_sha}\`. Do not fetch a diff; review only the amendment diff below. The rest of the repository is readable context: read surrounding source as needed to judge correctness, but every finding must anchor on a line inside the amendment diff.${isolated ? isolatedSentence : ''}`;
+    pinnedSection = renderDiffSection({
+      heading: `## Amendment diff (\`${amendment.since}...${amendment.head_sha}\`)`,
+      provenance: `Captured from \`${amendment.since}...${amendment.head_sha}\`. This is the whole change under review this round.`,
+      not_reviewed: amendment.not_reviewed,
+      text: amendment.text,
+    });
+  } else if (pinned_diff !== undefined) {
+    diffInstruction = `Do not fetch the diff; review only the diff below. Read surrounding source as needed to judge correctness.${isolated ? isolatedSentence : ''}`;
+    pinnedSection = renderDiffSection({
+      heading: `## Authoritative diff (pinned at \`${pinned_diff.head_sha}\`)`,
+      provenance: `Captured from \`${pinned_diff.base_sha}...${pinned_diff.head_sha}\`. This is the whole change under review.`,
+      not_reviewed: pinned_diff.not_reviewed,
+      text: pinned_diff.text,
+    });
+  } else {
+    diffInstruction = `Read the diff with \`gh pr diff ${pr} --repo ${repo}\`. Read surrounding source as needed to judge correctness.`;
+    pinnedSection = '';
+  }
+  return buildPromptText({
+    pr,
+    repo,
+    prFilePaths: paths,
+    diffInstruction,
+    pinnedSection,
+    listName: amendment === undefined ? 'PR' : 'amendment',
+    authorSection: author_context === undefined ? '' : renderAuthorContext(author_context),
+  });
 }
 
-function buildPromptText({ pr, repo, prFilePaths, diffInstruction, pinnedSection }) {
+function renderDiffSection({ heading, provenance, not_reviewed, text }) {
+  return [
+    '',
+    '',
+    heading,
+    '',
+    provenance,
+    ...(not_reviewed?.length > 0
+      ? ['', `Not reviewed (no patch in the pinned compare — binary, or a change with no text side): ${not_reviewed.join(', ')}.`]
+      : []),
+    '',
+    text,
+  ].join('\n');
+}
+
+/** The fixed heading the author's uncertainty block is delivered under. */
+export const AUTHOR_CONTEXT_HEADING = '## The author says these were not checked';
+
+/**
+ * Fence the author's block so its own headings and code fences stay inside it:
+ * the fence is one backtick longer than the longest backtick run in the text.
+ */
+function renderAuthorContext(text) {
+  const longest = Math.max(0, ...[...String(text).matchAll(/`+/g)].map((match) => match[0].length));
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `${AUTHOR_CONTEXT_HEADING}
+
+The lane that wrote this change listed what it did not verify: claims no control measures, forks it decided alone, ASSUMPTION lines, and follow-ups. These are places to look, not claims to trust. Check each against the code; nothing below is established, and nothing below is a reason to skip a check.
+
+${fence}markdown
+${String(text).replace(/\s+$/, '')}
+${fence}
+
+`;
+}
+
+function buildPromptText({ pr, repo, prFilePaths, diffInstruction, pinnedSection, listName = 'PR', authorSection = '' }) {
   return `Review pull request #${pr} in the repository at the current working directory.
 
 READ-ONLY: modify nothing; do not create or delete files, and do not run git write commands.
@@ -857,7 +997,7 @@ ${diffInstruction}
 
 When a changed file affects prompt/template generation, configuration resolution, or dispatch selection, identify one concrete claim, its consumer, and the path producing the consumer input. Inspect the real rendered or resolved result through an existing safe renderer/resolver, or a captured result from that same path. In \`summary\`, record the claim, command or supplied-evidence provenance, decisive excerpt, and any unverified limitation. Do not create worktrees, write source or configuration, install packages, run git writes, start services, or dispatch real actions to obtain evidence; use in-memory inputs and read-only paths. If that is impossible, state the limitation and ask the conductor for a render capture. A tool-less reviewer may assess supplied render evidence but must never claim to have run the renderer. Do not report a defect finding solely because a check was skipped; record the skip as a stated limitation, as Workspace Integrity requires. A match found inside quoted source or inlined artifacts does not prove delivery: where a slot or insertion is claimed, pass a distinct sentinel through the slot and a different marker through the artifacts, and confirm the sentinel lands outside the artifacts section.
 
-Authoritative PR file list:
+${authorSection}Authoritative ${listName} file list:
 ${prFilePaths.join('\n')}
 
 This list is coverage ground truth. Examine every entry and echo every entry you examined verbatim in \`examined_paths\`.${pinnedSection}
@@ -868,7 +1008,7 @@ Use severity P1 (blocks merge), P2 (should be resolved), or P3 (advisory). Each 
 
 Return ONLY JSON matching the schema. \`coverage\` is exactly \`examined ${prFilePaths.length} of ${prFilePaths.length} changed files\`; \`examined_paths\` echoes the authoritative list entries you examined verbatim.
 
-Cite repo-relative paths exactly as they appear in the authoritative PR file list.`;
+Cite repo-relative paths exactly as they appear in the authoritative ${listName} file list.`;
 }
 
 function defaultRun(program, args, { input, cwd } = {}) {
@@ -979,9 +1119,33 @@ export function cmdLens(opts, deps = {}) {
   return cmdLensStandalone(opts, deps);
 }
 
+/**
+ * Read `--context-file` once, before anything is spent. Absent flag →
+ * undefined (the prompt is the baseline); a missing or blank file → exit 2,
+ * because an empty uncertainty block is a finding about the report, and the
+ * `uncertainty` extractor never writes one.
+ */
+function readAuthorContext(path, die) {
+  if (path === undefined) return { ok: true, text: undefined };
+  let text;
+  try {
+    text = readFileSync(resolve(path), 'utf8');
+  } catch (err) {
+    die(2, `--context-file could not be read: ${err.message}`);
+    return { ok: false };
+  }
+  if (text.trim() === '') {
+    die(2, `--context-file is empty: ${path}. An empty uncertainty block is a finding about the lane report, not a clean one; re-run \`uncertainty\` on the report.`);
+    return { ok: false };
+  }
+  return { ok: true, text };
+}
+
 /** Run exactly one model lens. The process runner is injected so tests never spawn. */
 function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.log, now = Date.now, findCodexExe = defaultCodexExe, env = process.env, homeDir } = {}) {
   if (managedGate({ command: 'lens', repo: opts.repo, env, homeDir, log, die })) return;
+  const authorContext = readAuthorContext(opts.contextFile, die);
+  if (!authorContext.ok) return;
   const cwd = resolve(opts.cwd ?? process.cwd());
   const repo = opts.repo;
   const reasoning = opts.reasoning ?? LENS_MODELS[opts.lens].reasoning;
@@ -1001,12 +1165,34 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
   const tempDir = mkdtempSync(join(tmpdir(), 'slim-review-lens-'));
   const tempOut = join(tempDir, 'findings.json');
   const argv = lensArgv(tempOut);
+  const ghRun = (args, ghOpts) => run(process.platform === 'win32' ? 'gh.exe' : 'gh', args, ghOpts);
+  // `prFilePaths` is the coverage ground truth: the PR's files, or under
+  // --since the amendment's, taken from the same compare payload the prompt
+  // inlines so the list and the diff cannot disagree.
   let prFilePaths;
+  let amendment;
+  let amendmentRefusal;
   try {
-    prFilePaths = fetchPrFilePaths(repo, opts.pr, cwd, (args, ghOpts) => run(process.platform === 'win32' ? 'gh.exe' : 'gh', args, ghOpts));
+    if (opts.since) {
+      const head = String(ghRun(['pr', 'view', String(opts.pr), '--repo', repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd })).trim();
+      const compare = JSON.parse(ghRun(['api', `repos/${repo}/compare/${opts.since}...${head}`], { cwd }));
+      amendmentRefusal = amendmentProblem(compare, opts.since, head);
+      if (!amendmentRefusal) {
+        const rendered = renderPinnedDiff(compare);
+        amendment = { since: opts.since, head_sha: head, text: rendered.text, not_reviewed: rendered.not_reviewed };
+        prFilePaths = compare.files.map((file) => file.filename);
+      }
+    } else {
+      prFilePaths = fetchPrFilePaths(repo, opts.pr, cwd, ghRun);
+    }
   } catch (err) {
     rmSync(tempDir, { recursive: true, force: true });
-    die(4, `could not fetch PR files for ${repo}#${opts.pr}: ${err.message}`);
+    die(4, `could not fetch ${opts.since ? 'the amendment compare' : 'PR files'} for ${repo}#${opts.pr}: ${err.message}`);
+    return;
+  }
+  if (amendmentRefusal) {
+    rmSync(tempDir, { recursive: true, force: true });
+    die(5, `${amendmentRefusal}; reviewer was not run.`);
     return;
   }
   if (prFilePaths.length === 0) {
@@ -1014,7 +1200,13 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     die(5, `the PR API returned no changed files for ${repo}#${opts.pr}; reviewer was not run.`);
     return;
   }
-  const prompt = buildReviewerPrompt({ pr: opts.pr, repo, prFilePaths });
+  const prompt = buildReviewerPrompt({
+    pr: opts.pr,
+    repo,
+    prFilePaths,
+    ...(amendment ? { amendment, isolated: false } : {}),
+    ...(authorContext.text === undefined ? {} : { author_context: authorContext.text }),
+  });
   if (opts.promptOut) {
     mkdirSync(dirname(promptPath), { recursive: true });
     writeFileSync(promptPath, prompt, 'utf8');
@@ -1060,6 +1252,12 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     doc.reasoning = reasoning;
     doc.wall_ms = wallMs;
     doc.findings = doc.findings.map((finding) => ({ ...finding, lens: opts.lens }));
+    if (amendment) {
+      // `post` reads these two back: the scope, and the head the amendment
+      // diff was computed against.
+      doc.since_sha = amendment.since;
+      doc.head_sha = amendment.head_sha;
+    }
     mkdirSync(dirname(resolve(opts.out)), { recursive: true });
     writeFileSync(opts.out, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
     const counts = countSeverities(doc.findings);
@@ -1067,6 +1265,7 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     appendMeasurementRow(measureLog, {
       ts: new Date().toISOString(), repo, pr: Number(opts.pr), lens: opts.lens, model, reasoning, wall_ms: wallMs,
       ...counts, examined: doc.examined_paths.length, coverage: doc.coverage, ...(dirty.length > 0 ? { dirty: true } : {}),
+      ...(amendment ? { scope: 'delta', since: amendment.since } : {}),
     });
     if (dirty.length > 0) {
       die(4, `reviewer added worktree changes:\n${dirty.join('\n')}`);
@@ -1273,6 +1472,31 @@ export function renderPinnedDiff(comparePayload) {
     sections.push(`diff --git a/${file.filename} b/${file.filename}\n--- a/${file.filename}\n+++ b/${file.filename}\n${file.patch}`);
   }
   return { text: sections.join('\n'), not_reviewed: notReviewed, bytes };
+}
+
+/** GitHub's compare API returns at most this many files, with no page past it. */
+export const COMPARE_FILE_CAP = 300;
+
+/**
+ * Why a compare cannot serve as an amendment diff, or null when it can.
+ *
+ * `since` must be an ancestor of the head (`status: ahead`): after a rebase or
+ * a force-push the three-dot compare runs from a merge base, which carries
+ * changes nobody amended. A compare at the file cap may be truncated, and a
+ * truncated list would pass a partial review as complete. Either way there is
+ * no amendment to check, and how to review that head is the conductor's call,
+ * never a silent second full-PR round.
+ */
+export function amendmentProblem(payload, since, head) {
+  const at = `${String(since).slice(0, 7)}...${String(head).slice(0, 7)}`;
+  if (payload?.status === 'identical') return `the amendment ${at} changes nothing`;
+  if (payload?.status !== 'ahead') {
+    return `${String(since).slice(0, 7)} is not an ancestor of the head ${String(head).slice(0, 7)} (compare status: ${payload?.status ?? 'missing'}), so there is no amendment diff: amend with commits on top of the reviewed head, or the conductor decides how this head is reviewed`;
+  }
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  if (files.length === 0) return `the amendment ${at} lists no changed files`;
+  if (files.length >= COMPARE_FILE_CAP) return `the amendment ${at} lists ${files.length} files, the compare API's cap, so the list may be truncated; the conductor decides how this head is reviewed`;
+  return null;
 }
 
 // --- the review POST -------------------------------------------------------
@@ -2003,6 +2227,10 @@ async function cmdLensCoordinated(opts, {
     die(2, `could not read the attempt-ref file: ${err.message}`);
     return undefined;
   }
+  // Same class as the attempt-ref file: a local input the invocation cannot
+  // run without, read before any coordinator call so it costs no start.
+  const authorContext = readAuthorContext(opts.contextFile, die);
+  if (!authorContext.ok) return undefined;
   const attemptRef = file.attempt_ref;
   const resolved = resolveCoordinator({ env, homeDir, fileCoordinator: file.coordinator });
   if (!resolved.ok) {
@@ -2079,26 +2307,68 @@ async function cmdLensCoordinated(opts, {
     return missing.length > 0 || extra.length > 0 ? { missing, extra } : null;
   };
   const promptPath = opts.promptOut ? resolve(opts.promptOut) : join(tmpdir(), `slim-review-${opts.lens}-${attemptRef.pr}-prompt.txt`);
+  // --since keeps the attempt's base and manifest exactly as claimed — the
+  // pinned compare is still fetched and still checked against the manifest
+  // below — and adds a second compare from `since` to the same pinned head.
+  // That amendment is what the model is shown and what coverage is held to.
+  // The coordinator only references the document, so nothing in the claim or
+  // attempt protocol changes.
+  const since = opts.since;
+  const fetchAmendment = () => JSON.parse(runGh(['api', `repos/${attemptRef.repo}/compare/${since}...${attemptRef.head_sha}`], { cwd }));
+  const contextArg = authorContext.text === undefined ? {} : { author_context: authorContext.text };
+  /** The prompt, the coverage paths and the patch bytes, for the full or the amendment input. */
+  const reviewInput = (pinnedPayload, amendmentPayload) => {
+    if (since) {
+      const rendered = renderPinnedDiff(amendmentPayload);
+      const paths = amendmentPayload.files.map((entry) => entry.filename);
+      return {
+        paths,
+        bytes: rendered.bytes,
+        prompt: buildReviewerPrompt({
+          pr: attemptRef.pr,
+          repo: attemptRef.repo,
+          prFilePaths: paths,
+          amendment: { since, head_sha: attemptRef.head_sha, text: rendered.text, not_reviewed: rendered.not_reviewed },
+          isolated: true,
+          ...contextArg,
+        }),
+      };
+    }
+    const rendered = renderPinnedDiff(pinnedPayload);
+    return {
+      paths: manifestPaths,
+      bytes: rendered.bytes,
+      prompt: buildReviewerPrompt({
+        pr: attemptRef.pr,
+        repo: attemptRef.repo,
+        prFilePaths: manifestPaths,
+        manifest,
+        pinned_diff: { head_sha: attemptRef.head_sha, base_sha: attemptRef.base_sha, text: rendered.text, not_reviewed: rendered.not_reviewed },
+        ...contextArg,
+      }),
+    };
+  };
 
   // The dry run renders from the same pinned inputs and stops before anything
   // mutating: a start consumed by a preview is a start the real run cannot have.
   if (opts.dryRun) {
     let payload;
+    let amendmentPayload;
     try {
       payload = fetchCompare();
+      if (since) amendmentPayload = fetchAmendment();
     } catch (err) {
       emit({ outcome: 'failed', reason: 'gh-failure' });
       die(4, `could not fetch the pinned compare: ${err.message}`);
       return undefined;
     }
-    const rendered = renderPinnedDiff(payload);
-    const prompt = buildReviewerPrompt({
-      pr: attemptRef.pr,
-      repo: attemptRef.repo,
-      prFilePaths: manifestPaths,
-      manifest,
-      pinned_diff: { head_sha: attemptRef.head_sha, base_sha: attemptRef.base_sha, text: rendered.text, not_reviewed: rendered.not_reviewed },
-    });
+    const problem = since ? amendmentProblem(amendmentPayload, since, attemptRef.head_sha) : null;
+    if (problem) {
+      emit({ outcome: 'refused', reason: 'input-mismatch', dry_run: true });
+      die(1, `${problem}; nothing was rendered.`);
+      return undefined;
+    }
+    const { prompt } = reviewInput(payload, amendmentPayload);
     if (opts.promptOut) {
       mkdirSync(dirname(promptPath), { recursive: true });
       writeFileSync(promptPath, prompt, 'utf8');
@@ -2179,23 +2449,29 @@ async function cmdLensCoordinated(opts, {
       message: `the pinned compare does not match the manifest (missing: ${disagreement.missing.join(', ') || 'none'}; extra: ${disagreement.extra.join(', ') || 'none'}); the model was not invoked.`,
     });
   }
-  const rendered = renderPinnedDiff(payload);
-  if (rendered.bytes > maxDiffBytes) {
+  let amendmentPayload;
+  if (since) {
+    try {
+      amendmentPayload = fetchAmendment();
+    } catch (err) {
+      return finish({ outcome: 'failed', reason: 'gh-failure', message: `could not fetch the amendment compare: ${err.message}`, exitCode: 4 });
+    }
+    const problem = amendmentProblem(amendmentPayload, since, attemptRef.head_sha);
+    if (problem) {
+      return finish({ outcome: 'refused', reason: 'input-mismatch', extra: { since }, message: `${problem}; the model was not invoked.` });
+    }
+  }
+  const input = reviewInput(payload, amendmentPayload);
+  if (input.bytes > maxDiffBytes) {
     return finish({
       outcome: 'refused',
       reason: 'diff-too-large',
-      extra: { patch_bytes: rendered.bytes, max_diff_bytes: maxDiffBytes },
-      message: `the pinned diff is ${rendered.bytes} bytes and the bound is ${maxDiffBytes}; the model was not invoked.`,
+      extra: { patch_bytes: input.bytes, max_diff_bytes: maxDiffBytes },
+      message: `the ${since ? 'amendment' : 'pinned'} diff is ${input.bytes} bytes and the bound is ${maxDiffBytes}; the model was not invoked.`,
     });
   }
 
-  const prompt = buildReviewerPrompt({
-    pr: attemptRef.pr,
-    repo: attemptRef.repo,
-    prFilePaths: manifestPaths,
-    manifest,
-    pinned_diff: { head_sha: attemptRef.head_sha, base_sha: attemptRef.base_sha, text: rendered.text, not_reviewed: rendered.not_reviewed },
-  });
+  const { prompt } = input;
   if (opts.promptOut) {
     mkdirSync(dirname(promptPath), { recursive: true });
     writeFileSync(promptPath, prompt, 'utf8');
@@ -2204,7 +2480,7 @@ async function cmdLensCoordinated(opts, {
   let result;
   try {
     checkout = createReviewWorktree({ repo: attemptRef.repo, headSha: attemptRef.head_sha, run, diag });
-    result = runLensModel({ lens: opts.lens, cwd: checkout.cwd, prompt, prFilePaths: manifestPaths, run, findCodexExe, now });
+    result = runLensModel({ lens: opts.lens, cwd: checkout.cwd, prompt, prFilePaths: input.paths, run, findCodexExe, now });
     if (result.ok) {
       try { checkout.assertHead(); }
       catch (err) { result = { ok: false, reason: 'worktree-dirty', message: err.message }; }
@@ -2230,6 +2506,7 @@ async function cmdLensCoordinated(opts, {
   doc.base_sha = attemptRef.base_sha;
   doc.attempt = attemptRef.attempt;
   doc.run_id = attemptRef.run_id;
+  if (since) doc.since_sha = since;
 
   const documentPath = opts.out ? resolve(opts.out) : join(dirname(resolve(opts.attemptRef)), `${opts.lens}.json`);
   mkdirSync(dirname(documentPath), { recursive: true });
@@ -2244,6 +2521,7 @@ async function cmdLensCoordinated(opts, {
       ts: new Date().toISOString(), repo: attemptRef.repo, pr: Number(attemptRef.pr), lens: opts.lens,
       model: result.model, reasoning: result.reasoning, wall_ms: result.wallMs, ...countSeverities(doc.findings),
       examined: doc.examined_paths.length, coverage: doc.coverage, attempt: attemptRef.attempt, run_id: attemptRef.run_id,
+      ...(since ? { scope: 'delta', since } : {}),
     },
   });
   return finish({ outcome: 'ok', documentPath, documentSha256, extra: { document_sha256: documentSha256 } });
@@ -2446,13 +2724,39 @@ async function cmdPostCoordinated(opts, {
     return stop('revision-mismatch', { marker: markerFromDocuments }, `the marker built from the documents disagrees with the marker built from this attempt. Nothing was posted.`, headNow);
   }
 
+  // 6b. one scope per review: both documents full, or both the same amendment
+  const sinceValues = [...new Set(documents.map((item) => item.doc.since_sha ?? null))];
+  if (sinceValues.length > 1) {
+    return stop('revision-mismatch', { since_values: sinceValues },
+      `the documents mix scopes (${sinceValues.map((value) => value ? `amendment since ${value.slice(0, 7)}` : 'full PR').join(' + ')}); one review is one scope. Nothing was posted.`, headNow);
+  }
+  const since = sinceValues[0];
+
   // 7. per-document coverage against the PINNED manifest — the check that
-  //    already existed, pointed at the manifest instead of a live listing.
+  //    already existed, pointed at the manifest instead of a live listing. An
+  //    amendment check is held to the amendment's files instead, from the same
+  //    `<since>...<pinned head>` compare its lens was shown.
+  let coveragePaths = manifestPaths;
+  if (since) {
+    let amendmentPayload;
+    try {
+      amendmentPayload = JSON.parse(runGh(['api', `repos/${attemptRef.repo}/compare/${since}...${attemptRef.head_sha}`], { cwd: opts.cwd }));
+    } catch (err) {
+      emit({ outcome: 'failed', reason: 'gh-failure' });
+      die(4, `could not fetch the amendment compare: ${err.message}. Nothing was posted.`);
+      return undefined;
+    }
+    const problem = amendmentProblem(amendmentPayload, since, attemptRef.head_sha);
+    if (problem) {
+      return stop('coverage-mismatch', { since }, `${problem}. Nothing was posted.`);
+    }
+    coveragePaths = amendmentPayload.files.map((entry) => entry.filename);
+  }
   for (const item of documents) {
-    const check = checkCoverage(item.doc.coverage, item.doc.examined_paths, manifestPaths);
+    const check = checkCoverage(item.doc.coverage, item.doc.examined_paths, coveragePaths);
     if (!check.ok) {
       return stop('coverage-mismatch', { lens: item.lens, coverage_reason: check.reason },
-        `the ${item.lens} document does not cover the pinned manifest: ${check.reason}. Nothing was posted.`);
+        `the ${item.lens} document does not cover the ${since ? 'amendment' : 'pinned manifest'}: ${check.reason}. Nothing was posted.`);
     }
   }
 
@@ -2467,7 +2771,11 @@ async function cmdPostCoordinated(opts, {
   }
   const rendered = renderPinnedDiff(comparePayload);
   const diffFiles = parseDiff(rendered.text);
-  const findings = documents.flatMap((item) => item.doc.findings.map((finding) => ({ ...finding, lens: finding.lens ?? item.doc.lens ?? item.lens })));
+  const findings = documents.flatMap((item) => item.doc.findings.map((finding) => ({
+    ...finding,
+    lens: finding.lens ?? item.doc.lens ?? item.lens,
+    ...(since ? { scope: 'delta' } : {}),
+  })));
   const { anchored, offDiffChanged, offDiffUnchanged, offLine } = partitionFindings(findings, diffFiles, manifestPaths);
   const lensCounts = stampedLenses.map((lens) => {
     const own = findings.filter((finding) => finding.lens === lens);
@@ -2478,9 +2786,12 @@ async function cmdPostCoordinated(opts, {
       P3: own.filter((finding) => finding.severity === 'P3').length,
     };
   });
+  const summary = documents.map((item) => item.doc.summary).join('\n\n');
   const payload = buildReviewPayload({
-    summary: documents.map((item) => item.doc.summary).join('\n\n'),
-    coverage: `examined ${manifestPaths.length} of ${manifestPaths.length} changed files`,
+    summary: since
+      ? `**Amendment check:** this round reviewed only \`${since.slice(0, 7)}...${attemptRef.head_sha.slice(0, 7)}\` (${coveragePaths.length} file${coveragePaths.length === 1 ? '' : 's'}); the rest of the PR was reviewed in an earlier round.\n\n${summary}`
+      : summary,
+    coverage: `examined ${coveragePaths.length} of ${coveragePaths.length} ${since ? 'amendment' : 'changed'} files`,
     anchored,
     offDiffChanged,
     offDiffUnchanged,
@@ -2601,22 +2912,135 @@ async function cmdPostCoordinated(opts, {
 }
 
 // ---------------------------------------------------------------------------
+// Author uncertainty
+//
+// The lane knows where it did not check; the reviewers should hear it. What
+// crosses is the report's uncertainty and never its confidence: outcome,
+// controls, tests and receipted assertions stay behind, because a reviewer told
+// what passed is being told where not to look.
+// ---------------------------------------------------------------------------
+
+/** The report headings copied verbatim, matched on their text at any level. */
+export const UNCERTAINTY_HEADINGS = Object.freeze([
+  'Claims no control measures',
+  'Forks I decided that the brief did not settle',
+  'Follow-ups',
+]);
+
+/**
+ * Pull the uncertainty out of a lane report, verbatim.
+ *
+ * A matched section runs from its heading to the next heading at the same or
+ * a higher level, so `### Claims…` stops at `## Follow-ups` and `## Follow-ups`
+ * stops at `## Timing`. An `## Amendment N` with its own `#### Claims…` is
+ * matched again, in document order. Lines inside code fences are never read as
+ * headings. Outside the copied sections, every line containing `ASSUMPTION` is
+ * kept on its own. Nothing else is copied.
+ */
+export function extractUncertainty(markdown) {
+  const wanted = new Set(UNCERTAINTY_HEADINGS);
+  const sections = [];
+  const assumptionLines = [];
+  let current = null;
+  let fence = null;
+  const close = () => {
+    if (!current) return;
+    while (current.lines.length > 1 && current.lines.at(-1).trim() === '') current.lines.pop();
+    sections.push({ heading: current.heading, level: current.level, text: current.lines.join('\n') });
+    current = null;
+  };
+  for (const line of String(markdown).split(/\r?\n/)) {
+    const fenceMark = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence === null && fenceMark) {
+      fence = fenceMark;
+    } else if (fence !== null && fenceMark && fenceMark[0] === fence[0] && fenceMark.length >= fence.length && line.trim() === fenceMark) {
+      fence = null;
+    } else if (fence === null) {
+      const heading = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+      if (heading) {
+        const level = heading[1].length;
+        if (current && level <= current.level) close();
+        if (!current && wanted.has(heading[2].trim())) {
+          current = { heading: heading[2].trim(), level, lines: [line] };
+          continue;
+        }
+      }
+    }
+    if (current) current.lines.push(line);
+    else if (line.includes('ASSUMPTION')) assumptionLines.push(line);
+  }
+  close();
+  return { sections, assumptionLines };
+}
+
+/** The heading the out-of-section ASSUMPTION lines are gathered under. */
+export const ASSUMPTION_LINES_HEADING = '### Lines marked ASSUMPTION elsewhere in the report';
+
+/**
+ * Render the extraction, or say why there is nothing to render. A report with
+ * none of the three headings, or whose extraction is blank, is refused: an
+ * empty uncertainty block is a finding about the report, not a clean one.
+ */
+export function renderUncertainty({ sections, assumptionLines }, source) {
+  if (sections.length === 0) {
+    return { ok: false, problem: `${source} has none of the uncertainty headings (${UNCERTAINTY_HEADINGS.map((h) => `"${h}"`).join(', ')}). The lane contract requires them; an empty uncertainty block is a finding about the report, not a clean one.` };
+  }
+  const bodies = sections.map((section) => section.text.split(/\r?\n/).slice(1).join('\n')).join('\n');
+  if (bodies.trim() === '' && assumptionLines.length === 0) {
+    return { ok: false, problem: `${source} carries the uncertainty headings with nothing under them. "None" is an answer; a blank section is not.` };
+  }
+  const parts = [`<!-- Extracted verbatim by \`pr-review.mjs uncertainty\` from ${source}: the author's uncertainty sections only. -->`];
+  for (const section of sections) parts.push(section.text);
+  if (assumptionLines.length > 0) parts.push([ASSUMPTION_LINES_HEADING, '', ...assumptionLines].join('\n'));
+  return { ok: true, text: `${parts.join('\n\n')}\n` };
+}
+
+/** `uncertainty --report <lane-report.md> --out <file>` */
+export function cmdUncertainty(opts, { die = fail, log = console.log } = {}) {
+  let markdown;
+  try {
+    markdown = readFileSync(resolve(opts.report), 'utf8');
+  } catch (err) {
+    die(2, `--report could not be read: ${err.message}`);
+    return;
+  }
+  const rendered = renderUncertainty(extractUncertainty(markdown), basename(opts.report));
+  if (!rendered.ok) {
+    die(3, `${rendered.problem} Nothing was written.`);
+    return;
+  }
+  mkdirSync(dirname(resolve(opts.out)), { recursive: true });
+  writeFileSync(resolve(opts.out), rendered.text, 'utf8');
+  log(`wrote          ${opts.out}`);
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
 /** Commands that are about an installation or a login, never about one PR. */
-const NO_PR_COMMANDS = new Set(['managed', 'identity', 'recover']);
+const NO_PR_COMMANDS = new Set(['managed', 'identity', 'recover', 'uncertainty']);
 
 const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
 
+  uncertainty --report <lane-report.md> --out <file>
+           copies the report's uncertainty verbatim — "Claims no control
+           measures", "Forks I decided that the brief did not settle",
+           "Follow-ups", and every other line containing ASSUMPTION — and
+           nothing else. Exit 3 when the report has none of those sections
   lens     --pr <n> --repo owner/name --lens codex|astra|opus --out <findings.json>
            [--reasoning low|medium|high] [--cwd <abs repo or worktree>]
            [--prompt-out <path>] [--measure-log <path>] [--dry-run]
+           [--context-file <uncertainty.md>]   inlined under "The author says these were not checked"
+           [--since <reviewed head sha>]       amendment check: review only <sha>...<PR head>,
+                                               coverage held to that diff's files
   post     --pr <n> --repo owner/name --findings <file> --findings <file> [--dry-run] [--force-post]
            [--single-lens "<reason>"]   posting one lens is exit 7 unless the reason is given (it is stamped into the review)
   threads  --pr <n> --repo owner/name [--unresolved]
   reply    --pr <n> --repo owner/name --comment-id <id> --body-file <file>
-           [--verdict confirmed|refuted|note] [--measure-log <path>]
+           [--verdict confirmed|refuted|note|judgment] [--adjudicator lane|conductor|operator]
+           [--dup-of <comment id>] [--measure-log <path>]
+           judgment = cannot be settled by running anything; left as a PR note
   managed  --repo owner/name
            read-only: prints how this installation resolves that repository —
            standalone, managed, or managed-config-missing — with the directory
@@ -2636,7 +3060,7 @@ On a managed repository (see below), the coordinated flow replaces steps 2 and 3
            allocates one attempt for the current head and writes the attempt-ref
            file (owner-only) whose path it prints
   lens     --attempt-ref <file> --lens codex|astra [--out <findings.json>]
-           [--prompt-out <path>] [--dry-run]
+           [--prompt-out <path>] [--dry-run] [--context-file <file>] [--since <sha>]
            one lens execution against the pinned diff. --out defaults to the
            attempt's own directory
   post     --attempt-ref <file> [--dry-run]
@@ -2722,6 +3146,23 @@ export function parseArgs(argv) {
       case '--prompt-out': opts.promptOut = next(); break;
       case '--measure-log': opts.measureLog = next(); break;
       case '--verdict': opts.verdict = next(); break;
+      case '--adjudicator': opts.adjudicator = next(); break;
+      case '--dup-of': {
+        const v = next();
+        if (!/^\d+$/.test(v)) fail(2, '--dup-of must be a numeric comment id');
+        opts.dupOf = v;
+        break;
+      }
+      case '--context-file': opts.contextFile = next(); break;
+      case '--report': opts.report = next(); break;
+      case '--since': {
+        // A commit sha, never a ref name: a branch name would move under the
+        // check, and the amendment it named would no longer be the one reviewed.
+        const v = next();
+        if (!/^[0-9a-f]{7,40}$/i.test(v)) fail(2, `--since must be a commit sha (7-40 hex characters), got: ${JSON.stringify(v)}`);
+        opts.since = v;
+        break;
+      }
       case '--comment-id': opts.commentId = next(); break;
       case '--body-file': opts.bodyFile = next(); break;
       case '--dry-run': opts.dryRun = true; break;
@@ -2846,8 +3287,14 @@ function main(argv) {
       if (!opts.repo) fail(2, 'reply needs --repo owner/name');
       if (!opts.commentId || !/^\d+$/.test(String(opts.commentId))) fail(2, 'reply needs --comment-id <numeric id>');
       if (!opts.bodyFile) fail(2, 'reply needs --body-file <file>');
-      if (opts.verdict && !['confirmed', 'refuted', 'note'].includes(opts.verdict)) fail(2, 'reply --verdict must be confirmed, refuted, or note');
+      if (opts.verdict && !VERDICTS.includes(opts.verdict)) fail(2, `reply --verdict must be one of ${VERDICTS.join(', ')}`);
+      if (opts.adjudicator !== undefined && !ADJUDICATORS.includes(opts.adjudicator)) fail(2, `reply --adjudicator must be one of ${ADJUDICATORS.join(', ')}`);
+      if ((opts.adjudicator !== undefined || opts.dupOf !== undefined) && !opts.verdict) fail(2, 'reply --adjudicator and --dup-of describe a verdict row; pass --verdict too');
       return cmdReply(opts);
+    case 'uncertainty':
+      if (!opts.report) fail(2, 'uncertainty needs --report <lane-report.md>');
+      if (!opts.out) fail(2, 'uncertainty needs --out <file>');
+      return cmdUncertainty(opts);
     case 'managed':
       if (!opts.repo) fail(2, 'managed needs --repo owner/name');
       return cmdManaged(opts);

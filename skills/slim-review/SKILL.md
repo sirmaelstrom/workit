@@ -74,6 +74,27 @@ overrides the per-lens JSONL destination; `--dry-run` prints the resolved argv
 and prompt path without running a reviewer. Use `--prompt-out <path>` when you
 need to retain that exact grounded prompt for inspection.
 
+### The author's uncertainty goes to both reviewers
+
+When the PR comes from a lane with a report, extract the report's uncertainty
+and hand it to both lenses:
+
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" uncertainty \
+  --report "<lane report.md>" --out "$REVIEW_DIR/uncertainty.md"
+# then add to each lens call:  --context-file "$REVIEW_DIR/uncertainty.md"
+```
+
+`uncertainty` copies four things verbatim: `### Claims no control measures`,
+`### Forks I decided that the brief did not settle`, `## Follow-ups`, and every
+other line containing `ASSUMPTION`. It copies nothing else. The outcome, the
+controls, the tests and the receipted assertions stay out, because a reviewer
+told what passed has been told where not to look. A report with none of those
+sections is exit 3: an empty uncertainty block is a finding about the report.
+The lens inlines the block under **"The author says these were not checked"**,
+framed as places to look and not claims to trust. Both lens paths do this,
+standalone and `--attempt-ref`.
+
 Why two: on observatory#620 (2026-09-09, paired on a byte-identical prompt)
 Terra@high and Astra@low each found a real defect the other missed, neither
 produced a false finding, and Astra was better calibrated on severity — Terra
@@ -239,6 +260,10 @@ pull request.
 
 ## 4. Adjudicate
 
+**The cap: one paired review of the whole PR, then, after a nontrivial
+amendment, one delta-only pass per lens. There is no second full-PR review and
+no third round at T1.**
+
 This is the half that caught real defects three times out of three when it was
 run by hand, and it is the half no script can do.
 
@@ -263,31 +288,80 @@ signal, which is the one thing this skill exists to prevent. Adjudicate from the
 PR page in that case. Full `pageInfo` pagination is a known follow-up, not
 implemented here.
 
-For **each** thread, in order:
+**The lane adjudicates every finding, in one batch.** The lane that wrote the
+PR already has the code loaded; the conductor would have to reload it for each
+finding. The lane gives each finding exactly one of three outcomes:
 
-1. **Verify against the code, not the claim.** Open the cited file and the paths
-   it depends on. The reviewer had the diff and one pass; you have the repo and
-   the intent. Treat its finding as a hypothesis.
-2. **Reach a verdict, and say which.** Confirmed, refuted, or out of scope. A
-   finding you neither fix nor refute is the one failure mode of this loop.
-3. **Fix confirmed findings on the branch**, then push.
-4. **Reply on the thread** with the verdict and its evidence — the commit sha for
-   a fix, the reason for a refusal:
+1. **Fixed**, with a control seen failing: the test goes red with the fix
+   reverted. The fix commit is the evidence.
+2. **Refuted**, with a quoted observation: the guard the reviewer did not read,
+   the caller that makes the state unreachable, a command and its output.
+3. **Judgment**: nothing you can run settles it. It stays on the PR as a note
+   for the operator.
+
+A finding with none of the three is the one failure mode of this loop. The lane
+writes the batch as a table in its report's `## Amendment N`, one row per
+comment id (verdict, evidence, commit), per the lane contract.
+
+**The conductor re-reads only the refutations.** Author bias hides in a
+refutation, so the conductor checks each quoted observation against the code.
+A fix needs no second look, because its control is the evidence.
+
+Then reply on each thread with the verdict and who reached it:
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" reply \
   --pr <n> --repo <owner/name> --comment-id <id> --body-file "$REVIEW_DIR/reply-<id>.md" \
-  --verdict confirmed|refuted|note
+  --verdict confirmed|refuted|note|judgment \
+  [--adjudicator lane|conductor|operator] [--dup-of <other lens's comment id>]
 ```
 
 Write the reply to a file and pass `--body-file`; reply bodies quote code and
-would not survive being typed into a shell.
+would not survive being typed into a shell. The verdict row records the
+comment's lens, `head` (the commit the review was posted on), `severity` (the
+posted `[P<n>]`), `scope` (`full`, or `delta` when the comment carries the
+`**scope:** delta` tag), and `adjudicator` (null when the flag is absent).
+Pass `--dup-of` when the other lens raised the same defect; that row is the
+overlap record.
 
 **A refutation is worth as much as a fix and costs more to skip.** Say what the
 reviewer missed — the guard it did not read, the caller that makes the state
 unreachable, the invariant that already holds. Three of the wrong findings this
 loop has produced were reachability claims about code the reviewer never opened;
 the reply is where that gets recorded rather than re-litigated next time.
+
+### Round two: the amendment only
+
+A nontrivial amendment has not converged until something checks it: a paired
+review of amended heads has found real defects inside the amended code. Check
+the amendment, not the PR again. A second full pass draws a fresh sample over
+code nobody changed. Run one delta pass per lens against the head round one
+reviewed:
+
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens --pr <n> --repo <owner/name> \
+  --lens codex --since <reviewed head sha> --cwd "<checkout>" --out "$REVIEW_DIR/codex-delta.json" \
+  [--context-file "$REVIEW_DIR/uncertainty.md"]
+# the same with --lens astra, then:
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post --pr <n> --repo <owner/name> \
+  --findings "$REVIEW_DIR/codex-delta.json" --findings "$REVIEW_DIR/astra-delta.json"
+```
+
+The lens inlines the compare `<reviewed head>...<PR head>`, lists only its
+files, and tells the reviewer this is an amendment check: the rest of the
+repository is readable context, and findings anchor inside the amendment.
+Coverage is held to the amendment's files. `post` checks each handback against
+the same compare, anchors comments on the PR diff, tags each one
+`**scope:** delta`, and refuses a mix of full and delta handbacks (exit 5) or a
+head that moved after the delta lens ran (exit 6). `--since` takes a sha. It
+refuses with exit 5 when that sha is not an ancestor of the PR head, so amend
+with commits on top of the reviewed head. After a rebase, the conductor decides
+how that head gets reviewed. Under `--attempt-ref` the same flag keeps the
+attempt's claim, base and manifest unchanged and reviews the amendment inside
+it.
+
+Fix the delta pass's findings with controls, and the PR goes to the merge
+call. There is no third review.
 
 When every thread has a verdict and CI is green, the PR is ready for the
 operator's merge call.
