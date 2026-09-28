@@ -292,6 +292,67 @@ test('no patch: a non-test file, an added test file, and a pure rename are not r
   assert.deepEqual(detectTestWeakening(files).map((entry) => [entry.path, entry.unchecked]), [['tests/fixture.png', true]]);
 });
 
+// --- round one of workit#119 ---------------------------------------------------
+
+test('4117560925: a modified test file with no hunk stays unchecked; only a 100% rename or a mode change reads as unchanged', () => {
+  const files = filesFromDiff([
+    'diff --git a/src/big.test.mjs b/src/big.test.mjs',
+    'index 1111111..2222222 100644',
+    'diff --git a/src/run.test.mjs b/src/run.test.mjs',
+    'old mode 100644',
+    'new mode 100755',
+  ].join('\n'));
+  assert.equal(files[0].changes, undefined, 'no hunk alone is not git saying nothing changed');
+  assert.equal(files[1].changes, 0);
+  assert.deepEqual(detectTestWeakening(files).map((entry) => [entry.path, entry.unchecked]), [['src/big.test.mjs', true]]);
+});
+
+test('4117560929: a test moved unchanged under if (false) is reported by its wrapper', () => {
+  const [entry] = detectTestWeakening([{ filename: 'src/pay.test.mjs', status: 'modified', patch: [
+    '@@ -1,3 +1,5 @@',
+    "-test('critical', () => {",
+    '-  verifyPayment();',
+    '-});',
+    '+if (false) {',
+    "+  test('critical', () => {",
+    '+    verifyPayment();',
+    '+  });',
+    '+}',
+  ].join('\n') }]);
+  assert.deepEqual(entry?.items.map((item) => [item.kind, item.line, item.text]), [['disabled-added', 1, 'if (false) {']]);
+});
+
+test('4117560929: an opened block comment around moved tests is reported; a JSDoc opener, a closed one-line comment and a real condition are not', () => {
+  const commented = detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: "@@ -1,2 +1,4 @@\n-test('x', () => {\n-});\n+/*\n+test('x', () => {\n+});\n+*/" }]);
+  assert.deepEqual(commented[0]?.items.map((item) => item.kind), ['disabled-added']);
+  assert.deepEqual(detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: "@@ -1,1 +1,5 @@\n ctx\n+/**\n+ * helper\n+ */\n+/* eslint-disable no-console */\n+if (process.platform === 'win32') {" }]), []);
+});
+
+for (const [id, patch] of [
+  ['4117560930 (codex)', "@@ -1,3 +1,3 @@\n-test('critical', () => {\n-  verifyPayment();\n+test('placeholder', () => {\n+  noop();\n });"],
+  ['4117560933 (astra)', "@@ -1,3 +1,2 @@\n-test('rejects invalid input', () => {\n-  checkRejectsInvalidInput();\n+test('placeholder', () => {\n });"],
+]) {
+  test(`${id}: a renamed declaration whose body lost a line is reported as a removed test`, () => {
+    const [entry] = detectTestWeakening([{ filename: 'src/a.test.mjs', status: 'modified', patch }]);
+    assert.deepEqual(entry?.items.map((item) => [item.kind, item.side, item.line]), [['test-removed', 'LEFT', 1]]);
+  });
+}
+
+test('4117560938: a test file renamed out of the test paths is reported, pure rename or not', () => {
+  const pureRename = { filename: 'src/a.mjs', previous_filename: 'src/a.test.mjs', status: 'renamed', changes: 0 };
+  const pure = detectTestWeakening([pureRename]);
+  assert.deepEqual(pure.map((entry) => [entry.path, entry.renamedOut, entry.previousPath, entry.items.length]), [['src/a.mjs', true, 'src/a.test.mjs', 0]]);
+  const fromDiff = detectTestWeakening(filesFromDiff('diff --git a/src/a.test.mjs b/src/a.mjs\nsimilarity index 100%\nrename from src/a.test.mjs\nrename to src/a.mjs'));
+  assert.deepEqual(fromDiff.map((entry) => [entry.path, entry.renamedOut]), [['src/a.mjs', true]]);
+  const edited = detectTestWeakening([{ filename: 'src/a.mjs', previous_filename: 'src/a.test.mjs', status: 'renamed', changes: 2, patch: '@@ -1,1 +1,1 @@\n-// old\n+// new' }]);
+  assert.deepEqual(edited.map((entry) => entry.renamedOut), [true]);
+  const result = guardReview({ sourceFiles: [pureRename], prDiffFiles: ELSEWHERE });
+  assert.match(result.comments[0].body, /renamed out of the test paths: `src\/a\.test\.mjs` → `src\/a\.mjs`/);
+  assert.match(result.section, /`src\/a\.mjs`: renamed out of the test paths from `src\/a\.test\.mjs`/);
+  // Renamed within the test paths stays silent.
+  assert.deepEqual(detectTestWeakening([{ filename: 'tests/b.mjs', previous_filename: 'tests/a.mjs', status: 'renamed', changes: 0 }]), []);
+});
+
 test('guardReview renders tagged threads and a body section, and nothing at all when no test was weakened', () => {
   const files = filesFromDiff(LOOSENED_ASSERTION);
   const result = guardReview({ sourceFiles: files, prDiffFiles: files, delta: true });

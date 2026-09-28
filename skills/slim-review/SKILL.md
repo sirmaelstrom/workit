@@ -253,10 +253,13 @@ coverage verdict is the whole quality signal.
 `post` also reads the patches for signs that the PR went green by weakening a
 test: a test file deleted, a test case removed (`test(`, `it(`, `describe(`,
 `[Fact]`, …), a skip or focus added (`.skip`, `.only`, `xit`, `[Fact(Skip =`,
-…), or an assertion line removed or changed (`assert.`, `expect(`, `Assert.`,
-`.Should()`). The patterns are one table in `scripts/pr-review-guard.mjs`. It
-matches text and does not judge it. A line moved within the same file, and a
-test renamed with its body intact, are not reported. A changed test file with
+…), an assertion line removed or changed (`assert.`, `expect(`, `Assert.`,
+`.Should()`), a disabling wrapper added (`if (false)`, an opened `/*`,
+`#if false`), or a test file renamed out of the test paths. The patterns are
+one table in `scripts/pr-review-guard.mjs`. It matches text and does not judge
+it: a condition that needs evaluating is past it. A line moved within the same
+file is not reported, and neither is a renamed test declaration while every
+other removed line in the file came back unchanged. A changed test file with
 no patch (GitHub omits it on a large diff; a binary file has none) gets a
 **not checked: no patch** thread of its own, since nothing in it could be read.
 

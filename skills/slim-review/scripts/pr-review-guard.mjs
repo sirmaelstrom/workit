@@ -57,6 +57,20 @@ export const GUARD_PATTERNS = Object.freeze([
     ],
   },
   {
+    // Tests moved unchanged into code that never runs match as a move, so the
+    // wrapper itself is the signal. Literal guards and comment openers only:
+    // a condition that needs evaluating is past what a pattern can know.
+    kind: 'disabled-added',
+    on: 'added',
+    label: 'code disabled (literal-false guard or block comment opened)',
+    patterns: [
+      /\b(?:if|while)\s*\(\s*(?:false|0|!1|null|undefined|''|"")\s*\)/,
+      // a multi-line block comment opened: `/*` (not `/**`) with no `*/` after
+      /^\s*\/\*(?!\*)(?!.*\*\/)/,
+      /^\s*#if\s+(?:false|0)\b/i,
+    ],
+  },
+  {
     kind: 'assertion-removed',
     on: 'removed',
     label: 'assertion removed or changed',
@@ -105,7 +119,7 @@ export function filesFromDiff(diffText) {
   for (const raw of String(diffText).replace(/\r?\n$/, '').split(/\r?\n/)) {
     if (raw.startsWith('diff --git ')) {
       const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(raw);
-      current = { filename: m?.[2] ?? null, previous_filename: m?.[1] ?? null, status: 'modified', binary: false, patchLines: [] };
+      current = { filename: m?.[2] ?? null, previous_filename: m?.[1] ?? null, status: 'modified', binary: false, identical: false, modeOnly: false, patchLines: [] };
       files.push(current);
       inPatch = false;
       continue;
@@ -117,6 +131,8 @@ export function filesFromDiff(diffText) {
       else if (raw.startsWith('rename from ')) { current.status = 'renamed'; current.previous_filename = raw.slice(12); }
       else if (raw.startsWith('rename to ')) current.filename = raw.slice(10);
       else if (raw.startsWith('Binary files ')) current.binary = true;
+      else if (raw === 'similarity index 100%') current.identical = true;
+      else if (raw.startsWith('old mode ')) current.modeOnly = true;
       else if (raw.startsWith('--- ')) {
         const source = raw.slice(4).trim();
         if (source !== '/dev/null') current.previous_filename = source.replace(/^a\//, '');
@@ -132,7 +148,7 @@ export function filesFromDiff(diffText) {
     }
     current.patchLines.push(raw);
   }
-  return files.map(({ patchLines: lines, filename, previous_filename: previous, status, binary }) => {
+  return files.map(({ patchLines: lines, filename, previous_filename: previous, status, binary, identical, modeOnly }) => {
     // A deleted file's only name is its old one.
     const name = status === 'removed' ? (previous ?? filename) : filename;
     return {
@@ -140,9 +156,10 @@ export function filesFromDiff(diffText) {
       ...(previous && previous !== name ? { previous_filename: previous } : {}),
       status,
       patch: lines.join('\n'),
-      // No hunk and not binary: git saw no content change (a pure rename or a
-      // mode change), which the compare API reports as `changes: 0`.
-      ...(lines.length === 0 && !binary && status !== 'removed' ? { changes: 0 } : {}),
+      // `changes: 0` (as the compare API reports it) only on git's own word
+      // that the content did not change: a 100% rename, or a mode-only change.
+      // A missing hunk alone is not that word, and stays unchecked.
+      ...(lines.length === 0 && !binary && (identical || modeOnly) ? { changes: 0 } : {}),
     };
   });
 }
@@ -202,12 +219,16 @@ function countBy(lines, keyOf) {
  *   { path, status, deleted: true, patchMissing, removedTests, removedAssertions }
  *   { path, status, deleted: false, unchecked: true, items: [] }
  *   { path, status, deleted: false, items: [{ kind, label, side, line, text, at? }] }
+ * and `renamedOut: true, previousPath` on either of the last two when a test
+ * file was renamed to a path no runner discovers.
  *
  * `side` is GitHub's review-comment side: `LEFT` for a removed line (numbered
  * in the pre-change file), `RIGHT` for an added one. A line removed and re-added
  * unchanged elsewhere in the same file (compared trimmed) is a move and is not
  * reported. A removed test declaration whose rename-key reappears among the
- * added lines is a rename and is not reported either.
+ * added lines is a rename and is not reported either, but only while every
+ * other removed line in the file was re-added: the body is checked, not
+ * assumed.
  *
  * A changed test file with no patch (GitHub omits it on a large diff, and a
  * binary file has none) cannot be read, so it is reported `unchecked`: a thread
@@ -219,10 +240,18 @@ export function detectTestWeakening(files) {
   for (const file of files ?? []) {
     const path = file.filename;
     if (!isTestFile(path) && !isTestFile(file.previous_filename)) continue;
+    // A test file renamed to a path no runner discovers stops running, whatever
+    // its content: reported even as a pure rename.
+    const renamedOut = file.status === 'renamed' && isTestFile(file.previous_filename) && !isTestFile(path);
+    const outOf = renamedOut ? { renamedOut: true, previousPath: file.previous_filename } : {};
     const patchMissing = typeof file.patch !== 'string' || file.patch.trim() === '';
     if (patchMissing && file.status !== 'removed') {
+      if (renamedOut && file.changes === 0) {
+        report.push({ path, status: file.status, deleted: false, ...outOf, items: [] });
+        continue;
+      }
       if (file.status === 'added' || file.changes === 0) continue;
-      report.push({ path, status: file.status, deleted: false, unchecked: true, items: [] });
+      report.push({ path, status: file.status, deleted: false, unchecked: true, ...outOf, items: [] });
       continue;
     }
     const { removed, added } = patchLines(file.patch);
@@ -243,10 +272,14 @@ export function detectTestWeakening(files) {
     const removedTexts = countBy(removed, (text) => text.trim());
     const unmovedRemoved = removed.filter((line) => line.text.trim() === '' || !take(addedTexts, line.text.trim()));
     const unmovedAdded = added.filter((line) => line.text.trim() === '' || !take(removedTexts, line.text.trim()));
-    const addedDeclarations = countBy(
-      unmovedAdded.filter((line) => classify(line.text, 'removed').some((row) => row.kind === 'test-removed')),
-      declarationKey,
-    );
+    const isDeclaration = (text) => classify(text, 'removed').some((row) => row.kind === 'test-removed');
+    // A rename is exempt only when it is checked to be one: every other
+    // removed line in the file came back unchanged. A body line that did not
+    // (`verifyPayment()` → `noop()`) voids every pairing in the file.
+    const bodyIntact = unmovedRemoved.every((line) => line.text.trim() === '' || isDeclaration(line.text));
+    const addedDeclarations = bodyIntact
+      ? countBy(unmovedAdded.filter((line) => isDeclaration(line.text)), declarationKey)
+      : new Map();
     const items = [];
     for (const line of unmovedRemoved) {
       for (const row of classify(line.text, 'removed')) {
@@ -259,9 +292,9 @@ export function detectTestWeakening(files) {
         items.push({ kind: row.kind, label: row.label, side: 'RIGHT', line: line.line, text: line.text, at: line.line });
       }
     }
-    if (items.length === 0) continue;
+    if (items.length === 0 && !renamedOut) continue;
     items.sort((a, b) => a.at - b.at || (a.side === b.side ? a.line - b.line : a.side === 'LEFT' ? -1 : 1));
-    report.push({ path, status: file.status, deleted: false, items });
+    report.push({ path, status: file.status, deleted: false, ...outOf, items });
   }
   return report;
 }
@@ -370,9 +403,11 @@ export function renderGuardComment(entry, anchor, { delta = false } = {}) {
       : `The file held ${entry.removedTests} test declaration line(s) and ${entry.removedAssertions} assertion line(s).`);
   } else if (entry.unchecked) {
     lines.push(`**Test-weakening check: \`${entry.path}\` not checked: no patch**`, '');
+    if (entry.renamedOut) lines.push(`Renamed out of the test paths from \`${entry.previousPath}\`, so no test runner picks it up.`, '');
     lines.push(`This test file changed (${entry.status}), but GitHub sent no patch for it (a large diff or a binary file), so nothing in it was checked. Read the change before judging it.`);
   } else {
     lines.push(`**Test-weakening check: \`${entry.path}\`**`, '');
+    if (entry.renamedOut) lines.push(`- renamed out of the test paths: \`${entry.previousPath}\` → \`${entry.path}\`, so no test runner picks it up`);
     for (const item of entry.items.slice(0, MAX_LISTED)) {
       lines.push(`- ${item.side === 'LEFT' ? `\`-\` old line ${item.line}` : `\`+\` line ${item.line}`}, ${item.label}: ${quote(item.text)}`);
     }
@@ -414,9 +449,13 @@ export function guardReview({ sourceFiles, prDiffFiles, delta = false }) {
     '',
     '### Test-weakening check',
     '',
-    `${entries.length} test file(s) in ${delta ? 'this amendment' : 'this PR'} lost a test, an assertion, or gained a skip or focus, or changed with no patch to check. Each is an open thread for the conductor or the operator to judge; the lane cannot clear it.`,
+    `${entries.length} test file(s) in ${delta ? 'this amendment' : 'this PR'} lost a test or an assertion, gained a skip, a focus or a disabling wrapper, left the test paths, or changed with no patch to check. Each is an open thread for the conductor or the operator to judge; the lane cannot clear it.`,
     '',
-    ...entries.map((entry) => `- \`${entry.path}\`: ${entry.deleted ? 'deleted' : entry.unchecked ? 'not checked: no patch' : entry.items.map((item) => item.label).filter((label, i, all) => all.indexOf(label) === i).join(', ')}${unanchored.includes(entry) ? ' — **no line in this PR diff can carry a comment; judge it here**' : ''}`),
+    ...entries.map((entry) => `- \`${entry.path}\`: ${entry.deleted ? 'deleted' : [
+      ...(entry.renamedOut ? [`renamed out of the test paths from \`${entry.previousPath}\``] : []),
+      ...(entry.unchecked ? ['not checked: no patch'] : []),
+      ...entry.items.map((item) => item.label),
+    ].filter((label, i, all) => all.indexOf(label) === i).join(', ')}${unanchored.includes(entry) ? ' — **no line in this PR diff can carry a comment; judge it here**' : ''}`),
   ].join('\n');
   return { entries, comments, unanchored, section };
 }
