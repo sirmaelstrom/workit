@@ -318,6 +318,13 @@ async function brief(opts, deps, state) {
   return { target: target.target, file, accepted: true, stateAfter: agentState(result.stdout) };
 }
 
+// herdr answers `agent wait` on an agent that already left with one of two codes: agent_not_found
+// when the pane has no agent record, agent_not_running when the record remains but the process has
+// exited (a chain caller that exited on its own before the successor retired it, 2026-09-28).
+function agentAbsent(result) {
+  return /agent_not_found|agent_not_running/i.test(`${result.stdout}\n${result.stderr}`);
+}
+
 async function watch(opts, deps, state) {
   if (opts.positional.length !== 1) usage('watch needs one target');
   const target = opts.resolvedTarget ?? await resolveTarget(opts, state, opts.positional[0], deps);
@@ -328,7 +335,7 @@ async function watch(opts, deps, state) {
     ? [...new Set([...until.filter((value) => value !== 'gone'), 'done'])]
     : until;
   const result = call(deps, ['agent', 'wait', target.target, ...requested.flatMap((value) => ['--until', value]), '--timeout', String(timeout)]);
-  const missing = /agent_not_found/i.test(`${result.stdout}\n${result.stderr}`);
+  const missing = agentAbsent(result);
   if (until.includes('gone') && (missing || (result.code === 0 && agentState(result.stdout) === 'done'))) return { state: 'gone', target: target.target };
   if (result.code !== 0) {
     if (/timeout/i.test(`${result.stdout}\n${result.stderr}`)) throw new SessionError(EXIT.timeout, `watch timed out for ${target.target}`);
@@ -361,7 +368,7 @@ function onlyMcpChildren(children) {
 }
 function waitForGone(deps, target, timeout) {
   const result = call(deps, ['agent', 'wait', target.target, '--until', 'done', '--timeout', String(timeout)]);
-  const missing = /agent_not_found/i.test(`${result.stdout}\n${result.stderr}`);
+  const missing = agentAbsent(result);
   if (missing || (result.code === 0 && agentState(result.stdout) === 'done')) return { state: 'gone', target: target.target };
   if (result.code !== 0 && /timeout/i.test(`${result.stdout}\n${result.stderr}`)) return { state: 'timeout', target: target.target };
   if (result.code !== 0) throw new SessionError(EXIT.error, `herdr agent wait failed: ${(result.stderr || result.stdout).trim()}`);

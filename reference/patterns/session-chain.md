@@ -9,7 +9,7 @@ Long-running Claude work needs a deterministic rotation carrier rather than a ha
 ## Scope rulings
 
 - `retire self` is supported: it writes its receipt before sending `/exit`.
-- A successor closes a caller only after `done` or `agent_not_found` and a parseable `process-info.foreground_processes` array shows no Claude process. Idle is never gone; an absent or unreadable process list fails closed. The final message comes from the marker-gated Stop hook, not scrollback.
+- A successor closes a caller only after `done`, `agent_not_found` or `agent_not_running` (the caller already exited) and a parseable `process-info.foreground_processes` array shows no Claude process. Idle is never gone; an absent or unreadable process list fails closed. The final message comes from the marker-gated Stop hook, not scrollback.
 - `tokens.context` comes from `herdr pane get`; absent means `null`, never `0`.
 - The context threshold N is measured per model elsewhere; this carrier records the value.
 - Claude-to-Claude `delegate` is out of scope. In-turn work uses the Agent tool.

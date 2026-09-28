@@ -354,6 +354,26 @@ test('P1: a string pane field resolves an agent owner instead of treating it as 
   assert.equal(f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'wait').args[2], 'caller');
 });
 
+test('P1b: an agent that already exited (agent_not_running) is gone, for retire --mode close and watch --until gone', async (t) => {
+  // Verbatim herdr shape from a chain whose caller had exited before the successor retired it (2026-09-28).
+  const notRunning = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_running","message":"agent is no longer running in the target pane"},"id":"cli:agent:wait"}' };
+  const handler = (_program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'agent get') return { code: 0, stdout: herdrShapes.agentGet({ pane: 'pane:old' }), stderr: '' };
+    if (key === 'agent wait') return notRunning;
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'pwsh.exe' })]), stderr: '' };
+    if (key === 'pane read') return { code: 0, stdout: 'Resume this session with:\nclaude --resume 33333333-3333-4333-8333-333333333333\n', stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const close = fixture(t); writeFileSync(`${close.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8'); close.handler = handler;
+  const retired = await runSession(['retire', 'old', '--mode', 'close', '--log', close.log], { exec: close.exec });
+  assert.equal(retired.exit, 0); assert.equal(retired.output.closed, true); assert.equal(retired.output.resumeId, '33333333-3333-4333-8333-333333333333');
+  assert.equal(callsFor(close, 'pane').some((call) => call.args[1] === 'close'), true);
+  const watch = fixture(t); watch.handler = handler;
+  const watched = await runSession(['watch', 'old', '--until', 'gone', '--timeout', '1', '--log', watch.log], { exec: watch.exec });
+  assert.equal(watched.exit, 0); assert.equal(watched.output.state, 'gone');
+});
+
 test('P2: a blank child listing is unknown and never sends Enter', async (t) => {
   const f = fixture(t);
   writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8');
