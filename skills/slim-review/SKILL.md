@@ -248,6 +248,37 @@ The script does the checking you would otherwise have to remember:
 Read the receipt line before moving on. `anchored · off-line · off-diff` plus the
 coverage verdict is the whole quality signal.
 
+### Test-weakening check
+
+`post` also reads the patches for signs that the PR went green by weakening a
+test: a test file deleted, a test case removed (`test(`, `it(`, `describe(`,
+`[Fact]`, …), a skip or focus added (`.skip`, `.only`, `xit`, `[Fact(Skip =`,
+…), an assertion line removed or changed (`assert.`, `expect(`, `Assert.`,
+`.Should()`), a disabling wrapper added (`if (false)`, `#if false`, or a
+`/*` / `/**` opened around a test or an assertion), or a test file renamed out
+of the test paths. The patterns are
+one table in `scripts/pr-review-guard.mjs`. It matches text and does not judge
+it: a condition that needs evaluating is past it. A line moved within the same
+file is not reported, and neither is a renamed test declaration while every
+other removed line in the file came back unchanged. A changed test file with
+no patch (GitHub omits it on a large diff; a binary file has none) gets a
+**not checked: no patch** thread of its own, since nothing in it could be read.
+
+- **Which patches:** the PR diff on a full review, and the `<since>...<head>`
+  compare on an amendment check, so a delta round reports only what the
+  amendment removed.
+- **Where it lands:** one inline thread per weakened file, tagged
+  `**lens:** guard`, in the same review POST as the lens comments. A removed
+  line is anchored on the diff's left side, at its old line number. When the
+  PR diff has no such line (the amendment removed something an earlier round
+  added), the thread sits on the nearest commentable line and names the real
+  place. The receipt prints a `guard` line when anything was found.
+- **Not a lens:** the guard has no findings document and never appears in the
+  marker's `lenses=`. The two-lens rule, the coordinated lens-set check, and
+  coverage are all computed over the lens documents alone.
+
+
+
 Exit codes matter here:
 
 | Code | Meaning |
@@ -336,6 +367,19 @@ map onto `reply` like this:
 Use `note` for a comment that needs no defect verdict at all, such as a finding
 owed elsewhere or answered by the conductor. With this mapping the log counts
 lane refutations and conductor overturns separately.
+
+**A guard thread (`**lens:** guard`) is judged by the conductor or the
+operator, never the lane.** It flags the author's own change, so the author
+cannot clear it. `reply --verdict` on a guard comment exits 2, posting and
+logging nothing, unless `--adjudicator` is `conductor` or `operator`. The
+verdicts are the same three:
+- `refuted`: the removal is legitimate, with a quoted reason (the function it
+  tested was deleted, the case moved to another file);
+- `judgment`;
+- `confirmed`: it was a weakening, and the test is restored.
+
+The row records `lens: guard`. The lane lists a guard thread in its
+`## Amendment N` table for the conductor, never as `fixed`.
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" reply \

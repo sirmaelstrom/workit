@@ -123,7 +123,16 @@ verb is the only thing that sets it. The verdicts and who passes which
 `judgment` thread is replied to and resolved like any other: the verdict is the
 record, and the receipt lists it. A relative `--body-file` is resolved against
 your working directory, not the checkout. A missing one exits 4 before anything
-is replied. A confirmed finding is fixed on the branch
+is replied.
+
+**A guard thread is never the lane's to judge.** A comment tagged
+`**lens:** guard` is the writer's test-weakening check (slim-review § 3): the PR
+deleted, skipped or loosened a test. Its verdict needs `--adjudicator
+conductor` or `operator`. `adjudicate --adjudicator lane`, or no
+`--adjudicator`, fails: the writer's `reply` exits 2, nothing is replied, and
+the thread stays open, so the PR cannot converge past it.
+
+A confirmed finding is fixed on the branch
 and pushed. The loop sees the new head as the next iteration and claims the
 review its round is owed: a delta after a full review, nothing after a delta.
 Verify against the code, not the claim. The reviewer had the diff and one pass;
