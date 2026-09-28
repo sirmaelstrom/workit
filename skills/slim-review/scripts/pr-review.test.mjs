@@ -3379,6 +3379,18 @@ test('recognise reads the listing, excludes replaced reviews from GET /status, a
   });
 });
 
+test('recognise: an uppercase --head finds the same dedupe hits (heads compare lowercase)', async () => {
+  await withCoordinatedInstall({}, async ({ home }) => {
+    const seams = pinnedSeams();
+    const out = collector();
+    await cmdRecognise(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), head: PINNED_HEAD.toUpperCase() },
+      { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home },
+    );
+    assert.deepEqual(out.line().hits.filter((hit) => hit.kind === 'dedupe').map((hit) => hit.review_id), [5152010493, 5152040001, 5152040003]);
+  });
+});
+
 test('a listing that cannot be read is a classified gh-failure, not a silent clean listing', async () => {
   await withCoordinatedInstall({}, async ({ home }) => {
     const seams = pinnedSeams({ fail: { '/reviews': 'gh: server error' } });

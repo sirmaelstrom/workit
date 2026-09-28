@@ -2106,7 +2106,9 @@ export async function cmdRecognise(opts, {
   }
   const found = recognise({
     reviews,
-    head: opts.head,
+    // Posted heads (marker and commit_id) are lowercase and dedupe compares
+    // them byte for byte, so an uppercase --head would miss its own review.
+    head: String(opts.head).toLowerCase(),
     serviceLogin: pinned.body?.login,
     replacedReviewIds,
     runId: opts.run,
