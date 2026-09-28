@@ -2145,6 +2145,9 @@ export async function cmdRounds(opts, {
     emitOutcome({ outcome: 'refused', reason, ...extra }, log);
     die(code, message);
   };
+  // Posted heads (marker and commit_id) are lowercase and the round compares
+  // them byte for byte, so an uppercase --head would never read as reviewed.
+  const head = String(opts.head).toLowerCase();
   const resolved = resolveCoordinator({ env, homeDir });
   if (!resolved.ok) {
     refuse(resolved.reason, { directory: resolved.directory }, resolved.message);
@@ -2174,12 +2177,12 @@ export async function cmdRounds(opts, {
       .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
       .filter(Boolean);
     const last = reviews[reviews.length - 1];
-    if (last && last.head !== opts.head) tail = readTail({ repo: opts.repo, cwd: opts.cwd, runGh, from: last.head, to: opts.head });
+    if (last && last.head !== head) tail = readTail({ repo: opts.repo, cwd: opts.cwd, runGh, from: last.head, to: head });
   } catch (err) {
     refuse('gh-failure', {}, `could not read the review listing or the tail compare for ${opts.repo}#${opts.pr}: ${err.message}`, 4);
     return undefined;
   }
-  return emitOutcome({ outcome: 'ok', ...roundsAnswer({ reviews, head: opts.head, tail }) }, log);
+  return emitOutcome({ outcome: 'ok', ...roundsAnswer({ reviews, head, tail }) }, log);
 }
 
 /**
