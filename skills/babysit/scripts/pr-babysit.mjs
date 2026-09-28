@@ -47,7 +47,12 @@ import { tmpdir } from 'node:os';
 import { createClient, CLIENT_REASONS } from '../../slim-review/scripts/pr-review-coordinator.mjs';
 import { loadCoordinatorToken, resolveManaged, MANAGED_MODES } from '../../slim-review/scripts/pr-review-managed.mjs';
 import { postedReviewScope } from '../../slim-review/scripts/pr-review-recognise.mjs';
-import { amendmentProblem, readReviewListing } from '../../slim-review/scripts/pr-review.mjs';
+import { readReviewListing } from '../../slim-review/scripts/pr-review.mjs';
+import { cappedTailProblem, deltaTailProblem, readTail, reviewRound } from '../../slim-review/scripts/pr-review-rounds.mjs';
+
+// The round cap is the writer's (`pr-review.mjs rounds` answers the beat from
+// the same module); re-exported for this script's callers.
+export { reviewRound };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const WRITER_SCRIPT = resolve(HERE, '..', '..', 'slim-review', 'scripts', 'pr-review.mjs');
@@ -252,22 +257,7 @@ export async function observe({ repo, pr, cwd }, deps) {
       .map((r) => postedReviewScope(r, { serviceLogin: identity.login, replacedReviewIds }))
       .filter(Boolean);
     const last = reviews[reviews.length - 1];
-    if (last && last.head !== headBefore) {
-      const payload = JSON.parse(deps.runGh(['api', `repos/${repo}/compare/${last.head}...${headBefore}`], { cwd }));
-      const commits = Array.isArray(payload?.commits) ? payload.commits : null;
-      tail = {
-        from: last.head,
-        to: headBefore,
-        status: payload?.status ?? null,
-        aheadBy: payload?.ahead_by ?? null,
-        files: Array.isArray(payload?.files) ? payload.files.length : null,
-        // read here, not from `problem`: amendmentProblem answers "no changed
-        // files" before it looks at merges or the commit list
-        merge: commits ? commits.some((cm) => (cm?.parents?.length ?? 0) > 1) : null,
-        commitsComplete: commits !== null && !(Number.isInteger(payload?.total_commits) && payload.total_commits > commits.length),
-        problem: amendmentProblem(payload, last.head, headBefore),
-      };
-    }
+    if (last && last.head !== headBefore) tail = readTail({ repo, cwd, runGh: deps.runGh, from: last.head, to: headBefore });
   }
 
   const headAfter = readHead();
@@ -300,29 +290,6 @@ function owedFor(reason, ctx, extra = {}) {
     case 'amendment-not-descendant': return `there is no amendment diff from the last reviewed head ${(extra.from ?? '').slice(0, 7)} to head ${head} (${extra.problem ?? 'refused'}) — the conductor decides how this head is reviewed; this loop never claims a second full review.${extra.attemptRefFile ? ` The delta attempt stays live for that call: run its lenses without --since (\`pr-review.mjs lens --attempt-ref ${extra.attemptRefFile}\`), or \`pr-review.mjs recover withdraw --attempt-ref ${extra.attemptRefFile} --reason "<why>"\`.` : ''}`;
     default: return 'a person decides.';
   }
-}
-
-/**
- * Which review round the current head is in, from the posted reviews in
- * listing order (`postedReviewScope` entries). Pure.
- *
- *   full      no review yet — claim a full paired review
- *   reviewed  the last review is on this head — the existing path decides
- *   delta     a full review, no delta after it — claim a delta since its head
- *   capped    a delta after the last full review — no claim; converge on the tail
- *
- * Counting from the LAST full review means a full review the conductor ran
- * after a refused delta opens a fresh pair; nothing this loop claims does.
- */
-export function reviewRound(reviews, head) {
-  if (reviews.length === 0) return { round: 'full' };
-  const last = reviews[reviews.length - 1];
-  if (last.head === head) return { round: 'reviewed', last };
-  let fullAt = -1;
-  for (let i = reviews.length - 1; i >= 0; i--) if (reviews[i].scope === 'full') { fullAt = i; break; }
-  // a delta with no full review before it cannot open round two again
-  if (fullAt === -1 || reviews.slice(fullAt + 1).some((r) => r.scope === 'delta')) return { round: 'capped', last };
-  return { round: 'delta', since: reviews[fullAt].head, last };
 }
 
 /**
@@ -390,20 +357,13 @@ export function decide(obs, ctx) {
   const skipped = round.round === 'delta' && ctx.deltaSkipped?.head === obs.head ? ctx.deltaSkipped.reason : null;
   if (round.round === 'capped' || skipped) {
     // No third review (and no delta for a skipped amendment): the head
-    // converges on controls alone, and only on top of what was reviewed.
+    // converges on controls alone, and only on top of what was reviewed —
+    // an ahead tail with no merge from base, or an empty one (the writer's
+    // `cappedTailProblem`, which `rounds` answers the beat with).
     const tail = obs.tail;
-    if (!tail || tail.from !== round.last.head || tail.to !== obs.head || tail.status !== 'ahead') {
-      return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: round.last.head, problem: `compare status ${tail?.status ?? 'missing'}` }) };
-    }
-    // Ancestry is not enough: after a merge from the base branch (or a commit
-    // list too short to rule one out) the conductor decides how the head is
-    // reviewed (slim-review § 4). An ahead tail that changes no file — an
-    // empty commit to re-run CI — still converges, but only with no merge
-    // commit and a complete commit list: a merge from base can leave the tree
-    // unchanged when equivalent changes already landed.
-    const emptyTail = tail.files === 0 && tail.merge === false && tail.commitsComplete === true;
-    if (tail.problem && !emptyTail) {
-      return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: round.last.head, problem: tail.problem }) };
+    const tailProblem = cappedTailProblem(tail, round.last.head, obs.head);
+    if (tailProblem) {
+      return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: round.last.head, problem: tailProblem }) };
     }
     if (unresolved.length > 0) return { action: 'adjudicate', detail: `${unresolved.length} open thread(s)`, threads: unresolved, reviewId: round.last.review_id };
     if (obs.checks.pending > 0) return { action: 'wait', detail: `checks pending: ${obs.checks.names.pending.join(', ')}` };
@@ -420,7 +380,7 @@ export function decide(obs, ctx) {
   if (since) {
     // Pre-checked with the writer's own rule, so a rebase costs no claim; the
     // writer's refusal of the same `--since` is handled by the driver.
-    const problem = !obs.tail || obs.tail.from !== since || obs.tail.to !== obs.head ? 'no amendment compare was read' : obs.tail.problem;
+    const problem = deltaTailProblem(obs.tail, since, obs.head);
     if (problem) return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: since, problem }) };
   }
   const claim = (detail) => ({ action: 'claim', detail, ...(since ? { since } : {}) });
