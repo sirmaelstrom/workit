@@ -398,10 +398,12 @@ export function decide(obs, ctx) {
     }
     return claim(`attempt ${last.attempt} ended ${last.state}/${last.disposition ?? '?'} — one session claim allowed`);
   }
-  // The beat cannot run a delta pass yet, so round two is always a session claim.
+  // Round two is always a session claim, so it starts now rather than on the
+  // beat's cadence. The beat claims the same delta if it gets there first
+  // (observatory#765), and the coordinator admits one attempt per head.
   if (bounds.claim === 'beat' && !since) return { action: 'wait', detail: 'waiting for the beat to claim this head' };
   if (claimsUsed >= bounds.sessionClaimsPerHead) return { action: 'wait', detail: 'session claim already made on this head; waiting for its attempt to appear' };
-  if (since) return claim(`round two: delta since ${since.slice(0, 7)} — session claim${bounds.claim === 'beat' ? ' (--claim beat does not apply: the beat cannot run a delta pass yet)' : ''}`);
+  if (since) return claim(`round two: delta since ${since.slice(0, 7)} — session claim${bounds.claim === 'beat' ? ' (--claim beat does not apply to round two: the session claims the delta now)' : ''}`);
   return claim('no attempt on this head — session claim');
 }
 
