@@ -455,8 +455,10 @@ its seen-failing control, and that is the amendment check at that point.
 session or conductor), and so does `babysit`. Babysit reads the rounds from the
 posted reviews' markers, claims round two as a delta pass, and claims nothing
 after a delta. Observatory's pr-review beat does not follow it yet: it still
-runs a full paired review on every new head it picks up. Migrating the beat is
-a follow-up, not part of this skill.
+runs a full paired review on every new head it picks up. The writer answers
+the same rounds for any caller through `rounds` (under Managed repositories),
+which reads them from the same code babysit does; the beat's migration to ask
+it before claiming is Observatory's, not part of this skill.
 
 When every thread has a verdict and CI is green, the PR is ready for the
 operator's merge call.
@@ -614,6 +616,34 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" claim --pr <n> --repo <owner/na
 The superseded review stays on the pull request and is marked replaced; the new
 one names it. Adjudicating the review that is already there is usually cheaper
 than paying for a second one.
+
+### Which round a head is in
+
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" rounds --pr <n> --repo <owner/name> --head <full sha>
+```
+
+Read-only. It reads the posted reviews by the pinned login (replaced reviews and
+reply containers excluded, as for `recognise`) and prints one JSON line with the
+head's round under the cap (§ 4):
+
+| `round` | Meaning | Also carries |
+|---|---|---|
+| `full` | no review yet: a full paired review is owed | `problem: null` |
+| `reviewed` | the last review is on this head | `last`, `problem: null` |
+| `delta` | a full review and no delta after it: round two, `lens --since <since>` | `since` (the last **full** review's head), `last`, `problem` |
+| `capped` | a delta after the last full review: no third review | `last`, `problem` |
+
+`last` is `{head, scope: "full"|"delta", review_id}`. In the delta round
+`problem` is why `<since>...<head>` is no amendment diff (the rule `lens --since`
+refuses by), or null. In the capped round it is why the head can't converge on
+its tail: not an ancestor, a merge from the base branch, or an incomplete commit
+list. A tail with no changed files, no merge and a complete commit list is null.
+A non-null `problem` is the conductor's call. A refusal is
+`{"outcome":"refused","reason":…}` with the reasons `recognise` gives, plus
+`identity-unset` for a pinned identity with no login and `gh-failure` for a
+listing or compare it couldn't read. It never answers `full` from a read that
+failed.
 
 ### When an attempt ends without posting
 

@@ -57,7 +57,8 @@ import {
   MANAGED_MODES,
 } from './pr-review-managed.mjs';
 import { emitOutcome, WITHDRAW_REASONS } from './pr-review-outcomes.mjs';
-import { buildMarker, recognise } from './pr-review-recognise.mjs';
+import { buildMarker, recognise, postedReviewScope } from './pr-review-recognise.mjs';
+import { amendmentProblem, COMPARE_FILE_CAP, readTail, roundsAnswer } from './pr-review-rounds.mjs';
 import { filesFromDiff, guardReview, GUARD_ADJUDICATORS, GUARD_LENS } from './pr-review-guard.mjs';
 
 // ---------------------------------------------------------------------------
@@ -1553,41 +1554,10 @@ export function renderPinnedDiff(comparePayload) {
   return { text: sections.join('\n'), not_reviewed: notReviewed, bytes };
 }
 
-/** GitHub's compare API returns at most this many files, with no page past it. */
-export const COMPARE_FILE_CAP = 300;
-
-/**
- * Why a compare cannot serve as an amendment diff, or null when it can.
- *
- * `since` must be an ancestor of the head (`status: ahead`): after a rebase or
- * a force-push the three-dot compare runs from a merge base, which carries
- * changes nobody amended. A compare at the file cap may be truncated, and a
- * truncated list would pass a partial review as complete. Either way there is
- * no amendment to check, and how to review that head is the conductor's call,
- * never a silent second full-PR round.
- */
-export function amendmentProblem(payload, since, head) {
-  const at = `${String(since).slice(0, 7)}...${String(head).slice(0, 7)}`;
-  if (payload?.status === 'identical') return `the amendment ${at} changes nothing`;
-  if (payload?.status !== 'ahead') {
-    return `${String(since).slice(0, 7)} is not an ancestor of the head ${String(head).slice(0, 7)} (compare status: ${payload?.status ?? 'missing'}), so there is no amendment diff: amend with commits on top of the reviewed head, or the conductor decides how this head is reviewed`;
-  }
-  const files = Array.isArray(payload.files) ? payload.files : [];
-  if (files.length === 0) return `the amendment ${at} lists no changed files`;
-  if (files.length >= COMPARE_FILE_CAP) return `the amendment ${at} lists ${files.length} files, the compare API's cap, so the list may be truncated; the conductor decides how this head is reviewed`;
-  // A merge in the range (the lane merged the base branch in, or GitHub's
-  // "Update branch") brings upstream changes nobody amended into the diff.
-  // The commit list must be complete to say there is none.
-  if (!Array.isArray(payload.commits)) return `the amendment compare ${at} carries no commit list, so a merge in the range cannot be ruled out`;
-  if (Number.isInteger(payload.total_commits) && payload.total_commits > payload.commits.length) {
-    return `the amendment ${at} has ${payload.total_commits} commits and the compare listed ${payload.commits.length}, so a merge in the range cannot be ruled out; the conductor decides how this head is reviewed`;
-  }
-  const merge = payload.commits.find((commit) => (commit?.parents?.length ?? 0) > 1);
-  if (merge) {
-    return `the amendment ${at} contains a merge commit (${String(merge.sha).slice(0, 7)}), so its diff carries changes nobody amended; amend without merging the base branch in, or the conductor decides how this head is reviewed`;
-  }
-  return null;
-}
+// `amendmentProblem` and `COMPARE_FILE_CAP` live with the round cap in
+// pr-review-rounds.mjs (babysit and `rounds` read them there); re-exported for
+// every caller that imports them from here.
+export { amendmentProblem, COMPARE_FILE_CAP };
 
 /**
  * Why `since` is not a point on the PR branch, or null. `basePayload` is the
@@ -2148,6 +2118,68 @@ export async function cmdRecognise(opts, {
     listingCheckedAt,
   });
   return emitOutcome({ outcome: 'ok', hits: found.hits, listing_checked_at: found.listing_checked_at }, log);
+}
+
+/**
+ * `rounds --repo --pr --head` — which review round this head is in under the
+ * cap (slim-review § 4), read from the PR's posted review markers.
+ *
+ * The scheduled half asks this before it claims; babysit asks the same
+ * `roundsAnswer` in process. One JSON line, and only two outcomes: `ok` with
+ * `round` (and `since` / `last` / `problem`), or `refused` with a reason — a
+ * listing or compare that could not be read is refused `gh-failure`, never a
+ * `full` answer, because a caller that read "full" would claim a second full
+ * review. The posting identity is read as `recognise` reads it; a coordinator
+ * that answers with no login is refused `identity-unset`, since without it
+ * every review filters out and the head reads as never reviewed.
+ */
+export async function cmdRounds(opts, {
+  runGh = gh,
+  log = console.log,
+  die = fail,
+  env = process.env,
+  homeDir,
+  makeClient = createClient,
+} = {}) {
+  const refuse = (reason, extra, message, code = 1) => {
+    emitOutcome({ outcome: 'refused', reason, ...extra }, log);
+    die(code, message);
+  };
+  const resolved = resolveCoordinator({ env, homeDir });
+  if (!resolved.ok) {
+    refuse(resolved.reason, { directory: resolved.directory }, resolved.message);
+    return undefined;
+  }
+  const client = makeClient({ coordinator: resolved.coordinator, token: resolved.token });
+  const pinned = await client.readIdentity();
+  if (!pinned.ok) {
+    refuse(pinned.code, pinned.source === 'coordinator' ? { coordinator_code: pinned.code } : {}, pinned.message);
+    return undefined;
+  }
+  const serviceLogin = pinned.body?.login;
+  if (!serviceLogin) {
+    refuse('identity-unset', {}, 'the coordinator answered /identity with no login, so no posted review can be attributed to a round; nothing was read.');
+    return undefined;
+  }
+  const status = await client.readStatus({ repo: opts.repo, pr: Number(opts.pr) });
+  if (!status.ok) {
+    refuse(status.code, status.source === 'coordinator' ? { coordinator_code: status.code } : {}, status.message);
+    return undefined;
+  }
+  const replacedReviewIds = (status.body?.attempts ?? []).filter((row) => row.state === 'replaced').map((row) => row.review_id).filter((id) => id !== null && id !== undefined);
+  let reviews;
+  let tail = null;
+  try {
+    reviews = readReviewListing({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh })
+      .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
+      .filter(Boolean);
+    const last = reviews[reviews.length - 1];
+    if (last && last.head !== opts.head) tail = readTail({ repo: opts.repo, cwd: opts.cwd, runGh, from: last.head, to: opts.head });
+  } catch (err) {
+    refuse('gh-failure', {}, `could not read the review listing or the tail compare for ${opts.repo}#${opts.pr}: ${err.message}`, 4);
+    return undefined;
+  }
+  return emitOutcome({ outcome: 'ok', ...roundsAnswer({ reviews, head: opts.head, tail }) }, log);
 }
 
 /**
@@ -3267,11 +3299,15 @@ On a managed repository (see below), the coordinated flow replaces steps 2 and 3
   recognise --pr <n> --repo owner/name --head <sha>
            [--run <uuid> --attempt <k> --post-attempted-at <iso>]
            read-only: which reviews on this PR are already this identity's
-  recover  abandon|not-delivered|withdraw --attempt-ref <file> --reason "<why>"
+  rounds   --pr <n> --repo owner/name --head <full sha>
+           read-only: the head's review round under the cap —
+           {outcome:"ok", round: full|reviewed|delta|capped, since?, last?, problem}
+           or {outcome:"refused", reason}
+  recover abandon|not-delivered|withdraw --attempt-ref <file> --reason "<why>"
            [--force-unverified "<why>"]   the operator's recovery arcs
 
 Coordinated output:
-  managed, identity, manifest, claim, recognise, recover, and lens / post under
+  managed, identity, manifest, claim, recognise, rounds, recover, and lens / post under
   --attempt-ref print exactly one JSON line on stdout ({outcome, reason?, retry,
   …}) with every diagnostic on stderr. Their exit codes are for humans and
   non-contractual: 0 ok, 1 refused, 3 no usable handback, 4 a gh call failed.
@@ -3468,6 +3504,12 @@ function main(argv) {
       if (!opts.repo) fail(2, 'recognise needs --repo owner/name');
       if (!opts.head) fail(2, 'recognise needs --head <sha>');
       return cmdRecognise(opts);
+    case 'rounds':
+      if (!opts.repo) fail(2, 'rounds needs --repo owner/name');
+      // The full sha, because the round is decided by exact equality with the
+      // posted markers' heads: a short sha would never read as `reviewed`.
+      if (!/^[0-9a-f]{40}$/i.test(String(opts.head ?? ''))) fail(2, 'rounds needs --head <full 40-character sha>');
+      return cmdRounds(opts);
     case 'recover':
       if (!['abandon', 'not-delivered', 'withdraw'].includes(opts.recoverAction)) {
         fail(2, 'recover needs one of abandon, not-delivered, withdraw');

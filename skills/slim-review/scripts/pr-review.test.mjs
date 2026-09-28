@@ -42,6 +42,7 @@ import {
   cmdManifest,
   cmdClaim,
   cmdRecognise,
+  cmdRounds,
   cmdRecover,
   buildReviewerPrompt,
   defaultCodexExe,
@@ -3403,6 +3404,176 @@ test('recognise refuses identity-unset before it reads anything', async () => {
     assert.equal(out.line().reason, 'identity-unset');
     assert.deepEqual(seams.calls, [], 'nothing was read from GitHub');
   });
+});
+
+// --- rounds: the review-round cap as a verb (quest 329cba0d, lane rb1) -----
+//
+// The wire contract the scheduled beat reads (lane-rb.md § rb1): one JSON line,
+// `ok` with round full|reviewed|delta|capped (+ since / last / problem), or
+// `refused` with a reason.
+
+const RH1 = '1111111111111111111111111111111111111111';
+const RH2 = '2222222222222222222222222222222222222222';
+const RH3 = '3333333333333333333333333333333333333333';
+const RH4 = '4444444444444444444444444444444444444444';
+
+function roundsReview(review_id, head, { since, login = SERVICE_LOGIN } = {}) {
+  const marker = buildMarker({ repo: PINNED_REPO, pr: PINNED_PR, head, base: PINNED_BASE, lenses: REQUIRED_LENSES, run: RUN_ID, attempt: 1, ...(since ? { since } : {}) });
+  return { review_id, author_login: login, commit_id: head, submitted_at: '2026-09-27T10:00:00Z', state: 'COMMENTED', body: `a summary\n\n${marker}` };
+}
+
+/** A compare payload: `commits` is a list of parent counts, one per commit. */
+function roundsCompare({ status = 'ahead', files = 1, commits = [1], totalCommits } = {}) {
+  return {
+    status,
+    ahead_by: commits.length,
+    total_commits: totalCommits ?? commits.length,
+    files: Array.from({ length: files }, (_, i) => ({ filename: `f${i}.ts` })),
+    commits: commits.map((parents, i) => ({ sha: `c${i}`.padEnd(40, '0'), parents: Array.from({ length: parents }, () => ({ sha: 'p'.padEnd(40, '0') })) })),
+  };
+}
+
+function roundsSeams({ reviews = [], compare = roundsCompare(), fail: failNeedle = null } = {}) {
+  const calls = [];
+  const runGh = (args) => {
+    calls.push(args);
+    const joined = args.join(' ');
+    if (failNeedle && joined.includes(failNeedle)) throw new Error('gh: server error');
+    if (args[0] === 'api' && args[1] === '--paginate' && /\/reviews$/.test(args[2])) return `${reviews.map((r) => JSON.stringify(r)).join('\n')}\n`;
+    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(compare);
+    throw new Error(`unexpected gh call: ${joined}`);
+  };
+  return { runGh, calls };
+}
+
+async function runRounds({ reviews, compare, head, fake, failNeedle, makeClient }) {
+  let result;
+  await withCoordinatedInstall({ fake }, async ({ home }) => {
+    const seams = roundsSeams({ reviews, compare, fail: failNeedle });
+    const out = collector();
+    await cmdRounds(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), head },
+      { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home, ...(makeClient ? { makeClient } : {}) },
+    );
+    result = { line: out.line(), deaths: out.deaths, calls: seams.calls };
+  });
+  return result;
+}
+
+test('rounds answers each round from the posted markers: full, reviewed, delta, capped', async () => {
+  const full = await runRounds({ reviews: [], head: RH1 });
+  assert.deepEqual(full.line, { outcome: 'ok', retry: 'stop', round: 'full', problem: null });
+  assert.equal(full.calls.some((args) => args.join(' ').includes('/compare/')), false, 'no review, no tail to read');
+
+  const reviewed = await runRounds({ reviews: [roundsReview(11, RH1)], head: RH1 });
+  assert.deepEqual(reviewed.line, { outcome: 'ok', retry: 'stop', round: 'reviewed', last: { head: RH1, scope: 'full', review_id: 11 }, problem: null });
+
+  const delta = await runRounds({ reviews: [roundsReview(11, RH1)], head: RH2 });
+  assert.deepEqual(delta.line, { outcome: 'ok', retry: 'stop', round: 'delta', since: RH1, last: { head: RH1, scope: 'full', review_id: 11 }, problem: null });
+  assert.ok(delta.calls.some((args) => args[1] === `repos/${PINNED_REPO}/compare/${RH1}...${RH2}`), 'the tail is read from the last reviewed head');
+
+  const capped = await runRounds({ reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 })], head: RH3 });
+  assert.deepEqual(capped.line, { outcome: 'ok', retry: 'stop', round: 'capped', last: { head: RH2, scope: 'delta', review_id: 12 }, problem: null });
+  for (const r of [full, reviewed, delta, capped]) assert.deepEqual(r.deaths, []);
+});
+
+test('rounds: since is the last FULL review head, never a later delta head', async () => {
+  // full H1, delta H2 (since H1), then the conductor re-ran a full review on H3:
+  // H4 is round two of the fresh pair, measured from H3.
+  const r = await runRounds({ reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), roundsReview(13, RH3)], head: RH4 });
+  assert.equal(r.line.round, 'delta');
+  assert.equal(r.line.since, RH3);
+  assert.deepEqual(r.line.last, { head: RH3, scope: 'full', review_id: 13 });
+});
+
+test('rounds: a delta round over a rebased head carries amendmentProblem as its problem', async () => {
+  const r = await runRounds({ reviews: [roundsReview(11, RH1)], head: RH2, compare: roundsCompare({ status: 'diverged' }) });
+  assert.equal(r.line.round, 'delta');
+  assert.equal(r.line.since, RH1);
+  assert.match(r.line.problem, /is not an ancestor of the head 2222222 \(compare status: diverged\)/);
+});
+
+test('rounds: a capped head whose tail merged the base branch in is capped WITH a problem', async () => {
+  const r = await runRounds({
+    reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 })],
+    head: RH3,
+    compare: roundsCompare({ files: 4, commits: [1, 2] }),
+  });
+  assert.equal(r.line.round, 'capped');
+  assert.match(r.line.problem, /contains a merge commit/);
+});
+
+test('rounds: an empty-commit tail is capped with NO problem; a zero-file tail with a merge is not exempt', async () => {
+  const reviews = [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 })];
+  const empty = await runRounds({ reviews, head: RH3, compare: roundsCompare({ files: 0, commits: [1] }) });
+  assert.deepEqual([empty.line.round, empty.line.problem], ['capped', null]);
+  // The exemption needs zero files AND no merge AND a complete commit list.
+  const merged = await runRounds({ reviews, head: RH3, compare: roundsCompare({ files: 0, commits: [2] }) });
+  assert.deepEqual([merged.line.round, merged.line.problem], ['capped', `the amendment ${RH2.slice(0, 7)}...${RH3.slice(0, 7)} lists no changed files`]);
+  const short = await runRounds({ reviews, head: RH3, compare: roundsCompare({ files: 0, commits: [1], totalCommits: 2 }) });
+  assert.equal(short.line.problem, `the amendment ${RH2.slice(0, 7)}...${RH3.slice(0, 7)} lists no changed files`);
+  const rebased = await runRounds({ reviews, head: RH3, compare: roundsCompare({ status: 'diverged', files: 0 }) });
+  assert.equal(rebased.line.problem, 'compare status diverged');
+});
+
+test('rounds: another login and a replaced review are not rounds', async () => {
+  const fake = coordinatorFake({ attempts: [{ attempt: 1, state: 'replaced', review_id: 12 }] });
+  const r = await runRounds({
+    fake,
+    reviews: [roundsReview(10, RH1, { login: OTHER_LOGIN }), roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 })],
+    head: RH3,
+  });
+  assert.deepEqual([r.line.round, r.line.since], ['delta', RH1], 'the replaced delta does not spend round two');
+});
+
+test('rounds passes a refusal through: identity-unset, a login-less identity, coordinator-unreachable, managed-config-missing, gh-failure', async () => {
+  const unset = await runRounds({ fake: coordinatorFake({ identity: null }), reviews: [roundsReview(11, RH1)], head: RH2 });
+  assert.deepEqual(unset.line, { outcome: 'refused', reason: 'identity-unset', retry: 'stop', coordinator_code: 'identity-unset' });
+  assert.deepEqual(unset.calls, [], 'nothing was read from GitHub');
+  assert.equal(unset.deaths[0].code, 1);
+
+  // A login-less answer would filter every review out and read the head as
+  // never reviewed — the direction that claims a second full review.
+  const empty = await runRounds({ fake: coordinatorFake({ identity: '' }), reviews: [roundsReview(11, RH1)], head: RH2 });
+  assert.deepEqual(empty.line, { outcome: 'refused', reason: 'identity-unset', retry: 'stop' });
+  assert.deepEqual(empty.calls, []);
+
+  const unreachable = await runRounds({
+    reviews: [], head: RH1,
+    makeClient: () => ({ readIdentity: async () => ({ ok: false, code: 'coordinator-unreachable', source: 'client', message: 'ECONNREFUSED' }) }),
+  });
+  assert.deepEqual(unreachable.line, { outcome: 'refused', reason: 'coordinator-unreachable', retry: 'stop' });
+
+  await withProfile({}, async (home, dir) => {
+    const out = collector();
+    await cmdRounds(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), head: RH1 },
+      { ...out.deps, runGh: () => { throw new Error('no gh call before the config is read'); }, env: {}, homeDir: home, makeClient: () => { throw new Error('no client without a token'); } },
+    );
+    assert.deepEqual(out.line(), { outcome: 'refused', reason: 'managed-config-missing', retry: 'stop', directory: dir });
+  });
+
+  // A listing or compare that cannot be read is refused, never answered `full`.
+  const listing = await runRounds({ reviews: [roundsReview(11, RH1)], head: RH2, failNeedle: '/reviews' });
+  assert.deepEqual(listing.line, { outcome: 'refused', reason: 'gh-failure', retry: 'lens-budget' });
+  assert.equal(listing.deaths[0].code, 4);
+  const compare = await runRounds({ reviews: [roundsReview(11, RH1)], head: RH2, failNeedle: '/compare/' });
+  assert.equal(compare.line.reason, 'gh-failure');
+});
+
+test('rounds CLI refuses a short or missing --head before anything runs', () => {
+  for (const args of [['rounds', '--pr', '5', '--repo', 'o/r', '--head', 'abc1234'], ['rounds', '--pr', '5', '--repo', 'o/r']]) {
+    let status = 0;
+    let stderr = '';
+    try {
+      execFileSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      status = err.status;
+      stderr = String(err.stderr);
+    }
+    assert.equal(status, 2, args.join(' '));
+    assert.match(stderr, /rounds needs --head <full 40-character sha>/);
+  }
 });
 
 // --- V3: one pinned input, and incomplete input starts nothing -------------
