@@ -294,17 +294,37 @@ test('no patch: a non-test file, an added test file, and a pure rename are not r
 
 // --- round one of workit#119 ---------------------------------------------------
 
-test('4117560925: a modified test file with no hunk stays unchecked; only a 100% rename or a mode change reads as unchanged', () => {
+test('4117560925: a modified test file with no hunk stays unchecked; only evidence of identical content reads as unchanged', () => {
   const files = filesFromDiff([
     'diff --git a/src/big.test.mjs b/src/big.test.mjs',
     'index 1111111..2222222 100644',
+    'diff --git a/src/same.test.mjs b/src/same.test.mjs',
+    'index 3333333..3333333 100644',
+  ].join('\n'));
+  assert.equal(files[0].changes, undefined, 'no hunk alone is not git saying nothing changed');
+  assert.equal(files[1].changes, 0, 'equal blob ids are that word');
+  assert.deepEqual(detectTestWeakening(files).map((entry) => [entry.path, entry.unchecked]), [['src/big.test.mjs', true]]);
+});
+
+test('4117587311 / 4117587316: a mode header is not evidence of unchanged content', () => {
+  const files = filesFromDiff([
     'diff --git a/src/run.test.mjs b/src/run.test.mjs',
     'old mode 100644',
     'new mode 100755',
+    'index 1111111..2222222',
+    'diff --git a/src/chmod.test.mjs b/src/chmod.test.mjs',
+    'old mode 100644',
+    'new mode 100755',
+    'diff --git a/src/chmod-same.test.mjs b/src/chmod-same.test.mjs',
+    'old mode 100644',
+    'new mode 100755',
+    'index 4444444..4444444',
   ].join('\n'));
-  assert.equal(files[0].changes, undefined, 'no hunk alone is not git saying nothing changed');
-  assert.equal(files[1].changes, 0);
-  assert.deepEqual(detectTestWeakening(files).map((entry) => [entry.path, entry.unchecked]), [['src/big.test.mjs', true]]);
+  assert.deepEqual(files.map((file) => file.changes), [undefined, undefined, 0]);
+  assert.deepEqual(detectTestWeakening(files).map((entry) => [entry.path, entry.unchecked]), [
+    ['src/run.test.mjs', true],
+    ['src/chmod.test.mjs', true],
+  ], 'different blob ids, or none shown, stay not checked; only equal blob ids pass');
 });
 
 test('4117560929: a test moved unchanged under if (false) is reported by its wrapper', () => {
@@ -320,6 +340,15 @@ test('4117560929: a test moved unchanged under if (false) is reported by its wra
     '+}',
   ].join('\n') }]);
   assert.deepEqual(entry?.items.map((item) => [item.kind, item.line, item.text]), [['disabled-added', 1, 'if (false) {']]);
+});
+
+test('4117587314 / 4117587318: a /** block around a moved test, or around kept test lines, is reported; one still open at a hunk gap is too', () => {
+  const jsdocAroundMoved = detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: "@@ -1,3 +1,5 @@\n-test('x', () => {\n-  assert.ok(run());\n-});\n+/**\n+test('x', () => {\n+  assert.ok(run());\n+});\n+ */" }]);
+  assert.deepEqual(jsdocAroundMoved[0]?.items.map((item) => [item.kind, item.line, item.text]), [['disabled-added', 1, '/**']]);
+  const aroundKept = detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: "@@ -1,3 +1,5 @@\n+/*\n test('x', () => {\n   assert.ok(run());\n });\n+*/" }]);
+  assert.deepEqual(aroundKept[0]?.items.map((item) => [item.kind, item.line]), [['disabled-added', 1]]);
+  const openAtGap = detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: "@@ -1,1 +1,2 @@\n+/*\n ctx\n@@ -40,1 +41,2 @@\n ctx\n+*/" }]);
+  assert.deepEqual(openAtGap[0]?.items.map((item) => [item.kind, item.line]), [['disabled-added', 1]]);
 });
 
 test('4117560929: an opened block comment around moved tests is reported; a JSDoc opener, a closed one-line comment and a real condition are not', () => {

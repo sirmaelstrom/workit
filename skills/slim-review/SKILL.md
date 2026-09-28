@@ -254,8 +254,9 @@ coverage verdict is the whole quality signal.
 test: a test file deleted, a test case removed (`test(`, `it(`, `describe(`,
 `[Fact]`, …), a skip or focus added (`.skip`, `.only`, `xit`, `[Fact(Skip =`,
 …), an assertion line removed or changed (`assert.`, `expect(`, `Assert.`,
-`.Should()`), a disabling wrapper added (`if (false)`, an opened `/*`,
-`#if false`), or a test file renamed out of the test paths. The patterns are
+`.Should()`), a disabling wrapper added (`if (false)`, `#if false`, or a
+`/*` / `/**` opened around a test or an assertion), or a test file renamed out
+of the test paths. The patterns are
 one table in `scripts/pr-review-guard.mjs`. It matches text and does not judge
 it: a condition that needs evaluating is past it. A line moved within the same
 file is not reported, and neither is a renamed test declaration while every

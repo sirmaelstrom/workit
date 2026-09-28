@@ -58,15 +58,14 @@ export const GUARD_PATTERNS = Object.freeze([
   },
   {
     // Tests moved unchanged into code that never runs match as a move, so the
-    // wrapper itself is the signal. Literal guards and comment openers only:
-    // a condition that needs evaluating is past what a pattern can know.
+    // wrapper itself is the signal. Literal guards only: a condition that
+    // needs evaluating is past what a pattern can know. Block comments are
+    // judged by what they enclose, in `commentedOutTests` below.
     kind: 'disabled-added',
     on: 'added',
     label: 'code disabled (literal-false guard or block comment opened)',
     patterns: [
       /\b(?:if|while)\s*\(\s*(?:false|0|!1|null|undefined|''|"")\s*\)/,
-      // a multi-line block comment opened: `/*` (not `/**`) with no `*/` after
-      /^\s*\/\*(?!\*)(?!.*\*\/)/,
       /^\s*#if\s+(?:false|0)\b/i,
     ],
   },
@@ -119,7 +118,7 @@ export function filesFromDiff(diffText) {
   for (const raw of String(diffText).replace(/\r?\n$/, '').split(/\r?\n/)) {
     if (raw.startsWith('diff --git ')) {
       const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(raw);
-      current = { filename: m?.[2] ?? null, previous_filename: m?.[1] ?? null, status: 'modified', binary: false, identical: false, modeOnly: false, patchLines: [] };
+      current = { filename: m?.[2] ?? null, previous_filename: m?.[1] ?? null, status: 'modified', binary: false, identical: false, patchLines: [] };
       files.push(current);
       inPatch = false;
       continue;
@@ -132,7 +131,7 @@ export function filesFromDiff(diffText) {
       else if (raw.startsWith('rename to ')) current.filename = raw.slice(10);
       else if (raw.startsWith('Binary files ')) current.binary = true;
       else if (raw === 'similarity index 100%') current.identical = true;
-      else if (raw.startsWith('old mode ')) current.modeOnly = true;
+      else if (/^index ([0-9a-f]+)\.\.\1(?:\s|$)/.test(raw)) current.identical = true;
       else if (raw.startsWith('--- ')) {
         const source = raw.slice(4).trim();
         if (source !== '/dev/null') current.previous_filename = source.replace(/^a\//, '');
@@ -148,7 +147,7 @@ export function filesFromDiff(diffText) {
     }
     current.patchLines.push(raw);
   }
-  return files.map(({ patchLines: lines, filename, previous_filename: previous, status, binary, identical, modeOnly }) => {
+  return files.map(({ patchLines: lines, filename, previous_filename: previous, status, binary, identical }) => {
     // A deleted file's only name is its old one.
     const name = status === 'removed' ? (previous ?? filename) : filename;
     return {
@@ -156,10 +155,11 @@ export function filesFromDiff(diffText) {
       ...(previous && previous !== name ? { previous_filename: previous } : {}),
       status,
       patch: lines.join('\n'),
-      // `changes: 0` (as the compare API reports it) only on git's own word
-      // that the content did not change: a 100% rename, or a mode-only change.
-      // A missing hunk alone is not that word, and stays unchecked.
-      ...(lines.length === 0 && !binary && (identical || modeOnly) ? { changes: 0 } : {}),
+      // `changes: 0` (as the compare API reports it) only on evidence the
+      // content is identical: `similarity index 100%`, or equal blob ids on the
+      // `index` line. A mode header proves nothing about content, and a missing
+      // hunk alone is not evidence either: both stay unchecked.
+      ...(lines.length === 0 && !binary && identical ? { changes: 0 } : {}),
     };
   });
 }
@@ -213,6 +213,48 @@ function countBy(lines, keyOf) {
 }
 
 /**
+ * Added block-comment openers (`/*` or `/**`) that swallow a test: walking the
+ * post-change lines the patch shows, in order, an opener added by this change
+ * whose comment holds a test declaration or an assertion before the comment
+ * closes is reported, whether the enclosed lines were moved, kept or added. A JSDoc block
+ * above a function holds neither and stays silent. A comment still open when
+ * the visible lines skip ahead (a hunk gap) is reported too: the patch cannot
+ * show where it closes.
+ */
+function commentedOutTests(added, context) {
+  const shown = [
+    ...added.map((line) => ({ ...line, isAdded: true })),
+    ...context.map((line) => ({ line: line.line, text: line.text, isAdded: false })),
+  ].sort((a, b) => a.line - b.line);
+  const swallows = (text) => classify(text, 'removed').some((row) => row.kind === 'test-removed' || row.kind === 'assertion-removed');
+  const found = [];
+  let open = null;
+  let previous = null;
+  for (const line of shown) {
+    if (open && previous !== null && line.line !== previous + 1) {
+      found.push(open.opener);
+      open = null;
+    }
+    previous = line.line;
+    if (open) {
+      const close = line.text.indexOf('*/');
+      const inside = close === -1 ? line.text : line.text.slice(0, close);
+      if (!open.hit && swallows(inside)) open.hit = true;
+      if (close !== -1) {
+        if (open.hit) found.push(open.opener);
+        open = null;
+      }
+      continue;
+    }
+    const at = line.text.lastIndexOf('/*');
+    if (!line.isAdded || at === -1 || line.text.indexOf('*/', at + 2) !== -1) continue;
+    open = { opener: line, hit: swallows(line.text.slice(at + 2)) };
+  }
+  if (open) found.push(open.opener);
+  return found;
+}
+
+/**
  * The detector. One entry per changed test file that shows a sign of
  * weakening:
  *
@@ -233,7 +275,7 @@ function countBy(lines, keyOf) {
  * A changed test file with no patch (GitHub omits it on a large diff, and a
  * binary file has none) cannot be read, so it is reported `unchecked`: a thread
  * that says nothing was checked, rather than silence. An added file and one
- * with `changes: 0` (a pure rename or a mode change) have nothing to remove.
+ * with `changes: 0` (content shown identical) have nothing to remove.
  */
 export function detectTestWeakening(files) {
   const report = [];
@@ -254,7 +296,7 @@ export function detectTestWeakening(files) {
       report.push({ path, status: file.status, deleted: false, unchecked: true, ...outOf, items: [] });
       continue;
     }
-    const { removed, added } = patchLines(file.patch);
+    const { removed, added, context } = patchLines(file.patch);
     if (file.status === 'removed') {
       report.push({
         path,
@@ -291,6 +333,10 @@ export function detectTestWeakening(files) {
       for (const row of classify(line.text, 'added')) {
         items.push({ kind: row.kind, label: row.label, side: 'RIGHT', line: line.line, text: line.text, at: line.line });
       }
+    }
+    const disabled = GUARD_PATTERNS.find((row) => row.kind === 'disabled-added');
+    for (const opener of commentedOutTests(added, context)) {
+      items.push({ kind: disabled.kind, label: disabled.label, side: 'RIGHT', line: opener.line, text: opener.text, at: opener.line });
     }
     if (items.length === 0 && !renamedOut) continue;
     items.sort((a, b) => a.at - b.at || (a.side === b.side ? a.line - b.line : a.side === 'LEFT' ? -1 : 1));
