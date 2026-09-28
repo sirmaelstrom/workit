@@ -46,11 +46,11 @@ the writer refuses `--since` after the claim, the attempt stays live, and `owed`
 names its attempt-ref file for the conductor's call. The loop never falls back
 to a full review.
 
-**`--claim beat` covers round one only.** The beat can't run a delta pass yet,
-so round two is always a session claim, and the log line says so. The gap: if
-you push a fix and wait longer than the beat's eligibility window before `run`,
-the beat can post a full review on that head first. The beat's own migration
-closes this.
+**`--claim beat` covers round one only.** Round two is always a session
+claim, so it starts when you run rather than on the beat's cadence, and the log
+line says so. Since observatory#765 the beat follows the same cap: if it
+reaches the head first, it claims the same delta pass (never a full review),
+and the coordinator admits only one attempt per head.
 
 ## Convergence (the only clean exit)
 

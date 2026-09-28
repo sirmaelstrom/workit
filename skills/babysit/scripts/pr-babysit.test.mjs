@@ -544,7 +544,7 @@ test('--claim beat on round two: still a session claim with --since, and the dec
   await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1, claim: 'beat' } }, deps);
   assert.equal(w.writerCalls.filter((c) => c[0] === 'claim').length, 1);
   assert.deepEqual(lensCalls(w).map(sinceOf), [H1, H1]);
-  assert.ok(lines.some((l) => /--claim beat does not apply: the beat cannot run a delta pass yet/.test(l)), lines.join('\n'));
+  assert.ok(lines.some((l) => /--claim beat does not apply to round two: the session claims the delta now/.test(l)), lines.join('\n'));
   // round one still waits for the beat
   const fresh = world();
   await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 60, maxWallMinutes: 2, claim: 'beat' } }, fresh.deps);

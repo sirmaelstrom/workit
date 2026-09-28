@@ -454,11 +454,10 @@ its seen-failing control, and that is the amendment check at that point.
 **Who follows the cap today.** Manual T1 follows it (this skill run by a
 session or conductor), and so does `babysit`. Babysit reads the rounds from the
 posted reviews' markers, claims round two as a delta pass, and claims nothing
-after a delta. Observatory's pr-review beat does not follow it yet: it still
-runs a full paired review on every new head it picks up. The writer answers
-the same rounds for any caller through `rounds` (under Managed repositories),
-which reads them from the same code babysit does; the beat's migration to ask
-it before claiming is Observatory's, not part of this skill.
+after a delta. Observatory's pr-review beat follows it too (observatory#765,
+deployed 2026-09-28): it asks `rounds` (under Managed repositories) before it
+claims, runs round two as a delta pass, and records a later head as `capped`
+without claiming it. All three callers read the rounds from the same code.
 
 When every thread has a verdict and CI is green, the PR is ready for the
 operator's merge call.
