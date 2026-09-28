@@ -3477,6 +3477,13 @@ test('rounds answers each round from the posted markers: full, reviewed, delta, 
   for (const r of [full, reviewed, delta, capped]) assert.deepEqual(r.deaths, []);
 });
 
+test('rounds: an uppercase --head on a reviewed head answers reviewed (heads compare lowercase)', async () => {
+  const head = 'abcdef0123456789abcdef0123456789abcdef01';
+  const r = await runRounds({ reviews: [roundsReview(11, head)], head: head.toUpperCase() });
+  assert.deepEqual(r.line, { outcome: 'ok', retry: 'stop', round: 'reviewed', last: { head, scope: 'full', review_id: 11 }, problem: null });
+  assert.equal(r.calls.some((args) => args.join(' ').includes('/compare/')), false, 'a reviewed head reads no tail');
+});
+
 test('rounds: since is the last FULL review head, never a later delta head', async () => {
   // full H1, delta H2 (since H1), then the conductor re-ran a full review on H3:
   // H4 is round two of the fresh pair, measured from H3.
