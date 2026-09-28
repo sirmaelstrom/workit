@@ -245,6 +245,53 @@ test('anchoring: an amendment removal finds its text on the PR diff; a file the 
   assert.equal(anchorEntry(goneEntry, indexForAnchoring([])), null);
 });
 
+// --- no patch: GitHub omits it on a large diff, and a binary has none -------
+
+/** A PR diff with one commentable file, so a no-patch entry has somewhere to fall back to. */
+const ELSEWHERE = [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1,1 +1,1 @@\n-a\n+b' }];
+
+test('no patch: a modified test file with no patch is one "not checked" entry and a guard thread', () => {
+  const big = { filename: 'src/big.test.mjs', status: 'modified', changes: 4000 };
+  assert.deepEqual(detectTestWeakening([big]), [{ path: 'src/big.test.mjs', status: 'modified', deleted: false, unchecked: true, items: [] }]);
+  const result = guardReview({ sourceFiles: [big], prDiffFiles: [...ELSEWHERE, big] });
+  assert.equal(result.comments.length, 1);
+  assert.deepEqual({ path: result.comments[0].path, side: result.comments[0].side, line: result.comments[0].line }, { path: 'src/a.ts', side: 'RIGHT', line: 1 });
+  assert.match(result.comments[0].body, /^\*\*lens:\*\* guard\n\n\*\*Test-weakening check: `src\/big\.test\.mjs` not checked: no patch\*\*/);
+  assert.match(result.comments[0].body, /the change is in `src\/big\.test\.mjs`/);
+  assert.match(result.section, /`src\/big\.test\.mjs`: not checked: no patch/);
+});
+
+test('no patch: a deleted test file with no patch is reported as deleted, and says its contents were not counted', () => {
+  const gone = { filename: 'src/big.test.mjs', status: 'removed' };
+  const [entry, ...rest] = detectTestWeakening([gone]);
+  assert.deepEqual(rest, []);
+  assert.deepEqual({ deleted: entry.deleted, patchMissing: entry.patchMissing }, { deleted: true, patchMissing: true });
+  const result = guardReview({ sourceFiles: [gone], prDiffFiles: [...ELSEWHERE, gone] });
+  assert.equal(result.comments.length, 1);
+  assert.match(result.comments[0].body, /`src\/big\.test\.mjs` was deleted\*\*\n\nGitHub sent no patch for it/);
+  assert.equal(result.comments[0].body.includes('held 0 test declaration'), false, 'no count is claimed for a file nobody read');
+});
+
+test('no patch: a non-test file, an added test file, and a pure rename are not reported', () => {
+  assert.deepEqual(detectTestWeakening([
+    { filename: 'src/big.ts', status: 'modified', changes: 4000 },
+    { filename: 'src/big.ts', status: 'removed' },
+    { filename: 'src/new.test.mjs', status: 'added', changes: 9000 },
+    { filename: 'tests/moved.mjs', previous_filename: 'tests/old.mjs', status: 'renamed', changes: 0 },
+  ]), []);
+  // The same pure rename read from a gh pr diff, and a binary test fixture, which is reported.
+  const files = filesFromDiff([
+    'diff --git a/tests/old.mjs b/tests/moved.mjs',
+    'similarity index 100%',
+    'rename from tests/old.mjs',
+    'rename to tests/moved.mjs',
+    'diff --git a/tests/fixture.png b/tests/fixture.png',
+    'index 1111111..2222222 100644',
+    'Binary files a/tests/fixture.png and b/tests/fixture.png differ',
+  ].join('\n'));
+  assert.deepEqual(detectTestWeakening(files).map((entry) => [entry.path, entry.unchecked]), [['tests/fixture.png', true]]);
+});
+
 test('guardReview renders tagged threads and a body section, and nothing at all when no test was weakened', () => {
   const files = filesFromDiff(LOOSENED_ASSERTION);
   const result = guardReview({ sourceFiles: files, prDiffFiles: files, delta: true });

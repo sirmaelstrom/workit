@@ -256,7 +256,9 @@ test: a test file deleted, a test case removed (`test(`, `it(`, `describe(`,
 …), or an assertion line removed or changed (`assert.`, `expect(`, `Assert.`,
 `.Should()`). The patterns are one table in `scripts/pr-review-guard.mjs`. It
 matches text and does not judge it. A line moved within the same file, and a
-test renamed with its body intact, are not reported.
+test renamed with its body intact, are not reported. A changed test file with
+no patch (GitHub omits it on a large diff; a binary file has none) gets a
+**not checked: no patch** thread of its own, since nothing in it could be read.
 
 - **Which patches:** the PR diff on a full review, and the `<since>...<head>`
   compare on an amendment check, so a delta round reports only what the

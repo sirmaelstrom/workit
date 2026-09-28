@@ -105,7 +105,7 @@ export function filesFromDiff(diffText) {
   for (const raw of String(diffText).replace(/\r?\n$/, '').split(/\r?\n/)) {
     if (raw.startsWith('diff --git ')) {
       const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(raw);
-      current = { filename: m?.[2] ?? null, previous_filename: m?.[1] ?? null, status: 'modified', patchLines: [] };
+      current = { filename: m?.[2] ?? null, previous_filename: m?.[1] ?? null, status: 'modified', binary: false, patchLines: [] };
       files.push(current);
       inPatch = false;
       continue;
@@ -116,6 +116,7 @@ export function filesFromDiff(diffText) {
       else if (raw.startsWith('new file mode')) current.status = 'added';
       else if (raw.startsWith('rename from ')) { current.status = 'renamed'; current.previous_filename = raw.slice(12); }
       else if (raw.startsWith('rename to ')) current.filename = raw.slice(10);
+      else if (raw.startsWith('Binary files ')) current.binary = true;
       else if (raw.startsWith('--- ')) {
         const source = raw.slice(4).trim();
         if (source !== '/dev/null') current.previous_filename = source.replace(/^a\//, '');
@@ -131,7 +132,7 @@ export function filesFromDiff(diffText) {
     }
     current.patchLines.push(raw);
   }
-  return files.map(({ patchLines: lines, filename, previous_filename: previous, status }) => {
+  return files.map(({ patchLines: lines, filename, previous_filename: previous, status, binary }) => {
     // A deleted file's only name is its old one.
     const name = status === 'removed' ? (previous ?? filename) : filename;
     return {
@@ -139,6 +140,9 @@ export function filesFromDiff(diffText) {
       ...(previous && previous !== name ? { previous_filename: previous } : {}),
       status,
       patch: lines.join('\n'),
+      // No hunk and not binary: git saw no content change (a pure rename or a
+      // mode change), which the compare API reports as `changes: 0`.
+      ...(lines.length === 0 && !binary && status !== 'removed' ? { changes: 0 } : {}),
     };
   });
 }
@@ -195,7 +199,8 @@ function countBy(lines, keyOf) {
  * The detector. One entry per changed test file that shows a sign of
  * weakening:
  *
- *   { path, status, deleted: true, removedTests, removedAssertions }
+ *   { path, status, deleted: true, patchMissing, removedTests, removedAssertions }
+ *   { path, status, deleted: false, unchecked: true, items: [] }
  *   { path, status, deleted: false, items: [{ kind, label, side, line, text, at? }] }
  *
  * `side` is GitHub's review-comment side: `LEFT` for a removed line (numbered
@@ -203,18 +208,30 @@ function countBy(lines, keyOf) {
  * unchanged elsewhere in the same file (compared trimmed) is a move and is not
  * reported. A removed test declaration whose rename-key reappears among the
  * added lines is a rename and is not reported either.
+ *
+ * A changed test file with no patch (GitHub omits it on a large diff, and a
+ * binary file has none) cannot be read, so it is reported `unchecked`: a thread
+ * that says nothing was checked, rather than silence. An added file and one
+ * with `changes: 0` (a pure rename or a mode change) have nothing to remove.
  */
 export function detectTestWeakening(files) {
   const report = [];
   for (const file of files ?? []) {
     const path = file.filename;
     if (!isTestFile(path) && !isTestFile(file.previous_filename)) continue;
+    const patchMissing = typeof file.patch !== 'string' || file.patch.trim() === '';
+    if (patchMissing && file.status !== 'removed') {
+      if (file.status === 'added' || file.changes === 0) continue;
+      report.push({ path, status: file.status, deleted: false, unchecked: true, items: [] });
+      continue;
+    }
     const { removed, added } = patchLines(file.patch);
     if (file.status === 'removed') {
       report.push({
         path,
         status: file.status,
         deleted: true,
+        patchMissing,
         firstLine: removed[0]?.line ?? null,
         removedTests: removed.filter((line) => classify(line.text, 'removed').some((row) => row.kind === 'test-removed')).length,
         removedAssertions: removed.filter((line) => classify(line.text, 'removed').some((row) => row.kind === 'assertion-removed')).length,
@@ -315,7 +332,7 @@ export function anchorEntry(entry, index) {
       const candidates = own.removedByText.get(item.text.trim());
       if (candidates?.length) return { path: entry.path, side: 'LEFT', line: nearest(candidates, item.line), exact: true };
     }
-    const at = entry.deleted ? 1 : entry.items[0].at;
+    const at = entry.items?.[0]?.at ?? 1;
     const right = nearest(own.right.keys(), at);
     if (right !== null) return { path: entry.path, side: 'RIGHT', line: right, exact: false };
     const left = nearest(own.left.keys(), at);
@@ -348,7 +365,12 @@ export function renderGuardComment(entry, anchor, { delta = false } = {}) {
   if (delta) lines.push('**scope:** delta', '');
   if (entry.deleted) {
     lines.push(`**Test-weakening check: \`${entry.path}\` was deleted**`, '');
-    lines.push(`The file held ${entry.removedTests} test declaration line(s) and ${entry.removedAssertions} assertion line(s).`);
+    lines.push(entry.patchMissing
+      ? 'GitHub sent no patch for it, so its tests and assertions were not counted.'
+      : `The file held ${entry.removedTests} test declaration line(s) and ${entry.removedAssertions} assertion line(s).`);
+  } else if (entry.unchecked) {
+    lines.push(`**Test-weakening check: \`${entry.path}\` not checked: no patch**`, '');
+    lines.push(`This test file changed (${entry.status}), but GitHub sent no patch for it (a large diff or a binary file), so nothing in it was checked. Read the change before judging it.`);
   } else {
     lines.push(`**Test-weakening check: \`${entry.path}\`**`, '');
     for (const item of entry.items.slice(0, MAX_LISTED)) {
@@ -392,9 +414,9 @@ export function guardReview({ sourceFiles, prDiffFiles, delta = false }) {
     '',
     '### Test-weakening check',
     '',
-    `${entries.length} test file(s) in ${delta ? 'this amendment' : 'this PR'} lost a test, an assertion, or gained a skip or focus. Each is an open thread for the conductor or the operator to judge; the lane cannot clear it.`,
+    `${entries.length} test file(s) in ${delta ? 'this amendment' : 'this PR'} lost a test, an assertion, or gained a skip or focus, or changed with no patch to check. Each is an open thread for the conductor or the operator to judge; the lane cannot clear it.`,
     '',
-    ...entries.map((entry) => `- \`${entry.path}\`: ${entry.deleted ? 'deleted' : entry.items.map((item) => item.label).filter((label, i, all) => all.indexOf(label) === i).join(', ')}${unanchored.includes(entry) ? ' — **no line in this PR diff can carry a comment; judge it here**' : ''}`),
+    ...entries.map((entry) => `- \`${entry.path}\`: ${entry.deleted ? 'deleted' : entry.unchecked ? 'not checked: no patch' : entry.items.map((item) => item.label).filter((label, i, all) => all.indexOf(label) === i).join(', ')}${unanchored.includes(entry) ? ' — **no line in this PR diff can carry a comment; judge it here**' : ''}`),
   ].join('\n');
   return { entries, comments, unanchored, section };
 }
