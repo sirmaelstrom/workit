@@ -34,9 +34,9 @@ First steps:
    session id, and the caller context % from that row.
 4. Pick up the anchored quest.
 
-Authority: if you are Fable 5.1 the 2026-09-04 ruling applies (merges + pm2 deploys pre-authorized,
-production hosts held); if you are not Fable, hold at every PR boundary with
-needs_input.
+Authority: Fable 5.1 may merge and pm2-deploy without a per-PR go (2026-09-04);
+Opus 5.5 may merge (2026-09-29); production hosts stay held. Any other model
+holds at every PR boundary with needs_input.
 ```
 
 `chain` / `retire self` must be your LAST tool call — make no tool call after it; write your final message and stop.
