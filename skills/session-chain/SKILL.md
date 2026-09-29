@@ -34,8 +34,8 @@ First steps:
    session id, and the caller context % from that row.
 4. Pick up the anchored quest.
 
-Authority: Fable 5.1 may merge and pm2-deploy without a per-PR go (2026-09-04);
-Opus 5.5 may merge (2026-09-29); production hosts stay held. Any other model
+Authority: Fable 5.1 (2026-09-04) and Opus 5.5 (2026-09-29) may merge and
+pm2-deploy without a per-PR go; production hosts stay held. Any other model
 holds at every PR boundary with needs_input.
 ```
 
