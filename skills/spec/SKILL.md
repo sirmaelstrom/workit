@@ -297,11 +297,11 @@ Update `meta.json` status to `"ready"`.
 
 ### Phase 7: Refinement Loop (--review=full only)
 
-Iteratively review the work packages using fresh-eyes Sonnet sub-agents until convergence.
+Iteratively review the work packages using fresh-eyes Opus sub-agents until convergence.
 
 #### 7a. Fresh-Eyes Wave
 
-Launch a Sonnet sub-agent using the Agent tool. The full prompt template lives in `${CLAUDE_SKILL_DIR}/reference/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads.
+Launch an Opus sub-agent using the Agent tool (`model: opus`): the fresh-eyes verdict is a gate nothing re-checks, so it goes to the higher tier. The full prompt template lives in `${CLAUDE_SKILL_DIR}/reference/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads.
 
 #### 7b. Fix Findings
 
@@ -351,7 +351,7 @@ mcp__review-council__council_review({
 })
 ```
 
-The `spec` profile is **config-owned** — its membership lives in `models.json` (`profiles.spec`), so the roster can rotate without editing this skill. Roster-v2 (2026-07-11) it is `codex` (LEAD — agentic, explores `{project_path}` itself, runs on your ChatGPT login → plan-covered) + `grok` (adversarial, the one metered seat) + `opus` (the pivotal contradiction-catcher, `claude -p` → plan-covered) + `sonnet-5-carto` (agentic codebase grounding, `claude -p` → plan-covered). Two properties are load-bearing:
+The `spec` profile is **config-owned** — its membership lives in `models.json` (`profiles.spec`), so the roster can rotate without editing this skill; read `profiles.spec` for the current seats. Two properties are load-bearing:
 
 - **Anthropic runs natively via `claude -p` inside the MCP** — no separate in-session subagent anchor. This is plan-covered *today* only because the June-15 metering of `claude -p` was **deferred, not killed**. ⚠️ **Revert trigger:** the day `api_usage` anthropic rows flip `cost_basis` `notional`→`metered`, the opus + carto lenses start billing at API rates — at that point drop the Anthropic lenses from the `spec` profile (or point `/spec` back at `spec-external` + a local opus anchor). Watch: `SELECT cost_basis,count(*) FROM api_usage WHERE provider_id='anthropic' AND created_at>now()-interval '2 days' GROUP BY 1;` — a live instrument since 2026-08-29: Observatory's `costBasisFor` now observes `ANTHROPIC_API_KEY` presence in the recording process (until then anthropic-notional was hardcoded and this query was a tautology that could never fire).
 - Do **not** pass `models:` here — naming an explicit list re-inlines the roster this profile exists to own (explicit `models` overrides `profile` when both are present).
@@ -378,7 +378,7 @@ Count amendments applied.
 
 #### 8c. Final Validation Wave
 
-Run one more Sonnet fresh-eyes wave (same prompt as 7a) to verify the council amendments didn't introduce new issues. This is the final quality gate.
+Run one more Opus fresh-eyes wave (same prompt and model as 7a) to verify the council amendments didn't introduce new issues. This is the final quality gate.
 
 Then run the spec-validate script (bundled in this plugin):
 ```bash
@@ -494,7 +494,7 @@ Write a ledger event — as `event_type: "note"` with the stage record in the pa
 
 ## Principles
 
-- **Speed over perfection, but not over correctness.** The refinement loop exists because speed without review produces specs that fail at execution. The loop is fast (Sonnet agents, ~2 min/wave) and the ROI is proven.
+- **Speed over perfection, but not over correctness.** The refinement loop exists because speed without review produces specs that fail at execution. The loop is fast (a few minutes per wave) and the ROI is proven.
 - **Ground everything.** No architectural claims without file references. No "the system probably does X."
 - **Flag, don't hide.** Uncertainty is fine — hiding it isn't. Use [DECISION] and [ASSUMPTION] callouts liberally.
 - **Patterns are runtime reads, not memorized content.** Read each pattern file fresh before writing its artifact. Patterns evolve.
