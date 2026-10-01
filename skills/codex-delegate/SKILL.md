@@ -40,13 +40,13 @@ delegation case that justifies paying for a third. Do not reach for Grok here ev
 if a `grok` alias is registered and looks available; if Codex capacity is the
 constraint, wait or narrow the task rather than spending.
 
-### The Terra-vs-Luna threshold (measured)
+### The verdict-tier-vs-Luna threshold (measured)
 
 **Do not pick between a verdict tier and Luna on cost — they are the same $0 plan-covered channel.** Luna buys wall-clock and plan capacity, and pays in silent incompleteness. Measured 2026-08-07 with Terra as the verdict tier (the verdict tier is Astra@low since 2026-09-23; the Luna side of this threshold is unchanged), both tiers on a byte-identical whole-repo audit (`outputs/workshops/codex-delegation-pattern/luna-arm-measurement.md`):
 
 | Choose | For | Evidence |
 |---|---|---|
-| **Terra @ high** | Any output that is a **verdict about safety or correctness** — audits, "is X guarded", pre-merge verification, anything where a miss ships a bug | Luna returned a **confident wrong PASS on 2 of 9 examined stores (22%)**, citing real code at real line numbers. Terra found 3 genuine defects that both Luna and the July baseline called clean |
+| **Astra @ low** (the verdict tier; this arm ran Terra @ high) | Any output that is a **verdict about safety or correctness** — audits, "is X guarded", pre-merge verification, anything where a miss ships a bug | Luna returned a **confident wrong PASS on 2 of 9 examined stores (22%)**, citing real code at real line numbers. Terra found 3 genuine defects that both Luna and the July baseline called clean |
 | **Luna @ medium** | **Enumeration and extraction** whose output is mechanically checkable — inventories, find-all-X, classification, bulk mechanical edits | 141 s vs 249 s (**−43%**), 79k vs 93k leaf tokens (**−15%**), full recall of the known defect set |
 
 **A wrong verdict and a wrong locator both arrive in the register of a verified finding.** Luna's three failure modes — 25% silent store-coverage shortfall, 22% false PASS, one hallucinated directory — were *all invisible in a handback that read as complete*.
@@ -225,6 +225,6 @@ Codex prints a header, the transcript, and a `tokens used` line. The final assis
 
 *Origin: codex-delegation-pattern workshop (spec-LITE, 2026-07-04), quest `cb3ce3e7`; roster expansion quest `93d32058` (2026-07-10). Mechanism proven in Observatory's `CodexCliProvider` and the review council's lead lens. Measurement gate (D5) run 2026-07-06: `outputs/workshops/codex-delegation-pattern/measurement.md` — 177,307 → ~2,020 conductor tokens (98.9%, ~88x) with the same 4/4 defect set.*
 
-*Terra-vs-Luna threshold measured 2026-08-07, quest `a170a58d`: `outputs/workshops/codex-delegation-pattern/luna-arm-measurement.md` — both tiers re-run same-day on a byte-identical prompt (the D5 baseline's `gpt-5.5` + `--sandbox read-only` invocation is no longer reproducible). Directional, n=1 run per arm.*
+*Verdict-tier-vs-Luna threshold measured 2026-08-07 (Terra arm), quest `a170a58d`: `outputs/workshops/codex-delegation-pattern/luna-arm-measurement.md` — both tiers re-run same-day on a byte-identical prompt (the D5 baseline's `gpt-5.5` + `--sandbox read-only` invocation is no longer reproducible). Directional, n=1 run per arm.*
 
 </supporting_info>
