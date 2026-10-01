@@ -207,16 +207,22 @@ async function resolveTarget(opts, state, target, deps) {
     return { name: current.parentName ?? null, pane: current.spawnedBy, sessionId: null, target: current.spawnedBy };
   }
   if (target === 'self') return { name: null, pane: opts.currentPane, sessionId: null, target: opts.currentPane };
-  const record = state.sessions[target] ?? Object.values(state.sessions).find((item) => item.pane === target);
-  if (record) return { name: record.name ?? target, pane: record.pane, sessionId: record.sessionId ?? null, target: record.name ?? target };
-  if (target.startsWith('pane:') || /^w[0-9A-Za-z]+:p\d+$/.test(target)) {
+  const named = state.sessions[target];
+  if (named) return { name: named.name ?? target, pane: named.pane, sessionId: named.sessionId ?? null, target: named.name ?? target };
+  // herdr reissues pane ids (`wF:p2A`, `w1J:p1`), and a sidecar record outlives
+  // the agent it names, so a pane-shaped target asks herdr who owns it first. A
+  // record lends its session id only when it names that live owner.
+  if (target.startsWith('pane:') || /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/.test(target)) {
     const pane = call(deps, ['pane', 'get', target]);
     if (pane.code !== 0) usage(`pane_not_found: ${target}`);
     const agents = callOrFail(deps, ['agent', 'list']);
     const owner = agentOwningPane(agents, target);
     if (!owner) return { name: null, pane: target, sessionId: null, target, resolvedFrom: 'herdr', goneAgent: true };
-    return { name: owner, pane: target, sessionId: null, target: owner, resolvedFrom: 'herdr' };
+    const owned = Object.values(state.sessions).find((item) => item.pane === target && item.name === owner);
+    return { name: owner, pane: target, sessionId: owned?.sessionId ?? null, target: owner, resolvedFrom: 'herdr' };
   }
+  const record = Object.values(state.sessions).find((item) => item.pane === target);
+  if (record) return { name: record.name ?? target, pane: record.pane, sessionId: record.sessionId ?? null, target: record.name ?? target };
   const fetched = call(deps, ['agent', 'get', target]);
   const pane = fetched.code === 0 ? paneId(fetched.stdout) : null;
   if (!pane) usage(`target ${target} has no sidecar pane and herdr agent get did not return pane_id`);

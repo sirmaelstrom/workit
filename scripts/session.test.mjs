@@ -354,6 +354,24 @@ test('P1: a string pane field resolves an agent owner instead of treating it as 
   assert.equal(f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'wait').args[2], 'caller');
 });
 
+test('7b6a5fe1: a stale sidecar record naming a dead agent loses a pane-shaped target to herdr\'s live owner', async (t) => {
+  // Verbatim shape of the 2026-10-01 incident: a 09-29 chain record still claimed wF:p2A.
+  const f = fixture(t);
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { 'inherited-rulings': { name: 'inherited-rulings', pane: 'wF:p2A', sessionId: '55555555-5555-4555-8555-555555555555' } }, chains: [] }), 'utf8');
+  f.handler = (_program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(), stderr: '' };
+    if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents: [{ name: 'live-owner', pane_id: 'wF:p2A' }] }), stderr: '' };
+    if (key === 'agent prompt' && args[2] !== 'live-owner') return { code: 1, stdout: '', stderr: `agent target ${args[2]} not found` };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const result = await runSession(['retire', 'wF:p2A', '--mode', 'exit', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 0, result.output.error);
+  assert.equal(result.output.target, 'live-owner');
+  assert.equal(result.output.resolvedFrom, 'herdr');
+  assert.deepEqual(f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'prompt').args.slice(2), ['live-owner', '/exit']);
+});
+
 test('P1b: an agent that already exited (agent_not_running) is gone, for retire --mode close and watch --until gone', async (t) => {
   // Verbatim herdr shape from a chain whose caller had exited before the successor retired it (2026-09-28).
   const notRunning = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_running","message":"agent is no longer running in the target pane"},"id":"cli:agent:wait"}' };
