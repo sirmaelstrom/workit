@@ -2459,6 +2459,84 @@ test('c952d41e DO 2-4: a start lock wait is recorded and busy starts split once 
   assert.deepEqual([saved.pane, saved.paneSplitFrom, saved.branch, saved.base, saved.path], ['w1:p3', 'w1:p2', 'feat/lane', 'main', lanePath]);
 });
 
+// A plain claude start on an available shell: read, start, focus, focus check.
+const startOn = (f, pane) => {
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  return runLane(['start', 'lane-a', '--pane', pane, '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log], {
+    exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {},
+  });
+};
+const identity = (lane) => [lane.path, lane.branch, lane.base];
+
+test('54f1f5af (a): a reused lane NAME binds to the fresh create on the started pane, not its old record', async (t) => {
+  const f = fixture(t);
+  const oldPath = join(f.dir, 'projects', 'workit-wt-u-b1');
+  const newPath = join(f.dir, 'projects', 'workit-wt-y-a');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    creates: [
+      { paneId: 'w9:p1', path: oldPath, branch: 'u/old', base: 'main' },
+      { paneId: 'w1:p2', path: newPath, branch: 'y/new', base: 'dev' },
+    ],
+    lanes: { 'lane-a': { pane: 'w9:p1', kind: 'codex', path: oldPath, branch: 'u/old', base: 'main' } },
+  }), 'utf8');
+  const result = await startOn(f, 'w1:p2');
+  assert.equal(result.exit, 0);
+  assert.deepEqual(identity(readState(f).lanes['lane-a']), [newPath, 'y/new', 'dev']);
+});
+
+test('7b6a5fe1 (b): of two creates sharing a reissued pane id, the newer one binds', async (t) => {
+  const f = fixture(t);
+  const oldPath = join(f.dir, 'projects', 'infrastructure-wt-t-3');
+  const newPath = join(f.dir, 'projects', 'workit-wt-ab-lane-lookup');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    creates: [
+      { paneId: 'w1:p2', path: oldPath, branch: 't/start-cold-path', base: 'main' },
+      { paneId: 'w1:p2', path: newPath, branch: 'ab/lane-lookup', base: 'main' },
+    ],
+    lanes: {},
+  }), 'utf8');
+  const result = await startOn(f, 'w1:p2');
+  assert.equal(result.exit, 0);
+  assert.deepEqual(identity(readState(f).lanes['lane-a']), [newPath, 'ab/lane-lookup', 'main']);
+});
+
+test('7b6a5fe1 (c): a re-start of the same lane on its split pane keeps its own create over an older create on that pane', async (t) => {
+  const f = fixture(t);
+  const ancient = join(f.dir, 'projects', 'workit-wt-ancient');
+  const lanePath = join(f.dir, 'projects', 'workit-wt-lane');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    creates: [
+      { paneId: 'w1:p3', path: ancient, branch: 'old/ancient', base: 'main' },
+      { paneId: 'w1:p2', path: lanePath, branch: 'feat/lane', base: 'dev' },
+    ],
+    lanes: { 'lane-a': { pane: 'w1:p3', paneSplitFrom: 'w1:p2', kind: 'codex', path: lanePath, branch: 'feat/lane', base: 'dev' } },
+  }), 'utf8');
+  const result = await startOn(f, 'w1:p3');
+  assert.equal(result.exit, 0);
+  const saved = readState(f).lanes['lane-a'];
+  assert.deepEqual([...identity(saved), saved.pane, saved.paneSplitFrom], [lanePath, 'feat/lane', 'dev', 'w1:p3', 'w1:p2']);
+});
+
+test('54f1f5af (d): check on a lane whose worktree is gone names the missing path, not ENOENT on git or gh', async (t) => {
+  const f = fixture(t);
+  const gone = join(f.dir, 'projects', 'heathdev-dogan-wt-u-c1');
+  seedLane(f, { path: gone });
+  const commit = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], { exec: f.exec });
+  assert.equal(commit.exit, 1);
+  assert.match(commit.output.error, /worktree path does not exist/);
+  assert.ok(commit.output.error.includes(gone), 'the error names the missing directory');
+  f.responses.push({ code: 1, stdout: '', stderr: 'spawnSync gh ENOENT' });
+  const pr = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  assert.equal(pr.exit, 1);
+  assert.ok(pr.output.error.includes(gone), 'the error names the missing directory');
+  assert.equal(f.calls.length, 0, 'neither git nor gh is spawned in a missing cwd');
+});
+
 test('c952d41e DO 5 and 9: working prompts queue directly; a retained composer is retried then fails', async (t) => {
   const f = fixture(t);
   const prompt = join(f.dir, 'prompt.md'); writeFileSync(prompt, 'task', 'utf8'); seedLane(f);

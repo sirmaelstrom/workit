@@ -1045,10 +1045,18 @@ async function startLane(opts, deps, state) {
   // lane this helper exists to prevent.
     await mergeState(deps, opts.log, state, (draft) => {
     const existing = draft.lanes[opts.name] ?? {};
-    const byPath = existing.path
-      ? draft.creates.find((created) => created.path && resolve(created.path) === resolve(existing.path))
-      : null;
-    const prior = byPath ?? draft.creates.find((created) => created.paneId === opts.pane || created.paneId === pane) ?? {};
+    // creates[] is append-only (createLane's push is its one writer), so a higher
+    // index is a newer create. A re-start of the same live lane (fallback, or a
+    // split onto a fresh pane id) keeps its create by path (amendment 17). A lane
+    // NAME reused from an earlier run carries that run's path, and herdr reissues
+    // pane ids across workspaces; either way the newest create on the started pane
+    // is newer than the record's own create, and it wins.
+    const byPathIndex = existing.path
+      ? draft.creates.findLastIndex((created) => created.path && resolve(created.path) === resolve(existing.path))
+      : -1;
+    const byPaneIndex = draft.creates.findLastIndex((created) => created.paneId === opts.pane || created.paneId === pane);
+    const priorIndex = byPaneIndex > byPathIndex ? byPaneIndex : byPathIndex;
+    const prior = priorIndex >= 0 ? draft.creates[priorIndex] : {};
     draft.lanes[opts.name] = {
       ...existing,
       pane,
@@ -1575,6 +1583,15 @@ export function reportShapeProblems(text) {
   return problems;
 }
 
+// spawnSync reports a missing cwd as ENOENT on the PROGRAM ("spawnSync gh
+// ENOENT"), and git -C a swept path reads as a git failure; both send the
+// operator to PATH. Name the directory before either runs.
+function requireLaneDir(opts, lane, deps) {
+  if (!deps.exists(lane.path)) {
+    throw new LaneError(EXIT.ERROR, `lane ${opts.name} worktree path does not exist: ${lane.path} (a swept worktree, or a stale lane record)`);
+  }
+}
+
 async function checkLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   const expectations = [
@@ -1586,6 +1603,7 @@ async function checkLane(opts, deps, state) {
 
   if (opts.expectCommit) {
     if (!lane.path || !lane.base || !lane.branch) usage(`lane ${opts.name} has no worktree/base/branch metadata`);
+    requireLaneDir(opts, lane, deps);
     const count = call(deps, 'git', ['-C', lane.path, 'rev-list', '--count', `${lane.base}..${lane.branch}`]);
     // A git that could not answer is infrastructure, not a verdict about the
     // work — and 4 would have a conductor re-poll this forever. Ordinary
@@ -1621,6 +1639,7 @@ async function checkLane(opts, deps, state) {
     if (!lane.path) {
       throw new LaneError(EXIT.ERROR, `lane ${opts.name} has no worktree path; gh would answer about the conductor's own repo`);
     }
+    requireLaneDir(opts, lane, deps);
     // The body rides the same call: the contract requires ## Debrief in the PR
     // body as well as in the report.
     const viewed = call(deps, 'gh', ['pr', 'view', String(opts.expectPr), '--json', 'headRefName,state,body'], { cwd: lane.path ?? undefined });
