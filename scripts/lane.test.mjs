@@ -2527,14 +2527,16 @@ test('54f1f5af (d): check on a lane whose worktree is gone names the missing pat
   const gone = join(f.dir, 'projects', 'heathdev-dogan-wt-u-c1');
   seedLane(f, { path: gone });
   // What the real spawns answer in a missing directory (Sitting Z, 2026-09-26).
-  f.responses.push(
-    { code: 128, stdout: '', stderr: `fatal: cannot change to '${gone}': No such file or directory` },
-    { code: 1, stdout: '', stderr: 'spawnSync gh ENOENT' },
-  );
-  const commit = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], { exec: f.exec });
+  const exec = (program, args, options) => {
+    f.calls.push({ program, args: [...args], options });
+    return program === 'git'
+      ? { code: 128, stdout: '', stderr: `fatal: cannot change to '${gone}': No such file or directory` }
+      : { code: 1, stdout: '', stderr: `spawnSync ${program} ENOENT` };
+  };
+  const commit = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], { exec });
   assert.equal(commit.exit, 1);
   assert.match(commit.output.error, /worktree path does not exist/);
-  const pr = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  const pr = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec });
   assert.equal(pr.exit, 1);
   assert.match(pr.output.error, /worktree path does not exist/);
   assert.ok(pr.output.error.includes(gone), 'the error names the missing directory, not the program');
