@@ -192,7 +192,10 @@ function prepareFinalCapture(deps, id) {
   return join(root, 'final', `${id}.md`);
 }
 function finalMessagePath(deps, state, target) {
-  const session = target.sessionId
+  // A live owner named by herdr is authoritative: the sidecar's pane-keyed rows
+  // are the very records it overruled, so they cannot supply its session.
+  const herdrOwned = target.resolvedFrom === 'herdr' && !target.goneAgent;
+  const session = herdrOwned ? target.sessionId : target.sessionId
     ?? Object.values(state.sessions).find((item) => item.pane === target.pane)?.sessionId
     ?? [...state.chains].reverse().find((item) => item.callerPane === target.pane)?.callerSession
     ?? null;
@@ -210,16 +213,17 @@ async function resolveTarget(opts, state, target, deps) {
   const named = state.sessions[target];
   if (named) return { name: named.name ?? target, pane: named.pane, sessionId: named.sessionId ?? null, target: named.name ?? target };
   // herdr reissues pane ids (`wF:p2A`, `w1J:p1`), and a sidecar record outlives
-  // the agent it names, so a pane-shaped target asks herdr who owns it first. A
-  // record lends its session id only when it names that live owner.
+  // the agent it names, so a pane-shaped target asks herdr who owns it first. The
+  // owner's session id comes from herdr too: an agent name can be reused on a
+  // reissued pane, so a sidecar record matching both still names the old session.
   if (target.startsWith('pane:') || /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/.test(target)) {
     const pane = call(deps, ['pane', 'get', target]);
     if (pane.code !== 0) usage(`pane_not_found: ${target}`);
     const agents = callOrFail(deps, ['agent', 'list']);
     const owner = agentOwningPane(agents, target);
     if (!owner) return { name: null, pane: target, sessionId: null, target, resolvedFrom: 'herdr', goneAgent: true };
-    const owned = Object.values(state.sessions).find((item) => item.pane === target && item.name === owner);
-    return { name: owner, pane: target, sessionId: owned?.sessionId ?? null, target: owner, resolvedFrom: 'herdr' };
+    const live = call(deps, ['agent', 'get', owner]);
+    return { name: owner, pane: target, sessionId: live.code === 0 ? sessionId(live.stdout) : null, target: owner, resolvedFrom: 'herdr' };
   }
   const record = Object.values(state.sessions).find((item) => item.pane === target);
   if (record) return { name: record.name ?? target, pane: record.pane, sessionId: record.sessionId ?? null, target: record.name ?? target };

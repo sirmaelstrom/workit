@@ -372,6 +372,41 @@ test('7b6a5fe1: a stale sidecar record naming a dead agent loses a pane-shaped t
   assert.deepEqual(f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'prompt').args.slice(2), ['live-owner', '/exit']);
 });
 
+// The herdr-owner branch's session identity, for the final-message path: a stale
+// record on the pane, under another name or under the owner's own reused name,
+// must not supply it. Both final files exist, so a wrong lookup is visible.
+async function retireOwnedPane(t, staleName, liveGet) {
+  const f = fixture(t); const root = join(f.dir, 'capture');
+  const stale = '55555555-5555-4555-8555-555555555555'; const live = '66666666-6666-4666-8666-666666666666';
+  mkdirSync(join(root, 'final'), { recursive: true });
+  for (const id of [stale, live]) writeFileSync(join(root, 'final', `${id}.md`), id, 'utf8');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { [staleName]: { name: staleName, pane: 'wF:p2A', sessionId: stale } }, chains: [{ callerPane: 'wF:p2A', callerSession: stale }] }), 'utf8');
+  f.handler = (_program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(), stderr: '' };
+    if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents: [{ name: 'live-owner', pane_id: 'wF:p2A' }] }), stderr: '' };
+    if (key === 'agent get') return liveGet(live);
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const result = await runSession(['retire', 'wF:p2A', '--mode', 'exit', '--log', f.log], { exec: f.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: root }) });
+  assert.equal(result.exit, 0, result.output.error);
+  assert.equal(result.output.target, 'live-owner');
+  return { result, final: (id) => join(root, 'final', `${id}.md`), live };
+}
+
+test('7b6a5fe1: a herdr-resolved owner\'s final message comes from its live session, never a stale pane record', async (t) => {
+  const liveGet = (live) => ({ code: 0, stdout: herdrShapes.agentGet({ pane: 'wF:p2A', session: live }), stderr: '' });
+  const other = await retireOwnedPane(t, 'inherited-rulings', liveGet);
+  assert.equal(other.result.output.finalMessagePath, other.final(other.live), 'a differently named stale record does not supply the session');
+  const reused = await retireOwnedPane(t, 'live-owner', liveGet);
+  assert.equal(reused.result.output.finalMessagePath, reused.final(reused.live), 'a stale record under the reused owner name does not supply the session');
+  const noSession = () => ({ code: 1, stdout: '', stderr: 'agent_not_found' });
+  const otherUnknown = await retireOwnedPane(t, 'inherited-rulings', noSession);
+  assert.equal(otherUnknown.result.output.finalMessagePath, null, 'finalMessagePath\'s pane fallback does not restore the overruled record');
+  const reusedUnknown = await retireOwnedPane(t, 'live-owner', noSession);
+  assert.equal(reusedUnknown.result.output.finalMessagePath, null, 'an unverifiable session stays unknown');
+});
+
 test('P1b: an agent that already exited (agent_not_running) is gone, for retire --mode close and watch --until gone', async (t) => {
   // Verbatim herdr shape from a chain whose caller had exited before the successor retired it (2026-09-28).
   const notRunning = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_running","message":"agent is no longer running in the target pane"},"id":"cli:agent:wait"}' };
