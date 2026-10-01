@@ -394,17 +394,27 @@ async function retireOwnedPane(t, staleName, liveGet) {
   return { result, final: (id) => join(root, 'final', `${id}.md`), live };
 }
 
-test('7b6a5fe1: a herdr-resolved owner\'s final message comes from its live session, never a stale pane record', async (t) => {
-  const liveGet = (live) => ({ code: 0, stdout: herdrShapes.agentGet({ pane: 'wF:p2A', session: live }), stderr: '' });
-  const other = await retireOwnedPane(t, 'inherited-rulings', liveGet);
-  assert.equal(other.result.output.finalMessagePath, other.final(other.live), 'a differently named stale record does not supply the session');
-  const reused = await retireOwnedPane(t, 'live-owner', liveGet);
-  assert.equal(reused.result.output.finalMessagePath, reused.final(reused.live), 'a stale record under the reused owner name does not supply the session');
-  const noSession = () => ({ code: 1, stdout: '', stderr: 'agent_not_found' });
-  const otherUnknown = await retireOwnedPane(t, 'inherited-rulings', noSession);
-  assert.equal(otherUnknown.result.output.finalMessagePath, null, 'finalMessagePath\'s pane fallback does not restore the overruled record');
-  const reusedUnknown = await retireOwnedPane(t, 'live-owner', noSession);
-  assert.equal(reusedUnknown.result.output.finalMessagePath, null, 'an unverifiable session stays unknown');
+const liveGet = (live) => ({ code: 0, stdout: herdrShapes.agentGet({ pane: 'wF:p2A', session: live }), stderr: '' });
+const noSession = () => ({ code: 1, stdout: '', stderr: 'agent_not_found' });
+
+test('7b6a5fe1 owner-1: a herdr-resolved owner\'s final message comes from its live session, not a differently named stale record', async (t) => {
+  const { result, final, live } = await retireOwnedPane(t, 'inherited-rulings', liveGet);
+  assert.equal(result.output.finalMessagePath, final(live));
+});
+
+test('7b6a5fe1 owner-2: a stale record under the owner\'s own reused name does not lend its session', async (t) => {
+  const { result, final, live } = await retireOwnedPane(t, 'live-owner', liveGet);
+  assert.equal(result.output.finalMessagePath, final(live));
+});
+
+test('7b6a5fe1 owner-3: with no live session from herdr, finalMessagePath\'s pane fallback does not restore the overruled record', async (t) => {
+  const { result } = await retireOwnedPane(t, 'inherited-rulings', noSession);
+  assert.equal(result.output.finalMessagePath, null);
+});
+
+test('7b6a5fe1 owner-4: a reused-name record cannot stand in for an unverifiable live session', async (t) => {
+  const { result } = await retireOwnedPane(t, 'live-owner', noSession);
+  assert.equal(result.output.finalMessagePath, null);
 });
 
 test('P1b: an agent that already exited (agent_not_running) is gone, for retire --mode close and watch --until gone', async (t) => {
