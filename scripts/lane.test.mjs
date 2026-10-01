@@ -2526,14 +2526,18 @@ test('54f1f5af (d): check on a lane whose worktree is gone names the missing pat
   const f = fixture(t);
   const gone = join(f.dir, 'projects', 'heathdev-dogan-wt-u-c1');
   seedLane(f, { path: gone });
+  // What the real spawns answer in a missing directory (Sitting Z, 2026-09-26).
+  f.responses.push(
+    { code: 128, stdout: '', stderr: `fatal: cannot change to '${gone}': No such file or directory` },
+    { code: 1, stdout: '', stderr: 'spawnSync gh ENOENT' },
+  );
   const commit = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], { exec: f.exec });
   assert.equal(commit.exit, 1);
   assert.match(commit.output.error, /worktree path does not exist/);
-  assert.ok(commit.output.error.includes(gone), 'the error names the missing directory');
-  f.responses.push({ code: 1, stdout: '', stderr: 'spawnSync gh ENOENT' });
   const pr = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
   assert.equal(pr.exit, 1);
-  assert.ok(pr.output.error.includes(gone), 'the error names the missing directory');
+  assert.match(pr.output.error, /worktree path does not exist/);
+  assert.ok(pr.output.error.includes(gone), 'the error names the missing directory, not the program');
   assert.equal(f.calls.length, 0, 'neither git nor gh is spawned in a missing cwd');
 });
 
