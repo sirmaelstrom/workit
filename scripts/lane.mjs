@@ -24,10 +24,11 @@ import { pathToFileURL } from 'node:url';
 //   3 blocked (+ dialog) · 4 a wait deadline expired · 5 artifact check failed
 //   6 plan-low or a captured plan refusal
 //   7 admission refused: free commit memory below the admit threshold, or unread
+//   8 capacity: the turn ended on codex's "model is at capacity" banner; re-prompt
 // 4 means a deadline and nothing else. A dead daemon that reports as a timeout
 // is re-polled forever by a conductor that trusts this table.
-const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6, ADMIT_REFUSED: 7 });
-export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7 });
+const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6, ADMIT_REFUSED: 7, CAPACITY: 8 });
+export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7, capacity: 8 });
 
 export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per invocation, JSON on stdout.
 
@@ -54,7 +55,10 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
            Naming any state adds blocked; a bare wait forwards none (herdr's
-           default already matches idle|done|blocked).
+           default already matches idle|done|blocked). A codex lane's idle/done
+           must hold on a second poll 3 s later. A turn that ended on codex's
+           "Selected model is at capacity" banner exits 8 (retryable). stdout
+           is the verdict alone; the row counts pollCount and pollTimeouts.
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
            | --expect-report <path>
            --expect-report and --expect-pr (on the PR body) require ## Debrief with
@@ -94,6 +98,14 @@ export const PLAN_REFUSAL_PATTERNS = Object.freeze([
   /^\s*■\s*You've hit your usage limit/i,
   /^\s*Approaching rate limits\s+—\s+Switch to /i,
 ]);
+// Read off lane ored's pane, 2026-10-01 23:36Z: `■ Selected model is at
+// capacity. Please try a different model.`, after which herdr settled the
+// agent to done mid-amendment. Retryable, unlike the usage limit.
+export const CAPACITY_PATTERN = /^\s*■\s*Selected model is at capacity\b/i;
+// The banner counts only near the bottom: below it a live codex draws the
+// composer and the footer, so it sits a few lines up. Higher is scrollback
+// from an earlier turn.
+const CAPACITY_TAIL_LINES = 6;
 // Captured from the first-run trust interstitial. Keep these together: this is
 // a launch recovery, not a generic attempt to dismiss arbitrary Codex UI.
 export const HOOKS_TRUST_PATTERNS = Object.freeze([
@@ -1521,6 +1533,13 @@ async function waitLane(opts, deps, state) {
     if (!settled) unconfirmed = null;
     if (confirmed) {
       if (lane.kind === 'codex') polls.settleConfirmed = true;
+      if (plan.capacity) {
+        return settle({
+          exit: EXIT.CAPACITY,
+          output: { state: 'capacity', retryable: true, banner: plan.capacity, ...warning },
+          row: { ...laneInstrumentation(opts.name, lane, 'capacity'), ...meter, ...warning },
+        });
+      }
       return settle({
         exit: EXIT.OK,
         output: {
@@ -2334,8 +2353,16 @@ function readPlanState(deps, name) {
     meter: scrapePlanMeter(read.stdout),
     refusal: refusal?.line ?? null,
     refusalShape: refusal?.shape ?? null,
+    capacity: capacityBanner(read.stdout),
     dialog: responseText(read.stdout),
   };
+}
+
+export function capacityBanner(text) {
+  const lines = responseText(text).split(/\r?\n/).filter((line) => line.trim() !== '');
+  const liveFooter = LIVE_TUI.some((pattern) => lines.slice(-2).some((line) => pattern.test(line)));
+  const banner = lines.slice(-CAPACITY_TAIL_LINES).find((line) => CAPACITY_PATTERN.test(line));
+  return banner && liveFooter ? banner.trim() : null;
 }
 
 function planRefusal(text) {

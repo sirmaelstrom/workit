@@ -8,7 +8,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEBRIEF_HEADINGS, EXIT_CODES, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
   reportShapeProblems, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -987,7 +987,7 @@ test('WP-3: the refusal pattern list carries the captured live refusal', () => {
 test('WP-3: exported lifecycle exit codes match the binding table', () => {
   // 1 is the herdr/infra failure code. Without it every hard failure reported as
   // 4 and a dead daemon was indistinguishable from a retryable wait timeout.
-  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7 });
+  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7, capacity: 8 });
 });
 
 test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', async (t) => {
@@ -1921,7 +1921,7 @@ test('A2-11 / U15: an unreadable sidecar does not read as invalid JSON', async (
 });
 
 test('A2-12 / U15: EXIT_CODES carries every code the header documents', () => {
-  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7 });
+  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7, capacity: 8 });
 });
 
 // ---------------------------------------------------------------------------
@@ -3544,6 +3544,48 @@ test('a78b8313: a settled reading still unconfirmed at the deadline is a timeout
   const claude = await clockedWait(g);
   assert.equal(claude.exit, 0, JSON.stringify(claude.output));
   assert.equal(claude.row.pollCount, 1);
+});
+
+// --- quest ea083334: a codex turn that ended on the capacity banner is a
+// distinct, retryable exit, not done.
+const CAPACITY_LINE = '■ Selected model is at capacity. Please try a different model.';
+const capacityRead = (scrollback = []) => ({
+  code: 0,
+  stdout: [...CODEX_HEADER('GPT-6-Sol high'), '', '› Read X:\\fixture\\amend.md and execute it exactly.', '', ...scrollback,
+    '', '› Ask Codex to do anything', '', CODEX_FOOTER_LINE].join('\n'),
+  stderr: '',
+});
+
+test('ea083334: a codex lane settled under the capacity banner exits 8, retryable', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  const read = capacityRead([CAPACITY_LINE]);
+  f.responses.push(DONE_POLL, read, DONE_POLL, read);
+  const result = await clockedWait(f);
+  assert.equal(result.exit, 8, JSON.stringify(result.output));
+  assert.equal(result.exit, EXIT_CODES.capacity);
+  assert.deepEqual([result.output.state, result.output.retryable, result.output.banner], ['capacity', true, CAPACITY_LINE]);
+  assert.equal(result.row.state, 'capacity');
+});
+
+test('ea083334: the banner counts only in the live tail — scrollback, a dead frame, or a working lane is not capacity', async (t) => {
+  const later = ['• Ran npm test', '  └ 12 passed', '• Edited scripts/lane.mjs (+4 -1)', '• Ran node --test', '  └ 833 passed', '─ Worked for 2m 10s ─'];
+  const f = fixture(t);
+  seedLane(f);
+  const scrolled = capacityRead([CAPACITY_LINE, ...later]);
+  f.responses.push(DONE_POLL, scrolled, DONE_POLL, scrolled);
+  const resumed = await clockedWait(f);
+  assert.equal(resumed.exit, 0, 'a banner from an earlier turn, now in scrollback, is not this turn\'s end');
+
+  assert.equal(capacityBanner(capacityRead([CAPACITY_LINE]).stdout), CAPACITY_LINE);
+  assert.equal(capacityBanner(`${CAPACITY_LINE}\nPS X:\\fixture\\lane>`), null, 'no live TUI under it: codex is gone');
+  assert.equal(capacityBanner(capacityRead([`  quoted: ${CAPACITY_LINE}`]).stdout), null, 'anchored: a quoted banner is not one');
+
+  const g = fixture(t);
+  seedLane(g);
+  for (let poll = 0; poll < 20; poll++) g.responses.push(WORKING_POLL, capacityRead([CAPACITY_LINE]));
+  const working = await clockedWait(g);
+  assert.equal(working.exit, 4, 'a lane still working under the banner is waited on, not cut off');
 });
 
 // --- quest 93d4855b: the memory admission gate. Thresholds are GB of free
