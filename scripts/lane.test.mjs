@@ -3726,6 +3726,14 @@ test('ea083334: the banner counts only in the live tail — scrollback, a dead f
   assert.equal(capacityBanner(capacityRead([CAPACITY_LINE]).stdout), CAPACITY_LINE);
   assert.equal(capacityBanner(`${CAPACITY_LINE}\nPS X:\\fixture\\lane>`), null, 'no live TUI under it: codex is gone');
   assert.equal(capacityBanner(capacityRead([`  quoted: ${CAPACITY_LINE}`]).stdout), null, 'anchored: a quoted banner is not one');
+  // workit#129 review (codex): the banner, then a new prompt and a short
+  // successful turn, all inside the six-line tail.
+  const nextTurn = capacityRead([CAPACITY_LINE, '› Read next task', '• Finished next task successfully']);
+  assert.equal(capacityBanner(nextTurn.stdout), null, 'a banner above a later prompt ended an earlier turn');
+  const h = fixture(t);
+  seedLane(h);
+  h.responses.push(DONE_POLL, nextTurn, DONE_POLL, nextTurn);
+  assert.equal((await clockedWait(h)).exit, 0, 'the later turn settled; that is done, not capacity');
 
   const g = fixture(t);
   seedLane(g);

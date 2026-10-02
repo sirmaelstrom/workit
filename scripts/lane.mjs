@@ -2425,8 +2425,13 @@ function readPlanState(deps, name) {
 export function capacityBanner(text) {
   const lines = responseText(text).split(/\r?\n/).filter((line) => line.trim() !== '');
   const liveFooter = LIVE_TUI.some((pattern) => lines.slice(-2).some((line) => pattern.test(line)));
-  const banner = lines.slice(-CAPACITY_TAIL_LINES).find((line) => CAPACITY_PATTERN.test(line));
-  return banner && liveFooter ? banner.trim() : null;
+  const tailStart = Math.max(0, lines.length - CAPACITY_TAIL_LINES);
+  const at = lines.findLastIndex((line, index) => index >= tailStart && CAPACITY_PATTERN.test(line));
+  // The banner must belong to the turn that just settled: a column-zero `›`
+  // line between it and the composer is a later prompt, so the banner ended an
+  // earlier turn.
+  const laterPrompt = at >= 0 && codexTranscript(lines).slice(at + 1).some((line) => line.startsWith('›'));
+  return at >= 0 && liveFooter && !laterPrompt ? lines[at].trim() : null;
 }
 
 function planRefusal(text) {
