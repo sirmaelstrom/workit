@@ -22,20 +22,31 @@ function fixture(t) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const calls = [];
   const responses = [];
+  // The admission gate's memory read (start, admit on win32) answers from
+  // `memory`, outside the herdr response queue and `calls`: 64 GB free unless a
+  // test sets it.
+  const memoryReads = [];
   const exec = (program, args, options = {}) => {
+    if (program === 'pwsh' && args.some((arg) => String(arg).includes('FreeVirtualMemory'))) {
+      memoryReads.push([...args]);
+      return handle.memory;
+    }
     calls.push({ program, args: [...args], options });
     const next = responses.shift();
     if (typeof next === 'function') return next(program, args, options);
     return next ?? { code: 0, stdout: '{"result":{}}', stderr: '' };
   };
-  return {
+  const handle = {
     dir,
     log: join(dir, 'lane-log.jsonl'),
     repo: join(dir, 'projects', 'workit'),
     calls,
     responses,
     exec,
+    memoryReads,
+    memory: { code: 0, stdout: `${64 * 1024 * 1024}\r\n`, stderr: '' },
   };
+  return handle;
 }
 
 function readState(f) {
@@ -52,6 +63,9 @@ function fakeExists(present = () => true) {
 // pane's own prompt signature (A3). Every start-driving fixture therefore opens
 // with a shell read.
 const SHELL_READ = { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' };
+// FreeVirtualMemory is in KB.
+const memoryKb = (gb) => ({ code: 0, stdout: `${Math.round(gb * 1024 * 1024)}\r\n`, stderr: '' });
+const MEMORY_64GB = memoryKb(64);
 
 // Codex TUI frames, trimmed from a live capture on codex 0.156.1 (2026-09-24,
 // quest 7e1fecf7). A fresh codex prompt reads the pane before sending (loaded?)
@@ -777,6 +791,9 @@ test('SMOKE6 / S6: resume also accepts done, because an unfocused lane never rea
 
 test('WP-3 / S7: fallback reuses the same pane and prompt path and records the channel switch', async (t) => {
   const f = fixture(t);
+  // 93d4855b: a fallback is exempt from admission — it swaps the lane's own
+  // agent after codex has quit. A 1 GB reading must not stop it.
+  f.memory = memoryKb(1);
   const prompt = join(f.dir, 'prompt.md');
   writeFileSync(prompt, 'original task', 'utf8');
   seedLane(f, { promptFile: prompt });
@@ -798,9 +815,10 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
   );
   const result = await runLane(
     ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
-    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {} },
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {}, platform: 'win32' },
   );
   assert.equal(result.exit, 0);
+  assert.equal(f.memoryReads.length, 0, 'fallback does not run the admission gate');
   const start = f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
   const startIndex = f.calls.indexOf(start);
   // C11(b): the rate-limit modal must be dismissed and codex quit before a
@@ -962,7 +980,7 @@ test('WP-3: the refusal pattern list carries the captured live refusal', () => {
 test('WP-3: exported lifecycle exit codes match the binding table', () => {
   // 1 is the herdr/infra failure code. Without it every hard failure reported as
   // 4 and a dead daemon was indistinguishable from a retryable wait timeout.
-  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7 });
 });
 
 test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', async (t) => {
@@ -1890,7 +1908,7 @@ test('A2-11 / U15: an unreadable sidecar does not read as invalid JSON', async (
 });
 
 test('A2-12 / U15: EXIT_CODES carries every code the header documents', () => {
-  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7 });
 });
 
 // ---------------------------------------------------------------------------
@@ -2959,6 +2977,7 @@ test('amend 2 P7b: a holder refreshed during a 90-second wait is never reclaimed
   const f = fixture(t); let now = 0; let lock = null; let holderSleep; let holderReleased = false; let paneReads = 0; let refreshed = false; const warnings = [];
   const startArgs = (name) => ['start', name, '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log];
   const exec = (program, args) => {
+    if (program === 'pwsh') return MEMORY_64GB;
     if (args[0] === 'pane' && args[1] === 'read') return ++paneReads === 1 ? { code: 0, stdout: '', stderr: '' } : SHELL_READ;
     return { code: 0, stdout: '{"result":{}}', stderr: '' };
   };
@@ -2989,6 +3008,7 @@ test('amend 2 P7c: a reclaimed lock survives the original holder release', async
   const f = fixture(t); let now = 0; let lock = null; let paneReads = 0; const sleeps = [];
   const startArgs = (name) => ['start', name, '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log];
   const exec = (program, args) => {
+    if (program === 'pwsh') return MEMORY_64GB;
     if (args[0] === 'pane' && args[1] === 'read') return ++paneReads <= 2 ? { code: 0, stdout: '', stderr: '' } : SHELL_READ;
     if (args[0] === 'agent' && args[1] === 'start') return { code: 1, stdout: '', stderr: 'start failed' };
     return { code: 0, stdout: '{"result":{}}', stderr: '' };
@@ -3443,4 +3463,128 @@ test('207dbaf1: resolver shapes and failures — trailing id, snake_case quest_i
   assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', '207db'], bare)).exit, 2, 'a quest prefix needs 6 characters');
   assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], { WORKIT_RECEIPT_RESOLVER: '["", "x"]' })).exit, 2);
   assert.equal(f.calls.length, before, 'input refusals run nothing');
+});
+
+// --- quest 93d4855b: the memory admission gate. Thresholds are GB of free
+// commit memory (FreeVirtualMemory, KB); platform is injected so the Linux CI
+// runner exercises the Windows reader too.
+const admitStart = (f, extra = [], deps = {}) => {
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  return runLane(['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', ...extra, '--log', f.log], {
+    exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {}, platform: 'win32', ...deps,
+  });
+};
+const lastRow = (f) => JSON.parse(readFileSync(f.log, 'utf8').trim().split(/\r?\n/).at(-1));
+
+test('93d4855b: start above the admit threshold is admitted and logs the reading', async (t) => {
+  const f = fixture(t);
+  f.memory = memoryKb(12.5);
+  const result = await admitStart(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(f.memoryReads.length, 1);
+  assert.deepEqual(result.output.admission, { freeGb: 12.5, admitThreshold: 10, admitOverride: false });
+  const row = lastRow(f);
+  assert.deepEqual([row.state, row.freeGb, row.admitThreshold, row.admitOverride], ['started', 12.5, 10, false]);
+});
+
+test('93d4855b: start below the admit threshold is refused with exit 7 before herdr, naming the reading and the threshold', async (t) => {
+  const f = fixture(t);
+  f.memory = memoryKb(6);
+  const result = await admitStart(f);
+  assert.equal(result.exit, 7);
+  assert.equal(result.exit, EXIT_CODES.admitRefused);
+  assert.match(result.output.error, /free commit memory 6 GB is below the admit threshold 10 GB/);
+  assert.match(result.output.error, /--force-admit/);
+  assert.equal(f.calls.length, 0, 'a refused start touches no pane');
+  const row = lastRow(f);
+  assert.deepEqual([row.state, row.exit, row.freeGb, row.admitThreshold, row.admitOverride], ['refused', 7, 6, 10, false]);
+});
+
+test('93d4855b: --min-free-gb and LANE_MIN_FREE_GB move the threshold; the flag wins', async (t) => {
+  const f = fixture(t);
+  f.memory = memoryKb(6);
+  assert.equal((await admitStart(f, ['--min-free-gb', '5'])).exit, 0);
+  const g = fixture(t);
+  g.memory = memoryKb(6);
+  assert.equal((await admitStart(g, [], { env: { HERDR_PANE_ID: 'w1:p1', LANE_MIN_FREE_GB: '5' } })).exit, 0);
+  const h = fixture(t);
+  h.memory = memoryKb(6);
+  assert.equal((await admitStart(h, ['--min-free-gb', '8'], { env: { HERDR_PANE_ID: 'w1:p1', LANE_MIN_FREE_GB: '5' } })).exit, 7);
+  const bad = fixture(t);
+  assert.equal((await admitStart(bad, ['--min-free-gb', 'lots'])).exit, 2);
+});
+
+test('93d4855b: --force-admit starts below the threshold and the override is logged', async (t) => {
+  const f = fixture(t);
+  f.memory = memoryKb(3);
+  const result = await admitStart(f, ['--force-admit']);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.match(result.output.admission.overridden, /3 GB is below the admit threshold 10 GB/);
+  const row = lastRow(f);
+  assert.deepEqual([row.state, row.freeGb, row.admitThreshold, row.admitOverride], ['started', 3, 10, true]);
+});
+
+test('93d4855b: an unreadable memory reading refuses closed; --force-admit still overrides', async (t) => {
+  for (const memory of [{ code: 1, stdout: '', stderr: 'pwsh: not found' }, { code: 0, stdout: 'Get-CimInstance: Access denied', stderr: '' }]) {
+    const f = fixture(t);
+    f.memory = memory;
+    const refused = await admitStart(f);
+    assert.equal(refused.exit, 7, JSON.stringify(refused.output));
+    assert.match(refused.output.error, /could not read free commit memory/);
+    assert.equal(f.calls.length, 0);
+    assert.equal(lastRow(f).freeGb, null);
+    const g = fixture(t);
+    g.memory = memory;
+    assert.equal((await admitStart(g, ['--force-admit'])).exit, 0);
+  }
+});
+
+test('93d4855b: off Windows start admits unmeasured with the warning on its admission record', async (t) => {
+  const f = fixture(t);
+  const result = await admitStart(f, [], { platform: 'linux' });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(f.memoryReads.length, 0);
+  assert.equal(result.output.admission.freeGb, null);
+  assert.match(result.output.admission.warning, /Windows only/);
+});
+
+test('93d4855b: admit is a read-only verdict — exit 0 or 7, drain below 4 GB, no herdr, no sidecar', async (t) => {
+  const admit = async (gb, args = [], deps = {}) => {
+    const f = fixture(t);
+    if (gb !== null) f.memory = memoryKb(gb);
+    const result = await runLane(['admit', ...args, '--log', f.log], { exec: f.exec, env: {}, platform: 'win32', ...deps });
+    assert.equal(f.calls.length, 0, 'admit runs nothing but the memory read');
+    assert.equal(existsSync(`${f.log}.state.json`), false, 'admit writes no lane state');
+    return { result, row: lastRow(f) };
+  };
+  const roomy = await admit(32);
+  assert.equal(roomy.result.exit, 0);
+  assert.deepEqual(roomy.result.output, { admitted: true, freeGb: 32, admitThreshold: 10, admitOverride: false, drain: false, drainThreshold: 4 });
+  assert.deepEqual([roomy.row.verb, roomy.row.state, roomy.row.freeGb], ['admit', 'admitted', 32]);
+
+  const tight = await admit(7);
+  assert.equal(tight.result.exit, 7);
+  assert.equal(tight.result.output.drain, false);
+  assert.match(tight.result.output.reason, /7 GB is below the admit threshold 10 GB/);
+
+  const draining = await admit(3.5);
+  assert.equal(draining.result.exit, 7);
+  assert.equal(draining.result.output.drain, true);
+  assert.equal(draining.row.drain, true);
+
+  const raised = await admit(5, ['--drain-free-gb', '6', '--min-free-gb', '2']);
+  assert.deepEqual([raised.result.exit, raised.result.output.drain, raised.result.output.drainThreshold], [0, true, 6]);
+
+  const linux = await admit(null, [], { platform: 'linux' });
+  assert.equal(linux.result.exit, 0);
+  assert.equal(linux.result.output.freeGb, null);
+  assert.match(linux.result.output.warning, /Windows only/);
+
+  const named = fixture(t);
+  assert.equal((await runLane(['admit', 'lane-a', '--log', named.log], { exec: named.exec, env: {}, platform: 'win32' })).exit, 2);
 });

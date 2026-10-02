@@ -23,10 +23,11 @@ import { pathToFileURL } from 'node:url';
 //   0 ok · 1 herdr/infra failure · 2 usage, refused before any mutation
 //   3 blocked (+ dialog) · 4 a wait deadline expired · 5 artifact check failed
 //   6 plan-low or a captured plan refusal
+//   7 admission refused: free commit memory below the admit threshold, or unread
 // 4 means a deadline and nothing else. A dead daemon that reports as a timeout
 // is re-polled forever by a conductor that trusts this table.
-const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6 });
-export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6, ADMIT_REFUSED: 7 });
+export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7 });
 
 export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per invocation, JSON on stdout.
 
@@ -36,7 +37,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   start    <name> --pane <id> --kind claude|codex --model <slug> --reasoning <lvl>
            [--sandbox <mode>] [--permission-mode <mode>] [--allow-default-mode]
            [--mcp-startup-timeout <sec> --mcp-startup-server <name>]
-           [-- <native agent args>]
+           [--min-free-gb <n>] [--force-admit] [-- <native agent args>]
+           Refused (exit 7) below --min-free-gb of free commit memory (or
+           LANE_MIN_FREE_GB, default 10) or when the reading fails; --force-admit
+           starts anyway and is logged. fallback is exempt: it swaps one agent
+           for another in the same pane.
            dontAsk is always refused; default mode needs --allow-default-mode.
            Codex has no default MCP startup timeout. Opt in with the timeout/server
            pair; a caller-supplied mcp_servers.<server>.startup_timeout_sec wins.
@@ -67,6 +72,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            The delegate is HERDR_LANES_SCRIPT, else <workspace-root>/infrastructure/
            herdr-lanes.ps1, else that path from the cwd; if none exists, sweep
            prints the command to run instead of guessing a location.
+  admit    [--min-free-gb <n>] [--drain-free-gb <n>]
+           Read-only admission check, for a conductor before a start or a council
+           dispatch: exit 0 admitted, 7 refused. Prints freeGb, the thresholds,
+           and drain: true below --drain-free-gb (or LANE_DRAIN_FREE_GB, default 4).
+           Off Windows freeGb is null and the check admits with a warning.
 
   --log <path>  JSONL instrumentation (default: <workspace>/data/outputs/projects/
                 agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)
@@ -123,13 +133,19 @@ const SWEEP_DELEGATE = ['infrastructure', 'herdr-lanes.ps1'];
 const POLL_MS = 1_000;
 const LOG_BASENAME = 'lane-log.jsonl';
 const LOG_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 'lanes'];
-const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'sweep']);
+const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'sweep', 'admit']);
+// Operator rulings of 2026-10-01 (quest 93d4855b), in GB of free commit memory.
+const ADMIT_MIN_FREE_GB = 10;
+const ADMIT_DRAIN_FREE_GB = 4;
 
 class LaneError extends Error {
-  constructor(code, message, details = {}) {
+  // `row` carries instrumentation a refusal must still log (the JSONL row of a
+  // throw is otherwise just { state: 'failed' }).
+  constructor(code, message, details = {}, row = {}) {
     super(message);
     this.code = code;
     this.details = details;
+    this.row = row;
   }
 }
 
@@ -244,13 +260,13 @@ function parseArgs(argv) {
     throw new LaneError(EXIT.USAGE, `expected one verb: ${[...VERBS].join(', ')}`, { usage: USAGE_TEXT });
   }
   const opts = { verb, positional: [], agentArgs: [] };
-  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode', '--amendment', '--no-ruling']);
+  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode', '--amendment', '--no-ruling', '--force-admit']);
   const repeatableFlags = new Set(['--root', '--until']);
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
     '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--expect-report', '--to', '--log',
     '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex', '--mcp-startup-timeout', '--mcp-startup-server',
-    '--ruling-receipt', '--quest',
+    '--ruling-receipt', '--quest', '--min-free-gb', '--drain-free-gb',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -905,6 +921,66 @@ function resolvePaneId(deps, workspaceId) {
   return firstDefined(panes[0], ['pane_id', 'paneId']) ?? null;
 }
 
+function gbOption(value, flag, envValue, fallback) {
+  const raw = value ?? (envValue === '' ? undefined : envValue);
+  if (raw === undefined) return fallback;
+  const number = Number(raw);
+  if (!Number.isFinite(number) || number < 0) usage(`${flag} must be a non-negative number of GB`);
+  return number;
+}
+
+// Free commit memory, the resource run Y exhausted (lanes and council seats
+// died, production restarted). Win32_OperatingSystem reports it in KB.
+function readFreeGb(deps) {
+  if (deps.platform !== 'win32') {
+    return { freeGb: null, warning: `free commit memory is read on Windows only (platform ${deps.platform}); admitted unmeasured` };
+  }
+  const read = call(deps, 'pwsh', ['-NoProfile', '-NonInteractive', '-Command', '(Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory']);
+  const text = read.stdout.trim();
+  const kb = /^\d+$/.test(text) ? Number(text) : NaN;
+  if (read.code !== 0 || !Number.isFinite(kb)) {
+    return { freeGb: null, error: `could not read free commit memory (${read.stderr.trim() || text || `exit ${read.code}`})` };
+  }
+  return { freeGb: Math.round((kb / 1024 / 1024) * 100) / 100 };
+}
+
+// An unreadable reading refuses: the gate exists because nothing else stopped
+// the host running out, and "unknown" is not evidence there is room.
+function admission(opts, deps) {
+  const admitThreshold = gbOption(opts.minFreeGb, '--min-free-gb', deps.env.LANE_MIN_FREE_GB, ADMIT_MIN_FREE_GB);
+  const drainThreshold = gbOption(opts.drainFreeGb, '--drain-free-gb', deps.env.LANE_DRAIN_FREE_GB, ADMIT_DRAIN_FREE_GB);
+  const reading = readFreeGb(deps);
+  const reason = reading.error
+    ?? (reading.freeGb !== null && reading.freeGb < admitThreshold
+      ? `free commit memory ${reading.freeGb} GB is below the admit threshold ${admitThreshold} GB`
+      : null);
+  return {
+    admitted: reason === null || Boolean(opts.forceAdmit),
+    reason,
+    drain: reading.freeGb !== null && reading.freeGb < drainThreshold,
+    drainThreshold,
+    warning: reading.warning ?? null,
+    fields: { freeGb: reading.freeGb, admitThreshold, admitOverride: Boolean(opts.forceAdmit) },
+  };
+}
+
+async function admitLane(opts, deps) {
+  if (opts.name) usage('admit takes no lane name');
+  const admit = admission(opts, deps);
+  return {
+    exit: admit.admitted ? EXIT.OK : EXIT.ADMIT_REFUSED,
+    output: {
+      admitted: admit.admitted,
+      ...admit.fields,
+      drain: admit.drain,
+      drainThreshold: admit.drainThreshold,
+      ...(admit.reason ? { reason: admit.reason } : {}),
+      ...(admit.warning ? { warning: admit.warning } : {}),
+    },
+    row: { state: admit.admitted ? 'admitted' : 'refused', ...admit.fields, drain: admit.drain, warning: admit.warning },
+  };
+}
+
 async function startLane(opts, deps, state) {
   // C8: model AND reasoning effort are launch flags, never inherited. A claude
   // fallback lane started without --effort ran at xhigh — $5.24 in 9 minutes on
@@ -976,6 +1052,20 @@ async function startLane(opts, deps, state) {
       warning = `ignored --mcp-startup-timeout ${opts.mcpStartupTimeout} + --mcp-startup-server ${opts.mcpStartupServer}: caller-supplied MCP startup-timeout config wins`;
     }
   }
+
+  // The last refusal, and still herdr-free. A fallback is exempt: it replaces
+  // the lane's own agent in the same pane, after codex has already been quit.
+  const admit = opts.verb === 'fallback' ? null : admission(opts, deps);
+  if (admit && !admit.admitted) {
+    throw new LaneError(
+      EXIT.ADMIT_REFUSED,
+      `start refused: ${admit.reason}; pass --force-admit to start anyway`,
+      { ...admit.fields, drain: admit.drain },
+      { state: 'refused', ...admit.fields },
+    );
+  }
+  const admitRow = admit ? admit.fields : {};
+  const admitOutput = admit ? { admission: { ...admit.fields, ...(admit.reason ? { overridden: admit.reason } : {}), ...(admit.warning ? { warning: admit.warning } : {}) } } : {};
 
   // A sidecar write lock prevents lost state; this separate, longer-lived lock
   // prevents two launches from both claiming the same shell between writes.
@@ -1101,6 +1191,7 @@ async function startLane(opts, deps, state) {
       ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
       ...(hooksTrusted ? { hooksTrusted: true } : {}),
       ...(folderTrusted ? { folderTrusted: true } : {}),
+      ...admitOutput,
       ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
     },
     row: {
@@ -1109,6 +1200,7 @@ async function startLane(opts, deps, state) {
       model: opts.model,
       reasoning: opts.reasoning ?? null,
       state: 'started',
+      ...admitRow,
       ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
       ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
       ...(hooksTrusted ? { hooksTrusted: true } : {}),
@@ -2324,13 +2416,14 @@ export async function runLane(argv, overrides = {}) {
       case 'fallback': result = await fallbackLane(opts, deps, state); break;
       case 'stop': result = await stopLane(opts, deps, state); break;
       case 'sweep': result = await sweepLanes(opts, deps, state); break;
+      case 'admit': result = await admitLane(opts, deps); break;
       default: throw new LaneError(EXIT.USAGE, `${opts.verb} is not implemented yet`);
     }
     result.exit ??= EXIT.OK;
   } catch (error) {
     // An unclassified throw is an infrastructure failure, not a deadline.
     const code = error instanceof LaneError ? error.code : EXIT.ERROR;
-    result = { exit: code, output: { error: error.message, ...(error.details ?? {}) }, row: { state: 'failed' } };
+    result = { exit: code, output: { error: error.message, ...(error.details ?? {}) }, row: { state: 'failed', ...(error.row ?? {}) } };
   }
 
   const row = {
