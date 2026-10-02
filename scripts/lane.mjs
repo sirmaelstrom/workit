@@ -131,6 +131,7 @@ const FOLDER_TRUST_TIMEOUT_MS = 15_000;
 // the cwd. When none of them resolves, `sweep` prints the command to run.
 const SWEEP_DELEGATE = ['infrastructure', 'herdr-lanes.ps1'];
 const POLL_MS = 1_000;
+const SETTLE_CONFIRM_MS = 3_000;
 const LOG_BASENAME = 'lane-log.jsonl';
 const LOG_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 'lanes'];
 const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'sweep', 'admit']);
@@ -1439,6 +1440,10 @@ async function waitLane(opts, deps, state) {
   // The row counts the herdr polls; stdout carries only the verdict.
   const polls = { pollCount: 0, pollTimeouts: 0 };
   const settle = (result) => ({ ...result, row: { ...result.row, ...polls } });
+  // A codex lane passes through `done` between tool calls, so one settled poll
+  // is not a finished turn: the state must hold on a second poll
+  // SETTLE_CONFIRM_MS later. Claude lanes settle on one poll.
+  let unconfirmed = null;
 
   while (true) {
     const pollStarted = deps.now();
@@ -1502,7 +1507,20 @@ async function waitLane(opts, deps, state) {
         row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter, ...warning },
       });
     }
-    if (waited.code === 0 && ['idle', 'done'].includes(stateAfter)) {
+    // An observation still unconfirmed at the deadline is a timeout: the
+    // conductor waits again rather than reading a mid-turn lane as finished.
+    const settled = waited.code === 0 && ['idle', 'done'].includes(stateAfter);
+    const confirmed = settled && (lane.kind !== 'codex' || unconfirmed !== null);
+    if (settled && !confirmed) {
+      unconfirmed = stateAfter;
+      if (deps.now() < deadline) {
+        await deps.sleep(Math.min(SETTLE_CONFIRM_MS, deadline - deps.now()));
+        continue;
+      }
+    }
+    if (!settled) unconfirmed = null;
+    if (confirmed) {
+      if (lane.kind === 'codex') polls.settleConfirmed = true;
       return settle({
         exit: EXIT.OK,
         output: {

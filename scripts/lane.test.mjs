@@ -346,11 +346,14 @@ test('WP-2: blocked wait exits 3 and includes the approval dialog', async (t) =>
 test('WP-2: done wait exits 0 but says status is not evidence', async (t) => {
   const f = fixture(t);
   seedLane(f);
-  f.responses.push(
-    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
-    { code: 0, stdout: 'finished', stderr: '' },
-  );
-  const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
+  // A codex lane's settled state is confirmed on a second poll (a78b8313).
+  for (let poll = 0; poll < 2; poll++) {
+    f.responses.push(
+      { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+      { code: 0, stdout: 'finished', stderr: '' },
+    );
+  }
+  const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
   assert.equal(result.exit, 0);
   assert.equal(result.output.state, 'done');
   assert.match(result.output.notice, /status is not evidence.*lane check/i);
@@ -576,10 +579,13 @@ test('quest 653c5b81: low weekly meter preserves blocked and settled precedence'
   for (const [state, exit] of [['blocked', 3], ['idle', 0], ['done', 0]]) {
     const f = fixture(t);
     seedLane(f);
-    f.responses.push(
-      { code: 0, stdout: JSON.stringify({ result: { state } }), stderr: '' },
-      { code: 0, stdout: `gpt-6-astra medium · Context 100% left · weekly 15% left`, stderr: '' },
-    );
+    // Twice: a codex lane's settled state is confirmed on a second poll (a78b8313).
+    for (let poll = 0; poll < 2; poll++) {
+      f.responses.push(
+        { code: 0, stdout: JSON.stringify({ result: { state } }), stderr: '' },
+        { code: 0, stdout: `gpt-6-astra medium · Context 100% left · weekly 15% left`, stderr: '' },
+      );
+    }
     const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
     assert.equal(result.exit, exit, `${state} remains a lifecycle result, not plan-low`);
     assert.equal(result.output.state, state);
@@ -1428,13 +1434,16 @@ test('AM15: the usage text documents every flag the CLI accepts, including --lan
 test('SMOKE1: wait passes every --until through, so a finished lane is still seen', async (t) => {
   const f = fixture(t);
   seedLane(f);
-  f.responses.push(
-    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
-    { code: 0, stdout: 'finished', stderr: '' },
-  );
+  // A codex lane's settled state is confirmed on a second poll (a78b8313).
+  for (let poll = 0; poll < 2; poll++) {
+    f.responses.push(
+      { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+      { code: 0, stdout: 'finished', stderr: '' },
+    );
+  }
   const result = await runLane(
     ['wait', 'lane-a', '--until', 'blocked', '--until', 'idle', '--until', 'done', '--timeout', '1000', '--log', f.log],
-    { exec: f.exec },
+    { exec: f.exec, sleep: async () => {} },
   );
   assert.equal(result.exit, 0);
   assert.equal(result.output.state, 'done');
@@ -1842,10 +1851,13 @@ test('A2-8 / U7: an infra error is not masked by the plan meter, and a finished 
 
   const g = fixture(t);
   seedLane(g);
-  g.responses.push(
-    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
-    { code: 0, stdout: 'gpt-5.6-terra · 5h 3% left · weekly 40% left', stderr: '' },
-  );
+  // A codex lane's settled state is confirmed on a second poll (a78b8313).
+  for (let poll = 0; poll < 2; poll++) {
+    g.responses.push(
+      { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+      { code: 0, stdout: 'gpt-5.6-terra · 5h 3% left · weekly 40% left', stderr: '' },
+    );
+  }
   const finished = await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', g.log], { exec: g.exec, sleep: async () => {} });
   assert.equal(finished.exit, 0, 'work that finished is done, whatever the meter says');
   assert.equal(finished.output.state, 'done');
@@ -2316,11 +2328,14 @@ test('A3-9 / R3-U2: a sweep whose delegate is missing exits nonzero and still pr
 test('A3-10 / R3-M2: a bare wait sends no --until, and the poll timeout is the pacing', async (t) => {
   const f = fixture(t);
   seedLane(f);
-  f.responses.push(
-    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
-    { code: 0, stdout: 'finished', stderr: '' },
-  );
-  await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', f.log], { exec: f.exec });
+  // A codex lane's settled state is confirmed on a second poll (a78b8313).
+  for (let poll = 0; poll < 2; poll++) {
+    f.responses.push(
+      { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+      { code: 0, stdout: 'finished', stderr: '' },
+    );
+  }
+  await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
   // herdr's own default already matches idle|done|blocked, so the bare shape
   // forwards nothing — and the per-poll timeout is what paces production.
   assert.equal(f.calls[0].args.includes('--until'), false);
@@ -3481,6 +3496,54 @@ test('55477c2d: a wait that herdr times out N times prints exactly one line, and
   assert.equal(JSON.parse(lines[0]).state, 'done');
   const row = JSON.parse(readFileSync(f.log, 'utf8').trim().split(/\r?\n/).at(-1));
   assert.deepEqual([row.verb, row.pollTimeouts, row.pollCount], ['wait', 3, 4]);
+});
+
+// --- quest a78b8313: a codex lane flickers through `done` between tool calls,
+// so a settled state ends a wait only when a second poll still reads it.
+const DONE_POLL = { code: 0, stdout: '{"result":{"agent_status":"done"}}', stderr: '' };
+const WORKING_POLL = { code: 1, stdout: '', stderr: '{"error":{"code":"timeout","message":"timed out waiting for agent status"},"id":"cli:agent:wait"}' };
+const WORKING_READ = { code: 0, stdout: 'Working (1m 51s • esc to interrupt)', stderr: '' };
+const clockedWait = (f, timeout = '10000') => {
+  let clock = 0;
+  return runLane(['wait', 'lane-a', '--until', 'idle', '--until', 'done', '--timeout', timeout, '--log', f.log], {
+    exec: f.exec, now: () => clock, sleep: async (ms) => { clock += Math.max(ms, 1); },
+  });
+};
+
+test('a78b8313: a codex lane that reads done once and then working does not end the wait', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(DONE_POLL, WORKING_READ);
+  for (let poll = 0; poll < 20; poll++) f.responses.push(WORKING_POLL, WORKING_READ);
+  const result = await clockedWait(f);
+  assert.equal(result.exit, 4, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'timeout');
+});
+
+test('a78b8313: a codex lane that reads done on two polls ends the wait, confirmed', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(DONE_POLL, WORKING_READ, DONE_POLL, WORKING_READ);
+  const result = await clockedWait(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'done');
+  assert.deepEqual([result.row.pollCount, result.row.settleConfirmed], [2, true]);
+  assert.equal(f.calls.filter((call) => call.args[1] === 'wait').length, 2);
+});
+
+test('a78b8313: a settled reading still unconfirmed at the deadline is a timeout, and a claude lane settles on one poll', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(DONE_POLL, WORKING_READ);
+  const late = await clockedWait(f, '1');
+  assert.equal(late.exit, 4, JSON.stringify(late.output));
+
+  const g = fixture(t);
+  seedLane(g, { kind: 'claude' });
+  g.responses.push(DONE_POLL, WORKING_READ);
+  const claude = await clockedWait(g);
+  assert.equal(claude.exit, 0, JSON.stringify(claude.output));
+  assert.equal(claude.row.pollCount, 1);
 });
 
 // --- quest 93d4855b: the memory admission gate. Thresholds are GB of free
