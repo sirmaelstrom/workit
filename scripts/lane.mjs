@@ -1455,7 +1455,7 @@ async function waitLane(opts, deps, state) {
   // A codex lane passes through `done` between tool calls, so one settled poll
   // is not a finished turn: the state must hold on a second poll
   // SETTLE_CONFIRM_MS later. Claude lanes settle on one poll.
-  let unconfirmed = null;
+  let unconfirmedAt = null;
 
   while (true) {
     const pollStarted = deps.now();
@@ -1472,6 +1472,7 @@ async function waitLane(opts, deps, state) {
     }
     args.push('--timeout', String(pollMs));
     const waited = call(deps, 'herdr', args);
+    const observedAt = deps.now();
     polls.pollCount++;
     if (waited.code !== 0 && isTimeoutFailure(waited)) polls.pollTimeouts++;
     const stateAfter = waited.code === 0 ? responseState(waited.stdout, null) : null;
@@ -1521,16 +1522,16 @@ async function waitLane(opts, deps, state) {
     }
     // An observation still unconfirmed at the deadline is a timeout: the
     // conductor waits again rather than reading a mid-turn lane as finished.
+    // The interval runs from the first settled reading: a second reading taken
+    // sooner, because the deadline cut the sleep short, confirms nothing.
     const settled = waited.code === 0 && ['idle', 'done'].includes(stateAfter);
-    const confirmed = settled && (lane.kind !== 'codex' || unconfirmed !== null);
-    if (settled && !confirmed) {
-      unconfirmed = stateAfter;
-      if (deps.now() < deadline) {
-        await deps.sleep(Math.min(SETTLE_CONFIRM_MS, deadline - deps.now()));
-        continue;
-      }
+    if (!settled) unconfirmedAt = null;
+    else if (unconfirmedAt === null) unconfirmedAt = observedAt;
+    const confirmed = settled && (lane.kind !== 'codex' || observedAt - unconfirmedAt >= SETTLE_CONFIRM_MS);
+    if (settled && !confirmed && deps.now() < deadline) {
+      await deps.sleep(Math.max(0, Math.min(SETTLE_CONFIRM_MS - (deps.now() - unconfirmedAt), deadline - deps.now())));
+      continue;
     }
-    if (!settled) unconfirmed = null;
     if (confirmed) {
       if (lane.kind === 'codex') polls.settleConfirmed = true;
       if (plan.capacity) {

@@ -98,6 +98,14 @@ const codexDeliveredRead = (promptFile) => ({
   stderr: '',
 });
 
+// A clock that moves only when the wait sleeps: a codex settle is confirmed by a
+// second reading SETTLE_CONFIRM_MS after the first, and a no-op sleep on the
+// real clock never gets there.
+const steppedClock = () => {
+  let clock = 0;
+  return { now: () => clock, sleep: async (ms) => { clock += Math.max(ms, 1); } };
+};
+
 function promptCall(f) {
   return f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'prompt');
 }
@@ -364,7 +372,7 @@ test('WP-2: done wait exits 0 but says status is not evidence', async (t) => {
       { code: 0, stdout: 'finished', stderr: '' },
     );
   }
-  const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  const result = await runLane(['wait', 'lane-a', '--timeout', '10000', '--log', f.log], { exec: f.exec, ...steppedClock() });
   assert.equal(result.exit, 0);
   assert.equal(result.output.state, 'done');
   assert.match(result.output.notice, /status is not evidence.*lane check/i);
@@ -597,7 +605,7 @@ test('quest 653c5b81: low weekly meter preserves blocked and settled precedence'
         { code: 0, stdout: `gpt-6-astra medium · Context 100% left · weekly 15% left`, stderr: '' },
       );
     }
-    const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+    const result = await runLane(['wait', 'lane-a', '--timeout', '10000', '--log', f.log], { exec: f.exec, ...steppedClock() });
     assert.equal(result.exit, exit, `${state} remains a lifecycle result, not plan-low`);
     assert.equal(result.output.state, state);
   }
@@ -1458,8 +1466,8 @@ test('SMOKE1: wait passes every --until through, so a finished lane is still see
     );
   }
   const result = await runLane(
-    ['wait', 'lane-a', '--until', 'blocked', '--until', 'idle', '--until', 'done', '--timeout', '1000', '--log', f.log],
-    { exec: f.exec, sleep: async () => {} },
+    ['wait', 'lane-a', '--until', 'blocked', '--until', 'idle', '--until', 'done', '--timeout', '10000', '--log', f.log],
+    { exec: f.exec, ...steppedClock() },
   );
   assert.equal(result.exit, 0);
   assert.equal(result.output.state, 'done');
@@ -1874,7 +1882,7 @@ test('A2-8 / U7: an infra error is not masked by the plan meter, and a finished 
       { code: 0, stdout: 'gpt-5.6-terra · 5h 3% left · weekly 40% left', stderr: '' },
     );
   }
-  const finished = await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', g.log], { exec: g.exec, sleep: async () => {} });
+  const finished = await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', g.log], { exec: g.exec, ...steppedClock() });
   assert.equal(finished.exit, 0, 'work that finished is done, whatever the meter says');
   assert.equal(finished.output.state, 'done');
   assert.equal(finished.row.plan5h, 3, 'the meter is still recorded');
@@ -3659,6 +3667,22 @@ test('a78b8313: a settled reading still unconfirmed at the deadline is a timeout
   f.responses.push(DONE_POLL, WORKING_READ);
   const late = await clockedWait(f, '1');
   assert.equal(late.exit, 4, JSON.stringify(late.output));
+
+  // workit#129 review (codex, astra): a second settled reading the deadline
+  // pulled in before SETTLE_CONFIRM_MS is not a confirmation.
+  for (const timeout of ['1', '2999']) {
+    const h = fixture(t);
+    seedLane(h);
+    h.responses.push(DONE_POLL, WORKING_READ, DONE_POLL, WORKING_READ);
+    const short = await clockedWait(h, timeout);
+    assert.equal(short.exit, 4, `--timeout ${timeout}: ${JSON.stringify(short.output)}`);
+    assert.deepEqual([short.row.pollCount, short.row.settleConfirmed], [2, undefined]);
+  }
+  const k = fixture(t);
+  seedLane(k);
+  k.responses.push(DONE_POLL, WORKING_READ, DONE_POLL, WORKING_READ);
+  const exact = await clockedWait(k, '3000');
+  assert.equal(exact.exit, 0, `a deadline that holds the whole interval confirms: ${JSON.stringify(exact.output)}`);
 
   const g = fixture(t);
   seedLane(g, { kind: 'claude' });
