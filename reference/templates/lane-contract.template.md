@@ -54,7 +54,7 @@ List the callers of any function you add a check to, and every construct in your
      Put the same section in the PR body.
    - `## Follow-ups` (including the boundary question's answer and any doc sentence you made false)
    - `## Timing` (start and end from `date -u`)
-3. Reply in the pane in **60 lines or fewer**, pointing at the report. Then stop and wait. The conductor may send you review findings to fix in the same worktree.
+3. Reply in the pane in **three lines at most**: the outcome, the PR number, and the report path. The report is the record, so don't summarize it in the reply. Then stop and wait. The conductor may send you review findings to fix in the same worktree.
 4. **When the conductor sends review findings, you adjudicate them, all in one batch.** Each finding gets exactly one verdict:
    - **fixed**: fix it, **commit before the control**, and see the control fail with the fix reverted;
    - **refuted**: quote the observation that refutes it (the guard, the caller, a command and its output);
@@ -70,4 +70,4 @@ List the callers of any function you add a check to, and every construct in your
 
    After the table, the amendment's own Debrief uses **headings**, not bold paragraphs: `### Forks I decided that the brief did not settle` and `### Claims no control measures` (or `####` under the `## Amendment N` heading). The reviewers' uncertainty extractor matches headings only, so a bold-paragraph Debrief never reaches them.
 
-   The conductor re-reads only your refutations. When it records your verdicts, `fixed` becomes `reply --verdict confirmed --adjudicator lane`, `refuted` becomes `refuted`, and `judgment` becomes `judgment`. If the conductor overturns a refutation, the finding reopens: you fix it with a control like any other fix, and its row records `--adjudicator conductor`. A nontrivial amendment then gets one delta-only review pass (the amendment diff only) and no third round, so fix the delta pass's findings the same way; a fix made after that pass is checked by its control alone. Don't reply to or resolve GitHub threads; the conductor does that.
+   The conductor re-reads only your refutations. When it records your verdicts, `fixed` becomes `reply --verdict confirmed --adjudicator lane`, `refuted` becomes `refuted`, and `judgment` becomes `judgment`. If the conductor overturns a refutation, the finding reopens: you fix it with a control like any other fix, and its row records `--adjudicator conductor`. A nontrivial amendment then gets one delta-only review pass (the amendment diff only) and no third round, so fix the delta pass's findings the same way; a fix made after that pass is checked by its control alone. Don't reply to or resolve GitHub threads; the conductor does that. Once the amendment is written, reply in the pane as in step 3, naming the amendment.
