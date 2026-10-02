@@ -2164,6 +2164,49 @@ function delegateRootForLane(lanePath, deps) {
   return delegateRoot;
 }
 
+// The delegate (herdr-lanes.ps1) lists one row per lane it found:
+//   REPO  LANE  BRANCH  DIRTY  AHEAD  AGENT  VERDICT
+// under a dashed rule, reason lines indented below a row, a blank line after
+// the table. It walks <WorktreeRoot>\<repo dir>\<lane dir> and deletes the
+// lane dir's FullName, so a row's path is <WorktreeRoot>/<REPO>/<LANE>.
+// Returns those paths, [] for "No lanes under", or null when the output has
+// neither shape (unverifiable, so the caller refuses).
+export function delegateListedPaths(output, worktreeRoot) {
+  const lines = String(output).split(/\r?\n/);
+  const header = lines.findIndex((line) => /^\s*REPO\s+LANE\s+BRANCH\b/.test(line));
+  if (header < 0) return /No lanes under/i.test(String(output)) ? [] : null;
+  const paths = [];
+  for (const line of lines.slice(header + 2)) {
+    if (line.trim() === '') break;
+    if (/^\s/.test(line)) continue;
+    const [repo, lane] = line.trim().split(/\s+/);
+    if (!repo || !lane) return null;
+    paths.push(join(worktreeRoot, repo, lane));
+  }
+  return paths;
+}
+
+// d4480b68: `-Lane` scopes the delegate by basename only, two levels below
+// -WorktreeRoot — a same-named directory under a different parent matches too,
+// and -Clean deletes with Remove-Item -Recurse -Force. Before a cleaning call
+// for a named lane, list first and clean only when every listed path is the
+// sidecar's path for that lane.
+function verifyDelegateTarget(deps, delegate, entry) {
+  const fold = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
+  const root = entry.delegateRoot ?? entry.root;
+  const listFlags = entry.flags.filter((flag) => flag !== '-Clean' && flag !== '-Force');
+  const listed = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', root, ...listFlags]);
+  if (listed.code !== 0) return { refused: `delegate --list failed before -Clean: ${listed.stderr.trim() || listed.stdout.trim() || `exit ${listed.code}`}` };
+  const reported = delegateListedPaths(listed.stdout, root);
+  if (reported === null) return { refused: 'the delegate list could not be read, so the directory -Clean would remove is unverified' };
+  const expected = fold(resolve(entry.lanePath));
+  const strays = reported.filter((path) => fold(resolve(path)) !== expected);
+  if (strays.length > 0) {
+    return { refused: `the delegate lists ${strays.join(', ')} for -Lane ${entry.lane}, not the sidecar's ${resolve(entry.lanePath)}; -Clean refused` };
+  }
+  return { listed: listed.stdout, nothingListed: reported.length === 0 };
+}
+
 function sweepDelegate(opts, deps) {
   if (deps.env.HERDR_LANES_SCRIPT) return resolve(deps.env.HERDR_LANES_SCRIPT);
   const workspace = opts.workspaceRoot ?? deps.env.WORKIT_WORKSPACE_ROOT ?? null;
@@ -2277,6 +2320,15 @@ async function sweepLanes(opts, deps, state) {
   // lanes unswept behind a failing legacy root — the alert-fan-out failure
   // where one dead target silences the rest.
   const results = present.map((entry) => {
+    if (entry.lanePath && entry.flags.includes('-Clean')) {
+      const verified = verifyDelegateTarget(deps, delegate, entry);
+      if (verified.refused) {
+        return { root: entry.root, lane: entry.lane, ok: false, exit: null, output: '', refused: true, error: verified.refused };
+      }
+      if (verified.nothingListed) {
+        return { root: entry.root, lane: entry.lane, ok: true, exit: 0, output: verified.listed, cleaned: false };
+      }
+    }
     const swept = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', entry.delegateRoot ?? entry.root, ...entry.flags]);
     return {
       root: entry.root,

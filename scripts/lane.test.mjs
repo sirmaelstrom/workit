@@ -8,7 +8,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
   reportShapeProblems, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -67,6 +67,17 @@ const SHELL_READ = { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' };
 // FreeVirtualMemory is in KB.
 const memoryKb = (gb) => ({ code: 0, stdout: `${Math.round(gb * 1024 * 1024)}\r\n`, stderr: '' });
 const MEMORY_64GB = memoryKb(64);
+// herdr-lanes.ps1's list table (Write-LaneTable's format string), which `sweep`
+// reads before a -Clean for a named lane (d4480b68): one row per [repo, lane].
+const tableRow = (cells) => `${cells[0].padEnd(22)} ${cells[1].padEnd(30)} ${cells[2].padEnd(34)} ${cells[3].padStart(6)} ${cells[4].padStart(6)} ${cells[5].padEnd(14)} ${cells[6]}`;
+const delegateListing = (...rows) => ({
+  code: 0,
+  stderr: '',
+  stdout: ['', tableRow(['REPO', 'LANE', 'BRANCH', 'DIRTY', 'AHEAD', 'AGENT', 'VERDICT']), '-'.repeat(130),
+    ...rows.flatMap(([repo, lane]) => [tableRow([repo, lane, 'feat/lane', '0', '1', '-', 'SAFE']), `${''.padEnd(22)} -> already integrated (squash-tree)`]),
+    '', `Listing only. ${rows.length} of ${rows.length} lane(s) are safe to remove; re-run with -Clean.`].join('\n'),
+});
+const cleaningCalls = (f) => f.calls.filter((call) => call.program === 'pwsh' && call.args.includes('-Clean'));
 
 // Codex TUI frames, trimmed from a live capture on codex 0.156.1 (2026-09-24,
 // quest 7e1fecf7). A fresh codex prompt reads the pane before sending (loaded?)
@@ -999,6 +1010,8 @@ test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', 
   seedCreates(f, [join(f.dir, 'projects', 'workit-wt-lane')]);
   f.responses.push(
     { code: 0, stdout: 'removing legacy lane ... done', stderr: '' },
+    // d4480b68: the named lane is listed first, and cleaned only on a match.
+    delegateListing(['projects', 'workit-wt-lane']),
     { code: 0, stdout: 'removing workit-wt-lane ... done', stderr: '' },
   );
   const result = await runLane(['sweep', '--log', f.log], {
@@ -1007,8 +1020,9 @@ test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', 
     env: { USERPROFILE: profile, WORKIT_WORKSPACE_ROOT: f.dir },
   });
   assert.equal(result.exit, 0);
-  assert.equal(f.calls.length, 2, 'one delegate invocation per lane location');
-  for (const call of f.calls) {
+  assert.equal(cleaningCalls(f).length, 2, 'one cleaning delegate invocation per lane location');
+  assert.equal(f.calls.length, 3, 'plus the named lane\'s verifying list');
+  for (const call of cleaningCalls(f)) {
     assert.equal(call.program, 'pwsh');
     assert.equal(call.args[0], '-NoProfile');
     assert.equal(call.args[1], '-File');
@@ -1016,7 +1030,7 @@ test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', 
     assert.ok(call.args.includes('-Clean'), 'sweep must ask the delegate to clean');
     assert.equal(call.args.includes('-Force'), false, 'never force by default — HOLD verdicts are the point');
   }
-  const roots = f.calls.map((call) => call.args[call.args.indexOf('-WorktreeRoot') + 1]);
+  const roots = cleaningCalls(f).map((call) => call.args[call.args.indexOf('-WorktreeRoot') + 1]);
   assert.deepEqual(roots, [legacyRoot, f.dir]);
   const recorded = join(f.dir, 'projects', 'workit-wt-lane');
   assert.deepEqual(relative(roots[1], recorded).split(/[\\/]/), ['projects', 'workit-wt-lane']);
@@ -1159,6 +1173,7 @@ test('AM5 / U3: sweep visits every root even when one fails, and skips roots tha
   seedCreates(f, [join(f.dir, 'projects', 'workit-wt-lane')]);
   f.responses.push(
     { code: 1, stdout: '', stderr: 'legacy root exploded' },
+    delegateListing(['projects', 'workit-wt-lane']),
     { code: 0, stdout: 'removing workit-wt-lane ... done', stderr: '' },
   );
   const result = await runLane(['sweep', '--log', f.log], {
@@ -1166,19 +1181,20 @@ test('AM5 / U3: sweep visits every root even when one fails, and skips roots tha
     exists: fakeExists(),
     env: { USERPROFILE: profile, WORKIT_WORKSPACE_ROOT: f.dir },
   });
-  assert.equal(f.calls.length, 2, 'the second root must still be swept');
+  assert.equal(cleaningCalls(f).length, 2, 'the second root must still be swept');
   assert.equal(result.exit, 0, 'one failed root is not a failed sweep');
   assert.deepEqual(result.output.roots.map((entry) => entry.ok), [false, true]);
 
   const g = fixture(t);
   seedCreates(g, [join(g.dir, 'projects', 'workit-wt-lane')]);
-  g.responses.push({ code: 0, stdout: 'done', stderr: '' });
+  g.responses.push(delegateListing(['projects', 'workit-wt-lane']), { code: 0, stdout: 'done', stderr: '' });
   const skipped = await runLane(['sweep', '--log', g.log], {
     exec: g.exec,
     exists: fakeExists((path) => !path.includes('.herdr')),
     env: { USERPROFILE: join(g.dir, 'profile'), WORKIT_WORKSPACE_ROOT: g.dir },
   });
-  assert.equal(g.calls.length, 1, 'a default root that does not exist is skipped, not swept');
+  assert.equal(cleaningCalls(g).length, 1, 'a default root that does not exist is skipped, not swept');
+  assert.equal(g.calls.some((call) => call.args.includes(join(g.dir, 'profile', '.herdr', 'worktrees'))), false);
   assert.equal(skipped.exit, 0);
 });
 
@@ -2123,7 +2139,7 @@ test('A3-7 / R3-U1: --lane is intersected with the sidecar, not passed through',
 
   const g = fixture(t);
   seedCreates(g, [join(g.dir, 'projects', 'workit-wt-alpha')]);
-  g.responses.push({ code: 0, stdout: 'removing ... done', stderr: '' });
+  g.responses.push(delegateListing(['projects', 'workit-wt-alpha']), { code: 0, stdout: 'removing ... done', stderr: '' });
   const allowed = await runLane(['sweep', '--lane', 'workit-wt-alpha', '--log', g.log], {
     exec: g.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: g.dir },
   });
@@ -2166,6 +2182,63 @@ test('Q-5: unknown sweep lane refusal lists known agent names, labels, and basen
   assert.match(result.output.error, /workit-wt-lane-a/);
   assert.match(result.output.error, /lanes\[\].*creates\[\]/);
   assert.match(result.output.error, /Agent names come from lanes\[\].*labels and basenames come from creates\[\]/);
+});
+
+// --- quest d4480b68: -Lane scopes the delegate by basename only, two levels
+// down; -Clean runs only when the delegate's listed paths are the sidecar's.
+const cleanLane = (f, lane = 'workit-wt-alpha') => runLane(['sweep', '--lane', lane, '--log', f.log], {
+  exec: f.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: f.dir },
+});
+
+test('d4480b68: a delegate listing the same basename under another parent is refused -Clean', async (t) => {
+  for (const rows of [[['data', 'workit-wt-alpha']], [['projects', 'workit-wt-alpha'], ['data', 'workit-wt-alpha']]]) {
+    const f = fixture(t);
+    seedCreates(f, [join(f.dir, 'projects', 'workit-wt-alpha')]);
+    f.responses.push(delegateListing(...rows));
+    const result = await cleanLane(f);
+    assert.equal(cleaningCalls(f).length, 0, 'nothing reaches -Clean');
+    assert.equal(result.exit, 1, JSON.stringify(result.output));
+    const [entry] = result.output.roots;
+    assert.equal(entry.refused, true);
+    assert.ok(entry.error.includes(join(f.dir, 'data', 'workit-wt-alpha')), entry.error);
+    assert.ok(entry.error.includes(join(f.dir, 'projects', 'workit-wt-alpha')), entry.error);
+  }
+});
+
+test('d4480b68: an unreadable listing refuses closed; "No lanes" cleans nothing; --list is not verified twice', async (t) => {
+  const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-alpha')]);
+  f.responses.push({ code: 0, stdout: 'some other format entirely', stderr: '' });
+  const unreadable = await cleanLane(f);
+  assert.equal(cleaningCalls(f).length, 0);
+  assert.match(unreadable.output.roots[0].error, /could not be read/);
+
+  const g = fixture(t);
+  seedCreates(g, [join(g.dir, 'projects', 'workit-wt-alpha')]);
+  g.responses.push({ code: 0, stdout: `No lanes under ${g.dir}.`, stderr: '' });
+  const none = await cleanLane(g);
+  assert.equal(none.exit, 0);
+  assert.equal(cleaningCalls(g).length, 0, 'a lane the delegate cannot see is not cleaned');
+  assert.equal(none.output.roots[0].cleaned, false);
+
+  const h = fixture(t);
+  seedCreates(h, [join(h.dir, 'projects', 'workit-wt-alpha')]);
+  h.responses.push(delegateListing(['projects', 'workit-wt-alpha']));
+  const listed = await runLane(['sweep', '--lane', 'workit-wt-alpha', '--list', '--log', h.log], {
+    exec: h.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: h.dir },
+  });
+  assert.equal(listed.exit, 0);
+  assert.equal(h.calls.length, 1, 'a dry run is its own listing');
+});
+
+test('d4480b68: a matching listing cleans, and the parser reads the delegate table', async (t) => {
+  const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-alpha')]);
+  f.responses.push(delegateListing(['projects', 'workit-wt-alpha']), { code: 0, stdout: 'removing workit-wt-alpha ... done', stderr: '' });
+  const result = await cleanLane(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(cleaningCalls(f).length, 1);
+  assert.deepEqual(delegateListedPaths(delegateListing(['projects', 'a'], ['data', 'b']).stdout, 'X'), [join('X', 'projects', 'a'), join('X', 'data', 'b')]);
 });
 
 // --- quest e6841100: `sweep --lane` on a reused name. Measured after #128:
@@ -2224,7 +2297,7 @@ test('Q-6: every C13 root spelling reaches the recorded lane in exactly two dele
     seedCreates(f, [recorded]);
     const argv = root === null ? ['sweep', '--log', f.log]
       : ['sweep', '--root', root === 'projects' ? join(f.dir, 'projects') : f.dir, '--log', f.log];
-    f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+    f.responses.push(delegateListing(['projects', 'workit-wt-lane-a']), { code: 0, stdout: 'removing ... done', stderr: '' });
     const result = await runLane(argv, { exec: f.exec, exists: fakeExists(), env: root === null ? { WORKIT_WORKSPACE_ROOT: f.dir } : {} });
     assert.equal(result.exit, 0);
     const call = f.calls.find((entry) => entry.program === 'pwsh');
@@ -2251,7 +2324,7 @@ test('Q-6: win32 ancestor guard folds casing from path canonicalization', async 
     if (path.includes(casingSegment.toUpperCase())) return resolved.replace(casingSegment.toUpperCase(), casingSegment);
     return resolved;
   };
-  f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+  f.responses.push(delegateListing(['projects', 'workit-wt-lane-a']), { code: 0, stdout: 'removing ... done', stderr: '' });
   const result = await runLane(['sweep', '--lane', 'workit-wt-lane-a', '--root', join(f.dir, 'projects'), '--log', f.log], {
     exec: f.exec, exists: fakeExists(), env: {}, platform: 'win32', resolve: resolveWithWindowsCasing,
   });
@@ -2311,7 +2384,7 @@ test('A4-1: the sidecar check covers the herdr root too, not just the workspace 
   // A lane the sidecar knows is still swept, on whichever root holds it.
   const h = fixture(t);
   seedCreates(h, [join(h.dir, 'profile', '.herdr', 'worktrees', 'workit', 'mine')]);
-  h.responses.push({ code: 0, stdout: 'removing mine ... done', stderr: '' });
+  h.responses.push(delegateListing(['workit', 'mine']), { code: 0, stdout: 'removing mine ... done', stderr: '' });
   const known = await runLane(['sweep', '--lane', 'mine', '--log', h.log], {
     exec: h.exec, exists: fakeExists(), env: { USERPROFILE: join(h.dir, 'profile') },
   });
@@ -2322,7 +2395,7 @@ test('A4-1: the sidecar check covers the herdr root too, not just the workspace 
 test('A4-2: --lane matching follows the filesystem\'s casing rules', async (t) => {
   const f = fixture(t);
   seedCreates(f, [join(f.dir, 'projects', 'workit-wt-Alpha')]);
-  f.responses.push({ code: 0, stdout: 'removing ... done', stderr: '' });
+  f.responses.push(delegateListing(['projects', 'workit-wt-Alpha']), { code: 0, stdout: 'removing ... done', stderr: '' });
   const windows = await runLane(['sweep', '--lane', 'workit-wt-alpha', '--log', f.log], {
     exec: f.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: f.dir }, platform: 'win32',
   });
