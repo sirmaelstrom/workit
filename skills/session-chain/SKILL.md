@@ -43,7 +43,9 @@ holds at every PR boundary with needs_input.
 
 When `retire --mode close` reaches Claude Code's "Background work is running" exit dialog, it waits
 `--dialog-after-ms` (15,000 by default), proves every direct child of claude.exe is a `run-*-mcp.js`
-server, and answers Enter itself. A live non-MCP child is never approved: it returns
+server or a background `lane.mjs wait` (Claude Code's background-Bash wrapper running only the wait
+and output plumbing such as `tee`, `tail` or `echo`), and answers Enter itself; it reports
+`abandonedLaneWaits`. Any other live child is never approved: it returns
 `dialog: "background-process-live"` with its argv and exit 3 so a person can decide.
 
 Fork mode and Stop-hook ordering are unit-tested, not yet live-proven. The hook is shipped as `${CLAUDE_PLUGIN_ROOT}/scripts/session-stop-capture.mjs`, but its registration belongs to the private operator configuration.

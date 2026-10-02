@@ -23,10 +23,12 @@ import { pathToFileURL } from 'node:url';
 //   0 ok · 1 herdr/infra failure · 2 usage, refused before any mutation
 //   3 blocked (+ dialog) · 4 a wait deadline expired · 5 artifact check failed
 //   6 plan-low or a captured plan refusal
+//   7 admission refused: free commit memory below the admit threshold, or unread
+//   8 capacity: the turn ended on codex's "model is at capacity" banner; re-prompt
 // 4 means a deadline and nothing else. A dead daemon that reports as a timeout
 // is re-polled forever by a conductor that trusts this table.
-const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6 });
-export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6, ADMIT_REFUSED: 7, CAPACITY: 8 });
+export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7, capacity: 8 });
 
 export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per invocation, JSON on stdout.
 
@@ -36,7 +38,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   start    <name> --pane <id> --kind claude|codex --model <slug> --reasoning <lvl>
            [--sandbox <mode>] [--permission-mode <mode>] [--allow-default-mode]
            [--mcp-startup-timeout <sec> --mcp-startup-server <name>]
-           [-- <native agent args>]
+           [--min-free-gb <n>] [--force-admit] [-- <native agent args>]
+           Refused (exit 7) below --min-free-gb of free commit memory (or
+           LANE_MIN_FREE_GB, default 10) or when the reading fails; --force-admit
+           starts anyway and is logged. fallback is exempt: it swaps one agent
+           for another in the same pane.
            dontAsk is always refused; default mode needs --allow-default-mode.
            Codex has no default MCP startup timeout. Opt in with the timeout/server
            pair; a caller-supplied mcp_servers.<server>.startup_timeout_sec wins.
@@ -49,7 +55,10 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
            Naming any state adds blocked; a bare wait forwards none (herdr's
-           default already matches idle|done|blocked).
+           default already matches idle|done|blocked). A codex lane's idle/done
+           must hold on a second poll 3 s later. A turn that ended on codex's
+           "Selected model is at capacity" banner exits 8 (retryable). stdout
+           is the verdict alone; the row counts pollCount and pollTimeouts.
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
            | --expect-report <path>
            --expect-report and --expect-pr (on the PR body) require ## Debrief with
@@ -67,6 +76,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            The delegate is HERDR_LANES_SCRIPT, else <workspace-root>/infrastructure/
            herdr-lanes.ps1, else that path from the cwd; if none exists, sweep
            prints the command to run instead of guessing a location.
+  admit    [--min-free-gb <n>] [--drain-free-gb <n>]
+           Read-only admission check, for a conductor before a start or a council
+           dispatch: exit 0 admitted, 7 refused. Prints freeGb, the thresholds,
+           and drain: true below --drain-free-gb (or LANE_DRAIN_FREE_GB, default 4).
+           Off Windows freeGb is null and the check admits with a warning.
 
   --log <path>  JSONL instrumentation (default: <workspace>/data/outputs/projects/
                 agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)
@@ -84,6 +98,14 @@ export const PLAN_REFUSAL_PATTERNS = Object.freeze([
   /^\s*■\s*You've hit your usage limit/i,
   /^\s*Approaching rate limits\s+—\s+Switch to /i,
 ]);
+// Read off lane ored's pane, 2026-10-01 23:36Z: `■ Selected model is at
+// capacity. Please try a different model.`, after which herdr settled the
+// agent to done mid-amendment. Retryable, unlike the usage limit.
+export const CAPACITY_PATTERN = /^\s*■\s*Selected model is at capacity\b/i;
+// The banner counts only near the bottom: below it a live codex draws the
+// composer and the footer, so it sits a few lines up. Higher is scrollback
+// from an earlier turn.
+const CAPACITY_TAIL_LINES = 6;
 // Captured from the first-run trust interstitial. Keep these together: this is
 // a launch recovery, not a generic attempt to dismiss arbitrary Codex UI.
 export const HOOKS_TRUST_PATTERNS = Object.freeze([
@@ -121,15 +143,22 @@ const FOLDER_TRUST_TIMEOUT_MS = 15_000;
 // the cwd. When none of them resolves, `sweep` prints the command to run.
 const SWEEP_DELEGATE = ['infrastructure', 'herdr-lanes.ps1'];
 const POLL_MS = 1_000;
+const SETTLE_CONFIRM_MS = 3_000;
 const LOG_BASENAME = 'lane-log.jsonl';
 const LOG_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 'lanes'];
-const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'sweep']);
+const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'sweep', 'admit']);
+// Operator rulings of 2026-10-01 (quest 93d4855b), in GB of free commit memory.
+const ADMIT_MIN_FREE_GB = 10;
+const ADMIT_DRAIN_FREE_GB = 4;
 
 class LaneError extends Error {
-  constructor(code, message, details = {}) {
+  // `row` carries instrumentation a refusal must still log (the JSONL row of a
+  // throw is otherwise just { state: 'failed' }).
+  constructor(code, message, details = {}, row = {}) {
     super(message);
     this.code = code;
     this.details = details;
+    this.row = row;
   }
 }
 
@@ -140,6 +169,11 @@ export function execute(program, args, { cwd, input } = {}) {
       stdout: execFileSync(program, args, {
         cwd,
         input,
+        // execFileSync's default copies the child's stderr to ours as well as
+        // capturing it: every herdr poll timeout of a long `wait` reached the
+        // conductor's task output (~50 KB a wait). Captured is enough; failures
+        // already carry it.
+        stdio: ['pipe', 'pipe', 'pipe'],
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
         windowsHide: true,
@@ -244,13 +278,13 @@ function parseArgs(argv) {
     throw new LaneError(EXIT.USAGE, `expected one verb: ${[...VERBS].join(', ')}`, { usage: USAGE_TEXT });
   }
   const opts = { verb, positional: [], agentArgs: [] };
-  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode', '--amendment', '--no-ruling']);
+  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode', '--amendment', '--no-ruling', '--force-admit']);
   const repeatableFlags = new Set(['--root', '--until']);
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
     '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--expect-report', '--to', '--log',
     '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex', '--mcp-startup-timeout', '--mcp-startup-server',
-    '--ruling-receipt', '--quest',
+    '--ruling-receipt', '--quest', '--min-free-gb', '--drain-free-gb',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -905,6 +939,66 @@ function resolvePaneId(deps, workspaceId) {
   return firstDefined(panes[0], ['pane_id', 'paneId']) ?? null;
 }
 
+function gbOption(value, flag, envValue, fallback) {
+  const raw = value ?? (envValue === '' ? undefined : envValue);
+  if (raw === undefined) return fallback;
+  const number = Number(raw);
+  if (!Number.isFinite(number) || number < 0) usage(`${flag} must be a non-negative number of GB`);
+  return number;
+}
+
+// Free commit memory, the resource run Y exhausted (lanes and council seats
+// died, production restarted). Win32_OperatingSystem reports it in KB.
+function readFreeGb(deps) {
+  if (deps.platform !== 'win32') {
+    return { freeGb: null, warning: `free commit memory is read on Windows only (platform ${deps.platform}); admitted unmeasured` };
+  }
+  const read = call(deps, 'pwsh', ['-NoProfile', '-NonInteractive', '-Command', '(Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory']);
+  const text = read.stdout.trim();
+  const kb = /^\d+$/.test(text) ? Number(text) : NaN;
+  if (read.code !== 0 || !Number.isFinite(kb)) {
+    return { freeGb: null, error: `could not read free commit memory (${read.stderr.trim() || text || `exit ${read.code}`})` };
+  }
+  return { freeGb: Math.round((kb / 1024 / 1024) * 100) / 100 };
+}
+
+// An unreadable reading refuses: the gate exists because nothing else stopped
+// the host running out, and "unknown" is not evidence there is room.
+function admission(opts, deps) {
+  const admitThreshold = gbOption(opts.minFreeGb, '--min-free-gb', deps.env.LANE_MIN_FREE_GB, ADMIT_MIN_FREE_GB);
+  const drainThreshold = gbOption(opts.drainFreeGb, '--drain-free-gb', deps.env.LANE_DRAIN_FREE_GB, ADMIT_DRAIN_FREE_GB);
+  const reading = readFreeGb(deps);
+  const reason = reading.error
+    ?? (reading.freeGb !== null && reading.freeGb < admitThreshold
+      ? `free commit memory ${reading.freeGb} GB is below the admit threshold ${admitThreshold} GB`
+      : null);
+  return {
+    admitted: reason === null || Boolean(opts.forceAdmit),
+    reason,
+    drain: reading.freeGb !== null && reading.freeGb < drainThreshold,
+    drainThreshold,
+    warning: reading.warning ?? null,
+    fields: { freeGb: reading.freeGb, admitThreshold, admitOverride: Boolean(opts.forceAdmit) },
+  };
+}
+
+async function admitLane(opts, deps) {
+  if (opts.name) usage('admit takes no lane name');
+  const admit = admission(opts, deps);
+  return {
+    exit: admit.admitted ? EXIT.OK : EXIT.ADMIT_REFUSED,
+    output: {
+      admitted: admit.admitted,
+      ...admit.fields,
+      drain: admit.drain,
+      drainThreshold: admit.drainThreshold,
+      ...(admit.reason ? { reason: admit.reason } : {}),
+      ...(admit.warning ? { warning: admit.warning } : {}),
+    },
+    row: { state: admit.admitted ? 'admitted' : 'refused', ...admit.fields, drain: admit.drain, warning: admit.warning },
+  };
+}
+
 async function startLane(opts, deps, state) {
   // C8: model AND reasoning effort are launch flags, never inherited. A claude
   // fallback lane started without --effort ran at xhigh — $5.24 in 9 minutes on
@@ -976,6 +1070,20 @@ async function startLane(opts, deps, state) {
       warning = `ignored --mcp-startup-timeout ${opts.mcpStartupTimeout} + --mcp-startup-server ${opts.mcpStartupServer}: caller-supplied MCP startup-timeout config wins`;
     }
   }
+
+  // The last refusal, and still herdr-free. A fallback is exempt: it replaces
+  // the lane's own agent in the same pane, after codex has already been quit.
+  const admit = opts.verb === 'fallback' ? null : admission(opts, deps);
+  if (admit && !admit.admitted) {
+    throw new LaneError(
+      EXIT.ADMIT_REFUSED,
+      `start refused: ${admit.reason}; pass --force-admit to start anyway`,
+      { ...admit.fields, drain: admit.drain },
+      { state: 'refused', ...admit.fields },
+    );
+  }
+  const admitRow = admit ? admit.fields : {};
+  const admitOutput = admit ? { admission: { ...admit.fields, ...(admit.reason ? { overridden: admit.reason } : {}), ...(admit.warning ? { warning: admit.warning } : {}) } } : {};
 
   // A sidecar write lock prevents lost state; this separate, longer-lived lock
   // prevents two launches from both claiming the same shell between writes.
@@ -1101,6 +1209,7 @@ async function startLane(opts, deps, state) {
       ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
       ...(hooksTrusted ? { hooksTrusted: true } : {}),
       ...(folderTrusted ? { folderTrusted: true } : {}),
+      ...admitOutput,
       ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
     },
     row: {
@@ -1109,6 +1218,7 @@ async function startLane(opts, deps, state) {
       model: opts.model,
       reasoning: opts.reasoning ?? null,
       state: 'started',
+      ...admitRow,
       ...(mcpStartupTimeoutSec !== null ? { mcpStartupTimeoutSec } : {}),
       ...(waitedForStartLockMs > 0 ? { waitedForStartLockMs } : {}),
       ...(hooksTrusted ? { hooksTrusted: true } : {}),
@@ -1339,6 +1449,13 @@ async function waitLane(opts, deps, state) {
   const deadline = deps.now() + timeout;
   let meter = { plan5h: null, planWeekly: null };
   let dialog = '';
+  // The row counts the herdr polls; stdout carries only the verdict.
+  const polls = { pollCount: 0, pollTimeouts: 0 };
+  const settle = (result) => ({ ...result, row: { ...result.row, ...polls } });
+  // A codex lane passes through `done` between tool calls, so one settled poll
+  // is not a finished turn: the state must hold on a second poll
+  // SETTLE_CONFIRM_MS later. Claude lanes settle on one poll.
+  let unconfirmedAt = null;
 
   while (true) {
     const pollStarted = deps.now();
@@ -1355,6 +1472,9 @@ async function waitLane(opts, deps, state) {
     }
     args.push('--timeout', String(pollMs));
     const waited = call(deps, 'herdr', args);
+    const observedAt = deps.now();
+    polls.pollCount++;
+    if (waited.code !== 0 && isTimeoutFailure(waited)) polls.pollTimeouts++;
     const stateAfter = waited.code === 0 ? responseState(waited.stdout, null) : null;
 
     // Order matters, and it is not the obvious one:
@@ -1386,22 +1506,42 @@ async function waitLane(opts, deps, state) {
       && (planFloorReached(meter, floor) || ['idle', 'done'].includes(stateAfter));
     const refusalEligible = Boolean(refusal) && (plan.refusalShape === 'banner' || modalEligible);
     if (refusalEligible) {
-      return {
+      return settle({
         exit: EXIT.PLAN_LOW,
         output: { state: 'plan-refused', refusal, refusalShape: plan.refusalShape, plan5h: meter.plan5h, planWeekly: meter.planWeekly, ...warning },
         row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape, ...warning },
-      };
+      });
     }
 
     if (waited.code === 0 && stateAfter === 'blocked') {
-      return {
+      return settle({
         exit: EXIT.BLOCKED,
         output: { state: 'blocked', dialog, ...warning },
         row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter, ...warning },
-      };
+      });
     }
-    if (waited.code === 0 && ['idle', 'done'].includes(stateAfter)) {
-      return {
+    // An observation still unconfirmed at the deadline is a timeout: the
+    // conductor waits again rather than reading a mid-turn lane as finished.
+    // The interval runs from the first settled reading: a second reading taken
+    // sooner, because the deadline cut the sleep short, confirms nothing.
+    const settled = waited.code === 0 && ['idle', 'done'].includes(stateAfter);
+    if (!settled) unconfirmedAt = null;
+    else if (unconfirmedAt === null) unconfirmedAt = observedAt;
+    const confirmed = settled && (lane.kind !== 'codex' || observedAt - unconfirmedAt >= SETTLE_CONFIRM_MS);
+    if (settled && !confirmed && deps.now() < deadline) {
+      await deps.sleep(Math.max(0, Math.min(SETTLE_CONFIRM_MS - (deps.now() - unconfirmedAt), deadline - deps.now())));
+      continue;
+    }
+    if (confirmed) {
+      if (lane.kind === 'codex') polls.settleConfirmed = true;
+      if (plan.capacity) {
+        return settle({
+          exit: EXIT.CAPACITY,
+          output: { state: 'capacity', retryable: true, banner: plan.capacity, ...warning },
+          row: { ...laneInstrumentation(opts.name, lane, 'capacity'), ...meter, ...warning },
+        });
+      }
+      return settle({
         exit: EXIT.OK,
         output: {
           state: stateAfter,
@@ -1409,21 +1549,21 @@ async function waitLane(opts, deps, state) {
           ...warning,
         },
         row: { ...laneInstrumentation(opts.name, lane, stateAfter), ...meter, ...warning },
-      };
+      });
     }
     if (planFloorReached(meter, floor)) {
-      return {
+      return settle({
         exit: EXIT.PLAN_LOW,
         output: { state: 'plan-low', plan5h: meter.plan5h, planWeekly: meter.planWeekly, planFloor: floor },
         row: { ...laneInstrumentation(opts.name, lane, 'plan-low'), ...meter },
-      };
+      });
     }
     if (deps.now() >= deadline) {
-      return {
+      return settle({
         exit: EXIT.TIMEOUT,
         output: { state: 'timeout', ...warning },
         row: { ...laneInstrumentation(opts.name, lane, 'timeout'), ...meter, ...warning },
-      };
+      });
     }
     // One poll per second, not per 100ms: each poll spawns two herdr processes,
     // and a 120s wait was costing ~2,400 of them per lane.
@@ -1967,19 +2107,28 @@ function sweepRoots(opts, deps) {
   return roots;
 }
 
-// The lanes this helper actually created under a given root, by directory name.
 // `creates[]` is the sidecar's record of every path it made — the only list of
-// directories the sweeper is entitled to delete. A lane record contributes its
-// agent name only when its path exactly matches one of those creates.
-// Returns the sidecar's own spelling of the requested lane, or null. Windows
-// paths are case-insensitive, so a casing mismatch there is the same directory,
-// not a different one — and the delegate is handed the recorded name either way.
-function matchKnownLane(known, lane, deps) {
-  if (deps.platform === 'win32') {
-    const wanted = String(lane).toLowerCase();
-    return known.find((entry) => [entry.agentName, entry.label, entry.basename].some((name) => name?.toLowerCase() === wanted))?.basename ?? null;
-  }
-  return known.find((entry) => [entry.agentName, entry.label, entry.basename].includes(lane))?.basename ?? null;
+// directories the sweeper is entitled to delete. A lane record counts only when
+// its path exactly matches one of those creates.
+// `--lane <name>` names ONE directory, chosen across every create before any
+// root is visited. A lane name is reused across runs, and creates[] keeps the
+// old runs' rows (append order, oldest first): a first match per root picked
+// the oldest create's label and could match one under every root. The lane
+// record's path wins (start keeps it on the current create); otherwise the
+// newest create whose label or basename is the name. Windows paths and names
+// are case-insensitive, so a casing mismatch there is the same directory, and
+// the delegate is handed the recorded basename either way. Returns the folded
+// path key, or null.
+function sweepTargetKey(state, lane, deps) {
+  const fold = (value) => (deps.platform === 'win32' ? String(value).toLowerCase() : String(value));
+  const creates = (state.creates ?? []).filter((created) => typeof created?.path === 'string');
+  const createKeys = new Set(creates.map((created) => fold(resolve(created.path))));
+  const wanted = fold(lane);
+  const records = Object.entries(state.lanes ?? {})
+    .filter(([name, record]) => fold(name) === wanted && typeof record?.path === 'string' && createKeys.has(fold(resolve(record.path))));
+  if (records.length > 0) return fold(resolve(records.at(-1)[1].path));
+  const newest = creates.findLast((created) => [created.label, basename(resolve(created.path))].some((name) => typeof name === 'string' && fold(name) === wanted));
+  return newest ? fold(resolve(newest.path)) : null;
 }
 
 function knownLanesUnder(state, root, deps) {
@@ -2014,6 +2163,49 @@ function delegateRootForLane(lanePath, deps) {
     usage(`cannot derive a safe delegate root for lane ${resolvedLane}: ${delegateRoot} is not a non-root ancestor`);
   }
   return delegateRoot;
+}
+
+// The delegate (herdr-lanes.ps1) lists one row per lane it found:
+//   REPO  LANE  BRANCH  DIRTY  AHEAD  AGENT  VERDICT
+// under a dashed rule, reason lines indented below a row, a blank line after
+// the table. It walks <WorktreeRoot>\<repo dir>\<lane dir> and deletes the
+// lane dir's FullName, so a row's path is <WorktreeRoot>/<REPO>/<LANE>.
+// Returns those paths, [] for "No lanes under", or null when the output has
+// neither shape (unverifiable, so the caller refuses).
+export function delegateListedPaths(output, worktreeRoot) {
+  const lines = String(output).split(/\r?\n/);
+  const header = lines.findIndex((line) => /^\s*REPO\s+LANE\s+BRANCH\b/.test(line));
+  if (header < 0) return /No lanes under/i.test(String(output)) ? [] : null;
+  const paths = [];
+  for (const line of lines.slice(header + 2)) {
+    if (line.trim() === '') break;
+    if (/^\s/.test(line)) continue;
+    const [repo, lane] = line.trim().split(/\s+/);
+    if (!repo || !lane) return null;
+    paths.push(join(worktreeRoot, repo, lane));
+  }
+  return paths;
+}
+
+// d4480b68: `-Lane` scopes the delegate by basename only, two levels below
+// -WorktreeRoot — a same-named directory under a different parent matches too,
+// and -Clean deletes with Remove-Item -Recurse -Force. Before a cleaning call
+// for a named lane, list first and clean only when every listed path is the
+// sidecar's path for that lane.
+function verifyDelegateTarget(deps, delegate, entry) {
+  const fold = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
+  const root = entry.delegateRoot ?? entry.root;
+  const listFlags = entry.flags.filter((flag) => flag !== '-Clean' && flag !== '-Force');
+  const listed = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', root, ...listFlags]);
+  if (listed.code !== 0) return { refused: `delegate --list failed before -Clean: ${listed.stderr.trim() || listed.stdout.trim() || `exit ${listed.code}`}` };
+  const reported = delegateListedPaths(listed.stdout, root);
+  if (reported === null) return { refused: 'the delegate list could not be read, so the directory -Clean would remove is unverified' };
+  const expected = fold(resolve(entry.lanePath));
+  const strays = reported.filter((path) => fold(resolve(path)) !== expected);
+  if (strays.length > 0) {
+    return { refused: `the delegate lists ${strays.join(', ')} for -Lane ${entry.lane}, not the sidecar's ${resolve(entry.lanePath)}; -Clean refused` };
+  }
+  return { listed: listed.stdout, nothingListed: reported.length === 0 };
 }
 
 function sweepDelegate(opts, deps) {
@@ -2051,9 +2243,11 @@ async function sweepLanes(opts, deps, state) {
   // root is no exception — everything under it is a lane, but not necessarily
   // OUR lane, and --force is permitted there.
   let laneFound = false;
+  const targetKey = opts.lane ? sweepTargetKey(state, opts.lane, deps) : null;
+  const foldPath = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
   for (const root of roots) {
     const known = knownLanesUnder(state, root.path, deps);
-    const requested = opts.lane ? matchKnownLane(known, opts.lane, deps) : null;
+    const requested = targetKey ? known.find((entry) => foldPath(entry.path) === targetKey)?.basename ?? null : null;
     // A named lane lives under exactly one root; the others simply have nothing
     // to do, which is not a refusal.
     if (opts.lane && !requested) continue;
@@ -2127,6 +2321,15 @@ async function sweepLanes(opts, deps, state) {
   // lanes unswept behind a failing legacy root — the alert-fan-out failure
   // where one dead target silences the rest.
   const results = present.map((entry) => {
+    if (entry.lanePath && entry.flags.includes('-Clean')) {
+      const verified = verifyDelegateTarget(deps, delegate, entry);
+      if (verified.refused) {
+        return { root: entry.root, lane: entry.lane, ok: false, exit: null, output: '', refused: true, error: verified.refused };
+      }
+      if (verified.nothingListed) {
+        return { root: entry.root, lane: entry.lane, ok: true, exit: 0, output: verified.listed, cleaned: false };
+      }
+    }
     const swept = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', entry.delegateRoot ?? entry.root, ...entry.flags]);
     return {
       root: entry.root,
@@ -2214,8 +2417,21 @@ function readPlanState(deps, name) {
     meter: scrapePlanMeter(read.stdout),
     refusal: refusal?.line ?? null,
     refusalShape: refusal?.shape ?? null,
+    capacity: capacityBanner(read.stdout),
     dialog: responseText(read.stdout),
   };
+}
+
+export function capacityBanner(text) {
+  const lines = responseText(text).split(/\r?\n/).filter((line) => line.trim() !== '');
+  const liveFooter = LIVE_TUI.some((pattern) => lines.slice(-2).some((line) => pattern.test(line)));
+  const tailStart = Math.max(0, lines.length - CAPACITY_TAIL_LINES);
+  const at = lines.findLastIndex((line, index) => index >= tailStart && CAPACITY_PATTERN.test(line));
+  // The banner must belong to the turn that just settled: a column-zero `›`
+  // line between it and the composer is a later prompt, so the banner ended an
+  // earlier turn.
+  const laterPrompt = at >= 0 && codexTranscript(lines).slice(at + 1).some((line) => line.startsWith('›'));
+  return at >= 0 && liveFooter && !laterPrompt ? lines[at].trim() : null;
 }
 
 function planRefusal(text) {
@@ -2324,13 +2540,14 @@ export async function runLane(argv, overrides = {}) {
       case 'fallback': result = await fallbackLane(opts, deps, state); break;
       case 'stop': result = await stopLane(opts, deps, state); break;
       case 'sweep': result = await sweepLanes(opts, deps, state); break;
+      case 'admit': result = await admitLane(opts, deps); break;
       default: throw new LaneError(EXIT.USAGE, `${opts.verb} is not implemented yet`);
     }
     result.exit ??= EXIT.OK;
   } catch (error) {
     // An unclassified throw is an infrastructure failure, not a deadline.
     const code = error instanceof LaneError ? error.code : EXIT.ERROR;
-    result = { exit: code, output: { error: error.message, ...(error.details ?? {}) }, row: { state: 'failed' } };
+    result = { exit: code, output: { error: error.message, ...(error.details ?? {}) }, row: { state: 'failed', ...(error.row ?? {}) } };
   }
 
   const row = {

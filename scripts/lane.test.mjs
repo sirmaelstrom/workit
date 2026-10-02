@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -7,7 +8,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEBRIEF_HEADINGS, EXIT_CODES, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
   reportShapeProblems, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -22,20 +23,31 @@ function fixture(t) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const calls = [];
   const responses = [];
+  // The admission gate's memory read (start, admit on win32) answers from
+  // `memory`, outside the herdr response queue and `calls`: 64 GB free unless a
+  // test sets it.
+  const memoryReads = [];
   const exec = (program, args, options = {}) => {
+    if (program === 'pwsh' && args.some((arg) => String(arg).includes('FreeVirtualMemory'))) {
+      memoryReads.push([...args]);
+      return handle.memory;
+    }
     calls.push({ program, args: [...args], options });
     const next = responses.shift();
     if (typeof next === 'function') return next(program, args, options);
     return next ?? { code: 0, stdout: '{"result":{}}', stderr: '' };
   };
-  return {
+  const handle = {
     dir,
     log: join(dir, 'lane-log.jsonl'),
     repo: join(dir, 'projects', 'workit'),
     calls,
     responses,
     exec,
+    memoryReads,
+    memory: { code: 0, stdout: `${64 * 1024 * 1024}\r\n`, stderr: '' },
   };
+  return handle;
 }
 
 function readState(f) {
@@ -52,6 +64,20 @@ function fakeExists(present = () => true) {
 // pane's own prompt signature (A3). Every start-driving fixture therefore opens
 // with a shell read.
 const SHELL_READ = { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' };
+// FreeVirtualMemory is in KB.
+const memoryKb = (gb) => ({ code: 0, stdout: `${Math.round(gb * 1024 * 1024)}\r\n`, stderr: '' });
+const MEMORY_64GB = memoryKb(64);
+// herdr-lanes.ps1's list table (Write-LaneTable's format string), which `sweep`
+// reads before a -Clean for a named lane (d4480b68): one row per [repo, lane].
+const tableRow = (cells) => `${cells[0].padEnd(22)} ${cells[1].padEnd(30)} ${cells[2].padEnd(34)} ${cells[3].padStart(6)} ${cells[4].padStart(6)} ${cells[5].padEnd(14)} ${cells[6]}`;
+const delegateListing = (...rows) => ({
+  code: 0,
+  stderr: '',
+  stdout: ['', tableRow(['REPO', 'LANE', 'BRANCH', 'DIRTY', 'AHEAD', 'AGENT', 'VERDICT']), '-'.repeat(130),
+    ...rows.flatMap(([repo, lane]) => [tableRow([repo, lane, 'feat/lane', '0', '1', '-', 'SAFE']), `${''.padEnd(22)} -> already integrated (squash-tree)`]),
+    '', `Listing only. ${rows.length} of ${rows.length} lane(s) are safe to remove; re-run with -Clean.`].join('\n'),
+});
+const cleaningCalls = (f) => f.calls.filter((call) => call.program === 'pwsh' && call.args.includes('-Clean'));
 
 // Codex TUI frames, trimmed from a live capture on codex 0.156.1 (2026-09-24,
 // quest 7e1fecf7). A fresh codex prompt reads the pane before sending (loaded?)
@@ -71,6 +97,14 @@ const codexDeliveredRead = (promptFile) => ({
   stdout: [...CODEX_HEADER('GPT-6-Sol high'), '', `› Read ${promptFile} and execute it exactly.`, '', 'Working (0s • esc to interrupt)', '', '› Ask Codex to do anything', '', CODEX_FOOTER_LINE].join('\n'),
   stderr: '',
 });
+
+// A clock that moves only when the wait sleeps: a codex settle is confirmed by a
+// second reading SETTLE_CONFIRM_MS after the first, and a no-op sleep on the
+// real clock never gets there.
+const steppedClock = () => {
+  let clock = 0;
+  return { now: () => clock, sleep: async (ms) => { clock += Math.max(ms, 1); } };
+};
 
 function promptCall(f) {
   return f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'prompt');
@@ -331,11 +365,14 @@ test('WP-2: blocked wait exits 3 and includes the approval dialog', async (t) =>
 test('WP-2: done wait exits 0 but says status is not evidence', async (t) => {
   const f = fixture(t);
   seedLane(f);
-  f.responses.push(
-    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
-    { code: 0, stdout: 'finished', stderr: '' },
-  );
-  const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
+  // A codex lane's settled state is confirmed on a second poll (a78b8313).
+  for (let poll = 0; poll < 2; poll++) {
+    f.responses.push(
+      { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+      { code: 0, stdout: 'finished', stderr: '' },
+    );
+  }
+  const result = await runLane(['wait', 'lane-a', '--timeout', '10000', '--log', f.log], { exec: f.exec, ...steppedClock() });
   assert.equal(result.exit, 0);
   assert.equal(result.output.state, 'done');
   assert.match(result.output.notice, /status is not evidence.*lane check/i);
@@ -561,11 +598,14 @@ test('quest 653c5b81: low weekly meter preserves blocked and settled precedence'
   for (const [state, exit] of [['blocked', 3], ['idle', 0], ['done', 0]]) {
     const f = fixture(t);
     seedLane(f);
-    f.responses.push(
-      { code: 0, stdout: JSON.stringify({ result: { state } }), stderr: '' },
-      { code: 0, stdout: `gpt-6-astra medium · Context 100% left · weekly 15% left`, stderr: '' },
-    );
-    const result = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+    // Twice: a codex lane's settled state is confirmed on a second poll (a78b8313).
+    for (let poll = 0; poll < 2; poll++) {
+      f.responses.push(
+        { code: 0, stdout: JSON.stringify({ result: { state } }), stderr: '' },
+        { code: 0, stdout: `gpt-6-astra medium · Context 100% left · weekly 15% left`, stderr: '' },
+      );
+    }
+    const result = await runLane(['wait', 'lane-a', '--timeout', '10000', '--log', f.log], { exec: f.exec, ...steppedClock() });
     assert.equal(result.exit, exit, `${state} remains a lifecycle result, not plan-low`);
     assert.equal(result.output.state, state);
   }
@@ -777,6 +817,9 @@ test('SMOKE6 / S6: resume also accepts done, because an unfocused lane never rea
 
 test('WP-3 / S7: fallback reuses the same pane and prompt path and records the channel switch', async (t) => {
   const f = fixture(t);
+  // 93d4855b: a fallback is exempt from admission — it swaps the lane's own
+  // agent after codex has quit. A 1 GB reading must not stop it.
+  f.memory = memoryKb(1);
   const prompt = join(f.dir, 'prompt.md');
   writeFileSync(prompt, 'original task', 'utf8');
   seedLane(f, { promptFile: prompt });
@@ -798,9 +841,10 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
   );
   const result = await runLane(
     ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
-    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {} },
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {}, platform: 'win32' },
   );
   assert.equal(result.exit, 0);
+  assert.equal(f.memoryReads.length, 0, 'fallback does not run the admission gate');
   const start = f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'start');
   const startIndex = f.calls.indexOf(start);
   // C11(b): the rate-limit modal must be dismissed and codex quit before a
@@ -962,7 +1006,7 @@ test('WP-3: the refusal pattern list carries the captured live refusal', () => {
 test('WP-3: exported lifecycle exit codes match the binding table', () => {
   // 1 is the herdr/infra failure code. Without it every hard failure reported as
   // 4 and a dead daemon was indistinguishable from a retryable wait timeout.
-  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7, capacity: 8 });
 });
 
 test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', async (t) => {
@@ -974,6 +1018,8 @@ test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', 
   seedCreates(f, [join(f.dir, 'projects', 'workit-wt-lane')]);
   f.responses.push(
     { code: 0, stdout: 'removing legacy lane ... done', stderr: '' },
+    // d4480b68: the named lane is listed first, and cleaned only on a match.
+    delegateListing(['projects', 'workit-wt-lane']),
     { code: 0, stdout: 'removing workit-wt-lane ... done', stderr: '' },
   );
   const result = await runLane(['sweep', '--log', f.log], {
@@ -982,8 +1028,9 @@ test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', 
     env: { USERPROFILE: profile, WORKIT_WORKSPACE_ROOT: f.dir },
   });
   assert.equal(result.exit, 0);
-  assert.equal(f.calls.length, 2, 'one delegate invocation per lane location');
-  for (const call of f.calls) {
+  assert.equal(cleaningCalls(f).length, 2, 'one cleaning delegate invocation per lane location');
+  assert.equal(f.calls.length, 3, 'plus the named lane\'s verifying list');
+  for (const call of cleaningCalls(f)) {
     assert.equal(call.program, 'pwsh');
     assert.equal(call.args[0], '-NoProfile');
     assert.equal(call.args[1], '-File');
@@ -991,7 +1038,7 @@ test('WP-3 / S8+C13: sweep delegates a cleaning pass over both lane locations', 
     assert.ok(call.args.includes('-Clean'), 'sweep must ask the delegate to clean');
     assert.equal(call.args.includes('-Force'), false, 'never force by default — HOLD verdicts are the point');
   }
-  const roots = f.calls.map((call) => call.args[call.args.indexOf('-WorktreeRoot') + 1]);
+  const roots = cleaningCalls(f).map((call) => call.args[call.args.indexOf('-WorktreeRoot') + 1]);
   assert.deepEqual(roots, [legacyRoot, f.dir]);
   const recorded = join(f.dir, 'projects', 'workit-wt-lane');
   assert.deepEqual(relative(roots[1], recorded).split(/[\\/]/), ['projects', 'workit-wt-lane']);
@@ -1134,6 +1181,7 @@ test('AM5 / U3: sweep visits every root even when one fails, and skips roots tha
   seedCreates(f, [join(f.dir, 'projects', 'workit-wt-lane')]);
   f.responses.push(
     { code: 1, stdout: '', stderr: 'legacy root exploded' },
+    delegateListing(['projects', 'workit-wt-lane']),
     { code: 0, stdout: 'removing workit-wt-lane ... done', stderr: '' },
   );
   const result = await runLane(['sweep', '--log', f.log], {
@@ -1141,19 +1189,20 @@ test('AM5 / U3: sweep visits every root even when one fails, and skips roots tha
     exists: fakeExists(),
     env: { USERPROFILE: profile, WORKIT_WORKSPACE_ROOT: f.dir },
   });
-  assert.equal(f.calls.length, 2, 'the second root must still be swept');
+  assert.equal(cleaningCalls(f).length, 2, 'the second root must still be swept');
   assert.equal(result.exit, 0, 'one failed root is not a failed sweep');
   assert.deepEqual(result.output.roots.map((entry) => entry.ok), [false, true]);
 
   const g = fixture(t);
   seedCreates(g, [join(g.dir, 'projects', 'workit-wt-lane')]);
-  g.responses.push({ code: 0, stdout: 'done', stderr: '' });
+  g.responses.push(delegateListing(['projects', 'workit-wt-lane']), { code: 0, stdout: 'done', stderr: '' });
   const skipped = await runLane(['sweep', '--log', g.log], {
     exec: g.exec,
     exists: fakeExists((path) => !path.includes('.herdr')),
     env: { USERPROFILE: join(g.dir, 'profile'), WORKIT_WORKSPACE_ROOT: g.dir },
   });
-  assert.equal(g.calls.length, 1, 'a default root that does not exist is skipped, not swept');
+  assert.equal(cleaningCalls(g).length, 1, 'a default root that does not exist is skipped, not swept');
+  assert.equal(g.calls.some((call) => call.args.includes(join(g.dir, 'profile', '.herdr', 'worktrees'))), false);
   assert.equal(skipped.exit, 0);
 });
 
@@ -1409,13 +1458,16 @@ test('AM15: the usage text documents every flag the CLI accepts, including --lan
 test('SMOKE1: wait passes every --until through, so a finished lane is still seen', async (t) => {
   const f = fixture(t);
   seedLane(f);
-  f.responses.push(
-    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
-    { code: 0, stdout: 'finished', stderr: '' },
-  );
+  // A codex lane's settled state is confirmed on a second poll (a78b8313).
+  for (let poll = 0; poll < 2; poll++) {
+    f.responses.push(
+      { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+      { code: 0, stdout: 'finished', stderr: '' },
+    );
+  }
   const result = await runLane(
-    ['wait', 'lane-a', '--until', 'blocked', '--until', 'idle', '--until', 'done', '--timeout', '1000', '--log', f.log],
-    { exec: f.exec },
+    ['wait', 'lane-a', '--until', 'blocked', '--until', 'idle', '--until', 'done', '--timeout', '10000', '--log', f.log],
+    { exec: f.exec, ...steppedClock() },
   );
   assert.equal(result.exit, 0);
   assert.equal(result.output.state, 'done');
@@ -1823,11 +1875,14 @@ test('A2-8 / U7: an infra error is not masked by the plan meter, and a finished 
 
   const g = fixture(t);
   seedLane(g);
-  g.responses.push(
-    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
-    { code: 0, stdout: 'gpt-5.6-terra · 5h 3% left · weekly 40% left', stderr: '' },
-  );
-  const finished = await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', g.log], { exec: g.exec, sleep: async () => {} });
+  // A codex lane's settled state is confirmed on a second poll (a78b8313).
+  for (let poll = 0; poll < 2; poll++) {
+    g.responses.push(
+      { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+      { code: 0, stdout: 'gpt-5.6-terra · 5h 3% left · weekly 40% left', stderr: '' },
+    );
+  }
+  const finished = await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', g.log], { exec: g.exec, ...steppedClock() });
   assert.equal(finished.exit, 0, 'work that finished is done, whatever the meter says');
   assert.equal(finished.output.state, 'done');
   assert.equal(finished.row.plan5h, 3, 'the meter is still recorded');
@@ -1890,7 +1945,7 @@ test('A2-11 / U15: an unreadable sidecar does not read as invalid JSON', async (
 });
 
 test('A2-12 / U15: EXIT_CODES carries every code the header documents', () => {
-  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6 });
+  assert.deepEqual(EXIT_CODES, { ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7, capacity: 8 });
 });
 
 // ---------------------------------------------------------------------------
@@ -2092,7 +2147,7 @@ test('A3-7 / R3-U1: --lane is intersected with the sidecar, not passed through',
 
   const g = fixture(t);
   seedCreates(g, [join(g.dir, 'projects', 'workit-wt-alpha')]);
-  g.responses.push({ code: 0, stdout: 'removing ... done', stderr: '' });
+  g.responses.push(delegateListing(['projects', 'workit-wt-alpha']), { code: 0, stdout: 'removing ... done', stderr: '' });
   const allowed = await runLane(['sweep', '--lane', 'workit-wt-alpha', '--log', g.log], {
     exec: g.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: g.dir },
   });
@@ -2137,6 +2192,112 @@ test('Q-5: unknown sweep lane refusal lists known agent names, labels, and basen
   assert.match(result.output.error, /Agent names come from lanes\[\].*labels and basenames come from creates\[\]/);
 });
 
+// --- quest d4480b68: -Lane scopes the delegate by basename only, two levels
+// down; -Clean runs only when the delegate's listed paths are the sidecar's.
+const cleanLane = (f, lane = 'workit-wt-alpha') => runLane(['sweep', '--lane', lane, '--log', f.log], {
+  exec: f.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: f.dir },
+});
+
+test('d4480b68: a delegate listing the same basename under another parent is refused -Clean', async (t) => {
+  for (const rows of [[['data', 'workit-wt-alpha']], [['projects', 'workit-wt-alpha'], ['data', 'workit-wt-alpha']]]) {
+    const f = fixture(t);
+    seedCreates(f, [join(f.dir, 'projects', 'workit-wt-alpha')]);
+    f.responses.push(delegateListing(...rows));
+    const result = await cleanLane(f);
+    assert.equal(cleaningCalls(f).length, 0, 'nothing reaches -Clean');
+    assert.equal(result.exit, 1, JSON.stringify(result.output));
+    const [entry] = result.output.roots;
+    assert.equal(entry.refused, true);
+    assert.ok(entry.error.includes(join(f.dir, 'data', 'workit-wt-alpha')), entry.error);
+    assert.ok(entry.error.includes(join(f.dir, 'projects', 'workit-wt-alpha')), entry.error);
+  }
+});
+
+test('d4480b68: an unreadable listing refuses closed; "No lanes" cleans nothing; --list is not verified twice', async (t) => {
+  const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-alpha')]);
+  f.responses.push({ code: 0, stdout: 'some other format entirely', stderr: '' });
+  const unreadable = await cleanLane(f);
+  assert.equal(cleaningCalls(f).length, 0);
+  assert.match(unreadable.output.roots[0].error, /could not be read/);
+
+  const g = fixture(t);
+  seedCreates(g, [join(g.dir, 'projects', 'workit-wt-alpha')]);
+  g.responses.push({ code: 0, stdout: `No lanes under ${g.dir}.`, stderr: '' });
+  const none = await cleanLane(g);
+  assert.equal(none.exit, 0);
+  assert.equal(cleaningCalls(g).length, 0, 'a lane the delegate cannot see is not cleaned');
+  assert.equal(none.output.roots[0].cleaned, false);
+
+  const h = fixture(t);
+  seedCreates(h, [join(h.dir, 'projects', 'workit-wt-alpha')]);
+  h.responses.push(delegateListing(['projects', 'workit-wt-alpha']));
+  const listed = await runLane(['sweep', '--lane', 'workit-wt-alpha', '--list', '--log', h.log], {
+    exec: h.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: h.dir },
+  });
+  assert.equal(listed.exit, 0);
+  assert.equal(h.calls.length, 1, 'a dry run is its own listing');
+});
+
+test('d4480b68: a matching listing cleans, and the parser reads the delegate table', async (t) => {
+  const f = fixture(t);
+  seedCreates(f, [join(f.dir, 'projects', 'workit-wt-alpha')]);
+  f.responses.push(delegateListing(['projects', 'workit-wt-alpha']), { code: 0, stdout: 'removing workit-wt-alpha ... done', stderr: '' });
+  const result = await cleanLane(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(cleaningCalls(f).length, 1);
+  assert.deepEqual(delegateListedPaths(delegateListing(['projects', 'a'], ['data', 'b']).stdout, 'X'), [join('X', 'projects', 'a'), join('X', 'data', 'b')]);
+});
+
+// --- quest e6841100: `sweep --lane` on a reused name. Measured after #128:
+// `sweep --lane za --list` named the Sitting Z create, not the live one.
+const sweptLanes = (f) => f.calls.filter((call) => call.program === 'pwsh').map((call) => call.args[call.args.indexOf('-Lane') + 1]);
+const sweepList = (f, lane, roots) => runLane(['sweep', '--lane', lane, '--list', ...roots.flatMap((root) => ['--root', root]), '--log', f.log], {
+  exec: f.exec, exists: fakeExists(), env: {},
+});
+
+test('e6841100: a reused lane name sweeps the record\'s current create, not the oldest create carrying the name', async (t) => {
+  const f = fixture(t);
+  const projects = join(f.dir, 'projects');
+  const live = join(projects, 'workit-wt-ab-proof');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    lanes: { za: { path: live } },
+    creates: [
+      { path: join(projects, 'workit-wt-z-failloud'), label: 'za' },
+      { path: live, label: 'ab-proof' },
+    ],
+  }), 'utf8');
+  const result = await sweepList(f, 'za', [projects]);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(sweptLanes(f), ['workit-wt-ab-proof']);
+});
+
+test('e6841100: with no lane record, the newest create carrying the name is the one swept', async (t) => {
+  const f = fixture(t);
+  const projects = join(f.dir, 'projects');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    lanes: {},
+    creates: [{ path: join(projects, 'workit-wt-zz-old'), label: 'zz' }, { path: join(projects, 'workit-wt-zz-new'), label: 'zz' }],
+  }), 'utf8');
+  const result = await sweepList(f, 'zz', [projects]);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(sweptLanes(f), ['workit-wt-zz-new']);
+});
+
+test('e6841100: a named lane is one directory — an old create carrying the name under another root is not swept too', async (t) => {
+  const f = fixture(t);
+  const projects = join(f.dir, 'projects');
+  const other = join(f.dir, 'elsewhere', 'worktrees');
+  const live = join(projects, 'workit-wt-ab-proof');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    lanes: { za: { path: live } },
+    creates: [{ path: join(other, 'workit-wt-z-failloud'), label: 'za' }, { path: live, label: 'ab-proof' }],
+  }), 'utf8');
+  const result = await sweepList(f, 'za', [projects, other]);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(sweptLanes(f), ['workit-wt-ab-proof']);
+});
+
 test('Q-6: every C13 root spelling reaches the recorded lane in exactly two delegate levels', async (t) => {
   for (const root of [null, 'projects', 'workspace']) {
     const f = fixture(t);
@@ -2144,7 +2305,7 @@ test('Q-6: every C13 root spelling reaches the recorded lane in exactly two dele
     seedCreates(f, [recorded]);
     const argv = root === null ? ['sweep', '--log', f.log]
       : ['sweep', '--root', root === 'projects' ? join(f.dir, 'projects') : f.dir, '--log', f.log];
-    f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+    f.responses.push(delegateListing(['projects', 'workit-wt-lane-a']), { code: 0, stdout: 'removing ... done', stderr: '' });
     const result = await runLane(argv, { exec: f.exec, exists: fakeExists(), env: root === null ? { WORKIT_WORKSPACE_ROOT: f.dir } : {} });
     assert.equal(result.exit, 0);
     const call = f.calls.find((entry) => entry.program === 'pwsh');
@@ -2171,7 +2332,7 @@ test('Q-6: win32 ancestor guard folds casing from path canonicalization', async 
     if (path.includes(casingSegment.toUpperCase())) return resolved.replace(casingSegment.toUpperCase(), casingSegment);
     return resolved;
   };
-  f.responses.push({ code: 0, stdout: 'listing only', stderr: '' });
+  f.responses.push(delegateListing(['projects', 'workit-wt-lane-a']), { code: 0, stdout: 'removing ... done', stderr: '' });
   const result = await runLane(['sweep', '--lane', 'workit-wt-lane-a', '--root', join(f.dir, 'projects'), '--log', f.log], {
     exec: f.exec, exists: fakeExists(), env: {}, platform: 'win32', resolve: resolveWithWindowsCasing,
   });
@@ -2231,7 +2392,7 @@ test('A4-1: the sidecar check covers the herdr root too, not just the workspace 
   // A lane the sidecar knows is still swept, on whichever root holds it.
   const h = fixture(t);
   seedCreates(h, [join(h.dir, 'profile', '.herdr', 'worktrees', 'workit', 'mine')]);
-  h.responses.push({ code: 0, stdout: 'removing mine ... done', stderr: '' });
+  h.responses.push(delegateListing(['workit', 'mine']), { code: 0, stdout: 'removing mine ... done', stderr: '' });
   const known = await runLane(['sweep', '--lane', 'mine', '--log', h.log], {
     exec: h.exec, exists: fakeExists(), env: { USERPROFILE: join(h.dir, 'profile') },
   });
@@ -2242,7 +2403,7 @@ test('A4-1: the sidecar check covers the herdr root too, not just the workspace 
 test('A4-2: --lane matching follows the filesystem\'s casing rules', async (t) => {
   const f = fixture(t);
   seedCreates(f, [join(f.dir, 'projects', 'workit-wt-Alpha')]);
-  f.responses.push({ code: 0, stdout: 'removing ... done', stderr: '' });
+  f.responses.push(delegateListing(['projects', 'workit-wt-Alpha']), { code: 0, stdout: 'removing ... done', stderr: '' });
   const windows = await runLane(['sweep', '--lane', 'workit-wt-alpha', '--log', f.log], {
     exec: f.exec, exists: fakeExists(), env: { WORKIT_WORKSPACE_ROOT: f.dir }, platform: 'win32',
   });
@@ -2297,11 +2458,14 @@ test('A3-9 / R3-U2: a sweep whose delegate is missing exits nonzero and still pr
 test('A3-10 / R3-M2: a bare wait sends no --until, and the poll timeout is the pacing', async (t) => {
   const f = fixture(t);
   seedLane(f);
-  f.responses.push(
-    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
-    { code: 0, stdout: 'finished', stderr: '' },
-  );
-  await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', f.log], { exec: f.exec });
+  // A codex lane's settled state is confirmed on a second poll (a78b8313).
+  for (let poll = 0; poll < 2; poll++) {
+    f.responses.push(
+      { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+      { code: 0, stdout: 'finished', stderr: '' },
+    );
+  }
+  await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
   // herdr's own default already matches idle|done|blocked, so the bare shape
   // forwards nothing — and the per-poll timeout is what paces production.
   assert.equal(f.calls[0].args.includes('--until'), false);
@@ -2959,6 +3123,7 @@ test('amend 2 P7b: a holder refreshed during a 90-second wait is never reclaimed
   const f = fixture(t); let now = 0; let lock = null; let holderSleep; let holderReleased = false; let paneReads = 0; let refreshed = false; const warnings = [];
   const startArgs = (name) => ['start', name, '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log];
   const exec = (program, args) => {
+    if (program === 'pwsh') return MEMORY_64GB;
     if (args[0] === 'pane' && args[1] === 'read') return ++paneReads === 1 ? { code: 0, stdout: '', stderr: '' } : SHELL_READ;
     return { code: 0, stdout: '{"result":{}}', stderr: '' };
   };
@@ -2989,6 +3154,7 @@ test('amend 2 P7c: a reclaimed lock survives the original holder release', async
   const f = fixture(t); let now = 0; let lock = null; let paneReads = 0; const sleeps = [];
   const startArgs = (name) => ['start', name, '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', '--log', f.log];
   const exec = (program, args) => {
+    if (program === 'pwsh') return MEMORY_64GB;
     if (args[0] === 'pane' && args[1] === 'read') return ++paneReads <= 2 ? { code: 0, stdout: '', stderr: '' } : SHELL_READ;
     if (args[0] === 'agent' && args[1] === 'start') return { code: 1, stdout: '', stderr: 'start failed' };
     return { code: 0, stdout: '{"result":{}}', stderr: '' };
@@ -3443,4 +3609,259 @@ test('207dbaf1: resolver shapes and failures — trailing id, snake_case quest_i
   assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', '207db'], bare)).exit, 2, 'a quest prefix needs 6 characters');
   assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], { WORKIT_RECEIPT_RESOLVER: '["", "x"]' })).exit, 2);
   assert.equal(f.calls.length, before, 'input refusals run nothing');
+});
+
+// --- quest 55477c2d: a wait prints one verdict line. The driver runs the real
+// `execute` against a child that answers each poll as herdr does on a timeout:
+// JSON on stderr, exit 1. Whatever reaches this process's stdout or stderr is
+// what a conductor's backgrounded task would show.
+test('55477c2d: a wait that herdr times out N times prints exactly one line, and the row counts the polls', (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  const driver = fileURLToPath(new URL('./fixtures/wait-noise-driver.mjs', import.meta.url));
+  const run = spawnSync(process.execPath, [driver, f.log, '3'], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  const lines = `${run.stdout}\n${run.stderr}`.split(/\r?\n/).filter((line) => line.trim() !== '');
+  assert.equal(lines.length, 1, `expected the verdict alone, got:\n${lines.join('\n')}`);
+  assert.equal(JSON.parse(lines[0]).state, 'done');
+  const row = JSON.parse(readFileSync(f.log, 'utf8').trim().split(/\r?\n/).at(-1));
+  assert.deepEqual([row.verb, row.pollTimeouts, row.pollCount], ['wait', 3, 4]);
+});
+
+// --- quest a78b8313: a codex lane flickers through `done` between tool calls,
+// so a settled state ends a wait only when a second poll still reads it.
+const DONE_POLL = { code: 0, stdout: '{"result":{"agent_status":"done"}}', stderr: '' };
+const WORKING_POLL = { code: 1, stdout: '', stderr: '{"error":{"code":"timeout","message":"timed out waiting for agent status"},"id":"cli:agent:wait"}' };
+const WORKING_READ = { code: 0, stdout: 'Working (1m 51s • esc to interrupt)', stderr: '' };
+const clockedWait = (f, timeout = '10000') => {
+  let clock = 0;
+  return runLane(['wait', 'lane-a', '--until', 'idle', '--until', 'done', '--timeout', timeout, '--log', f.log], {
+    exec: f.exec, now: () => clock, sleep: async (ms) => { clock += Math.max(ms, 1); },
+  });
+};
+
+test('a78b8313: a codex lane that reads done once and then working does not end the wait', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(DONE_POLL, WORKING_READ);
+  for (let poll = 0; poll < 20; poll++) f.responses.push(WORKING_POLL, WORKING_READ);
+  const result = await clockedWait(f);
+  assert.equal(result.exit, 4, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'timeout');
+});
+
+test('a78b8313: a codex lane that reads done on two polls ends the wait, confirmed', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(DONE_POLL, WORKING_READ, DONE_POLL, WORKING_READ);
+  const result = await clockedWait(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'done');
+  assert.deepEqual([result.row.pollCount, result.row.settleConfirmed], [2, true]);
+  assert.equal(f.calls.filter((call) => call.args[1] === 'wait').length, 2);
+});
+
+test('a78b8313: a settled reading still unconfirmed at the deadline is a timeout, and a claude lane settles on one poll', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(DONE_POLL, WORKING_READ);
+  const late = await clockedWait(f, '1');
+  assert.equal(late.exit, 4, JSON.stringify(late.output));
+
+  // workit#129 review (codex, astra): a second settled reading the deadline
+  // pulled in before SETTLE_CONFIRM_MS is not a confirmation.
+  for (const timeout of ['1', '2999']) {
+    const h = fixture(t);
+    seedLane(h);
+    h.responses.push(DONE_POLL, WORKING_READ, DONE_POLL, WORKING_READ);
+    const short = await clockedWait(h, timeout);
+    assert.equal(short.exit, 4, `--timeout ${timeout}: ${JSON.stringify(short.output)}`);
+    assert.deepEqual([short.row.pollCount, short.row.settleConfirmed], [2, undefined]);
+  }
+  const k = fixture(t);
+  seedLane(k);
+  k.responses.push(DONE_POLL, WORKING_READ, DONE_POLL, WORKING_READ);
+  const exact = await clockedWait(k, '3000');
+  assert.equal(exact.exit, 0, `a deadline that holds the whole interval confirms: ${JSON.stringify(exact.output)}`);
+
+  const g = fixture(t);
+  seedLane(g, { kind: 'claude' });
+  g.responses.push(DONE_POLL, WORKING_READ);
+  const claude = await clockedWait(g);
+  assert.equal(claude.exit, 0, JSON.stringify(claude.output));
+  assert.equal(claude.row.pollCount, 1);
+});
+
+// --- quest ea083334: a codex turn that ended on the capacity banner is a
+// distinct, retryable exit, not done.
+const CAPACITY_LINE = '■ Selected model is at capacity. Please try a different model.';
+const capacityRead = (scrollback = []) => ({
+  code: 0,
+  stdout: [...CODEX_HEADER('GPT-6-Sol high'), '', '› Read X:\\fixture\\amend.md and execute it exactly.', '', ...scrollback,
+    '', '› Ask Codex to do anything', '', CODEX_FOOTER_LINE].join('\n'),
+  stderr: '',
+});
+
+test('ea083334: a codex lane settled under the capacity banner exits 8, retryable', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  const read = capacityRead([CAPACITY_LINE]);
+  f.responses.push(DONE_POLL, read, DONE_POLL, read);
+  const result = await clockedWait(f);
+  assert.equal(result.exit, 8, JSON.stringify(result.output));
+  assert.equal(result.exit, EXIT_CODES.capacity);
+  assert.deepEqual([result.output.state, result.output.retryable, result.output.banner], ['capacity', true, CAPACITY_LINE]);
+  assert.equal(result.row.state, 'capacity');
+});
+
+test('ea083334: the banner counts only in the live tail — scrollback, a dead frame, or a working lane is not capacity', async (t) => {
+  const later = ['• Ran npm test', '  └ 12 passed', '• Edited scripts/lane.mjs (+4 -1)', '• Ran node --test', '  └ 833 passed', '─ Worked for 2m 10s ─'];
+  const f = fixture(t);
+  seedLane(f);
+  const scrolled = capacityRead([CAPACITY_LINE, ...later]);
+  f.responses.push(DONE_POLL, scrolled, DONE_POLL, scrolled);
+  const resumed = await clockedWait(f);
+  assert.equal(resumed.exit, 0, 'a banner from an earlier turn, now in scrollback, is not this turn\'s end');
+
+  assert.equal(capacityBanner(capacityRead([CAPACITY_LINE]).stdout), CAPACITY_LINE);
+  assert.equal(capacityBanner(`${CAPACITY_LINE}\nPS X:\\fixture\\lane>`), null, 'no live TUI under it: codex is gone');
+  assert.equal(capacityBanner(capacityRead([`  quoted: ${CAPACITY_LINE}`]).stdout), null, 'anchored: a quoted banner is not one');
+  // workit#129 review (codex): the banner, then a new prompt and a short
+  // successful turn, all inside the six-line tail.
+  const nextTurn = capacityRead([CAPACITY_LINE, '› Read next task', '• Finished next task successfully']);
+  assert.equal(capacityBanner(nextTurn.stdout), null, 'a banner above a later prompt ended an earlier turn');
+  const h = fixture(t);
+  seedLane(h);
+  h.responses.push(DONE_POLL, nextTurn, DONE_POLL, nextTurn);
+  assert.equal((await clockedWait(h)).exit, 0, 'the later turn settled; that is done, not capacity');
+
+  const g = fixture(t);
+  seedLane(g);
+  for (let poll = 0; poll < 20; poll++) g.responses.push(WORKING_POLL, capacityRead([CAPACITY_LINE]));
+  const working = await clockedWait(g);
+  assert.equal(working.exit, 4, 'a lane still working under the banner is waited on, not cut off');
+});
+
+// --- quest 93d4855b: the memory admission gate. Thresholds are GB of free
+// commit memory (FreeVirtualMemory, KB); platform is injected so the Linux CI
+// runner exercises the Windows reader too.
+const admitStart = (f, extra = [], deps = {}) => {
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  return runLane(['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'low', ...extra, '--log', f.log], {
+    exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {}, platform: 'win32', ...deps,
+  });
+};
+const lastRow = (f) => JSON.parse(readFileSync(f.log, 'utf8').trim().split(/\r?\n/).at(-1));
+
+test('93d4855b: start above the admit threshold is admitted and logs the reading', async (t) => {
+  const f = fixture(t);
+  f.memory = memoryKb(12.5);
+  const result = await admitStart(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(f.memoryReads.length, 1);
+  assert.deepEqual(result.output.admission, { freeGb: 12.5, admitThreshold: 10, admitOverride: false });
+  const row = lastRow(f);
+  assert.deepEqual([row.state, row.freeGb, row.admitThreshold, row.admitOverride], ['started', 12.5, 10, false]);
+});
+
+test('93d4855b: start below the admit threshold is refused with exit 7 before herdr, naming the reading and the threshold', async (t) => {
+  const f = fixture(t);
+  f.memory = memoryKb(6);
+  const result = await admitStart(f);
+  assert.equal(result.exit, 7);
+  assert.equal(result.exit, EXIT_CODES.admitRefused);
+  assert.match(result.output.error, /free commit memory 6 GB is below the admit threshold 10 GB/);
+  assert.match(result.output.error, /--force-admit/);
+  assert.equal(f.calls.length, 0, 'a refused start touches no pane');
+  const row = lastRow(f);
+  assert.deepEqual([row.state, row.exit, row.freeGb, row.admitThreshold, row.admitOverride], ['refused', 7, 6, 10, false]);
+});
+
+test('93d4855b: --min-free-gb and LANE_MIN_FREE_GB move the threshold; the flag wins', async (t) => {
+  const f = fixture(t);
+  f.memory = memoryKb(6);
+  assert.equal((await admitStart(f, ['--min-free-gb', '5'])).exit, 0);
+  const g = fixture(t);
+  g.memory = memoryKb(6);
+  assert.equal((await admitStart(g, [], { env: { HERDR_PANE_ID: 'w1:p1', LANE_MIN_FREE_GB: '5' } })).exit, 0);
+  const h = fixture(t);
+  h.memory = memoryKb(6);
+  assert.equal((await admitStart(h, ['--min-free-gb', '8'], { env: { HERDR_PANE_ID: 'w1:p1', LANE_MIN_FREE_GB: '5' } })).exit, 7);
+  const bad = fixture(t);
+  assert.equal((await admitStart(bad, ['--min-free-gb', 'lots'])).exit, 2);
+});
+
+test('93d4855b: --force-admit starts below the threshold and the override is logged', async (t) => {
+  const f = fixture(t);
+  f.memory = memoryKb(3);
+  const result = await admitStart(f, ['--force-admit']);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.match(result.output.admission.overridden, /3 GB is below the admit threshold 10 GB/);
+  const row = lastRow(f);
+  assert.deepEqual([row.state, row.freeGb, row.admitThreshold, row.admitOverride], ['started', 3, 10, true]);
+});
+
+test('93d4855b: an unreadable memory reading refuses closed; --force-admit still overrides', async (t) => {
+  for (const memory of [{ code: 1, stdout: '', stderr: 'pwsh: not found' }, { code: 0, stdout: 'Get-CimInstance: Access denied', stderr: '' }]) {
+    const f = fixture(t);
+    f.memory = memory;
+    const refused = await admitStart(f);
+    assert.equal(refused.exit, 7, JSON.stringify(refused.output));
+    assert.match(refused.output.error, /could not read free commit memory/);
+    assert.equal(f.calls.length, 0);
+    assert.equal(lastRow(f).freeGb, null);
+    const g = fixture(t);
+    g.memory = memory;
+    assert.equal((await admitStart(g, ['--force-admit'])).exit, 0);
+  }
+});
+
+test('93d4855b: off Windows start admits unmeasured with the warning on its admission record', async (t) => {
+  const f = fixture(t);
+  const result = await admitStart(f, [], { platform: 'linux' });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(f.memoryReads.length, 0);
+  assert.equal(result.output.admission.freeGb, null);
+  assert.match(result.output.admission.warning, /Windows only/);
+});
+
+test('93d4855b: admit is a read-only verdict — exit 0 or 7, drain below 4 GB, no herdr, no sidecar', async (t) => {
+  const admit = async (gb, args = [], deps = {}) => {
+    const f = fixture(t);
+    if (gb !== null) f.memory = memoryKb(gb);
+    const result = await runLane(['admit', ...args, '--log', f.log], { exec: f.exec, env: {}, platform: 'win32', ...deps });
+    assert.equal(f.calls.length, 0, 'admit runs nothing but the memory read');
+    assert.equal(existsSync(`${f.log}.state.json`), false, 'admit writes no lane state');
+    return { result, row: lastRow(f) };
+  };
+  const roomy = await admit(32);
+  assert.equal(roomy.result.exit, 0);
+  assert.deepEqual(roomy.result.output, { admitted: true, freeGb: 32, admitThreshold: 10, admitOverride: false, drain: false, drainThreshold: 4 });
+  assert.deepEqual([roomy.row.verb, roomy.row.state, roomy.row.freeGb], ['admit', 'admitted', 32]);
+
+  const tight = await admit(7);
+  assert.equal(tight.result.exit, 7);
+  assert.equal(tight.result.output.drain, false);
+  assert.match(tight.result.output.reason, /7 GB is below the admit threshold 10 GB/);
+
+  const draining = await admit(3.5);
+  assert.equal(draining.result.exit, 7);
+  assert.equal(draining.result.output.drain, true);
+  assert.equal(draining.row.drain, true);
+
+  const raised = await admit(5, ['--drain-free-gb', '6', '--min-free-gb', '2']);
+  assert.deepEqual([raised.result.exit, raised.result.output.drain, raised.result.output.drainThreshold], [0, true, 6]);
+
+  const linux = await admit(null, [], { platform: 'linux' });
+  assert.equal(linux.result.exit, 0);
+  assert.equal(linux.result.output.freeGb, null);
+  assert.match(linux.result.output.warning, /Windows only/);
+
+  const named = fixture(t);
+  assert.equal((await runLane(['admit', 'lane-a', '--log', named.log], { exec: named.exec, env: {}, platform: 'win32' })).exit, 2);
 });
