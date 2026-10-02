@@ -283,7 +283,16 @@ test('68af2e33: only a wait and its output plumbing are abandonable; anything el
     'node /x/lane.mjs stop a',
     'npm test 2>&1 | tail -5',
     'echo waiting',
-  ]) assert.equal(laneWaitMonitor(bashWrapped(command)), false, command);
+    // workit#129 review (codex P1, astra P2): separators the segment split does not parse.
+    'node /x/lane.mjs wait a\ngit push',
+    'node /x/lane.mjs wait a\r\ngit push',
+    'node /x/lane.mjs wait a & npm run build',
+    'node /x/lane.mjs wait a 2>&1 & npm run build',
+    'node /x/lane.mjs wait a |& sh',
+    'node /x/lane.mjs wait a | tee >(sh)',
+    'node /x/lane.mjs wait a < <(git push)',
+  ]) assert.equal(laneWaitMonitor(bashWrapped(command)), false, JSON.stringify(command));
+  assert.equal(laneWaitMonitor(bashWrapped('node /x/lane.mjs wait a &>/x/w.txt; echo done >&2')), true, 'redirections are plumbing, not separators');
   assert.equal(laneWaitMonitor('node scripts/lane.mjs wait caller'), false, 'a bare node child is not the background-task shape');
   assert.equal(laneWaitMonitor(V_WAIT.replace(' < /dev/null', '')), false, 'the wrapper shape is required');
 });

@@ -381,7 +381,11 @@ function mcpChild(child) { return /run-.*-mcp\.js/i.test(commandLineOf(child)); 
 //   bash.exe -c "<preamble> && eval '<command>' < /dev/null && pwd -P >| <file>"
 // and the child is abandonable only when every segment of <command> is the wait
 // itself or output plumbing (an assignment, tee, tail, head, echo, date, cat).
-// A command substitution, any other program, or any other shape refuses.
+// A command substitution, any other program, or any other shape refuses. So
+// does any separator the split below does not parse: a newline, a lone `&`
+// (background), or a process substitution, any of which can carry another
+// command inside a segment the patterns read as plumbing.
+const UNPARSED_SEPARATOR = /[\r\n]|[<>]\(|&/;
 const MONITOR_SEGMENTS = [
   /^node\s+(?:\\?"[^"]*lane\.mjs\\?"|\S*lane\.mjs)\s+wait\s/,
   /^(?:tee|tail|head|echo|date|cat)(?:\s|$)/,
@@ -390,6 +394,8 @@ const MONITOR_SEGMENTS = [
 export function laneWaitMonitor(commandLine) {
   const wrapped = /^"?[^"]*\bbash(?:\.exe)?"?\s+-c\s+"[\s\S]*?\beval '((?:[^']|'\\'')*)' < \/dev\/null && pwd -P >\| \S+"$/.exec(String(commandLine).trim());
   if (!wrapped || /\$\(|`/.test(wrapped[1])) return false;
+  // `&&` is split below; `2>&1`, `>&2` and `&>` are redirections, not separators.
+  if (UNPARSED_SEPARATOR.test(wrapped[1].replace(/&&|[0-9]*[<>]&[0-9-]*|&>>?/g, ' '))) return false;
   const segments = wrapped[1].split(/\s*(?:&&|\|\||;|\|)\s*/).map((segment) => segment.trim()).filter(Boolean);
   return segments.some((segment) => MONITOR_SEGMENTS[0].test(segment))
     && segments.every((segment) => MONITOR_SEGMENTS.some((pattern) => pattern.test(segment)));
