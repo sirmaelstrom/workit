@@ -156,6 +156,11 @@ export function execute(program, args, { cwd, input } = {}) {
       stdout: execFileSync(program, args, {
         cwd,
         input,
+        // execFileSync's default copies the child's stderr to ours as well as
+        // capturing it: every herdr poll timeout of a long `wait` reached the
+        // conductor's task output (~50 KB a wait). Captured is enough; failures
+        // already carry it.
+        stdio: ['pipe', 'pipe', 'pipe'],
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
         windowsHide: true,
@@ -1431,6 +1436,9 @@ async function waitLane(opts, deps, state) {
   const deadline = deps.now() + timeout;
   let meter = { plan5h: null, planWeekly: null };
   let dialog = '';
+  // The row counts the herdr polls; stdout carries only the verdict.
+  const polls = { pollCount: 0, pollTimeouts: 0 };
+  const settle = (result) => ({ ...result, row: { ...result.row, ...polls } });
 
   while (true) {
     const pollStarted = deps.now();
@@ -1447,6 +1455,8 @@ async function waitLane(opts, deps, state) {
     }
     args.push('--timeout', String(pollMs));
     const waited = call(deps, 'herdr', args);
+    polls.pollCount++;
+    if (waited.code !== 0 && isTimeoutFailure(waited)) polls.pollTimeouts++;
     const stateAfter = waited.code === 0 ? responseState(waited.stdout, null) : null;
 
     // Order matters, and it is not the obvious one:
@@ -1478,22 +1488,22 @@ async function waitLane(opts, deps, state) {
       && (planFloorReached(meter, floor) || ['idle', 'done'].includes(stateAfter));
     const refusalEligible = Boolean(refusal) && (plan.refusalShape === 'banner' || modalEligible);
     if (refusalEligible) {
-      return {
+      return settle({
         exit: EXIT.PLAN_LOW,
         output: { state: 'plan-refused', refusal, refusalShape: plan.refusalShape, plan5h: meter.plan5h, planWeekly: meter.planWeekly, ...warning },
         row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), ...meter, refusalShape: plan.refusalShape, ...warning },
-      };
+      });
     }
 
     if (waited.code === 0 && stateAfter === 'blocked') {
-      return {
+      return settle({
         exit: EXIT.BLOCKED,
         output: { state: 'blocked', dialog, ...warning },
         row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter, ...warning },
-      };
+      });
     }
     if (waited.code === 0 && ['idle', 'done'].includes(stateAfter)) {
-      return {
+      return settle({
         exit: EXIT.OK,
         output: {
           state: stateAfter,
@@ -1501,21 +1511,21 @@ async function waitLane(opts, deps, state) {
           ...warning,
         },
         row: { ...laneInstrumentation(opts.name, lane, stateAfter), ...meter, ...warning },
-      };
+      });
     }
     if (planFloorReached(meter, floor)) {
-      return {
+      return settle({
         exit: EXIT.PLAN_LOW,
         output: { state: 'plan-low', plan5h: meter.plan5h, planWeekly: meter.planWeekly, planFloor: floor },
         row: { ...laneInstrumentation(opts.name, lane, 'plan-low'), ...meter },
-      };
+      });
     }
     if (deps.now() >= deadline) {
-      return {
+      return settle({
         exit: EXIT.TIMEOUT,
         output: { state: 'timeout', ...warning },
         row: { ...laneInstrumentation(opts.name, lane, 'timeout'), ...meter, ...warning },
-      };
+      });
     }
     // One poll per second, not per 100ms: each poll spawns two herdr processes,
     // and a 120s wait was costing ~2,400 of them per lane.

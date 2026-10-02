@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -3463,6 +3464,23 @@ test('207dbaf1: resolver shapes and failures — trailing id, snake_case quest_i
   assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', '207db'], bare)).exit, 2, 'a quest prefix needs 6 characters');
   assert.equal((await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], { WORKIT_RECEIPT_RESOLVER: '["", "x"]' })).exit, 2);
   assert.equal(f.calls.length, before, 'input refusals run nothing');
+});
+
+// --- quest 55477c2d: a wait prints one verdict line. The driver runs the real
+// `execute` against a child that answers each poll as herdr does on a timeout:
+// JSON on stderr, exit 1. Whatever reaches this process's stdout or stderr is
+// what a conductor's backgrounded task would show.
+test('55477c2d: a wait that herdr times out N times prints exactly one line, and the row counts the polls', (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  const driver = fileURLToPath(new URL('./fixtures/wait-noise-driver.mjs', import.meta.url));
+  const run = spawnSync(process.execPath, [driver, f.log, '3'], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  const lines = `${run.stdout}\n${run.stderr}`.split(/\r?\n/).filter((line) => line.trim() !== '');
+  assert.equal(lines.length, 1, `expected the verdict alone, got:\n${lines.join('\n')}`);
+  assert.equal(JSON.parse(lines[0]).state, 'done');
+  const row = JSON.parse(readFileSync(f.log, 'utf8').trim().split(/\r?\n/).at(-1));
+  assert.deepEqual([row.verb, row.pollTimeouts, row.pollCount], ['wait', 3, 4]);
 });
 
 // --- quest 93d4855b: the memory admission gate. Thresholds are GB of free
