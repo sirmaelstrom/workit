@@ -2106,19 +2106,28 @@ function sweepRoots(opts, deps) {
   return roots;
 }
 
-// The lanes this helper actually created under a given root, by directory name.
 // `creates[]` is the sidecar's record of every path it made — the only list of
-// directories the sweeper is entitled to delete. A lane record contributes its
-// agent name only when its path exactly matches one of those creates.
-// Returns the sidecar's own spelling of the requested lane, or null. Windows
-// paths are case-insensitive, so a casing mismatch there is the same directory,
-// not a different one — and the delegate is handed the recorded name either way.
-function matchKnownLane(known, lane, deps) {
-  if (deps.platform === 'win32') {
-    const wanted = String(lane).toLowerCase();
-    return known.find((entry) => [entry.agentName, entry.label, entry.basename].some((name) => name?.toLowerCase() === wanted))?.basename ?? null;
-  }
-  return known.find((entry) => [entry.agentName, entry.label, entry.basename].includes(lane))?.basename ?? null;
+// directories the sweeper is entitled to delete. A lane record counts only when
+// its path exactly matches one of those creates.
+// `--lane <name>` names ONE directory, chosen across every create before any
+// root is visited. A lane name is reused across runs, and creates[] keeps the
+// old runs' rows (append order, oldest first): a first match per root picked
+// the oldest create's label and could match one under every root. The lane
+// record's path wins (start keeps it on the current create); otherwise the
+// newest create whose label or basename is the name. Windows paths and names
+// are case-insensitive, so a casing mismatch there is the same directory, and
+// the delegate is handed the recorded basename either way. Returns the folded
+// path key, or null.
+function sweepTargetKey(state, lane, deps) {
+  const fold = (value) => (deps.platform === 'win32' ? String(value).toLowerCase() : String(value));
+  const creates = (state.creates ?? []).filter((created) => typeof created?.path === 'string');
+  const createKeys = new Set(creates.map((created) => fold(resolve(created.path))));
+  const wanted = fold(lane);
+  const records = Object.entries(state.lanes ?? {})
+    .filter(([name, record]) => fold(name) === wanted && typeof record?.path === 'string' && createKeys.has(fold(resolve(record.path))));
+  if (records.length > 0) return fold(resolve(records.at(-1)[1].path));
+  const newest = creates.findLast((created) => [created.label, basename(resolve(created.path))].some((name) => typeof name === 'string' && fold(name) === wanted));
+  return newest ? fold(resolve(newest.path)) : null;
 }
 
 function knownLanesUnder(state, root, deps) {
@@ -2190,9 +2199,11 @@ async function sweepLanes(opts, deps, state) {
   // root is no exception — everything under it is a lane, but not necessarily
   // OUR lane, and --force is permitted there.
   let laneFound = false;
+  const targetKey = opts.lane ? sweepTargetKey(state, opts.lane, deps) : null;
+  const foldPath = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
   for (const root of roots) {
     const known = knownLanesUnder(state, root.path, deps);
-    const requested = opts.lane ? matchKnownLane(known, opts.lane, deps) : null;
+    const requested = targetKey ? known.find((entry) => foldPath(entry.path) === targetKey)?.basename ?? null : null;
     // A named lane lives under exactly one root; the others simply have nothing
     // to do, which is not a refusal.
     if (opts.lane && !requested) continue;

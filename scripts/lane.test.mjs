@@ -2168,6 +2168,55 @@ test('Q-5: unknown sweep lane refusal lists known agent names, labels, and basen
   assert.match(result.output.error, /Agent names come from lanes\[\].*labels and basenames come from creates\[\]/);
 });
 
+// --- quest e6841100: `sweep --lane` on a reused name. Measured after #128:
+// `sweep --lane za --list` named the Sitting Z create, not the live one.
+const sweptLanes = (f) => f.calls.filter((call) => call.program === 'pwsh').map((call) => call.args[call.args.indexOf('-Lane') + 1]);
+const sweepList = (f, lane, roots) => runLane(['sweep', '--lane', lane, '--list', ...roots.flatMap((root) => ['--root', root]), '--log', f.log], {
+  exec: f.exec, exists: fakeExists(), env: {},
+});
+
+test('e6841100: a reused lane name sweeps the record\'s current create, not the oldest create carrying the name', async (t) => {
+  const f = fixture(t);
+  const projects = join(f.dir, 'projects');
+  const live = join(projects, 'workit-wt-ab-proof');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    lanes: { za: { path: live } },
+    creates: [
+      { path: join(projects, 'workit-wt-z-failloud'), label: 'za' },
+      { path: live, label: 'ab-proof' },
+    ],
+  }), 'utf8');
+  const result = await sweepList(f, 'za', [projects]);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(sweptLanes(f), ['workit-wt-ab-proof']);
+});
+
+test('e6841100: with no lane record, the newest create carrying the name is the one swept', async (t) => {
+  const f = fixture(t);
+  const projects = join(f.dir, 'projects');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    lanes: {},
+    creates: [{ path: join(projects, 'workit-wt-zz-old'), label: 'zz' }, { path: join(projects, 'workit-wt-zz-new'), label: 'zz' }],
+  }), 'utf8');
+  const result = await sweepList(f, 'zz', [projects]);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(sweptLanes(f), ['workit-wt-zz-new']);
+});
+
+test('e6841100: a named lane is one directory — an old create carrying the name under another root is not swept too', async (t) => {
+  const f = fixture(t);
+  const projects = join(f.dir, 'projects');
+  const other = join(f.dir, 'elsewhere', 'worktrees');
+  const live = join(projects, 'workit-wt-ab-proof');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    lanes: { za: { path: live } },
+    creates: [{ path: join(other, 'workit-wt-z-failloud'), label: 'za' }, { path: live, label: 'ab-proof' }],
+  }), 'utf8');
+  const result = await sweepList(f, 'za', [projects, other]);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(sweptLanes(f), ['workit-wt-ab-proof']);
+});
+
 test('Q-6: every C13 root spelling reaches the recorded lane in exactly two delegate levels', async (t) => {
   for (const root of [null, 'projects', 'workspace']) {
     const f = fixture(t);
