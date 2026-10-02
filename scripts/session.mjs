@@ -373,8 +373,29 @@ function childProcesses(deps, pid) {
   if (value === null) return { children: null, error: 'PowerShell returned invalid child-process JSON' };
   return { children: Array.isArray(value) ? value : [value], error: null };
 }
-function onlyMcpChildren(children) {
-  return Array.isArray(children) && children.length > 0 && children.every((child) => /run-.*-mcp\.js/i.test(String(child?.CommandLine ?? child?.commandLine ?? child?.argv ?? '')));
+function commandLineOf(child) { return String(child?.CommandLine ?? child?.commandLine ?? child?.argv ?? ''); }
+function mcpChild(child) { return /run-.*-mcp\.js/i.test(commandLineOf(child)); }
+// A `lane.mjs wait` the caller left in the background is a monitor: it reads
+// herdr and prints a verdict, and nothing is lost when it dies with the caller.
+// Claude Code runs a background Bash call as
+//   bash.exe -c "<preamble> && eval '<command>' < /dev/null && pwd -P >| <file>"
+// and the child is abandonable only when every segment of <command> is the wait
+// itself or output plumbing (an assignment, tee, tail, head, echo, date, cat).
+// A command substitution, any other program, or any other shape refuses.
+const MONITOR_SEGMENTS = [
+  /^node\s+(?:\\?"[^"]*lane\.mjs\\?"|\S*lane\.mjs)\s+wait\s/,
+  /^(?:tee|tail|head|echo|date|cat)(?:\s|$)/,
+  /^[A-Za-z_][A-Za-z0-9_]*=\S*$/,
+];
+export function laneWaitMonitor(commandLine) {
+  const wrapped = /^"?[^"]*\bbash(?:\.exe)?"?\s+-c\s+"[\s\S]*?\beval '((?:[^']|'\\'')*)' < \/dev\/null && pwd -P >\| \S+"$/.exec(String(commandLine).trim());
+  if (!wrapped || /\$\(|`/.test(wrapped[1])) return false;
+  const segments = wrapped[1].split(/\s*(?:&&|\|\||;|\|)\s*/).map((segment) => segment.trim()).filter(Boolean);
+  return segments.some((segment) => MONITOR_SEGMENTS[0].test(segment))
+    && segments.every((segment) => MONITOR_SEGMENTS.some((pattern) => pattern.test(segment)));
+}
+function abandonableChildren(children) {
+  return Array.isArray(children) && children.length > 0 && children.every((child) => mcpChild(child) || laneWaitMonitor(commandLineOf(child)));
 }
 function waitForGone(deps, target, timeout) {
   const result = call(deps, ['agent', 'wait', target.target, '--until', 'done', '--timeout', String(timeout)]);
@@ -405,13 +426,14 @@ async function waitForClose(deps, target, timeout, dialogAfter) {
     const process = callOrFail(deps, ['pane', 'process-info', '--pane', target.pane]);
     const listed = childProcesses(deps, processPid(process));
     if (listed.error || listed.children.length === 0) throw new SessionError(EXIT.blocked, `Claude exit dialog children could not be listed for ${target.pane}`, { dialog: 'children-unknown', childrenError: listed.error ?? 'PowerShell returned no child processes' });
-    if (!onlyMcpChildren(listed.children)) {
+    if (!abandonableChildren(listed.children)) {
       const argv = listed.children.map((child) => child?.CommandLine ?? child?.commandLine ?? child?.argv ?? null);
       throw new SessionError(EXIT.blocked, `Claude exit dialog has a live background process in ${target.pane}`, { dialog: 'background-process-live', argv });
     }
+    const abandoned = listed.children.filter((child) => !mcpChild(child)).length;
     callOrFail(deps, ['pane', 'send-keys', target.pane, 'enter']);
     const afterAnswer = Math.max(1, deadline - deps.now());
-    return { ...requireGone(waitForGone(deps, target, afterAnswer)), dialogAnswered: true };
+    return { ...requireGone(waitForGone(deps, target, afterAnswer)), dialogAnswered: true, ...(abandoned > 0 ? { abandonedLaneWaits: abandoned } : {}) };
   } while (deps.now() < deadline);
   throw new SessionError(EXIT.timeout, `watch timed out for ${target.target}`);
 }
@@ -454,8 +476,9 @@ async function retire(opts, deps, state) {
   let resumeId = null; let closed = false;
   if (opts.mode === 'exit' || opts.mode === 'exit+close') callOrFail(deps, ['agent', 'prompt', target.target, '/exit']);
   let dialogAnswered = false;
-  if (opts.mode === 'close' || opts.mode === 'exit+close') ({ resumeId, closed, dialogAnswered } = await closeTarget(deps, target, timeout, dialogAfter));
-  return { target: target.target, mode: opts.mode, resumeId, closed, dialogAnswered, resolvedFrom: target.resolvedFrom ?? null, finalMessagePath: finalMessagePath(deps, state, target) };
+  let abandonedLaneWaits;
+  if (opts.mode === 'close' || opts.mode === 'exit+close') ({ resumeId, closed, dialogAnswered, abandonedLaneWaits } = await closeTarget(deps, target, timeout, dialogAfter));
+  return { target: target.target, mode: opts.mode, resumeId, closed, dialogAnswered, ...(abandonedLaneWaits ? { abandonedLaneWaits } : {}), resolvedFrom: target.resolvedFrom ?? null, finalMessagePath: finalMessagePath(deps, state, target) };
 }
 
 async function chain(opts, deps, state) {

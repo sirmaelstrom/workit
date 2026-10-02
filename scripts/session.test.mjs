@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runSession } from './session.mjs';
+import { laneWaitMonitor, runSession } from './session.mjs';
 import { runStopCapture } from './session-stop-capture.mjs';
 
 function fixture(t) {
@@ -244,6 +244,48 @@ test('R1: retire refuses the exit dialog when a non-MCP background child remains
   const result = await runSession(['retire', 'old', '--mode', 'close', '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 3); assert.equal(result.output.dialog, 'background-process-live'); assert.deepEqual(result.output.argv, ['node scripts/lane.mjs wait caller']);
   assert.equal(callsFor(f, 'pane').some((call) => call.args[1] === 'send-keys'), false);
+});
+
+// 68af2e33: the two background `lane wait` children that blocked a retire in
+// Burn-down V (2026-09-20), in Claude Code's bash wrapper as logged (argv in
+// session-log.jsonl), host paths replaced with fixture paths. Y's shape is the
+// second one.
+const bashWrapped = (command) => String.raw`"C:\Program Files\Git\bin\bash.exe" -c "source /x/home/.claude/shell-snapshots/snapshot-bash-1.sh 2>/dev/null || true && export TEMP='X:\tmp' TMP='X:\tmp' && shopt -u extglob 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval '` + command + String.raw`' < /dev/null && pwd -P >| /x/tmp/claude-defe-cwd"`;
+const V_WAIT = bashWrapped(String.raw`LOG=/x/lanes/lane-log.jsonl; node /x/workit/scripts/lane.mjs wait v3-beat-guard --until blocked --until idle --until done --timeout 2400000 --plan-floor 20 --log \"$LOG\" 2>&1 | tee \"X:/scratch/v3-wait2.txt\"; echo \"WAIT_EXIT=$?\" >> \"X:/scratch/v3-wait2.txt\"`);
+const Y_WAIT = bashWrapped('node X:/x/plugins/cache/workit/workit/1.24.1/scripts/lane.mjs wait yd2 --until blocked --until idle --until done --timeout 3600000 2>&1 | tail -1; date -u +%H:%M:%SZ');
+
+test('68af2e33: a caller\'s background lane waits do not block retire — the dialog is answered and the waits counted', async (t) => {
+  const f = fixture(t); let waits = 0; let processReads = 0; let paneReads = 0;
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8');
+  const children = [{ CommandLine: 'node C:\\mcp\\run-a-mcp.js' }, { CommandLine: V_WAIT }, { CommandLine: Y_WAIT }];
+  f.handler = (program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (program === 'powershell.exe') return { code: 0, stdout: JSON.stringify(children), stderr: '' };
+    if (key === 'agent wait') return waits++ === 0 ? { code: 1, stdout: '', stderr: 'timeout' } : { code: 1, stdout: '', stderr: 'agent_not_found' };
+    if (key === 'pane read') return { code: 0, stdout: paneReads++ === 0 ? rotation4ExitDialog : 'Resume this session with:\nclaude --resume 33333333-3333-4333-8333-333333333333', stderr: '' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: processReads++ === 0 ? 'claude.exe' : 'pwsh.exe', argv0: '<path>/claude.exe', pid: 42 })]), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const result = await runSession(['retire', 'old', '--mode', 'close', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual([result.output.dialogAnswered, result.output.abandonedLaneWaits, result.output.closed], [true, 2, true]);
+  assert.equal(callsFor(f, 'pane').filter((call) => call.args[1] === 'send-keys' && call.args[3] === 'enter').length, 1);
+});
+
+test('68af2e33: only a wait and its output plumbing are abandonable; anything else in the command refuses', () => {
+  assert.equal(laneWaitMonitor(V_WAIT), true);
+  assert.equal(laneWaitMonitor(Y_WAIT), true);
+  for (const command of [
+    'node /x/lane.mjs wait a && git push',
+    'node /x/lane.mjs wait a; node /x/lane.mjs sweep --lane a',
+    'node /x/lane.mjs wait a --log $(rm -rf /x/y)',
+    'node /x/lane.mjs wait a --log `id`',
+    'node /x/lane.mjs stop a',
+    'npm test 2>&1 | tail -5',
+    'echo waiting',
+  ]) assert.equal(laneWaitMonitor(bashWrapped(command)), false, command);
+  assert.equal(laneWaitMonitor('node scripts/lane.mjs wait caller'), false, 'a bare node child is not the background-task shape');
+  assert.equal(laneWaitMonitor(V_WAIT.replace(' < /dev/null', '')), false, 'the wrapper shape is required');
 });
 
 test('R1: prose containing Background is not the exit dialog', async (t) => {
