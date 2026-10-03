@@ -549,6 +549,95 @@ test('68af2e33: a nameless owner\'s final message comes from herdr\'s live sessi
   assert.equal(result.output.finalMessagePath, join(root, 'final', `${live}.md`));
 });
 
+// workit#133 council r1. The exit dialog counts only as the ACTIVE prompt at the
+// bottom of the read. The live shape is the w1R:p1 read of 2026-10-02 10:12:14Z,
+// host paths replaced.
+const LIVE_EXIT_DIALOG = `  ✻ Crunched for 2m 10s · done 5:10 AM
+Background task update waiting while this panel is open
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Background work is running
+   The following will stop when you exit:
+
+   shell · Start-Sleep 8; node X:/x/.claude/plugin…
+   shell · node X:/x/.claude/plugins/cache/workit/…
+
+   ❯ 1. Exit and stop tasks
+     2. Move to background and exit
+     3. Stay
+
+   Enter to confirm · Esc to cancel
+`;
+const EDIT_PROMPT = `⏺ Update(scripts/session.mjs)
+Do you want to make this edit to session.mjs?
+❯ 1. Yes
+  2. Yes, allow all edits during this session (shift+tab)
+  3. No, and tell Claude what to do differently (esc)`;
+const MIXED_SCREENS = {
+  'old dialog, current edit prompt': `${rotation4ExitDialog}\n${EDIT_PROMPT}`,
+  'old dialog, current menu with the same footer': `${rotation4ExitDialog}\nSelect a model\n❯ 1. Opus\n  2. Sonnet\nEnter to confirm · Esc to cancel`,
+  'dialog with the cursor on Stay': rotation4ExitDialog.replace('❯ 1. Exit and stop tasks', '  1. Exit and stop tasks').replace('  3. Stay', '❯ 3. Stay'),
+};
+
+test('#133 M1: exit dialog text that is not the active prompt is never answered, on either entry point', async (t) => {
+  const outcomes = [];
+  for (const [name, screen] of Object.entries(MIXED_SCREENS)) {
+    for (const mode of ['close', 'exit+close']) {
+      const f = fixture(t); f.handler = openDialogHerdr(f, { agents: NAMED_OWNER, screen });
+      const result = await runSession(['retire', 'w1R:p1', '--mode', mode, '--log', f.log], { exec: f.exec, ...fastClock() });
+      outcomes.push({ name, mode, exit: result.exit, dialog: result.output.dialog, keys: sendKeys(f).length, children: f.calls.filter((call) => call.program === 'powershell.exe').length });
+    }
+  }
+  assert.deepEqual(outcomes, Object.keys(MIXED_SCREENS).flatMap((name) => ['close', 'exit+close'].map((mode) => ({ name, mode, exit: 3, dialog: 'exit-dialog-not-active', keys: 0, children: 0 }))));
+});
+
+test('#133 M1: the live exit dialog at the bottom of the read is still answered, on either entry point', async (t) => {
+  for (const mode of ['close', 'exit+close']) {
+    const f = fixture(t); f.handler = openDialogHerdr(f, { agents: NAMED_OWNER, screen: LIVE_EXIT_DIALOG });
+    const result = await runSession(['retire', 'w1R:p1', '--mode', mode, '--log', f.log], { exec: f.exec, ...fastClock() });
+    assert.equal(result.exit, 0, `${mode}: ${JSON.stringify(result.output)}`);
+    assert.deepEqual([result.output.dialogAnswered, sendKeys(f).length], [true, 1], mode);
+  }
+});
+
+test('#133 N1: a named entry beats a nameless one on the same pane, in either list order', async (t) => {
+  for (const agents of [[...NAMED_OWNER, ...NAMELESS_OWNER], [...NAMELESS_OWNER, ...NAMED_OWNER]]) {
+    const f = fixture(t); f.handler = openDialogHerdr(f, { agents });
+    const result = await runSession(['retire', 'w1R:p1', '--mode', 'close', '--log', f.log], { exec: f.exec, ...fastClock() });
+    assert.equal(result.output.target, 'conductor', JSON.stringify(agents));
+    assert.equal(f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'wait').args[2], 'conductor');
+  }
+});
+
+test('#133 S2: a refusal logs a bounded excerpt from the bottom of the pane', async (t) => {
+  const scroll = Array.from({ length: 60 }, (_, i) => `transcript line ${i} ${'x'.repeat(300)}`).join('\n');
+  const f = fixture(t); f.handler = openDialogHerdr(f, { screen: `${scroll}\n${EDIT_PROMPT}\n\n` });
+  const result = await runSession(['retire', 'w1R:p1', '--mode', 'exit+close', '--log', f.log], { exec: f.exec, ...fastClock() });
+  assert.equal(result.output.dialog, 'blocked-other-prompt');
+  const excerpt = row(f).paneText;
+  assert.equal(excerpt, result.output.paneText);
+  assert.ok(excerpt.split('\n').length <= 15, `${excerpt.split('\n').length} lines`);
+  assert.equal(excerpt.length, 2000);
+  assert.ok(excerpt.endsWith('3. No, and tell Claude what to do differently (esc)'));
+});
+
+test('#133 S3: agent_blocked on a pane herdr lists no agent for still reads the pane and keeps the dialog guards', async (t) => {
+  const outcomes = [];
+  for (const [name, options] of Object.entries({
+    'lane wait': {},
+    'PowerShell child': { children: [{ CommandLine: PWSH_TOOL_CHILD }] },
+    'other prompt': { screen: EDIT_PROMPT },
+  })) {
+    const f = fixture(t); f.handler = openDialogHerdr(f, { agents: [], ...options });
+    const result = await runSession(['retire', 'w1R:p1', '--mode', 'exit+close', '--log', f.log], { exec: f.exec, ...fastClock() });
+    outcomes.push({ name, exit: result.exit, dialog: result.output.dialog ?? null, answered: result.output.dialogAnswered ?? null, reads: paneReads(f) > 0, keys: sendKeys(f).length });
+  }
+  assert.deepEqual(outcomes, [
+    { name: 'lane wait', exit: 0, dialog: null, answered: true, reads: true, keys: 1 },
+    { name: 'PowerShell child', exit: 3, dialog: 'background-process-live', answered: null, reads: true, keys: 0 },
+    { name: 'other prompt', exit: 3, dialog: 'blocked-other-prompt', answered: null, reads: true, keys: 0 },
+  ]);
+});
+
 test('R1: prose containing Background is not the exit dialog', async (t) => {
   const f = fixture(t); let now = 0;
   writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8');

@@ -414,8 +414,42 @@ async function watch(opts, deps, state) {
   return { state: stateAfter, target: target.target };
 }
 
-function exitDialog(text) {
-  return /Background work is running/i.test(text) && /Enter to confirm/i.test(text);
+// Claude Code's background-work exit menu counts only as the active prompt: the
+// last header line in the read, followed by nothing but the menu's own lines and
+// ending on its footer, with the cursor on option 1 (Enter confirms the selected
+// option). The same phrases anywhere else in the read are scrollback beside some
+// other prompt, so that read is ambiguous and is never answered.
+const EXIT_MENU_LINES = [
+  /^The following will stop when you exit:$/,
+  /^[a-z]+ · .+$/i,
+  /^(?:❯\s*)?1\. Exit and stop tasks$/,
+  /^(?:❯\s*)?2\. Move to background and exit$/,
+  /^(?:❯\s*)?3\. Stay$/,
+];
+function exitDialogState(text) {
+  const lines = String(text).split(/\r?\n/).map((line) => line.trim());
+  while (lines.length > 0 && !lines.at(-1)) lines.pop();
+  const header = lines.findLastIndex((line) => /^Background work is running$/i.test(line));
+  const menu = header < 0 ? [] : lines.slice(header + 1);
+  const footer = menu.pop();
+  const active = header >= 0
+    && /^Enter to confirm · Esc to cancel$/i.test(footer ?? '')
+    && menu.filter((line) => /^❯\s*1\. Exit and stop tasks$/.test(line)).length === 1
+    && menu.every((line) => !line || EXIT_MENU_LINES.some((pattern) => pattern.test(line)));
+  if (active) return 'active';
+  return /Background work is running/i.test(text) && /Enter to confirm/i.test(text) ? 'ambiguous' : 'absent';
+}
+// A refusal logs only the bottom of the screen, where the prompt is. The excerpt
+// is diagnostic and is not redacted.
+const PANE_EXCERPT_LINES = 15;
+const PANE_EXCERPT_CHARS = 2000;
+function paneExcerpt(text) {
+  const lines = String(text).split(/\r?\n/);
+  while (lines.length > 0 && !lines.at(-1).trim()) lines.pop();
+  return lines.slice(-PANE_EXCERPT_LINES).join('\n').slice(-PANE_EXCERPT_CHARS);
+}
+function notActiveDialog(target, paneText) {
+  return new SessionError(EXIT.blocked, `exit dialog text is on screen but is not the active prompt in ${target.pane}`, { dialog: 'exit-dialog-not-active', paneText: paneExcerpt(paneText) });
 }
 function childProcesses(deps, pid) {
   if (!pid) return { children: null, error: 'claude.exe pid was unavailable from process-info' };
@@ -479,7 +513,9 @@ async function waitForClose(deps, target, timeout, dialogAfter) {
     const waited = waitForGone(deps, target, Math.min(dialogAfter, remaining));
     if (waited.state === 'gone') return { ...waited, dialogAnswered: false };
     const paneText = callOrFail(deps, ['pane', 'read', target.pane, '--source', 'recent-unwrapped', '--lines', '40']);
-    if (!exitDialog(paneText)) {
+    const dialog = exitDialogState(paneText);
+    if (dialog === 'ambiguous') throw notActiveDialog(target, paneText);
+    if (dialog === 'absent') {
       if (waited.state !== 'timeout') return { ...requireGone(waited), dialogAnswered: false };
       if (deps.now() < deadline) continue;
       return { ...requireGone(waited), dialogAnswered: false };
@@ -504,11 +540,13 @@ function answerExitDialog(deps, target, deadline) {
   return { ...requireGone(waitForGone(deps, target, afterAnswer)), dialogAnswered: true, ...(abandoned > 0 ? { abandonedLaneWaits: abandoned } : {}) };
 }
 // herdr refused `/exit` with agent_blocked: the target was already waiting on a
-// prompt. Only the background-work exit dialog goes on to the answer path; any
-// other prompt is returned with its pane text and no key is sent.
+// prompt. Only the active background-work exit dialog goes on to the answer path;
+// any other prompt is returned with a pane excerpt and no key is sent.
 function answerBlockedExit(deps, target, timeout) {
   const paneText = callOrFail(deps, ['pane', 'read', target.pane, '--source', 'recent-unwrapped', '--lines', '40']);
-  if (!exitDialog(paneText)) throw new SessionError(EXIT.blocked, `target is blocked on a prompt that is not the exit dialog: ${target.target}`, { dialog: 'blocked-other-prompt', paneText });
+  const dialog = exitDialogState(paneText);
+  if (dialog === 'ambiguous') throw notActiveDialog(target, paneText);
+  if (dialog === 'absent') throw new SessionError(EXIT.blocked, `target is blocked on a prompt that is not the exit dialog: ${target.target}`, { dialog: 'blocked-other-prompt', paneText: paneExcerpt(paneText) });
   return answerExitDialog(deps, target, deps.now() + timeout);
 }
 

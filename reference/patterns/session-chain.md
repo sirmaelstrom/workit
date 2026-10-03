@@ -34,6 +34,7 @@ Default sidecar: `<workspace>/data/outputs/projects/agentic-practice-transfer/se
 2. Spawn model and effort are mandatory launch flags; they are never inherited. `dontAsk` is refused before a call.
 3. Context is read, not invented: absent is null.
 4. A pane with a Claude process is never closed. `process-info` must expose `foreground_processes`; absent or malformed JSON is live until proved otherwise.
+4a. Retire sends Enter to Claude Code's background-work exit dialog only when the dialog is the active prompt: the last menu in the pane read, complete and ending on its footer, with the cursor on option 1. Otherwise no key is sent. A refusal records `paneText`: the last 15 lines of the read, capped at 2,000 characters. The excerpt is diagnostic. It is not redacted, and it is written to the session log.
 5. Gone has three successful shapes: done-with-record, agent-not-found, or agent-not-running (the record remains but the process exited); idle is never gone.
 6. Resume ids are parsed only from `Resume this session with: ... claude --resume <uuid>`; a missing banner warns by yielding null but does not block a clean close.
 7. Self retirement writes the row first and sends `/exit` last; self close is invalid. `--capture-final` gets the caller session id from `agent get <HERDR_PANE_ID>` first, then the sidecar; no id is a usage refusal. It is invalid with `chain --no-retire`.
