@@ -864,3 +864,42 @@ test('S10: the Stop capture is marker-gated', async (t) => {
   const retired = await runSession(['retire', 'self', '--mode', 'exit', '--capture-final', '--log', self.log], { exec: self.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: selfRoot }) });
   assert.equal(retired.exit, 0); assert.equal(existsSync(join(selfRoot, 'final-pending', id)), true);
 });
+
+function briefPrompt(f) { return f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'prompt')?.args; }
+
+test('f3760d4e: brief --timeout without --wait is a usage error naming both flags, before any herdr call', async (t) => {
+  const file = handoff(fixture(t));
+  for (const target of ['new', 'pane:x', 'w1:p1']) for (const value of ['60000', '']) {
+    const f = fixture(t); f.handler = successHerdr();
+    const result = await runSession(['brief', target, '--file', file, '--timeout', value, '--log', f.log], { exec: f.exec, env: env() });
+    assert.equal(result.exit, 2, `${target} --timeout ${JSON.stringify(value)}`);
+    assert.match(result.output.error, /--timeout/); assert.match(result.output.error, /--wait/);
+    assert.equal(f.calls.length, 0, `herdr is never invoked for the bad pairing (${target}, ${JSON.stringify(value)})`);
+  }
+  const control = fixture(t); control.handler = successHerdr();
+  await runSession(['brief', 'new', '--file', file, '--wait', '--timeout', '60000', '--log', control.log], { exec: control.exec, env: env() });
+  assert.ok(control.calls.length > 0, 'the valid pairing does reach herdr, so a zero count above can observe an invocation');
+});
+
+test('f3760d4e: brief forwards exactly the flags it was given', async (t) => {
+  const file = handoff(fixture(t));
+  const run = async (flags) => {
+    const f = fixture(t); f.handler = successHerdr();
+    const result = await runSession(['brief', 'new', '--file', file, ...flags, '--log', f.log], { exec: f.exec, env: env() });
+    return { result, prompt: briefPrompt(f) };
+  };
+  const text = `Read ${file} and execute it exactly.`;
+  const plain = await run([]);
+  assert.equal(plain.result.exit, 0); assert.deepEqual(plain.prompt, ['agent', 'prompt', 'new', text]);
+  const waited = await run(['--wait']);
+  assert.equal(waited.result.exit, 0); assert.deepEqual(waited.prompt, ['agent', 'prompt', 'new', text, '--wait', '--until', 'working']);
+  const timed = await run(['--wait', '--timeout', '5000']);
+  assert.equal(timed.result.exit, 0); assert.deepEqual(timed.prompt, ['agent', 'prompt', 'new', text, '--wait', '--until', 'working', '--timeout', '5000']);
+  const bad = await run(['--wait', '--timeout', '0']);
+  assert.equal(bad.result.exit, 2); assert.match(bad.result.output.error, /--timeout must be a positive number/); assert.equal(bad.prompt, undefined);
+  const empty = await run(['--wait', '--timeout', '']);
+  assert.equal(empty.result.exit, 2); assert.match(empty.result.output.error, /--timeout must be a positive number/); assert.equal(empty.prompt, undefined);
+  const chained = fixture(t); chained.handler = successHerdr();
+  await runSession(['chain', '--handoff', file, '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--log', chained.log], { exec: chained.exec, env: env() });
+  assert.deepEqual(briefPrompt(chained).slice(-3), ['--wait', '--until', 'working'], 'chain without --successor-timeout still briefs with --wait and no --timeout');
+});
