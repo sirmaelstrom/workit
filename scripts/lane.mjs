@@ -648,6 +648,19 @@ export function paneAtPrompt(text, { signature = null, patterns = DEFAULT_PROMPT
   return patterns.some((pattern) => pattern.test(last));
 }
 
+// Claude prints these two lines when it exits. As the pane's TAIL, with nothing
+// drawn below, they mean Claude is gone but the shell has not redrawn its
+// prompt; a footer with the prompt under it is an ordinary exit.
+const CLAUDE_RESUME_HINT = 'Resume this session with:';
+const CLAUDE_RESUME_LINE = /^claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+// The resume id when the pane ends in Claude's exit footer, else null.
+function claudeExitFooterTail(text) {
+  const lines = paneLines(text);
+  if (lines.length < 2 || lines.at(-2) !== CLAUDE_RESUME_HINT) return null;
+  return CLAUDE_RESUME_LINE.exec(lines.at(-1))?.[1] ?? null;
+}
+
 // An operator who knows their prompt can say so; anything unparseable is a
 // usage error rather than a silently ignored setting.
 function promptPatterns(opts, deps) {
@@ -776,15 +789,20 @@ async function capturePromptSignature(deps, pane, options, timeoutMs = 5_000) {
 
 async function waitForPanePrompt(deps, pane, options = {}, timeoutMs = 30_000) {
   const deadline = deps.now() + timeoutMs;
+  let last = null;
   do {
     const snapshot = readPane(deps, pane);
     if (snapshot.code === 0 && paneAtPrompt(snapshot.stdout, options)) return;
+    last = snapshot.code === 0 ? (paneLines(snapshot.stdout).at(-1) ?? '') : null;
     await deps.sleep(100);
   } while (deps.now() < deadline);
   // A wedged pane is infrastructure, not the operator's deadline: 4 belongs to
   // `lane wait` alone, and prepareCodexPane already raises ERROR for the same
-  // shape of failure.
-  throw new LaneError(EXIT.ERROR, `pane ${pane} never returned to a shell prompt${options.signature ? ` (${JSON.stringify(options.signature)})` : ''}`);
+  // shape of failure. The message quotes the line the pane ENDED on: quoting
+  // only the expected prompt invited a match against prompt text higher up.
+  const seen = last === null ? 'the last pane read failed' : `its last line was ${JSON.stringify(last.length > 200 ? `${last.slice(0, 200)}…` : last)}`;
+  const expected = options.signature ? `, not the recorded prompt ${JSON.stringify(options.signature)}` : '';
+  throw new LaneError(EXIT.ERROR, `pane ${pane} never returned to a shell prompt: ${seen}${expected}`);
 }
 
 function laneSlug(value) {
@@ -2030,9 +2048,10 @@ async function stopLane(opts, deps, state) {
       patterns: promptPatterns(opts, deps),
     });
     const exitBanner = !liveTui && lateLines.slice(-3).some((line) => /^(?:goodbye|codex\s+(?:exited|closed))/i.test(line));
+    const resumeId = lane.kind === 'claude' && latePane.code === 0 && !liveTui ? claudeExitFooterTail(lateText) : null;
     // The same listing lag as the normal path: with the pane showing an exit
     // (or unreadable), the listing gets the same window; a live TUI gets one read.
-    const exitSeen = !liveTui && (latePrompt || exitBanner || latePane.code !== 0);
+    const exitSeen = !liveTui && (latePrompt || exitBanner || resumeId !== null || latePane.code !== 0);
     const late = await pollUntilUnlisted(deps, opts.name, exitSeen ? STOP_UNLIST_WINDOW_MS : 0);
     const lateListing = late.listing;
     const lateNames = late.names;
@@ -2046,6 +2065,24 @@ async function stopLane(opts, deps, state) {
         exit: EXIT.OK,
         output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'late', ...latePolls },
         row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'late', ...latePolls },
+      };
+    }
+    // Claude has exited and herdr has dropped it, but the shell under the
+    // footer never came back, so the pane is not free. A failure, kept apart
+    // from a prompt that never matched so the conductor knows the agent is gone.
+    if (Array.isArray(lateNames) && !lateNames.includes(opts.name) && resumeId) {
+      const blocked = 'exited-shell-blocked';
+      return {
+        exit: EXIT.ERROR,
+        output: {
+          error: `stop ${blocked}: ${opts.name} exited and is no longer listed, but pane ${lane.pane} ends in Claude's resume footer with no shell prompt under it; likely herdr's Start-Process -Wait launch is still waiting on a live descendant of the Claude process, so the shell has not returned and the pane is not reusable`,
+          state: blocked,
+          panePrompt: false,
+          agentListed: false,
+          resumeId,
+          ...latePolls,
+        },
+        row: { ...laneInstrumentation(opts.name, lane, blocked), resumeId, ...latePolls },
       };
     }
     if (Array.isArray(lateNames) && lateNames.includes(opts.name)) {

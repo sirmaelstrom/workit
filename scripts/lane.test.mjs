@@ -2223,6 +2223,144 @@ test('A3-3: the default shapes cover the common prompts and reject TUI lines', (
   assert.equal(paneAtPrompt(CODEX_TUI), false, 'the Ask Codex footer is not a shell prompt');
 });
 
+// d5fca67d. A captured Claude stop (AB lane ocost), path and user segments
+// scrubbed, every other byte kept. The posh lines are the LAUNCH prompt (the
+// clock is the start time); Claude's resume footer is the tail and no prompt
+// was redrawn under it.
+const BLOCKED_SIGNATURE = '~ \u{e5ff} X: / fixture / projects / lane-a ~';
+const BLOCKED_RESUME_ID = '5966ad8e-7732-4a60-8235-83687bc81852';
+const BLOCKED_TAIL = [
+  `~ user \u{f408} \u{e725} ab/o-cost-codex-reasoning \u{f120} pwsh${' '.repeat(44)}0.002s \u{f01dd} Thursday at 6:56 PM  \u{e718} 24.13.0`,
+  `${BLOCKED_SIGNATURE} if((Get-Command claude -ErrorAction SilentlyContinue).CommandType -eq 'ExternalScript'){& claude '--model' claude-opus-5-5 '--permission-mode' bypassPermissions '--effort' high}else{St`,
+  "art-Process -FilePath claude -ArgumentList '--model claude-opus-5-5 --permission-mode bypassPermissions --effort high' -NoNewWindow -Wait}",
+  '',
+  'Resume this session with:',
+  `claude --resume ${BLOCKED_RESUME_ID}`,
+].join('\n');
+
+// The ordinary success shape (lane wquota, scrubbed the same way): the same
+// footer, with the shell's fresh two-line prompt drawn under it.
+const RETURNED_SIGNATURE = '~ \u{e5ff} X: / fixture / projects / lane-b ~';
+const RETURNED_TAIL = [
+  `${RETURNED_SIGNATURE} if((Get-Command claude -ErrorAction SilentlyContinue).CommandType -eq 'ExternalScript'){& claude '--model' claude-opus-5-5 '--permission-mode' bypassPermissions '--effort' high}else{Start-Process -`,
+  "FilePath claude -ArgumentList '--model claude-opus-5-5 --permission-mode bypassPermissions --effort high' -NoNewWindow -Wait}",
+  '',
+  'Resume this session with:',
+  'claude --resume 37680e5b-7c3f-4647-b516-40184218248b',
+  '',
+  `~ user \u{f408} \u{e725} susannah/quota-footer-only \u{f120} pwsh${' '.repeat(176)}34:35.224s \u{f01dd} Saturday at 12:33 PM`,
+  '',
+  RETURNED_SIGNATURE,
+  '',
+].join('\n');
+
+// herdr answered by verb, not by call order: every pane read returns `pane`, and
+// `agent list` names lane-a while `listed()` says so.
+function stopHerdr(pane, listed = () => false) {
+  const calls = [];
+  const exec = (program, args) => {
+    calls.push([...args]);
+    if (args[0] === 'pane' && args[1] === 'read') return { code: 0, stdout: pane, stderr: '' };
+    if (args[0] === 'agent' && args[1] === 'list') {
+      const agents = listed() ? [{ name: 'lane-a', agent: 'claude', agent_status: 'done' }] : [];
+      return { code: 0, stdout: JSON.stringify({ result: { agents } }), stderr: '' };
+    }
+    return { code: 0, stdout: '{}', stderr: '' };
+  };
+  return { exec, calls };
+}
+
+async function stopWith(f, herdr) {
+  let clock = 0;
+  return runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: herdr.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+}
+
+test('d5fca67d: a Claude exit footer as the tail, agent unlisted, is exited-shell-blocked: a failure that names the resume id', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL));
+  assert.equal(result.exit, EXIT_CODES.error, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'exited-shell-blocked');
+  assert.equal(result.output.resumeId, BLOCKED_RESUME_ID);
+  assert.equal(result.output.agentListed, false);
+  assert.equal(result.output.panePrompt, false);
+  assert.match(result.output.error, /likely herdr's Start-Process -Wait launch is still waiting on a live descendant/);
+  const row = JSON.parse(readFileSync(f.log, 'utf8').trim().split('\n').at(-1));
+  assert.equal(row.state, 'exited-shell-blocked');
+  assert.equal(row.resumeId, BLOCKED_RESUME_ID);
+  assert.equal(row.exit, EXIT_CODES.error);
+});
+
+test('d5fca67d: a shell prompt drawn under the footer is still an ordinary stop', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: RETURNED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(RETURNED_TAIL));
+  assert.equal(result.exit, EXIT_CODES.ok, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'stopped');
+  assert.equal(result.output.panePrompt, true);
+  assert.equal(result.output.resumeId, undefined);
+});
+
+test('d5fca67d: a footer tail with the agent still listed is the still-listed failure, never exited-shell-blocked', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL, () => true));
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /lane-a is still listed after late prompt check/);
+  assert.notEqual(result.output.state, 'exited-shell-blocked');
+});
+
+test('d5fca67d: a footer above later output is scrollback, not the tail', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(`${BLOCKED_TAIL}\nsomething printed after the footer`));
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /^stop pane prompt check failed/);
+  assert.notEqual(result.output.state, 'exited-shell-blocked');
+});
+
+test('d5fca67d: a live Claude TUI under a scrollback footer is vetoed as before', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(`${BLOCKED_TAIL}\n${CLAUDE_TUI}`));
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /^stop pane prompt check failed/);
+  assert.notEqual(result.output.state, 'exited-shell-blocked');
+});
+
+test('d5fca67d: the footer is Claude-only; a codex lane with that tail keeps today\'s failure', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'codex', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL));
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /^stop pane prompt check failed/);
+  assert.notEqual(result.output.state, 'exited-shell-blocked');
+});
+
+test('d5fca67d: fallback never takes a footer-tailed pane as free', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'prompt.md');
+  writeFileSync(prompt, 'task', 'utf8');
+  seedLane(f, { promptFile: prompt, promptSignature: BLOCKED_SIGNATURE });
+  const herdr = stopHerdr(BLOCKED_TAIL);
+  let clock = 0;
+  const result = await runLane(
+    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: herdr.exec, now: () => clock, sleep: async (ms) => { clock += ms; } },
+  );
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /^pane w1:p2 never returned to a shell prompt/);
+  assert.equal(herdr.calls.some((args) => args[0] === 'agent' && args[1] === 'start'), false, 'no agent is started into a blocked shell');
+});
+
+test('d5fca67d: the prompt-wait failure quotes the line the pane ended on, then the prompt it expected', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'codex', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL));
+  assert.equal(result.output.error,
+    `stop pane prompt check failed: pane w1:p2 never returned to a shell prompt: its last line was "claude --resume ${BLOCKED_RESUME_ID}", not the recorded prompt ${JSON.stringify(BLOCKED_SIGNATURE)}`);
+});
+
 test('A3-4: an operator can declare the prompt, by flag or by env', async (t) => {
   const f = fixture(t);
   const prompt = join(f.dir, 'prompt.md');
