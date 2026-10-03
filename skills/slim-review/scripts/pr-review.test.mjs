@@ -35,6 +35,7 @@ import {
   parseArgs,
   cmdPost,
   cmdThreads,
+  THREADS_OPEN_EXIT,
   cmdReply,
   cmdLens,
   cmdManaged,
@@ -959,6 +960,7 @@ function runThreadsWithFakeGh({ threads, unresolved = false }) {
   const calls = [];
   const logs = [];
   const deaths = [];
+  const exits = [];
   const runGh = (args, opts) => {
     calls.push({ args, opts });
     return JSON.stringify({
@@ -967,10 +969,51 @@ function runThreadsWithFakeGh({ threads, unresolved = false }) {
   };
   cmdThreads(
     { pr: '53', repo: 'owner/repo', unresolved },
-    { runGh, die: (code, message) => deaths.push({ code, message }), log: (m) => logs.push(String(m)) },
+    {
+      runGh,
+      die: (code, message) => deaths.push({ code, message }),
+      log: (m) => logs.push(String(m)),
+      exit: (code, message) => exits.push({ code, message }),
+    },
   );
-  return { calls, out: logs.join('\n'), deaths };
+  return { calls, logs, out: logs.join('\n'), deaths, exits };
 }
+
+test('threads --unresolved with one open thread lists it, then exits THREADS_OPEN_EXIT', () => {
+  const { logs, deaths, exits } = runThreadsWithFakeGh({
+    threads: [thread({ isResolved: false }), thread()],
+    unresolved: true,
+  });
+  assert.deepEqual(deaths, []);
+  assert.equal(logs[0], '1 of 2 thread(s) (unresolved)\n', 'the listing prints exactly as before');
+  assert.equal(exits.length, 1);
+  assert.equal(exits[0].code, THREADS_OPEN_EXIT);
+  assert.match(exits[0].message, /1 unresolved review thread\(s\) on owner\/repo#53/);
+});
+
+test('threads --unresolved with zero open (one resolved) prints the exact line and does not exit nonzero', () => {
+  const { logs, deaths, exits } = runThreadsWithFakeGh({ threads: [thread()], unresolved: true });
+  assert.deepEqual(deaths, []);
+  assert.deepEqual(exits, []);
+  assert.deepEqual(logs, ['no unresolved review threads']);
+});
+
+test('bare threads is a listing, not a gate: open threads still exit 0', () => {
+  const { exits, deaths } = runThreadsWithFakeGh({ threads: [thread({ isResolved: false })] });
+  assert.deepEqual(deaths, []);
+  assert.deepEqual(exits, []);
+});
+
+test('the open-thread exit code collides with no other code pr-review.mjs uses', () => {
+  const src = readFileSync(SCRIPT, 'utf8');
+  const used = new Set();
+  for (const m of src.matchAll(/\b(?:die|fail)\(\s*(\d+)\s*,/g)) used.add(Number(m[1]));
+  for (const m of src.matchAll(/,\s*(\d+)\);/g)) used.add(Number(m[1]));
+  for (const m of src.matchAll(/exitCode:\s*[^,}]*?(\d+)\s*:\s*(\d+)/g)) { used.add(Number(m[1])); used.add(Number(m[2])); }
+  for (const code of [2, 4, 6]) assert.ok(used.has(code), `the scan missed exit ${code}; it cannot vouch for the rest`);
+  assert.notEqual(THREADS_OPEN_EXIT, 0);
+  assert.ok(!used.has(THREADS_OPEN_EXIT), `exit ${THREADS_OPEN_EXIT} is already used: ${[...used].sort().join(',')}`);
+});
 
 test('threads lists normally when nothing is truncated', () => {
   const { out, deaths } = runThreadsWithFakeGh({
@@ -983,12 +1026,14 @@ test('threads lists normally when nothing is truncated', () => {
 test('a full 100-thread page exits nonzero instead of claiming completeness', () => {
   // The exact silent-completeness class this PR removed from `post`, left
   // standing on the command that prints the merge verdict.
-  const { out, deaths } = runThreadsWithFakeGh({
-    threads: Array.from({ length: 100 }, () => thread()),
+  const { out, deaths, exits } = runThreadsWithFakeGh({
+    threads: [thread({ isResolved: false }), ...Array.from({ length: 99 }, () => thread())],
     unresolved: true,
   });
   assert.equal(deaths[0]?.code, 6);
   assert.match(deaths[0].message, /truncat/i);
+  assert.equal(out, '', 'truncation fires before any listing');
+  assert.deepEqual(exits, [], 'truncation is exit 6, never the open-thread code');
   assert.doesNotMatch(
     out,
     /no unresolved review threads/,
@@ -1504,6 +1549,25 @@ test('threads requires --repo — same-number-different-repo reads as "no unreso
   assert.doesNotMatch(r.stderr, /gh /);
 });
 
+test('threads --unresolved: a gh that cannot run is exit 4, not the open-thread code and not 0', () => {
+  // An empty PATH means the real ghOrDie cannot spawn gh at all: the failure
+  // path under test is the production one, not a fake.
+  let r;
+  try {
+    const stdout = execFileSync(process.execPath, [SCRIPT, 'threads', '--pr', '1', '--repo', 'o/r', '--unresolved'], {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: '', Path: '' },
+    });
+    r = { code: 0, stdout, stderr: '' };
+  } catch (err) {
+    r = { code: err.status, stdout: String(err.stdout ?? ''), stderr: String(err.stderr ?? '') };
+  }
+  assert.equal(r.code, 4);
+  assert.notEqual(r.code, THREADS_OPEN_EXIT);
+  assert.match(r.stderr, /gh api graphql/);
+  assert.equal(r.stdout, '');
+});
+
 test('a malformed --repo is a usage error on every subcommand, with the value echoed', () => {
   // `own/er/repo` used to sail through: cmdThreads destructures [owner, name]
   // and drops the third segment, so `threads` printed "no unresolved review
@@ -1674,7 +1738,7 @@ test('characterisation: standalone post prints the receipt exactly and posts one
   assertNoOutcomeLine(logs);
 });
 
-function characterisationThreads({ unresolved = false } = {}) {
+function characterisationThreads({ unresolved = false, exits = [] } = {}) {
   const logs = [];
   const runGh = () => JSON.stringify({
     data: {
@@ -1702,13 +1766,19 @@ function characterisationThreads({ unresolved = false } = {}) {
   });
   withNoManagedConfig(() => cmdThreads(
     { pr: '53', repo: 'owner/repo', unresolved },
-    { runGh, die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(String(line)) },
+    {
+      runGh,
+      die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); },
+      log: (line) => logs.push(String(line)),
+      exit: (code) => exits.push(code),
+    },
   ));
   return logs;
 }
 
 test('characterisation: standalone threads prints one block per thread and the reply hint', () => {
-  const logs = characterisationThreads();
+  const exits = [];
+  const logs = characterisationThreads({ exits });
   assert.deepEqual(logs, [
     '2 of 2 thread(s)\n',
     '#1  src/a.ts:11  [OPEN]  replies:0',
@@ -1720,10 +1790,12 @@ test('characterisation: standalone threads prints one block per thread and the r
     'reply with:  node pr-review.mjs reply --pr 53 --repo owner/repo --comment-id <id> --body-file <file>',
   ]);
   assertNoOutcomeLine(logs);
+  assert.deepEqual(exits, []);
 });
 
 test('characterisation: standalone threads --unresolved shows only the open one', () => {
-  const logs = characterisationThreads({ unresolved: true });
+  const exits = [];
+  const logs = characterisationThreads({ unresolved: true, exits });
   assert.deepEqual(logs, [
     '1 of 2 thread(s) (unresolved)\n',
     '#1  src/a.ts:11  [OPEN]  replies:0',
@@ -1732,6 +1804,7 @@ test('characterisation: standalone threads --unresolved shows only the open one'
     'reply with:  node pr-review.mjs reply --pr 53 --repo owner/repo --comment-id <id> --body-file <file>',
   ]);
   assertNoOutcomeLine(logs);
+  assert.deepEqual(exits, [THREADS_OPEN_EXIT],'the stdout listing is unchanged; the open thread is the exit code');
 });
 
 test('characterisation: standalone reply posts one reply and records one verdict row', () => {

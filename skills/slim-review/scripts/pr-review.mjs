@@ -811,7 +811,21 @@ query($owner:String!, $name:String!, $pr:Int!) {
   }
 }`;
 
-export function cmdThreads(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
+/**
+ * `threads --unresolved` is the merge gate: `threads … --unresolved && gh pr merge …`.
+ * So an open thread is a nonzero exit, distinct from every other code this
+ * script uses (2 usage, 4 gh failure, 6 truncation). It goes through
+ * `process.exitCode`, not `fail`, so the listing on stdout is flushed whole
+ * before the process ends.
+ */
+export const THREADS_OPEN_EXIT = 8;
+
+export function cmdThreads(opts, {
+  runGh = ghOrDie,
+  die = fail,
+  log = console.log,
+  exit = (code, message) => { console.error(message); process.exitCode = code; },
+} = {}) {
   const repo = resolveRepo(opts.repo, opts.cwd);
   const [owner, name] = repo.split('/');
   const res = runGh(
@@ -857,6 +871,10 @@ export function cmdThreads(opts, { runGh = ghOrDie, die = fail, log = console.lo
     log('');
   }
   log(`reply with:  node pr-review.mjs reply --pr ${opts.pr} --repo ${repo} --comment-id <id> --body-file <file>`);
+  // Bare `threads` is a listing, not a gate: it exits 0 whatever it lists.
+  if (opts.unresolved) {
+    exit(THREADS_OPEN_EXIT, `${shown.length} unresolved review thread(s) on ${repo}#${opts.pr}: not merge-ready (exit ${THREADS_OPEN_EXIT}).`);
+  }
 }
 
 export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
@@ -3271,6 +3289,7 @@ const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
   post     --pr <n> --repo owner/name --findings <file> --findings <file> [--dry-run] [--force-post]
            [--single-lens "<reason>"]   posting one lens is exit 7 unless the reason is given (it is stamped into the review)
   threads  --pr <n> --repo owner/name [--unresolved]
+           --unresolved exits 8 when any thread is open, 0 when none is; exit 6 on a truncated page
   reply    --pr <n> --repo owner/name --comment-id <id> --body-file <file>
            [--verdict confirmed|refuted|note|judgment] [--adjudicator lane|conductor|operator]
            [--dup-of <comment id>] [--measure-log <path>]
