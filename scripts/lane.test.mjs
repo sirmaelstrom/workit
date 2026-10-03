@@ -353,7 +353,7 @@ test('WP-2: blocked wait exits 3 and includes the approval dialog', async (t) =>
   seedLane(f);
   f.responses.push(
     { code: 0, stdout: '{"result":{"state":"blocked"}}', stderr: '' },
-    { code: 0, stdout: 'Approve running npm test?\n5h 72% left · weekly 88% left', stderr: '' },
+    { code: 0, stdout: 'Approve running npm test?\ngpt-5.6-terra high · Context 62% left · 5h 72% left · weekly 88% left', stderr: '' },
   );
   const result = await runLane(['wait', 'lane-a', '--until', 'blocked', '--timeout', '1000', '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 3);
@@ -438,7 +438,7 @@ test('quest 653c5b81: the weekly selected window trips at the boundary and honou
   seedLane(fiveHourBoundary);
   fiveHourBoundary.responses.push(
     { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
-    { code: 0, stdout: 'gpt-5.6-terra high · 5h 20% left · weekly 15% left', stderr: '' },
+    { code: 0, stdout: 'gpt-5.6-terra high · Context 62% left · 5h 20% left · weekly 15% left', stderr: '' },
   );
   const fiveHourAtFloor = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', fiveHourBoundary.log], { exec: fiveHourBoundary.exec, sleep: async () => {} });
   assert.equal(fiveHourAtFloor.exit, 6, 'the 5h exact boundary now trips too');
@@ -494,7 +494,7 @@ test('quest 653c5b81: 5h remains first and the last footer is never combined wit
   let fiveHourClock = 0;
   fiveHour.responses.push(
     { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
-    { code: 0, stdout: 'gpt-5.6-terra high · 5h 80% left · weekly 15% left', stderr: '' },
+    { code: 0, stdout: 'gpt-5.6-terra high · Context 62% left · 5h 80% left · weekly 15% left', stderr: '' },
   );
   const fiveHourFirst = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', fiveHour.log], {
     exec: fiveHour.exec,
@@ -509,7 +509,7 @@ test('quest 653c5b81: 5h remains first and the last footer is never combined wit
   seedLane(lastFooter);
   lastFooter.responses.push(
     { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
-    { code: 0, stdout: 'gpt-5.6-terra high · 5h 80% left · weekly 90% left\nworking\ngpt-6-astra medium · weekly 15% left', stderr: '' },
+    { code: 0, stdout: 'gpt-5.6-terra high · Context 62% left · 5h 80% left · weekly 90% left\nworking\ngpt-6-astra medium · Context 100% left · weekly 15% left', stderr: '' },
   );
   const selectedLast = await runLane(['wait', 'lane-a', '--timeout', '1000', '--log', lastFooter.log], { exec: lastFooter.exec, sleep: async () => {} });
   assert.equal(selectedLast.exit, 6);
@@ -553,13 +553,123 @@ test('quest 653c5b81 amendment 1: a claude lane with no footer stays silent', as
   assert.equal(result.row.planWeekly, null);
 });
 
+// quest 8b7c477c: the meter is read off the live Codex footer only. The claude
+// pane is the measured w129 shape: a lane editing lane.test.mjs shows fixture
+// meter text in its diff, and wait exited 6 with planWeekly 15.
+const CLAUDE_EDITING_FIXTURES = [
+  '● Update(scripts/lane.test.mjs)',
+  "  441 -    { code: 0, stdout: 'gpt-5.6-terra · 5h 3% left · weekly 40% left', stderr: '' },",
+  "  442 +    { code: 0, stdout: 'gpt-6-astra medium · weekly 15% left', stderr: '' },",
+  '────────────────────────────────────────',
+  '❯ ',
+  '────────────────────────────────────────',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+].join('\n');
+
+async function timedOutWait(f, verb = 'wait') {
+  let clock = 0;
+  return runLane([verb, 'lane-a', '--timeout', '1000', '--log', f.log], {
+    exec: f.exec,
+    now: () => (clock += 1000),
+    sleep: async () => {},
+  });
+}
+
+test('quest 8b7c477c: a claude lane whose pane quotes meter text is never plan-low', async (t) => {
+  // The second pane ends on a footer-shaped line: only the kind gate stops it.
+  for (const pane of [CLAUDE_EDITING_FIXTURES, `${CLAUDE_EDITING_FIXTURES}\ngpt-6-astra medium · Context 100% left · weekly 15% left`]) {
+    for (const verb of ['wait', 'resume']) {
+      const f = fixture(t);
+      seedLane(f, { kind: 'claude' });
+      f.responses.push(
+        { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+        { code: 0, stdout: pane, stderr: '' },
+      );
+      const result = await timedOutWait(f, verb);
+      assert.equal(result.exit, 4, `${verb}: a claude lane has no plan meter to be low`);
+      assert.equal(result.output.state, 'timeout');
+      assert.equal(result.row.plan5h, null);
+      assert.equal(result.row.planWeekly, null);
+      assert.equal(result.row.warning, null, 'a claude lane expects no meter, so none is missing');
+    }
+  }
+});
+
+test('quest 8b7c477c: a codex lane reads its live footer, never a transcript line that quotes a meter', async (t) => {
+  const quoted = '• The old fixture read gpt-5.6-terra · 5h 3% left · weekly 40% left';
+  const live = fixture(t);
+  seedLane(live);
+  live.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: [quoted, '', '› Ask Codex to do anything', '', 'gpt-5.6-terra high · Context 62% left · 5h 79% left · weekly 91% left'].join('\n'), stderr: '' },
+  );
+  const read = await timedOutWait(live);
+  assert.equal(read.exit, 4);
+  assert.equal(read.row.plan5h, 79);
+  assert.equal(read.row.planWeekly, 91);
+
+  // A footer that carries no plan figures leaves the quoted line as the last
+  // match in the buffer.
+  const bare = fixture(t);
+  seedLane(bare);
+  bare.responses.push(
+    { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+    { code: 0, stdout: [quoted, '', '› Ask Codex to do anything', '', 'gpt-6-astra medium · Context 100% left · Fast off'].join('\n'), stderr: '' },
+  );
+  const unknown = await timedOutWait(bare);
+  assert.equal(unknown.exit, 4, 'a quoted 5h 3% is not this lane\'s meter');
+  assert.equal(unknown.row.plan5h, null);
+  assert.equal(unknown.row.planWeekly, null);
+  assert.equal(unknown.row.warning, 'plan meter unavailable; capacity is unknown');
+});
+
+test('quest 8b7c477c: a genuine low footer still trips plan-low under a transcript that quotes higher figures', async (t) => {
+  for (const [footer, plan5h, planWeekly] of [
+    ['gpt-5.6-terra high · Context 62% left · 5h 15% left · weekly 91% left', 15, 91],
+    ['gpt-6-astra medium · Context 100% left · weekly 12% left · Fast off', null, 12],
+  ]) {
+    const f = fixture(t);
+    seedLane(f);
+    f.responses.push(
+      { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+      { code: 0, stdout: ['• quoted: 5h 90% left · weekly 95% left', 'Working (3s • esc to interrupt)', '› Ask Codex to do anything', footer].join('\n'), stderr: '' },
+    );
+    const result = await timedOutWait(f);
+    assert.equal(result.exit, 6);
+    assert.equal(result.output.state, 'plan-low');
+    assert.equal(result.row.plan5h, plan5h);
+    assert.equal(result.row.planWeekly, planWeekly);
+  }
+});
+
+test('quest 8b7c477c: a codex pane with no live footer has an unknown meter, never a scrollback figure', async (t) => {
+  for (const pane of [
+    // codex quit: its last footer stays in the scrollback above the shell prompt
+    ['› Ask Codex to do anything', 'gpt-5.6-terra high · Context 62% left · 5h 9% left · weekly 91% left', 'PS X:\\fixture\\lane>'].join('\n'),
+    // no footer drawn at all
+    ['some output', '5h 9% left · weekly 91% left'].join('\n'),
+  ]) {
+    const f = fixture(t);
+    seedLane(f);
+    f.responses.push(
+      { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+      { code: 0, stdout: pane, stderr: '' },
+    );
+    const result = await timedOutWait(f);
+    assert.equal(result.exit, 4);
+    assert.equal(result.row.plan5h, null);
+    assert.equal(result.row.planWeekly, null);
+    assert.equal(result.row.warning, 'plan meter unavailable; capacity is unknown');
+  }
+});
+
 test('quest 653c5b81: a failed pane read clears the prior meter and a later read recovers it', async (t) => {
   const stale = fixture(t);
   seedLane(stale);
   let staleClock = 0;
   stale.responses.push(
     { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
-    { code: 0, stdout: 'gpt-5.6-terra high · 5h 80% left · weekly 90% left', stderr: '' },
+    { code: 0, stdout: 'gpt-5.6-terra high · Context 62% left · 5h 80% left · weekly 90% left', stderr: '' },
     { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
     { code: 1, stdout: '', stderr: 'pane read failed' },
   );
@@ -578,11 +688,11 @@ test('quest 653c5b81: a failed pane read clears the prior meter and a later read
   let recoveredClock = 0;
   recovered.responses.push(
     { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
-    { code: 0, stdout: 'gpt-5.6-terra high · 5h 80% left · weekly 90% left', stderr: '' },
+    { code: 0, stdout: 'gpt-5.6-terra high · Context 62% left · 5h 80% left · weekly 90% left', stderr: '' },
     { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
     { code: 1, stdout: '', stderr: 'pane read failed' },
     { code: 0, stdout: '{"result":{"state":"blocked"}}', stderr: '' },
-    { code: 0, stdout: 'Approve running tests\nweekly 55% left', stderr: '' },
+    { code: 0, stdout: 'Approve running tests\ngpt-6-astra medium · Context 100% left · weekly 55% left', stderr: '' },
   );
   const recoveredResult = await runLane(['wait', 'lane-a', '--until', 'blocked', '--timeout', '2000', '--log', recovered.log], {
     exec: recovered.exec,
@@ -694,14 +804,14 @@ test('WP-2 / C11: the default plan floor is the measured 20%, not 10%', async (t
 
 test('WP-2: footer scrape returns the last meter and nulls when absent', () => {
   assert.deepEqual(
-    scrapePlanMeter('old 5h 80% left · weekly 90% left\nnew 5h 79% left · weekly 89% left'),
+    scrapePlanMeter('old · Context 62% left · 5h 80% left · weekly 90% left\nnew · Context 61% left · 5h 79% left · weekly 89% left'),
     { plan5h: 79, planWeekly: 89 },
   );
   assert.deepEqual(scrapePlanMeter('gpt-5.6-terra · Context 62% left'), { plan5h: null, planWeekly: null });
   // C11 says the last FOOTER LINE. Taking the last match anywhere in the buffer
   // pairs a live 5h figure with a stale weekly one.
   assert.deepEqual(
-    scrapePlanMeter('5h 80% left · weekly 90% left\nsome output\n5h 9% left'),
+    scrapePlanMeter('Context 62% left · 5h 80% left · weekly 90% left\nsome output\nContext 61% left · 5h 9% left'),
     { plan5h: 9, planWeekly: null },
   );
 });
@@ -1879,7 +1989,7 @@ test('A2-8 / U7: an infra error is not masked by the plan meter, and a finished 
   for (let poll = 0; poll < 2; poll++) {
     g.responses.push(
       { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
-      { code: 0, stdout: 'gpt-5.6-terra · 5h 3% left · weekly 40% left', stderr: '' },
+      { code: 0, stdout: 'gpt-5.6-terra · Context 62% left · 5h 3% left · weekly 40% left', stderr: '' },
     );
   }
   const finished = await runLane(['wait', 'lane-a', '--timeout', '5000', '--log', g.log], { exec: g.exec, ...steppedClock() });
@@ -2475,7 +2585,7 @@ test('A3-10 / R3-M2: a bare wait sends no --until, and the poll timeout is the p
 test('A3-11 / R3-U4: the plan meter unwraps the herdr envelope before reading the last footer line', () => {
   const enveloped = JSON.stringify({
     id: 'cli:agent:read',
-    result: { text: 'old 5h 80% left · weekly 90% left\nnew 5h 9% left · weekly 40% left' },
+    result: { text: 'old · Context 62% left · 5h 80% left · weekly 90% left\nnew · Context 61% left · 5h 9% left · weekly 40% left' },
   });
   assert.deepEqual(scrapePlanMeter(enveloped), { plan5h: 9, planWeekly: 40 },
     'an enveloped response collapses to one line, turning "last footer line" into "first match"');

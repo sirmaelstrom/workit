@@ -1491,7 +1491,7 @@ async function waitLane(opts, deps, state) {
 
     // The read feeds plan metering and the dialog text only. A transient read
     // failure must not end a wait that herdr is still answering.
-    const plan = readPlanState(deps, opts.name);
+    const plan = readPlanState(deps, opts.name, lane.kind);
     if (plan.ok) {
       meter = plan.meter;
       dialog = plan.dialog;
@@ -1845,7 +1845,7 @@ async function resumeLane(opts, deps, state) {
       // A timeout says the lane is still working, not that its pane is
       // unreadable. Take one fresh reading so a live reserve floor can still
       // stop dispatch; resume remains a settled-state wait, never a poll loop.
-      const plan = readPlanState(deps, opts.name);
+      const plan = readPlanState(deps, opts.name, lane.kind);
       const meter = plan.meter ?? { plan5h: null, planWeekly: null };
       const warning = planMeterWarning(meter, lane.kind);
       const modalEligible = plan.refusalShape === 'modal' && planFloorReached(meter, floor);
@@ -1875,7 +1875,7 @@ async function resumeLane(opts, deps, state) {
   // The same pane scrape `wait` runs: the plan meter and the captured refusal
   // belong to the lane, not to the verb that happened to look. C11(a) again —
   // herdr reports `idle` while that modal is up, so this outranks the state.
-  const plan = readPlanState(deps, opts.name);
+  const plan = readPlanState(deps, opts.name, lane.kind);
   const meter = plan.meter ?? { plan5h: null, planWeekly: null };
   const warning = planMeterWarning(meter, lane.kind);
   const modalEligible = plan.refusalShape === 'modal'
@@ -2408,13 +2408,16 @@ function isTimeoutFailure(result) {
 
 // One pane read, shared by `wait` and `resume`: the plan meter and the captured
 // refusal are properties of the lane, not of the verb that happened to look.
-function readPlanState(deps, name) {
+function readPlanState(deps, name, kind) {
   const read = call(deps, 'herdr', ['agent', 'read', name, '--lines', '40']);
   if (read.code !== 0) return { ok: false, meter: null, refusal: null, refusalShape: null, dialog: '' };
   const refusal = planRefusal(read.stdout);
   return {
     ok: true,
-    meter: scrapePlanMeter(read.stdout),
+    // A claude lane has no plan footer, so any meter text in its pane is its
+    // own output (measured: a lane editing lane.test.mjs fixtures read as
+    // weekly 15%, exit 6).
+    meter: expectsPlanMeter(kind) ? scrapePlanMeter(read.stdout) : { plan5h: null, planWeekly: null },
     refusal: refusal?.line ?? null,
     refusalShape: refusal?.shape ?? null,
     capacity: capacityBanner(read.stdout),
@@ -2454,19 +2457,26 @@ function planFloorReached(meter, floor) {
   return selected !== null && selected <= floor;
 }
 
+// A lane record from before `kind` was recorded is a codex lane.
+function expectsPlanMeter(kind) {
+  return kind === undefined || kind === null || kind === 'codex';
+}
+
 function planMeterWarning(meter, kind) {
-  const expectsCodexMeter = kind === undefined || kind === null || kind === 'codex';
-  return expectsCodexMeter && selectedPlanWindow(meter) === null
+  return expectsPlanMeter(kind) && selectedPlanWindow(meter) === null
     ? { warning: 'plan meter unavailable; capacity is unknown' }
     : {};
 }
 
 export function scrapePlanMeter(text) {
-  // C11 says the LAST FOOTER LINE, not the last match in the buffer: mixing
-  // lines returns a live 5h figure beside a stale weekly one. Unwrap first —
-  // an enveloped response is one JSON line, which silently turns "last footer
-  // line" into "first match" (measured: enveloped 80%, plain 9%).
-  const source = responseText(text).split(/\r?\n/).filter((line) => /(?:5h|weekly)\s+\d+%\s+left/i.test(line)).at(-1) ?? '';
+  // C11 says the LAST FOOTER LINE: the pane's last non-blank line, and only
+  // when it is the live Codex footer (`Context N% left`). Any line above it is
+  // transcript — a lane's own output can quote meter text, and a quit codex
+  // leaves its old footer in the scrollback under a fresh shell prompt. Unwrap
+  // first — an enveloped response is one JSON line, which silently turns "last
+  // footer line" into "first match" (measured: enveloped 80%, plain 9%).
+  const last = responseText(text).split(/\r?\n/).filter((line) => line.trim() !== '').at(-1) ?? '';
+  const source = CODEX_FOOTER.test(last) ? last : '';
   const five = /5h\s+(\d+)%\s+left/i.exec(source);
   const weekly = /weekly\s+(\d+)%\s+left/i.exec(source);
   return { plan5h: five ? Number(five[1]) : null, planWeekly: weekly ? Number(weekly[1]) : null };
