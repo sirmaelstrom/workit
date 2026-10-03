@@ -2048,7 +2048,9 @@ async function stopLane(opts, deps, state) {
       patterns: promptPatterns(opts, deps),
     });
     const exitBanner = !liveTui && lateLines.slice(-3).some((line) => /^(?:goodbye|codex\s+(?:exited|closed))/i.test(line));
-    const resumeId = lane.kind === 'claude' && latePane.code === 0 && !liveTui ? claudeExitFooterTail(lateText) : null;
+    // The footer must be the last two lines, so a live TUI's footer below it
+    // keeps it out: neither footer line matches a LIVE_TUI pattern.
+    const resumeId = lane.kind === 'claude' && latePane.code === 0 ? claudeExitFooterTail(lateText) : null;
     // The same listing lag as the normal path: with the pane showing an exit
     // (or unreadable), the listing gets the same window; a live TUI gets one read.
     const exitSeen = !liveTui && (latePrompt || exitBanner || resumeId !== null || latePane.code !== 0);
