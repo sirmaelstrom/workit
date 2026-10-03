@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, statSync, copyFileSync, symlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve, relative } from 'node:path';
@@ -35,6 +35,7 @@ import {
   parseArgs,
   cmdPost,
   cmdThreads,
+  THREADS_OPEN_EXIT,
   cmdReply,
   cmdLens,
   cmdManaged,
@@ -959,6 +960,7 @@ function runThreadsWithFakeGh({ threads, unresolved = false }) {
   const calls = [];
   const logs = [];
   const deaths = [];
+  const exits = [];
   const runGh = (args, opts) => {
     calls.push({ args, opts });
     return JSON.stringify({
@@ -967,10 +969,117 @@ function runThreadsWithFakeGh({ threads, unresolved = false }) {
   };
   cmdThreads(
     { pr: '53', repo: 'owner/repo', unresolved },
-    { runGh, die: (code, message) => deaths.push({ code, message }), log: (m) => logs.push(String(m)) },
+    {
+      runGh,
+      die: (code, message) => deaths.push({ code, message }),
+      log: (m) => logs.push(String(m)),
+      exit: (code, message) => exits.push({ code, message }),
+    },
   );
-  return { calls, out: logs.join('\n'), deaths };
+  return { calls, logs, out: logs.join('\n'), deaths, exits };
 }
+
+test('threads --unresolved with one open thread lists it, then exits THREADS_OPEN_EXIT', () => {
+  const { logs, deaths, exits } = runThreadsWithFakeGh({
+    threads: [thread({ isResolved: false }), thread()],
+    unresolved: true,
+  });
+  assert.deepEqual(deaths, []);
+  assert.equal(logs[0], '1 of 2 thread(s) (unresolved)\n', 'the listing prints exactly as before');
+  assert.equal(exits.length, 1);
+  assert.equal(exits[0].code, THREADS_OPEN_EXIT);
+  assert.match(exits[0].message, /1 unresolved review thread\(s\) on owner\/repo#53/);
+});
+
+test('threads --unresolved with zero open (one resolved) prints the exact line and does not exit nonzero', () => {
+  const { logs, deaths, exits } = runThreadsWithFakeGh({ threads: [thread()], unresolved: true });
+  assert.deepEqual(deaths, []);
+  assert.deepEqual(exits, []);
+  assert.deepEqual(logs, ['no unresolved review threads']);
+});
+
+test('bare threads is a listing, not a gate: open threads still exit 0', () => {
+  const { exits, deaths } = runThreadsWithFakeGh({ threads: [thread({ isResolved: false })] });
+  assert.deepEqual(deaths, []);
+  assert.deepEqual(exits, []);
+});
+
+// Exit-shaped call sites only, so an unrelated `x.slice(0, 8);` is never read
+// as an exit code. A code computed from a non-literal is still invisible here.
+const EXIT_CODE_SHAPES = [
+  /\b(?:die|fail)\(\s*(\d+)\s*,/g, // die(6, …) / fail(2, …)
+  /\b(?:die|fail)\(\s*[^,;()]*\?\s*(\d+)\s*:\s*(\d+)\s*,/g, // die(cond ? 3 : 4, …)
+  /\brefuse\([^;]*?,\s*(\d+)\s*,?\s*\);/g, // refuse(reason, extra, message, 4);
+  /\b(?:code|exitCode)\s*=\s*(\d+)\b/g, // the refuse/finish defaults: code = 1
+  /\bexitCode:\s*[^,;}]*?\?\s*(\d+)\s*:\s*(\d+)/g, // exitCode: cond ? 4 : 3
+  /\bprocess\.exit\(\s*(?:[^;()]*\?\s*(\d+)\s*:\s*)?(\d+)\s*\)/g, // process.exit(opts.cmd ? 0 : 2)
+];
+
+function exitCodesUsedIn(src) {
+  const used = new Set();
+  for (const shape of EXIT_CODE_SHAPES) {
+    for (const m of src.matchAll(shape)) for (const code of m.slice(1)) if (code !== undefined) used.add(Number(code));
+  }
+  return used;
+}
+
+test('the open-thread exit code collides with no other code pr-review.mjs uses', () => {
+  const used = exitCodesUsedIn(readFileSync(SCRIPT, 'utf8'));
+  for (const code of [1, 2, 3, 4, 5, 6, 7]) assert.ok(used.has(code), `the scan missed exit ${code}; it cannot vouch for the rest`);
+  assert.notEqual(THREADS_OPEN_EXIT, 0);
+  assert.ok(!used.has(THREADS_OPEN_EXIT), `exit ${THREADS_OPEN_EXIT} is already used: ${[...used].sort().join(',')}`);
+});
+
+test('the exit-code scan ignores a non-exit call that ends in a number', () => {
+  const used = exitCodesUsedIn("const head = sha.slice(0, 8);\nsetTimeout(tick, 8);\ndie(6, 'x');\n");
+  assert.deepEqual([...used], [6]);
+});
+
+test('threads --unresolved counts an outdated unresolved thread as open', () => {
+  const { logs, exits } = runThreadsWithFakeGh({
+    threads: [thread({ isResolved: false, isOutdated: true }), thread()],
+    unresolved: true,
+  });
+  assert.deepEqual(exits.map((e) => e.code), [THREADS_OPEN_EXIT]);
+  assert.match(logs[1], /\[OPEN, outdated\]/);
+});
+
+test('threads: a GraphQL reply with no thread list is exit 1 with no output, never an empty board', () => {
+  for (const body of [
+    JSON.stringify({ data: { repository: { pullRequest: null } } }),
+    'not json',
+  ]) {
+    const logs = [];
+    const deaths = [];
+    const exits = [];
+    cmdThreads(
+      { pr: '53', repo: 'owner/repo', unresolved: true },
+      {
+        runGh: () => body,
+        die: (code, message) => deaths.push({ code, message }),
+        log: (m) => logs.push(String(m)),
+        exit: (code, message) => exits.push({ code, message }),
+      },
+    );
+    assert.deepEqual(deaths.map((d) => d.code), [1], `for reply ${body}`);
+    assert.match(deaths[0].message, /not a merge-ready signal/);
+    assert.deepEqual(logs, []);
+    assert.deepEqual(exits, []);
+  }
+});
+
+test('the source header, USAGE and SKILL agree on the threads exit codes', () => {
+  const src = readFileSync(SCRIPT, 'utf8');
+  const header = src.slice(src.indexOf('Exit codes (`threads`):'), src.indexOf('*/'));
+  for (const code of [0, 1, 2, 4, 6, 8]) assert.match(header, new RegExp(`\\*\\s+${code}\\s+\\S`), `header misses threads exit ${code}`);
+  assert.match(header, /8\s+`--unresolved` listed one or more unresolved threads, outdated ones\s+\*\s+included/);
+  assert.match(src, /--unresolved exits 8 when any thread is open, 0 when none is/);
+  const skill = readFileSync(SKILL, 'utf8');
+  const from = skill.indexOf('| Code | `threads --unresolved` means |');
+  const table = skill.slice(from, skill.indexOf('\n\n', from));
+  for (const code of [0, 1, 2, 4, 6, 8]) assert.match(table, new RegExp(`^\\| ${code} \\|`, 'm'), `SKILL table misses exit ${code}`);
+  assert.match(table, /\| 8 \| One or more unresolved threads, outdated ones included/);
+});
 
 test('threads lists normally when nothing is truncated', () => {
   const { out, deaths } = runThreadsWithFakeGh({
@@ -983,12 +1092,14 @@ test('threads lists normally when nothing is truncated', () => {
 test('a full 100-thread page exits nonzero instead of claiming completeness', () => {
   // The exact silent-completeness class this PR removed from `post`, left
   // standing on the command that prints the merge verdict.
-  const { out, deaths } = runThreadsWithFakeGh({
-    threads: Array.from({ length: 100 }, () => thread()),
+  const { out, deaths, exits } = runThreadsWithFakeGh({
+    threads: [thread({ isResolved: false }), ...Array.from({ length: 99 }, () => thread())],
     unresolved: true,
   });
   assert.equal(deaths[0]?.code, 6);
   assert.match(deaths[0].message, /truncat/i);
+  assert.equal(out, '', 'truncation fires before any listing');
+  assert.deepEqual(exits, [], 'truncation is exit 6, never the open-thread code');
   assert.doesNotMatch(
     out,
     /no unresolved review threads/,
@@ -1504,6 +1615,85 @@ test('threads requires --repo — same-number-different-repo reads as "no unreso
   assert.doesNotMatch(r.stderr, /gh /);
 });
 
+/**
+ * The real CLI's `threads --unresolved`, with PATH holding only `binDir` (or
+ * nothing) and run from `cwd`. Windows (libuv) looks for a bare `gh.exe` in the
+ * cwd first and then on PATH (the cwd step is skipped when the environment sets
+ * NoDefaultCurrentDirectoryInExePath), so `cwd` is always a directory this test made.
+ */
+function runThreadsCli({ binDir = '', cwd }) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PATH'));
+  env.PATH = binDir;
+  try {
+    const stdout = execFileSync(process.execPath, [SCRIPT, 'threads', '--pr', '1', '--repo', 'o/r', '--unresolved'], { encoding: 'utf8', env, cwd });
+    return { code: 0, stdout, stderr: '' };
+  } catch (err) {
+    return { code: err.status, stdout: String(err.stdout ?? ''), stderr: String(err.stderr ?? '') };
+  }
+}
+
+/**
+ * A fake `gh` for the real CLI: node itself under gh's name. gh() spawns
+ * `gh api graphql …` with no shell, so this node takes `api` as its script and
+ * runs the `api` file in the cwd, which prints `reply`. The copy lives in a
+ * temp dir that is removed afterwards; nothing binary is committed.
+ */
+function withFakeGh(reply, fn) {
+  const root = mkdtempSync(join(tmpdir(), 'slim-review-fake-gh-'));
+  const binDir = join(root, 'bin');
+  const cwd = join(root, 'cwd');
+  mkdirSync(binDir);
+  mkdirSync(cwd);
+  const gh = join(binDir, process.platform === 'win32' ? 'gh.exe' : 'gh');
+  if (process.platform === 'win32') copyFileSync(process.execPath, gh);
+  else symlinkSync(process.execPath, gh);
+  writeFileSync(join(cwd, 'api'), `process.stdout.write(${JSON.stringify(reply)});\n`, 'utf8');
+  try {
+    return fn({ binDir, cwd });
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
+const graphqlReply = (nodes) => JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes } } } } });
+
+test('threads --unresolved: a gh that cannot run is exit 4, not the open-thread code and not 0', () => {
+  // No PATH entry and an empty cwd: the real ghOrDie cannot spawn gh at all,
+  // so the failure path under test is the production one, not a fake.
+  const cwd = mkdtempSync(join(tmpdir(), 'slim-review-no-gh-'));
+  let r;
+  try {
+    r = runThreadsCli({ cwd });
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+  assert.equal(r.code, 4);
+  assert.notEqual(r.code, THREADS_OPEN_EXIT);
+  assert.match(r.stderr, /gh api graphql/);
+  assert.equal(r.stdout, '');
+});
+
+test('threads --unresolved through the real CLI: one open thread is OS exit 8 after the whole listing', () => {
+  const r = withFakeGh(graphqlReply([thread({ isResolved: false }), thread()]), runThreadsCli);
+  assert.equal(r.code, THREADS_OPEN_EXIT);
+  assert.match(r.stdout, /^1 of 2 thread\(s\) \(unresolved\)\n/);
+  assert.match(r.stdout, /reply with: {2}node pr-review\.mjs reply --pr 1 --repo o\/r --comment-id <id> --body-file <file>\n$/);
+  assert.match(r.stderr, /1 unresolved review thread\(s\) on o\/r#1: not merge-ready \(exit 8\)\./);
+});
+
+test('threads --unresolved through the real CLI: zero open is OS exit 0 and exactly the merge-ready line', () => {
+  const r = withFakeGh(graphqlReply([thread()]), runThreadsCli);
+  assert.equal(r.code, 0);
+  assert.equal(r.stdout, 'no unresolved review threads\n');
+});
+
+test('threads --unresolved through the real CLI: pullRequest null is OS exit 1 with nothing listed', () => {
+  const r = withFakeGh(JSON.stringify({ data: { repository: { pullRequest: null } } }), runThreadsCli);
+  assert.equal(r.code, 1);
+  assert.equal(r.stdout, '');
+  assert.match(r.stderr, /unexpected GraphQL reply for o\/r#1/);
+});
+
 test('a malformed --repo is a usage error on every subcommand, with the value echoed', () => {
   // `own/er/repo` used to sail through: cmdThreads destructures [owner, name]
   // and drops the third segment, so `threads` printed "no unresolved review
@@ -1674,7 +1864,7 @@ test('characterisation: standalone post prints the receipt exactly and posts one
   assertNoOutcomeLine(logs);
 });
 
-function characterisationThreads({ unresolved = false } = {}) {
+function characterisationThreads({ unresolved = false, exits = [] } = {}) {
   const logs = [];
   const runGh = () => JSON.stringify({
     data: {
@@ -1702,13 +1892,19 @@ function characterisationThreads({ unresolved = false } = {}) {
   });
   withNoManagedConfig(() => cmdThreads(
     { pr: '53', repo: 'owner/repo', unresolved },
-    { runGh, die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(String(line)) },
+    {
+      runGh,
+      die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); },
+      log: (line) => logs.push(String(line)),
+      exit: (code) => exits.push(code),
+    },
   ));
   return logs;
 }
 
 test('characterisation: standalone threads prints one block per thread and the reply hint', () => {
-  const logs = characterisationThreads();
+  const exits = [];
+  const logs = characterisationThreads({ exits });
   assert.deepEqual(logs, [
     '2 of 2 thread(s)\n',
     '#1  src/a.ts:11  [OPEN]  replies:0',
@@ -1720,10 +1916,12 @@ test('characterisation: standalone threads prints one block per thread and the r
     'reply with:  node pr-review.mjs reply --pr 53 --repo owner/repo --comment-id <id> --body-file <file>',
   ]);
   assertNoOutcomeLine(logs);
+  assert.deepEqual(exits, []);
 });
 
 test('characterisation: standalone threads --unresolved shows only the open one', () => {
-  const logs = characterisationThreads({ unresolved: true });
+  const exits = [];
+  const logs = characterisationThreads({ unresolved: true, exits });
   assert.deepEqual(logs, [
     '1 of 2 thread(s) (unresolved)\n',
     '#1  src/a.ts:11  [OPEN]  replies:0',
@@ -1732,6 +1930,7 @@ test('characterisation: standalone threads --unresolved shows only the open one'
     'reply with:  node pr-review.mjs reply --pr 53 --repo owner/repo --comment-id <id> --body-file <file>',
   ]);
   assertNoOutcomeLine(logs);
+  assert.deepEqual(exits, [THREADS_OPEN_EXIT], 'the stdout listing is unchanged; the open thread is the exit code');
 });
 
 test('characterisation: standalone reply posts one reply and records one verdict row', () => {

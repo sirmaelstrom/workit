@@ -316,8 +316,24 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" threads --pr <n> --repo <owner/
 ```
 
 `--repo` is required here, not optional. Resolved from cwd, `--pr <n>` silently
-answers about a *different* repository's PR of the same number — and the answer
-it prints, "no unresolved review threads", is the merge-ready signal.
+answers about a *different* repository's PR of the same number — and its answer
+is the merge-ready signal.
+
+**The gate is the exit code.** Chain the merge on it:
+`threads --pr <n> --repo <owner/name> --unresolved && <merge>`. The printed line
+`no unresolved review threads` is the human-readable form of exit 0.
+
+| Code | `threads --unresolved` means |
+|---|---|
+| 0 | No unresolved threads; prints exactly `no unresolved review threads`. Merge-ready |
+| 1 | The GraphQL reply had no thread list (e.g. `pullRequest: null`), or an unexpected error; nothing was listed. Not merge-ready |
+| 2 | Usage error (missing `--repo`, malformed `--repo`, no `--pr`); no `gh` call was made |
+| 4 | A `gh` call failed; nothing was listed |
+| 6 | The page came back full (truncated); no listing at all — see below |
+| 8 | One or more unresolved threads, outdated ones included; the list is printed, then exit 8. Not merge-ready |
+
+Bare `threads` (no `--unresolved`) is a listing, not a gate: it exits 0 on any
+successful listing, open threads or not, and shares codes 1, 2, 4 and 6.
 
 This lists every unresolved review thread on the PR, not only the ones this loop
 just posted — a human's or a bot's open comment deserves the same verdict, and a

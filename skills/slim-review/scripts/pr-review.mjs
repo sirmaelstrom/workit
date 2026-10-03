@@ -32,9 +32,16 @@
  *      back empty (a fetch failure, never a PR that changes nothing)
  *
  * Exit codes (`threads`):
+ *   0  listed (bare `threads`, whatever it lists), or `--unresolved` found no
+ *      unresolved thread and printed `no unresolved review threads`
+ *   1  the GraphQL reply had no thread list; nothing was listed
+ *   2  usage error
+ *   4  a `gh` call failed
  *   6  the result was truncated by the query's own page size, so the thread list
  *      is incomplete and must not be read as a merge-ready signal. Full
  *      pagination is a follow-up; this is the floor that keeps the gap loud.
+ *   8  `--unresolved` listed one or more unresolved threads, outdated ones
+ *      included: not merge-ready. The listing prints first; the code is the gate.
  */
 
 import {
@@ -811,14 +818,40 @@ query($owner:String!, $name:String!, $pr:Int!) {
   }
 }`;
 
-export function cmdThreads(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
+/**
+ * `threads --unresolved` is the merge gate: `threads … --unresolved && gh pr merge …`.
+ * So an open thread is a nonzero exit, distinct from every other code this
+ * script uses (2 usage, 4 gh failure, 6 truncation). It goes through
+ * `process.exitCode`, not `fail`, so the listing on stdout is flushed whole
+ * before the process ends.
+ */
+export const THREADS_OPEN_EXIT = 8;
+
+export function cmdThreads(opts, {
+  runGh = ghOrDie,
+  die = fail,
+  log = console.log,
+  exit = (code, message) => { console.error(message); process.exitCode = code; },
+} = {}) {
   const repo = resolveRepo(opts.repo, opts.cwd);
   const [owner, name] = repo.split('/');
   const res = runGh(
     ['api', 'graphql', '-f', `query=${THREADS_QUERY}`, '-F', `owner=${owner}`, '-F', `name=${name}`, '-F', `pr=${opts.pr}`],
     { cwd: opts.cwd },
   );
-  const threads = JSON.parse(res).data.repository.pullRequest.reviewThreads.nodes;
+  // A reply with no thread list (`pullRequest: null`, or not JSON at all) is a
+  // failed read, never an empty board: exit 1 before any output.
+  let threads;
+  let problem = 'it has no reviewThreads.nodes list';
+  try {
+    threads = JSON.parse(res)?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  } catch (err) {
+    problem = `it is not JSON (${err.message})`;
+  }
+  if (!Array.isArray(threads)) {
+    die(1, `unexpected GraphQL reply for ${repo}#${opts.pr}: ${problem}. Nothing was listed; this is not a merge-ready signal.`);
+    return;
+  }
 
   // Completeness check BEFORE any output. This query is unpaginated, and
   // SKILL.md leans on the result as the merge-ready signal — so a full page must
@@ -857,6 +890,10 @@ export function cmdThreads(opts, { runGh = ghOrDie, die = fail, log = console.lo
     log('');
   }
   log(`reply with:  node pr-review.mjs reply --pr ${opts.pr} --repo ${repo} --comment-id <id> --body-file <file>`);
+  // Bare `threads` is a listing, not a gate: it exits 0 whatever it lists.
+  if (opts.unresolved) {
+    exit(THREADS_OPEN_EXIT, `${shown.length} unresolved review thread(s) on ${repo}#${opts.pr}: not merge-ready (exit ${THREADS_OPEN_EXIT}).`);
+  }
 }
 
 export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
@@ -3271,6 +3308,8 @@ const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
   post     --pr <n> --repo owner/name --findings <file> --findings <file> [--dry-run] [--force-post]
            [--single-lens "<reason>"]   posting one lens is exit 7 unless the reason is given (it is stamped into the review)
   threads  --pr <n> --repo owner/name [--unresolved]
+           --unresolved exits 8 when any thread is open, 0 when none is; exit 6 on a truncated page,
+           exit 1 when the GraphQL reply has no thread list
   reply    --pr <n> --repo owner/name --comment-id <id> --body-file <file>
            [--verdict confirmed|refuted|note|judgment] [--adjudicator lane|conductor|operator]
            [--dup-of <comment id>] [--measure-log <path>]
