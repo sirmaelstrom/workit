@@ -31,7 +31,7 @@ export const USAGE_TEXT = `session <verb> [options] — one Claude-session lifec
   spawn  --name <n> --model <id> --effort <lvl> [--cwd <abs>] [--from <pane>|--current]
          [--direction down|right] [--mode fresh|fork --from-session <id>] [--chrome]
          [--permission-mode bypassPermissions] [--timeout <ms>] [-- <native args>]
-  brief  <name|pane> --file <abs> [--wait] [--timeout <ms>]
+  brief  <name|pane> --file <abs> [--wait [--timeout <ms>]]
   watch  <name|pane> [--until idle|done|blocked|gone]... --timeout <ms>
   retire <self|parent|name|pane> --mode exit|close|exit+close [--timeout <ms>] [--dialog-after-ms <ms>] [--capture-final]
   chain  --handoff <abs> --model <id> --effort <lvl> --name <successor> [--no-retire]
@@ -369,6 +369,7 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
 
 async function brief(opts, deps, state) {
   if (opts.positional.length !== 1) usage('brief needs one target');
+  if (opts.timeout && !opts.wait) usage('brief --timeout requires --wait');
   required(opts, 'file');
   const file = resolve(opts.file);
   if (!isAbsolute(opts.file) || !deps.exists(file)) usage(`brief file does not exist: ${file}`);
