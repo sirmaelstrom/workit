@@ -225,8 +225,11 @@ async function resolveTarget(opts, state, target, deps) {
     const agents = callOrFail(deps, ['agent', 'list']);
     const owner = agentOwningPane(agents, target);
     if (!owner) return { name: null, pane: target, sessionId: null, target, resolvedFrom: 'herdr', goneAgent: true };
-    const live = call(deps, ['agent', 'get', owner]);
-    return { name: owner, pane: target, sessionId: live.code === 0 ? sessionId(live.stdout) : null, target: owner, resolvedFrom: 'herdr' };
+    // A Claude started by hand in the pane is listed with no name; herdr takes the
+    // pane id as its agent target, so the pane id addresses that live owner.
+    const agentTarget = owner.name ?? target;
+    const live = call(deps, ['agent', 'get', agentTarget]);
+    return { name: owner.name, pane: target, sessionId: live.code === 0 ? sessionId(live.stdout) : null, target: agentTarget, resolvedFrom: 'herdr' };
   }
   const record = Object.values(state.sessions).find((item) => item.pane === target);
   if (record) return { name: record.name ?? target, pane: record.pane, sessionId: record.sessionId ?? null, target: record.name ?? target };
@@ -235,7 +238,10 @@ async function resolveTarget(opts, state, target, deps) {
   if (!pane) usage(`target ${target} has no sidecar pane and herdr agent get did not return pane_id`);
   return { name: target, pane, sessionId: fetched.code === 0 ? sessionId(fetched.stdout) : null, target };
 }
+// The pane's owner: `{ name }` for a named entry, `{ name: null }` when the only
+// entry on the pane has no name, and null when no entry claims the pane.
 function agentOwningPane(raw, pane) {
+  let nameless = false;
   const search = (value) => {
     if (Array.isArray(value)) {
       for (const item of value) { const found = search(item); if (found) return found; }
@@ -245,12 +251,16 @@ function agentOwningPane(raw, pane) {
     const paneId = value.pane_id ?? value.paneId ?? (typeof value.pane === 'string' ? value.pane : value.pane?.id ?? value.pane?.pane_id);
     if (paneId === pane) {
       const name = value.name ?? value.agent_name ?? value.agentName ?? value.id;
-      return typeof name === 'string' ? name : null;
+      if (typeof name === 'string') return name;
+      nameless = true;
+      return null;
     }
     for (const child of Object.values(value)) { const found = search(child); if (found) return found; }
     return null;
   };
-  return search(resultOf(raw));
+  const named = search(resultOf(raw));
+  if (named) return { name: named };
+  return nameless ? { name: null } : null;
 }
 function normalizeNativeArgs(args) {
   const normalized = [];
@@ -264,6 +274,7 @@ function normalizeNativeArgs(args) {
 function nativeOption(args, flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : undefined; }
 function nativeHasDontAsk(args) { return String(nativeOption(args, '--permission-mode') ?? '').toLowerCase() === 'dontask'; }
 function paneBusy(result) { return /agent_pane_busy/i.test(`${result.stderr}\n${result.stdout}`); }
+function agentBlocked(result) { return /agent_blocked/i.test(`${result.stderr}\n${result.stdout}`); }
 // A pane fresh from `pane split` is not an available shell until pwsh draws its
 // prompt; herdr refuses `agent start` there with agent_pane_busy (570 ms after
 // the split, 2026-10-01). The retry polls at lane.mjs's prompt-read cadence.
@@ -403,8 +414,42 @@ async function watch(opts, deps, state) {
   return { state: stateAfter, target: target.target };
 }
 
-function exitDialog(text) {
-  return /Background work is running/i.test(text) && /Enter to confirm/i.test(text);
+// Claude Code's background-work exit menu counts only as the active prompt: the
+// last header line in the read, followed by nothing but the menu's own lines and
+// ending on its footer, with the cursor on option 1 (Enter confirms the selected
+// option). The same phrases anywhere else in the read are scrollback beside some
+// other prompt, so that read is ambiguous and is never answered.
+const EXIT_MENU_LINES = [
+  /^The following will stop when you exit:$/,
+  /^[a-z]+ · .+$/i,
+  /^(?:❯\s*)?1\. Exit and stop tasks$/,
+  /^(?:❯\s*)?2\. Move to background and exit$/,
+  /^(?:❯\s*)?3\. Stay$/,
+];
+function exitDialogState(text) {
+  const lines = String(text).split(/\r?\n/).map((line) => line.trim());
+  while (lines.length > 0 && !lines.at(-1)) lines.pop();
+  const header = lines.findLastIndex((line) => /^Background work is running$/i.test(line));
+  const menu = header < 0 ? [] : lines.slice(header + 1);
+  const footer = menu.pop();
+  const active = header >= 0
+    && /^Enter to confirm · Esc to cancel$/i.test(footer ?? '')
+    && menu.filter((line) => /^❯\s*1\. Exit and stop tasks$/.test(line)).length === 1
+    && menu.every((line) => !line || EXIT_MENU_LINES.some((pattern) => pattern.test(line)));
+  if (active) return 'active';
+  return /Background work is running/i.test(text) && /Enter to confirm/i.test(text) ? 'ambiguous' : 'absent';
+}
+// A refusal logs only the bottom of the screen, where the prompt is. The excerpt
+// is diagnostic and is not redacted.
+const PANE_EXCERPT_LINES = 15;
+const PANE_EXCERPT_CHARS = 2000;
+function paneExcerpt(text) {
+  const lines = String(text).split(/\r?\n/);
+  while (lines.length > 0 && !lines.at(-1).trim()) lines.pop();
+  return lines.slice(-PANE_EXCERPT_LINES).join('\n').slice(-PANE_EXCERPT_CHARS);
+}
+function notActiveDialog(target, paneText) {
+  return new SessionError(EXIT.blocked, `exit dialog text is on screen but is not the active prompt in ${target.pane}`, { dialog: 'exit-dialog-not-active', paneText: paneExcerpt(paneText) });
 }
 function childProcesses(deps, pid) {
   if (!pid) return { children: null, error: 'claude.exe pid was unavailable from process-info' };
@@ -468,30 +513,49 @@ async function waitForClose(deps, target, timeout, dialogAfter) {
     const waited = waitForGone(deps, target, Math.min(dialogAfter, remaining));
     if (waited.state === 'gone') return { ...waited, dialogAnswered: false };
     const paneText = callOrFail(deps, ['pane', 'read', target.pane, '--source', 'recent-unwrapped', '--lines', '40']);
-    if (!exitDialog(paneText)) {
+    const dialog = exitDialogState(paneText);
+    if (dialog === 'ambiguous') throw notActiveDialog(target, paneText);
+    if (dialog === 'absent') {
       if (waited.state !== 'timeout') return { ...requireGone(waited), dialogAnswered: false };
       if (deps.now() < deadline) continue;
       return { ...requireGone(waited), dialogAnswered: false };
     }
-    const process = callOrFail(deps, ['pane', 'process-info', '--pane', target.pane]);
-    const listed = childProcesses(deps, processPid(process));
-    if (listed.error || listed.children.length === 0) throw new SessionError(EXIT.blocked, `Claude exit dialog children could not be listed for ${target.pane}`, { dialog: 'children-unknown', childrenError: listed.error ?? 'PowerShell returned no child processes' });
-    if (!abandonableChildren(listed.children)) {
-      const argv = listed.children.map((child) => child?.CommandLine ?? child?.commandLine ?? child?.argv ?? null);
-      throw new SessionError(EXIT.blocked, `Claude exit dialog has a live background process in ${target.pane}`, { dialog: 'background-process-live', argv });
-    }
-    const abandoned = listed.children.filter((child) => !mcpChild(child)).length;
-    callOrFail(deps, ['pane', 'send-keys', target.pane, 'enter']);
-    const afterAnswer = Math.max(1, deadline - deps.now());
-    return { ...requireGone(waitForGone(deps, target, afterAnswer)), dialogAnswered: true, ...(abandoned > 0 ? { abandonedLaneWaits: abandoned } : {}) };
+    return answerExitDialog(deps, target, deadline);
   } while (deps.now() < deadline);
   throw new SessionError(EXIT.timeout, `watch timed out for ${target.target}`);
 }
+// The exit dialog is on screen: Enter is sent only when every claude.exe child is
+// an MCP server or a recognised lane wait; anything else refuses with its argv.
+function answerExitDialog(deps, target, deadline) {
+  const process = callOrFail(deps, ['pane', 'process-info', '--pane', target.pane]);
+  const listed = childProcesses(deps, processPid(process));
+  if (listed.error || listed.children.length === 0) throw new SessionError(EXIT.blocked, `Claude exit dialog children could not be listed for ${target.pane}`, { dialog: 'children-unknown', childrenError: listed.error ?? 'PowerShell returned no child processes' });
+  if (!abandonableChildren(listed.children)) {
+    const argv = listed.children.map((child) => child?.CommandLine ?? child?.commandLine ?? child?.argv ?? null);
+    throw new SessionError(EXIT.blocked, `Claude exit dialog has a live background process in ${target.pane}`, { dialog: 'background-process-live', argv });
+  }
+  const abandoned = listed.children.filter((child) => !mcpChild(child)).length;
+  callOrFail(deps, ['pane', 'send-keys', target.pane, 'enter']);
+  const afterAnswer = Math.max(1, deadline - deps.now());
+  return { ...requireGone(waitForGone(deps, target, afterAnswer)), dialogAnswered: true, ...(abandoned > 0 ? { abandonedLaneWaits: abandoned } : {}) };
+}
+// herdr refused `/exit` with agent_blocked: the target was already waiting on a
+// prompt. Only the active background-work exit dialog goes on to the answer path;
+// any other prompt is returned with a pane excerpt and no key is sent.
+function answerBlockedExit(deps, target, timeout) {
+  const paneText = callOrFail(deps, ['pane', 'read', target.pane, '--source', 'recent-unwrapped', '--lines', '40']);
+  const dialog = exitDialogState(paneText);
+  if (dialog === 'ambiguous') throw notActiveDialog(target, paneText);
+  if (dialog === 'absent') throw new SessionError(EXIT.blocked, `target is blocked on a prompt that is not the exit dialog: ${target.target}`, { dialog: 'blocked-other-prompt', paneText: paneExcerpt(paneText) });
+  return answerExitDialog(deps, target, deps.now() + timeout);
+}
 
-async function closeTarget(deps, target, timeout, dialogAfter) {
-  const watched = target.goneAgent
-    ? { state: 'gone', target: target.target, dialogAnswered: false }
-    : await waitForClose(deps, target, timeout, dialogAfter);
+async function closeTarget(deps, target, timeout, dialogAfter, blocked = false) {
+  const watched = blocked
+    ? answerBlockedExit(deps, target, timeout)
+    : target.goneAgent
+      ? { state: 'gone', target: target.target, dialogAnswered: false }
+      : await waitForClose(deps, target, timeout, dialogAfter);
   const deadline = deps.now() + timeout;
   do {
     const info = callOrFail(deps, ['pane', 'process-info', '--pane', target.pane]);
@@ -524,10 +588,18 @@ async function retire(opts, deps, state) {
   const dialogAfter = positive(opts.dialogAfterMs, '--dialog-after-ms', 15_000);
   if (self) return { self, target, timeout };
   let resumeId = null; let closed = false;
-  if (opts.mode === 'exit' || opts.mode === 'exit+close') callOrFail(deps, ['agent', 'prompt', target.target, '/exit']);
+  let blocked = false;
+  if (opts.mode === 'exit' || opts.mode === 'exit+close') {
+    const args = ['agent', 'prompt', target.target, '/exit'];
+    const sent = call(deps, args);
+    // `exit` never closes, so it keeps the plain failure; exit+close goes on to
+    // read what the blocked target is showing.
+    blocked = sent.code !== 0 && opts.mode === 'exit+close' && agentBlocked(sent);
+    if (sent.code !== 0 && !blocked) throw new SessionError(EXIT.error, `herdr ${args.join(' ')} failed: ${(sent.stderr || sent.stdout).trim()}`);
+  }
   let dialogAnswered = false;
   let abandonedLaneWaits;
-  if (opts.mode === 'close' || opts.mode === 'exit+close') ({ resumeId, closed, dialogAnswered, abandonedLaneWaits } = await closeTarget(deps, target, timeout, dialogAfter));
+  if (opts.mode === 'close' || opts.mode === 'exit+close') ({ resumeId, closed, dialogAnswered, abandonedLaneWaits } = await closeTarget(deps, target, timeout, dialogAfter, blocked));
   return { target: target.target, mode: opts.mode, resumeId, closed, dialogAnswered, ...(abandonedLaneWaits ? { abandonedLaneWaits } : {}), resolvedFrom: target.resolvedFrom ?? null, finalMessagePath: finalMessagePath(deps, state, target) };
 }
 
