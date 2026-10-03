@@ -495,13 +495,13 @@ test('68af2e33: exit+close answers an already-open exit dialog when herdr refuse
 });
 
 test('68af2e33: a PowerShell-tool background child on an already-open dialog refuses in both modes with its argv and no key', async (t) => {
+  const outcomes = [];
   for (const mode of ['close', 'exit+close']) {
     const f = fixture(t); f.handler = openDialogHerdr(f, { children: [{ CommandLine: PWSH_TOOL_CHILD }] });
     const result = await runSession(['retire', 'w1R:p1', '--mode', mode, '--log', f.log], { exec: f.exec, ...fastClock() });
-    assert.equal(result.exit, 3, `${mode}: ${JSON.stringify(result.output)}`);
-    assert.equal(result.output.dialog, 'background-process-live'); assert.deepEqual(result.output.argv, [PWSH_TOOL_CHILD]);
-    assert.equal(sendKeys(f).length, 0, mode);
+    outcomes.push({ mode, exit: result.exit, dialog: result.output.dialog, argv: result.output.argv, keys: sendKeys(f).length });
   }
+  assert.deepEqual(outcomes, ['close', 'exit+close'].map((mode) => ({ mode, exit: 3, dialog: 'background-process-live', argv: [PWSH_TOOL_CHILD], keys: 0 })));
   assert.equal(laneWaitMonitor(PWSH_TOOL_CHILD), false);
   assert.equal(laneWaitMonitor(bashWrapped('Start-Sleep 8; node X:/x/lane.mjs wait o790 --until idle')), false, 'no sleep-prefix shape is recognised');
 });
