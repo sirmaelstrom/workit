@@ -140,11 +140,11 @@ council_review(workshop_path, surface, round, profile | models[])
     the config defaultProfile ("spec").
 
 council_synthesize(review_dir)
-  → Read all lenses, invoke synthesis model (default: codex), write synthesis.md
+  → Read all lenses, invoke synthesis model (defaults.synthesisModel), write synthesis.md
 
 council_challenge(review_dir)
-  → Adversarial pass against synthesis (default: grok — cross-vendor
-    attack on the codex-authored synthesis), write challenge.md
+  → Adversarial pass against synthesis (defaults.challengeModel — pick a
+    vendor other than the synthesizer's), write challenge.md
 ```
 
 **Config:** `<DATA_DIR>/config/review-council/models.json` — lens registry + profiles + defaults (config-owned so the roster rotates without skill/pattern edits; hot-reloaded per call).
