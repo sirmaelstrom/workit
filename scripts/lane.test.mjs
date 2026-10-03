@@ -1162,6 +1162,8 @@ test('0d44bab7 amend 4: the late-prompt path re-reads the listing too and stops 
     { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
     listed, listed,
     { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+    // The re-read once the agent is gone (d5fca67d S1).
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
   );
   let clock = 0;
   const result = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
@@ -2254,13 +2256,14 @@ const RETURNED_TAIL = [
   '',
 ].join('\n');
 
-// herdr answered by verb, not by call order: every pane read returns `pane`, and
-// `agent list` names lane-a while `listed()` says so.
+// herdr answered by verb, not by call order: every pane read returns `pane` (a
+// string, or a function read at call time), and `agent list` names lane-a while
+// `listed()` says so.
 function stopHerdr(pane, listed = () => false) {
   const calls = [];
   const exec = (program, args) => {
     calls.push([...args]);
-    if (args[0] === 'pane' && args[1] === 'read') return { code: 0, stdout: pane, stderr: '' };
+    if (args[0] === 'pane' && args[1] === 'read') return { code: 0, stdout: typeof pane === 'function' ? pane() : pane, stderr: '' };
     if (args[0] === 'agent' && args[1] === 'list') {
       const agents = listed() ? [{ name: 'lane-a', agent: 'claude', agent_status: 'done' }] : [];
       return { code: 0, stdout: JSON.stringify({ result: { agents } }), stderr: '' };
@@ -2351,6 +2354,52 @@ test('d5fca67d: fallback never takes a footer-tailed pane as free', async (t) =>
   assert.equal(result.exit, EXIT_CODES.error);
   assert.match(result.output.error, /^pane w1:p2 never returned to a shell prompt/);
   assert.equal(herdr.calls.some((args) => args[0] === 'agent' && args[1] === 'start'), false, 'no agent is started into a blocked shell');
+});
+
+test('d5fca67d B1: a banner line above a Claude footer tail does not make it a stop', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const pane = ['Goodbye!', 'Resume this session with:', `claude --resume ${BLOCKED_RESUME_ID}`].join('\n');
+  const result = await stopWith(f, stopHerdr(pane));
+  assert.equal(result.exit, EXIT_CODES.error, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'exited-shell-blocked');
+  assert.equal(result.output.panePrompt, false);
+  assert.equal(result.output.resumeId, BLOCKED_RESUME_ID);
+});
+
+test('d5fca67d B1: a codex lane\'s own exit banner is still a late stop', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'codex', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr('some codex output\nCodex exited'));
+  assert.equal(result.exit, EXIT_CODES.ok, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'stopped');
+  assert.equal(result.output.promptCheck, 'late');
+});
+
+test('d5fca67d S1: a shell that comes back while the listing is polled is judged on the fresh read', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  // The reviewers' timeline: the late read at ~6.1 s sees the footer, the
+  // prompt is drawn at 6.5 s, the agent drops out of the listing at 7 s.
+  let clock = 0;
+  const herdr = stopHerdr(
+    () => (clock < 6_500 ? BLOCKED_TAIL : `${BLOCKED_TAIL}\n~ user  pwsh\n${BLOCKED_SIGNATURE}`),
+    () => clock < 7_000,
+  );
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: herdr.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.exit, EXIT_CODES.ok, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'stopped');
+  assert.equal(result.output.promptCheck, 'late');
+});
+
+test('d5fca67d D1: a footer tail buys the listing window, so a slow unlisting still ends exited-shell-blocked', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  let lists = 0;
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL, () => ++lists === 1));
+  assert.equal(result.exit, EXIT_CODES.error, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'exited-shell-blocked');
+  assert.equal(result.output.agentListPolls, 2);
 });
 
 test('d5fca67d: the prompt-wait failure quotes the line the pane ended on, then the prompt it expected', async (t) => {
@@ -3299,6 +3348,8 @@ test('c952d41e DO 6-8: late stop succeeds, hooks trust is dismissed, and sweep f
   stopped.responses.push(
     { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
     { code: 0, stdout: 'still exiting', stderr: '' }, { code: 0, stdout: 'Codex exited\nPS X:\\fixture\\lane>', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+    // The re-read once the agent is gone (d5fca67d S1).
+    { code: 0, stdout: 'Codex exited\nPS X:\\fixture\\lane>', stderr: '' },
   );
   const late = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', stopped.log], { exec: stopped.exec, now: () => clock, sleep: async () => { clock += 10; } });
   assert.equal(late.output.promptCheck, 'late');
@@ -3340,12 +3391,12 @@ test('amend 1 P1 and P4c/P4d: footer composer is retried; banner fires while mod
 
 test('amend 1 P5/P6: unread disappeared agent succeeds; live TUI and still-listed late paths fail', async (t) => {
   const unread = fixture(t); seedLane(unread, { promptSignature: 'PS X:\\fixture\\lane>' }); let clock = 0;
-  unread.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 1, stdout: '', stderr: 'read failed' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  unread.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 1, stdout: '', stderr: 'read failed' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' }, { code: 1, stdout: '', stderr: 'read failed' });
   const p5 = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', unread.log], { exec: unread.exec, now: () => (clock += 10), sleep: async () => {}, warn: () => {} });
   assert.equal(p5.output.promptCheck, 'unread');
 
   const live = fixture(t); seedLane(live, { promptSignature: 'PS X:\\fixture\\lane>' }); clock = 0;
-  live.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\src>\n| Ask Codex to do anything |\ngpt-5.6-terra high · Context 62% left', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  live.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\src>\n| Ask Codex to do anything |\ngpt-5.6-terra high · Context 62% left', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\src>\n| Ask Codex to do anything |\ngpt-5.6-terra high · Context 62% left', stderr: '' });
   const p6 = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', live.log], { exec: live.exec, now: () => (clock += 10), sleep: async () => {} });
   assert.equal(p6.exit, 1);
 });
