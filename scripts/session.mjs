@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
  * Claude-session lifecycle carrier.  Each invocation emits JSON and appends one
- * receipt row; herdr is reached only through the injectable executor.
+ * receipt row, except a chain whose caller /exit is refused: it appends its
+ * `chained` row and then a `retire-failed` row. herdr is reached only through
+ * the injectable executor.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -33,6 +35,7 @@ export const USAGE_TEXT = `session <verb> [options] — one Claude-session lifec
   watch  <name|pane> [--until idle|done|blocked|gone]... --timeout <ms>
   retire <self|parent|name|pane> --mode exit|close|exit+close [--timeout <ms>] [--dialog-after-ms <ms>] [--capture-final]
   chain  --handoff <abs> --model <id> --effort <lvl> --name <successor> [--no-retire]
+         [--successor-timeout <ms>]  one deadline from the split for busy retries, start and readiness (default 90000)
   status [--chain <id>] [--last]
 
   --log <path> overrides the session JSONL sidecar. --workspace-root <abs> selects its default root.`;
@@ -265,6 +268,18 @@ function paneBusy(result) { return /agent_pane_busy/i.test(`${result.stderr}\n${
 // prompt; herdr refuses `agent start` there with agent_pane_busy (570 ms after
 // the split, 2026-10-01). The retry polls at lane.mjs's prompt-read cadence.
 const BUSY_RETRY_MS = 250;
+// The split is this verb's own and empty only while its foreground is the shell
+// alone (every foreground pid is shell_pid). Anything else, or any doubt about
+// process-info, keeps the pane open; the return value names why (null: closed).
+function closeEmptySplit(deps, pane) {
+  const info = call(deps, ['pane', 'process-info', '--pane', pane]);
+  if (info.code !== 0) return 'process-info-failed';
+  const processes = foregroundProcesses(info.stdout);
+  const shellPid = Number(resultOf(info.stdout)?.process_info?.shell_pid);
+  if (!processes || !Number.isInteger(shellPid) || shellPid <= 0) return 'process-info-unreadable';
+  if (processes.length === 0 || !processes.every((process) => Number(process?.pid) === shellPid)) return 'foreground-not-shell';
+  return call(deps, ['pane', 'close', pane]).code === 0 ? null : 'close-failed';
+}
 
 async function spawn(opts, deps, state, { chain = false } = {}) {
   const nativeArgs = normalizeNativeArgs(opts.nativeArgs);
@@ -293,35 +308,39 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
   if ((opts.mode ?? 'fresh') === 'fork') agentArgs.push('--resume', opts.fromSession, '--fork-session');
   agentArgs.push(...nativeArgs);
   try {
-    // herdr's agent_pane_busy is its own "not an available shell" verdict, so the
-    // start is retried on that code alone, on the same pane, until the readiness
-    // timeout measured from the split runs out. Any other failure is final.
-    const startArgs = ['agent', 'start', opts.name, '--kind', 'claude', '--pane', pane, '--timeout', String(timeout), '--', ...agentArgs];
-    const busyUntil = deps.now() + timeout;
-    let startAttempts = 0;
+    // One wall-clock deadline, `timeout` ms after the split, bounds the whole
+    // start phase: busy retries, agent start, and the readiness poll. No start
+    // attempt begins at or after it, and each retry passes herdr only what is
+    // left. herdr's agent_pane_busy is its own "not an available shell" verdict,
+    // so the start is retried on that code alone, on the same pane; any other
+    // failure is final. An attempt launched in time can still return after the
+    // deadline: that start is not ready, so chain keeps the caller.
+    const readyBy = deps.now() + timeout;
+    let budget = timeout; let startAttempts = 0;
     for (;;) {
       startAttempts++;
+      const startArgs = ['agent', 'start', opts.name, '--kind', 'claude', '--pane', pane, '--timeout', String(budget), '--', ...agentArgs];
       const started = call(deps, startArgs);
       if (started.code === 0) break;
       const detail = (started.stderr || started.stdout).trim();
       if (!paneBusy(started)) throw new SessionError(EXIT.error, `herdr ${startArgs.join(' ')} failed: ${detail}`, { successorPane: pane, startAttempts });
-      if (deps.now() >= busyUntil) {
-        // No agent ever started here, so the pane is this verb's own empty split;
-        // close it behind the same process-info guard retire uses.
-        const info = call(deps, ['pane', 'process-info', '--pane', pane]);
-        const successorPaneClosed = info.code === 0 && !hasClaude(info.stdout) && call(deps, ['pane', 'close', pane]).code === 0;
-        throw new SessionError(EXIT.timeout, `successor pane ${pane} was not an available shell within ${timeout} ms (agent_pane_busy on ${startAttempts} attempts); caller remains active`, { reason: 'agent_pane_busy', successorPane: pane, successorPaneClosed, startAttempts });
+      const left = readyBy - deps.now();
+      if (left > 0) await deps.sleep(Math.min(BUSY_RETRY_MS, left));
+      budget = readyBy - deps.now();
+      if (budget <= 0) {
+        const kept = closeEmptySplit(deps, pane);
+        throw new SessionError(EXIT.timeout, `successor pane ${pane} was not an available shell within ${timeout} ms (agent_pane_busy on ${startAttempts} attempts); caller remains active`, { reason: 'agent_pane_busy', successorPane: pane, successorPaneClosed: kept === null, successorPaneKept: kept, startAttempts });
       }
-      await deps.sleep(BUSY_RETRY_MS);
     }
-    const deadline = deps.now() + timeout;
+    const startedLate = deps.now() >= readyBy;
     let status = null; let session = null;
-    do {
+    for (;;) {
       const gotten = call(deps, ['agent', 'get', opts.name]);
       if (gotten.code === 0) { status = agentState(gotten.stdout); session = sessionId(gotten.stdout); if (session && (!chain || status === 'idle')) break; }
-      if (deps.now() >= deadline) break;
-      await deps.sleep(100);
-    } while (true);
+      const left = readyBy - deps.now();
+      if (left <= 0) break;
+      await deps.sleep(Math.min(100, left));
+    }
     const record = { name: opts.name, pane, sessionId: session, model: opts.model, effort: opts.effort, mode: opts.mode ?? 'fresh', argvVerified: false, spawnedBy: from, startAttempts, startedAt: deps.timestamp() };
     state.sessions[opts.name] = record;
     saveState(deps, opts.log, state);
@@ -329,7 +348,7 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
     record.argvVerified = processModel(process) === opts.model;
     if (!record.argvVerified) throw new SessionError(EXIT.checkFailed, `pane ${pane} argv does not contain requested model ${opts.model}`, { pane });
     saveState(deps, opts.log, state);
-    return { record, ready: Boolean(session) && (!chain || status === 'idle') };
+    return { record, startedLate, ready: !startedLate && Boolean(session) && (!chain || status === 'idle') };
   } finally {
     // Agent start has no --no-focus. The caller remains the interaction owner
     // even when argv verification rejects an already-running successor.
@@ -528,7 +547,8 @@ async function chain(opts, deps, state) {
   const spawned = await spawn({ ...opts, from: callerPane, readinessTimeout: successorTimeout }, deps, state, { chain: true });
   const chainId = `${callerSession ?? callerPane}:${spawned.record.sessionId ?? spawned.record.pane}:${deps.timestamp()}`;
   if (!spawned.ready) {
-    return { exit: EXIT.timeout, output: { chainId, outcome: 'successor-not-ready', callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane, nextStep: 'inspect the successor pane; caller remains active' }, row: { chainId, outcome: 'successor-not-ready', callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane } };
+    const notReady = { chainId, outcome: 'successor-not-ready', callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane, successorStartAttempts: spawned.record.startAttempts, successorStartedLate: spawned.startedLate };
+    return { exit: EXIT.timeout, output: { ...notReady, nextStep: 'inspect the successor pane; caller remains active' }, row: notReady };
   }
   const delivered = await brief({ verb: 'brief', positional: [opts.name], file: handoff, wait: true, timeout: opts.successorTimeout }, deps, state);
   const modelChanged = callerModel !== null && callerModel !== opts.model;
@@ -595,13 +615,20 @@ export async function runSession(argv, overrides = {}) {
         const committed = { ...base, ...chained.row, state: 'chained' };
         appendRow(deps, opts.log, committed);
         const sent = call(deps, ['agent', 'prompt', chained.target.target, '/exit']);
+        // An accepted /exit is a delivered prompt, not proof the caller exited; the
+        // successor's `retire <caller pane> --mode close` is what confirms it.
         if (sent.code === 0) return { exit: EXIT.ok, output: chained.output, row: committed, log: opts.log, logSource: opts.logSource };
         // The chained row was written before the send; a refused /exit gets its own
-        // row so `status --last` shows a caller that is still live.
+        // row so `status --last` shows a caller that is still live. The caller is not
+        // retiring, so its final capture is disarmed (the Stop hook would otherwise
+        // take whichever turn ends next) and the persisted chain record says so too.
         const error = `herdr agent prompt ${chained.target.target} /exit failed: ${(sent.stderr || sent.stdout).trim()}`;
-        const refused = { ...committed, ts: deps.timestamp(), state: 'retire-failed', exit: EXIT.error, error, callerRetirement: 'exit-refused', waitMs: deps.now() - started };
+        if (chained.captureSession) deps.remove(join(finalStateRoot(deps), 'final-pending', chained.captureSession));
+        Object.assign(chained.row, { callerRetirement: 'exit-refused', ...(chained.captureSession ? { finalMessagePath: null } : {}) });
+        saveState(deps, opts.log, state);
+        const refused = { ...committed, ...chained.row, ts: deps.timestamp(), state: 'retire-failed', exit: EXIT.error, error, waitMs: deps.now() - started };
         appendRow(deps, opts.log, refused);
-        return { exit: EXIT.error, output: { ...chained.output, callerRetirement: 'exit-refused', error }, row: refused, log: opts.log, logSource: opts.logSource };
+        return { exit: EXIT.error, output: { ...chained.output, callerRetirement: 'exit-refused', ...(chained.captureSession ? { finalMessagePath: null } : {}), error }, row: refused, log: opts.log, logSource: opts.logSource };
       }
       result = { exit: chained.exit, output: chained.output, row: chained.row };
     } else if (opts.verb === 'status') { const output = status(opts, deps); result = { output, row: { state: 'reported' } }; }
