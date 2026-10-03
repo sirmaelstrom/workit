@@ -260,6 +260,11 @@ function normalizeNativeArgs(args) {
 }
 function nativeOption(args, flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : undefined; }
 function nativeHasDontAsk(args) { return String(nativeOption(args, '--permission-mode') ?? '').toLowerCase() === 'dontask'; }
+function paneBusy(result) { return /agent_pane_busy/i.test(`${result.stderr}\n${result.stdout}`); }
+// A pane fresh from `pane split` is not an available shell until pwsh draws its
+// prompt; herdr refuses `agent start` there with agent_pane_busy (570 ms after
+// the split, 2026-10-01). The retry polls at lane.mjs's prompt-read cadence.
+const BUSY_RETRY_MS = 250;
 
 async function spawn(opts, deps, state, { chain = false } = {}) {
   const nativeArgs = normalizeNativeArgs(opts.nativeArgs);
@@ -288,7 +293,27 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
   if ((opts.mode ?? 'fresh') === 'fork') agentArgs.push('--resume', opts.fromSession, '--fork-session');
   agentArgs.push(...nativeArgs);
   try {
-    callOrFail(deps, ['agent', 'start', opts.name, '--kind', 'claude', '--pane', pane, '--timeout', String(timeout), '--', ...agentArgs]);
+    // herdr's agent_pane_busy is its own "not an available shell" verdict, so the
+    // start is retried on that code alone, on the same pane, until the readiness
+    // timeout measured from the split runs out. Any other failure is final.
+    const startArgs = ['agent', 'start', opts.name, '--kind', 'claude', '--pane', pane, '--timeout', String(timeout), '--', ...agentArgs];
+    const busyUntil = deps.now() + timeout;
+    let startAttempts = 0;
+    for (;;) {
+      startAttempts++;
+      const started = call(deps, startArgs);
+      if (started.code === 0) break;
+      const detail = (started.stderr || started.stdout).trim();
+      if (!paneBusy(started)) throw new SessionError(EXIT.error, `herdr ${startArgs.join(' ')} failed: ${detail}`, { successorPane: pane, startAttempts });
+      if (deps.now() >= busyUntil) {
+        // No agent ever started here, so the pane is this verb's own empty split;
+        // close it behind the same process-info guard retire uses.
+        const info = call(deps, ['pane', 'process-info', '--pane', pane]);
+        const successorPaneClosed = info.code === 0 && !hasClaude(info.stdout) && call(deps, ['pane', 'close', pane]).code === 0;
+        throw new SessionError(EXIT.timeout, `successor pane ${pane} was not an available shell within ${timeout} ms (agent_pane_busy on ${startAttempts} attempts); caller remains active`, { reason: 'agent_pane_busy', successorPane: pane, successorPaneClosed, startAttempts });
+      }
+      await deps.sleep(BUSY_RETRY_MS);
+    }
     const deadline = deps.now() + timeout;
     let status = null; let session = null;
     do {
@@ -297,7 +322,7 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
       if (deps.now() >= deadline) break;
       await deps.sleep(100);
     } while (true);
-    const record = { name: opts.name, pane, sessionId: session, model: opts.model, effort: opts.effort, mode: opts.mode ?? 'fresh', argvVerified: false, spawnedBy: from, startedAt: deps.timestamp() };
+    const record = { name: opts.name, pane, sessionId: session, model: opts.model, effort: opts.effort, mode: opts.mode ?? 'fresh', argvVerified: false, spawnedBy: from, startAttempts, startedAt: deps.timestamp() };
     state.sessions[opts.name] = record;
     saveState(deps, opts.log, state);
     const process = callOrFail(deps, ['pane', 'process-info', '--pane', pane]);
@@ -507,7 +532,7 @@ async function chain(opts, deps, state) {
   }
   const delivered = await brief({ verb: 'brief', positional: [opts.name], file: handoff, wait: true, timeout: opts.successorTimeout }, deps, state);
   const modelChanged = callerModel !== null && callerModel !== opts.model;
-  const row = { chainId, callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane, successorSession: spawned.record.sessionId, successorModel: opts.model, modelChanged, handoff, ts: deps.timestamp() };
+  const row = { chainId, callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane, successorSession: spawned.record.sessionId, successorModel: opts.model, successorStartAttempts: spawned.record.startAttempts, modelChanged, handoff, callerRetirement: opts.noRetire ? 'kept' : 'retiring', ts: deps.timestamp() };
   state.chains.push(row); saveState(deps, opts.log, state);
   const output = { ...row, accepted: delivered.accepted, nextStep: `run session status --last, then cite chain ${chainId} in the landing receipt`, ...(modelChanged ? { warning: 'model changed: the brief must carry the merge/deploy-authority clause' } : {}) };
   return { self: !opts.noRetire, captureSession: opts.captureFinal ? callerSession : null, target: { target: callerPane, pane: callerPane, sessionId: callerSession }, row, output };
@@ -570,7 +595,13 @@ export async function runSession(argv, overrides = {}) {
         const committed = { ...base, ...chained.row, state: 'chained' };
         appendRow(deps, opts.log, committed);
         const sent = call(deps, ['agent', 'prompt', chained.target.target, '/exit']);
-        return { exit: sent.code === 0 ? EXIT.ok : EXIT.error, output: chained.output, row: committed, log: opts.log, logSource: opts.logSource };
+        if (sent.code === 0) return { exit: EXIT.ok, output: chained.output, row: committed, log: opts.log, logSource: opts.logSource };
+        // The chained row was written before the send; a refused /exit gets its own
+        // row so `status --last` shows a caller that is still live.
+        const error = `herdr agent prompt ${chained.target.target} /exit failed: ${(sent.stderr || sent.stdout).trim()}`;
+        const refused = { ...committed, ts: deps.timestamp(), state: 'retire-failed', exit: EXIT.error, error, callerRetirement: 'exit-refused', waitMs: deps.now() - started };
+        appendRow(deps, opts.log, refused);
+        return { exit: EXIT.error, output: { ...chained.output, callerRetirement: 'exit-refused', error }, row: refused, log: opts.log, logSource: opts.logSource };
       }
       result = { exit: chained.exit, output: chained.output, row: chained.row };
     } else if (opts.verb === 'status') { const output = status(opts, deps); result = { output, row: { state: 'reported' } }; }

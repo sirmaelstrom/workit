@@ -205,6 +205,85 @@ test('S9: a model change is flagged', async (t) => {
   assert.equal(no.output.modelChanged, false);
 });
 
+// 317f6cef: herdr's refusal when `agent start` lands on a pane whose shell has not
+// drawn its prompt yet, verbatim from the 2026-10-01 23:59:04Z session-log row.
+const paneBusy = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_pane_busy","message":"agent target pane pane:successor is not an available shell"},"id":"cli:agent:start"}' };
+function busyHerdr(busyStarts, { onStart = () => {}, exitResult = null } = {}) {
+  const success = successHerdr();
+  let starts = 0;
+  return (program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'agent start') {
+      starts++; onStart(starts);
+      if (starts > 1000) throw new Error('agent start retried without a bound');
+      if (starts <= busyStarts) return paneBusy;
+    }
+    if (key === 'pane process-info' && args.at(-1) === 'pane:successor' && starts <= busyStarts) return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'pwsh.exe' })]), stderr: '' };
+    if (key === 'agent prompt' && args.includes('/exit') && exitResult) return exitResult;
+    return success(program, args);
+  };
+}
+function chainArgv(f, ...extra) { return ['chain', '--handoff', handoff(f), '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--log', f.log, ...extra]; }
+function clock() { const c = { now: 0 }; c.deps = { now: () => c.now, sleep: async (ms) => { c.now += ms; } }; return c; }
+function startCalls(f) { return f.calls.filter((call) => call.args[0] === 'agent' && call.args[1] === 'start'); }
+function exitSent(f) { return f.calls.some((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && call.args.includes('/exit')); }
+
+test('317f6cef falsifier: agent_pane_busy once, then success — chain retries on the same pane, briefs, and retires the caller', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(1);
+  const result = await runSession(chainArgv(f), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(startCalls(f).map((call) => call.args[call.args.indexOf('--pane') + 1]), ['pane:successor', 'pane:successor']);
+  assert.equal(f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'split').length, 1);
+  assert.ok(f.calls.some((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && call.args[2] === 'new' && /^Read .* and execute it exactly\.$/.test(call.args[3])), 'the successor is briefed');
+  assert.equal(row(f).successorStartAttempts, 2);
+});
+
+test('317f6cef: a chain that started on a retry reaches the same retirement path, and status --last shows the caller retiring', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(3);
+  const result = await runSession(chainArgv(f), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(f.calls.filter((call) => call.args.includes('/exit')).map((call) => call.args), [['agent', 'prompt', 'pane:caller', '/exit']]);
+  const status = await runSession(['status', '--last', '--log', f.log], { exec: f.exec, env: env() });
+  const [last] = status.output.rows;
+  assert.deepEqual([last.state, last.callerRetirement, last.callerPane, last.successorStartAttempts], ['chained', 'retiring', 'pane:caller', 4]);
+});
+
+test('317f6cef custody: a pane busy for the whole successor timeout leaves the caller live, closes the empty split, and reports agent_pane_busy', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(Infinity);
+  const result = await runSession(chainArgv(f, '--successor-timeout', '5000'), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 4, JSON.stringify(result.output));
+  assert.equal(exitSent(f), false, 'no /exit reaches the caller');
+  assert.match(result.output.error, /agent_pane_busy/);
+  assert.deepEqual([row(f).state, row(f).reason, row(f).successorPane, row(f).successorPaneClosed], ['failed', 'agent_pane_busy', 'pane:successor', true]);
+  assert.deepEqual(f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'close').map((call) => call.args[2]), ['pane:successor']);
+  // Any other start failure is final on the first attempt and closes nothing.
+  const other = fixture(t); const otherClock = clock();
+  other.handler = (program, args) => (`${args[0]} ${args[1]}` === 'agent start' ? { code: 1, stdout: '', stderr: '{"error":{"code":"agent_timeout"}}' } : successHerdr()(program, args));
+  const failed = await runSession(chainArgv(other), { exec: other.exec, env: env(), ...otherClock.deps });
+  assert.deepEqual([failed.exit, startCalls(other).length, exitSent(other), row(other).successorPane], [1, 1, false, 'pane:successor']);
+  assert.equal(other.calls.some((call) => call.args[0] === 'pane' && call.args[1] === 'close'), false);
+});
+
+test('317f6cef bound: busy-forever retries stop at the successor timeout measured from the split', async (t) => {
+  const f = fixture(t); const c = clock(); let lastStartAt = null;
+  f.handler = busyHerdr(Infinity, { onStart: () => { lastStartAt = c.now; } });
+  const result = await runSession(chainArgv(f, '--successor-timeout', '5000'), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 4);
+  assert.equal(lastStartAt, 5000); assert.equal(c.now, 5000);
+  assert.equal(startCalls(f).length, 5000 / 250 + 1);
+  assert.equal(row(f).startAttempts, 5000 / 250 + 1);
+});
+
+test('317f6cef: a refused /exit to the caller is its own row, so status --last does not read as retired', async (t) => {
+  const f = fixture(t); const c = clock();
+  f.handler = busyHerdr(0, { exitResult: { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' } });
+  const result = await runSession(chainArgv(f), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /\/exit failed: .*agent_not_found/);
+  const status = await runSession(['status', '--last', '--log', f.log], { exec: f.exec, env: env() });
+  assert.deepEqual([status.output.rows[0].state, status.output.rows[0].callerRetirement, status.output.rows[0].exit], ['retire-failed', 'exit-refused', 1]);
+});
+
 const rotation4ExitDialog = `Background work is running
 The following will stop when you exit:
   shell · cd /d/Development/projects/workit && node scripts…

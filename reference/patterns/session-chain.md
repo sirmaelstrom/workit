@@ -38,6 +38,7 @@ Default sidecar: `<workspace>/data/outputs/projects/agentic-practice-transfer/se
 6. Resume ids are parsed only from `Resume this session with: ... claude --resume <uuid>`; a missing banner warns by yielding null but does not block a clean close.
 7. Self retirement writes the row first and sends `/exit` last; self close is invalid. `--capture-final` gets the caller session id from `agent get <HERDR_PANE_ID>` first, then the sidecar; no id is a usage refusal. It is invalid with `chain --no-retire`.
 8. A successor that is not ready leaves the caller and successor in place, returns exit 4, and records `successor-not-ready`.
+8a. A freshly split pane is not an available shell until its prompt draws, so `spawn` retries `agent start` on the same pane every 250 ms while herdr answers `agent_pane_busy`, for at most the readiness timeout (`--successor-timeout` under `chain`, else `--timeout`) measured from the split. Any other start failure is final on the first attempt. A pane still busy at the bound returns exit 4 with `reason: agent_pane_busy`, never retires the caller, and closes the empty split when `process-info` shows no Claude process. The row records `startAttempts`; a chain row records `successorStartAttempts` and `callerRetirement` (`retiring` or `kept`), and a refused caller `/exit` appends a `retire-failed` row so `status --last` never reads as retired.
 9. Public artifacts contain no host topology; all paths come from environment or arguments.
 10. Herdr commands use the executor (`execFileSync` underneath), never a shell string.
 11. Model change is recorded and requires the handoff's authority clause.
@@ -50,7 +51,7 @@ Default sidecar: `<workspace>/data/outputs/projects/agentic-practice-transfer/se
 
 ## Verification
 
-The unit suite uses an injected fake executor and establishes: refused `dontAsk`; mandatory launch flags; successor timeout makes no `/exit`; a live process makes no pane close; every gone shape; parsed-only resume ids; null context; ordered happy chain receipt; model-change warning; marker-gated capture. The successor-not-ready and live-process cases each include a positive branch so their absence assertions are not vacuous.
+The unit suite uses an injected fake executor and establishes: refused `dontAsk`; mandatory launch flags; successor timeout makes no `/exit`; a live process makes no pane close; every gone shape; parsed-only resume ids; null context; ordered happy chain receipt; model-change warning; marker-gated capture; a busy-then-ready successor pane that still retires the caller; a busy-forever pane that keeps caller custody within the bound; a refused caller `/exit` recorded as `retire-failed`. The successor-not-ready and live-process cases each include a positive branch so their absence assertions are not vacuous.
 
 Herdr flags were verified from local help: `pane split --direction --cwd --no-focus`; `agent start --kind --pane --timeout --`; `agent prompt --wait --until --timeout`; `agent wait --until --timeout`; `pane process-info --pane`; `pane close <id>`; `pane get <id>`; and `agent get <target>`.
 
