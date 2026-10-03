@@ -715,6 +715,30 @@ test('quest 8b7c477c amend 1: a claude lane whose pane quotes the capacity banne
   assert.equal(result.output.state, 'done');
 });
 
+test('quest 8b7c477c K1: a lane with no recorded kind is never scraped, and still warns that capacity is unknown', async (t) => {
+  // A no-kind record is a lane whose start failed after herdr registered the
+  // agent (lane zd, a claude lane). Each pane would trip one codex scrape.
+  const timedOut = { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' };
+  const done = { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' };
+  for (const kind of [undefined, null]) {
+    for (const [label, pane, waited, exit] of [
+      ['meter', `${CLAUDE_EDITING_FIXTURES}\ngpt-6-astra medium · Context 100% left · weekly 15% left`, timedOut, 4],
+      ['refusal banner', CLAUDE_QUOTES_BANNER, timedOut, 4],
+      ['capacity banner', CLAUDE_QUOTES_CAPACITY, done, 0],
+    ]) {
+      const f = fixture(t);
+      seedLane(f, { kind });
+      f.responses.push(waited, { code: 0, stdout: pane, stderr: '' });
+      const result = await timedOutWait(f);
+      assert.equal(result.exit, exit, `kind ${kind}, ${label}: an unknown kind is not read as codex`);
+      assert.equal(result.output.refusal ?? null, null, `kind ${kind}, ${label}`);
+      assert.equal(result.row.plan5h, null, `kind ${kind}, ${label}`);
+      assert.equal(result.row.planWeekly, null, `kind ${kind}, ${label}`);
+      assert.equal(result.row.warning, 'plan meter unavailable; capacity is unknown', `kind ${kind}, ${label}: capacity is unknown, so say so`);
+    }
+  }
+});
+
 test('quest 8b7c477c amend 1: a codex lane with a genuine banner over its live footer is still plan-refused', async (t) => {
   const pane = [
     "■ You've hit your usage limit. Try again later.",

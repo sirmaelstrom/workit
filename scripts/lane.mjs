@@ -2414,8 +2414,9 @@ function readPlanState(deps, name, kind) {
   // The meter footer, the refusal banner and modal, and the capacity banner
   // are all codex TUI text. A claude lane draws none of them, so any of it in
   // its pane is its own output (measured: a lane editing lane.test.mjs
-  // fixtures read as weekly 15%, exit 6).
-  if (!expectsPlanMeter(kind)) {
+  // fixtures read as weekly 15%, exit 6), and a lane of unknown kind may be a
+  // claude lane.
+  if (!readsCodexTui(kind)) {
     return {
       ok: true,
       meter: { plan5h: null, planWeekly: null },
@@ -2468,13 +2469,22 @@ function planFloorReached(meter, floor) {
   return selected !== null && selected <= floor;
 }
 
-// A lane record from before `kind` was recorded is a codex lane.
-function expectsPlanMeter(kind) {
-  return kind === undefined || kind === null || kind === 'codex';
+// Codex TUI text (the meter footer, the refusal banner and modal, the capacity
+// banner) is read only off a lane recorded as codex.
+function readsCodexTui(kind) {
+  return kind === 'codex';
+}
+
+// A record with no kind is a lane whose `start` failed after herdr had already
+// registered the agent (lane zd, 2026-09-26: `start --kind claude` failed
+// agent_not_ready and the record kept no kind), so its kind is unknown. Its
+// pane is not scraped, but its capacity is unknown too, so it warns.
+function warnsOnUnknownMeter(kind) {
+  return readsCodexTui(kind) || kind === undefined || kind === null;
 }
 
 function planMeterWarning(meter, kind) {
-  return expectsPlanMeter(kind) && selectedPlanWindow(meter) === null
+  return warnsOnUnknownMeter(kind) && selectedPlanWindow(meter) === null
     ? { warning: 'plan meter unavailable; capacity is unknown' }
     : {};
 }
