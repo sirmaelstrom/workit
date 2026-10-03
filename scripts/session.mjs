@@ -535,7 +535,7 @@ async function chain(opts, deps, state) {
   const row = { chainId, callerPane, callerSession, callerContext, callerModel, successorPane: spawned.record.pane, successorSession: spawned.record.sessionId, successorModel: opts.model, successorStartAttempts: spawned.record.startAttempts, modelChanged, handoff, callerRetirement: opts.noRetire ? 'kept' : 'retiring', ts: deps.timestamp() };
   state.chains.push(row); saveState(deps, opts.log, state);
   const output = { ...row, accepted: delivered.accepted, nextStep: `run session status --last, then cite chain ${chainId} in the landing receipt`, ...(modelChanged ? { warning: 'model changed: the brief must carry the merge/deploy-authority clause' } : {}) };
-  return { self: !opts.noRetire, captureSession: opts.captureFinal ? callerSession : null, target: { target: callerPane, pane: callerPane, sessionId: callerSession }, row, output };
+  return { self: row.callerRetirement === 'retiring', captureSession: opts.captureFinal ? callerSession : null, target: { target: callerPane, pane: callerPane, sessionId: callerSession }, row, output };
 }
 
 function status(opts, deps) {
