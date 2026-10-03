@@ -30,7 +30,7 @@ Read <handoff> and execute it exactly.
 First steps:
 1. node ${CLAUDE_PLUGIN_ROOT}/scripts/session.mjs retire <caller pane> --mode close --log <path>
 2. node ${CLAUDE_PLUGIN_ROOT}/scripts/session.mjs status --last --log <path>
-   If step 1 exited 4 (the caller never left) or that row is
+   If step 1 exited 3 or 4 (the caller never left) or that row is
    `state: retire-failed` (the caller's /exit was refused), the caller is
    still live: run `session.mjs retire <caller pane> --mode exit+close --log <path>`.
 3. Write a spine_receipt on the anchor citing the caller resume id, your pane +
