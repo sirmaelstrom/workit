@@ -1162,6 +1162,8 @@ test('0d44bab7 amend 4: the late-prompt path re-reads the listing too and stops 
     { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
     listed, listed,
     { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+    // The re-read once the agent is gone (d5fca67d S1).
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
   );
   let clock = 0;
   const result = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
@@ -2223,6 +2225,191 @@ test('A3-3: the default shapes cover the common prompts and reject TUI lines', (
   assert.equal(paneAtPrompt(CODEX_TUI), false, 'the Ask Codex footer is not a shell prompt');
 });
 
+// d5fca67d. A captured Claude stop (AB lane ocost), path and user segments
+// scrubbed, every other byte kept. The posh lines are the LAUNCH prompt (the
+// clock is the start time); Claude's resume footer is the tail and no prompt
+// was redrawn under it.
+const BLOCKED_SIGNATURE = '~ \u{e5ff} X: / fixture / projects / lane-a ~';
+const BLOCKED_RESUME_ID = '5966ad8e-7732-4a60-8235-83687bc81852';
+const BLOCKED_TAIL = [
+  `~ user \u{f408} \u{e725} ab/o-cost-codex-reasoning \u{f120} pwsh${' '.repeat(44)}0.002s \u{f01dd} Thursday at 6:56 PM  \u{e718} 24.13.0`,
+  `${BLOCKED_SIGNATURE} if((Get-Command claude -ErrorAction SilentlyContinue).CommandType -eq 'ExternalScript'){& claude '--model' claude-opus-5-5 '--permission-mode' bypassPermissions '--effort' high}else{St`,
+  "art-Process -FilePath claude -ArgumentList '--model claude-opus-5-5 --permission-mode bypassPermissions --effort high' -NoNewWindow -Wait}",
+  '',
+  'Resume this session with:',
+  `claude --resume ${BLOCKED_RESUME_ID}`,
+].join('\n');
+
+// The ordinary success shape (lane wquota, scrubbed the same way): the same
+// footer, with the shell's fresh two-line prompt drawn under it.
+const RETURNED_SIGNATURE = '~ \u{e5ff} X: / fixture / projects / lane-b ~';
+const RETURNED_TAIL = [
+  `${RETURNED_SIGNATURE} if((Get-Command claude -ErrorAction SilentlyContinue).CommandType -eq 'ExternalScript'){& claude '--model' claude-opus-5-5 '--permission-mode' bypassPermissions '--effort' high}else{Start-Process -`,
+  "FilePath claude -ArgumentList '--model claude-opus-5-5 --permission-mode bypassPermissions --effort high' -NoNewWindow -Wait}",
+  '',
+  'Resume this session with:',
+  'claude --resume 37680e5b-7c3f-4647-b516-40184218248b',
+  '',
+  `~ user \u{f408} \u{e725} susannah/quota-footer-only \u{f120} pwsh${' '.repeat(176)}34:35.224s \u{f01dd} Saturday at 12:33 PM`,
+  '',
+  RETURNED_SIGNATURE,
+  '',
+].join('\n');
+
+// herdr answered by verb, not by call order: every pane read returns `pane` (a
+// string, or a function read at call time), and `agent list` names lane-a while
+// `listed()` says so.
+function stopHerdr(pane, listed = () => false) {
+  const calls = [];
+  const exec = (program, args) => {
+    calls.push([...args]);
+    if (args[0] === 'pane' && args[1] === 'read') return { code: 0, stdout: typeof pane === 'function' ? pane() : pane, stderr: '' };
+    if (args[0] === 'agent' && args[1] === 'list') {
+      const agents = listed() ? [{ name: 'lane-a', agent: 'claude', agent_status: 'done' }] : [];
+      return { code: 0, stdout: JSON.stringify({ result: { agents } }), stderr: '' };
+    }
+    return { code: 0, stdout: '{}', stderr: '' };
+  };
+  return { exec, calls };
+}
+
+async function stopWith(f, herdr) {
+  let clock = 0;
+  return runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: herdr.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+}
+
+test('d5fca67d: a Claude exit footer as the tail, agent unlisted, is exited-shell-blocked: a failure that names the resume id', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL));
+  assert.equal(result.exit, EXIT_CODES.error, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'exited-shell-blocked');
+  assert.equal(result.output.resumeId, BLOCKED_RESUME_ID);
+  assert.equal(result.output.agentListed, false);
+  assert.equal(result.output.panePrompt, false);
+  assert.match(result.output.error, /likely herdr's Start-Process -Wait launch is still waiting on a live descendant/);
+  const row = JSON.parse(readFileSync(f.log, 'utf8').trim().split('\n').at(-1));
+  assert.equal(row.state, 'exited-shell-blocked');
+  assert.equal(row.resumeId, BLOCKED_RESUME_ID);
+  assert.equal(row.exit, EXIT_CODES.error);
+});
+
+test('d5fca67d: a shell prompt drawn under the footer is still an ordinary stop', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: RETURNED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(RETURNED_TAIL));
+  assert.equal(result.exit, EXIT_CODES.ok, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'stopped');
+  assert.equal(result.output.panePrompt, true);
+  assert.equal(result.output.resumeId, undefined);
+});
+
+test('d5fca67d: a footer tail with the agent still listed is the still-listed failure, never exited-shell-blocked', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL, () => true));
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /lane-a is still listed after late prompt check/);
+  assert.notEqual(result.output.state, 'exited-shell-blocked');
+});
+
+test('d5fca67d: a footer above later output is scrollback, not the tail', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(`${BLOCKED_TAIL}\nsomething printed after the footer`));
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /^stop pane prompt check failed/);
+  assert.notEqual(result.output.state, 'exited-shell-blocked');
+});
+
+test('d5fca67d: a live Claude TUI under a scrollback footer is vetoed as before', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(`${BLOCKED_TAIL}\n${CLAUDE_TUI}`));
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /^stop pane prompt check failed/);
+  assert.notEqual(result.output.state, 'exited-shell-blocked');
+});
+
+test('d5fca67d: the footer is Claude-only; a codex lane with that tail keeps today\'s failure', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'codex', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL));
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /^stop pane prompt check failed/);
+  assert.notEqual(result.output.state, 'exited-shell-blocked');
+});
+
+test('d5fca67d: fallback never takes a footer-tailed pane as free', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'prompt.md');
+  writeFileSync(prompt, 'task', 'utf8');
+  seedLane(f, { promptFile: prompt, promptSignature: BLOCKED_SIGNATURE });
+  const herdr = stopHerdr(BLOCKED_TAIL);
+  let clock = 0;
+  const result = await runLane(
+    ['fallback', 'lane-a', '--to', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: herdr.exec, now: () => clock, sleep: async (ms) => { clock += ms; } },
+  );
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.match(result.output.error, /^pane w1:p2 never returned to a shell prompt/);
+  assert.equal(herdr.calls.some((args) => args[0] === 'agent' && args[1] === 'start'), false, 'no agent is started into a blocked shell');
+});
+
+test('d5fca67d B1: a banner line above a Claude footer tail does not make it a stop', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  const pane = ['Goodbye!', 'Resume this session with:', `claude --resume ${BLOCKED_RESUME_ID}`].join('\n');
+  const result = await stopWith(f, stopHerdr(pane));
+  assert.equal(result.exit, EXIT_CODES.error, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'exited-shell-blocked');
+  assert.equal(result.output.panePrompt, false);
+  assert.equal(result.output.resumeId, BLOCKED_RESUME_ID);
+});
+
+test('d5fca67d B1: a codex lane\'s own exit banner is still a late stop', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'codex', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr('some codex output\nCodex exited'));
+  assert.equal(result.exit, EXIT_CODES.ok, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'stopped');
+  assert.equal(result.output.promptCheck, 'late');
+});
+
+test('d5fca67d S1: a shell that comes back while the listing is polled is judged on the fresh read', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  // The reviewers' timeline: the late read at ~6.1 s sees the footer, the
+  // prompt is drawn at 6.5 s, the agent drops out of the listing at 7 s.
+  let clock = 0;
+  const herdr = stopHerdr(
+    () => (clock < 6_500 ? BLOCKED_TAIL : `${BLOCKED_TAIL}\n~ user  pwsh\n${BLOCKED_SIGNATURE}`),
+    () => clock < 7_000,
+  );
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: herdr.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.exit, EXIT_CODES.ok, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'stopped');
+  assert.equal(result.output.promptCheck, 'late');
+});
+
+test('d5fca67d D1: a footer tail buys the listing window, so a slow unlisting still ends exited-shell-blocked', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  let lists = 0;
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL, () => ++lists === 1));
+  assert.equal(result.exit, EXIT_CODES.error, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'exited-shell-blocked');
+  assert.equal(result.output.agentListPolls, 2);
+});
+
+test('d5fca67d: the prompt-wait failure quotes the line the pane ended on, then the prompt it expected', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'codex', promptSignature: BLOCKED_SIGNATURE });
+  const result = await stopWith(f, stopHerdr(BLOCKED_TAIL));
+  assert.equal(result.output.error,
+    `stop pane prompt check failed: pane w1:p2 never returned to a shell prompt: its last line was "claude --resume ${BLOCKED_RESUME_ID}", not the recorded prompt ${JSON.stringify(BLOCKED_SIGNATURE)}`);
+});
+
 test('A3-4: an operator can declare the prompt, by flag or by env', async (t) => {
   const f = fixture(t);
   const prompt = join(f.dir, 'prompt.md');
@@ -3161,6 +3348,8 @@ test('c952d41e DO 6-8: late stop succeeds, hooks trust is dismissed, and sweep f
   stopped.responses.push(
     { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' },
     { code: 0, stdout: 'still exiting', stderr: '' }, { code: 0, stdout: 'Codex exited\nPS X:\\fixture\\lane>', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
+    // The re-read once the agent is gone (d5fca67d S1).
+    { code: 0, stdout: 'Codex exited\nPS X:\\fixture\\lane>', stderr: '' },
   );
   const late = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', stopped.log], { exec: stopped.exec, now: () => clock, sleep: async () => { clock += 10; } });
   assert.equal(late.output.promptCheck, 'late');
@@ -3202,12 +3391,12 @@ test('amend 1 P1 and P4c/P4d: footer composer is retried; banner fires while mod
 
 test('amend 1 P5/P6: unread disappeared agent succeeds; live TUI and still-listed late paths fail', async (t) => {
   const unread = fixture(t); seedLane(unread, { promptSignature: 'PS X:\\fixture\\lane>' }); let clock = 0;
-  unread.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 1, stdout: '', stderr: 'read failed' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  unread.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 1, stdout: '', stderr: 'read failed' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' }, { code: 1, stdout: '', stderr: 'read failed' });
   const p5 = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', unread.log], { exec: unread.exec, now: () => (clock += 10), sleep: async () => {}, warn: () => {} });
   assert.equal(p5.output.promptCheck, 'unread');
 
   const live = fixture(t); seedLane(live, { promptSignature: 'PS X:\\fixture\\lane>' }); clock = 0;
-  live.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\src>\n| Ask Codex to do anything |\ngpt-5.6-terra high · Context 62% left', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  live.responses.push({ code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: '{}', stderr: '' }, { code: 0, stdout: 'not prompt', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\src>\n| Ask Codex to do anything |\ngpt-5.6-terra high · Context 62% left', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' }, { code: 0, stdout: 'PS X:\\fixture\\src>\n| Ask Codex to do anything |\ngpt-5.6-terra high · Context 62% left', stderr: '' });
   const p6 = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', live.log], { exec: live.exec, now: () => (clock += 10), sleep: async () => {} });
   assert.equal(p6.exit, 1);
 });

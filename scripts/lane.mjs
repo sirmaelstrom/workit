@@ -68,7 +68,9 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Waits --until idle --until done, never bare; honours --plan-floor.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
   stop     <name> [--timeout <ms>]  Stops the lane agent; a late shell/banner
-           check is accepted only after the live-TUI veto.
+           check is accepted only after the live-TUI veto. A Claude lane gone
+           from the listing whose pane still ends in its resume footer exits 1
+           with state "exited-shell-blocked" and its resumeId.
   sweep    [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
            --lane <name> limits the delegate to one lane; --list is a dry run.
            Outside a herdr worktrees root, every call is scoped to a lane this
@@ -648,6 +650,19 @@ export function paneAtPrompt(text, { signature = null, patterns = DEFAULT_PROMPT
   return patterns.some((pattern) => pattern.test(last));
 }
 
+// Claude prints these two lines when it exits. As the pane's TAIL, with nothing
+// drawn below, they mean Claude is gone but the shell has not redrawn its
+// prompt; a footer with the prompt under it is an ordinary exit.
+const CLAUDE_RESUME_HINT = 'Resume this session with:';
+const CLAUDE_RESUME_LINE = /^claude --resume ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+// The resume id when the pane ends in Claude's exit footer, else null.
+function claudeExitFooterTail(text) {
+  const lines = paneLines(text);
+  if (lines.length < 2 || lines.at(-2) !== CLAUDE_RESUME_HINT) return null;
+  return CLAUDE_RESUME_LINE.exec(lines.at(-1))?.[1] ?? null;
+}
+
 // An operator who knows their prompt can say so; anything unparseable is a
 // usage error rather than a silently ignored setting.
 function promptPatterns(opts, deps) {
@@ -776,15 +791,20 @@ async function capturePromptSignature(deps, pane, options, timeoutMs = 5_000) {
 
 async function waitForPanePrompt(deps, pane, options = {}, timeoutMs = 30_000) {
   const deadline = deps.now() + timeoutMs;
+  let last = null;
   do {
     const snapshot = readPane(deps, pane);
     if (snapshot.code === 0 && paneAtPrompt(snapshot.stdout, options)) return;
+    last = snapshot.code === 0 ? (paneLines(snapshot.stdout).at(-1) ?? '') : null;
     await deps.sleep(100);
   } while (deps.now() < deadline);
   // A wedged pane is infrastructure, not the operator's deadline: 4 belongs to
   // `lane wait` alone, and prepareCodexPane already raises ERROR for the same
-  // shape of failure.
-  throw new LaneError(EXIT.ERROR, `pane ${pane} never returned to a shell prompt${options.signature ? ` (${JSON.stringify(options.signature)})` : ''}`);
+  // shape of failure. The message quotes the line the pane ENDED on: quoting
+  // only the expected prompt invited a match against prompt text higher up.
+  const seen = last === null ? 'the last pane read failed' : `its last line was ${JSON.stringify(last.length > 200 ? `${last.slice(0, 200)}…` : last)}`;
+  const expected = options.signature ? `, not the recorded prompt ${JSON.stringify(options.signature)}` : '';
+  throw new LaneError(EXIT.ERROR, `pane ${pane} never returned to a shell prompt: ${seen}${expected}`);
 }
 
 function laneSlug(value) {
@@ -2021,27 +2041,58 @@ async function stopLane(opts, deps, state) {
     // that hand-off one short second look before calling a completed exit a
     // failure; the agent listing is the deciding signal.
     await deps.sleep(5_000);
-    const latePane = readPane(deps, lane.pane);
-    const lateText = latePane.code === 0 ? responseText(latePane.stdout) : '';
-    const lateLines = paneLines(lateText);
-    const liveTui = LIVE_TUI.some((pattern) => lateLines.slice(-2).some((line) => pattern.test(line)));
-    const latePrompt = latePane.code === 0 && paneAtPrompt(latePane.stdout, {
-      signature: lane.promptSignature ?? null,
-      patterns: promptPatterns(opts, deps),
-    });
-    const exitBanner = !liveTui && lateLines.slice(-3).some((line) => /^(?:goodbye|codex\s+(?:exited|closed))/i.test(line));
+    const promptOptions = { signature: lane.promptSignature ?? null, patterns: promptPatterns(opts, deps) };
+    // What one late read of the pane shows.
+    const look = (read) => {
+      const text = read.code === 0 ? responseText(read.stdout) : '';
+      const lines = paneLines(text);
+      const liveTui = LIVE_TUI.some((pattern) => lines.slice(-2).some((line) => pattern.test(line)));
+      return {
+        unread: read.code !== 0,
+        liveTui,
+        prompt: read.code === 0 && paneAtPrompt(read.stdout, promptOptions),
+        banner: !liveTui && lines.slice(-3).some((line) => /^(?:goodbye|codex\s+(?:exited|closed))/i.test(line)),
+        // The footer must be the last two lines, so a live TUI's footer below
+        // it keeps it out: neither footer line matches a LIVE_TUI pattern.
+        resumeId: lane.kind === 'claude' && read.code === 0 ? claudeExitFooterTail(text) : null,
+      };
+    };
+    const before = look(readPane(deps, lane.pane));
     // The same listing lag as the normal path: with the pane showing an exit
     // (or unreadable), the listing gets the same window; a live TUI gets one read.
-    const exitSeen = !liveTui && (latePrompt || exitBanner || latePane.code !== 0);
+    const exitSeen = !before.liveTui && (before.prompt || before.banner || before.resumeId !== null || before.unread);
     const late = await pollUntilUnlisted(deps, opts.name, exitSeen ? STOP_UNLIST_WINDOW_MS : 0);
     const lateListing = late.listing;
     const lateNames = late.names;
     const latePolls = late.polls > 1 ? { agentListPolls: late.polls } : {};
-    if (lateListing.code === 0 && Array.isArray(lateNames) && !lateNames.includes(opts.name) && latePane.code !== 0) {
+    const gone = lateListing.code === 0 && Array.isArray(lateNames) && !lateNames.includes(opts.name);
+    // The poll can take the whole window, and the shell may come back during
+    // it: once the agent is gone, the pane is judged as it is now.
+    const now = gone ? look(readPane(deps, lane.pane)) : before;
+    if (gone && now.unread) {
       deps.warn(`lane: stop pane re-read failed after ${opts.name} disappeared; accepting unread exit`);
       return { exit: EXIT.OK, output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'unread', ...latePolls }, row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'unread', ...latePolls } };
     }
-    if (Array.isArray(lateNames) && !lateNames.includes(opts.name) && (latePrompt || exitBanner)) {
+    // Claude has exited and herdr has dropped it, but the shell under the
+    // footer never came back, so the pane is not free. A failure, kept apart
+    // from a prompt that never matched so the conductor knows the agent is gone.
+    // The footer tail outranks a banner above it: no prompt was drawn.
+    if (gone && now.resumeId) {
+      const blocked = 'exited-shell-blocked';
+      return {
+        exit: EXIT.ERROR,
+        output: {
+          error: `stop ${blocked}: ${opts.name} exited and is no longer listed, but pane ${lane.pane} ends in Claude's resume footer with no shell prompt under it; likely herdr's Start-Process -Wait launch is still waiting on a live descendant of the Claude process, so the shell has not returned and the pane is not reusable`,
+          state: blocked,
+          panePrompt: false,
+          agentListed: false,
+          resumeId: now.resumeId,
+          ...latePolls,
+        },
+        row: { ...laneInstrumentation(opts.name, lane, blocked), resumeId: now.resumeId, ...latePolls },
+      };
+    }
+    if (gone && (now.prompt || now.banner)) {
       return {
         exit: EXIT.OK,
         output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'late', ...latePolls },
