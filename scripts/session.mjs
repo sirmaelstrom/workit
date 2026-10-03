@@ -369,7 +369,7 @@ async function spawn(opts, deps, state, { chain = false } = {}) {
 
 async function brief(opts, deps, state) {
   if (opts.positional.length !== 1) usage('brief needs one target');
-  if (opts.timeout && !opts.wait) usage('brief --timeout requires --wait');
+  if (opts.timeout !== undefined && !opts.wait) usage('brief --timeout requires --wait');
   required(opts, 'file');
   const file = resolve(opts.file);
   if (!isAbsolute(opts.file) || !deps.exists(file)) usage(`brief file does not exist: ${file}`);
@@ -378,7 +378,7 @@ async function brief(opts, deps, state) {
   if (found.code !== 0 || agentState(found.stdout) === 'blocked') throw new SessionError(EXIT.blocked, `target is blocked or unavailable: ${target.target}`);
   const args = ['agent', 'prompt', target.target, `Read ${file} and execute it exactly.`];
   if (opts.wait) args.push('--wait', '--until', 'working');
-  if (opts.timeout) args.push('--timeout', String(positive(opts.timeout, '--timeout')));
+  if (opts.timeout !== undefined) args.push('--timeout', String(positive(opts.timeout, '--timeout')));
   const result = call(deps, args);
   if (result.code !== 0) throw new SessionError(/agent_blocked/i.test(result.stderr) ? EXIT.blocked : EXIT.error, `herdr agent prompt failed: ${(result.stderr || result.stdout).trim()}`);
   return { target: target.target, file, accepted: true, stateAfter: agentState(result.stdout) };

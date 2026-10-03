@@ -20,7 +20,7 @@ Long-running Claude work needs a deterministic rotation carrier rather than a ha
 | Verb | Inputs | Action | Receipt |
 |---|---|---|---|
 | `spawn` | explicit `--name`, `--model`, `--effort`; optional cwd, source pane, direction, fresh/fork, chrome, timeout | split a no-focus pane; start Claude with explicit permission/model/effort; wait briefly for session publication; verify the launched argv; restore caller focus | name, pane, session id, model, effort, mode, argv verification, parent pane, start time |
-| `brief` | target, absolute `--file`; optional wait/timeout | sends exactly `Read <path> and execute it exactly.` through herdr argv | target, file, accepted, observed state |
+| `brief` | target, absolute `--file`; optional wait (timeout only with wait) | sends exactly `Read <path> and execute it exactly.` through herdr argv | target, file, accepted, observed state |
 | `watch` | target, repeated terminal states, timeout | herdr agent wait; on blocked reads the dialog | state; gone accepts done-with-record, agent-not-found or agent-not-running, never idle |
 | `retire` | self, parent, name, or pane; exit/close/exit+close | sends `/exit` through the executor; close waits for gone and a clean process guard, then reads the resume banner (once more if still painting) | target, mode, resume id or null, closed, final path or null |
 | `chain` | handoff, successor name, model, effort; optional fork/cwd/direction/chrome | reads caller session/context/model; spawn; require successor idle; brief; receipt; retire caller unless opted out | chain id, caller and successor identity, context, models, model-change flag, handoff, timestamp |
