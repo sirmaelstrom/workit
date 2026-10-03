@@ -30,6 +30,9 @@ Read <handoff> and execute it exactly.
 First steps:
 1. node ${CLAUDE_PLUGIN_ROOT}/scripts/session.mjs retire <caller pane> --mode close --log <path>
 2. node ${CLAUDE_PLUGIN_ROOT}/scripts/session.mjs status --last --log <path>
+   If step 1 exited 3 or 4 (the caller never left) or that row is
+   `state: retire-failed` (the caller's /exit was refused), the caller is
+   still live: run `session.mjs retire <caller pane> --mode exit+close --log <path>`.
 3. Write a spine_receipt on the anchor citing the caller resume id, your pane +
    session id, and the caller context % from that row.
 4. Pick up the anchored quest.
@@ -40,6 +43,8 @@ holds at every PR boundary with needs_input.
 ```
 
 `chain` / `retire self` must be your LAST tool call — make no tool call after it; write your final message and stop.
+
+A `chain` that exits nonzero did not retire you. Exit 4 with `reason: agent_pane_busy` means the successor pane never became a shell (`successorPaneKept` says why a pane was left open). Exit 4 with `outcome: successor-not-ready` leaves a successor in `successorPane` to inspect. Exit 1 with `callerRetirement: exit-refused` means the successor is briefed but your `/exit` was refused. Read the output before retrying or continuing.
 
 When `retire --mode close` reaches Claude Code's "Background work is running" exit dialog, it waits
 `--dialog-after-ms` (15,000 by default), proves every direct child of claude.exe is a `run-*-mcp.js`

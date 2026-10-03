@@ -205,6 +205,149 @@ test('S9: a model change is flagged', async (t) => {
   assert.equal(no.output.modelChanged, false);
 });
 
+// 317f6cef: herdr's refusal when `agent start` lands on a pane whose shell has not
+// drawn its prompt yet, verbatim from the 2026-10-01 23:59:04Z session-log row.
+const paneBusy = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_pane_busy","message":"agent target pane pane:successor is not an available shell"},"id":"cli:agent:start"}' };
+// The fixture's process-info envelope reports shell_pid 1: a bare split is its shell alone.
+const bareShell = () => ({ code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'pwsh.exe', pid: 1 })]), stderr: '' });
+function busyHerdr(busyStarts, { onStart = () => {}, exitResult = null, successorInfo = bareShell } = {}) {
+  const success = successHerdr();
+  let starts = 0;
+  return (program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'agent start') {
+      starts++; onStart(starts);
+      if (starts > 1000) throw new Error('agent start retried without a bound');
+      if (starts <= busyStarts) return paneBusy;
+    }
+    if (key === 'pane process-info' && args.at(-1) === 'pane:successor' && starts <= busyStarts) return successorInfo();
+    if (key === 'agent prompt' && args.includes('/exit') && exitResult) return exitResult;
+    return success(program, args);
+  };
+}
+function chainArgv(f, ...extra) { return ['chain', '--handoff', handoff(f), '--name', 'new', '--model', 'claude-opus-5', '--effort', 'high', '--log', f.log, ...extra]; }
+function clock() { const c = { now: 0 }; c.deps = { now: () => c.now, sleep: async (ms) => { c.now += ms; } }; return c; }
+function startCalls(f) { return f.calls.filter((call) => call.args[0] === 'agent' && call.args[1] === 'start'); }
+function exitSent(f) { return f.calls.some((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && call.args.includes('/exit')); }
+
+test('317f6cef falsifier: agent_pane_busy once, then success — chain retries on the same pane, briefs, and retires the caller', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(1);
+  const result = await runSession(chainArgv(f), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(startCalls(f).map((call) => call.args[call.args.indexOf('--pane') + 1]), ['pane:successor', 'pane:successor']);
+  assert.equal(f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'split').length, 1);
+  assert.ok(f.calls.some((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && call.args[2] === 'new' && /^Read .* and execute it exactly\.$/.test(call.args[3])), 'the successor is briefed');
+  assert.equal(row(f).successorStartAttempts, 2);
+  assert.deepEqual([exitSent(f), result.output.callerRetirement], [true, 'retiring']);
+});
+
+test('317f6cef: a chain that started on a retry reaches the same retirement path, and status --last shows the caller retiring', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(3);
+  const result = await runSession(chainArgv(f), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(f.calls.filter((call) => call.args.includes('/exit')).map((call) => call.args), [['agent', 'prompt', 'pane:caller', '/exit']]);
+  const status = await runSession(['status', '--last', '--log', f.log], { exec: f.exec, env: env() });
+  const [last] = status.output.rows;
+  assert.deepEqual([last.state, last.callerRetirement, last.callerPane, last.successorStartAttempts], ['chained', 'retiring', 'pane:caller', 4]);
+});
+
+test('317f6cef custody: a pane busy for the whole successor timeout leaves the caller live, closes the empty split, and reports agent_pane_busy', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(Infinity);
+  const result = await runSession(chainArgv(f, '--successor-timeout', '5000'), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 4, JSON.stringify(result.output));
+  assert.equal(exitSent(f), false, 'no /exit reaches the caller');
+  assert.match(result.output.error, /agent_pane_busy/);
+  assert.deepEqual([row(f).state, row(f).reason, row(f).successorPane, row(f).successorPaneClosed], ['failed', 'agent_pane_busy', 'pane:successor', true]);
+  assert.deepEqual(f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'close').map((call) => call.args[2]), ['pane:successor']);
+  // Any other start failure is final on the first attempt and closes nothing.
+  const other = fixture(t); const otherClock = clock();
+  other.handler = (program, args) => (`${args[0]} ${args[1]}` === 'agent start' ? { code: 1, stdout: '', stderr: '{"error":{"code":"agent_timeout"}}' } : successHerdr()(program, args));
+  const failed = await runSession(chainArgv(other), { exec: other.exec, env: env(), ...otherClock.deps });
+  assert.deepEqual([failed.exit, startCalls(other).length, exitSent(other), row(other).successorPane], [1, 1, false, 'pane:successor']);
+  assert.equal(other.calls.some((call) => call.args[0] === 'pane' && call.args[1] === 'close'), false);
+});
+
+// workit#132 council S1: only a pane whose foreground is its shell alone is an empty split.
+test('317f6cef close predicate: busy exhaustion closes the split only when its foreground is the shell alone, and names why it kept one', async (t) => {
+  const processInfo = (...processes) => () => ({ code: 0, stdout: herdrShapes.processInfo(processes), stderr: '' });
+  for (const [label, successorInfo, kept] of [
+    ['codex.exe (council probe)', processInfo(herdrShapes.process({ name: 'codex.exe', pid: 7 })), 'foreground-not-shell'],
+    ['claude.exe', processInfo(herdrShapes.process({ name: 'claude.exe', pid: 8 })), 'foreground-not-shell'],
+    ['the shell and a child', processInfo(herdrShapes.process({ name: 'pwsh.exe', pid: 1 }), herdrShapes.process({ name: 'node.exe', pid: 9 })), 'foreground-not-shell'],
+    ['a shell-named child', processInfo(herdrShapes.process({ name: 'pwsh.exe', pid: 10 })), 'foreground-not-shell'],
+    ['an empty foreground', processInfo(), 'foreground-not-shell'],
+    ['process-info failing', () => ({ code: 1, stdout: '', stderr: 'pane_not_found' }), 'process-info-failed'],
+    ['process-info unreadable', () => ({ code: 0, stdout: '{not-json', stderr: '' }), 'process-info-unreadable'],
+  ]) {
+    const f = fixture(t); const c = clock(); f.handler = busyHerdr(Infinity, { successorInfo });
+    const result = await runSession(chainArgv(f, '--successor-timeout', '1000'), { exec: f.exec, env: env(), ...c.deps });
+    assert.deepEqual([result.exit, row(f).successorPaneClosed, row(f).successorPaneKept, exitSent(f)], [4, false, kept, false], label);
+    assert.equal(f.calls.some((call) => call.args[0] === 'pane' && call.args[1] === 'close'), false, label);
+  }
+});
+
+// workit#132 council M1: no start attempt begins at or after the deadline, the
+// sleep is capped at what remains, and a start that returns after the deadline
+// is not ready, so the caller is never retired on it.
+test('317f6cef bound: busy-forever retries stop at the successor timeout measured from the split', async (t) => {
+  for (const timeout of [5000, 4100]) {
+    const f = fixture(t); const c = clock(); let lastStartAt = null;
+    f.handler = busyHerdr(Infinity, { onStart: () => { lastStartAt = c.now; } });
+    const result = await runSession(chainArgv(f, '--successor-timeout', String(timeout)), { exec: f.exec, env: env(), ...c.deps });
+    const attempts = Math.ceil(timeout / 250);
+    assert.deepEqual([result.exit, c.now, startCalls(f).length, row(f).startAttempts], [4, timeout, attempts, attempts], `timeout ${timeout}`);
+    assert.ok(lastStartAt < timeout, `timeout ${timeout}: last start at ${lastStartAt}`);
+  }
+});
+
+test('317f6cef M1 astra probe: busy, then a success that would start after a 100 ms budget, never retires the caller', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(1);
+  const result = await runSession(chainArgv(f, '--successor-timeout', '100'), { exec: f.exec, env: env(), ...c.deps });
+  assert.deepEqual([result.exit, startCalls(f).length, exitSent(f), c.now], [4, 1, false, 100], JSON.stringify(result.output));
+});
+
+test('317f6cef M1 codex probe: busy twice, then a slow success that would land at 800 ms on a 500 ms budget, never retires the caller', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(2, { onStart: (n) => { if (n === 3) c.now += 300; } });
+  const result = await runSession(chainArgv(f, '--successor-timeout', '500'), { exec: f.exec, env: env(), ...c.deps });
+  assert.deepEqual([result.exit, startCalls(f).length, exitSent(f)], [4, 2, false], JSON.stringify(result.output));
+});
+
+test('317f6cef M1 latency: a start launched in the window that returns after the deadline is successor-not-ready, and the caller stays', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(1, { onStart: (n) => { if (n === 2) c.now += 400; } });
+  const result = await runSession(chainArgv(f, '--successor-timeout', '500'), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 4, JSON.stringify(result.output));
+  assert.equal(exitSent(f), false);
+  assert.deepEqual([row(f).outcome, row(f).successorStartAttempts, row(f).successorStartedLate], ['successor-not-ready', 2, true]);
+  assert.deepEqual(startCalls(f).map((call) => call.args[call.args.indexOf('--timeout') + 1]), ['500', '250'], 'a retry gets only the remaining budget');
+});
+
+test('317f6cef: a refused /exit to the caller is its own row, so status --last does not read as retired', async (t) => {
+  const f = fixture(t); const c = clock();
+  f.handler = busyHerdr(0, { exitResult: { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' } });
+  const result = await runSession(chainArgv(f), { exec: f.exec, env: env(), ...c.deps });
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /\/exit failed: .*agent_not_found/);
+  const status = await runSession(['status', '--last', '--log', f.log], { exec: f.exec, env: env() });
+  assert.deepEqual([status.output.rows[0].state, status.output.rows[0].callerRetirement, status.output.rows[0].exit], ['retire-failed', 'exit-refused', 1]);
+});
+
+// workit#132 council U1/U2: a refused /exit leaves a live caller, so its final
+// capture is disarmed and the persisted chain record agrees with the log.
+test('317f6cef: a refused /exit disarms --capture-final and marks the persisted chain exit-refused', async (t) => {
+  const f = fixture(t); const c = clock(); const root = join(f.dir, 'capture');
+  f.handler = busyHerdr(0, { exitResult: { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_found"}}' } });
+  const result = await runSession(chainArgv(f, '--capture-final'), { exec: f.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: root }), ...c.deps });
+  assert.equal(result.exit, 1);
+  assert.equal(existsSync(join(root, 'final-pending', '11111111-1111-4111-8111-111111111111')), false, 'no marker is left armed on a live caller');
+  assert.deepEqual([result.output.finalMessagePath, row(f).finalMessagePath], [null, null]);
+  assert.equal(state(f).chains.at(-1).callerRetirement, 'exit-refused');
+  // Positive branch: an accepted /exit keeps the marker and the persisted 'retiring'.
+  const ok = fixture(t); const okClock = clock(); const okRoot = join(ok.dir, 'capture'); ok.handler = busyHerdr(0);
+  await runSession(chainArgv(ok, '--capture-final'), { exec: ok.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: okRoot }), ...okClock.deps });
+  assert.equal(existsSync(join(okRoot, 'final-pending', '11111111-1111-4111-8111-111111111111')), true);
+  assert.equal(state(ok).chains.at(-1).callerRetirement, 'retiring');
+});
+
 const rotation4ExitDialog = `Background work is running
 The following will stop when you exit:
   shell · cd /d/Development/projects/workit && node scripts…
