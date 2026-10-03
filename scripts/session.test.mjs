@@ -440,6 +440,115 @@ test('68af2e33: only a wait and its output plumbing are abandonable; anything el
   assert.equal(laneWaitMonitor(V_WAIT.replace(' < /dev/null', '')), false, 'the wrapper shape is required');
 });
 
+// 68af2e33 (reopened): the caller is ALREADY on the exit dialog when the successor
+// retires it (2026-10-02, w1R:p1). herdr listed that hand-started Claude with no
+// `name` (agent_list at 09:21:40Z) and refused its `/exit` with agent_blocked.
+const NAMELESS_OWNER = [{ agent: 'claude', agent_status: 'blocked', pane_id: 'w1R:p1' }];
+const NAMED_OWNER = [{ agent: 'claude', agent_status: 'blocked', pane_id: 'w1R:p1', name: 'conductor' }];
+const BASH_LANE_WAIT = bashWrapped('node X:/x/plugins/cache/workit/workit/1.27.9/scripts/lane.mjs wait o790 --until idle --until done --timeout 3500000');
+// A Claude Code PowerShell-tool background child, captured 2026-10-03 from a live
+// claude.exe while `Start-Sleep 45; Write-Output 'probe-done'` ran in the background;
+// host paths replaced. The command itself is not in the argv: it arrives through
+// CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT, so the classifier cannot read it.
+const PWSH_TOOL_CHILD = String.raw`C:\WINDOWS\System32\cmd.exe /d /s /c ""C:\WINDOWS\System32\chcp.com" 65001 >nul & "X:\pwsh\pwsh.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$__claudeCodeScript = $env:CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT; $env:CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT = $null; Invoke-Expression -Command $__claudeCodeScript" > "X:\tmp\claude\tasks\bjrm7181g.output" 2>&1"`;
+const BLOCKED_EXIT = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_blocked","message":"agent w1R:p1 is blocked and requires interactive input"},"id":"cli:agent:prompt"}' };
+
+// The pane sits on `screen` until Enter is sent; then the agent is gone and the pane
+// shows the resume banner over a bare shell.
+function openDialogHerdr(f, { agents = NAMELESS_OWNER, children = [{ CommandLine: BASH_LANE_WAIT }], screen = rotation4ExitDialog } = {}) {
+  const answered = () => f.calls.some((call) => call.args[0] === 'pane' && call.args[1] === 'send-keys');
+  return (program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (program === 'powershell.exe') return { code: 0, stdout: JSON.stringify(children), stderr: '' };
+    if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(), stderr: '' };
+    if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents }), stderr: '' };
+    if (key === 'agent get') return { code: 0, stdout: herdrShapes.agentGet({ pane: 'w1R:p1', state: 'blocked', session: '77777777-7777-4777-8777-777777777777' }), stderr: '' };
+    if (key === 'agent prompt') return answered() ? { code: 0, stdout: herdrShapes.prompt(), stderr: '' } : BLOCKED_EXIT;
+    if (key === 'agent wait') return answered() ? { code: 1, stdout: '', stderr: 'agent_not_found' } : { code: 1, stdout: '', stderr: 'timeout' };
+    if (key === 'pane read') return { code: 0, stdout: answered() ? 'Resume this session with:\nclaude --resume 77777777-7777-4777-8777-777777777777' : screen, stderr: '' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process(answered() ? { name: 'pwsh.exe', pid: 1 } : { name: 'claude.exe', argv0: '<path>/claude.exe', pid: 42 })]), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+}
+const sendKeys = (f) => callsFor(f, 'pane').filter((call) => call.args[1] === 'send-keys');
+const paneReads = (f) => callsFor(f, 'pane').filter((call) => call.args[1] === 'read').length;
+const fastClock = () => { let now = 0; return { now: () => (now += 1000), sleep: async () => {} }; };
+
+test('68af2e33: a nameless herdr owner already on the exit dialog is retired by --mode close with one Enter', async (t) => {
+  const f = fixture(t); f.handler = openDialogHerdr(f);
+  const result = await runSession(['retire', 'w1R:p1', '--mode', 'close', '--log', f.log], { exec: f.exec, ...fastClock() });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual([result.output.closed, result.output.dialogAnswered, result.output.abandonedLaneWaits, result.output.target], [true, true, 1, 'w1R:p1']);
+  assert.equal(sendKeys(f).length, 1); assert.equal(sendKeys(f)[0].args[3], 'enter');
+  assert.equal(f.calls.find((call) => call.args[0] === 'agent' && call.args[1] === 'wait').args[2], 'w1R:p1', 'the pane id addresses the nameless owner');
+});
+
+test('68af2e33: exit+close answers an already-open exit dialog when herdr refuses /exit with agent_blocked', async (t) => {
+  for (const agents of [NAMELESS_OWNER, NAMED_OWNER]) {
+    const f = fixture(t); f.handler = openDialogHerdr(f, { agents });
+    const result = await runSession(['retire', 'w1R:p1', '--mode', 'exit+close', '--dialog-after-ms', '3000', '--timeout', '60000', '--log', f.log], { exec: f.exec, ...fastClock() });
+    assert.equal(result.exit, 0, JSON.stringify(result.output));
+    assert.deepEqual([result.output.closed, result.output.dialogAnswered, result.output.abandonedLaneWaits, result.output.resumeId], [true, true, 1, '77777777-7777-4777-8777-777777777777']);
+    assert.equal(sendKeys(f).length, 1);
+    assert.equal(callsFor(f, 'agent').filter((call) => call.args[1] === 'prompt').length, 1, 'the refused /exit is not resent');
+  }
+});
+
+test('68af2e33: a PowerShell-tool background child on an already-open dialog refuses in both modes with its argv and no key', async (t) => {
+  for (const mode of ['close', 'exit+close']) {
+    const f = fixture(t); f.handler = openDialogHerdr(f, { children: [{ CommandLine: PWSH_TOOL_CHILD }] });
+    const result = await runSession(['retire', 'w1R:p1', '--mode', mode, '--log', f.log], { exec: f.exec, ...fastClock() });
+    assert.equal(result.exit, 3, `${mode}: ${JSON.stringify(result.output)}`);
+    assert.equal(result.output.dialog, 'background-process-live'); assert.deepEqual(result.output.argv, [PWSH_TOOL_CHILD]);
+    assert.equal(sendKeys(f).length, 0, mode);
+  }
+  assert.equal(laneWaitMonitor(PWSH_TOOL_CHILD), false);
+  assert.equal(laneWaitMonitor(bashWrapped('Start-Sleep 8; node X:/x/lane.mjs wait o790 --until idle')), false, 'no sleep-prefix shape is recognised');
+});
+
+test('68af2e33: agent_blocked on a prompt that is not the exit dialog sends no key and returns the pane text', async (t) => {
+  const prompt = 'Do you want to make this edit to session.mjs?\n❯ 1. Yes\n  2. No\nEsc to cancel';
+  const f = fixture(t); f.handler = openDialogHerdr(f, { screen: prompt });
+  const result = await runSession(['retire', 'w1R:p1', '--mode', 'exit+close', '--log', f.log], { exec: f.exec, ...fastClock() });
+  assert.equal(result.exit, 3, JSON.stringify(result.output));
+  assert.equal(result.output.dialog, 'blocked-other-prompt'); assert.equal(result.output.paneText, prompt);
+  assert.equal(sendKeys(f).length, 0); assert.equal(f.calls.some((call) => call.program === 'powershell.exe'), false);
+});
+
+test('68af2e33: --mode exit alone keeps the plain agent_blocked failure and reads nothing', async (t) => {
+  const f = fixture(t); f.handler = openDialogHerdr(f);
+  const result = await runSession(['retire', 'w1R:p1', '--mode', 'exit', '--log', f.log], { exec: f.exec, ...fastClock() });
+  assert.equal(result.exit, 1); assert.match(result.output.error, /^herdr agent prompt w1R:p1 \/exit failed: .*agent_blocked/);
+  assert.equal(sendKeys(f).length, 0); assert.equal(paneReads(f), 0);
+});
+
+test('68af2e33: a pane no herdr entry claims stays gone; another pane\'s nameless entry does not claim it', async (t) => {
+  const f = fixture(t); let now = 0;
+  f.handler = (_program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(), stderr: '' };
+    if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents: [{ agent: 'claude', pane_id: 'wX:p9' }] }), stderr: '' };
+    if (key === 'pane process-info') return { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'claude.exe' })]), stderr: '' };
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const result = await runSession(['retire', 'w1R:p1', '--mode', 'close', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => (now += 2), sleep: async () => {} });
+  assert.equal(result.exit, 3); assert.match(result.output.error, /still has a live Claude process/);
+  assert.equal(f.calls.some((call) => call.args[0] === 'agent' && ['get', 'wait'].includes(call.args[1])), false, 'a gone pane is never waited on');
+  assert.equal(paneReads(f), 0); assert.equal(sendKeys(f).length, 0);
+});
+
+test('68af2e33: a nameless owner\'s final message comes from herdr\'s live session, not a stale record on the pane', async (t) => {
+  const f = fixture(t); const root = join(f.dir, 'capture');
+  const stale = '55555555-5555-4555-8555-555555555555'; const live = '77777777-7777-4777-8777-777777777777';
+  mkdirSync(join(root, 'final'), { recursive: true });
+  for (const id of [stale, live]) writeFileSync(join(root, 'final', `${id}.md`), id, 'utf8');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'other' } }, chains: [{ callerPane: 'w1R:p1', callerSession: stale }] }), 'utf8');
+  f.handler = openDialogHerdr(f);
+  const result = await runSession(['retire', 'w1R:p1', '--mode', 'close', '--log', f.log], { exec: f.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: root }), ...fastClock() });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.finalMessagePath, join(root, 'final', `${live}.md`));
+});
+
 test('R1: prose containing Background is not the exit dialog', async (t) => {
   const f = fixture(t); let now = 0;
   writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { old: { name: 'old', pane: 'pane:old' } }, chains: [] }), 'utf8');

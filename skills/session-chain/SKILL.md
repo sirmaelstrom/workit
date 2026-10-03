@@ -52,5 +52,15 @@ server or a background `lane.mjs wait` (Claude Code's background-Bash wrapper ru
 and output plumbing such as `tee`, `tail` or `echo`), and answers Enter itself; it reports
 `abandonedLaneWaits`. Any other live child is never approved: it returns
 `dialog: "background-process-live"` with its argv and exit 3 so a person can decide.
+A caller already sitting on that dialog is handled the same way. `--mode close` reaches it through
+the pane's herdr owner (a hand-started Claude has no herdr name and is addressed by its pane id), and
+`--mode exit+close` reads the pane when herdr refuses `/exit` with `agent_blocked`. Any other prompt
+on a blocked pane gets no key: exit 3 with `dialog: "blocked-other-prompt"` and the pane text.
+`--mode exit` alone never closes, so it keeps the plain exit 1 on `agent_blocked`.
+
+Retire can abandon a background lane wait only when it was launched through the **Bash** tool as a
+bare `node …lane.mjs wait …` with no sleep prefix. A PowerShell-tool background shell carries its
+command in an environment variable, not in its argv, so retire cannot see that the shell is a wait.
+It always refuses: stop those waits, or answer the dialog by hand, before you retire.
 
 Fork mode and Stop-hook ordering are unit-tested, not yet live-proven. The hook is shipped as `${CLAUDE_PLUGIN_ROOT}/scripts/session-stop-capture.mjs`, but its registration belongs to the private operator configuration.
