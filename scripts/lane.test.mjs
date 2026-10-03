@@ -663,6 +663,80 @@ test('quest 8b7c477c: a codex pane with no live footer has an unknown meter, nev
   }
 });
 
+// Codex's refusal banner, its rate-limit modal and its capacity banner, quoted
+// in a claude lane's own output above a claude live tail.
+const CLAUDE_TAIL = [
+  '────────────────────────────────────────',
+  '❯ ',
+  '────────────────────────────────────────',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+];
+const CLAUDE_QUOTES_BANNER = ['● Write(scripts/fixture.txt)', "■ You've hit your usage limit. Try again later.", ...CLAUDE_TAIL].join('\n');
+const CLAUDE_QUOTES_MODAL = [
+  '● Write(scripts/fixture.txt)',
+  'Approaching rate limits — Switch to gpt-5.6-luna for lower credit usage?',
+  '  › 1. Switch  2. Keep current model',
+  ...CLAUDE_TAIL,
+].join('\n');
+const CLAUDE_QUOTES_CAPACITY = ['● Write(scripts/fixture.txt)', '■ Selected model is at capacity. Please try a different model.', ...CLAUDE_TAIL].join('\n');
+
+test('quest 8b7c477c amend 1: a claude lane whose pane quotes a codex refusal is never plan-refused', async (t) => {
+  // [pane, verb, herdr's wait answer, expected exit]. The modal needs a settled
+  // state or a low meter; a claude lane's meter is null, so only the settled
+  // paths can reach it.
+  const timedOut = { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' };
+  const settled = (state) => ({ code: 0, stdout: `{"result":{"state":"${state}"}}`, stderr: '' });
+  for (const [label, pane, verb, waited, exit] of [
+    ['banner, wait', CLAUDE_QUOTES_BANNER, 'wait', timedOut, 4],
+    ['banner, resume timeout', CLAUDE_QUOTES_BANNER, 'resume', timedOut, 4],
+    ['banner, resume settled', CLAUDE_QUOTES_BANNER, 'resume', settled('idle'), 0],
+    ['modal, wait settled', CLAUDE_QUOTES_MODAL, 'wait', settled('done'), 0],
+    ['modal, resume settled', CLAUDE_QUOTES_MODAL, 'resume', settled('idle'), 0],
+  ]) {
+    const f = fixture(t);
+    seedLane(f, { kind: 'claude' });
+    f.responses.push(waited, { code: 0, stdout: pane, stderr: '' });
+    const result = await timedOutWait(f, verb);
+    assert.equal(result.exit, exit, `${label}: a claude lane draws no codex refusal`);
+    assert.notEqual(result.output.state, 'plan-refused', label);
+    assert.equal(result.output.refusal ?? null, null, label);
+  }
+});
+
+test('quest 8b7c477c amend 1: a claude lane whose pane quotes the capacity banner settles as done, not capacity', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' },
+    { code: 0, stdout: CLAUDE_QUOTES_CAPACITY, stderr: '' },
+  );
+  const result = await timedOutWait(f);
+  assert.equal(result.exit, 0);
+  assert.equal(result.output.state, 'done');
+});
+
+test('quest 8b7c477c amend 1: a codex lane with a genuine banner over its live footer is still plan-refused', async (t) => {
+  const pane = [
+    "■ You've hit your usage limit. Try again later.",
+    '',
+    '› Ask Codex to do anything',
+    '',
+    'gpt-5.6-terra high · Context 62% left · 5h 0% left · weekly 91% left',
+  ].join('\n');
+  for (const verb of ['wait', 'resume']) {
+    const f = fixture(t);
+    seedLane(f);
+    f.responses.push(
+      { code: 1, stdout: '', stderr: '{"error":{"code":"timeout"}}' },
+      { code: 0, stdout: pane, stderr: '' },
+    );
+    const result = await timedOutWait(f, verb);
+    assert.equal(result.exit, 6, verb);
+    assert.equal(result.output.state, 'plan-refused', verb);
+    assert.equal(result.output.refusalShape, 'banner', verb);
+  }
+});
+
 test('quest 653c5b81: a failed pane read clears the prior meter and a later read recovers it', async (t) => {
   const stale = fixture(t);
   seedLane(stale);
@@ -3035,7 +3109,7 @@ test('c952d41e DO 11: plan refusal requires a Codex banner or numbered modal plu
   const compiler = fixture(t); seedLane(compiler); let clock = 0;
   compiler.responses.push(
     { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
-    { code: 0, stdout: 'src/mcp/review-council/seat-fallback.ts(78,26): error TS2367: This comparison appears to be unintentional because the types \"usage limit\" | \"hit your usage limit\" | \"rate limit\" | \"Approaching rate limits\" and \"CODEX_SILENT_STREAM_ERROR\" have no overlap.\ngpt-5.6-terra high · 5h 81% left · weekly 91% left', stderr: '' },
+    { code: 0, stdout: 'src/mcp/review-council/seat-fallback.ts(78,26): error TS2367: This comparison appears to be unintentional because the types \"usage limit\" | \"hit your usage limit\" | \"rate limit\" | \"Approaching rate limits\" and \"CODEX_SILENT_STREAM_ERROR\" have no overlap.\ngpt-5.6-terra high · Context 62% left · 5h 81% left · weekly 91% left', stderr: '' },
   );
   const falsePositive = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', compiler.log], { exec: compiler.exec, now: () => (clock += 10), sleep: async () => {} });
   assert.equal(falsePositive.exit, 4);
@@ -3043,7 +3117,7 @@ test('c952d41e DO 11: plan refusal requires a Codex banner or numbered modal plu
   const sourceLine = fixture(t); seedLane(sourceLine); let sourceClock = 0;
   sourceLine.responses.push(
     { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
-    { code: 0, stdout: 'export const PLAN_REFUSAL_PATTERNS = Object.freeze([/hit your usage limit/i]);\ngpt-5.6-terra high · 5h 77% left · weekly 91% left', stderr: '' },
+    { code: 0, stdout: 'export const PLAN_REFUSAL_PATTERNS = Object.freeze([/hit your usage limit/i]);\ngpt-5.6-terra high · Context 62% left · 5h 77% left · weekly 91% left', stderr: '' },
   );
   const ownSource = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', sourceLine.log], { exec: sourceLine.exec, now: () => (sourceClock += 10), sleep: async () => {} });
   assert.equal(ownSource.exit, 4, 'a visible regex literal in helper source is not a refusal');
@@ -3206,12 +3280,16 @@ test('amend 2: a prompt error whose text says timeout does not authorize Enter',
 
 test('amend 2: a column-zero banner in prose needs a live TUI footer', async (t) => {
   const f = fixture(t); seedLane(f); let clock = 0;
+  // The last line is meter-shaped prose, NOT a live footer: it lacks
+  // `Context N% left`, so it matches no LIVE_TUI pattern and is no meter either.
   f.responses.push(
     { code: 0, stdout: '{"result":{"state":"working"}}', stderr: '' },
     { code: 0, stdout: "■ You've hit your usage limit. Try again later.\ngpt-5.6-terra high · 5h 81% left · weekly 91% left", stderr: '' },
   );
   const result = await runLane(['wait', 'lane-a', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => (clock += 10), sleep: async () => {} });
   assert.equal(result.exit, 4);
+  assert.equal(result.row.plan5h, null);
+  assert.equal(result.row.warning, 'plan meter unavailable; capacity is unknown');
 });
 
 test('amend 2: sweep scopes HOLDs to known panes and surfaces split-failure candidates', async (t) => {

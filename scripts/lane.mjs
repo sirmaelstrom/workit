@@ -2411,13 +2411,24 @@ function isTimeoutFailure(result) {
 function readPlanState(deps, name, kind) {
   const read = call(deps, 'herdr', ['agent', 'read', name, '--lines', '40']);
   if (read.code !== 0) return { ok: false, meter: null, refusal: null, refusalShape: null, dialog: '' };
+  // The meter footer, the refusal banner and modal, and the capacity banner
+  // are all codex TUI text. A claude lane draws none of them, so any of it in
+  // its pane is its own output (measured: a lane editing lane.test.mjs
+  // fixtures read as weekly 15%, exit 6).
+  if (!expectsPlanMeter(kind)) {
+    return {
+      ok: true,
+      meter: { plan5h: null, planWeekly: null },
+      refusal: null,
+      refusalShape: null,
+      capacity: null,
+      dialog: responseText(read.stdout),
+    };
+  }
   const refusal = planRefusal(read.stdout);
   return {
     ok: true,
-    // A claude lane has no plan footer, so any meter text in its pane is its
-    // own output (measured: a lane editing lane.test.mjs fixtures read as
-    // weekly 15%, exit 6).
-    meter: expectsPlanMeter(kind) ? scrapePlanMeter(read.stdout) : { plan5h: null, planWeekly: null },
+    meter: scrapePlanMeter(read.stdout),
     refusal: refusal?.line ?? null,
     refusalShape: refusal?.shape ?? null,
     capacity: capacityBanner(read.stdout),
