@@ -236,6 +236,7 @@ test('317f6cef falsifier: agent_pane_busy once, then success — chain retries o
   assert.equal(f.calls.filter((call) => call.args[0] === 'pane' && call.args[1] === 'split').length, 1);
   assert.ok(f.calls.some((call) => call.args[0] === 'agent' && call.args[1] === 'prompt' && call.args[2] === 'new' && /^Read .* and execute it exactly\.$/.test(call.args[3])), 'the successor is briefed');
   assert.equal(row(f).successorStartAttempts, 2);
+  assert.deepEqual([exitSent(f), result.output.callerRetirement], [true, 'retiring']);
 });
 
 test('317f6cef: a chain that started on a retry reaches the same retirement path, and status --last shows the caller retiring', async (t) => {
@@ -262,6 +263,14 @@ test('317f6cef custody: a pane busy for the whole successor timeout leaves the c
   const failed = await runSession(chainArgv(other), { exec: other.exec, env: env(), ...otherClock.deps });
   assert.deepEqual([failed.exit, startCalls(other).length, exitSent(other), row(other).successorPane], [1, 1, false, 'pane:successor']);
   assert.equal(other.calls.some((call) => call.args[0] === 'pane' && call.args[1] === 'close'), false);
+  // The empty-split close keeps retire's process-info guard: a Claude process in the pane keeps it open.
+  const live = fixture(t); const liveClock = clock(); const busy = busyHerdr(Infinity);
+  live.handler = (program, args) => (`${args[0]} ${args[1]}` === 'pane process-info' && args.at(-1) === 'pane:successor'
+    ? { code: 0, stdout: herdrShapes.processInfo([herdrShapes.process({ name: 'claude.exe' })]), stderr: '' }
+    : busy(program, args));
+  const kept = await runSession(chainArgv(live, '--successor-timeout', '1000'), { exec: live.exec, env: env(), ...liveClock.deps });
+  assert.deepEqual([kept.exit, row(live).successorPaneClosed, exitSent(live)], [4, false, false]);
+  assert.equal(live.calls.some((call) => call.args[0] === 'pane' && call.args[1] === 'close'), false);
 });
 
 test('317f6cef bound: busy-forever retries stop at the successor timeout measured from the split', async (t) => {
