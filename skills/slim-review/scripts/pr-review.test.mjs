@@ -1040,8 +1040,8 @@ test('threads --unresolved counts an outdated unresolved thread as open', () => 
     threads: [thread({ isResolved: false, isOutdated: true }), thread()],
     unresolved: true,
   });
-  assert.match(logs[1], /\[OPEN, outdated\]/);
   assert.deepEqual(exits.map((e) => e.code), [THREADS_OPEN_EXIT]);
+  assert.match(logs[1], /\[OPEN, outdated\]/);
 });
 
 test('threads: a GraphQL reply with no thread list is exit 1 with no output, never an empty board', () => {
@@ -1618,7 +1618,8 @@ test('threads requires --repo — same-number-different-repo reads as "no unreso
 /**
  * The real CLI's `threads --unresolved`, with PATH holding only `binDir` (or
  * nothing) and run from `cwd`. Windows (libuv) looks for a bare `gh.exe` in the
- * cwd first and then on PATH, so `cwd` is always a directory this test made.
+ * cwd first and then on PATH (the cwd step is skipped when the environment sets
+ * NoDefaultCurrentDirectoryInExePath), so `cwd` is always a directory this test made.
  */
 function runThreadsCli({ binDir = '', cwd }) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toUpperCase() !== 'PATH'));
