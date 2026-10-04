@@ -4342,6 +4342,15 @@ test('056de846: a codex lane whose pane carries the same text keeps its settle-c
   assert.deepEqual([result.output.state, result.output.background, result.row.pollCount, result.row.settleConfirmed], ['done', undefined, 2, true]);
 });
 
+test('056de846: a codex lane whose pane cannot be read still settles on its two polls, as before', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  const unreadable = { code: 1, stdout: '', stderr: 'read failed' };
+  f.responses.push(DONE_POLL, unreadable, DONE_POLL, unreadable);
+  const result = await clockedWait(f);
+  assert.deepEqual([result.exit, result.output.state, result.output.paneUnread, result.row.pollCount], [0, 'done', undefined, 2]);
+});
+
 test('056de846: a lane of unknown kind is held like a claude lane — its pane may be one', async (t) => {
   const f = fixture(t);
   seedLane(f, { kind: undefined });
