@@ -1179,6 +1179,23 @@ test('liveness (C2-9): an uncertain stop read on a terminal WP sets wps[].cleanu
   assert.equal(h.wp('WP-02').lane.exitedAt ?? null, null);
 });
 
+test('liveness (C2-9): an error read between uncertain reads does not reset the count', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'merged' });
+  await pendingAfter(h, await perform(h, h.state.pending));
+  const wp = h.wp('WP-02');
+  Object.assign(wp.lane, { exitedAt: null, deadline: new Date(T0 - 60000).toISOString() });
+  wp.queue = [];
+  h.lifeByPid.set(4202, 9);
+  const reads = [{ code: 1, stdout: 'not json', stderr: '' }, { code: 1, stdout: 'not json', stderr: '' }, { code: 2, stdout: '', stderr: 'lane alive: usage' }, { code: 1, stdout: 'not json', stderr: '' }];
+  for (const read of reads) {
+    await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
+    await pendingAfter(h, read);
+  }
+  assert.equal(h.wp('WP-02').lane.uncertain, 3);
+  assert.match(h.wp('WP-02').cleanup, /3 reads/);
+});
+
 test('gate cap (C1-2): the third gate-driven amendment blocks the WP with the last gate cause as its reason', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   h.gateCmdCode = { 'WP-02': [1, 1, 1] };
