@@ -119,6 +119,14 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      the portable T2 path — T2's requirement is independent lenses plus an
      adversarial pass, not that specific server.
 
+   **The conductor's full suite runs once, at the candidate merge head**, when
+   the repo's CI does not run its database-backed tests per PR. It gets its
+   own test database, never the lane's (name it after the lane's with a
+   `_cond` suffix), so it never blocks the lane: start it in parallel with
+   the lane's amendment or with the challenge on the amended tree, and record
+   its start and end in the row. Run no suite before the amendment; a green
+   suite on a head that is about to change gates nothing.
+
    Two rules with receipts: **never downgrade a fired T2 trigger** (the one
    measured downgrade would have cost 10 confirmed defects — run-4 ruling 8,
    held three times), and **a round that produced nontrivial amendments has
