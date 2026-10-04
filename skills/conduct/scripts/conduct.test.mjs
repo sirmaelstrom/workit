@@ -1,17 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync, appendFileSync,
+  mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync, appendFileSync, renameSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runConduct } from './conduct.mjs';
-import { STEPS, STEP_SEAM, resolveRunDir } from './lib/state.mjs';
+import { STEPS, STEP_SEAM, resolveRunDir, readEvents } from './lib/state.mjs';
 import { detectAdapters, laneModel } from './lib/adapters.mjs';
 import { resolveRecipe, recipeArgv } from './lib/recipe.mjs';
 import { shellArgv, spawnDetached, pidAlive } from './lib/exec.mjs';
 import { openTouch, touchAction, recordTouch } from './lib/touch.mjs';
+import { validateGrant } from './lib/phases/preapproval.mjs';
+import { samePath } from './lib/phases/spec.mjs';
+import { questKey } from './lib/phases/mint.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '__fixtures__', 'intake');
@@ -21,8 +24,9 @@ const captured = (name) => {
   return { code, stdout, stderr };
 };
 
-// slug `fixture-run` matches the tag in the spine fixtures' questions.
+// slug `fixture-run` and run id `abcd1234` match the spine fixtures' questions.
 const GOAL = 'fixture run';
+const RUN_ID = 'abcd1234';
 const ANCHOR = '93427349';
 const ANCHOR_UUID = '93427349-2540-4d97-8437-db3af451caf2';
 const ANSWERED_AT = '2026-09-27T15:56:42.000Z';
@@ -53,8 +57,9 @@ function fixture(t, deps = {}) {
   const calls = [];
   const table = {
     [`git -C ${repo} rev-parse --is-inside-work-tree`]: { code: 0, stdout: 'true\n', stderr: '' },
+    [`git -C ${repo} rev-parse --show-toplevel`]: { code: 0, stdout: `${repo}\n`, stderr: '' },
     [`git -C ${repo} config --get remote.origin.url`]: { code: 0, stdout: 'https://github.com/sirmaelstrom/workit.git\n', stderr: '' },
-    'gh auth status': captured('gh-auth-status.json'),
+    'gh auth status --hostname github.com': captured('gh-auth-status.json'),
     'gh repo view sirmaelstrom/workit --json nameWithOwner,defaultBranchRef': captured('gh-repo-view.json'),
     'gh api repos/sirmaelstrom/workit/actions/workflows': captured('gh-actions-workflows.json'),
     'claude --version': { code: 0, stdout: '2.1.289 (Claude Code)\n', stderr: '' },
@@ -69,18 +74,28 @@ function fixture(t, deps = {}) {
   const base = {
     exec, env: {}, platform: 'linux', home: join(dir, 'home'), stdinIsTTY: false, pluginRoot: join(dir, 'plugin'),
     resolveCodex: () => 'codex', now: () => clock, timestamp: () => new Date((clock += 1000)).toISOString(),
-    importModule: testLoader, ...deps,
+    newRunId: () => RUN_ID, lockWaitMs: 0, importModule: testLoader, ...deps,
   };
   return { dir, repo, runs, calls, table, deps: base, run: (argv, more = {}) => runConduct(argv, { ...base, ...more }) };
 }
 
 const out = (result) => JSON.parse(result.stdout);
 const readState = (runDir) => JSON.parse(readFileSync(join(runDir, 'state.json'), 'utf8'));
-const events = (runDir) => readFileSync(join(runDir, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+const fsDeps = { exists: existsSync, read: (path) => readFileSync(path, 'utf8') };
+const events = (runDir) => readEvents(runDir, fsDeps, readState(runDir));
+const rawEvents = (runDir) => readFileSync(join(runDir, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+// A spine read-back result answering this run's current filing of touch n.
+function answeredFor(runDir, n = 1, answerPatch = {}) {
+  const result = fixtureJson('spine-quest-answered.json');
+  const touch = readState(runDir).touches[n - 1];
+  result.quests[0].latestReceipt.question = `${touch.tag} (run ${RUN_ID}/${touch.filings}) synthetic question`;
+  Object.assign(result.quests[0].latestReceipt.answer, answerPatch);
+  return result;
+}
 const SPINE = ['--adapter', 'spine', '--anchor', ANCHOR];
 
-function intake(f, extra = [], more = {}) {
-  return f.run(['intake', '--goal', GOAL, '--repo', f.repo, '--runs-root', f.runs, ...extra], more);
+function intake(f, extra = [], more = {}, goal = GOAL) {
+  return f.run(['intake', '--goal', goal, '--repo', f.repo, '--runs-root', f.runs, ...extra], more);
 }
 function record(f, runDir, id, result, more = {}) {
   return f.run(['record', '--run', runDir, '--action', id, '--result', JSON.stringify(result)], more);
@@ -90,15 +105,15 @@ function answer(f, runDir, key, { text, tty = true } = {}) {
 }
 
 // intake → anchor → touch 1 filed; returns the read-back action.
-async function toSpineReadBack(f, extra = []) {
-  const first = out(await intake(f, [...SPINE, ...extra]));
+async function toSpineReadBack(f, extra = [], goal = GOAL) {
+  const first = out(await intake(f, [...SPINE, ...extra], {}, goal));
   const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
   const readBack = out(await record(f, first.runDir, receipt.id, { id: 'filed-receipt-uuid' })).action;
   return { runDir: first.runDir, anchorAction: first.action, receipt, readBack };
 }
-async function toSpineSpec(f, extra = []) {
-  const flow = await toSpineReadBack(f, extra);
-  const spec = out(await record(f, flow.runDir, flow.readBack.id, fixtureJson('spine-quest-answered.json'))).action;
+async function toSpineSpec(f, extra = [], goal = GOAL) {
+  const flow = await toSpineReadBack(f, extra, goal);
+  const spec = out(await record(f, flow.runDir, flow.readBack.id, answeredFor(flow.runDir))).action;
   return { ...flow, spec };
 }
 async function toCoreSpec(f, extra = [], key = 'a') {
@@ -118,7 +133,7 @@ function seedRun(f, patch = {}) {
   const runDir = join(f.runs, 'seeded', 'run');
   mkdirSync(runDir, { recursive: true });
   const state = {
-    schemaVersion: 1, slug: 'seeded', runDir, workshopDir: dirname(runDir), pluginRoot: f.deps.pluginRoot,
+    schemaVersion: 1, slug: 'seeded', runId: RUN_ID, rev: 0, runDir, workshopDir: dirname(runDir), pluginRoot: f.deps.pluginRoot,
     intent: { goal: GOAL, anchor: null }, agents: {}, adapters: { spine: { on: false } }, phase: 'build',
     touches: [], wps: [], handover: null, pending: null, lastRecorded: null, seq: 0, ...patch,
   };
@@ -174,7 +189,7 @@ test('intake refuses <case>: exit 2 and the runs root stays empty', async (t) =>
       return intake(f);
     }],
     ['refusal 3: gh auth', (f) => {
-      f.table['gh auth status'] = { code: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts.' };
+      f.table['gh auth status --hostname github.com'] = { code: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts.' };
       return intake(f);
     }],
     ['refusal 5: no agent', (f) => {
@@ -182,6 +197,8 @@ test('intake refuses <case>: exit 2 and the runs root stays empty', async (t) =>
       return intake(f);
     }],
     ['refusal 7: spine without anchor', (f) => intake(f, ['--adapter', 'spine'])],
+    ['refusal 7: empty anchor (C13)', (f) => intake(f, ['--adapter', 'spine', '--anchor', ''])],
+    ['refusal 7: anchor shorter than 8 hex (C13)', (f) => intake(f, ['--adapter', 'spine', '--anchor', '9342'])],
     ['recipe missing bump', (f) => {
       const { bump, ...rest } = RECIPE;
       return intake(f, ['--release', recipeFile(f, rest)]);
@@ -236,9 +253,36 @@ test('adapter quote rule: a quoted spend command is off on win32 and never run',
     };
     const { adapters } = detectAdapters({ env: { WORKIT_SPEND_CMD: 'spend "x"' }, exec, platform, resolveCodex: () => 'codex' });
     assert.equal(adapters.spend.on, on, platform);
-    if (!on) assert.match(adapters.spend.detail, /double quote/);
-    assert.ok(!calls.some((call) => call.includes('spend')), calls.join('\n'));
+    if (!on) {
+      assert.match(adapters.spend.detail, /double quote/);
+      assert.ok(!calls.some((call) => call.includes('spend')), calls.join('\n'));
+    }
+    // Resolving the program (linux: `command -v`) is allowed; running the command never is.
+    assert.ok(!calls.some((call) => call.startsWith('spend') || call.includes('spend "x"')), calls.join('\n'));
   }
+});
+
+test('C2: spend and notify are on only when the program resolves (D2), looked up without running it', () => {
+  const probe = (env, answers, platform = 'linux', exists = () => false) => {
+    const calls = [];
+    const exec = (program, args) => {
+      const key = [program, ...args].join(' ');
+      calls.push(key);
+      return answers[key] ?? { code: key.endsWith('--version') ? 0 : 1, stdout: 'v1\n', stderr: '' };
+    };
+    return { ...detectAdapters({ env, exec, exists, platform, resolveCodex: () => 'codex' }).adapters, calls };
+  };
+  const missing = probe({ WORKIT_SPEND_CMD: 'missing-spend --since' }, {});
+  assert.equal(missing.spend.on, false);
+  assert.match(missing.spend.detail, /missing-spend does not resolve/);
+  const found = probe({ WORKIT_SPEND_CMD: 'spend-usd --since' }, { 'sh -c command -v "$1" sh spend-usd': { code: 0, stdout: '/usr/bin/spend-usd\n', stderr: '' } });
+  assert.equal(found.spend.on, true);
+  assert.match(found.spend.detail, /resolves to \/usr\/bin\/spend-usd/);
+  const win = probe({ WORKIT_NOTIFY_CMD: 'merge-ping --pr' }, { 'where merge-ping': { code: 0, stdout: 'C:\\tools\\merge-ping.exe\r\n', stderr: '' } }, 'win32');
+  assert.equal(win.notify.on, true);
+  const absolute = join(tmpdir(), 'spend.exe');
+  assert.equal(probe({ WORKIT_SPEND_CMD: `${absolute} --x` }, {}, 'linux', (path) => path === absolute).spend.on, true);
+  assert.ok(!missing.calls.some((call) => call.startsWith('missing-spend')));
 });
 
 test('run-dir precedence: --runs-root > WORKIT_WORKSPACE_ROOT > workspace ancestor > ~/.workit/runs', () => {
@@ -409,6 +453,7 @@ test('touch 1 budget label (D19.28)', async (t) => {
   assert.match(off.action.touch.question, /lane-only lower bound/);
   assert.equal(readState(off.runDir).authority.metered, false);
   const g = fixture(t, { env: { WORKIT_SPEND_CMD: 'spend-usd --since' } });
+  g.table['sh -c command -v "$1" sh spend-usd'] = { code: 0, stdout: '/usr/local/bin/spend-usd\n', stderr: '' };
   const on = out(await intake(g));
   assert.doesNotMatch(on.action.touch.question, /unmetered|lane-only lower bound/);
   assert.equal(readState(on.runDir).authority.metered, true);
@@ -485,19 +530,40 @@ test('touch-opened event: one per touch, spine on and off', async (t) => {
 });
 
 test('interim deep mint', async (t) => {
+  // Goal `rc1` gives slug `rc1`, so the run's keys are the real fixture's `rc1-wp-01` … `rc1-wp-06`.
   const f = fixture(t);
-  const { runDir, spec } = await toSpineSpec(f);
+  const { runDir, spec } = await toSpineSpec(f, [], 'rc1');
   const minted = fixtureJson('spine-author-result.json');
-  const wps = minted.quests.map((quest, i) => ({ id: quest.key.toUpperCase(), name: `wp ${i + 1}`, specPath: `wp-0${i + 1}.md`, tier: 'T2' }));
+  const wps = minted.quests.map((quest, i) => ({
+    id: `WP-0${i + 1}`, name: `wp ${i + 1}`, specPath: `wp-0${i + 1}.md`, tier: 'T2',
+    precondition: `pre ${i + 1}`, verification: `verify ${i + 1}`,
+  }));
   const mint = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir: readState(runDir).workshopDir, wps })).action;
   assert.equal(mint.tool, 'spine_author');
   assert.deepEqual(mint.args.campaign, { title: fixtureJson('spine-quest-answered.json').quests[0].campaign.title });
-  assert.equal(mint.args.quests.length, wps.length);
+  assert.deepEqual(mint.args.quests.map((quest) => quest.key), minted.quests.map((quest) => quest.key));
+  assert.deepEqual(mint.args.seams.map((seam) => seam.to), minted.quests.map((quest) => quest.key));
   assert.ok(mint.args.seams.every((seam) => seam.from === ANCHOR_UUID && seam.type === 'decomposition'));
+  // C21: the resume note carries what the consumer reads.
+  assert.match(mint.args.quests[0].resumeNote, /^wp-01\.md · precondition: pre 1 · verification: verify 1 · review tier: T2 · runtime exercise: /);
   assert.equal((await record(f, runDir, mint.id, minted)).code, 0);
   const state = readState(runDir);
   assert.deepEqual(state.wps.map((wp) => wp.questId), minted.quests.map((quest) => quest.id));
   assert.equal(state.phase, 'build');
+});
+
+test('C4: mint keys carry the run slug, so two runs in one campaign never share a key', () => {
+  const wp = { id: 'WP-01' };
+  assert.equal(questKey({ slug: 'goal-one' }, wp), 'goal-one-wp-01');
+  assert.notEqual(questKey({ slug: 'goal-one' }, wp), questKey({ slug: 'goal-two' }, wp));
+});
+
+test('C24: a deep spec result listing a WP id twice is refused', async (t) => {
+  const f = fixture(t);
+  const { runDir, spec } = await toCoreSpec(f);
+  const result = await record(f, runDir, spec.id, { depth: 'deep', workshopDir: readState(runDir).workshopDir, wps: [{ id: 'WP-01' }, { id: 'wp-01' }] });
+  assert.equal(result.code, 2);
+  assert.match(out(result).error, /wp-01 twice/);
 });
 
 test('spine touch is filed once', async (t) => {
@@ -537,7 +603,7 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   // Two open touches: only one is filed at a time.
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-touch-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const state = { slug: 'fixture-run', runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
+  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
   const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z' };
   const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
   const first = openTouch(state, { kind: 'preapproval', question: 'Q1', options }, deps);
@@ -702,20 +768,258 @@ test('missing phase handler: exit 4 naming the phase', async (t) => {
   assert.match(out(result).error, /phase handler build/);
 });
 
-const PRIVATE_PATHS = [/[A-Za-z]:[\\/]+(Users|Development)\b/i, /[\\/]Users[\\/][^\\/\s"]+[\\/]/];
-const privatePathHits = (text) => PRIVATE_PATHS.filter((pattern) => pattern.test(text)).map(String);
+// ---- Amendment 1: council round 1 findings (ids C1–C24) ----
 
-test('fixture paths: no private-path shapes under __fixtures__/intake', (t) => {
+test('C1: a failed receipt filing is refused and the filing stays retryable', async (t) => {
+  const f = fixture(t);
+  const first = out(await intake(f, SPINE));
+  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  for (const bad of [{ error: 'spine_receipt failed: 500' }, { isError: true, content: [] }, 'filed', null]) {
+    const result = await record(f, first.runDir, receipt.id, bad);
+    assert.equal(result.code, 2, JSON.stringify(bad));
+    const state = readState(first.runDir);
+    assert.equal(state.touches[0].status, 'open');
+    assert.equal(state.pending.id, receipt.id);
+  }
+  assert.equal(out(await record(f, first.runDir, receipt.id, {})).action.tool, 'spine_quest');
+  assert.equal(readState(first.runDir).touches[0].receiptId, null);
+});
+
+test('C3: a same-tag answer from another run of the goal is not this run\'s answer', async (t) => {
+  const f = fixture(t);
+  const { runDir, receipt, readBack } = await toSpineReadBack(f);
+  assert.ok(receipt.args.question.startsWith(`[conduct fixture-run touch 1] (run ${RUN_ID}/1) DO:`), receipt.args.question);
+  const wait = out(await record(f, runDir, readBack.id, fixtureJson('spine-quest-answered-stale.json'))).action;
+  assert.equal(wait.kind, 'wait');
+  const state = readState(runDir);
+  assert.equal(state.phase, 'preapproval');
+  assert.equal(state.touches[0].status, 'filed');
+  assert.equal(state.runId, RUN_ID);
+});
+
+test('C5: an answer racing a next is serialized by the state lock, never lost; a dead holder\'s lock is taken over', async (t) => {
+  const f = fixture(t);
+  const touch = {
+    n: 1, kind: 'blocked', status: 'open', tag: '[conduct seeded touch 1]', wpId: 'WP-01', question: '[conduct seeded touch 1] Q',
+    options: [{ key: 'a', label: 'go', consequence: 'go' }], allowFreeText: false, answer: null, file: 'touches/1.md',
+  };
+  const runDir = seedRun(f, { touches: [touch] });
+  const answerArgv = ['answer', '--run', runDir, '--touch', '1', '--key', 'a'];
+  let nested;
+  const racer = {
+    next: async () => {
+      nested = await f.run(answerArgv, { stdinIsTTY: true });
+      return { kind: 'shell', step: 'gate-cmd', command: ['node', '--test'], expects: { type: 'exit0' } };
+    },
+    record: () => {},
+  };
+  assert.equal((await f.run(['next', '--run', runDir], { importModule: loaderWith({ 'lib/phases/build.mjs': racer }) })).code, 0);
+  assert.equal(nested.code, 2, nested.stdout);
+  assert.match(out(nested).error, /locked by pid/);
+  assert.equal(readState(runDir).touches[0].status, 'open');
+  assert.equal((await f.run(answerArgv, { stdinIsTTY: true })).code, 0);
+  assert.equal(readState(runDir).touches[0].status, 'answered');
+
+  writeFileSync(join(runDir, 'state.lock'), JSON.stringify({ pid: 999999, at: '2026-10-04T18:00:00.000Z' }));
+  const takenOver = await f.run(['next', '--run', runDir], { importModule: loaderWith({ 'lib/phases/build.mjs': shellHandler({}) }), pidAlive: () => false });
+  assert.equal(takenOver.code, 0, takenOver.stdout);
+  assert.equal(existsSync(join(runDir, 'state.lock')), false);
+});
+
+test('C6: a save that fails after its events were appended leaves no duplicate in readEvents', async (t) => {
+  const f = fixture(t);
+  const first = out(await intake(f, SPINE));
+  let failures = 1;
+  const rename = (from, to) => {
+    if (failures-- > 0) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+    return renameSync(from, to);
+  };
+  await assert.rejects(record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'), { rename }), /EPERM/);
+  assert.equal(readState(first.runDir).pending.id, first.action.id);
+  assert.equal((await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).code, 0);
+  const isRecord = (line) => line.event === 'recorded' && line.actionId === first.action.id;
+  assert.equal(rawEvents(first.runDir).filter(isRecord).length, 2);
+  assert.equal(events(first.runDir).filter(isRecord).length, 1);
+  assert.equal(events(first.runDir).filter((line) => line.event === 'touch-opened').length, 1);
+});
+
+test('C7: after a record whose next emit failed, a replay and next both re-emit the same action', async (t) => {
+  const f = fixture(t);
+  const { runDir, spec } = await toCoreSpec(f);
+  const result = { depth: 'none', workshopDir: readState(runDir).workshopDir, gateCommand: 'node --test' };
+  const missing = (relPath) => (relPath === 'lib/phases/build.mjs' ? missingLoader() : testLoader(relPath));
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const failed = await record(f, runDir, spec.id, result, { importModule: missing });
+    assert.equal(failed.code, 4);
+    assert.equal(out(failed).recorded, spec.id);
+  }
+  const build = loaderWith({ 'lib/phases/build.mjs': shellHandler({}) });
+  const replay = out(await record(f, runDir, spec.id, result, { importModule: build }));
+  assert.equal(replay.noop, true);
+  assert.equal(replay.action.step, 'gate-cmd');
+  assert.deepEqual(out(await f.run(['next', '--run', runDir], { importModule: build })).action, replay.action);
+});
+
+test('C10: a (c) grant reaches /spec through the --preapproved ref, narrowed scope included', async (t) => {
+  const f = fixture(t);
+  const { runDir, grant } = await toGrant(f, 'only the hello subcommand');
+  writeFileSync(grant.outPath, JSON.stringify({ merge: true, release: false, budgetUsd: 10, scope: 'only the hello subcommand' }));
+  const spec = out(await record(f, runDir, grant.id, {})).action;
+  assert.deepEqual(spec.skillArgv, [GOAL, '--workshop', readState(runDir).workshopDir, '--preapproved', `core:${runDir}/touches/1-grant.json`]);
+  const target = JSON.parse(readFileSync(join(runDir, 'touches', '1-grant.json'), 'utf8'));
+  assert.equal(target.scope, 'only the hello subcommand');
+  assert.equal(target.validated, true);
+  assert.equal(target.answer.key, 'c');
+  assert.equal((await record(f, runDir, spec.id, { depth: 'none', workshopDir: readState(runDir).workshopDir, gateCommand: 'node --test' })).code, 0);
+  assert.match(readFileSync(join(runDir, 'wp-00.md'), 'utf8'), /^\*\*Approved scope:\*\* only the hello subcommand$/m);
+});
+
+test('C11: an operator answer with no usable key re-files the touch; a typed answer with no key is (c)', async (t) => {
+  const f = fixture(t);
+  const { runDir, readBack } = await toSpineReadBack(f);
+  const refiled = out(await record(f, runDir, readBack.id, answeredFor(runDir, 1, { key: 'z' }))).action;
+  assert.equal(refiled.tool, 'spine_receipt');
+  assert.ok(refiled.args.question.startsWith(`[conduct fixture-run touch 1] (run ${RUN_ID}/2) Your previous answer could not be used`), refiled.args.question);
+  const g = fixture(t);
+  const flow = await toSpineReadBack(g);
+  const grant = out(await record(g, flow.runDir, flow.readBack.id, answeredFor(flow.runDir, 1, { key: null, text: 'only alpha' }))).action;
+  assert.equal(grant.step, 'grant');
+  assert.equal(readState(flow.runDir).touches[0].answer.text, 'only alpha');
+});
+
+test('C12: only workflows that can gate a PR count as CI', async (t) => {
+  const f = fixture(t);
+  f.table['gh api repos/sirmaelstrom/workit/actions/workflows'] = captured('gh-actions-workflows-dependabot-only.json');
+  const first = out(await intake(f));
+  assert.equal(readState(first.runDir).intent.ciWorkflows, 0);
+  assert.deepEqual(first.action.touch.options.map((option) => option.key), ['b', 'c', 'd']);
+  const g = fixture(t);
+  assert.equal(readState(out(await intake(g)).runDir).intent.ciWorkflows, 1);
+});
+
+test('C14: recording an unanswered core touch keeps it pending, with no new id', async (t) => {
+  const f = fixture(t);
+  const { runDir, action } = out(await intake(f));
+  const before = { seq: readState(runDir).seq, lines: rawEvents(runDir).length };
+  for (let i = 0; i < 2; i += 1) {
+    const again = out(await record(f, runDir, action.id, {}));
+    assert.equal(again.action.id, action.id);
+    assert.equal(again.answered, false);
+  }
+  assert.equal(readState(runDir).seq, before.seq);
+  assert.equal(rawEvents(runDir).length, before.lines);
+});
+
+test('C15: validateGrant refuses a release without merge', () => {
+  const checked = validateGrant({ merge: false, release: true, budgetUsd: 5, scope: GOAL }, { merge: true, release: true, budgetUsd: 25 }, GOAL);
+  assert.equal(checked.ok, false);
+  assert.match(checked.problems.join(';'), /release requires merge/);
+});
+
+test('C16: any failure after a durable record reports recorded', async (t) => {
+  const f = fixture(t);
+  const { runDir, spec } = await toCoreSpec(f);
+  const broken = loaderWith({ 'lib/phases/build.mjs': { next: () => { throw new TypeError('boom'); }, record: () => {} } });
+  const result = await record(f, runDir, spec.id, { depth: 'none', workshopDir: readState(runDir).workshopDir, gateCommand: 'node --test' }, { importModule: broken });
+  assert.equal(result.code, 1);
+  assert.equal(out(result).recorded, spec.id);
+  assert.match(out(result).error, /boom/);
+  assert.equal(readState(runDir).lastRecorded, spec.id);
+});
+
+test('C17: a missing --result-file is a structured exit 2 naming the path', async (t) => {
+  const f = fixture(t);
+  const { runDir, action } = out(await intake(f));
+  const missing = join(f.dir, 'no-such-result.json');
+  const result = await f.run(['record', '--run', runDir, '--action', action.id, '--result-file', missing]);
+  assert.equal(result.code, 2);
+  assert.ok(out(result).error.includes(missing));
+});
+
+test('C18: skillArgv carries a goal with quotes and flag-like text as one argument', async (t) => {
+  const f = fixture(t);
+  const goal = 'say "hi" --workshop elsewhere';
+  const first = out(await intake(f, [], {}, goal));
+  assert.equal((await answer(f, first.runDir, 'a')).code, 0);
+  const spec = out(await record(f, first.runDir, first.action.id, {})).action;
+  assert.equal(spec.skillArgv[0], goal);
+  assert.equal(spec.skillArgv.filter((arg) => arg === '--workshop').length, 1);
+});
+
+test('C19, C20: gh auth is scoped to github.com; next --resume is next --run', async (t) => {
+  const f = fixture(t);
+  const { runDir, action } = out(await intake(f));
+  assert.ok(f.calls.includes('gh auth status --hostname github.com'), f.calls.join('\n'));
+  const resumed = await f.run(['next', '--resume', runDir]);
+  assert.equal(resumed.code, 0, resumed.stdout);
+  assert.deepEqual(out(resumed).action, action);
+});
+
+test('C22: intake from a subdirectory uses the work-tree root; a refusal never echoes URL credentials', async (t) => {
+  const f = fixture(t);
+  const sub = join(f.repo, 'sub');
+  f.table[`git -C ${sub} rev-parse --is-inside-work-tree`] = { code: 0, stdout: 'true\n', stderr: '' };
+  f.table[`git -C ${sub} rev-parse --show-toplevel`] = { code: 0, stdout: `${f.repo}\n`, stderr: '' };
+  const first = out(await f.run(['intake', '--goal', GOAL, '--repo', sub, '--runs-root', f.runs]));
+  assert.equal(readState(first.runDir).intent.repo.path, f.repo);
+  const g = fixture(t);
+  g.table[`git -C ${g.repo} config --get remote.origin.url`] = { code: 0, stdout: 'https://deploy:s3cret-token@gitlab.example.com/a/b.git\n', stderr: '' };
+  const refused = await intake(g);
+  assert.equal(refused.code, 2);
+  assert.ok(!refused.stdout.includes('s3cret-token') && !refused.stderr.includes('s3cret-token'), refused.stdout);
+  assert.match(out(refused).error, /<redacted>@gitlab\.example\.com/);
+});
+
+test('C23: workshop paths compare case-insensitively and in Git Bash form on win32', () => {
+  assert.equal(samePath('D:\\Dev\\Workshops\\Goal', '/d/dev/workshops/goal', 'win32'), true);
+  assert.equal(samePath('D:\\Dev\\Goal', 'd:/DEV/goal/', 'win32'), true);
+  assert.equal(samePath('D:\\Dev\\Goal', 'C:\\Dev\\Goal', 'win32'), false);
+  assert.equal(samePath('/tmp/Goal', '/tmp/goal', 'linux'), false);
+});
+
+test('C24: --text keeps a value that starts with --; --agent names the missing agent', async (t) => {
+  const f = fixture(t);
+  const first = out(await intake(f));
+  assert.equal((await answer(f, first.runDir, 'c', { text: '--skip release' })).code, 0);
+  assert.equal(readState(first.runDir).touches[0].answer.text, '--skip release');
+  const g = fixture(t);
+  const refused = await intake(g, ['--agent', 'codex']);
+  assert.equal(refused.code, 2);
+  assert.match(out(refused).error, /refusal 5: --agent codex is not available: spawnSync codex ENOENT/);
+});
+
+const PRIVATE_PATHS = [/[A-Za-z]:[\\/]+(Users|Development)\b/i, /[\\/]Users[\\/][^\\/\s"]+[\\/]/];
+// C9: host names and LAN URLs. A dotless host is a LAN name; private IPv4
+// ranges, `localhost:` and `.local` names are LAN addresses.
+const HOST_SHAPES = [
+  /:\/\/[a-z0-9-]+(?=[:/\s"]|$)/i,
+  /:\/\/(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/,
+  /\blocalhost:\d/i,
+  /:\/\/[a-z0-9.-]+\.local\b/i,
+];
+const privatePathHits = (text) => [...PRIVATE_PATHS, ...HOST_SHAPES].filter((pattern) => pattern.test(text)).map(String);
+
+test('fixture paths: no private-path, host-name or LAN-URL shapes under __fixtures__/intake', (t) => {
   const files = readdirSync(FIXTURES);
   assert.ok(files.length >= 9, files.join(', '));
   for (const name of files) assert.deepEqual(privatePathHits(readFileSync(join(FIXTURES, name), 'utf8')), [], name);
-  // Control: the same check flags a copy with a user-profile path inserted.
+  // Controls: the same check flags a copy with each shape inserted (built at
+  // run time, so this file stays clean).
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-fixture-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const copy = join(dir, 'gh-repo-view.json');
   const text = readFileSync(join(FIXTURES, 'gh-repo-view.json'), 'utf8');
-  writeFileSync(copy, text.replace('"stderr": ""', `"stderr": ${JSON.stringify(['C:', 'Users', 'someone', 'x'].join('\\'))}`));
-  assert.notDeepEqual(privatePathHits(readFileSync(copy, 'utf8')), []);
+  const inserts = [
+    ['C:', 'Users', 'someone', 'x'].join('\\'),
+    ['http:', '', 'somehost:3100'].join('/'),
+    ['http:', '', ['192', '168', '1', '5'].join('.')].join('/'),
+    ['localhost', '8080'].join(':'),
+    ['http:', '', ['printer', 'local'].join('.')].join('/'),
+  ];
+  for (const [i, insert] of inserts.entries()) {
+    const copy = join(dir, `copy-${i}.json`);
+    writeFileSync(copy, text.replace('"stderr": ""', `"stderr": ${JSON.stringify(insert)}`));
+    assert.notDeepEqual(privatePathHits(readFileSync(copy, 'utf8')), [], insert);
+  }
 });
 
 test('spawnDetached + pidAlive', async (t) => {

@@ -27,6 +27,7 @@ export function validateGrant(grant, proposed, goal) {
     if (typeof grant[key] !== 'boolean') problems.push(`${key} must be a boolean`);
     else if (grant[key] && !proposed[key]) problems.push(`${key} is wider than option (a), which does not grant it`);
   }
+  if (grant.release === true && grant.merge !== true) problems.push('release requires merge: the release runs only after every WP merged');
   // Whether a narrower scope really narrows the goal is the agent's reading
   // of the operator's text; no code can check it (ASSUMPTION).
   if (typeof grant.scope !== 'string' || !grant.scope.trim()) problems.push(`scope must be a non-empty string (the goal verbatim, or a narrowing of: ${goal})`);
@@ -55,8 +56,8 @@ function touchOne(state) {
     `Lane agent: ${intent.agent}; models: opus = ${laneModel(intent.agent, 'opus')}, sonnet = ${laneModel(intent.agent, 'sonnet')}`,
     release ? `Release recipe: ${JSON.stringify(intent.release)}` : 'release: none',
     noCi
-      ? `CI workflows: ${intent.ciWorkflows ?? 'unreadable, treated as 0'}. No CI workflows exist on ${intent.repo.remote}, so only hold-at-PR authority is offered: (b), (c) capped at no merge and no release, or (d).`
-      : `CI workflows: ${ci}`,
+      ? `CI workflows that can gate a PR: ${intent.ciWorkflows ?? 'unreadable, treated as 0'}. No CI workflows exist on ${intent.repo.remote} that can gate a PR, so only hold-at-PR authority is offered: (b), (c) capped at no merge and no release, or (d).`
+      : `CI workflows that can gate a PR: ${ci}`,
     budget,
   ].join('\n');
   const options = [
@@ -109,6 +110,10 @@ function recordGrant(state, touch, deps) {
   }
   const checked = validateGrant(grant, proposal(state), state.intent.goal);
   if (!checked.ok) throw new ConductError(2, `grant ${path}: ${checked.problems.join('; ')}`);
+  // The record /spec --preapproved names: the validated grant, rewritten with
+  // the answer it came from, so a narrowed scope reaches the spec.
+  const { merge, release, budgetUsd, scope } = grant;
+  deps.write(path, `${JSON.stringify({ merge, release, budgetUsd, scope, validated: true, touch: touch.n, answer: touch.answer }, null, 2)}\n`);
   state.authority = {
     merge: grant.merge, release: grant.release, budgetUsd: grant.budgetUsd, scope: grant.scope,
     metered: state.authority.metered, notes: text, grant: `touches/${touch.n}-grant.json`,

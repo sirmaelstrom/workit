@@ -44,7 +44,7 @@ export function openTouch(state, { kind, question, options, allowFreeText = true
   const touch = {
     n, kind, status: 'open', tag, wpId, suspendedStep,
     question: `${tag} ${question}`, options, allowFreeText,
-    did, receiptId: null, file: `touches/${n}.md`, answer: null, waiting: false,
+    did, receiptId: null, file: `touches/${n}.md`, answer: null, waiting: false, filings: 0, refusal: null,
   };
   state.touches.push(touch);
   if (!spineOn(state)) writeTouchFiles(state, touch, deps);
@@ -85,10 +85,29 @@ export function touchAction(state, touch) {
       outcome: 'needs_input',
       did: touch.did ?? `conduct ${state.slug} ran up to touch ${touch.n}`,
       stoppedAt: `touch ${touch.n} (${touch.kind}): waiting on the operator's answer`,
-      question: touch.question,
+      question: filedQuestion(state, touch, touch.filings + 1),
       ask: { options: touch.options, allowFreeText: touch.allowFreeText },
     },
   };
+}
+
+// A spine answer belongs to this run's filing only when its question starts
+// with the tag plus the run id and filing number: a same-tag answer from an
+// earlier run of the same goal, or to an earlier filing, does not match.
+export function correlation(state, touch, filing = touch.filings) {
+  return `${touch.tag} (run ${state.runId}/${filing})`;
+}
+
+function filedQuestion(state, touch, filing) {
+  const body = touch.question.slice(touch.tag.length + 1);
+  const refused = touch.refusal ? `Your previous answer could not be used (${touch.refusal}). ` : '';
+  return `${correlation(state, touch, filing)} ${refused}${body}`;
+}
+
+function receiptFailure(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return 'the result is not an object';
+  if (result.error || result.isError) return `the tool reported an error: ${JSON.stringify(result.error ?? result.content ?? result).slice(0, 200)}`;
+  return null;
 }
 
 // Refuses (exit 3) an answer that is not the operator's: a spine answer must
@@ -118,20 +137,38 @@ export function recordTouch(state, touch, action, result) {
   }
   if (action.kind !== 'agent-tool') return;
   if (action.part === 'receipt') {
-    touch.receiptId = typeof result?.id === 'string' ? result.id : null;
+    // A failed filing is refused, so the filing action stays pending and is
+    // retried. The success shape is uncaptured (ASSUMPTION): any other object
+    // counts as filed, its string `id` (if any) kept as receiptId.
+    const failure = receiptFailure(result);
+    if (failure) throw new ConductError(2, `spine_receipt did not file ${touch.tag}: ${failure}`);
+    touch.receiptId = typeof result.id === 'string' ? result.id : null;
+    touch.filings += 1;
     touch.status = 'filed';
+    touch.refusal = null;
     return;
   }
-  // The read-back: accept only an answered receipt to THIS touch's question.
+  // The read-back: accept only an answered receipt to THIS run's filing.
   const latest = result?.quests?.[0]?.latestReceipt;
   const answered = latest?.outcome === 'answered' && latest.answer
-    && typeof latest.question === 'string' && latest.question.startsWith(touch.tag);
+    && typeof latest.question === 'string' && latest.question.startsWith(correlation(state, touch));
   if (!answered) {
     touch.waiting = true;
     return;
   }
-  acceptAnswer(touch, {
+  const answer = {
     key: latest.answer.key, text: latest.answer.text, by: latest.answer.by, answeredAt: latest.answer.answeredAt,
     source: 'spine', receiptId: typeof latest.id === 'string' ? latest.id : null,
-  });
+  };
+  if (!String(answer.by ?? '').startsWith('operator:')) acceptAnswer(touch, answer);
+  // An operator's typed answer with no key is option (c), when the touch has it.
+  if (!answer.key && answer.text && touch.allowFreeText && touch.options.some((option) => option.key === 'c')) answer.key = 'c';
+  if (!touch.options.some((option) => option.key === answer.key)) {
+    // The operator answered, but not with a usable option: re-file the touch
+    // saying why, so it stays answerable.
+    touch.status = 'open';
+    touch.refusal = `answer ${answer.key ?? '(no key)'} is not one of ${touch.options.map((option) => option.key).join(', ')}`;
+    return;
+  }
+  acceptAnswer(touch, answer);
 }

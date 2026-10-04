@@ -5,7 +5,7 @@ import { openSync, closeSync } from 'node:fs';
 import { execute } from '../../../../scripts/lane.mjs';
 import { defaultCodexExe } from '../../../slim-review/scripts/pr-review.mjs';
 
-export { execute };
+export { execute, defaultCodexExe };
 
 // The one process that outlives a verb: a lane agent, detached, logging to a file.
 export function spawnDetached(program, args, { cwd, logPath, env } = {}) {

@@ -1,0 +1,10 @@
+{
+  "command": [
+    "gh",
+    "api",
+    "repos/sirmaelstrom/workit/actions/workflows"
+  ],
+  "code": 0,
+  "stdout": "{\"total_count\":1,\"workflows\":[{\"id\":299230749,\"node_id\":\"W_kwDOS_8yoc4R1eYd\",\"name\":\"Dependabot Updates\",\"path\":\"dynamic/dependabot/dependabot-updates\",\"state\":\"active\",\"created_at\":\"2026-06-20T01:33:16.000-05:00\",\"updated_at\":\"2026-06-20T01:33:16.000-05:00\",\"url\":\"https://api.github.com/repos/sirmaelstrom/workit/actions/workflows/299230749\",\"html_url\":\"https://github.com/sirmaelstrom/workit/actions/workflows/dependabot/dependabot-updates\",\"badge_url\":\"https://github.com/sirmaelstrom/workit/actions/workflows/dependabot/dependabot-updates/badge.svg\"}]}",
+  "stderr": ""
+}

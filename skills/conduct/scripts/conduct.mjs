@@ -3,18 +3,18 @@
 // does one bounded thing, writes state, appends to events.jsonl and exits; the
 // agent running the skill drives the loop: intake → [next → act → record]*.
 // `next` never runs a program: it hands the agent an action to perform.
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendFileSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { isatty } from 'node:tty';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execute, spawnDetached, pidAlive } from './lib/exec.mjs';
-import { defaultCodexExe } from '../../slim-review/scripts/pr-review.mjs';
+import { execute, spawnDetached, pidAlive, defaultCodexExe } from './lib/exec.mjs';
 import {
   ConductError, SCHEMA_VERSION, STEPS, STEP_SEAM, TERMINAL_PHASES,
-  appendEvent, loadState, resolveRunDir, saveState, slugify, statePath,
+  appendEvent, loadState, resolveRunDir, saveState, slugify, statePath, withStateLock,
 } from './lib/state.mjs';
-import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters } from './lib/adapters.mjs';
+import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { acceptAnswer, touchStep, writeTouchFiles } from './lib/touch.mjs';
 
@@ -26,7 +26,7 @@ const PLUGIN_ROOT = resolve(SCRIPTS_DIR, '../../..');
 const USAGE = `usage: conduct.mjs <verb> [flags]
   intake --goal <text> --repo <abs> [--anchor <quest id>] [--budget <usd>] [--lanes 1|2] [--agent claude|codex]
          [--adapter <name>]... [--no-adapter <name>]... [--release <json file>] [--runs-root <dir>]
-  next --run <dir>                 (alias: --resume <dir>)
+  next --run <dir>                 (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
   status --run <dir>
@@ -36,6 +36,10 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
 
 const BOOLEAN_FLAGS = new Set(['manual']);
 const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
+// These always take the next token as their value, even one that starts with
+// `--` (an operator's `--text "--skip release"`).
+const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
+  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -45,7 +49,7 @@ function parseFlags(tokens) {
     const name = token.slice(2);
     const following = tokens[i + 1];
     let value = true;
-    if (!BOOLEAN_FLAGS.has(name) && following !== undefined && !following.startsWith('--')) {
+    if (!BOOLEAN_FLAGS.has(name) && following !== undefined && (VALUE_FLAGS.has(name) || !following.startsWith('--'))) {
       value = following;
       i += 1;
     }
@@ -73,13 +77,22 @@ async function loadModule(deps, relPath, what) {
   }
 }
 
+function runDirFlag(flags) {
+  return resolve(stringFlag(flags, flags.run === undefined && flags.resume !== undefined ? 'resume' : 'run'));
+}
+
 function openRun(flags, deps) {
-  const runDir = resolve(stringFlag(flags, 'run'));
+  const runDir = runDirFlag(flags);
   const state = loadState(runDir, deps);
   if (state.handover && deps.pluginRoot !== state.pluginRoot) {
     throw new ConductError(2, `this run moved to the plugin root ${state.pluginRoot}; re-run the verb with that root's skills/conduct/scripts/conduct.mjs`);
   }
   return { runDir, state };
+}
+
+// A state transaction: load, change and save under the run's lock.
+function transact(flags, deps, fn) {
+  return withStateLock(runDirFlag(flags), deps, () => fn(openRun(flags, deps).state));
 }
 
 function stamp(state, spec) {
@@ -115,9 +128,26 @@ async function emit(state, deps) {
   throw new ConductError(2, 'phase handlers did not settle on an action');
 }
 
+// After a durable record, every failure says so: `recorded` tells the driver
+// the record landed, and the next `next` (or a replay of it) re-emits.
+async function emitAfterRecord(state, deps, id) {
+  try {
+    return await emit(state, deps);
+  } catch (error) {
+    const recorded = error instanceof ConductError ? error : new ConductError(1, `after recording ${id}: ${error.message}`);
+    recorded.details = { recorded: id };
+    throw recorded;
+  }
+}
+
 function parseGitHubRemote(url) {
   const match = /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/.exec(url.trim());
   return match ? `${match[1]}/${match[2]}` : null;
+}
+
+// A URL's userinfo (a token or password) never reaches a refusal message.
+function redactUrl(url) {
+  return url.trim().replace(/\/\/[^@/\s]+@/, '//<redacted>@');
 }
 
 function parseJson(text) {
@@ -128,8 +158,11 @@ function parseJson(text) {
   }
 }
 
-function firstLine(text) {
-  return String(text ?? '').trim().split(/\r?\n/)[0];
+// Workflows that can gate a PR: active, and defined in the repo. Dynamic
+// workflows (Dependabot, CodeQL default setup, pages) are not counted.
+function gatingWorkflows(listing) {
+  if (!Array.isArray(listing?.workflows)) return null;
+  return listing.workflows.filter((workflow) => workflow.state === 'active' && String(workflow.path).startsWith('.github/workflows/')).length;
 }
 
 function intakeOptions(flags) {
@@ -158,17 +191,22 @@ async function intake(tokens, deps) {
   const options = intakeOptions(flags);
   const refuse = (n, reason) => { throw new ConductError(2, `refusal ${n}: ${reason}`); };
   if (typeof flags.repo !== 'string') refuse(1, '--repo <abs path to a git checkout> is required');
-  const repoPath = resolve(flags.repo);
-  const inside = deps.exec('git', ['-C', repoPath, 'rev-parse', '--is-inside-work-tree']);
-  if (inside.code !== 0 || inside.stdout.trim() !== 'true') refuse(1, `${repoPath} is not a git work tree`);
-  if (options.spine && typeof flags.anchor !== 'string') refuse(7, '--adapter spine needs --anchor <quest id>: the touches need a quest to carry them');
+  const inside = deps.exec('git', ['-C', resolve(flags.repo), 'rev-parse', '--is-inside-work-tree']);
+  if (inside.code !== 0 || inside.stdout.trim() !== 'true') refuse(1, `${resolve(flags.repo)} is not a git work tree`);
+  // The repo is its work tree's root, wherever inside it --repo points.
+  const top = deps.exec('git', ['-C', resolve(flags.repo), 'rev-parse', '--show-toplevel']);
+  if (top.code !== 0 || !top.stdout.trim()) refuse(1, `${resolve(flags.repo)} has no work-tree root`);
+  const repoPath = resolve(top.stdout.trim());
+  if (options.spine && !/^[0-9a-f]{8}/i.test(typeof flags.anchor === 'string' ? flags.anchor : '')) {
+    refuse(7, '--adapter spine needs --anchor <quest id> (a uuid or a prefix of at least 8 hex characters): the touches need a quest to carry them');
+  }
   // The raw origin URL, before any insteadOf rewrite.
   const origin = deps.exec('git', ['-C', repoPath, 'config', '--get', 'remote.origin.url']);
   if (origin.code !== 0 || !origin.stdout.trim()) refuse(2, `${repoPath} has no origin remote`);
   const ownerName = parseGitHubRemote(origin.stdout);
-  if (!ownerName) refuse(2, `origin ${origin.stdout.trim()} is not a GitHub remote`);
-  const auth = deps.exec('gh', ['auth', 'status']);
-  if (auth.code !== 0) refuse(3, `gh auth status failed: ${firstLine(auth.stderr || auth.stdout)}`);
+  if (!ownerName) refuse(2, `origin ${redactUrl(origin.stdout)} is not a GitHub remote`);
+  const auth = deps.exec('gh', ['auth', 'status', '--hostname', 'github.com']);
+  if (auth.code !== 0) refuse(3, `gh auth status --hostname github.com failed: ${firstLine(auth.stderr || auth.stdout)}`);
   const view = deps.exec('gh', ['repo', 'view', ownerName, '--json', 'nameWithOwner,defaultBranchRef']);
   if (view.code !== 0) refuse(2, `gh cannot resolve ${ownerName}: ${firstLine(view.stderr)}`);
   const repoInfo = parseJson(view.stdout);
@@ -176,15 +214,15 @@ async function intake(tokens, deps) {
   const remote = repoInfo.nameWithOwner;
   // A failed or unreadable workflow count is stored as null and treated as zero.
   const workflows = deps.exec('gh', ['api', `repos/${remote}/actions/workflows`]);
-  const count = workflows.code === 0 ? parseJson(workflows.stdout)?.total_count : undefined;
-  const ciWorkflows = Number.isInteger(count) ? count : null;
-  const ciError = workflows.code !== 0 ? workflows.stderr : ciWorkflows === null ? 'total_count missing from the workflows listing' : null;
+  const ciWorkflows = workflows.code === 0 ? gatingWorkflows(parseJson(workflows.stdout)) : null;
+  const ciError = workflows.code !== 0 ? workflows.stderr : ciWorkflows === null ? 'no workflows array in the workflows listing' : null;
   const { adapters, agents } = detectAdapters({
-    env: deps.env, exec: deps.exec, declared: options.declared, forcedOff: options.forcedOff,
+    env: deps.env, exec: deps.exec, exists: deps.exists, declared: options.declared, forcedOff: options.forcedOff,
     platform: deps.platform, resolveCodex: deps.resolveCodex,
   });
+  if (flags.agent !== undefined && !agents[flags.agent].on) refuse(5, `--agent ${flags.agent} is not available: ${agents[flags.agent].detail}`);
   const agent = flags.agent ?? AGENTS.find((name) => agents[name].on);
-  if (!agent || !agents[agent].on) refuse(5, `no lane agent CLI on PATH (${AGENTS.map((name) => `${name}: ${agents[name].detail}`).join('; ')})`);
+  if (!agent) refuse(5, `no lane agent CLI on PATH (${AGENTS.map((name) => `${name}: ${agents[name].detail}`).join('; ')})`);
   const recipe = resolveRecipe({ flagPath: typeof flags.release === 'string' ? resolve(flags.release) : null, repoPath, read: deps.read });
   if (recipe !== null) {
     const checked = validateRecipe(recipe);
@@ -195,41 +233,49 @@ async function intake(tokens, deps) {
     repo: repoPath, slug, env: deps.env, runsRoot: typeof flags['runs-root'] === 'string' ? flags['runs-root'] : null,
     exists: deps.exists, home: deps.home,
   });
-  if (deps.exists(statePath(runDir))) refuse(6, `a run already exists at ${runDir}; continue it with next --run ${runDir}`);
+  const refuseExisting = () => refuse(6, `a run already exists at ${runDir}; continue it with next --run ${runDir}`);
+  if (deps.exists(statePath(runDir))) refuseExisting();
 
   deps.mkdir(runDir);
-  const state = {
-    schemaVersion: SCHEMA_VERSION, slug, createdAt: deps.timestamp(), runDir, workshopDir, pluginRoot: deps.pluginRoot,
-    intent: {
-      goal: options.goal, repo: { path: repoPath, remote, defaultBranch: repoInfo.defaultBranchRef?.name ?? null },
-      anchor: typeof flags.anchor === 'string' ? flags.anchor : null, campaign: null,
-      budgetUsd: options.budgetUsd, lanesCap: options.lanesCap, agent, release: recipe, ciWorkflows,
-    },
-    agents, adapters,
-    phase: options.spine ? 'intake' : 'preapproval',
-    authority: { merge: false, release: false, budgetUsd: 0, metered: adapters.spend.on, scope: options.goal, notes: null, grant: null },
-    touches: [],
-    spec: { depth: null, reviewLevel: null, gate: null, gateCommand: null },
-    wps: [],
-    release: { state: 'pending', reason: null, base: null, worktree: null, branch: null, pr: null, gate: null, merge: null },
-    mergeLock: null, dispatchHalt: null, handover: null, sentBack: null, pending: null, lastRecorded: null, seq: 0,
-  };
-  saveState(state, deps);
-  appendEvent(state, deps, { step: 'intake', event: 'intake', source: 'next', data: { remote, ciWorkflows, ciError } });
-  const action = await emit(state, deps);
-  return { out: { ok: true, runDir, action } };
+  return withStateLock(runDir, deps, async () => {
+    if (deps.exists(statePath(runDir))) refuseExisting();
+    const state = {
+      schemaVersion: SCHEMA_VERSION, slug, runId: deps.newRunId(), createdAt: deps.timestamp(), runDir, workshopDir, pluginRoot: deps.pluginRoot,
+      intent: {
+        goal: options.goal, repo: { path: repoPath, remote, defaultBranch: repoInfo.defaultBranchRef?.name ?? null },
+        anchor: typeof flags.anchor === 'string' ? flags.anchor : null, campaign: null,
+        budgetUsd: options.budgetUsd, lanesCap: options.lanesCap, agent, release: recipe, ciWorkflows,
+      },
+      agents, adapters,
+      phase: options.spine ? 'intake' : 'preapproval',
+      authority: { merge: false, release: false, budgetUsd: 0, metered: adapters.spend.on, scope: options.goal, notes: null, grant: null },
+      touches: [],
+      spec: { depth: null, reviewLevel: null, gate: null, gateCommand: null },
+      wps: [],
+      release: { state: 'pending', reason: null, base: null, worktree: null, branch: null, pr: null, gate: null, merge: null },
+      mergeLock: null, dispatchHalt: null, handover: null, sentBack: null, pending: null, lastRecorded: null, seq: 0, rev: 0,
+    };
+    appendEvent(state, deps, { step: 'intake', event: 'intake', source: 'next', data: { remote, ciWorkflows, ciError } });
+    saveState(state, deps);
+    return { out: { ok: true, runDir, action: await emit(state, deps) } };
+  });
 }
 
 async function next(tokens, deps) {
-  const { state } = openRun(parseFlags(tokens), deps);
-  return { out: { ok: true, action: await emit(state, deps) } };
+  return transact(parseFlags(tokens), deps, async (state) => ({ out: { ok: true, action: await emit(state, deps) } }));
 }
 
 function readResult(flags, deps) {
   let text;
   if (typeof flags.result === 'string') text = flags.result;
-  else if (typeof flags['result-file'] === 'string') text = deps.read(resolve(flags['result-file']));
-  else throw new ConductError(2, '--result <json> or --result-file <path> is required');
+  else if (typeof flags['result-file'] === 'string') {
+    const path = resolve(flags['result-file']);
+    try {
+      text = deps.read(path);
+    } catch (error) {
+      throw new ConductError(2, `cannot read --result-file ${path}: ${error.message}`);
+    }
+  } else throw new ConductError(2, '--result <json> or --result-file <path> is required');
   try {
     return JSON.parse(text);
   } catch (error) {
@@ -251,45 +297,49 @@ function checkShellResult(action, result) {
 
 async function record(tokens, deps) {
   const flags = parseFlags(tokens);
-  const { state } = openRun(flags, deps);
-  const id = stringFlag(flags, 'action');
-  if (id === state.lastRecorded) return { out: { ok: true, phase: state.phase, action: state.pending, noop: true } };
-  const action = state.pending;
-  if (!action || action.id !== id) throw new ConductError(5, `action ${id} is not the pending action (${action?.id ?? 'none pending'})`);
-  const result = readResult(flags, deps);
-  if (action.kind === 'shell') checkShellResult(action, result);
-  const handler = await loadModule(deps, `lib/phases/${action.phase}.mjs`, `phase handler ${action.phase}`);
-  await handler.record(state, action, result, deps);
-  state.pending = null;
-  state.lastRecorded = id;
-  appendEvent(state, deps, {
-    actionId: id, step: action.step, seam: action.seam, kind: action.kind, event: 'recorded',
-    source: flags.manual === true ? 'manual' : 'next', phase: action.phase,
-    data: state.phase === action.phase ? {} : { phase: state.phase },
+  return transact(flags, deps, async (state) => {
+    const id = stringFlag(flags, 'action');
+    // A replay of the last record changes nothing and re-emits the next action.
+    if (id === state.lastRecorded) return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id), noop: true } };
+    const action = state.pending;
+    if (!action || action.id !== id) throw new ConductError(5, `action ${id} is not the pending action (${action?.id ?? 'none pending'})`);
+    const result = readResult(flags, deps);
+    if (action.kind === 'shell') checkShellResult(action, result);
+    // A core touch the operator has not answered yet stays pending: recording
+    // it again does not mint a new action.
+    if (action.kind === 'touch' && state.touches[action.touch.n - 1]?.status !== 'answered') {
+      return { out: { ok: true, phase: state.phase, action, answered: false } };
+    }
+    const handler = await loadModule(deps, `lib/phases/${action.phase}.mjs`, `phase handler ${action.phase}`);
+    await handler.record(state, action, result, deps);
+    state.pending = null;
+    state.lastRecorded = id;
+    appendEvent(state, deps, {
+      actionId: id, step: action.step, seam: action.seam, kind: action.kind, event: 'recorded',
+      source: flags.manual === true ? 'manual' : 'next', phase: action.phase,
+      data: state.phase === action.phase ? {} : { phase: state.phase },
+    });
+    saveState(state, deps);
+    return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id) } };
   });
-  saveState(state, deps);
-  try {
-    return { out: { ok: true, phase: state.phase, action: await emit(state, deps) } };
-  } catch (error) {
-    if (error instanceof ConductError) error.details = { recorded: id };
-    throw error;
-  }
 }
 
-// An operator's answer to a core touch. An agent's tool call runs with stdin
-// piped, never a TTY, so this refuses it (MN5).
+// An operator's answer to a core touch. stdinIsTTY comes from isatty(0) and
+// no flag or env var sets it: a procedural approval boundary, not proof of
+// the operator's identity (MN5).
 async function answer(tokens, deps) {
   const flags = parseFlags(tokens);
-  const { state } = openRun(flags, deps);
-  if (deps.stdinIsTTY !== true) throw new ConductError(3, 'stdin is not a TTY: the operator answers a touch from their own terminal');
-  const touch = state.touches.find((candidate) => String(candidate.n) === String(flags.touch));
-  if (!touch || touch.status !== 'open' || state.adapters.spine?.on) throw new ConductError(5, `no open core touch ${flags.touch}`);
-  touch.tty = true;
-  acceptAnswer(touch, { key: flags.key, text: typeof flags.text === 'string' ? flags.text : null, by: 'operator:tty', answeredAt: deps.timestamp(), source: 'tty' });
-  writeTouchFiles(state, touch, deps);
-  appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'answered', source: 'tty', data: { n: touch.n, key: touch.answer.key } });
-  saveState(state, deps);
-  return { out: { ok: true, touch } };
+  return transact(flags, deps, async (state) => {
+    if (deps.stdinIsTTY !== true) throw new ConductError(3, 'stdin is not a TTY: the operator answers a touch from their own terminal');
+    const touch = state.touches.find((candidate) => String(candidate.n) === String(flags.touch));
+    if (!touch || touch.status !== 'open' || state.adapters.spine?.on) throw new ConductError(5, `no open core touch ${flags.touch}`);
+    touch.tty = true;
+    acceptAnswer(touch, { key: flags.key, text: typeof flags.text === 'string' ? flags.text : null, by: 'operator:tty', answeredAt: deps.timestamp(), source: 'tty' });
+    writeTouchFiles(state, touch, deps);
+    appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'answered', source: 'tty', data: { n: touch.n, key: touch.answer.key } });
+    saveState(state, deps);
+    return { out: { ok: true, touch } };
+  });
 }
 
 async function status(tokens, deps) {
@@ -330,11 +380,14 @@ const VERBS = {
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
 };
 
+// overrides is the in-process test seam; main() passes none.
 export async function runConduct(argv, overrides = {}) {
   const deps = {
     exec: execute,
     read: (path) => readFileSync(path, 'utf8'),
     write: (path, value) => writeFileSync(path, value, 'utf8'),
+    writeNew: (path, value) => writeFileSync(path, value, { encoding: 'utf8', flag: 'wx' }),
+    remove: (path) => rmSync(path, { force: true }),
     exists: existsSync,
     mkdir: (path) => mkdirSync(path, { recursive: true }),
     rename: renameSync,
@@ -343,8 +396,12 @@ export async function runConduct(argv, overrides = {}) {
     env: process.env,
     platform: process.platform,
     home: homedir(),
+    pid: process.pid,
     now: () => Date.now(),
     timestamp: () => new Date().toISOString(),
+    sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
+    lockWaitMs: 2000,
+    newRunId: () => randomBytes(4).toString('hex'),
     stdinIsTTY: isatty(0),
     spawnDetached,
     pidAlive,

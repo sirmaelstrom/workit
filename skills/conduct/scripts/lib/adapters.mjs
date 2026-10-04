@@ -2,6 +2,7 @@
 // state.agents; adapters replace a core mechanism when present. herdr, notify
 // and spend are probed; spine, council, kb and verify are declared by the
 // agent, because a script cannot see MCP tools.
+import { isAbsolute } from 'node:path';
 import { resolveProgram } from './exec.mjs';
 
 export const AGENTS = Object.freeze(['claude', 'codex']);
@@ -24,7 +25,7 @@ export function laneModel(agent, label) {
   return LANE_MODELS[agent][key];
 }
 
-function firstLine(text) {
+export function firstLine(text) {
   return String(text ?? '').trim().split(/\r?\n/)[0] ?? '';
 }
 
@@ -48,18 +49,29 @@ function probeAgents({ exec, platform, resolveCodex }) {
   return agents;
 }
 
-// A shell-string adapter command. On win32, cmd.exe /d /s /c mis-quotes a
-// string holding a double quote, so such a command is never run.
-function probeCommand(env, name, platform) {
-  const command = env[name];
-  if (!command) return { on: false, evidence: 'probed', detail: `${name} is not set` };
-  if (platform === 'win32' && command.includes('"')) {
-    return { on: false, evidence: 'probed', detail: `${name} contains a double quote; cmd.exe would mis-quote it` };
-  }
-  return { on: true, evidence: 'probed', detail: `${name} is set` };
+// Whether a program resolves, looked up without running it: an absolute path
+// must exist; a bare name goes through `where` (win32) or `command -v`.
+function resolves(program, { exec, exists, platform }) {
+  if (isAbsolute(program)) return { ok: exists(program), how: `${program} ${exists(program) ? 'exists' : 'does not exist'}` };
+  const result = platform === 'win32' ? exec('where', [program]) : exec('sh', ['-c', 'command -v "$1"', 'sh', program]);
+  return { ok: result.code === 0, how: result.code === 0 ? `resolves to ${firstLine(result.stdout)}` : `does not resolve (exit ${result.code})` };
 }
 
-export function detectAdapters({ env = {}, exec, declared = [], forcedOff = [], platform, resolveCodex }) {
+// A shell-string adapter command: on when it is set and its program resolves
+// (D2). On win32, cmd.exe /d /s /c mis-quotes a string holding a double quote,
+// so such a command is never run, or even resolved.
+function probeCommand(env, name, probe) {
+  const command = env[name];
+  if (!command) return { on: false, evidence: 'probed', detail: `${name} is not set` };
+  if (probe.platform === 'win32' && command.includes('"')) {
+    return { on: false, evidence: 'probed', detail: `${name} contains a double quote; cmd.exe would mis-quote it` };
+  }
+  const program = command.trim().split(/\s+/)[0];
+  const found = resolves(program, probe);
+  return { on: found.ok, evidence: 'probed', detail: `${name} is set; ${program} ${found.how}` };
+}
+
+export function detectAdapters({ env = {}, exec, exists = () => false, declared = [], forcedOff = [], platform, resolveCodex }) {
   const agents = probeAgents({ exec, platform, resolveCodex });
   const adapters = {};
   for (const name of ADAPTERS) {
@@ -73,9 +85,9 @@ export function detectAdapters({ env = {}, exec, declared = [], forcedOff = [], 
         adapters.herdr = { on: result.code === 0, evidence: 'probed', detail: `herdr agent list exit ${result.code}` };
       }
     } else if (name === 'notify') {
-      adapters.notify = probeCommand(env, 'WORKIT_NOTIFY_CMD', platform);
+      adapters.notify = probeCommand(env, 'WORKIT_NOTIFY_CMD', { exec, exists, platform });
     } else if (name === 'spend') {
-      adapters.spend = probeCommand(env, 'WORKIT_SPEND_CMD', platform);
+      adapters.spend = probeCommand(env, 'WORKIT_SPEND_CMD', { exec, exists, platform });
     } else {
       adapters[name] = declared.includes(name)
         ? { on: true, evidence: 'declared', detail: `--adapter ${name}` }

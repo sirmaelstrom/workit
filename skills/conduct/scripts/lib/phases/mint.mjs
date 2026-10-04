@@ -4,8 +4,11 @@
 import { basename } from 'node:path';
 import { ConductError } from '../state.mjs';
 
-function questKey(wp) {
-  return wp.id.toLowerCase();
+// spine_author is idempotent per (campaign, key), so a bare `wp-01` would
+// reuse another run's quest: the key carries the run's slug. One function
+// serves the quests, the seams and the result mapping.
+export function questKey(state, wp) {
+  return `${state.slug}-${wp.id}`.toLowerCase();
 }
 
 function resumeNote(wp) {
@@ -26,18 +29,18 @@ export function next(state) {
     args: {
       campaign: { title: state.intent.campaign.title },
       quests: state.wps.map((wp) => ({
-        key: questKey(wp), title: `${wp.id}: ${wp.name} (${state.slug})`, provisional: false, project,
+        key: questKey(state, wp), title: `${wp.id}: ${wp.name} (${state.slug})`, provisional: false, project,
         resumeNote: resumeNote(wp), ...(wp.specPath ? { artifacts: [{ type: 'file', locator: wp.specPath }] } : {}),
       })),
-      seams: state.wps.map((wp) => ({ from: state.intent.anchor, to: questKey(wp), type: 'decomposition' })),
+      seams: state.wps.map((wp) => ({ from: state.intent.anchor, to: questKey(state, wp), type: 'decomposition' })),
     },
   };
 }
 
 export function record(state, action, result) {
   const ids = new Map((result?.quests ?? []).map((quest) => [quest.key, quest.id]));
-  const unmapped = state.wps.filter((wp) => typeof ids.get(questKey(wp)) !== 'string').map((wp) => wp.id);
+  const unmapped = state.wps.filter((wp) => typeof ids.get(questKey(state, wp)) !== 'string').map((wp) => wp.id);
   if (unmapped.length) throw new ConductError(2, `spine_author result has no quest for ${unmapped.join(', ')}`);
-  for (const wp of state.wps) wp.questId = ids.get(questKey(wp));
+  for (const wp of state.wps) wp.questId = ids.get(questKey(state, wp));
   state.phase = 'build';
 }
