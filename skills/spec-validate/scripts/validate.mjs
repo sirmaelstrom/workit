@@ -641,15 +641,25 @@ function validateTargets(meta) {
 const CONDUCTOR_FIELD_COUNT = 3;
 
 // What a WP declares, not what it quotes: fenced blocks, `>` lines and inline code spans
-// are dropped before a tier is read. skills/conduct/scripts/lib/schedule.mjs does the same
-// (no import across skills; validate.test.mjs runs both parsers over the same WPs).
+// are dropped before a tier is read. A fence closes only on the same character with a run at
+// least as long as its opener, and a span is delimited by equal-length backtick runs
+// (CommonMark). A span that is the label's own value (**Review tier:** `T2`) is the value.
+// skills/conduct/scripts/lib/schedule.mjs does the same (no import across skills;
+// validate.test.mjs runs both parsers over the same WPs).
 function unquoted(text) {
   let fence = null;
   return text.split(/\r?\n/).filter((line) => {
-    const mark = /^\s*(```|~~~)/.exec(line)?.[1];
-    if (mark && (!fence || fence === mark)) { fence = fence ? null : mark; return false; }
-    return !fence && !/^\s*>/.test(line);
-  }).map((line) => line.replace(/`[^`\n]*`/g, '')).join('\n');
+    if (fence) {
+      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1];
+      if (close && close[0] === fence.char && close.length >= fence.len) fence = null;
+      return false;
+    }
+    const open = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
+    if (open) { fence = { char: (open[1] ?? open[2])[0], len: (open[1] ?? open[2]).length }; return false; }
+    return !/^\s*>/.test(line);
+  }).map((line) => line
+    .replace(/(\*\*Review tier:\*\*\s*)(`+)\s*([^`\s]+)\s*\2(?!`)/g, '$1$3')
+    .replace(/(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, '')).join('\n');
 }
 
 const expandBraces = (token) => {
@@ -657,11 +667,14 @@ const expandBraces = (token) => {
   return m ? m[1].split(',').flatMap((alt) => expandBraces(token.slice(0, m.index) + alt + token.slice(m.index + m[0].length))) : [token];
 };
 
-// The scheduler refuses these paths: absolute, drive-qualified, escaping the repo, or empty.
+// The scheduler refuses these paths, normalized the same way (trailing dots and spaces dropped
+// per segment, as Windows does): absolute, drive-qualified, escaping the repo, or empty.
+// Containment is checked after normalization: `.../x` becomes `/x`.
 function badFilesPath(path) {
-  const slashed = path.trim().replace(/\\/g, '/');
-  const normal = posix.normalize(slashed || '.');
-  return /^[A-Za-z]:/.test(slashed) || slashed.startsWith('/') || normal === '..' || normal.startsWith('../') || normal === '.' || normal === './';
+  const slashed = path.replace(/\\/g, '/');
+  const segments = slashed.split('/').map((segment) => (segment === '.' || segment === '..' ? segment : segment.replace(/[. ]+$/, '')));
+  const normal = posix.normalize(segments.join('/'));
+  return /^[A-Za-z]:/.test(slashed) || slashed.startsWith('/') || normal === '..' || normal.startsWith('../') || normal.startsWith('/') || normal === '.' || normal === './';
 }
 
 function conductorFieldProblems(content) {
@@ -690,8 +703,8 @@ function conductorFieldProblems(content) {
   }
   // Only bullets on the lines after the label count, as in the scheduler: `**Files:**- Modify …` has none.
   const bullets = fieldLines('Files', (l) => labelLine.test(l), false).filter((l) => /^- (Create|Modify) /.test(l)).map((l) => /`([^`]+)`/.exec(l)?.[1]);
-  if (!bullets.some(Boolean)) problems.push(`**Files:** has no bullet beginning "- Create " or "- Modify " with a backticked path on a line after the label.${spelled('Files')}`);
-  const bad = bullets.filter(Boolean).flatMap(expandBraces).filter(badFilesPath);
+  if (!bullets.some((token) => token !== undefined)) problems.push(`**Files:** has no bullet beginning "- Create " or "- Modify " with a backticked path on a line after the label.${spelled('Files')}`);
+  const bad = bullets.filter((token) => token !== undefined).map((token) => token.trim()).flatMap(expandBraces).filter(badFilesPath);
   if (bad.length) problems.push(`**Files:** paths must be repo-relative (no absolute or drive path, no ".." escape, not empty): ${bad.map((p) => `"${p}"`).join(', ')}.`);
   return problems;
 }

@@ -463,6 +463,25 @@ test('tier: a quoted T0 before a real T2 leaves the real declaration standing', 
   assert.equal(status, 0, `the real T2 is the declaration, got:\n${out}`);
 });
 
+test('tier: fences close only on the same character with a run at least as long (CommonMark)', () => {
+  // astra's case: a four-backtick block holding a triple-backtick line and a quoted T0, then a real T2.
+  const four = validateWp(withTier('````\n```\n**Review tier:** T0\n```\n````\n\n**Review tier:** T2\n\n'));
+  assert.equal(four.status, 0, `the real T2 stands after the four-backtick block, got:\n${four.out}`);
+  const tilde = validateWp(withTier('~~~~\n~~~\n**Review tier:** T0\n~~~\n~~~~\n\n'));
+  assert.equal(tilde.status, 1, 'a quoted T0 inside a four-tilde block is not a declaration');
+  assert.match(tilde.out, /Missing \*\*Review tier:\*\* field/);
+});
+
+test('tier: a span is delimited by equal-length backtick runs; a span that is the label\'s value is the value', () => {
+  const double = validateWp(withTier('Example: ``**Review tier:** T0`` is how a tier reads.\n\n'));
+  assert.equal(double.status, 1, 'a double-backtick span quoting T0 is not a declaration');
+  assert.match(double.out, /Missing \*\*Review tier:\*\* field/);
+  assert.equal(validateWp(withTier('**Review tier:** `T2` (adds tests)\n\n')).status, 0, 'the backticked value is the value');
+  const bad = validateWp(withTier('**Review tier:** `T3` (adds tests)\n\n'));
+  assert.equal(bad.status, 1);
+  assert.match(bad.out, /value "T3" is not T0, T1 or T2/, 'the error names the declared value, not the word after the span');
+});
+
 test('tier: two different real declarations are an error naming both; an example token is not a value', () => {
   const conflict = validateWp(withTier('**Review tier:** T0\n\n**Review tier:** T2\n\n'));
   assert.equal(conflict.status, 1);
@@ -479,12 +498,12 @@ test('files: a same-line **Files:**- Modify bullet is not counted (the scheduler
 });
 
 test('files: absolute, drive, escaping and empty paths are errors (the scheduler refuses them)', () => {
-  for (const bad of ['/etc/thing.ts', 'C:/x/thing.ts', 'C:\\x\\thing.ts', '../outside.ts', 'a/../../outside.ts', ' ', '{ok.ts,/abs.ts}']) {
+  for (const bad of ['/etc/thing.ts', 'C:/x/thing.ts', 'C:\\x\\thing.ts', '../outside.ts', 'a/../../outside.ts', ' ', '{ok.ts,/abs.ts}', '...', '{ok.mjs,...}', '.../x', 'a/ /..']) {
     const { status, out } = validateWp(COV_WP.replace('- Modify `src/thing.ts`.', `- Modify \`${bad}\``));
     assert.equal(status, 1, `path "${bad}" must be refused`);
     assert.match(out, /\*\*Files:\*\* paths must be repo-relative/);
   }
-  assert.equal(validateWp(COV_WP.replace('- Modify `src/thing.ts`.', '- Modify `lib/{a,b}.mjs`\n- Create `docs/`')).status, 0, 'brace groups and directories are fine');
+  assert.equal(validateWp(COV_WP.replace('- Modify `src/thing.ts`.', '- Modify `lib/{a,b}.mjs`\n- Create `docs/`\n- Modify `dir /a.mjs.`')).status, 0, 'brace groups, directories and trailing dots or spaces per segment are fine');
 });
 
 test('colon-outside labels get a diagnostic naming the required spelling', () => {
@@ -518,6 +537,9 @@ test('parity: a WP the validator accepts, the scheduler reads with files and the
   for (const [name, text, tier] of [
     ['complete', COV_WP, 'T1'],
     ['quoted T0 before a real T2', withTier('```\n**Review tier:** T0\n```\n\n**Review tier:** T2\n\n'), 'T2'],
+    ['quoted T0 in a four-backtick block before a real T2', withTier('````\n```\n**Review tier:** T0\n```\n````\n\n**Review tier:** T2\n\n'), 'T2'],
+    ['backticked value', withTier('**Review tier:** `T2` (adds tests)\n\n'), 'T2'],
+    ['double-backtick span quoting T0 before a real T2', withTier('Example: ``**Review tier:** T0``.\n\n**Review tier:** T2\n\n'), 'T2'],
     ['mid-line tier', COV_WP.replace(REAL_TIER, '').replace('**Precondition:**', '**Execution:** review-needed · **Review tier:** T0 (docs)\n\n**Precondition:**'), 'T0'],
   ]) {
     const { validator, wp, error } = parity(text);
@@ -531,7 +553,7 @@ test('parity: a WP the validator rejects, the scheduler also refuses or reads as
   const sameLine = parity(COV_WP.replace('**Files:**\n- Modify `src/thing.ts`.', '**Files:**- Modify `src/thing.ts`.'));
   assert.equal(sameLine.validator.status, 1);
   assert.deepEqual(sameLine.wp.files, [], 'the scheduler reads no file set from a same-line bullet');
-  for (const bad of ['/etc/thing.ts', 'C:/x/thing.ts', '../outside.ts', ' ']) {
+  for (const bad of ['/etc/thing.ts', 'C:/x/thing.ts', '../outside.ts', ' ', '...', '{ok.mjs,...}', '.../x', 'a/ /..']) {
     const result = parity(COV_WP.replace('- Modify `src/thing.ts`.', `- Modify \`${bad}\``));
     assert.equal(result.validator.status, 1, `validator refuses "${bad}"`);
     assert.match(result.error ?? '', /is not a path inside the repository/, `scheduler refuses "${bad}"`);

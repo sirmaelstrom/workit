@@ -175,6 +175,23 @@ test('tier: a quoted tier does not count (fence, inline code, blockquote); a rea
   assert.equal(tierOf(t, '**Execution:** review-needed · **Review tier:** T2 (adds tests) · **Lane model:** x\n'), 'T2', 'the mid-line form stands');
 });
 
+test('tier: fences close only on the same character with a run at least as long; spans match by run length', (t) => {
+  assert.equal(tierOf(t, '````\n```\n**Review tier:** T0\n```\n````\n\n**Review tier:** T2\n'), 'T2', 'a four-backtick block holding a triple-backtick line and a quoted T0, then a real T2');
+  assert.equal(tierOf(t, '~~~~\n~~~\n**Review tier:** T0\n~~~\n~~~~\n'), 'T1', 'a four-tilde block is one block');
+  assert.equal(tierOf(t, 'Example: ``**Review tier:** T0``.\n\n**Review tier:** T2\n'), 'T2', 'a double-backtick span quoting T0 is not a declaration');
+  assert.equal(tierOf(t, '**Review tier:** `T2` (adds tests)\n'), 'T2', 'a span that is the label\'s value is the value');
+  assert.throws(() => tierOf(t, '**Review tier:** `T3` (adds tests)\n'), /value "T3" is not T0, T1 or T2/);
+});
+
+test('paths: `.../x` (dots dropped, then absolute) and `...` are refused after normalization', (t) => {
+  for (const bad of ['.../x', '...', '{ok.mjs,...}', 'a/ /..']) {
+    const dir = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: `**Files:**\n- Modify \`${bad}\`\n` } });
+    assert.throws(() => parseWorkPackages(dir), /is not a path inside the repository/, `"${bad}" must be refused`);
+  }
+  const ok = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: '**Files:**\n- Modify `dir /a.mjs.`\n- Modify `b.../c.mjs`\n' } });
+  assert.deepEqual(parseWorkPackages(ok)[0].files, ['dir/a.mjs', 'b/c.mjs']);
+});
+
 test('tier: two different real declarations, or a value outside T0|T1|T2, is a parse error', (t) => {
   assert.throws(() => tierOf(t, '**Review tier:** T0\n\n**Review tier:** T2\n'), /conflicting \*\*Review tier:\*\* declarations \(T0, T2\)/);
   assert.throws(() => tierOf(t, '**Review tier:** T3\n'), /value "T3" is not T0, T1 or T2/);

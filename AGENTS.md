@@ -4,7 +4,7 @@
 
 ## What This Is
 
-**workit** is a spec-and-skill toolkit for Codex: a plugin bundling the skills under `skills/` (count them with `ls skills/*/SKILL.md`) (spec/plan → execute → review/repair → skill meta-tooling) plus a `reference/` library of patterns, heuristics, templates, and examples. It's the live successor to the retired `heathdev-workshop-plugin` (methodology/skills) and `heathdev-patterns` (pattern library) — both were deleted from disk and GitHub-archived **2026-07-01**; their content was bundled here (see `reference/README.md` § Origin).
+**workit** is a spec-and-skill toolkit for Codex: a plugin bundling the skills under `skills/` (spec/plan → execute → review/repair → skill meta-tooling; count them with `ls skills/*/SKILL.md`) plus a `reference/` library of patterns, heuristics, templates, and examples. It's the live successor to the retired `heathdev-workshop-plugin` (methodology/skills) and `heathdev-patterns` (pattern library) — both were deleted from disk and GitHub-archived **2026-07-01**; their content was bundled here (see `reference/README.md` § Origin).
 
 ## Load-bearing consumer (don't break this)
 

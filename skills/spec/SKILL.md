@@ -73,13 +73,16 @@ For deep specs, parse the `--review` flag. If not specified, auto-select:
 
 Before any gate is crossed, check the ref against the record it names. Every step is yours to perform; nothing else reads it.
 
-1. **`spine:<anchor uuid>@<answeredAt> by <by>`.** Read the quest with the Spine quest-read tool (`spine_quest`). The ref is valid only when the quest's **latest** receipt has outcome `answered`, its `answer.answeredAt` equals `<answeredAt>`, its `answer.by` equals `<by>` and begins `operator:`, and its question begins `[conduct `. A superseded receipt (a later one exists), an unanswered one, or one not attributed to an operator is not an approval. With no Spine tool to read it, the ref can't be verified.
-2. **`core:<path>`.** The file exists, parses as JSON, and has one of the two shapes the conductor writes:
-   - a touch record `touches/<n>.json` (any `<n>`: a re-asked touch after an ambiguous grant is `touches/2.json`): `status` is `answered`, `tty` is `true`, `answer.key` is set and `answer.by` begins `operator:`;
-   - an authority record `touches/<n>-authority.json` (the checked grant after a "change it" answer): `{ merge, release, budgetUsd, scope, validated: true, touch, grant, answer }` with `validated` `true`, a non-empty `scope`, and an `answer` whose `key` is set and whose `by` begins `operator:`.
+0. **Bind it to this run.** The run's state is `<workshop>/run/state.json` (the `--workshop` layout); read it for `runId`. No readable state, or no `runId`, means the ref can't be bound to a run.
+1. **`spine:<anchor uuid>@<answeredAt> by <by>`.** Read the quest with the Spine quest-read tool (`spine_quest`). The ref is valid only when the quest's **latest** receipt has outcome `answered`, its `answer.answeredAt` equals `<answeredAt>`, its `answer.by` equals `<by>` and begins `operator:`, and its question carries this run's correlation prefix `(run <runId>/` after the `[conduct <slug> touch <n>]` tag (the bare tag isn't enough: it is shared by every run of the same goal). A superseded receipt (a later one exists), an unanswered one, or one not attributed to an operator is not an approval. If a later receipt supersedes the approval, stop: the conductor re-files the touch, an extra touch that the run analysis counts. With no Spine tool to read it, the ref can't be verified.
+2. **`core:<path>`.** The path resolves to a file under `<workshop>/run/touches/`, which exists, parses as JSON, and has one of the two shapes the conductor writes. Validate each against its own shape:
+   - a touch record `touches/<n>.json` (any `<n>`: a re-asked touch after an ambiguous grant is `touches/2.json`): `status` is `answered`, `tty` is `true`, `answer.by` begins `operator:`, and `kind` is `preapproval` or the re-ask (`blocked` with a question about the "(c) answer to touch <m>"; any other blocked touch is not an approval);
+   - an authority record `touches/<n>-authority.json` (the checked grant after a "change it" answer): `{ merge, release, budgetUsd, scope, validated: true, touch, grant, answer }` with `validated` `true`, a non-empty `scope`, and an `answer` whose `key` is `c` and whose `by` begins `operator:`.
 
-   A file that is missing, unreadable, of another shape, or with an empty `answer` is not an approval.
-3. **Scope.** When the record carries `scope` (the authority record), write the spec inside it: the goal you were given must be that scope or fall inside it. A goal outside it, or inside it only on your own reading of the scope, is a stop. The goal text stays verbatim. A touch record or a Spine answer carries no `scope`: it approves the goal as written. An `[ASSUMPTION: …]` that would widen or change the goal's scope is subject to this step.
+   A file that is missing, unreadable, outside `<workshop>/run/touches/`, of another shape, or with an empty `answer` is not an approval.
+   
+   **The answer must approve.** The conductor maps the answer key to authority: `a` approves as proposed, `b` approves with every PR held, `c` approves a checked grant (recorded as the authority record, never as the touch record), and **`d` declines** the run. So a touch record or a Spine answer is an approval only with key `a` or `b`, and an authority record only with key `c`. A decline, or any other key, is a stop.
+3. **Scope.** When the record carries `scope` (the authority record), keep the goal for context but write the spec, the WPs and every assumption **only inside the scope**. List whatever the goal asks beyond it under an `Out of scope` heading (a short list in `problem-statement.md`, or in lite's Problem section) and never plan it. The goal text stays verbatim: the conductor passes it unchanged even under a narrowed grant. A touch record or a Spine answer carries no `scope`: it approves the goal as written. An `[ASSUMPTION: …]` that would widen the scope is not written.
 4. **Any failed check keeps the normal stop** (the gate waits for a person, as without the flag) and prints one line naming the check that failed: `Gate not preapproved: <the check>`. An empty value, or one beginning with neither `spine:` nor `core:`, fails step 1 or 2 the same way.
 
 With a verified `--preapproved`:
@@ -89,7 +92,7 @@ With a verified `--preapproved`:
 - **Council unavailable:** the Phase 8 and lite council branches continue on the self-review floor and record `"council": "unavailable"` in `meta.json`; they do not stop.
 - **No sub-agent for the fresh-eyes reviewer:** Phase 7a continues on the self-review floor and records `"fresh-eyes": "unavailable"` in `meta.json`; it does not stop.
 - The flag skips no review wave: the fresh-eyes loop, the council and the final wave still run at whatever `--review` level applies. It only answers the gate that waits for a person.
-- `[ASSUMPTION: …]` flags no longer reach a person at the gate. List every one in the final output (Phase 9 / lite Final Output); the conductor carries them to the showcase.
+- `[ASSUMPTION: …]` flags no longer reach a person at the gate. List every one on the `**Assumptions:**` line of the final output (Phase 9 / lite Final Output).
 
 Without these flags, every gate and stop in this skill is unchanged.
 
@@ -108,7 +111,7 @@ Extract from the intent:
 - **Which project(s)** this touches — check your projects directory for matching repos
 - **Slug** — kebab-case, ≤40 chars
 
-If the project is ambiguous, ask (with `--workshop`, take it from the current directory and don't ask: § Conductor flags). If the scope is ambiguous, make your best guess and flag it as `[ASSUMPTION: A1]` — the human will correct at the review gate (under a verified `--preapproved` there is no such gate: the flags are listed in the final output instead).
+If the project is ambiguous, ask (with `--workshop`, take it from the current directory and don't ask: § Conductor flags). If the scope is ambiguous, make your best guess and flag it as `[ASSUMPTION: A1]` — the human will correct at the review gate (under a verified `--preapproved` there is no such gate: the flags are listed on the final output's `**Assumptions:**` line instead).
 
 #### 1b. Scaffold Workshop
 
@@ -418,7 +421,7 @@ Run one more Opus fresh-eyes wave (same prompt and model as 7a) to verify the co
 
 Then run the spec-validate script (bundled in this plugin):
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/skills/spec-validate/scripts/validate.mjs" {workshop_path}
+node "${CLAUDE_PLUGIN_ROOT}/skills/spec-validate/scripts/validate.mjs" "{workshop_path}"
 ```
 
 Report: validation result (errors/warnings/passes) + final wave verdict.
@@ -457,7 +460,7 @@ A compressed specification for well-understood changes. Produces a single `spec.
 ### Setup
 
 1. **Parse intent** — extract what, which project, slug (same as deep spec Phase 1a)
-2. **Scaffold workshop** — create directory (at `--workshop <abs>` when given, § Conductor flags) + `meta.json` with status `"captured"`. Mark cost tracking: `node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase lite --event start`
+2. **Scaffold workshop** — create directory (at `--workshop <abs>` when given, § Conductor flags) + `meta.json` with status `"captured"`. Mark cost tracking: `node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state "{workshop}/cost-log.json" --phase lite --event start`
 3. **Quick explore** — read key files likely affected. ≤5 files, no Explore agent. If you're reaching for a wider survey, the depth was wrong — upgrade to deep.
 4. **Read CORRECTIONS.md** — non-negotiable regardless of depth
 5. **KB search** — one `kb_search` query for prior work on this topic, when available (with no KB tool, skip and say so)
@@ -502,8 +505,8 @@ Show a brief summary with flagged items. Wait for approval. Apply revisions if n
 
 Update `meta.json` status to `"ready"`. Close cost tracking and generate the report:
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase lite --event end
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-log.json
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state "{workshop}/cost-log.json" --phase lite --event end
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state "{workshop}/cost-log.json"
 ```
 
 > **The report reads the SESSION's transcripts, not the workshop's.** The
@@ -548,12 +551,12 @@ State file: `{workshop}/cost-log.json`. Collection reads subagent transcripts po
 
 At the START of each deep-pipeline phase, run:
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase phase-N-<slug> --event start
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state "{workshop}/cost-log.json" --phase phase-N-<slug> --event start
 ```
 Phase names: `phase-1-setup` … `phase-9-final` (matching this document's Phase 1-9 headings). At Phase 9, close the final phase and generate the report:
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase phase-9-final --event end
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-log.json
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state "{workshop}/cost-log.json" --phase phase-9-final --event end
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state "{workshop}/cost-log.json"
 ```
 Include the printed markdown table in the Phase 9 final output.
 
