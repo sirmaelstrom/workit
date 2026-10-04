@@ -1,0 +1,6 @@
+{
+  "command": "gh api repos/sirmaelstrom/workit/branches/feat%2Fconduct-wp03-land-release/protection/required_status_checks",
+  "code": 1,
+  "stdout": "{\"message\":\"Branch not protected\",\"documentation_url\":\"https://docs.github.com/rest/branches/branch-protection#get-status-checks-protection\",\"status\":\"404\"}",
+  "stderr": "gh: Branch not protected (HTTP 404)\n"
+}

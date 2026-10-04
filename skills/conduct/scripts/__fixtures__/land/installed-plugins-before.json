@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "plugins": {
+    "workit@workit": [
+      {
+        "scope": "user",
+        "installPath": "<home>/.claude/plugins/cache/workit/workit/1.27.17",
+        "version": "1.27.17",
+        "installedAt": "2026-07-06T17:49:35.169Z",
+        "lastUpdated": "2026-10-04T13:55:19.624Z",
+        "gitCommitSha": "37e79605735904eac875b000ad1b2ca55885db89"
+      }
+    ]
+  }
+}
