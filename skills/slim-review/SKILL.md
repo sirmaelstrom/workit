@@ -420,7 +420,8 @@ the reply is where that gets recorded rather than re-litigated next time.
 
 ### Round two: the amendment only
 
-A nontrivial amendment has not converged until something checks it: a paired
+A nontrivial amendment (one that changes an executable line) has not
+converged until something checks it: a paired
 review of amended heads has found real defects inside the amended code. Check
 the amendment, not the PR again. A second full pass draws a fresh sample over
 code nobody changed. Run one delta pass per lens against the head round one
