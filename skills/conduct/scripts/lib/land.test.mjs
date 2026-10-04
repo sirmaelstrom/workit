@@ -744,6 +744,9 @@ test('recordLandStep outcomes (D19.15)', () => {
   assert.deepEqual([anomaly.outcome, anomaly.reason, anomaly.patch.mergeLock], ['block', TREE_MISMATCH, null]);
   assert.deepEqual(anomaly.patch.dispatchHalt, { reason: TREE_MISMATCH, since: new Date(NOW).toISOString() });
   assert.deepEqual(recordLandStep(state, wp, merged, ok('{}'), {}).patch, { mergeLock: null });
+  // C1-25: an exit 5 that is not a tree mismatch keeps its reason and halts nothing.
+  const compare = recordLandStep(state, wp, merged, { code: 5, stdout: JSON.stringify({ ok: false, reason: 'tree compare failed: fatal: bad object' }), stderr: '' }, { now: () => NOW });
+  assert.deepEqual([compare.outcome, compare.reason, Object.hasOwn(compare.patch, 'dispatchHalt')], ['block', 'tree compare failed: fatal: bad object', false]);
   const other = makeState({ mergeLock: { wpId: 'WP-02', since: minutesAgo(1) } });
   const [fetch] = rebaseActions(state, wp);
   const yielded = recordLandStep(other, { ...wp, queue: [fetch] }, fetch, ok(), { now: () => NOW });
