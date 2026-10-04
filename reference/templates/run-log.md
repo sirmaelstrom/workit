@@ -15,6 +15,8 @@
 4. **Doc-only content** — the sections allowed short prose: queue order + ranking rationale, gates and window reasoning, sittings, protocol deltas vs the /burn-down standing rules, out-of-window rejections (named, with reasons — V4 discipline), bench.
 5. **Watch the size at close.** At one row per stop the log stays small in *rows*; the measured erosion vector is fat rows (run 4: ~66k chars at 14 items — structure held, rows bloated). At run close, record the doc's measured size next to the prior runs' figures, same method. Add a size guard only if the format demonstrably erodes (guard-first lesson, quest 94165afb) — the counterweight here is structural (the prose field is gone), not willpower.
 
+6. **Count the run's post-landing escapes at close.** `node ${CLAUDE_PLUGIN_ROOT}/scripts/escape-reader.mjs --repo <owner/name> … --measure-log <t1 verdict jsonl> --run-docs <dir>` tallies the `Escape:` lines fix PRs carry (saw / missed / unreviewed / unparsed), joins each introducing PR to the T1 log, and lists per run (`attribution.byRun`) the escapes whose introducing PR that run shipped. Introducers it cannot place are `unattributed` or `ambiguous` and credited to no run. Exit 3 means a repo hit `--limit` and the census may be short.
+
 ## Skeleton
 
 ```markdown
