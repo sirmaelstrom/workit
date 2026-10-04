@@ -75,6 +75,17 @@ test('C1-14 resolvePluginRoot respects scope: another project\'s install never w
   assert.equal(resolvePluginRoot({ installedPluginsPath: '/p.json', projectPath: '/this/repo/', read }), '<home>/cache/workit/1.27.16');
 });
 
+test('C2-9 a scope-less (legacy) entry is user scope; project paths compare case-sensitively on Linux, folded on Windows and macOS', () => {
+  const legacy = JSON.stringify({ version: 1, plugins: { 'workit@workit': [{ version: '1.27.10', installPath: '<home>/cache/workit/1.27.10' }] } });
+  assert.equal(resolvePluginRoot({ installedPluginsPath: '/legacy.json', read: files({ '/legacy.json': legacy }) }), '<home>/cache/workit/1.27.10');
+  const entries = [{ scope: 'user', version: '1.27.17', installPath: 'user' }, { scope: 'project', version: '1.27.16', installPath: 'App', projectPath: '/repos/App' }];
+  const read = files({ '/p.json': JSON.stringify({ version: 2, plugins: { 'workit@workit': entries } }) });
+  assert.equal(resolvePluginRoot({ installedPluginsPath: '/p.json', projectPath: '/repos/app', platform: 'linux', read }), 'user');
+  assert.equal(resolvePluginRoot({ installedPluginsPath: '/p.json', projectPath: '/repos/App', platform: 'linux', read }), 'App');
+  assert.equal(resolvePluginRoot({ installedPluginsPath: '/p.json', projectPath: '/repos/app', platform: 'win32', read }), 'App');
+  assert.equal(resolvePluginRoot({ installedPluginsPath: '/p.json', projectPath: '/repos/app', platform: 'darwin', read }), 'App');
+});
+
 const wp = (state) => ({ id: 'WP', state });
 const run = (over = {}) => ({ intent: { release: CONFIG.release }, authority: { release: true }, wps: [wp('merged'), wp('merged')], ...over });
 

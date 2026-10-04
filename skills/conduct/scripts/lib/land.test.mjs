@@ -1,14 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   tierFor, pickReviewers, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions, recordLandStep, runLandVerb,
-  parsePages, findingsCount, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH,
+  parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH,
 } from './land.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
+import { runConduct } from '../conduct.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '..', '__fixtures__', 'land');
@@ -59,7 +61,7 @@ function makeState(over = {}) {
 
 function makeWp(over = {}) {
   return {
-    id: 'WP-01', name: 'fixture', tier: 'T1', state: 'gate', files: ['lib/x.mjs', 'lib/fix.mjs', 'lib/x.test.mjs'],
+    id: 'WP-01', name: 'fixture', tier: 'T1', state: 'gate', files: ['lib/x.mjs', 'lib/fix.mjs', 'lib/x.test.mjs', 'skills/spec/scripts/x.mjs'],
     lane: { worktree: WT, branch: 'conduct/fixture/wp-01', base: BASE },
     pr: { number: 7, head: HEAD },
     reviews: [{ round: 1, scope: 'full', tier: 'T1', head: HEAD, lenses: ['codex', 'astra'], verdicts: [], resolved: [] }],
@@ -86,13 +88,15 @@ function gateExec(o = {}) {
       return { code: ancestry[`${args[4]}..${args[5]}`] ?? 0, stdout: '', stderr: '' };
     }
     if (program === 'gh' && /\/check-runs\?/.test(args[1])) return args[1].includes(BASE_TIP) ? baseRuns : ci;
-    if (program === 'gh' && /\/status$/.test(args[1])) return status;
+    if (program === 'gh' && /\/status\?/.test(args[1])) return status;
     if (program === 'gh' && /required_status_checks$/.test(args[1])) return required;
     if (program === 'node' && args[1] === 'threads') return { code: threads, stdout: '', stderr: threads ? 'open threads' : '' };
     if (program === 'git' && args[2] === 'show') return config === null ? { code: 128, stdout: '', stderr: 'fatal: path \'.workit/conduct.json\' does not exist in \'origin/main\'' } : ok(config);
     const rows = has('--no-renames') ? tailFiles : tailFiles.filter((file) => !Object.hasOwn(renames, file));
     if (program === 'git' && args[2] === 'diff' && has('--quiet') && has('--no-renames')) return { code: tailFiles.length ? 1 : 0, stdout: '', stderr: '' };
-    if (program === 'git' && args[2] === 'diff' && has('--numstat')) return ok(rows.map((file) => `${tailLines}\t0\t${file}`).join('\n'));
+    if (program === 'git' && args[2] === 'diff' && has('--numstat')) {
+      return ok(rows.map((file) => `${typeof tailLines === 'object' ? tailLines[file] ?? 1 : tailLines}\t0\t${file}`).join('\n'));
+    }
     if (program === 'git' && args[2] === 'diff' && has('--name-only')) return ok(rows.join('\n'));
     if (program === 'git' && args[2] === 'diff' && has('--quiet')) return { code: diffQuiet, stdout: '', stderr: '' };
     if (program === 'git' && args[2] === 'diff') return ok(diffs[`${args.at(-2)} ${args.at(-1)}`] ?? `diff ${args.at(-2)} ${args.at(-1)}\n`);
@@ -106,6 +110,9 @@ function gateExec(o = {}) {
 
 const gate = (state, wp, options = {}, now = NOW) => gateCheck(state, wp, { exec: gateExec(options), now: () => now });
 const olderReview = (over = {}) => makeWp({ reviews: [{ round: 1, scope: 'full', head: sha('e'), verdicts: [] }], ...over });
+const gateJson = (out) => JSON.stringify({ ok: false, pending: false, blocked: false, head: HEAD, failures: [], causes: [], ...out });
+const GATE_OK = ok(gateJson({ ok: true }));
+const GATE_PENDING = { code: 6, stdout: gateJson({ pending: true }), stderr: '' };
 
 test('gateCheck: ok for green CI, threads exit 0, a review at head, a fresh base and the lock held', () => {
   const out = gate(makeState(), makeWp());
@@ -123,6 +130,24 @@ test('gateCheck: zero check-runs are pending, then "no CI at head" 10 minutes af
   assert.deepEqual([fresh.ok, fresh.pending, fresh.failures], [false, true, []]);
   const late = gate(makeState(), makeWp({ gate: { head: HEAD, pendingSince: minutesAgo(11) } }), { ci: ZERO });
   assert.deepEqual([late.ok, late.pending, late.failures], [false, false, ['no CI at head']]);
+});
+
+test('C2-3 pendingSince is initialized by the wait record, kept per head, reset on a new head; a module-produced state reaches the deadline', () => {
+  const state = makeState();
+  const t0 = NOW - 11 * 60000;
+  const action = { kind: 'shell', step: 'gate', part: 'gate', command: ['node', 'conduct.mjs', 'land', 'gate'] };
+  let wp = makeWp();
+  const first = gateCheck(state, wp, { exec: gateExec({ ci: ZERO }), now: () => t0 });
+  const waited = recordLandStep(state, wp, action, { code: 6, stdout: JSON.stringify(first), stderr: '' }, { now: () => t0 });
+  assert.deepEqual([waited.outcome, waited.patch.gate.pendingSince], ['wait', new Date(t0).toISOString()]);
+  wp = { ...wp, ...waited.patch };
+  const again = recordLandStep(state, wp, action, { code: 6, stdout: JSON.stringify(first), stderr: '' }, { now: () => t0 + 60000 });
+  assert.equal(again.patch.gate.pendingSince, new Date(t0).toISOString(), 'kept across pending results at the same head');
+  const moved = recordLandStep(state, wp, action, { code: 6, stdout: JSON.stringify({ ...first, head: sha('c') }), stderr: '' }, { now: () => t0 + 60000 });
+  assert.equal(moved.patch.gate.pendingSince, new Date(t0 + 60000).toISOString(), 'reset on a new head');
+  const late = gateCheck(state, wp, { exec: gateExec({ ci: ZERO }), now: () => NOW });
+  assert.deepEqual(late.failures, ['no CI at head']);
+  assert.equal(recordLandStep(state, wp, action, GATE_OK, { now: () => NOW }).patch.gate.pendingSince, null);
 });
 
 test('gateCheck: a sha GitHub does not have (422) is "no CI at head"', () => {
@@ -143,15 +168,52 @@ test('C1-2 CI completeness: total_count, trailing text, a malformed page and dup
   }
 });
 
-test('C1-2 expected checks: a required check absent at head fails; an unprotected base falls back to the checks that ran on it', () => {
+test('C2-5 complete input: a quoted suffix or an unterminated string after a page is unreadable', () => {
+  assert.throws(() => parsePages(`${GREEN.stdout.trim()}"garbage"`), /text outside a page/);
+  assert.throws(() => parsePages(`${GREEN.stdout.trim()}"unterminated`), /text outside a page/);
+  assert.throws(() => parsePages('{"a":"unterminated'), /truncated/);
+  assert.equal(parsePages(`${GREEN.stdout.trim()}\n ${GREEN.stdout.trim()}\n`).length, 2);
+  for (const ci of [ok(`${GREEN.stdout.trim()}"garbage"`), ok(`${GREEN.stdout.trim()}"unterminated`)]) {
+    assert.match(gate(makeState(), makeWp(), { ci }).failures.join(), /CI unreadable/);
+  }
+});
+
+test('C2-5 legacy statuses are read on every page and must be complete', () => {
+  const exec = gateExec();
+  gateCheck(makeState(), makeWp(), { exec, now: () => NOW });
+  assert.deepEqual(exec.calls.find((call) => /\/status\?/.test(call.args[1] ?? '')).args, ['api', `repos/sirmaelstrom/workit/commits/${HEAD}/status?per_page=100`, '--paginate']);
+  const page = (contexts, total) => JSON.stringify({ state: 'success', total_count: total, statuses: contexts.map((context) => ({ context, state: 'success' })) });
+  assert.equal(gate(makeState(), makeWp(), { status: ok(`${page(['a'], 2)}${page(['b'], 2)}`) }).ok, true);
+  assert.match(gate(makeState(), makeWp(), { status: ok(page(['a'], 2)) }).failures.join(), /commit statuses unreadable/);
+});
+
+test('C2-2 expected checks: a required check not yet registered waits, then blocks with cause ci-missing-check', () => {
   const noScan = derived((page) => { page.check_runs = page.check_runs.filter((run) => run.name !== 'Secret scan (gitleaks)'); page.total_count = page.check_runs.length; });
-  assert.deepEqual(gate(makeState(), makeWp(), { ci: noScan }).failures, ['expected check missing at head: Secret scan (gitleaks)']);
+  const early = gate(makeState(), makeWp(), { ci: noScan });
+  assert.deepEqual([early.ok, early.pending, early.failures], [false, true, []]);
+  const late = gate(makeState(), makeWp({ gate: { head: HEAD, pendingSince: minutesAgo(11) } }), { ci: noScan });
+  assert.deepEqual([late.failures, late.causes], [['expected check missing at head: Secret scan (gitleaks)'], ['ci-missing-check']]);
+  const action = { kind: 'shell', step: 'gate', part: 'gate', command: ['node'] };
+  assert.equal(recordLandStep(makeState(), makeWp(), action, { code: 6, stdout: JSON.stringify(early), stderr: '' }, { now: () => NOW }).outcome, 'wait');
+  const recorded = recordLandStep(makeState(), makeWp(), action, { code: 5, stdout: JSON.stringify(late), stderr: '' }, { now: () => NOW });
+  assert.deepEqual([recorded.outcome, recorded.patch.mergeLock, recorded.patch.queue], ['block', null, []]);
+});
+
+test('C1-2 expected checks: an unprotected base falls back to the checks that ran on it', () => {
   assert.match(UNPROTECTED.stderr, /HTTP 404/);
   const extraOnBase = derived((page) => { page.check_runs.push({ ...page.check_runs[0], id: 1, name: 'Deploy' }); page.total_count += 1; });
-  const out = gate(makeState(), makeWp(), { required: UNPROTECTED, baseRuns: extraOnBase });
+  const out = gate(makeState(), makeWp({ gate: { head: HEAD, pendingSince: minutesAgo(11) } }), { required: UNPROTECTED, baseRuns: extraOnBase });
   assert.deepEqual(out.failures, ['expected check missing at head: Deploy']);
   assert.equal(gate(makeState(), makeWp(), { required: UNPROTECTED }).ok, true);
   assert.deepEqual(gate(makeState(), makeWp(), { required: { code: 1, stdout: '', stderr: 'gh: Server Error (HTTP 502)' } }).causes, ['infra']);
+});
+
+test('C2-4 required checks are the union of contexts and checks: a checks-only protection still requires its check', () => {
+  const checksOnly = ok(JSON.stringify({ strict: true, contexts: [], checks: [{ context: 'Deploy gate', app_id: 1 }] }));
+  const out = gate(makeState(), makeWp({ gate: { head: HEAD, pendingSince: minutesAgo(11) } }), { required: checksOnly });
+  assert.deepEqual(out.failures, ['expected check missing at head: Deploy gate']);
+  const both = ok(JSON.stringify({ contexts: ['Tests (node --test)'], checks: [{ context: 'Secret scan (gitleaks)' }] }));
+  assert.equal(gate(makeState(), makeWp(), { required: both }).ok, true);
 });
 
 test('C1-27 legacy commit statuses are read: a failed status fails, a pending one is pending', () => {
@@ -185,6 +247,17 @@ test('gateCheck: a review at an older head whose tail changes a .mjs file fails'
   assert.match(out.failures.join(), /review does not cover head: tail .* changes skills\/conduct\/scripts\/lib\/land\.mjs$/);
 });
 
+test('C2-6 an uncovered review blocks with cause review-uncovered, never amend', () => {
+  const tail = gate(makeState(), olderReview(), { tailFiles: ['lib/x.mjs'] });
+  assert.deepEqual(tail.causes, ['review-uncovered']);
+  const none = gate(makeState(), makeWp({ reviews: [] }));
+  assert.deepEqual([none.failures, none.causes], [['no review of this WP'], ['review-uncovered']]);
+  for (const out of [tail, none]) {
+    const recorded = recordLandStep(makeState(), makeWp(), GATE_ACTION, { code: 5, stdout: JSON.stringify(out), stderr: '' }, { now: () => NOW });
+    assert.deepEqual([recorded.outcome, recorded.patch.queue], ['block', []]);
+  }
+});
+
 test('gateCheck: a tail that changes only plain *.md is ok as trivial; an empty net diff is trivial', () => {
   const out = gate(makeState(), olderReview(), { tailFiles: ['README.md', 'docs/notes.md'] });
   assert.deepEqual([out.ok, out.unreviewedTail], [true, `${sha('e')}..${HEAD} (trivial)`]);
@@ -199,7 +272,6 @@ test('trivial is docs only: tests, fixtures and behavior-bearing Markdown are no
     assert.equal(out.ok, false, file);
     assert.equal(out.unreviewedTail, null, file);
   }
-  // The base's .workit/conduct.json replaces the list and adds its contractPaths.
   const config = JSON.stringify({ trivialExclude: [], contractPaths: ['docs/contract.md'] });
   assert.equal(gate(makeState(), olderReview(), { tailFiles: ['skills/conduct/SKILL.md'], config }).ok, true);
   assert.equal(gate(makeState(), olderReview(), { tailFiles: ['docs/contract.md'], config }).ok, false);
@@ -216,7 +288,7 @@ test('C1-6 a production file renamed to .md is not a docs-only tail: the tail is
 const C1 = sha('1');
 const C2 = sha('2');
 const D = sha('d');
-const anchorReview = (verdicts) => ({ round: 2, scope: 'delta', head: D, reviewId: 'review-2', verdicts });
+const anchorReview = (verdicts) => ({ round: 2, scope: 'delta', since: sha('f'), head: D, reviewId: 'review-2', verdicts });
 const postCapWp = (over = {}) => makeWp({
   reviews: [
     { round: 1, scope: 'full', head: sha('f'), verdicts: [{ comment: '11', verdict: 'fixed', commit: sha('3').slice(0, 7) }] },
@@ -225,45 +297,70 @@ const postCapWp = (over = {}) => makeWp({
   ...over,
 });
 const TAIL = { tailFiles: ['lib/x.mjs'], tailCommits: [C2, C1] };
-const inspected = (verdict = 'addresses-findings', head = HEAD, tail = `${D}..${HEAD}`) => ({ inspections: [{ verdict, tail, head }] });
+// The binding the gate asks for, as the driver's inspection would record it.
+function inspected(wp, options = TAIL, verdict = 'addresses-findings', edit = (binding) => binding) {
+  const { inspect } = gate(makeState(), wp, options);
+  const { files, anchor, ...binding } = inspect;
+  return { ...wp, inspections: [{ verdict, ...edit(binding) }] };
+}
 
 test('C1-1 post-cap: the anchoring delta review\'s fixes, an inspection of exactly that tail, then ok', () => {
   const needs = gate(makeState(), postCapWp(), TAIL);
   assert.deepEqual([needs.ok, needs.causes, needs.failures], [false, ['inspect'], [`post-cap tail ${D}..${HEAD} needs an inspection`]]);
-  assert.deepEqual(needs.inspect, { tail: `${D}..${HEAD}`, head: HEAD, files: ['lib/x.mjs'], anchor: 'review-2' });
-  const out = gate(makeState(), postCapWp(inspected()), TAIL);
+  assert.deepEqual([needs.inspect.tail, needs.inspect.head, needs.inspect.files, needs.inspect.anchor], [`${D}..${HEAD}`, HEAD, ['lib/x.mjs'], 'review-2']);
+  const out = gate(makeState(), inspected(postCapWp()), TAIL);
   assert.deepEqual([out.ok, out.unreviewedTail], [true, `${D}..${HEAD} (post-cap)`]);
-  // An inspection of another head does not count.
-  assert.deepEqual(gate(makeState(), postCapWp(inspected('addresses-findings', sha('c'))), TAIL).causes, ['inspect']);
-  // unrelated-change holds.
-  assert.deepEqual(gate(makeState(), postCapWp(inspected('unrelated-change')), TAIL).causes, ['out-of-bounds']);
+  assert.deepEqual(gate(makeState(), inspected(postCapWp(), TAIL, 'addresses-findings', (b) => ({ ...b, head: sha('c') })), TAIL).causes, ['inspect']);
+  assert.deepEqual(gate(makeState(), inspected(postCapWp(), TAIL, 'unrelated-change'), TAIL).causes, ['tail-out-of-bounds']);
+});
+
+test('C2-7 the inspection binds tail, head, the anchoring review and its findings', () => {
+  const wp = inspected(postCapWp());
+  assert.equal(gate(makeState(), wp, TAIL).ok, true);
+  const otherTail = inspected(postCapWp(), TAIL, 'addresses-findings', (b) => ({ ...b, tail: `${sha('e')}..${HEAD}` }));
+  assert.deepEqual(gate(makeState(), otherTail, TAIL).causes, ['inspect'], 'same head, a different tail');
+  const changed = { ...wp, reviews: [wp.reviews[0], anchorReview([...wp.reviews[1].verdicts, { comment: '14', verdict: 'refuted', commit: null }])] };
+  assert.deepEqual(gate(makeState(), changed, TAIL).causes, ['inspect'], 'same tail, the findings changed');
+  const otherReview = { ...wp, reviews: [wp.reviews[0], { ...wp.reviews[1], round: 3 }] };
+  assert.deepEqual(gate(makeState(), otherReview, TAIL).causes, ['inspect'], 'same tail, another review');
+  assert.equal(typeof gate(makeState(), postCapWp(), TAIL).inspect.findingsHash, 'string');
 });
 
 test('C1-1 post-cap: fixes come only from the anchoring review, which must be a delta; one unadjudicated commit fails', () => {
-  assert.match(gate(makeState(), postCapWp(inspected()), { ...TAIL, tailCommits: [C2, sha('9')] }).failures.join(), /not fixed rows of the anchoring review/);
-  assert.match(gate(makeState(), postCapWp(inspected()), { ...TAIL, tailCommits: [C2, sha('3')] }).failures.join(), /not fixed rows of the anchoring review/);
-  const full = postCapWp(inspected());
+  assert.match(gate(makeState(), inspected(postCapWp()), { ...TAIL, tailCommits: [C2, sha('9')] }).failures.join(), /not fixed rows of the anchoring review/);
+  assert.match(gate(makeState(), inspected(postCapWp()), { ...TAIL, tailCommits: [C2, sha('3')] }).failures.join(), /not fixed rows of the anchoring review/);
+  const full = postCapWp();
   full.reviews[1].scope = 'full';
   assert.match(gate(makeState(), full, TAIL).failures.join(), /review does not cover head/);
 });
 
 test('C1-1 post-cap bounds: more than 400 production lines, or a file outside the WP\'s Files, is out of bounds', () => {
-  const big = gate(makeState(), postCapWp(inspected()), { ...TAIL, tailLines: 401 });
-  assert.deepEqual([big.ok, big.causes], [false, ['out-of-bounds']]);
-  assert.match(gate(makeState(), postCapWp(inspected()), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/other.mjs'] }).failures.join(), /outside the WP's Files: lib\/other\.mjs/);
-  assert.equal(gate(makeState(), postCapWp(inspected()), { ...TAIL, tailLines: 400 }).ok, true);
-  // Test lines do not count toward the cap, and a test file is still not trivial.
-  const withTest = gate(makeState(), postCapWp(inspected()), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/x.test.mjs'], tailLines: 300 });
+  const big = gate(makeState(), postCapWp(), { ...TAIL, tailLines: 401 });
+  assert.deepEqual([big.ok, big.causes], [false, ['tail-out-of-bounds']]);
+  assert.match(gate(makeState(), postCapWp(), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/other.mjs'] }).failures.join(), /outside the WP's Files: lib\/other\.mjs/);
+  assert.equal(gate(makeState(), inspected(postCapWp(), { ...TAIL, tailLines: 400 }), { ...TAIL, tailLines: 400 }).ok, true);
+  const mixed = { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/x.test.mjs'], tailLines: { 'lib/x.mjs': 300, 'lib/x.test.mjs': 300 } };
+  const withTest = gate(makeState(), inspected(postCapWp(), mixed), mixed);
   assert.deepEqual([withTest.ok, withTest.unreviewedTail], [true, `${D}..${HEAD} (post-cap)`]);
-  assert.deepEqual(gate(makeState(), postCapWp(), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/x.test.mjs'] }).inspect.files, ['lib/x.mjs']);
   assert.equal(gate(makeState(), olderReview(), { tailFiles: ['lib/x.test.mjs'] }).ok, false);
+});
+
+test('C2-8 test paths: names anywhere, test/ tests/ spec/ only at the root; skills/spec/ is production; the inspection lists every non-trivial path', () => {
+  for (const path of ['lib/x.test.mjs', 'pkg/x_test.go', 'a/b.spec.ts', 'a/__tests__/x.js', 'a/__fixtures__/x.json', 'test/x.js', 'tests/x.md', 'spec/x.rb']) assert.equal(isTestPath(path), true, path);
+  for (const path of ['skills/spec/scripts/x.mjs', 'skills/spec-validate/tests/x.mjs', 'lib/testing.mjs', 'docs/spec/x.md']) assert.equal(isTestPath(path), false, path);
+  const specTail = { ...TAIL, tailFiles: ['skills/spec/scripts/x.mjs'], tailLines: 5000 };
+  assert.deepEqual(gate(makeState(), inspected(postCapWp(), { ...specTail, tailLines: 1 }), specTail).causes, ['tail-out-of-bounds']);
+  const mixed = gate(makeState(), postCapWp(), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/x.test.mjs'] });
+  assert.deepEqual(mixed.inspect.files, ['lib/x.mjs', 'lib/x.test.mjs']);
+  const testOnly = gate(makeState(), postCapWp(), { ...TAIL, tailFiles: ['lib/x.test.mjs'] });
+  assert.deepEqual([testOnly.causes, testOnly.inspect.files], [['inspect'], ['lib/x.test.mjs']]);
 });
 
 test('post-cap after an equivalent rebase: the tail is computed against the pre-rebase from', () => {
   const pre = sha('7');
-  const wp = postCapWp({ ...inspected('addresses-findings', HEAD, `${D}..${pre}`), rebases: [{ from: pre, to: HEAD, oldBase: BASE, newBase: sha('8'), equivalent: true }] });
+  const wp = postCapWp({ rebases: [{ from: pre, to: HEAD, oldBase: BASE, newBase: sha('8'), equivalent: true }] });
   const exec = gateExec(TAIL);
-  const out = gateCheck(makeState(), wp, { exec, now: () => NOW });
+  const out = gateCheck(makeState(), inspected(wp), { exec, now: () => NOW });
   assert.deepEqual([out.ok, out.unreviewedTail], [true, `${D}..${pre} (post-cap)`]);
   assert.ok(exec.calls.some((call) => call.args.join(' ') === `-C ${WT} rev-list ${D}..${pre}`));
 });
@@ -275,6 +372,20 @@ test('C1-7 review → equivalent rebase → amendment → gate: the tail past th
   assert.deepEqual([docs.ok, docs.unreviewedTail], [true, `${t}..${HEAD} (trivial)`]);
   const code = gate(makeState(), wp, { tailFiles: ['lib/x.mjs'], ancestry: { [`${sha('f')}..${HEAD}`]: 1 } });
   assert.match(code.failures.join(), new RegExp(`tail ${t}\\.\\.${HEAD} changes lib/x\\.mjs`));
+});
+
+test('C2-1 review A → equivalent rebase B → amendment C → equivalent rebase D: coverage for B..C, bound to head D', () => {
+  const [A, B, C] = [sha('4'), sha('5'), sha('6')];
+  const rebases = [{ from: A, to: B, equivalent: true }, { from: C, to: HEAD, equivalent: true }];
+  const ancestry = { [`${A}..${C}`]: 1 };
+  const docs = gate(makeState(), makeWp({ reviews: [{ round: 1, scope: 'full', head: A, verdicts: [] }], rebases }), { tailFiles: ['README.md'], ancestry });
+  assert.deepEqual([docs.ok, docs.unreviewedTail], [true, `${B}..${C} (trivial)`]);
+  const anchor = { round: 2, scope: 'delta', since: sha('f'), head: A, reviewId: 'review-2', verdicts: [{ comment: '1', verdict: 'fixed', commit: C }] };
+  const wp = makeWp({ reviews: [anchor], rebases });
+  const opts = { tailFiles: ['lib/x.mjs'], tailCommits: [C], ancestry };
+  const needs = gate(makeState(), wp, opts);
+  assert.deepEqual([needs.causes, needs.inspect.tail, needs.inspect.head], [['inspect'], `${B}..${C}`, HEAD]);
+  assert.deepEqual([gate(makeState(), inspected(wp, opts), opts).ok, gate(makeState(), inspected(wp, opts), opts).unreviewedTail], [true, `${B}..${C} (post-cap)`]);
 });
 
 test('fresh base: merge-base --is-ancestor exit 1 is "stale base", and land gate is code 5', async () => {
@@ -322,12 +433,12 @@ test('equivalent rebase covered; a non-equivalent rebase needs a full review eve
   assert.deepEqual([changed.ok, changed.needsFullReview, changed.causes], [false, true, ['full-review']]);
 });
 
-test('C1-15 a second non-equivalent rebase on the same WP is held, never another full round', () => {
+test('C1-15/C2-12 a second non-equivalent rebase is held, with the serialized cause tail-out-of-bounds', () => {
   const wp = makeWp({ reviews: [{ round: 2, scope: 'full', head: HEAD, verdicts: [] }], rebases: [{ from: sha('1'), to: sha('2'), equivalent: false }, { from: sha('3'), to: HEAD, equivalent: false }] });
   const out = gate(makeState(), wp);
-  assert.deepEqual([out.ok, out.causes], [false, ['out-of-bounds']]);
-  const recorded = recordLandStep(makeState(), wp, GATE_ACTION, { code: 5, stdout: JSON.stringify(out), stderr: '' }, {});
-  assert.deepEqual([recorded.outcome, recorded.patch.mergeLock], ['held', null]);
+  assert.equal(JSON.stringify(out.causes), '["tail-out-of-bounds"]');
+  const recorded = recordLandStep(makeState(), wp, GATE_ACTION, { code: 5, stdout: JSON.stringify(out), stderr: '' }, { now: () => NOW });
+  assert.deepEqual([recorded.outcome, recorded.patch.mergeLock, recorded.patch.queue], ['held', null, []]);
 });
 
 test('recordRebase: equal verbatim patch-ids are equivalent; the patch-id call gets the controlled diff as input (C1-5, C1-16)', () => {
@@ -343,10 +454,8 @@ test('recordRebase: equal verbatim patch-ids are equivalent; the patch-id call g
   assert.deepEqual(ids.map((call) => [call.args[3], call.input]), [['--verbatim', `diff ${BASE} ${from}\n`], ['--verbatim', `diff ${newBase} ${HEAD}\n`]]);
   const differ = gateExec({ patchIds: { [`diff ${BASE} ${from}\n`]: 'pid1', [`diff ${newBase} ${HEAD}\n`]: 'pid2' } });
   assert.equal(recordRebase(makeState(), wp, { from, to: HEAD, newBase }, { exec: differ }).equivalent, false);
-  // An empty id for a non-empty diff is unreadable, never equal to another empty id.
   const empty = gateExec({ patchIds: { [`diff ${BASE} ${from}\n`]: '', [`diff ${newBase} ${HEAD}\n`]: '' } });
   assert.deepEqual(recordRebase(makeState(), wp, { from, to: HEAD, newBase }, { exec: empty }).patchIds, { from: null, to: null });
-  // Two genuinely empty diffs are equivalent.
   const none = gateExec({ diffs: { [`${BASE} ${from}`]: '', [`${newBase} ${HEAD}`]: '' } });
   assert.equal(recordRebase(makeState(), wp, { from, to: HEAD, newBase }, { exec: none }).equivalent, true);
   const again = recordRebase(makeState(), makeWp({ rebases: [{ newBase }] }), { from: HEAD, to: sha('c'), newBase: sha('6') }, { exec: same });
@@ -470,10 +579,19 @@ test('C1-21 the review author is the WP\'s effective lane agent, not the run\'s'
   assert.deepEqual(queue.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]), ['astra', 'opus']);
 });
 
-test('C1-22 no lens that can run is ConductError 5, never an empty array', () => {
+test('C1-22 no lens that can run is ConductError 5 from the emitters, never an empty array', () => {
   const none = makeState({ agents: agents(false, false) });
   assert.throws(() => reviewActions(none, makeWp({ reviewMode: 'standalone' })), (error) => error.code === 5 && /review impossible/.test(error.message));
   assert.throws(() => deltaReviewActions(OBS({ agents: agents(true, false) }), makeWp({ reviewMode: 'managed' }), sha('5')), (error) => error.code === 5);
+});
+
+test('C2-13 the recorder never throws a ConductError: an impossible lens selection in a full review blocks', () => {
+  const none = makeState({ agents: agents(false, false) });
+  const out = recordLandStep(none, makeWp({ reviewMode: 'standalone' }), GATE_ACTION, { code: 5, stdout: gateJson({ failures: ['x'], causes: ['full-review'] }), stderr: '' }, { now: () => NOW });
+  assert.deepEqual([out.outcome, out.patch.queue, out.patch.mergeLock], ['block', [], null]);
+  assert.match(out.reason, /review impossible/);
+  const unknown = recordLandStep(makeState(), makeWp(), { kind: 'shell', step: 'nope', part: 'x' }, ok(), {});
+  assert.equal(unknown.outcome, 'block');
 });
 
 const OBS = (over = {}) => makeState({ intent: { ...makeState().intent, repo: { ...makeState().intent.repo, remote: 'heathdev-me/observatory' } }, ...over });
@@ -565,16 +683,30 @@ test('deltaReviewActions: managed claims a fresh round; standalone passes --sinc
   assert.equal(standalone.at(-1).land.scope, 'delta');
 });
 
-test('C1-4 council scope comes from the dispatch: a delta council round records scope delta; a full one stays full', () => {
+const usableModels = { models: { astra: { status: 'success' }, codex: { status: 'success' } } };
+
+test('C1-4/C2-10 a delta council round writes the delta diff and hands it to the council; only then is it recorded as delta', () => {
   const state = makeState({ adapters: { council: { on: true } } });
-  const wp = makeWp({ tier: 'T2', councilStage: { round: 2, usable: 4 } });
-  const delta = deltaReviewActions(state, wp, HEAD, { changedPaths: [join(WT, 'lib', 'x.mjs')] });
-  assert.deepEqual(delta.map((a) => a.tool), ['council_review', 'council_synthesize', 'council_challenge']);
-  assert.deepEqual(delta[1].land, { round: 2, scope: 'delta', since: HEAD });
-  const entry = recordLandStep(state, wp, delta[1], { findings: 1, seats: ['astra'] }, {}).patch.reviews.at(-1);
-  assert.deepEqual([entry.scope, entry.since, entry.round], ['delta', HEAD, 2]);
-  const full = t2Actions(state, wp, { round: 2 });
-  assert.equal(recordLandStep(state, wp, full[1], { findings: 0, seats: ['astra'] }, {}).patch.reviews.at(-1).scope, 'full');
+  const wp = makeWp({ tier: 'T2' });
+  const changed = [join(WT, 'lib', 'x.mjs')];
+  const delta = deltaReviewActions(state, wp, sha('f'), { changedPaths: changed });
+  const diffFile = join(RUN, 'council', 'wp-01', 'delta-r2.diff');
+  assert.deepEqual(delta.map((a) => a.tool ?? a.part), ['delta-diff', 'council_review', 'council_synthesize', 'council_challenge']);
+  assert.deepEqual(delta[0].command, ['git', '-C', WT, 'diff', '--no-color', `--output=${diffFile}`, sha('f'), HEAD]);
+  const full = t2Actions(state, wp, { round: 2, changedPaths: changed });
+  assert.deepEqual(delta[1].args.artifact_paths, [diffFile, ...changed]);
+  assert.notDeepEqual(delta[1].args, full[0].args, 'the payloads differ at the tool-input boundary');
+  const staged = recordLandStep(state, wp, delta[1], usableModels, {});
+  assert.equal(staged.patch.councilStage.scope, 'delta');
+  const entry = recordLandStep(state, { ...wp, ...staged.patch }, delta[2], { findings: 1, seats: ['astra'] }, {}).patch.reviews.at(-1);
+  assert.deepEqual([entry.scope, entry.since, entry.round], ['delta', sha('f'), 2]);
+  // A delta-labelled review that did not carry the diff is recorded as full.
+  const stripped = { ...delta[1], args: { ...delta[1].args, artifact_paths: changed } };
+  const fullStage = recordLandStep(state, wp, stripped, usableModels, {}).patch.councilStage;
+  assert.equal(fullStage.scope, 'full');
+  const fullEntry = recordLandStep(state, { ...wp, councilStage: fullStage }, full[1], { findings: 0, seats: ['astra'] }, {}).patch.reviews.at(-1);
+  assert.deepEqual([fullEntry.scope, fullEntry.since], ['full', null]);
+  assert.equal(recordLandStep(state, wp, delta[0], { code: 128, stdout: '', stderr: 'fatal' }, {}).outcome, 'block');
 });
 
 test('every review runs before the rebase: deltaReviewActions → rebaseActions, never a delta after it', () => {
@@ -607,26 +739,29 @@ test('t2Actions: council off → every available lens and no other; on → counc
 test('council review is recorded (D20) after its stages succeed, and the gate accepts it like a posted review', () => {
   const state = makeState({ adapters: { council: { on: true } } });
   let wp = makeWp({ reviews: [], tier: 'T2' });
-  const [review, synth] = t2Actions(state, wp, { round: 1 });
+  const [review, synth] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
   const staged = recordLandStep(state, wp, review, { output_dir: 'x', models: { astra: { status: 'success' }, codex: { status: 'failed' } } }, {});
-  assert.deepEqual([staged.outcome, staged.patch.councilStage], ['continue', { round: 1, usable: 1 }]);
+  assert.deepEqual([staged.outcome, staged.patch.councilStage], ['continue', { round: 1, usable: 1, seats: ['astra'], scope: 'full' }]);
   wp = { ...wp, ...staged.patch };
-  const out = recordLandStep(state, wp, synth, { findings: 2, seats: ['astra', 'codex'] }, {});
-  assert.deepEqual(out.patch.reviews, [{ round: 1, scope: 'full', since: null, tier: 'T2', head: HEAD, lenses: ['astra', 'codex'], reviewId: synth.args.review_dir, findings: 2, verdicts: [], resolved: [] }]);
+  const out = recordLandStep(state, wp, synth, { findings: 2, seats: ['astra'] }, {});
+  assert.deepEqual(out.patch.reviews, [{ round: 1, scope: 'full', since: null, tier: 'T2', head: HEAD, lenses: ['astra'], reviewId: synth.args.review_dir, findings: 2, verdicts: [], resolved: [] }]);
   assert.equal(out.patch.councilStage, null);
   assert.equal(gate(state, { ...wp, ...out.patch }).ok, true);
 });
 
-test('C1-3 a council round is not coverage when a stage failed', () => {
+test('C1-3/C2-11 a council round is not coverage when a stage failed, a seat failed, or nothing was given to review', () => {
   const state = makeState({ adapters: { council: { on: true } } });
   const wp = makeWp({ reviews: [], tier: 'T2' });
-  const [review, synth, challenge] = t2Actions(state, wp, { round: 1 });
+  const [review, synth, challenge] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
   assert.equal(recordLandStep(state, wp, review, { models: { astra: { status: 'failed' }, codex: { status: 'timeout' } } }, {}).outcome, 'block');
   assert.equal(recordLandStep(state, wp, review, { error: 'All models failed', models: {} }, {}).outcome, 'block');
+  const [emptyReview] = t2Actions(state, wp, { round: 1 });
+  assert.match(recordLandStep(state, wp, emptyReview, usableModels, {}).reason, /no artifact_paths/);
   const noStage = recordLandStep(state, wp, synth, { findings: 0, seats: ['astra'] }, {});
   assert.deepEqual([noStage.outcome, noStage.patch.reviews], ['block', undefined]);
-  const staged = makeWp({ reviews: [], tier: 'T2', councilStage: { round: 1, usable: 2 } });
-  for (const bad of [{ error: 'synthesis failed' }, { findings: 0, seats: [] }, { findings: 'two', seats: ['astra'] }, { isError: true, findings: -1, seats: ['x'] }]) {
+  const staged = makeWp({ reviews: [], tier: 'T2', councilStage: { round: 1, usable: 1, seats: ['astra'], scope: 'full' } });
+  for (const bad of [{ error: 'synthesis failed' }, { findings: 0, seats: [] }, { findings: 'two', seats: ['astra'] }, { isError: true, findings: -1, seats: ['x'] },
+    { findings: 0, seats: ['codex'] }, { findings: 0, seats: ['astra', 'codex'] }]) {
     const out = recordLandStep(state, staged, synth, bad, {});
     assert.deepEqual([out.outcome, out.patch.reviews], ['block', undefined], JSON.stringify(bad));
   }
@@ -661,6 +796,23 @@ test('claim refusal (C1-9): already-posted reads the posted review of this head,
   assert.equal(recordLandStep(OBS(), wp, recover, other, {}).outcome, 'held');
   const blocked = recordLandStep(OBS(), wp, queue[0], refused('live-attempt'), {});
   assert.deepEqual([blocked.outcome, blocked.reason], ['block', 'claim refused: live-attempt']);
+});
+
+test('C2-13 a rounds recovery with empty stdout reaches the recorder through the real record dispatcher, and holds', async (t) => {
+  const queue = reviewActions(OBS(), makeWp({ reviewMode: 'managed' }), { round: 1 });
+  const refusedWp = makeWp({ reviewMode: 'managed', reviews: [], queue });
+  const [recover] = recordLandStep(OBS(), refusedWp, queue[0], { code: 1, stdout: JSON.stringify({ outcome: 'refused', reason: ALREADY_REVIEWED }), stderr: '' }, {}).patch.queue;
+  const dir = mkdtempSync(join(tmpdir(), 'workit-land-dispatch-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const state = { ...OBS(), runDir: dir, workshopDir: dir, handover: null, seq: 1, rev: 0, txns: [], lastRecorded: null,
+    wps: [makeWp({ reviewMode: 'managed', reviews: [] })], pending: { ...recover, id: '1-review', phase: 'build' } };
+  writeFileSync(join(dir, 'state.json'), JSON.stringify(state));
+  let outcome = null;
+  const build = { next: () => ({ kind: 'done' }), record: (s, action, r, deps) => { outcome = recordLandStep(s, s.wps[0], action, r, deps); } };
+  const out = await runConduct(['record', '--run', dir, '--action', '1-review', '--result', JSON.stringify({ code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' })],
+    { importModule: (relPath) => (relPath === 'lib/phases/build.mjs' ? build : import(pathToFileURL(join(HERE, '..', relPath)).href)) });
+  assert.equal(out.code, 0, out.stdout + out.stderr);
+  assert.deepEqual([outcome.outcome, outcome.patch.queue], ['held', []]);
 });
 
 test('reply bodies and council ids (D20); replies carry the run\'s measure log (C1-17)', () => {
@@ -728,28 +880,27 @@ test('threads get resolved (D19.9): table → replies → thread ids → resolve
 });
 
 const GATE_ACTION = { kind: 'shell', step: 'gate', part: 'gate', command: ['node', 'conduct.mjs', 'land', 'gate'] };
-const gateResult = (out) => ({ code: 5, stdout: JSON.stringify({ ok: false, pending: false, failures: ['x'], causes: [], ...out }), stderr: '' });
+const gateResult = (out) => ({ code: 5, stdout: gateJson({ failures: ['x'], ...out }), stderr: '' });
 
 test('recordLandStep outcomes (D19.15)', () => {
   const state = makeState();
   const wp = makeWp();
-  assert.equal(recordLandStep(state, wp, GATE_ACTION, ok('{}'), {}).outcome, 'continue');
-  const waiting = recordLandStep(state, wp, GATE_ACTION, { code: 6, stdout: '{}', stderr: '' }, {});
+  assert.equal(recordLandStep(state, wp, GATE_ACTION, GATE_OK, { now: () => NOW }).outcome, 'continue');
+  const waiting = recordLandStep(state, wp, GATE_ACTION, GATE_PENDING, { now: () => NOW });
   assert.deepEqual([waiting.outcome, waiting.waitMs, waiting.patch.queue[0].step], ['wait', 60000, 'gate']);
-  const amend = recordLandStep(state, wp, GATE_ACTION, gateResult({ failures: ['unresolved review threads'], causes: ['threads'] }), {});
-  assert.deepEqual([amend.outcome, amend.reason, amend.patch.mergeLock], ['amend', 'unresolved review threads', null]);
-  assert.equal(recordLandStep(state, wp, GATE_ACTION, gateResult({ blocked: true, causes: ['ci'] }), {}).outcome, 'block');
-  const stale = recordLandStep(state, wp, GATE_ACTION, gateResult({ staleBase: true, causes: ['stale-base'] }), {});
+  const amend = recordLandStep(state, wp, GATE_ACTION, gateResult({ failures: ['unresolved review threads'], causes: ['threads'] }), { now: () => NOW });
+  assert.deepEqual([amend.outcome, amend.reason, amend.patch.mergeLock, amend.patch.queue], ['amend', 'unresolved review threads', null, []]);
+  assert.equal(recordLandStep(state, wp, GATE_ACTION, gateResult({ blocked: true, causes: ['ci'] }), { now: () => NOW }).outcome, 'block');
+  const stale = recordLandStep(state, wp, GATE_ACTION, gateResult({ staleBase: true, causes: ['stale-base'] }), { now: () => NOW });
   assert.deepEqual([stale.outcome, stale.patch.queue.map((a) => a.part).slice(0, 2)], ['continue', ['fetch', 'pre-head']]);
-  const full = recordLandStep(state, { ...wp, reviewMode: 'standalone' }, GATE_ACTION, gateResult({ needsFullReview: true, causes: ['full-review'] }), {});
+  const full = recordLandStep(state, { ...wp, reviewMode: 'standalone' }, GATE_ACTION, gateResult({ needsFullReview: true, causes: ['full-review'] }), { now: () => NOW });
   assert.equal(full.outcome, 'continue');
   assert.deepEqual([full.patch.queue.at(-1).land.round, full.patch.queue.at(-1).land.scope, full.patch.mergeLock], [2, 'full', null]);
   const merged = { kind: 'shell', step: 'merged', part: 'merged', command: ['node'] };
   const anomaly = recordLandStep(state, wp, merged, { code: 5, stdout: JSON.stringify({ ok: false, reason: TREE_MISMATCH }), stderr: '' }, { now: () => NOW });
   assert.deepEqual([anomaly.outcome, anomaly.reason, anomaly.patch.mergeLock], ['block', TREE_MISMATCH, null]);
   assert.deepEqual(anomaly.patch.dispatchHalt, { reason: TREE_MISMATCH, since: new Date(NOW).toISOString() });
-  assert.deepEqual(recordLandStep(state, wp, merged, ok('{}'), {}).patch, { mergeLock: null });
-  // C1-25: an exit 5 that is not a tree mismatch keeps its reason and halts nothing.
+  assert.deepEqual(recordLandStep(state, wp, merged, ok('{}'), {}).patch, { queue: [], mergeLock: null });
   const compare = recordLandStep(state, wp, merged, { code: 5, stdout: JSON.stringify({ ok: false, reason: 'tree compare failed: fatal: bad object' }), stderr: '' }, { now: () => NOW });
   assert.deepEqual([compare.outcome, compare.reason, Object.hasOwn(compare.patch, 'dispatchHalt')], ['block', 'tree compare failed: fatal: bad object', false]);
   const other = makeState({ mergeLock: { wpId: 'WP-02', since: minutesAgo(1) } });
@@ -764,48 +915,56 @@ test('recordLandStep outcomes (D19.15)', () => {
 
 test('C1-8/C1-18 failures are classified: lock re-acquires, infrastructure retries 3 times then blocks, a held gate releases the lock', () => {
   const state = makeState();
-  const free = recordLandStep(makeState({ mergeLock: null }), makeWp(), GATE_ACTION, gateResult({ failures: ['merge lock not held'], causes: ['lock'] }), {});
+  const deps = { now: () => NOW };
+  const free = recordLandStep(makeState({ mergeLock: null }), makeWp(), GATE_ACTION, gateResult({ failures: ['merge lock not held'], causes: ['lock'] }), deps);
   assert.deepEqual([free.outcome, free.patch.queue[0].part], ['continue', 'fetch']);
-  const busy = recordLandStep(makeState({ mergeLock: { wpId: 'WP-02' } }), makeWp(), GATE_ACTION, gateResult({ failures: ['merge lock held by WP-02'], causes: ['lock'] }), {});
+  const busy = recordLandStep(makeState({ mergeLock: { wpId: 'WP-02' } }), makeWp(), GATE_ACTION, gateResult({ failures: ['merge lock held by WP-02'], causes: ['lock'] }), deps);
   assert.deepEqual([busy.outcome, busy.waitMs, busy.patch.queue[0].part], ['wait', 60000, 'yield']);
   const infra = gateResult({ failures: ['fetch failed: HTTP 502'], causes: ['infra'] });
   let wp = makeWp();
   for (const n of [1, 2, 3]) {
-    const out = recordLandStep(state, wp, GATE_ACTION, infra, {});
+    const out = recordLandStep(state, wp, GATE_ACTION, infra, deps);
     assert.deepEqual([out.outcome, out.patch.retries, out.patch.queue[0].step], ['wait', n, 'gate']);
     wp = { ...wp, ...out.patch };
   }
-  const gaveUp = recordLandStep(state, wp, GATE_ACTION, infra, {});
-  assert.deepEqual([gaveUp.outcome, gaveUp.patch.mergeLock], ['block', null]);
-  const held = recordLandStep(makeState({ authority: { merge: false } }), makeWp(), GATE_ACTION, ok('{}'), {});
-  assert.deepEqual([held.outcome, held.patch.mergeLock], ['held', null]);
+  const gaveUp = recordLandStep(state, wp, GATE_ACTION, infra, deps);
+  assert.deepEqual([gaveUp.outcome, gaveUp.patch.mergeLock, gaveUp.patch.queue], ['block', null, []]);
+  // An unrelated outcome resets the counter.
+  assert.equal(recordLandStep(state, { ...wp, retries: 2 }, GATE_ACTION, gateResult({ causes: ['threads'] }), deps).patch.retries, 0);
+  const held = recordLandStep(makeState({ authority: { merge: false } }), makeWp(), GATE_ACTION, GATE_OK, deps);
+  assert.deepEqual([held.outcome, held.patch.mergeLock, held.patch.queue], ['held', null, []]);
 });
 
 test('C1-24 malformed gate output blocks', () => {
   for (const stdout of ['{}', '{"failures":"x"}', 'not json', '{"failures":[1]}']) {
-    assert.equal(recordLandStep(makeState(), makeWp(), GATE_ACTION, { code: 5, stdout, stderr: '' }, {}).outcome, 'block', stdout);
+    assert.equal(recordLandStep(makeState(), makeWp(), GATE_ACTION, { code: 5, stdout, stderr: '' }, { now: () => NOW }).outcome, 'block', stdout);
   }
+  assert.equal(recordLandStep(makeState(), makeWp(), GATE_ACTION, { code: 0, stdout: '{}', stderr: '' }, { now: () => NOW }).outcome, 'block');
 });
 
 test('C1-19 the push lease is pinned to the PR head; stale base plus head mismatch blocks', () => {
   const push = rebaseActions(makeState(), makeWp()).find((a) => a.part === 'push');
   assert.deepEqual(push.command, ['git', '-C', WT, 'push', `--force-with-lease=conduct/fixture/wp-01:${HEAD}`, 'origin', 'conduct/fixture/wp-01']);
-  const both = recordLandStep(makeState(), makeWp(), GATE_ACTION, gateResult({ failures: ['head mismatch', 'stale base'], causes: ['head-mismatch', 'stale-base'], staleBase: true }), {});
+  const both = recordLandStep(makeState(), makeWp(), GATE_ACTION, gateResult({ failures: ['head mismatch', 'stale base'], causes: ['head-mismatch', 'stale-base'], staleBase: true }), { now: () => NOW });
   assert.deepEqual([both.outcome, both.patch.mergeLock], ['block', null]);
 });
 
-test('C1-1 the inspection: the gate queues it, its record re-queues the gate or holds', () => {
-  const inspect = { tail: `${D}..${HEAD}`, head: HEAD, files: ['lib/x.mjs'], anchor: 'review-2' };
-  const queued = recordLandStep(makeState(), makeWp(), GATE_ACTION, gateResult({ failures: ['needs an inspection'], causes: ['inspect'], inspect }), {});
+test('C1-1/C2-13 the inspection: the gate queues it (validated), its record binds it and re-queues the gate or holds', () => {
+  const { inspect } = gate(makeState(), postCapWp(), TAIL);
+  const queued = recordLandStep(makeState(), makeWp(), GATE_ACTION, gateResult({ failures: ['needs an inspection'], causes: ['inspect'], inspect }), { now: () => NOW });
   const [action] = queued.patch.queue;
   assert.deepEqual([queued.outcome, action.kind, action.step, action.part], ['continue', 'inspect', 'gate', 'inspect']);
   assert.deepEqual(action.command, ['git', '-C', WT, 'diff', '--no-color', '--no-renames', D, HEAD, '--', 'lib/x.mjs']);
   const good = recordLandStep(makeState(), makeWp(), action, { verdict: 'addresses-findings', tail: inspect.tail, head: HEAD }, {});
-  assert.deepEqual([good.outcome, good.patch.inspections, good.patch.queue[0].step], ['continue', [{ verdict: 'addresses-findings', tail: inspect.tail, head: HEAD }], 'gate']);
-  assert.deepEqual(recordLandStep(makeState(), makeWp(), action, { verdict: 'unrelated-change', tail: inspect.tail, head: HEAD }, {}).outcome, 'held');
+  assert.deepEqual(good.patch.inspections, [{ verdict: 'addresses-findings', tail: inspect.tail, head: HEAD, review: inspect.review, findingsHash: inspect.findingsHash }]);
+  assert.deepEqual([good.outcome, good.patch.queue[0].step], ['continue', 'gate']);
+  assert.equal(recordLandStep(makeState(), makeWp(), action, { verdict: 'unrelated-change', tail: inspect.tail, head: HEAD }, {}).outcome, 'held');
   assert.equal(recordLandStep(makeState(), makeWp(), action, { verdict: 'addresses-findings', tail: 'x..y', head: HEAD }, {}).outcome, 'block');
-  const mixed = recordLandStep(makeState(), makeWp(), GATE_ACTION, gateResult({ causes: ['inspect', 'threads'], inspect }), {});
+  const mixed = recordLandStep(makeState(), makeWp(), GATE_ACTION, gateResult({ causes: ['inspect', 'threads'], inspect }), { now: () => NOW });
   assert.equal(mixed.outcome, 'amend');
+  for (const bad of [true, { ...inspect, files: [] }, { ...inspect, tail: 'nope' }, { ...inspect, findingsHash: undefined }]) {
+    assert.equal(recordLandStep(makeState(), makeWp(), GATE_ACTION, gateResult({ causes: ['inspect'], inspect: bad }), { now: () => NOW }).outcome, 'block', JSON.stringify(bad));
+  }
 });
 
 test('C1-11 a rebase conflict queues the abort; the abort\'s record is the amendment', () => {
@@ -817,16 +976,16 @@ test('C1-11 a rebase conflict queues the abort; the abort\'s record is the amend
   const [abort] = conflict.patch.queue;
   assert.deepEqual(abort.command, ['git', '-C', WT, 'rebase', '--abort']);
   const amended = recordLandStep(state, wp, abort, ok(), {});
-  assert.deepEqual([amended.outcome, amended.patch.mergeLock], ['amend', null]);
+  assert.deepEqual([amended.outcome, amended.patch.mergeLock, amended.patch.queue], ['amend', null, []]);
   assert.match(amended.reason, /conflicted: CONFLICT/);
 });
 
 test('C1-20 a full review whose changed files cannot be read blocks', () => {
   const state = makeState({ adapters: { council: { on: true } } });
   const exec = () => ({ code: 128, stdout: '', stderr: 'fatal: bad revision' });
-  const out = recordLandStep(state, makeWp({ tier: 'T2' }), GATE_ACTION, gateResult({ needsFullReview: true, causes: ['full-review'] }), { exec });
+  const out = recordLandStep(state, makeWp({ tier: 'T2' }), GATE_ACTION, gateResult({ needsFullReview: true, causes: ['full-review'] }), { exec, now: () => NOW });
   assert.deepEqual([out.outcome, out.patch.mergeLock], ['block', null]);
-  const unknownTier = recordLandStep(state, makeWp({ tier: 'X' }), GATE_ACTION, gateResult({ causes: ['full-review'] }), { exec: () => ok('lib/x.mjs\n') });
+  const unknownTier = recordLandStep(state, makeWp({ tier: 'X' }), GATE_ACTION, gateResult({ causes: ['full-review'] }), { exec: () => ok('lib/x.mjs\n'), now: () => NOW });
   assert.equal(unknownTier.patch.queue[0].tool, 'council_review');
 });
 
@@ -849,7 +1008,8 @@ test('tierFor (D19.11): raise only, on a contract path or a test file', () => {
   assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], contractPaths), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], []), 'T1');
   assert.equal(tierFor({ tier: 'T1' }, ['skills/conduct/scripts/lib/x.test.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['skills/spec-validate/tests/fixture.md'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['tests/fixture.md'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['skills/spec/scripts/x.mjs'], []), 'T1');
   assert.equal(tierFor({ tier: 'T0' }, ['README.md'], []), 'T0');
   assert.equal(tierFor({ tier: 'weird' }, ['README.md'], []), 'T2');
 });

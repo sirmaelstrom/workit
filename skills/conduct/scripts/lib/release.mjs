@@ -72,10 +72,15 @@ export function selfHosted({ repoRemote, pluginRoot, read }) {
 
 // The installPath the session uses for the plugin key, or null: among the
 // user-scope entries and the project/local entries of `projectPath`, the most
-// specific scope wins (local > project > user), then the highest version.
+// specific scope wins (local > project > user), then the highest version. An
+// entry with no scope (the legacy shape) is user scope. The caller supplies
+// `projectPath` (WP-06: the run's repo path). Paths compare case-sensitively
+// on Linux and case-folded on Windows and macOS.
 const SCOPE_RANK = { local: 3, project: 2, user: 1 };
-const samePath = (a, b) => norm(a) === norm(b);
-const norm = (path) => String(path ?? '').replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
+const norm = (path, platform) => {
+  const p = String(path ?? '').replaceAll('\\', '/').replace(/\/+$/, '');
+  return platform === 'win32' || platform === 'darwin' ? p.toLowerCase() : p;
+};
 export function resolvePluginRoot({ installedPluginsPath, pluginKey = 'workit@workit', projectPath = null, read, env = {}, platform = process.platform }) {
   let path = installedPluginsPath;
   if (!path) {
@@ -89,8 +94,9 @@ export function resolvePluginRoot({ installedPluginsPath, pluginKey = 'workit@wo
   } catch (error) {
     throw new ConductError(2, `${path} cannot be read: ${error.message}`);
   }
-  const applies = (entry) => entry.scope === 'user' || (SCOPE_RANK[entry.scope] && projectPath && samePath(entry.projectPath, projectPath));
-  const best = entries.filter(applies).sort((a, b) => (SCOPE_RANK[b.scope] - SCOPE_RANK[a.scope]) || compareVersions(b.version, a.version))[0];
+  const scoped = entries.map((entry) => ({ ...entry, scope: entry.scope ?? 'user' }));
+  const applies = (entry) => entry.scope === 'user' || (SCOPE_RANK[entry.scope] && projectPath && norm(entry.projectPath, platform) === norm(projectPath, platform));
+  const best = scoped.filter(applies).sort((a, b) => (SCOPE_RANK[b.scope] - SCOPE_RANK[a.scope]) || compareVersions(b.version, a.version))[0];
   return best?.installPath ?? null;
 }
 

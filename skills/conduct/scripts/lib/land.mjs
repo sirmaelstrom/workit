@@ -6,20 +6,32 @@
 // Every function returns actions or a recorder outcome. Programs run only in
 // gateCheck, runLandVerb, recordRebase and recordLandStep (git, for a rebase
 // record or a full review's changed files), always through the injected exec.
-// Recorder outcomes are continue | amend | block | wait | done | held; `held`
-// keeps the PR open and releases the merge lock. In a recorder `patch`,
-// `mergeLock` and `dispatchHalt` are run-level; every other key is a WP field.
-// Optional fields this module adds: action `land` (metadata its recorder
-// reads back), action `files` (reply bodies), action kind `inspect`;
-// `wps[].reviewMode`, `rebaseFrom`, `threadIds`, `inspections`,
-// `councilStage`, `retries`. It reads `wps[].commit` (the WP's Commit line),
-// `wps[].agent` (the lane's effective author), `wps[].files` and `wps[].tier`,
-// which WP-04 persists (tierFor's raise included) before the review.
+//
+// Contract for WP-04 (the build phase that drives this module):
+// - Queue: an emitter's array goes to `wps[].queue`; recordLandStep's
+//   `patch.queue`, when present, replaces the remaining queue whole (a leading
+//   copy of the recorded action is dropped either way). A terminal outcome
+//   (amend, block, held, done) carries `queue: []` or exactly the cleanup owed.
+// - Outcomes: continue | amend | block | wait | done | held. `wait` carries
+//   `waitMs` and re-queues what it waits on; `held` keeps the PR open, ends the
+//   WP's build and releases the merge lock. ConductErrors become `block`.
+// - Records: a shell action is recorded as { code, stdout, stderr }; the
+//   `inspect` action as { verdict, tail, head }; council tools as their JSON.
+// - Patch: `mergeLock` and `dispatchHalt` are run-level; every other key is a
+//   WP field, applied as given: `reviewMode`, `rebaseFrom`, `rebases`,
+//   `threadIds`, `reviews`, `inspections`, `councilStage`, `retries`, `gate`
+//   (with `pendingSince`), `merge`, `pr`.
+// - WP-04 sets: `wps[].commit` (the WP's Commit line), `wps[].agent` (the
+//   lane's effective author), `wps[].files`, `wps[].tier` (tierFor's raise
+//   persisted before the review), and `wps[].pr.head` after every lane push,
+//   so the rebase lease pins the current remote head.
+// - Emitters throw ConductError 5 when no lens can run: block the WP.
 //
 // `land merged` compares the squash tree with the checked head. That holds
 // only while the base does not move between the gate and the merge; a moved
 // base reads as a tree mismatch and halts dispatch, never as a pass.
 import { join, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { ConductError, STEP_SEAM, loadState } from './state.mjs';
 
 const WAIT_MS = 60000;
@@ -73,10 +85,12 @@ function waitAction(step, part, instruction) {
 
 const requeue = (action) => Object.fromEntries(Object.entries(action).filter(([key]) => key !== 'id' && key !== 'phase'));
 
+// Tests by file name anywhere, by `__tests__/` or `__fixtures__/` segment
+// anywhere, and `test/`, `tests/`, `spec/` only at the repo root.
 export function isTestPath(path) {
-  const p = norm(path);
+  const p = norm(path).replace(/^\.\//, '');
   const base = p.split('/').pop();
-  return /\.(test|spec)\./.test(base) || /_test\./.test(base) || /(^|\/)(tests?|spec|__tests__)\//.test(p);
+  return /\.(test|spec)\./.test(base) || /_test\./.test(base) || /(^|\/)(__tests__|__fixtures__)\//.test(p) || /^(tests?|spec)\//.test(p);
 }
 
 function globRegex(glob) {
@@ -172,15 +186,20 @@ export function deltaReviewActions(state, wp, sinceHead, { report = null, change
 }
 
 // The council round's scope comes from its dispatch, never the round number.
+// A delta round first writes `git diff <since> <head>` into the run dir and
+// hands that file to the council, so the scope reaches the tool's input.
 export function t2Actions(state, wp, { round = 1, changedPaths = [], report = null, scope = 'full', since = null } = {}) {
   if (!state.adapters?.council?.on) return reviewActions(state, wp, { round, report, all: true, since: scope === 'delta' ? since : null });
   const workshop = `${join(state.runDir, 'council', lower(wp))}${sep}`;
   const outDir = `${join(state.runDir, 'council', lower(wp), `review-${round}`)}${sep}`;
-  const land = { round, scope, since };
+  const deltaDiff = scope === 'delta' ? join(state.runDir, 'council', lower(wp), `delta-r${round}.diff`) : null;
+  const land = { round, scope, since, deltaDiff };
   const tool = (part, name, args, extra = {}) => ({ kind: 'agent-tool', step: 'council', seam: STEP_SEAM.council, part, tool: name,
     instruction: `Call ${name} with these args and record its result.`, args, expects: { type: 'json' }, land, ...extra });
   return [
-    tool('review', 'council_review', { workshop_path: workshop, output_dir: outDir, surface: 'code', code_root: wp.lane.worktree, artifact_paths: changedPaths, round, profile: 'code' }),
+    ...(deltaDiff ? [shell('council', 'delta-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', `--output=${deltaDiff}`, since, wp.pr.head], { land })] : []),
+    tool('review', 'council_review', { workshop_path: workshop, output_dir: outDir, surface: 'code', code_root: wp.lane.worktree,
+      artifact_paths: [...(deltaDiff ? [deltaDiff] : []), ...changedPaths], round, profile: 'code' }),
     tool('synthesize', 'council_synthesize', { review_dir: outDir, workshop_path: workshop }, {
       head: wp.pr.head, expects: { type: 'json', fields: ['findings', 'seats'] },
       instruction: 'Call council_synthesize, then record { findings: <Critical + Major count>, seats: [<usable seats>] } read from the synthesis.',
@@ -302,7 +321,8 @@ export function recordRebase(state, wp, { from, to, newBase }, deps) {
 }
 
 // `gh api --paginate` prints one JSON object per page with nothing between
-// them. Anything else outside a page is a malformed read.
+// them. Outside a page only whitespace or a page opener is allowed, and an
+// unfinished page or string is a truncated read.
 export function parsePages(text) {
   const pages = [];
   let depth = 0;
@@ -311,6 +331,10 @@ export function parsePages(text) {
   let escaped = false;
   for (let i = 0; i < text.length; i += 1) {
     const c = text[i];
+    if (depth === 0 && c !== '{' && c !== '[') {
+      if (!/\s/.test(c)) throw new Error(`text outside a page at offset ${i}`);
+      continue;
+    }
     if (inString) {
       if (escaped) escaped = false;
       else if (c === '\\') escaped = true;
@@ -319,9 +343,8 @@ export function parsePages(text) {
     else if (c === '{' || c === '[') {
       if (depth++ === 0) start = i;
     } else if ((c === '}' || c === ']') && --depth === 0) pages.push(JSON.parse(text.slice(start, i + 1)));
-    else if (depth === 0 && !/\s/.test(c)) throw new Error(`text outside a page at offset ${i}`);
   }
-  if (depth !== 0) throw new Error('a page is truncated');
+  if (depth !== 0 || inString) throw new Error('a page is truncated');
   return pages;
 }
 
@@ -345,25 +368,37 @@ function readRuns(state, sha, exec) {
   if (pages.some((page) => page.total_count !== total) || runs.length !== total || new Set(runs.map((run) => run.id)).size !== runs.length) {
     return { failure: `CI incomplete: ${runs.length} distinct-checked runs read of total_count ${total}` };
   }
-  const status = exec('gh', ['api', `repos/${repoOf(state)}/commits/${sha}/status`]);
-  const body = status.code === 0 ? parseJson(status.stdout) : null;
-  if (!Array.isArray(body?.statuses) || body.statuses.length !== (body.total_count ?? body.statuses.length)) {
+  // Legacy statuses: the combined status, every page; one entry per context.
+  const status = exec('gh', ['api', `repos/${repoOf(state)}/commits/${sha}/status?per_page=100`, '--paginate']);
+  let statusPages = null;
+  try {
+    statusPages = status.code === 0 ? parsePages(status.stdout) : null;
+  } catch {
+    statusPages = null;
+  }
+  const statuses = statusPages?.every((page) => Array.isArray(page?.statuses) && typeof page.total_count === 'number') ? statusPages.flatMap((page) => page.statuses) : null;
+  if (!statuses || statuses.length !== statusPages[0].total_count || new Set(statuses.map((s) => s.context)).size !== statuses.length) {
     return { failure: `commit statuses unreadable: ${first(status.stderr) || 'malformed or incomplete'}` };
   }
-  const legacy = body.statuses.map((s) => ({ id: `status:${s.context}`, name: s.context, status: s.state === 'pending' ? 'in_progress' : 'completed',
+  const legacy = statuses.map((s) => ({ id: `status:${s.context}`, name: s.context, status: s.state === 'pending' ? 'in_progress' : 'completed',
     conclusion: s.state === 'success' ? 'success' : s.state === 'pending' ? null : 'failure' }));
   return { runs: [...runs, ...legacy] };
 }
 
-// The checks the head must carry: the branch's required status checks when
-// readable, otherwise the names that ran on the base commit.
+// The checks the head must carry: the branch's required status checks (the
+// union of `contexts` and `checks`) when readable, else the names that ran on
+// the base commit.
 function expectedChecks(state, wt, exec) {
   const def = defaultOf(state);
   const required = exec('gh', ['api', `repos/${repoOf(state)}/branches/${encodeURIComponent(def)}/protection/required_status_checks`]);
   if (required.code === 0) {
     const body = parseJson(required.stdout);
-    const names = Array.isArray(body?.contexts) ? body.contexts : body?.checks?.map((check) => check.context);
-    return Array.isArray(names) ? { names } : { failure: 'required status checks unreadable: malformed' };
+    const contexts = body?.contexts ?? [];
+    const checks = body?.checks ?? [];
+    if (!Array.isArray(contexts) || !Array.isArray(checks) || !checks.every((check) => typeof check?.context === 'string')) {
+      return { failure: 'required status checks unreadable: malformed' };
+    }
+    return { names: [...new Set([...contexts, ...checks.map((check) => check.context)])] };
   }
   if (!/HTTP 40[34]/.test(required.stderr)) return { failure: `required status checks unreadable: ${first(required.stderr)}` };
   const base = exec('git', ['-C', wt, 'rev-parse', `origin/${def}`]);
@@ -390,7 +425,9 @@ function ciCondition(state, wp, head, { exec, now }) {
   if (expected.failure) return { failure: expected.failure, cause: 'infra' };
   const names = new Set(runs.map((run) => run.name));
   const absent = expected.names.filter((name) => !names.has(name));
-  return absent.length ? { failure: `expected check missing at head: ${absent.join(', ')}`, cause: 'ci' } : {};
+  if (!absent.length) return {};
+  // A check not yet registered is pending until the no-CI deadline, then blocks.
+  return waited >= NO_CI_MS ? { failure: `expected check missing at head: ${absent.join(', ')}`, cause: 'ci-missing-check' } : { pending: true };
 }
 
 // The repo config on the base branch, so a PR cannot widen its own trivial set.
@@ -415,6 +452,13 @@ function ancestor(wt, a, b, exec) {
 const fixedCommits = (review) => (review.verdicts ?? [])
   .filter((row) => row.verdict === 'fixed' && /^[0-9a-f]{7,40}$/i.test(row.commit ?? '')).map((row) => row.commit.toLowerCase());
 
+// An inspection binds the exact tail and candidate head, the anchoring
+// review's identity and a hash of its adjudication table.
+const reviewIdentity = (review) => ({ round: review.round ?? null, scope: review.scope ?? null, since: review.since ?? null });
+const findingsHash = (review) => createHash('sha256').update(JSON.stringify(review.verdicts ?? [])).digest('hex');
+const sameBinding = (entry, binding) => entry.tail === binding.tail && entry.head === binding.head
+  && JSON.stringify(entry.review) === JSON.stringify(binding.review) && entry.findingsHash === binding.findingsHash;
+
 function declaredFile(wp, path) {
   return (wp.files ?? []).map(norm).some((file) => (file.endsWith('/') ? norm(path).startsWith(file) : norm(path) === file));
 }
@@ -437,25 +481,27 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
   const nonTrivial = rows.filter((row) => !trivialPath(row.path, notTrivial));
   if (rows.length && !nonTrivial.length) return { tail: `${key} (trivial)` };
   const changes = nonTrivial.map((row) => row.path).join(', ') || 'file modes';
-  // The cap and the inspection read production code; tests and fixtures are
-  // never trivial, and their fixes carry their own seen-failing controls.
-  const production = nonTrivial.filter((row) => !isTestPath(row.path) && !/(^|\/)(__fixtures__|fixtures|testdata)\//.test(norm(row.path)));
-  if (anchor.scope !== 'delta') return { failure: `review does not cover head: tail ${key} changes ${changes}`, cause: 'review' };
+  // The cap counts production lines (tests excluded); the inspection reads
+  // every non-trivial path, tests included.
+  const production = nonTrivial.filter((row) => !isTestPath(row.path));
+  if (anchor.scope !== 'delta') return { failure: `review does not cover head: tail ${key} changes ${changes}`, cause: 'review-uncovered' };
   const listed = exec('git', ['-C', wt, 'rev-list', key]);
   if (listed.code !== 0) return { failure: `tail ${key} commits unreadable: ${first(listed.stderr)}`, cause: 'infra' };
   const fixed = fixedCommits(anchor);
   const shas = lines(listed.stdout);
   if (!shas.length || !shas.every((sha) => fixed.some((commit) => sha.toLowerCase().startsWith(commit)))) {
-    return { failure: `review does not cover head: tail ${key} has commits that are not fixed rows of the anchoring review`, cause: 'review' };
+    return { failure: `review does not cover head: tail ${key} has commits that are not fixed rows of the anchoring review`, cause: 'review-uncovered' };
   }
   const count = production.reduce((sum, row) => sum + row.lines, 0);
   const outside = rows.map((row) => row.path).filter((path) => !declaredFile(wp, path));
   if (count > TAIL_LINE_CAP || outside.length || rows.some((row) => row.binary)) {
-    return { failure: `post-cap tail ${key} out of bounds: ${count} production lines${outside.length ? `; outside the WP's Files: ${outside.join(', ')}` : ''}`, cause: 'out-of-bounds' };
+    return { failure: `post-cap tail ${key} out of bounds: ${count} production lines${outside.length ? `; outside the WP's Files: ${outside.join(', ')}` : ''}`, cause: 'tail-out-of-bounds' };
   }
-  const inspection = (wp.inspections ?? []).find((entry) => entry.tail === key && entry.head === head);
-  if (!inspection) return { failure: `post-cap tail ${key} needs an inspection`, cause: 'inspect', inspect: { tail: key, head, files: production.map((row) => row.path), anchor: anchor.reviewId ?? anchor.head } };
-  if (inspection.verdict !== 'addresses-findings') return { failure: `post-cap tail ${key} inspected: ${inspection.verdict}`, cause: 'out-of-bounds' };
+  const binding = { tail: key, head, review: reviewIdentity(anchor), findingsHash: findingsHash(anchor) };
+  const inspection = (wp.inspections ?? []).find((entry) => sameBinding(entry, binding));
+  const files = (nonTrivial.length ? nonTrivial : rows).map((row) => row.path);
+  if (!inspection) return { failure: `post-cap tail ${key} needs an inspection`, cause: 'inspect', inspect: { ...binding, files, anchor: anchor.reviewId ?? anchor.head } };
+  if (inspection.verdict !== 'addresses-findings') return { failure: `post-cap tail ${key} inspected: ${inspection.verdict}`, cause: 'tail-out-of-bounds' };
   return { tail: `${key} (post-cap)` };
 }
 
@@ -464,9 +510,9 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
 function reviewCondition(wp, head, exec, notTrivial) {
   if (effectiveTier(wp) === 'T0') return { tail: `${wp.lane.base}..${head} (T0)` };
   const anchor = (wp.reviews ?? []).at(-1);
-  if (!anchor) return { failure: 'no review of this WP', cause: 'review' };
+  if (!anchor) return { failure: 'no review of this WP', cause: 'review-uncovered' };
   const rebases = wp.rebases ?? [];
-  if (rebases.filter((rebase) => !rebase.equivalent).length >= 2) return { failure: 'a second rebase changed the WP\'s diff: held for the operator', cause: 'out-of-bounds' };
+  if (rebases.filter((rebase) => !rebase.equivalent).length >= 2) return { failure: 'a second rebase changed the WP\'s diff: held for the operator', cause: 'tail-out-of-bounds' };
   if (anchor.head === head) return {};
   const changed = { failure: 'rebase changed the WP\'s diff: full review of the rebased head', cause: 'full-review', needsFullReview: true };
   let after = anchor.head;
@@ -480,14 +526,17 @@ function reviewCondition(wp, head, exec, notTrivial) {
     if (!rebases[i].equivalent) return changed;
     pre = rebases[i].from;
   }
-  if (after === head || pre === anchor.head) return {};
+  if (after === head || pre === anchor.head || after === pre) return {};
+  // The tail runs from the anchor's head (or its equivalent-rebase image) to
+  // the candidate (or its pre-rebase image); the first pair on one line wins.
   const wt = wp.lane.worktree;
-  const onPre = ancestor(wt, anchor.head, pre, exec);
-  const onPost = after !== anchor.head ? ancestor(wt, after, head, exec) : false;
-  if (onPre === null || onPost === null) return { failure: 'review coverage unreadable: an ancestry check failed', cause: 'infra' };
-  if (onPre) return classifyTail(wp, anchor, anchor.head, pre, head, exec, notTrivial);
-  if (onPost) return classifyTail(wp, anchor, after, head, head, exec, notTrivial);
-  return { failure: `review does not cover head: ${anchor.head} reaches ${head} through no recorded rebase`, cause: 'review' };
+  const pairs = [[anchor.head, pre], ...(after !== anchor.head ? [[after, pre], [after, head]] : [])].filter(([a, b]) => a !== b);
+  for (const [from, to] of pairs) {
+    const onLine = ancestor(wt, from, to, exec);
+    if (onLine === null) return { failure: 'review coverage unreadable: an ancestry check failed', cause: 'infra' };
+    if (onLine) return classifyTail(wp, anchor, from, to, head, exec, notTrivial);
+  }
+  return { failure: `review does not cover head: ${anchor.head} reaches ${head} through no recorded rebase`, cause: 'review-uncovered' };
 }
 
 // The merge gate at the exact head. Every condition runs and every failure is
@@ -606,7 +655,7 @@ function recordReview(state, wp, action, r) {
     if (reason !== ALREADY_REVIEWED) return result('block', `claim refused: ${reason}`);
     // The refusal is not a review: recover the posted review of this exact head, or hold.
     const recover = shell('review', 'recover', ['node', prReview(state), 'rounds', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--head', action.land.head],
-      { land: action.land, expects: { type: 'json' } });
+      { land: action.land });
     return result('continue', `claim refused ${ALREADY_REVIEWED}: reading the posted review of this head`,
       { queue: [recover, ...after.filter((a) => a.land?.attemptRef !== action.land.attemptRef)] });
   }
@@ -625,18 +674,24 @@ function recordReview(state, wp, action, r) {
 // synthesis with a parseable count; the entry is written at that point.
 function recordCouncil(state, wp, action, r) {
   const land = action.land ?? {};
+  if (action.part === 'delta-diff') return r.code === 0 ? result('continue') : result('block', `delta diff for council round ${land.round} failed: ${first(r.stderr)}`);
   if (action.part === 'review') {
-    const usable = Object.values(r.models ?? {}).filter((seat) => seat?.status === 'success').length;
-    if (r.error || usable === 0) return result('block', `council review round ${land.round} has no usable seat: ${r.error ?? 'every seat failed'}`);
-    return result('continue', null, { councilStage: { round: land.round, usable } });
+    const paths = action.args?.artifact_paths ?? [];
+    if (!paths.length) return result('block', `council review round ${land.round} was dispatched with no artifact_paths: nothing to review`);
+    const seats = Object.entries(r.models ?? {}).filter(([, seat]) => seat?.status === 'success').map(([name]) => name);
+    if (r.error || !seats.length) return result('block', `council review round ${land.round} has no usable seat: ${r.error ?? 'every seat failed'}`);
+    // Delta only when the dispatched review carried the delta diff.
+    const scope = land.scope === 'delta' && land.deltaDiff && paths.includes(land.deltaDiff) ? 'delta' : 'full';
+    return result('continue', null, { councilStage: { round: land.round, usable: seats.length, seats, scope } });
   }
   if (action.part === 'synthesize') {
-    if (wp.councilStage?.round !== land.round) return result('block', `council synthesis for round ${land.round} has no recorded review stage`);
+    const stage = wp.councilStage;
+    if (stage?.round !== land.round) return result('block', `council synthesis for round ${land.round} has no recorded review stage`);
     const seats = Array.isArray(r.seats) ? r.seats.filter((seat) => typeof seat === 'string' && seat) : [];
-    if (r.error || !Number.isInteger(r.findings) || r.findings < 0 || !seats.length) {
-      return result('block', `council synthesis round ${land.round} is unusable: ${r.error ?? 'needs an integer findings count and the usable seats'}`);
+    if (r.error || !Number.isInteger(r.findings) || r.findings < 0 || !seats.length || !seats.every((seat) => (stage.seats ?? []).includes(seat))) {
+      return result('block', `council synthesis round ${land.round} is unusable: ${r.error ?? 'needs an integer findings count and seats that succeeded at review'}`);
     }
-    const entry = { round: land.round, scope: land.scope ?? 'full', since: land.since ?? null, tier: 'T2', head: action.head, lenses: seats,
+    const entry = { round: land.round, scope: stage.scope ?? 'full', since: stage.scope === 'delta' ? land.since ?? null : null, tier: 'T2', head: action.head, lenses: seats,
       reviewId: action.args.review_dir, findings: r.findings, verdicts: [], resolved: [] };
     return result('continue', null, { councilStage: null, reviews: [...(wp.reviews ?? []), entry] });
   }
@@ -693,38 +748,67 @@ function fullReview(state, wp, deps) {
   return { queue: t2Actions(state, wp, { round, changedPaths: lines(diff.stdout).map((path) => join(wp.lane.worktree, path)) }) };
 }
 
+const validInspect = (inspect) => inspect && typeof inspect === 'object' && /^[0-9a-f]{7,40}\.\.[0-9a-f]{7,40}$/i.test(inspect.tail ?? '')
+  && typeof inspect.head === 'string' && Array.isArray(inspect.files) && inspect.files.length > 0 && inspect.files.every((file) => typeof file === 'string' && file)
+  && inspect.review && typeof inspect.findingsHash === 'string';
+
 function inspectAction(state, wp, inspect, gate) {
   const [from, to] = inspect.tail.split('..');
   return { kind: 'inspect', step: 'gate', seam: STEP_SEAM.gate, part: 'inspect',
-    instruction: `Read the post-cap tail's production diff (this argv) against the findings of review ${inspect.anchor}; record { verdict: 'addresses-findings' | 'unrelated-change', tail: '${inspect.tail}', head: '${inspect.head}' }.`,
+    instruction: `Read the post-cap tail's diff (this argv) against the findings of review ${inspect.anchor}; record { verdict: 'addresses-findings' | 'unrelated-change', tail: '${inspect.tail}', head: '${inspect.head}' }.`,
     command: ['git', '-C', wp.lane.worktree, 'diff', '--no-color', '--no-renames', from, to, '--', ...inspect.files],
-    land: { tail: inspect.tail, head: inspect.head, gate: requeue(gate) }, expects: { type: 'json', fields: ['verdict', 'tail', 'head'] } };
+    land: { tail: inspect.tail, head: inspect.head, review: inspect.review, findingsHash: inspect.findingsHash, gate: requeue(gate) },
+    expects: { type: 'json', fields: ['verdict', 'tail', 'head'] } };
 }
 
 const validGate = (gate) => gate && typeof gate === 'object' && Array.isArray(gate.failures) && gate.failures.every((text) => typeof text === 'string')
   && (gate.causes === undefined || (Array.isArray(gate.causes) && gate.causes.every((cause) => typeof cause === 'string')));
 
+// The gate record keeps `pendingSince`: set at the first pending result for a
+// head, kept while that head stays pending or failed, cleared on a new head or ok.
+function gateRecord(wp, gate, deps) {
+  const same = wp.gate?.head && wp.gate.head === gate.head;
+  const kept = same ? wp.gate.pendingSince ?? null : null;
+  const pendingSince = gate.ok ? null : gate.pending ? kept ?? new Date(deps.now()).toISOString() : kept;
+  return { ...gate, pendingSince };
+}
+
 // Failures are classified: infrastructure retries, lock contention re-acquires,
-// limits hold, and only what a lane can fix becomes an amendment.
+// limits hold, coverage gaps block, and only what a lane can fix is an amendment.
 function recordGate(state, wp, action, r, deps) {
   if (action.part === 'inspect') {
     if (!INSPECTION.includes(r.verdict) || r.tail !== action.land.tail || r.head !== action.land.head) {
       return result('block', `the inspection must name ${action.land.tail} at ${action.land.head} with a verdict of ${INSPECTION.join(' or ')}`);
     }
-    const inspections = [...(wp.inspections ?? []), { verdict: r.verdict, tail: r.tail, head: r.head }];
+    const { review, findingsHash: hash } = action.land;
+    const inspections = [...(wp.inspections ?? []), { verdict: r.verdict, tail: r.tail, head: r.head, review, findingsHash: hash }];
     if (r.verdict !== 'addresses-findings') return result('held', `post-cap tail ${r.tail} does not address the findings`, { inspections });
     return result('continue', null, { inspections, queue: [action.land.gate, ...rest(wp, action)] });
   }
-  if (r.code === 0) return state.authority?.merge === true ? result('continue', null, { retries: 0 }) : result('held', 'gate passed; no merge authority', { retries: 0 });
-  if (r.code === 6) return { ...result('wait', 'CI is still running at head', { queue: [requeue(action), ...rest(wp, action)] }), waitMs: WAIT_MS };
   const gate = parseJson(r.stdout);
-  if (r.code !== 5 || !validGate(gate)) return result('block', `land gate output unreadable (exit ${r.code}): ${first(r.stderr) || first(r.stdout)}`);
+  if (![0, 5, 6].includes(r.code) || !validGate(gate)) return result('block', `land gate output unreadable (exit ${r.code}): ${first(r.stderr) || first(r.stdout)}`);
+  const recorded = { gate: gateRecord(wp, gate, deps) };
+  if (r.code === 0) {
+    return state.authority?.merge === true ? result('continue', null, { ...recorded, retries: 0 }) : result('held', 'gate passed; no merge authority', { ...recorded, retries: 0 });
+  }
+  if (r.code === 6) return { ...result('wait', 'CI is still running at head', { ...recorded, retries: 0, queue: [requeue(action), ...rest(wp, action)] }), waitMs: WAIT_MS };
   const causes = new Set(gate.causes ?? []);
   const reason = gate.failures.join('; ');
-  if (causes.has('infra')) return retry(wp, action, `infrastructure failure: ${reason}`);
-  if (gate.blocked || causes.has('pr-state')) return result('block', reason);
+  if (causes.has('infra')) {
+    const retried = retry(wp, action, `infrastructure failure: ${reason}`);
+    return { ...retried, patch: { ...retried.patch, ...recorded } };
+  }
+  const out = classifyGate(state, wp, action, gate, causes, reason, deps);
+  return { ...out, patch: { retries: 0, ...recorded, ...out.patch } };
+}
+
+function classifyGate(state, wp, action, gate, causes, reason, deps) {
+  if (gate.blocked || causes.has('pr-state') || causes.has('ci-missing-check')) return result('block', reason);
   if (causes.has('stale-base') && causes.has('head-mismatch')) return result('block', `stale base and head mismatch together: ${reason}`);
-  if (causes.has('out-of-bounds')) return result('held', reason);
+  if (causes.has('tail-out-of-bounds')) return result('held', reason);
+  // A lane commit cannot repair coverage: the conductor dispatches a review
+  // within the cap or holds the PR.
+  if (causes.has('review-uncovered')) return result('block', reason);
   if (causes.has('lock') || causes.has('stale-base')) {
     const other = mergeLockFor(state, wp) === 'other';
     return { ...result(other ? 'wait' : 'continue', `re-acquire the lock and rebase: ${reason}`, { queue: rebaseActions(state, wp) }), ...(other ? { waitMs: WAIT_MS } : {}) };
@@ -734,7 +818,8 @@ function recordGate(state, wp, action, r, deps) {
     if (review.failure) return result('block', review.failure);
     return result('continue', reason, { ...(mergeLockFor(state, wp) === 'mine' ? { mergeLock: null } : {}), queue: review.queue });
   }
-  if (causes.size === 1 && causes.has('inspect') && gate.inspect) {
+  if (causes.size === 1 && causes.has('inspect')) {
+    if (!validInspect(gate.inspect)) return result('block', `the gate asked for an inspection with an unusable payload: ${JSON.stringify(gate.inspect)}`);
     return result('continue', reason, { queue: [inspectAction(state, wp, gate.inspect, action), ...rest(wp, action)] });
   }
   return result('amend', reason);
@@ -774,10 +859,20 @@ function landOutcome(state, wp, action, r, deps) {
 
 // The one recorder for every landing action. Any amend, block or held between
 // the rebase and merged, and merged itself, releases the lock its WP holds.
+// A ConductError (an impossible lens selection, an unknown step) becomes
+// `block`; only a programming error escapes. A terminal outcome leaves only
+// the cleanup it owes queued.
 export function recordLandStep(state, wp, action, r, deps = {}) {
-  const out = landOutcome(state, wp, action, r ?? {}, deps);
-  if (['amend', 'block', 'held', 'done'].includes(out.outcome) && LOCKED_STEPS.has(action.step) && mergeLockFor(state, wp) === 'mine') {
-    out.patch = { ...out.patch, mergeLock: null };
+  let out;
+  try {
+    out = landOutcome(state, wp, action, r ?? {}, deps);
+  } catch (error) {
+    if (!(error instanceof ConductError)) throw error;
+    out = result('block', error.message);
+  }
+  if (['amend', 'block', 'held', 'done'].includes(out.outcome)) {
+    out.patch = { queue: [], ...out.patch };
+    if (LOCKED_STEPS.has(action.step) && mergeLockFor(state, wp) === 'mine') out.patch.mergeLock = null;
   }
   return out;
 }
