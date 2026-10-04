@@ -976,6 +976,17 @@ test('gate command: exit 1 at the rebased head → an amendment and no merge act
   assert.ok(!h.trace.some((a) => a.step === 'merge'));
 });
 
+test('gate command after a no-op rebase: the amended head gets a full review (round + 1), not a refused delta that blocks the WP', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.gateCmdCode = { 'WP-02': [1] };
+  h.answer = (a) => (a.part === 'post-heads' ? ok(`${h.head(a.wpId)}\n${'e'.repeat(40)}\n`) : undefined);
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged', h.wp('WP-02').reason);
+  assert.equal(h.wp('WP-02').rebases[0].from, h.wp('WP-02').rebases[0].to, 'the first rebase was a no-op');
+  const posts = of(h, 'WP-02').filter((a) => a.step === 'post');
+  assert.deepEqual(posts.map((a) => [a.land.round, a.land.scope]), [[1, 'full'], [2, 'full']]);
+});
+
 test('tier from the recipe file (D17, D19.11): contractPaths or an added test raise T1 to T2; neither stays T1; WP-00 at depth none too', async (t) => {
   const cases = [['scripts/lane.mjs\n', 'T2'], ['lib/x.test.mjs\n', 'T2'], ['lib/x.mjs\n', 'T1']];
   for (const [diff, tier] of cases) {

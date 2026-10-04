@@ -233,6 +233,9 @@ function metaAction(state, wp) {
     instruction: `Write ${outPath} = ${JSON.stringify({ title })} (create the directory). Record {}.` };
 }
 
+// The changed files of the PR: the start of a full review (D19.11).
+const prDiff = (state) => shell('review', 'diff', ['gh', 'pr', 'diff', '{pr.number}', '--repo', state.intent.repo.remote, '--name-only']);
+
 const withMeta = (state, wp, actions) => (actions.some((a) => a.step === 'council' && a.part === 'review') ? [metaAction(state, wp), ...actions] : actions);
 
 // ---- touches the build opens (D19.3, D19.4, D19.8, D16) ----
@@ -397,7 +400,7 @@ function expand(state, wp, deps) {
       wp.checkAmends = 0;
       if (wp.state !== 'pr') setState(state, wp, 'pr', null, deps);
       if (findings) return undefined;
-      if (!wp.reviews?.length) return go([shell('review', 'diff', ['gh', 'pr', 'diff', '{pr.number}', '--repo', state.intent.repo.remote, '--name-only'])], null);
+      if (!wp.reviews?.length) return go([prDiff(state)], null);
       return go([], 'delta');
     }
     case 'reviewed': {
@@ -408,7 +411,11 @@ function expand(state, wp, deps) {
     case 'delta': {
       // One delta pass per full review; a later tail is the gate's post-cap inspection.
       const since = wp.amendment?.since;
-      if ((wp.reviews ?? []).at(-1)?.scope !== 'full' || !since || since === wp.pr?.head) return go([], 'land');
+      if (!since || since === wp.pr?.head) return go([], 'land');
+      // Commits on top of a rebase's start (a no-op rebase included) are not a
+      // delta deltaReviewActions accepts: a full review (round + 1) is owed.
+      if ((wp.rebases ?? []).some((rebase) => rebase.from === since)) return go([prDiff(state)], null);
+      if ((wp.reviews ?? []).at(-1)?.scope !== 'full') return go([], 'land');
       return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
     }
     case 'land':
