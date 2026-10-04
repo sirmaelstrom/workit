@@ -1,0 +1,156 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseWorkPackages, filesDisjoint, dispatchable } from './schedule.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const WORKSHOP = join(HERE, '..', '__fixtures__', 'lanes', 'workshop');
+const C = 'skills/conduct/scripts';
+
+const EXPECTED_FILES = {
+  'WP-01': [`${C}/conduct.mjs`, `${C}/lib/state.mjs`, `${C}/lib/exec.mjs`, `${C}/lib/adapters.mjs`, `${C}/lib/touch.mjs`, `${C}/lib/recipe.mjs`,
+    `${C}/lib/phases/intake.mjs`, `${C}/lib/phases/preapproval.mjs`, `${C}/lib/phases/spec.mjs`, `${C}/lib/phases/mint.mjs`,
+    `${C}/conduct.test.mjs`, `${C}/__fixtures__/intake/`],
+  'WP-02': [`${C}/lib/schedule.mjs`, `${C}/lib/lanes.mjs`, 'skills/conduct/templates/lane-brief.md', `${C}/lib/schedule.test.mjs`,
+    `${C}/lib/lanes.test.mjs`, `${C}/__fixtures__/lanes/`],
+  'WP-03': [`${C}/lib/land.mjs`, `${C}/lib/release.mjs`, '.workit/conduct.json', `${C}/lib/land.test.mjs`, `${C}/lib/release.test.mjs`,
+    `${C}/__fixtures__/land/`],
+  'WP-04': [`${C}/lib/phases/build.mjs`, `${C}/lib/phases/build.test.mjs`, `${C}/__fixtures__/build/`],
+  'WP-05': ['skills/conduct/SKILL.md', 'skills/spec/SKILL.md', 'reference/patterns/work-package.md', 'reference/templates/_orchestrator.template.md',
+    'README.md', 'AGENTS.md', 'skills/_shared/delegated-skills.test.mjs', 'reference/templates/lane-contract.template.md',
+    'skills/spec-validate/SKILL.md', 'skills/spec-validate/scripts/validate.mjs', 'skills/spec-validate/tests/validate.test.mjs',
+    'skills/spec-validate/tests/fixtures/canonical-spec/work-packages/'],
+  'WP-06': [`${C}/lib/phases/release.mjs`, `${C}/lib/phases/analyze.mjs`, `${C}/lib/phases/showcase.mjs`, `${C}/lib/analyze.mjs`,
+    `${C}/lib/phases/mint.mjs`, `${C}/conduct.test.mjs`, `${C}/conduct.seam.test.mjs`, `${C}/__fixtures__/seam/`],
+};
+
+const parsed = () => new Map(parseWorkPackages(WORKSHOP).map((wp) => [wp.id, wp]));
+
+test('parseWorkPackages: the run workshop, exact files in Files order', () => {
+  const wps = parsed();
+  assert.deepEqual([...wps.keys()], ['WP-01', 'WP-02', 'WP-03', 'WP-04', 'WP-05', 'WP-06']);
+  for (const [id, files] of Object.entries(EXPECTED_FILES)) assert.deepEqual(wps.get(id).files, files, id);
+  assert.equal(wps.get('WP-02').specPath, join(WORKSHOP, 'work-packages', 'wp-02-schedule-lanes.md'));
+  assert.equal(wps.get('WP-04').name, 'The build phase');
+});
+
+test('parseWorkPackages: wave, model, dependsOn, tier and runtimeExercise', () => {
+  const wps = [...parsed().values()];
+  assert.deepEqual(wps.map((wp) => wp.wave), [1, 2, 2, 3, 3, 4]);
+  assert.deepEqual(wps.map((wp) => wp.model), ['opus', 'opus', 'opus', 'opus', 'sonnet', 'opus']);
+  assert.deepEqual(Object.fromEntries(wps.map((wp) => [wp.id, wp.dependsOn])), {
+    'WP-01': [], 'WP-02': ['WP-01'], 'WP-03': ['WP-01'], 'WP-04': ['WP-02', 'WP-03'],
+    'WP-05': ['WP-01', 'WP-02', 'WP-03'], 'WP-06': ['WP-04', 'WP-05'],
+  });
+  assert.deepEqual(wps.map((wp) => wp.tier), Array(6).fill('T2'));
+  for (const wp of wps) assert.ok(wp.runtimeExercise.length > 0, wp.id);
+  assert.match(parsed().get('WP-02').runtimeExercise, /^CLI \+ a real detached agent\./);
+  assert.doesNotMatch(parsed().get('WP-02').runtimeExercise, /Negative controls/);
+});
+
+test('filesDisjoint on the run workshop (D17, D19.29)', () => {
+  const wps = parsed();
+  const files = (id) => wps.get(id).files;
+  const disjoint = [['WP-02', 'WP-03'], ['WP-04', 'WP-05'], ['WP-04', 'WP-06'], ['WP-05', 'WP-06']];
+  for (const n of [1, 2, 3]) disjoint.push([`WP-0${n}`, 'WP-04'], [`WP-0${n}`, 'WP-05']);
+  for (const [a, b] of disjoint) assert.equal(filesDisjoint(files(a), files(b)), true, `${a} ${b}`);
+  assert.equal(filesDisjoint(files('WP-01'), files('WP-06')), false);
+});
+
+test('filesDisjoint: equal after normalizing, and a directory contains its files', () => {
+  assert.equal(filesDisjoint(['a/b.mjs'], ['a\\b.mjs']), false);
+  assert.equal(filesDisjoint(['a/fixtures/'], ['a/fixtures/x.json']), false);
+  assert.equal(filesDisjoint(['a/fixtures/x.json'], ['a/fixtures/']), false);
+  assert.equal(filesDisjoint(['a/fixtures/'], ['a/fixtures-2/x.json']), true);
+  assert.equal(filesDisjoint(['a/b.mjs'], ['a/b.mjs.bak']), true);
+});
+
+test('empty files fail safe (D18)', (t) => {
+  assert.equal(filesDisjoint([], ['x.mjs']), false);
+  assert.equal(filesDisjoint(['x.mjs'], []), false);
+  assert.equal(filesDisjoint([], []), false);
+  const dir = workshop(t, {
+    'WP-01': { wave: 1, model: '-', body: '**Files:**\n- the state module, in prose\n- also the tests\n' },
+    'WP-02': { wave: 1, model: '-', body: '**Files:**\n- write `lib/b.mjs` somewhere\n' },
+  });
+  const wps = parseWorkPackages(dir);
+  assert.deepEqual(wps.map((wp) => [wp.files, wp.model]), [[[], 'opus'], [[], 'opus']]);
+  const [a, b] = wps;
+  const other = { id: 'WP-09', files: ['z.mjs'], dependsOn: [] };
+  assert.deepEqual(ids(dispatchable(run([{ ...a, state: 'dispatched' }, { ...other, state: 'pending' }], 2))), []);
+  assert.deepEqual(ids(dispatchable(run([{ ...other, state: 'dispatched' }, { ...b, state: 'pending' }], 2))), []);
+  // Alone, an empty-files WP runs, and holds the run to itself.
+  assert.deepEqual(ids(dispatchable(run([{ ...a, state: 'pending' }, { ...other, state: 'pending' }], 2))), ['WP-01']);
+});
+
+test('Files list ends at the next field label (D19)', (t) => {
+  const dir = workshop(t, {
+    'WP-01': {
+      wave: 1, model: 'opus',
+      body: '**Files:**\n- Create `a.mjs`: with **bold text** inside the bullet\n- Modify `lib/{b,c}.mjs` and `not-this.mjs`\n'
+        + '**Phase behavior:**\n- Create `x.mjs`\n\n**Review tier:** T2\n',
+    },
+  });
+  const [wp] = parseWorkPackages(dir);
+  assert.deepEqual(wp.files, ['a.mjs', 'lib/b.mjs', 'lib/c.mjs']);
+  assert.equal(wp.tier, 'T2');
+});
+
+test('parseWorkPackages: tier defaults to T1, a missing Model column to opus, a missing Runtime exercise to empty', (t) => {
+  const dir = workshop(t, { 'WP-01': { wave: 1, body: '**Files:**\n- Create `a.mjs`\n' } }, { modelColumn: false });
+  const [wp] = parseWorkPackages(dir);
+  assert.deepEqual([wp.tier, wp.model, wp.runtimeExercise], ['T1', 'opus', '']);
+});
+
+const wp = (id, state, files, dependsOn = []) => ({ id, state, files, dependsOn });
+const run = (wps, lanesCap = 2, extra = {}) => ({ intent: { lanesCap }, wps, dispatchHalt: null, ...extra });
+const ids = (wps) => wps.map((item) => item.id);
+
+test('dispatchable: dependencies, shared files, the lane cap and dispatchHalt', () => {
+  const wps = parsed();
+  const at = (states) => [...wps.values()].map((item) => ({ ...item, state: states[item.id] ?? 'pending' }));
+  assert.deepEqual(ids(dispatchable(run(at({ 'WP-01': 'merged' })))), ['WP-02', 'WP-03']);
+  assert.deepEqual(ids(dispatchable(run(at({ 'WP-01': 'gate' })))), []);
+  assert.deepEqual(ids(dispatchable(run(at({}), 2))), ['WP-01']);
+  // Two pending WPs sharing a file: one.
+  assert.deepEqual(ids(dispatchable(run([wp('WP-01', 'pending', ['a.mjs', 'b.mjs']), wp('WP-02', 'pending', ['b.mjs'])]))), ['WP-01']);
+  // One live lane, cap 2: at most one more.
+  const three = [wp('WP-01', 'review', ['a']), wp('WP-02', 'pending', ['b']), wp('WP-03', 'pending', ['c'])];
+  assert.deepEqual(ids(dispatchable(run(three, 2))), ['WP-02']);
+  assert.deepEqual(ids(dispatchable(run(three, 1))), []);
+  assert.deepEqual(ids(dispatchable(run(at({ 'WP-01': 'merged' }), 2, { dispatchHalt: { reason: 'budget', since: 'x' } }))), []);
+});
+
+test('dispatchable: held and blocked WPs hold no slot (D12)', () => {
+  const wps = [wp('WP-01', 'held', ['a']), wp('WP-02', 'blocked', ['b']), wp('WP-03', 'pending', ['c']), wp('WP-04', 'pending', ['d'])];
+  assert.deepEqual(ids(dispatchable(run(wps, 2))), ['WP-03', 'WP-04']);
+  for (const state of ['deferred', 'merged', 'refuted']) {
+    assert.deepEqual(ids(dispatchable(run([wp('WP-01', state, ['a']), wp('WP-02', 'pending', ['b'])], 1))), ['WP-02'], state);
+  }
+});
+
+test('dispatchable: a WP depending on a held, blocked or refuted WP is never dispatchable', () => {
+  for (const state of ['held', 'blocked', 'refuted']) {
+    const wps = [wp('WP-01', 'merged', ['a']), wp('WP-02', state, ['b']), wp('WP-03', 'pending', ['c'], ['WP-01', 'WP-02'])];
+    assert.deepEqual(ids(dispatchable(run(wps, 2))), [], state);
+  }
+});
+
+// A workshop in a temp dir: an orchestrator naming each WP's wave and model,
+// and one wp-*.md per WP with the given body.
+function workshop(t, wps, { modelColumn = true } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'workit-schedule-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const packages = join(dir, 'work-packages');
+  mkdirSync(packages);
+  const entries = Object.entries(wps);
+  const plan = [...new Set(entries.map(([, spec]) => spec.wave))].map((wave) => `Wave ${wave}: ${entries.filter(([, spec]) => spec.wave === wave).map(([id]) => `[${id}: x]`).join(' ')}`);
+  const rows = entries.map(([id, spec]) => (modelColumn ? `| ${id}: name ${id} | ${spec.wave} | p | s | ${spec.model} |` : `| ${id}: name ${id} | ${spec.wave} | p | s |`));
+  const header = modelColumn ? ['| Package | Wave | Project | Spec | Model |', '|---|---|---|---|---|'] : ['| Package | Wave | Project | Spec |', '|---|---|---|---|'];
+  writeFileSync(join(packages, '_orchestrator.md'), ['# O', '', '## Wave Plan', '', ...plan, '', '## Package Inventory', '', ...header, ...rows, ''].join('\n'));
+  for (const [id, spec] of entries) writeFileSync(join(packages, `${id.toLowerCase()}-x.md`), `# ${id}: name ${id}\n\n${spec.body}`);
+  return dir;
+}
