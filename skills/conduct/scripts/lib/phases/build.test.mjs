@@ -775,7 +775,10 @@ test('merge lock (D19.8): WP-03\'s rebase waits while WP-02 holds the lock and r
   assert.equal(await drive(h), null);
   assert.ok(yielded, 'WP-03 reached its rebase while WP-02 held the lock');
   const merged2 = indexWhere(h, (a) => a.wpId === 'WP-02' && a.step === 'merged');
-  assert.ok(indexWhere(h, (a) => a.wpId === 'WP-03' && a.step === 'rebase') > merged2);
+  const landing = of(h, 'WP-03').filter((a) => ['rebase', 'gate-cmd', 'gate'].includes(a.step) && !isWait(a));
+  assert.equal(`${landing[0].step}/${landing[0].part}`, 'rebase/fetch', 'WP-03 lands through its own rebase');
+  assert.ok(h.trace.indexOf(landing[0]) > merged2);
+  assert.equal(landing.filter((a) => a.part === 'gate').length, 1, 'one gate run: the lock was held when it ran');
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
 
   const g = harness(t, { wps: [TWO[0], TWO[1]] });
