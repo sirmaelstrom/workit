@@ -365,7 +365,6 @@ test('lane contract: the first action; run-level slots refused (exit 2); per-lan
   assert.ok(first.template.endsWith(join('reference', 'templates', 'lane-contract.template.md')));
   const isolation = Object.entries(first.slots).find(([slot]) => slot.startsWith('<Per-repo lane isolation'));
   assert.equal(isolation[1], JSON.parse(fixture('build', 'conduct.json')).laneSuite);
-  assert.equal(first.slots['<repo B>'], null);
   assert.equal(first.slots['<run name>'], 'conduct demo');
   assert.equal(first.slots['<gate command(s)>'], 'node --version');
   await assert.rejects(recordPending(h, {}), { code: 2, message: /was not written/ });
@@ -374,6 +373,7 @@ test('lane contract: the first action; run-level slots refused (exit 2); per-lan
     writeFileSync(first.outPath, bad);
     await assert.rejects(recordPending(h, {}), { code: 2, message: /run-level slots/ });
   }
+  assert.equal(first.slots['<repo B>'], null, 'a single-repo run deletes the <repo B lines');
   writeFileSync(first.outPath, `${filled}\nPer lane: <your-lane-id>, <id>, <lane>, <n>, <sha>, <path>\n`);
   await recordPending(h, {});
   assert.equal(h.state.build.contract, first.outPath);
