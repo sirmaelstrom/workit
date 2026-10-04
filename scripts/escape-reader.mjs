@@ -80,6 +80,9 @@ const keyOf = (repo, pr) => `${repo.toLowerCase()}#${pr}`;
 // needs a digit, so a word like "decade" is not one, and a repo word before it).
 const REF = /(?<![\w./-])(?:([\w.-]+(?:\/[\w.-]+)?)#(\d+)|([\w.-]+(?:\/[\w.-]+)?)\s+(?=[0-9a-f]{7,40}\b)(?=[a-f]*\d)([0-9a-f]{7,40})\b|#(\d+))/g;
 
+/** One reference's identity: the PR key, else the commit, else the unresolved spelling and number. */
+const refId = (ref) => ref.key ?? (ref.commit ? `${ref.repo}@${ref.commit}` : `?${ref.spelling}#${ref.pr}`);
+
 /** Every PR or commit named in `text`. A bare `#n` takes the previous ref's repo, else `inherit`. */
 function refsIn(text, inherit, resolve) {
   const refs = [];
@@ -90,14 +93,14 @@ function refsIn(text, inherit, resolve) {
     const pr = m[2] ?? m[5];
     const ref = { repo, spelling, ...(pr ? { pr: Number(pr) } : { commit: m[4] }) };
     if (repo && pr) ref.key = keyOf(repo, pr);
-    if (!refs.some((seen) => seen.key ? seen.key === ref.key : seen.commit === ref.commit && seen.repo === ref.repo)) refs.push(ref);
+    if (!refs.some((seen) => refId(seen) === refId(ref))) refs.push(ref);
   }
   return refs;
 }
 
 const VERDICT_PHRASE = /\breview\s+(saw|missed)\s+it\b|\bunreviewed\b/gi;
 // The template copied unfilled: all three choices joined by pipes.
-const UNFILLED = /\bsaw it\s*\|\s*\**missed it\**\s*\|\s*\**unreviewed\b/i;
+const UNFILLED = /\bsaw it[\s*]*\|[\s*]*missed it[\s*]*\|[\s*]*unreviewed\b/i;
 const BOLD_CHOICE = /\*\*\s*(?:review\s+)?(saw it|missed it|unreviewed)\s*\*\*/gi;
 const canonical = (phrase) => ({ 'saw it': 'saw', 'missed it': 'missed', unreviewed: 'unreviewed' })[phrase.toLowerCase()];
 
@@ -204,21 +207,24 @@ function readRunDocs(dirs, deps, resolve) {
 
 /**
  * Which run shipped an introducing PR: a run whose PR/review/closed rows name
- * it AND whose first-to-last row stamps span the instant the PR was created (a
- * later run's row for the fix names the introducer too; the span keeps that row
- * from claiming it). Two runs left is `ambiguous`; none is `unattributed`.
+ * it AND whose first-to-last row stamps span the instant the PR merged (a later
+ * run's row for the fix names the introducer too; the span keeps that row from
+ * claiming it). A PR that never merged shipped in no run. Two runs left is
+ * `ambiguous`; none is `unattributed`.
  */
 function attribute(ref, meta, runs) {
   if (ref.commit) return { status: 'unattributed', reason: 'a commit, not a PR' };
   if (!ref.key) return { status: 'unattributed', reason: `repo ${JSON.stringify(ref.spelling)} did not resolve` };
   const namedBy = runs.filter((run) => run.named.has(ref.key));
   if (namedBy.length === 0) return { status: 'unattributed', reason: 'no run doc names it' };
-  const created = meta.get(ref.key)?.createdAt;
-  if (!created) return { status: 'unattributed', reason: 'no PR metadata (repo not in --repo)', namedBy: namedBy.map((run) => run.id) };
-  const inSpan = namedBy.filter((run) => run.from <= created && created <= run.to);
+  const named = namedBy.map((run) => run.id);
+  const info = meta.get(ref.key);
+  if (!info) return { status: 'unattributed', reason: 'no PR metadata (repo not in --repo)', namedBy: named };
+  if (!info.mergedAt) return { status: 'unattributed', reason: 'not merged', namedBy: named };
+  const inSpan = namedBy.filter((run) => run.from <= info.mergedAt && info.mergedAt <= run.to);
   if (inSpan.length === 1) return { status: 'attributed', run: inSpan[0].id };
   if (inSpan.length > 1) return { status: 'ambiguous', runs: inSpan.map((run) => run.id) };
-  return { status: 'unattributed', reason: 'named only by runs that were not open when it was created', namedBy: namedBy.map((run) => run.id) };
+  return { status: 'unattributed', reason: 'named only by runs that were not open when it merged', namedBy: named };
 }
 
 const emptyTally = () => Object.fromEntries(VERDICTS.map((v) => [v, 0]));
@@ -238,12 +244,22 @@ export function runEscapeReader(argv, overrides = {}) {
     const runDocs = opts['run-docs'].length > 0 ? readRunDocs(opts['run-docs'], deps, resolve) : null;
 
     const escapes = [];
+    const pending = [];
     const census = {};
     for (const { repo, rows } of censuses) {
-      census[repo] = { prs: rows.length, withEscapeLine: 0 };
+      census[repo] = { prs: rows.length, withEscapeLine: 0, pending: 0, closedUnmerged: 0 };
       for (const pr of rows.filter((row) => !opts.since || row.createdAt.slice(0, 10) >= opts.since)) {
         const lines = (pr.body ?? '').split(/\r?\n/).filter((line) => /^Escape:/.test(line));
         if (lines.length > 0) census[repo].withEscapeLine++;
+        // Only a merged fix PR is an escape that landed. An open one is listed as pending;
+        // a closed-unmerged one is counted in the census and nowhere else.
+        if (lines.length > 0 && !pr.mergedAt) {
+          if (pr.state === 'OPEN') {
+            census[repo].pending++;
+            for (const raw of new Set(lines)) pending.push({ fix: { repo, pr: pr.number, url: pr.url }, raw });
+          } else census[repo].closedUnmerged++;
+          continue;
+        }
         // An identical line repeated in one body is one claim (observatory#808 has two).
         for (const raw of new Set(lines)) {
           const parsed = parseEscapeLine(raw, repo, resolve);
@@ -271,6 +287,7 @@ export function runEscapeReader(argv, overrides = {}) {
       tally,
       lines: escapes.length,
       escapes,
+      pending,
       unparsed: escapes.filter((e) => e.verdict === 'unparsed').map((e) => ({ fix: e.fix, reason: e.reason, raw: e.raw })),
     };
     if (measure) output.measureLog = { rowsUnreadable: measure.unreadable };
@@ -281,8 +298,7 @@ export function runEscapeReader(argv, overrides = {}) {
       for (const escape of escapes) {
         const runsHit = new Set();
         for (const ref of escape.introducers) {
-          const id = ref.key ?? `${ref.spelling}@${ref.commit ?? ref.pr}`;
-          if (!seen.has(id)) { seen.add(id); status[ref.attribution.status]++; }
+          if (!seen.has(refId(ref))) { seen.add(refId(ref)); status[ref.attribution.status]++; }
           if (ref.attribution.status === 'attributed') runsHit.add(ref.attribution.run);
         }
         for (const run of runsHit) {

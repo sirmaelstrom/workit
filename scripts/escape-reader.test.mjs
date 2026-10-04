@@ -75,6 +75,29 @@ test('parser: the template copied unfilled takes the choice in bold, and says so
   assert.deepEqual(keys(parsed), [`${WORKIT}#128`]);
 });
 
+test('parser: whichever of the three choices is in bold is the verdict, first choice included', () => {
+  const cases = [
+    ['Escape: introduced by workit#128; review **saw it** | missed it | unreviewed', 'saw'],
+    ['Escape: introduced by workit#128; **review saw it** | missed it | unreviewed', 'saw'],
+    ['Escape: introduced by workit#128; review saw it | **missed it** | unreviewed', 'missed'],
+    ['Escape: introduced by workit#128; review saw it | missed it | **unreviewed**', 'unreviewed'],
+  ];
+  for (const [raw, verdict] of cases) {
+    const parsed = parse(raw, WORKIT);
+    assert.deepEqual([parsed.verdict, parsed.parse], [verdict, 'bold-choice'], raw);
+    assert.deepEqual(keys(parsed), [`${WORKIT}#128`]);
+  }
+});
+
+test('parser: distinct unresolved references stay distinct; the same one twice is one', () => {
+  const two = parse('Escape: introduced by ghost#1 and ghost#2; review missed it');
+  assert.deepEqual(two.introducers.map((ref) => ref.pr), [1, 2]);
+  assert.deepEqual(parse('Escape: introduced by ghost#1 and ghost#1; review missed it').introducers.map((ref) => ref.pr), [1]);
+  assert.deepEqual(parse('Escape: introduced by ghost#7 and phantom#7; review missed it').introducers.map((ref) => ref.spelling), ['ghost', 'phantom']);
+  const commits = parse('Escape: introduced by heathdev-me/observatory 8709d1e and heathdev-me/observatory 1a2b3c4d; review unreviewed');
+  assert.deepEqual(commits.introducers.map((ref) => ref.commit), ['8709d1e', '1a2b3c4d']);
+});
+
 test('parser: the template copied with nothing (or two things) in bold is unparsed', () => {
   for (const raw of [
     'Escape: introduced by workit#128; review saw it | missed it | unreviewed',
@@ -130,9 +153,19 @@ const APP = [
   pr(42, '2026-10-05T10:00:00Z', 'Escape: introduced by ghost#3; review missed it'),
   pr(43, AT, 'Escape: introduced by app#10; review saw it\nEscape: introduced by app#10; review saw it'),
   pr(44, AT, 'Escape: introduced by app#16; review missed it'),
+  // An open fix PR is pending, a closed-unmerged one is neither tallied nor listed.
+  { ...pr(45, AT, 'Escape: introduced by app#10; review saw it'), state: 'OPEN', mergedAt: null },
+  { ...pr(46, AT, 'Escape: introduced by app#10; review saw it'), state: 'CLOSED', mergedAt: null },
+  // Introducers whose merge, not their creation, decides the run: #17 never merged; #18 was created
+  // inside r1 and merged after every run closed.
+  { ...pr(17, '2026-10-01T15:00:00Z'), state: 'OPEN', mergedAt: null },
+  { ...pr(18, '2026-10-01T15:30:00Z'), mergedAt: '2026-10-03T00:00:00Z' },
+  pr(47, AT, 'Escape: introduced by app#17; review missed it'),
+  pr(48, AT, 'Escape: introduced by app#18; review missed it'),
 ];
 const LIB = [
-  pr(5, '2026-10-01T14:00:00Z'),
+  // Created the day before r1 opened, merged inside it.
+  { ...pr(5, '2026-09-30T09:00:00Z'), mergedAt: '2026-10-01T14:20:00Z' },
   pr(40, AT, 'Summary\r\nEscape: introduced by lib#5; review missed it\r\n'),
 ];
 
@@ -161,8 +194,8 @@ const escapeFor = (output, repo, number) => output.escapes.filter((e) => e.fix.r
 test('collect: only a line that starts with `Escape:` counts; a mid-line mention, a null body and a CRLF body are handled', () => {
   const { exit, output } = read(BASE);
   assert.equal(exit, 0, JSON.stringify(output));
-  assert.deepEqual(output.census['acme/app'], { prs: APP.length, withEscapeLine: 10 });
-  assert.deepEqual(output.census['acme/lib'], { prs: LIB.length, withEscapeLine: 1 });
+  assert.deepEqual(output.census['acme/app'], { prs: APP.length, withEscapeLine: 14, pending: 1, closedUnmerged: 1 });
+  assert.deepEqual(output.census['acme/lib'], { prs: LIB.length, withEscapeLine: 1, pending: 0, closedUnmerged: 0 });
   assert.equal(escapeFor(output, 'acme/app', 34).length, 0, 'the mid-line "Escape:" is not counted');
   assert.equal(escapeFor(output, 'acme/app', 35).length, 0);
   assert.equal(escapeFor(output, 'acme/lib', 40)[0].verdict, 'missed', 'CRLF line endings do not hide the line');
@@ -182,10 +215,10 @@ test('collect: an identical line repeated in one body is one claim, and says it 
 
 test('tally: overall and per repo, unparsed counted and listed with its raw line', () => {
   const { output } = read(BASE);
-  assert.deepEqual(output.tally.overall, { saw: 3, missed: 5, unreviewed: 2, unparsed: 1 });
-  assert.deepEqual(output.tally.byRepo['acme/app'], { saw: 3, missed: 4, unreviewed: 2, unparsed: 1 });
+  assert.deepEqual(output.tally.overall, { saw: 3, missed: 7, unreviewed: 2, unparsed: 1 });
+  assert.deepEqual(output.tally.byRepo['acme/app'], { saw: 3, missed: 6, unreviewed: 2, unparsed: 1 });
   assert.deepEqual(output.tally.byRepo['acme/lib'], { saw: 0, missed: 1, unreviewed: 0, unparsed: 0 });
-  assert.equal(output.lines, 11);
+  assert.equal(output.lines, 13);
   assert.equal(output.unparsed.length, 1);
   assert.equal(output.unparsed[0].raw, 'Escape: something went wrong somewhere');
   assert.equal(output.unparsed[0].fix.pr, 37);
@@ -196,7 +229,7 @@ test('collect: --since limits the fix PRs read, not the introducer metadata', ()
   assert.deepEqual(output.escapes.map((e) => e.fix.pr), [42]);
   assert.equal(output.census['acme/app'].prs, APP.length, 'the census still lists every PR');
   const { output: all } = read([...FULL, '--since', '2026-10-01']);
-  assert.equal(all.lines, 11);
+  assert.equal(all.lines, 13);
   assert.equal(escapeFor(all, 'acme/app', 30)[0].introducers[0].attribution.run, 'r1', 'a pre-window introducer keeps its metadata');
 });
 
@@ -267,10 +300,25 @@ test('attribution: named in two run docs that were both open — ambiguous, cred
   assert.deepEqual(output.attribution.byRun.r2, undefined);
 });
 
-test('attribution: a run that names the PR but was not open when it was created does not claim it', () => {
+test('attribution: a run that names the PR but was not open when it merged does not claim it', () => {
   const { output } = read(FULL);
-  // app#15 (09-15) is named only by r2, in the fix row for it.
-  assert.deepEqual(attribution(output, 33), { status: 'unattributed', reason: 'named only by runs that were not open when it was created', namedBy: ['r2'] });
+  // app#15 (merged 09-15) is named only by r2, in the fix row for it.
+  assert.deepEqual(attribution(output, 33), { status: 'unattributed', reason: 'named only by runs that were not open when it merged', namedBy: ['r2'] });
+});
+
+test('attribution: the merge decides — created before the run but merged in it is the run\'s; created in it but merged after is not; never merged is no run\'s', () => {
+  const { output } = read(FULL);
+  assert.deepEqual(escapeFor(output, 'acme/lib', 40)[0].introducers[0].attribution, { status: 'attributed', run: 'r1' }, 'lib#5: created 09-30, merged 10-01T14:20 inside r1');
+  assert.deepEqual(attribution(output, 48), { status: 'unattributed', reason: 'named only by runs that were not open when it merged', namedBy: ['r1'] }, 'app#18: created inside r1, merged 10-03');
+  assert.deepEqual(attribution(output, 47), { status: 'unattributed', reason: 'not merged', namedBy: ['r1'] }, 'app#17: r1 has a "draft app#17" PR row, the PR never merged');
+});
+
+test('tally: an open fix PR is pending, not an escape that landed; a closed-unmerged one is in neither', () => {
+  const { output } = read(FULL);
+  assert.deepEqual(output.pending, [{ fix: { repo: 'acme/app', pr: 45, url: 'https://example.test/45' }, raw: 'Escape: introduced by app#10; review saw it' }]);
+  assert.equal(output.escapes.filter((e) => [45, 46].includes(e.fix.pr)).length, 0);
+  assert.equal(output.tally.overall.saw, 3, 'saw lines: #30, #41, #43 only');
+  assert.equal(output.attribution.byRun.r1.escapes, 4, 'app#10 is credited by fix PRs 30 and 43, not by the open #45 or the closed #46');
 });
 
 test('attribution: per-run counts, the fraction attributable, and the run docs that could not be read', () => {
@@ -278,8 +326,8 @@ test('attribution: per-run counts, the fraction attributable, and the run docs t
   const { byRun, runDocs, ...counts } = output.attribution;
   // r1: fix PRs 30, 31 and 43 (app#10, app#12) and lib 40 (lib#5). Fix 31's other introducer, app#11, is ambiguous.
   assert.deepEqual(byRun, { r1: { escapes: 4, introducers: ['acme/app#10', 'acme/app#12', 'acme/lib#5'] }, day: { escapes: 2, introducers: ['acme/app#14', 'acme/app#16'] } });
-  // Distinct introducers: app#10 #11 #12 #13 #14 #15 #16, lib#5, the commit, ghost#3.
-  assert.deepEqual(counts, { introducers: 10, attributed: 5, ambiguous: 1, unattributed: 4 });
+  // Distinct introducers: app#10 #11 #12 #13 #14 #15 #16 #17 #18, lib#5, the commit, ghost#3.
+  assert.deepEqual(counts, { introducers: 12, attributed: 5, ambiguous: 1, unattributed: 6 });
   assert.deepEqual(runDocs.read, ['day', 'r1', 'r2']);
   assert.equal(runDocs.skipped.length, 1);
   assert.equal(runDocs.skipped[0].run, 'old');

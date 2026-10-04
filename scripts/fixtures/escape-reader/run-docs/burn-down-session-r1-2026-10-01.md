@@ -9,5 +9,7 @@
 | 2026-10-01T12:20:00Z | q-2 | PR | acme/app#12 and obs#999 | — |
 | 2026-10-01T13:20:00Z | q-3 | review | #77 only, no repo named | — |
 | 2026-10-01T14:20:00Z | q-4 | closed | acme/lib#5 merged | — |
+| 2026-10-01T15:10:00Z | q-4b | PR | draft app#17 | — |
+| 2026-10-01T15:40:00Z | q-4c | PR | draft app#18 | — |
 | 2026-10-01T17:10:00Z | q-5 | PR | app#11 | — |
 | 2026-10-01T18:00:00Z | R1 | run closed | — | — |
