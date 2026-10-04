@@ -4389,6 +4389,32 @@ test('056de846: resume is held by a live segment and settles when it is absent',
   assert.equal((await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', g.log], { exec: g.exec })).exit, 0);
 });
 
+test('056de846 amend 1: a retained frame under a shell prompt, with no exit footer, is dead — the wait settles', async (t) => {
+  // Claude killed without its footer; the shell redrew beneath the old frame.
+  const OMP_PROMPT = '~  home / worktrees / workit-wt-fix ~';
+  const withDefaultPrompt = `${BG_LIVE.trimEnd()}\nPS X:\\fixture\\lane>`;
+  const withRecordedPrompt = `${BG_LIVE.trimEnd()}\n${OMP_PROMPT}`;
+  assert.equal(claudeBackgroundWork(withDefaultPrompt), null, 'a default prompt shape under the frame');
+  assert.equal(claudeBackgroundWork(withRecordedPrompt, { signature: OMP_PROMPT }), null, 'the lane\'s recorded signature under the frame');
+  assert.equal(claudeBackgroundWork(withRecordedPrompt), '1 shell, 1 monitor', 'no signature and no default shape: the limit — it fails toward live (a timeout), never a false settle');
+  assert.equal(claudeBackgroundWork(BG_LIVE_AGENT_PANEL, { signature: OMP_PROMPT }), '4 shells, 2 monitors', 'a subagent panel is not a prompt');
+
+  for (const [label, pane, lane] of [
+    ['default prompt shape', withDefaultPrompt, { kind: 'claude' }],
+    ['recorded signature', withRecordedPrompt, { kind: 'claude', promptSignature: OMP_PROMPT }],
+  ]) {
+    const f = fixture(t);
+    seedLane(f, lane);
+    pushPolls(f, pane, 1);
+    const result = await clockedWait(f);
+    assert.deepEqual([result.exit, result.output.state], [0, 'done'], label);
+  }
+  const g = fixture(t);
+  seedLane(g, { kind: 'claude', promptSignature: OMP_PROMPT });
+  pushPolls(g, BG_LIVE, 20);
+  assert.equal((await clockedWait(g, '3000')).output.state, 'settled-background-live', 'a signature recorded, but the frame is the last thing drawn: still live');
+});
+
 test('056de846: claudeBackgroundWork reads the status bar only — every variant seen live, and what it must not match', () => {
   assert.equal(claudeBackgroundWork(BG_LIVE), '1 shell, 1 monitor');
   assert.equal(claudeBackgroundWork(BG_LIVE_PLURAL), '4 shells, 1 monitor');

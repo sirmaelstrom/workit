@@ -1525,7 +1525,7 @@ async function waitLane(opts, deps, state) {
 
     // The read feeds plan metering and the dialog text only. A transient read
     // failure must not end a wait that herdr is still answering.
-    const plan = readPlanState(deps, opts.name, lane.kind);
+    const plan = readPlanState(deps, opts.name, lane.kind, lane.promptSignature);
     if (plan.ok) {
       meter = plan.meter;
       dialog = plan.dialog;
@@ -1913,7 +1913,7 @@ async function resumeLane(opts, deps, state) {
   // The same pane scrape `wait` runs: the plan meter and the captured refusal
   // belong to the lane, not to the verb that happened to look. C11(a) again —
   // herdr reports `idle` while that modal is up, so this outranks the state.
-  const plan = readPlanState(deps, opts.name, lane.kind);
+  const plan = readPlanState(deps, opts.name, lane.kind, lane.promptSignature);
   const meter = plan.meter ?? { plan5h: null, planWeekly: null };
   const warning = planMeterWarning(meter, lane.kind);
   const modalEligible = plan.refusalShape === 'modal'
@@ -2487,7 +2487,7 @@ function isTimeoutFailure(result) {
 
 // One pane read, shared by `wait` and `resume`: the plan meter and the captured
 // refusal are properties of the lane, not of the verb that happened to look.
-function readPlanState(deps, name, kind) {
+function readPlanState(deps, name, kind, signature = null) {
   const read = call(deps, 'herdr', ['agent', 'read', name, '--lines', '40']);
   if (read.code !== 0) return { ok: false, meter: null, refusal: null, refusalShape: null, background: null, dialog: '' };
   // The meter footer, the refusal banner and modal, and the capacity banner
@@ -2502,7 +2502,7 @@ function readPlanState(deps, name, kind) {
       refusal: null,
       refusalShape: null,
       capacity: null,
-      background: claudeBackgroundWork(read.stdout),
+      background: claudeBackgroundWork(read.stdout, { signature }),
       dialog: responseText(read.stdout),
     };
   }
@@ -2523,13 +2523,19 @@ function readPlanState(deps, name, kind) {
 // composer is the last rule line followed by a `❯` line, and its bottom rule
 // the next rule: rules drawn further down (a survey box) are not it, and the
 // segment is read only in the lines under that bottom rule, so a lane's own
-// transcript quoting the text above the composer is not evidence.
-export function claudeBackgroundWork(text) {
+// transcript quoting the text above the composer is not evidence. A frame is
+// dead, and reads null, when Claude's exit footer is under it or when the pane's
+// last line is the shell's own prompt (the lane's recorded signature, else a
+// default prompt shape): Claude was killed and the shell redrew beneath it. A
+// prompt that is neither (a multi-line prompt, no signature captured) leaves the
+// old frame reading live, which costs a timeout, never a false settle.
+export function claudeBackgroundWork(text, { signature = null } = {}) {
   const lines = responseText(text).split(/\r?\n/).filter((line) => line.trim() !== '');
   const top = lines.findLastIndex((line, index) => CLAUDE_COMPOSER_RULE.test(line) && lines[index + 1]?.startsWith('❯'));
   const bottom = top < 0 ? -1 : lines.findIndex((line, index) => index > top + 1 && CLAUDE_COMPOSER_RULE.test(line));
-  // Claude's exit footer under the frame: a dead frame, not a live status bar.
-  if (bottom < 0 || lines.slice(bottom + 1).some((line) => line.trim() === CLAUDE_RESUME_HINT)) return null;
+  const last = lines.at(-1)?.trim() ?? '';
+  const atShellPrompt = (signature && last === String(signature).trim()) || DEFAULT_PROMPT_PATTERNS.some((pattern) => pattern.test(last));
+  if (bottom < 0 || atShellPrompt || lines.slice(bottom + 1).some((line) => line.trim() === CLAUDE_RESUME_HINT)) return null;
   const segment = CLAUDE_BACKGROUND_SEGMENT.exec(lines.slice(bottom + 1, bottom + 1 + CLAUDE_STATUS_LINES).join(' '));
   return segment ? segment[1].replace(/\s+/g, ' ') : null;
 }
