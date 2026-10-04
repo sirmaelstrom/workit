@@ -70,7 +70,9 @@ export function agentArgv(state, wp, { brief, sessionId = null }, deps) {
 export function laneBackend(state, deps, backend) {
   const repo = resolve(state.intent.repo.path);
   const fallbackBranch = state.intent.repo.defaultBranch ?? 'main';
-  const conduct = (sub, wp, extra = []) => ['node', join(deps.pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'lane', sub, '--run', state.runDir, '--wp', wp.id, ...extra];
+  // A recorder's deps are { exec, read, now }; it re-arms steps from the run's root.
+  const pluginRoot = deps.pluginRoot ?? state.pluginRoot;
+  const conduct = (sub, wp, extra = []) => ['node', join(pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'lane', sub, '--run', state.runDir, '--wp', wp.id, ...extra];
   const prLookup = (wp) => shellAction('pr-lookup', {
     instruction: 'List the lane branch\'s PRs and record the JSON.', expects: { type: 'json' },
     command: ['gh', 'pr', 'list', '--repo', state.intent.repo.remote, '--head', laneLayout(state, wp).branch, '--state', 'all', '--json', 'number,headRefOid,state'],
@@ -80,7 +82,7 @@ export function laneBackend(state, deps, backend) {
     shellAction('base', { instruction: 'Resolve the base sha.', command: ['git', '-C', repo, 'rev-parse', `origin/${fallbackBranch}`] }),
   ];
   if (backend === 'herdr') {
-    const laneMjs = (verb, args, log) => ['node', join(deps.pluginRoot, 'scripts', 'lane.mjs'), verb, ...args, '--log', log];
+    const laneMjs = (verb, args, log) => ['node', join(pluginRoot, 'scripts', 'lane.mjs'), verb, ...args, '--log', log];
     return {
       name: 'herdr',
       admit: () => [shellAction('admit', { instruction: 'Ask lane.mjs whether a lane may start.', command: laneMjs('admit', [], join(state.runDir, 'lane-runner.jsonl')) })],
@@ -306,7 +308,7 @@ function recordHerdrWait(state, wp, result, deps, backend) {
     case LANE_EXIT.planLow: {
       const fallback = shellAction('fallback', {
         instruction: 'Hand the lane to claude.',
-        command: ['node', join(deps.pluginRoot, 'scripts', 'lane.mjs'), 'fallback', name, '--to', 'claude', '--model', LANE_MODELS.claude.opus, '--reasoning', 'high', '--log', laneLayout(state, wp).runnerLog],
+        command: ['node', join(deps.pluginRoot ?? state.pluginRoot, 'scripts', 'lane.mjs'), 'fallback', name, '--to', 'claude', '--model', LANE_MODELS.claude.opus, '--reasoning', 'high', '--log', laneLayout(state, wp).runnerLog],
       });
       return { outcome: 'continue', reason: 'plan low: falling back to claude', patch: { queue: [fallback, ...backend.wait(wp)] } };
     }

@@ -232,6 +232,19 @@ test('start exit 7 re-arms start (D20)', (t) => {
   }
 });
 
+test('recordLaneStep with deps { exec, read, now } alone re-arms from the run\'s plugin root (D20)', (t) => {
+  for (const name of ['herdr', 'exec']) {
+    const f = lanes(t, { backend: name, wpLane: { paneId: 'w1:p1', briefPath: '/b.md' } });
+    const narrow = { exec: f.deps.exec, read: f.deps.read, now: f.deps.now };
+    const rearmed = recordLaneStep(f.state, f.wp, f.backend().start(f.wp)[0], exit(7), narrow);
+    assert.deepEqual(rearmed.patch.queue.slice(1), f.backend().start(f.wp));
+    if (name === 'herdr') {
+      const queued = recordLaneStep(f.state, f.wp, f.backend().wait(f.wp)[0], exit(6), narrow).patch.queue;
+      assert.equal(queued[0].command[1], LANE(f));
+    }
+  }
+});
+
 test('herdr start exit 2 → block with the stderr', (t) => {
   const f = lanes(t, { backend: 'herdr', agent: 'codex', wpLane: { paneId: 'w1:p1' } });
   const result = f.record(f.backend().start(f.wp)[0], exit(2, 'codex start needs an explicit --sandbox'));
