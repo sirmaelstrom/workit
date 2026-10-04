@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 
-import { ESCAPE_READER_EXIT_CODES, parseEscapeLine, repoResolver, runEscapeReader } from './escape-reader.mjs';
+import { ESCAPE_READER_EXIT_CODES, parseEscapeLine, repoResolver, runEscapeReader, stampBounds } from './escape-reader.mjs';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures/escape-reader/', import.meta.url));
 const RUN_DOCS = `${FIXTURES}run-docs`;
@@ -117,6 +117,7 @@ const APP = [
   pr(13, '2026-10-01T13:00:00Z'),
   pr(14, '2026-09-01T09:00:00Z'),
   pr(15, '2026-09-15T09:00:00Z'),
+  pr(16, '2026-09-01T09:00:00Z'),
   pr(30, AT, 'Fixes it.\nEscape: introduced by app#10; review saw it\n'),
   pr(31, AT, 'Escape: introduced by app#11 and #12; review missed it'),
   pr(32, AT, 'Escape: introduced by app#13; unreviewed.'),
@@ -128,6 +129,7 @@ const APP = [
   pr(41, AT, 'Escape: introduced by app#14; review saw it'),
   pr(42, '2026-10-05T10:00:00Z', 'Escape: introduced by ghost#3; review missed it'),
   pr(43, AT, 'Escape: introduced by app#10; review saw it\nEscape: introduced by app#10; review saw it'),
+  pr(44, AT, 'Escape: introduced by app#16; review missed it'),
 ];
 const LIB = [
   pr(5, '2026-10-01T14:00:00Z'),
@@ -159,7 +161,7 @@ const escapeFor = (output, repo, number) => output.escapes.filter((e) => e.fix.r
 test('collect: only a line that starts with `Escape:` counts; a mid-line mention, a null body and a CRLF body are handled', () => {
   const { exit, output } = read(BASE);
   assert.equal(exit, 0, JSON.stringify(output));
-  assert.deepEqual(output.census['acme/app'], { prs: APP.length, withEscapeLine: 9 });
+  assert.deepEqual(output.census['acme/app'], { prs: APP.length, withEscapeLine: 10 });
   assert.deepEqual(output.census['acme/lib'], { prs: LIB.length, withEscapeLine: 1 });
   assert.equal(escapeFor(output, 'acme/app', 34).length, 0, 'the mid-line "Escape:" is not counted');
   assert.equal(escapeFor(output, 'acme/app', 35).length, 0);
@@ -180,10 +182,10 @@ test('collect: an identical line repeated in one body is one claim, and says it 
 
 test('tally: overall and per repo, unparsed counted and listed with its raw line', () => {
   const { output } = read(BASE);
-  assert.deepEqual(output.tally.overall, { saw: 3, missed: 4, unreviewed: 2, unparsed: 1 });
-  assert.deepEqual(output.tally.byRepo['acme/app'], { saw: 3, missed: 3, unreviewed: 2, unparsed: 1 });
+  assert.deepEqual(output.tally.overall, { saw: 3, missed: 5, unreviewed: 2, unparsed: 1 });
+  assert.deepEqual(output.tally.byRepo['acme/app'], { saw: 3, missed: 4, unreviewed: 2, unparsed: 1 });
   assert.deepEqual(output.tally.byRepo['acme/lib'], { saw: 0, missed: 1, unreviewed: 0, unparsed: 0 });
-  assert.equal(output.lines, 10);
+  assert.equal(output.lines, 11);
   assert.equal(output.unparsed.length, 1);
   assert.equal(output.unparsed[0].raw, 'Escape: something went wrong somewhere');
   assert.equal(output.unparsed[0].fix.pr, 37);
@@ -194,7 +196,7 @@ test('collect: --since limits the fix PRs read, not the introducer metadata', ()
   assert.deepEqual(output.escapes.map((e) => e.fix.pr), [42]);
   assert.equal(output.census['acme/app'].prs, APP.length, 'the census still lists every PR');
   const { output: all } = read([...FULL, '--since', '2026-10-01']);
-  assert.equal(all.lines, 10);
+  assert.equal(all.lines, 11);
   assert.equal(escapeFor(all, 'acme/app', 30)[0].introducers[0].attribution.run, 'r1', 'a pre-window introducer keeps its metadata');
 });
 
@@ -275,13 +277,24 @@ test('attribution: per-run counts, the fraction attributable, and the run docs t
   const { output } = read(FULL);
   const { byRun, runDocs, ...counts } = output.attribution;
   // r1: fix PRs 30, 31 and 43 (app#10, app#12) and lib 40 (lib#5). Fix 31's other introducer, app#11, is ambiguous.
-  assert.deepEqual(byRun, { r1: { escapes: 4, introducers: ['acme/app#10', 'acme/app#12', 'acme/lib#5'] }, day: { escapes: 1, introducers: ['acme/app#14'] } });
-  // Distinct introducers: app#10 #11 #12 #13 #14 #15, lib#5, the commit, ghost#3.
-  assert.deepEqual(counts, { introducers: 9, attributed: 4, ambiguous: 1, unattributed: 4 });
+  assert.deepEqual(byRun, { r1: { escapes: 4, introducers: ['acme/app#10', 'acme/app#12', 'acme/lib#5'] }, day: { escapes: 2, introducers: ['acme/app#14', 'acme/app#16'] } });
+  // Distinct introducers: app#10 #11 #12 #13 #14 #15 #16, lib#5, the commit, ghost#3.
+  assert.deepEqual(counts, { introducers: 10, attributed: 5, ambiguous: 1, unattributed: 4 });
   assert.deepEqual(runDocs.read, ['day', 'r1', 'r2']);
   assert.equal(runDocs.skipped.length, 1);
   assert.equal(runDocs.skipped[0].run, 'old');
   assert.match(runDocs.skipped[0].reason, /header/);
+});
+
+test('attribution: every run-doc stamp shape the live docs use gives a span, and a year-less one takes the file name\'s year', () => {
+  assert.deepEqual(stampBounds('2026-10-04T01:26:00Z', '2026'), ['2026-10-04T01:26:00Z', '2026-10-04T01:26:00Z']);
+  assert.deepEqual(stampBounds('2026-09-19 15:12:16Z', '2026'), ['2026-09-19T15:12:16Z', '2026-09-19T15:12:16Z']);
+  assert.deepEqual(stampBounds('2026-09-22T19:14Z', '2026'), ['2026-09-22T19:14:00Z', '2026-09-22T19:14:59Z']);
+  assert.deepEqual(stampBounds('2026-09-04 08:58Z', undefined), ['2026-09-04T08:58:00Z', '2026-09-04T08:58:59Z']);
+  assert.deepEqual(stampBounds('2026-08-30', undefined), ['2026-08-30T00:00:00Z', '2026-08-30T23:59:59Z']);
+  assert.deepEqual(stampBounds('09-24 02:58Z', '2026'), ['2026-09-24T02:58:00Z', '2026-09-24T02:58:59Z']);
+  assert.equal(stampBounds('09-24 02:58Z', undefined), null, 'no year anywhere: no span, so the doc is skipped rather than dated by a guess');
+  assert.equal(stampBounds('run opened', '2026'), null);
 });
 
 test('attribution: a repo outside --repo has no metadata, so a name is not enough', () => {

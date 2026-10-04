@@ -62,7 +62,7 @@ function parseArgs(argv) {
   return opts;
 }
 
-/** Spelling → `owner/name`, or null when nothing names it: never a guess. */
+/** Spelling → `owner/name`, or null when no alias or --repo names it (or two --repo do). */
 export function repoResolver(repos, aliases) {
   const known = new Map(repos.map((repo) => [repo.toLowerCase(), repo]));
   return (spelling) => {
@@ -165,23 +165,34 @@ function measureFor(index, key) {
   return { ...rest, lenses: [...lenses] };
 }
 
+// The run docs' stamps came in several shapes: `2026-10-04T01:26:00Z` (run-log.mjs),
+// `2026-09-19 15:12:16Z`, `2026-09-22T19:14Z`, `2026-08-30` and `09-24 02:58Z` (no year;
+// the file name's year fills it). Returns the [earliest, latest] instant the stamp could
+// mean, as full `…Z` strings that compare as text, or null.
+export function stampBounds(cell, fileYear) {
+  const m = /^(?:(\d{4})-)?(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?Z?)?(?!\d)/.exec(cell);
+  const year = m?.[1] ?? fileYear;
+  if (!m || !year) return null;
+  const day = `${year}-${m[2]}-${m[3]}`;
+  if (m[4] === undefined) return [`${day}T00:00:00Z`, `${day}T23:59:59Z`];
+  return [`${day}T${m[4]}:${m[5]}:${m[6] ?? '00'}Z`, `${day}T${m[4]}:${m[5]}:${m[6] ?? '59'}Z`];
+}
+
 function readRunDocs(dirs, deps, resolve) {
   const runs = [];
   const skipped = [];
   for (const dir of dirs) {
     for (const file of deps.readdir(dir).filter((name) => /^burn-down-session-.*\.md$/.test(name)).sort()) {
-      const id = /^burn-down-session-(.+?)(?:-\d{4}-\d{2}-\d{2})?\.md$/.exec(file)[1];
+      const [, id, fileYear] = /^burn-down-session-(.+?)(?:-(\d{4})-\d{2}-\d{2})?\.md$/.exec(file);
       const table = findTable(deps.read(join(dir, file)));
       if (table.error) { skipped.push({ run: id, file, reason: table.error }); continue; }
-      // A row stamp is a full UTC instant (run-log.mjs) or, in the older docs, a bare day:
-      // a bare day opens at its 00:00:00Z and closes at its 23:59:59Z.
       const opens = [];
       const closes = [];
       const named = new Set();
       for (const row of table.rows.filter((r) => !r.problem)) {
         const [stamp, item, event, pointers] = splitCells(row.text);
-        const at = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?$/.exec(stamp)?.[0];
-        if (at) { opens.push(at.length === 10 ? `${at}T00:00:00Z` : at); closes.push(at.length === 10 ? `${at}T23:59:59Z` : at); }
+        const bounds = stampBounds(stamp, fileYear);
+        if (bounds) { opens.push(bounds[0]); closes.push(bounds[1]); }
         if (SHIPPED_EVENT.test(event)) for (const ref of refsIn(`${item} ${pointers}`, null, resolve)) if (ref.key) named.add(ref.key);
       }
       if (opens.length === 0) { skipped.push({ run: id, file, reason: 'no row carries a date' }); continue; }
