@@ -1,0 +1,40 @@
+      4401 +});
+
+  Ran 1 shell command
+
+● Update(scripts\lane.mjs)
+  ⎿  Added 2 lines, removed 1 line
+      2526    const lines = responseText(text).split(/\r?\n/).filter((line) => line.trim() !== '');
+      2527    const top = lines.findLastIndex((line, index) => CLAUDE_COMPOSER_RULE.test(line) && lines[index + 1]?.startsWith('❯'));
+      2528    const bottom = top < 0 ? -1 : lines.findIndex((line, index) => index > top + 1 && CLAUDE_COMPOSER_RULE.test(line));
+      2529 -  if (bottom < 0) return null;
+      2529 +  // Claude's exit footer under the frame: a dead frame, not a live status bar.
+      2530 +  if (bottom < 0 || lines.slice(bottom + 1).some((line) => line.trim() === CLAUDE_RESUME_HINT)) return null;
+      2531    return CLAUDE_BACKGROUND_SEGMENT.exec(lines.slice(bottom + 1, bottom + 1 + CLAUDE_STATUS_LINES).join(' '))?.[1] ?? null;
+      2532  }
+      2533
+
+● Update(scripts\lane.test.mjs)
+  ⎿  Added 2 lines, removed 1 line
+      4393    assert.equal(claudeBackgroundWork(livePane.replace('1 shell, 1 monitor', '1 shell,\n  1 monitor')), '1 shell, 1 monitor', 'a wrap at the space still reads');
+      4394    const quoted = `${BG_SEGMENT}\n● Bash(node --test)\n${BG_CONTROL}`;
+      4395    assert.equal(claudeBackgroundWork(quoted), null, 'text above the composer is transcript');
+      4396 -  assert.equal(claudeBackgroundWork(`${BG_LIVE}\nPS X:\\fixture\\lane>`), '1 shell, 1 monitor', 'a shell prompt under a dead frame is a different failure, not read here');
+      4396 +  const exited = `${livePane}\n\nResume this session with:\nclaude --resume 37680e5b-7c3f-4647-b516-40184218248b\nPS X:\\fixture\\lane>`;
+      4397 +  assert.equal(claudeBackgroundWork(exited), null, 'a frame left in scrollback under Claude\'s exit footer is dead');
+      4398    const barePane = ['● Ran node --test', `  ${BG_SEGMENT}`, 'PS X:\\fixture\\lane>'].join('\n');
+      4399    assert.equal(claudeBackgroundWork(barePane), null, 'no composer, no status bar');
+      4400    const deep = livePane.replace(BG_SEGMENT, ['  line one', '  line two', '  line three', `  ${BG_SEGMENT}`].join('\n'));
+
+● Background command "Background sampler of own pane status segment" completed (exit code 0)
+
+  Running 1 shell command…
+  ⎿  $ herdr pane read "$HERDR_PANE_ID" --lines 40 > "$TEMP/fx/one.raw"; grep -n "bypass" "$TEMP/fx/one.raw"; date -u +%FT%TZ
+
+* Architecting… (4m 29s · ↓ 32.3k tokens)
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚡ Sonnet 5.5 │ 🌿 fix/lane-wait-claude-background-live ●1 ✎1 ?4 │ workit-wt-fix-lane-wait-claude-background-live │ ▓▓░░░░░░░░ 17% │ $2.05 │ +237 -7
+  ⏵⏵ bypass permissions on · 1 shell · ← for agents

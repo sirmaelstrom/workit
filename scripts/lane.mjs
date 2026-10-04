@@ -57,8 +57,10 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Naming any state adds blocked; a bare wait forwards none (herdr's
            default already matches idle|done|blocked). A codex lane's idle/done
            must hold on a second poll 3 s later. A turn that ended on codex's
-           "Selected model is at capacity" banner exits 8 (retryable). stdout
-           is the verdict alone; the row counts pollCount and pollTimeouts.
+           "Selected model is at capacity" banner exits 8 (retryable). A Claude
+           lane whose status bar still shows background work ("· 1 shell ·") is
+           not settled: at the deadline it exits 4 as settled-background-live.
+           stdout is the verdict alone; the row counts pollCount and pollTimeouts.
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
            | --expect-report <path>
            --expect-report and --expect-pr (on the PR body) require ## Debrief with
@@ -137,6 +139,18 @@ const FOLDER_TRUST_BLOCK_LINES = 12;
 // statusline. Claude Code draws it last, so a mode line anywhere else is an
 // older frame with something newer under it. The other shapes are LIVE_TUI's.
 const CLAUDE_MODE_LINE = /←\s*for agents|shift\+tab to cycle|⏵⏵/i;
+// A Claude lane that ends its turn with its own background shell or Monitor
+// still running is herdr-settled, but the real hand-back comes later, when the
+// monitor wakes it. Claude Code 2.1.289 says so in the mode line below the
+// composer: `⏵⏵ bypass permissions on · 1 shell, 1 monitor · ← for agents`.
+// The segment sits within the first two non-blank lines below the composer's
+// bottom rule (a configured statusline, then the mode line); a subagent panel
+// draws further down, so counting from the rule, not from the pane's end, keeps
+// the match. Three lines leave one for a wrapped mode line.
+const CLAUDE_COMPOSER_RULE = /^\s*─{8,}\s*$/;
+const CLAUDE_STATUS_LINES = 3;
+const CLAUDE_BACKGROUND_KIND = String.raw`\d+\s+(?:shell|monitor)s?`;
+const CLAUDE_BACKGROUND_SEGMENT = new RegExp(String.raw`·\s+(${CLAUDE_BACKGROUND_KIND}(?:,\s+${CLAUDE_BACKGROUND_KIND})*)\s+(?:·|$)`);
 const FOLDER_TRUST_TIMEOUT_MS = 15_000;
 // The sweep delegate's location is resolved, never hardcoded: this file ships in
 // a public repo, and one operator's drive layout is not a default. Order:
@@ -1511,7 +1525,7 @@ async function waitLane(opts, deps, state) {
 
     // The read feeds plan metering and the dialog text only. A transient read
     // failure must not end a wait that herdr is still answering.
-    const plan = readPlanState(deps, opts.name, lane.kind);
+    const plan = readPlanState(deps, opts.name, lane.kind, statusFramePrompt(opts, deps, lane));
     if (plan.ok) {
       meter = plan.meter;
       dialog = plan.dialog;
@@ -1544,7 +1558,10 @@ async function waitLane(opts, deps, state) {
     // conductor waits again rather than reading a mid-turn lane as finished.
     // The interval runs from the first settled reading: a second reading taken
     // sooner, because the deadline cut the sleep short, confirms nothing.
-    const settled = waited.code === 0 && ['idle', 'done'].includes(stateAfter);
+    // A herdr-settled Claude lane whose status bar still shows background work
+    // has not handed back: keep polling, and at the deadline say why.
+    const hold = waited.code === 0 && ['idle', 'done'].includes(stateAfter) ? settleHold(plan, lane.kind) : null;
+    const settled = waited.code === 0 && ['idle', 'done'].includes(stateAfter) && !hold;
     if (!settled) unconfirmedAt = null;
     else if (unconfirmedAt === null) unconfirmedAt = observedAt;
     const confirmed = settled && (lane.kind !== 'codex' || observedAt - unconfirmedAt >= SETTLE_CONFIRM_MS);
@@ -1579,10 +1596,11 @@ async function waitLane(opts, deps, state) {
       });
     }
     if (deps.now() >= deadline) {
+      const { state: holdState = 'timeout', ...held } = hold ?? {};
       return settle({
         exit: EXIT.TIMEOUT,
-        output: { state: 'timeout', ...warning },
-        row: { ...laneInstrumentation(opts.name, lane, 'timeout'), ...meter, ...warning },
+        output: { state: holdState, ...held, ...warning },
+        row: { ...laneInstrumentation(opts.name, lane, holdState), ...meter, ...held, ...warning },
       });
     }
     // One poll per second, not per 100ms: each poll spawns two herdr processes,
@@ -1895,7 +1913,7 @@ async function resumeLane(opts, deps, state) {
   // The same pane scrape `wait` runs: the plan meter and the captured refusal
   // belong to the lane, not to the verb that happened to look. C11(a) again —
   // herdr reports `idle` while that modal is up, so this outranks the state.
-  const plan = readPlanState(deps, opts.name, lane.kind);
+  const plan = readPlanState(deps, opts.name, lane.kind, statusFramePrompt(opts, deps, lane));
   const meter = plan.meter ?? { plan5h: null, planWeekly: null };
   const warning = planMeterWarning(meter, lane.kind);
   const modalEligible = plan.refusalShape === 'modal'
@@ -1914,6 +1932,16 @@ async function resumeLane(opts, deps, state) {
       exit: EXIT.BLOCKED,
       output: { state: 'blocked', dialog: plan.dialog, ...warning },
       row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter, ...warning },
+    };
+  }
+  // One settled reading, not a poll loop: a lane that settled with background
+  // work live is a timeout the conductor answers with `lane wait`.
+  const { state: holdState = null, ...held } = settleHold(plan, lane.kind) ?? {};
+  if (holdState) {
+    return {
+      exit: EXIT.TIMEOUT,
+      output: { state: holdState, ...held, ...warning },
+      row: { ...laneInstrumentation(opts.name, lane, holdState), ...meter, ...held, ...warning },
     };
   }
   return {
@@ -2457,11 +2485,30 @@ function isTimeoutFailure(result) {
   return code === 'timeout' || code === 'agent_prompt_stalled';
 }
 
+// What the status-frame check treats as this pane's own shell prompt, in
+// promptPatterns' order: a declared regex (flag, then LANE_PROMPT_REGEX)
+// replaces the default shapes, and the lane's recorded signature always counts.
+// Unlike promptPatterns, a declared regex that cannot compile falls back to the
+// default shapes: this check must give `wait` no new way to fail (the flag is
+// already refused at parse time for every verb).
+function statusFramePrompt(opts, deps, lane) {
+  let patterns = DEFAULT_PROMPT_PATTERNS;
+  const declared = opts.promptRegex ?? deps.env.LANE_PROMPT_REGEX ?? null;
+  if (declared) {
+    try {
+      patterns = [new RegExp(declared)];
+    } catch {
+      // keep the default shapes
+    }
+  }
+  return { signature: lane.promptSignature ?? null, patterns };
+}
+
 // One pane read, shared by `wait` and `resume`: the plan meter and the captured
 // refusal are properties of the lane, not of the verb that happened to look.
-function readPlanState(deps, name, kind) {
+function readPlanState(deps, name, kind, prompt = {}) {
   const read = call(deps, 'herdr', ['agent', 'read', name, '--lines', '40']);
-  if (read.code !== 0) return { ok: false, meter: null, refusal: null, refusalShape: null, dialog: '' };
+  if (read.code !== 0) return { ok: false, meter: null, refusal: null, refusalShape: null, background: null, dialog: '' };
   // The meter footer, the refusal banner and modal, and the capacity banner
   // are all codex TUI text. A claude lane draws none of them, so any of it in
   // its pane is its own output (measured: a lane editing lane.test.mjs
@@ -2474,6 +2521,7 @@ function readPlanState(deps, name, kind) {
       refusal: null,
       refusalShape: null,
       capacity: null,
+      background: claudeBackgroundWork(read.stdout, prompt),
       dialog: responseText(read.stdout),
     };
   }
@@ -2484,8 +2532,41 @@ function readPlanState(deps, name, kind) {
     refusal: refusal?.line ?? null,
     refusalShape: refusal?.shape ?? null,
     capacity: capacityBanner(read.stdout),
+    background: null,
     dialog: responseText(read.stdout),
   };
+}
+
+// The status-bar segment text (`1 shell, 1 monitor`) when the pane's composer
+// is followed by a mode line naming live background work, else null. The
+// composer is the last rule line followed by a `❯` line, and its bottom rule
+// the next rule: rules drawn further down (a survey box) are not it, and the
+// segment is read only in the lines under that bottom rule, so a lane's own
+// transcript quoting the text above the composer is not evidence. A frame is
+// dead, and reads null, when Claude's exit footer is under it or when the pane's
+// last line is the shell's own prompt (the lane's recorded signature, else a
+// default prompt shape): Claude was killed and the shell redrew beneath it. A
+// prompt that is neither (a multi-line prompt, no signature captured) leaves the
+// old frame reading live, which costs a timeout, never a false settle.
+export function claudeBackgroundWork(text, { signature = null, patterns = DEFAULT_PROMPT_PATTERNS } = {}) {
+  const lines = responseText(text).split(/\r?\n/).filter((line) => line.trim() !== '');
+  const top = lines.findLastIndex((line, index) => CLAUDE_COMPOSER_RULE.test(line) && lines[index + 1]?.startsWith('❯'));
+  const bottom = top < 0 ? -1 : lines.findIndex((line, index) => index > top + 1 && CLAUDE_COMPOSER_RULE.test(line));
+  const last = lines.at(-1)?.trim() ?? '';
+  const atShellPrompt = (signature && last === String(signature).trim()) || patterns.some((pattern) => pattern.test(last));
+  if (bottom < 0 || atShellPrompt || lines.slice(bottom + 1).some((line) => line.trim() === CLAUDE_RESUME_HINT)) return null;
+  const segment = CLAUDE_BACKGROUND_SEGMENT.exec(lines.slice(bottom + 1, bottom + 1 + CLAUDE_STATUS_LINES).join(' '));
+  return segment ? segment[1].replace(/\s+/g, ' ') : null;
+}
+
+// What keeps a herdr-settled non-codex lane from settling: live background work
+// in its status bar, or a pane that could not be read (an unread pane must not
+// make a live segment look absent). Both end at the deadline as exit 4.
+function settleHold(plan, kind) {
+  if (readsCodexTui(kind)) return null;
+  if (!plan.ok) return { state: 'timeout', paneUnread: true };
+  if (plan.background) return { state: 'settled-background-live', background: plan.background };
+  return null;
 }
 
 export function capacityBanner(text) {
