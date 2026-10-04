@@ -87,7 +87,7 @@ Try these first. A blocked touch is for what they can't settle.
 
 ## Self-hosted runs
 
-When the target repo is the plugin running this skill, lanes never invoke `/conduct`: a lane building the skill tests it with fake executors only. The release phase runs the repo's recipe; after the plugin update, re-read the new SKILL.md's close section and use the new script (§ The loop, "A new plugin root").
+When the target repo is the plugin running this skill, lanes never invoke `/conduct`: a lane building the skill tests it with fake executors only. The release phase runs the repo's recipe; after the plugin update, re-read the new SKILL.md and use the new script (§ The loop, "A new plugin root").
 
 ## Refusals
 

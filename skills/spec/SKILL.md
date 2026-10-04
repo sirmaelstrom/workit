@@ -108,7 +108,7 @@ Extract from the intent:
 - **Which project(s)** this touches — check your projects directory for matching repos
 - **Slug** — kebab-case, ≤40 chars
 
-If the project is ambiguous, ask. If the scope is ambiguous, make your best guess and flag it as `[ASSUMPTION: A1]` — the human will correct at the review gate (under a verified `--preapproved` there is no such gate: the flags are listed in the final output instead).
+If the project is ambiguous, ask (with `--workshop`, take it from the current directory and don't ask: § Conductor flags). If the scope is ambiguous, make your best guess and flag it as `[ASSUMPTION: A1]` — the human will correct at the review gate (under a verified `--preapproved` there is no such gate: the flags are listed in the final output instead).
 
 #### 1b. Scaffold Workshop
 
