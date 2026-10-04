@@ -1,0 +1,13 @@
+{
+  "command": [
+    "gh",
+    "api",
+    "--paginate",
+    "repos/sirmaelstrom/workit/actions/workflows",
+    "--jq",
+    ".workflows[]"
+  ],
+  "code": 0,
+  "stdout": "",
+  "stderr": ""
+}

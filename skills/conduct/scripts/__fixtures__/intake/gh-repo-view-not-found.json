@@ -1,0 +1,13 @@
+{
+  "command": [
+    "gh",
+    "repo",
+    "view",
+    "sirmaelstrom/does-not-exist-xyz",
+    "--json",
+    "nameWithOwner"
+  ],
+  "code": 1,
+  "stdout": "",
+  "stderr": "GraphQL: Could not resolve to a Repository with the name 'sirmaelstrom/does-not-exist-xyz'. (repository)\n"
+}
