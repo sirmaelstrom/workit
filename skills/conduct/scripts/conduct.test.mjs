@@ -797,23 +797,20 @@ test('C3: a same-tag answer from another run of the goal is not this run\'s answ
   assert.equal(state.runId, RUN_ID);
 });
 
-test('C5: an answer racing a next is serialized by the state lock, never lost; a dead holder\'s lock is taken over', async (t) => {
+test('C5: an answer racing a record is serialized by the state lock, never lost; a dead holder\'s lock is taken over', async (t) => {
   const f = fixture(t);
   const touch = {
     n: 1, kind: 'blocked', status: 'open', tag: '[conduct seeded touch 1]', wpId: 'WP-01', question: '[conduct seeded touch 1] Q',
     options: [{ key: 'a', label: 'go', consequence: 'go' }], allowFreeText: false, answer: null, file: 'touches/1.md',
   };
-  const runDir = seedRun(f, { touches: [touch] });
+  const pending = { id: '1-gate-cmd', phase: 'build', kind: 'shell', step: 'gate-cmd', command: ['node', '--test'], expects: { type: 'exit0' }, seam: 'merge-gate' };
+  const runDir = seedRun(f, { touches: [touch], pending, seq: 1 });
   const answerArgv = ['answer', '--run', runDir, '--touch', '1', '--key', 'a'];
   let nested;
-  const racer = {
-    next: async () => {
-      nested = await f.run(answerArgv, { stdinIsTTY: true });
-      return { kind: 'shell', step: 'gate-cmd', command: ['node', '--test'], expects: { type: 'exit0' } };
-    },
-    record: () => {},
-  };
-  assert.equal((await f.run(['next', '--run', runDir], { importModule: loaderWith({ 'lib/phases/build.mjs': racer }) })).code, 0);
+  // The operator's answer lands while the agent's record is between its load and its save.
+  const racer = { ...shellHandler({}), record: async () => { nested = await f.run(answerArgv, { stdinIsTTY: true }); } };
+  const recorded = await record(f, runDir, '1-gate-cmd', { code: 0, stdout: '', stderr: '' }, { importModule: loaderWith({ 'lib/phases/build.mjs': racer }) });
+  assert.equal(recorded.code, 0, recorded.stdout);
   assert.equal(nested.code, 2, nested.stdout);
   assert.match(out(nested).error, /locked by pid/);
   assert.equal(readState(runDir).touches[0].status, 'open');
