@@ -4669,6 +4669,14 @@ test('4f55ea42: findCodexRollout takes the earliest TUI rollout for this worktre
   assert.equal(findCodexRollout(deps, lane), own, 'the earliest session since the start is the lane\'s own');
   assert.equal(findCodexRollout(deps, { ...lane, startRequestedAt: '2026-10-04T02:10:00.000Z' }), join(f.dir, 'codex-home', 'sessions', '2026', '10', '04', 'rollout-2026-10-04T01-00-00-later.jsonl'), 'a session begun before the lane start is another lane\'s');
   assert.equal(findCodexRollout(deps, { path: f.dir, promptedAt: '2026-10-04T02:18:04.729Z' }), null, 'no start stamp, no scan');
+
+  // A DST fall-back repeats the local hour: a lane started 01:55 CDT (06:55Z)
+  // files a name that sorts after a later TUI's 01:05 CST (07:05Z).
+  const dst = fixture(t);
+  const dstDeps = { ...deps, env: { CODEX_HOME: join(dst.dir, 'codex-home') }, now: () => Date.parse('2026-11-01T08:00:00Z') };
+  const lane1155 = writeRollout(dst, dst.dir, AE_TURN, 'rollout-2026-11-01T01-55-00-lane.jsonl', ['2026', '11', '01'], { timestamp: '2026-11-01T06:55:00.000Z' });
+  writeRollout(dst, dst.dir, AE_TURN, 'rollout-2026-11-01T01-05-00-later.jsonl', ['2026', '11', '01'], { timestamp: '2026-11-01T07:05:00.000Z' });
+  assert.equal(findCodexRollout(dstDeps, { path: dst.dir, startRequestedAt: '2026-11-01T06:54:30.000Z' }), lane1155, 'ordered by the UTC session stamp, not the local filename');
   const newer = own;
 
   // A last line still being written is skipped, not misread.

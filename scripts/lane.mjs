@@ -2656,7 +2656,7 @@ export function findCodexRollout(deps, lane) {
       continue;
     }
     for (const name of names) {
-      if (!/^rollout-.*\.jsonl$/.test(name) || (best && name >= best.name)) continue;
+      if (!/^rollout-.*\.jsonl$/.test(name)) continue;
       const path = join(dir, name);
       let head;
       try {
@@ -2676,8 +2676,11 @@ export function findCodexRollout(deps, lane) {
         continue;
       }
       if (fold(resolve(cwdValue)) !== want) continue;
-      if (!(Date.parse(stamp[1]) >= sinceMs)) continue;
-      best = { name, path };
+      // Ordered by the session's own UTC stamp: the filename is local time,
+      // which repeats an hour at a DST fall-back.
+      const at = Date.parse(stamp[1]);
+      if (!(at >= sinceMs)) continue;
+      if (!best || at < best.at || (at === best.at && name < best.name)) best = { name, path, at };
     }
   }
   return best?.path ?? null;
