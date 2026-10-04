@@ -1,0 +1,40 @@
+      1601 +        row: { ...laneInstrumentation(opts.name, lane, holdState), ...meter, ...held, ...warning },
+      1602        });
+      1603      }
+      1604      // One poll per second, not per 100ms: each poll spawns two herdr processes,
+
+● Monitor "second fixture monitor (100s)" stream ended
+
+● Update(scripts\lane.mjs)
+  ⎿  Added 10 lines
+      1932        row: { ...laneInstrumentation(opts.name, lane, 'blocked'), ...meter, ...warning },
+      1933      };
+      1934    }
+      1935 +  // One settled reading, not a poll loop: a lane that settled with background
+      1936 +  // work live is a timeout the conductor answers with `lane wait`.
+      1937 +  const { state: holdState = null, ...held } = settleHold(plan, lane.kind) ?? {};
+      1938 +  if (holdState) {
+      1939 +    return {
+      1940 +      exit: EXIT.TIMEOUT,
+      1941 +      output: { state: holdState, ...held, ...warning },
+      1942 +      row: { ...laneInstrumentation(opts.name, lane, holdState), ...meter, ...held, ...warning },
+      1943 +    };
+      1944 +  }
+      1945    return {
+      1946      exit: EXIT.OK,
+      1947      output: { state: statusAfter, notice: 'status is not evidence — run lane check', ...warning },
+
+  Ran 1 shell command
+
+● Agent "Sleep agent one for fixture" finished · 56s
+
+* Architecting… (2m 51s · ↓ 19.8k tokens · thinking with high effort)
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚡ Sonnet 5.5 │ 🌿 fix/lane-wait-claude-background-live ●1 ?1 │ workit-wt-fix-lane-wait-claude-background-live │ ▓▓░░░░░░░░ 15% │ $1.53 │ +99 -4
+  ⏵⏵ bypass permissions on · 3 shells · /tasks to see subagents · ← for agents
+
+  ● main
+  ◯ general-purpose  Sleep agent two for fixture                                                                                                                                                                                         9s · ↓ 44.2k tokens

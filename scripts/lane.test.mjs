@@ -8,7 +8,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
   reportShapeProblems, runLane, scrapePlanMeter,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -4265,4 +4265,139 @@ test('93d4855b: admit is a read-only verdict — exit 0 or 7, drain below 4 GB, 
 
   const named = fixture(t);
   assert.equal((await runLane(['admit', 'lane-a', '--log', named.log], { exec: named.exec, env: {}, platform: 'win32' })).exit, 2);
+});
+
+// --- quest 056de846: a Claude lane that ends its turn with its own background
+// shell or Monitor still running is herdr-settled but has not handed back. The
+// panes are read off a live Claude Code 2.1.289 session (2026-10-04), not typed.
+const fixturePane = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
+const BG_LIVE = fixturePane('claude-statusbar-live-1shell-1monitor.txt');
+const BG_CONTROL = fixturePane('claude-statusbar-control.txt');
+const BG_LIVE_AGENT_PANEL = fixturePane('claude-statusbar-live-agent-panel.txt');
+const BG_LIVE_PLURAL = fixturePane('claude-statusbar-live-plural-4shells-1monitor.txt');
+const BG_LIVE_SHELLS_ONLY = fixturePane('claude-statusbar-live-3shells.txt');
+const BG_SEGMENT = '⏵⏵ bypass permissions on · 1 shell, 1 monitor · ← for agents';
+const paneRead = (stdout) => ({ code: 0, stdout, stderr: '' });
+const pushPolls = (f, pane, count) => {
+  for (let poll = 0; poll < count; poll++) f.responses.push(DONE_POLL, paneRead(pane));
+};
+
+test('056de846: a claude lane herdr-settled with a shell and a monitor live in its status bar is not done', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  pushPolls(f, BG_LIVE, 20);
+  const result = await clockedWait(f, '5000');
+  assert.notEqual(result.exit, 0, JSON.stringify(result.output));
+  assert.notEqual(result.output.state, 'done');
+});
+
+test('056de846: the wait settles done once the status-bar segment is gone', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  pushPolls(f, BG_LIVE, 2);
+  pushPolls(f, BG_CONTROL, 1);
+  const result = await clockedWait(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'done');
+  assert.equal(result.output.background, undefined);
+  assert.equal(result.row.pollCount, 3);
+});
+
+test('056de846: the segment quoted in the transcript above the composer is not evidence', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  const quoted = BG_CONTROL.replace(/^(─{8,})/m, `● The lane said: ${BG_SEGMENT}\n$1`);
+  assert.ok(quoted.includes(BG_SEGMENT), 'the control pane now quotes the segment above its composer');
+  pushPolls(f, quoted, 1);
+  const result = await clockedWait(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(result.output.state, 'done');
+  assert.equal(result.row.pollCount, 1);
+});
+
+test('056de846: a deadline reached with the segment still live is its own timeout state, on stdout and on the row', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  pushPolls(f, BG_LIVE, 20);
+  const result = await clockedWait(f, '3000');
+  assert.equal(result.exit, 4);
+  assert.equal(result.exit, EXIT_CODES.timeout);
+  assert.deepEqual([result.output.state, result.output.background], ['settled-background-live', '1 shell, 1 monitor']);
+  const row = lastRow(f);
+  assert.deepEqual([row.verb, row.state, row.background, row.exit], ['wait', 'settled-background-live', '1 shell, 1 monitor', 4]);
+  // A lane herdr still reports working is the plain timeout it always was.
+  const g = fixture(t);
+  seedLane(g, { kind: 'claude' });
+  for (let poll = 0; poll < 20; poll++) g.responses.push(WORKING_POLL, paneRead(BG_LIVE));
+  const working = await clockedWait(g, '3000');
+  assert.deepEqual([working.exit, working.output.state, working.output.background], [4, 'timeout', undefined]);
+});
+
+test('056de846: a codex lane whose pane carries the same text keeps its settle-confirmation path', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  f.responses.push(DONE_POLL, paneRead(BG_LIVE), DONE_POLL, paneRead(BG_LIVE));
+  const result = await clockedWait(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual([result.output.state, result.output.background, result.row.pollCount, result.row.settleConfirmed], ['done', undefined, 2, true]);
+});
+
+test('056de846: a lane of unknown kind is held like a claude lane — its pane may be one', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: undefined });
+  pushPolls(f, BG_LIVE, 20);
+  const result = await clockedWait(f, '3000');
+  assert.deepEqual([result.exit, result.output.state], [4, 'settled-background-live']);
+});
+
+test('056de846: an unreadable pane never settles a claude lane — it is waited on, then a timeout naming the read', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  const unreadable = { code: 1, stdout: '', stderr: 'read failed' };
+  for (let poll = 0; poll < 20; poll++) f.responses.push(DONE_POLL, unreadable);
+  const stuck = await clockedWait(f, '3000');
+  assert.deepEqual([stuck.exit, stuck.output.state, stuck.output.paneUnread], [4, 'timeout', true]);
+  // The wait is not wedged: the next readable pane settles it.
+  const g = fixture(t);
+  seedLane(g, { kind: 'claude' });
+  g.responses.push(DONE_POLL, unreadable);
+  pushPolls(g, BG_CONTROL, 1);
+  const recovered = await clockedWait(g);
+  assert.deepEqual([recovered.exit, recovered.output.state, recovered.row.pollCount], [0, 'done', 2]);
+});
+
+test('056de846: resume is held by a live segment and settles when it is absent', async (t) => {
+  const settledIdle = { code: 0, stdout: '{"result":{"state":"idle"}}', stderr: '' };
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude' });
+  f.responses.push(settledIdle, paneRead(BG_LIVE));
+  const held = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec });
+  assert.deepEqual([held.exit, held.output.state, held.output.background], [4, 'settled-background-live', '1 shell, 1 monitor']);
+  assert.equal(lastRow(f).state, 'settled-background-live');
+  const g = fixture(t);
+  seedLane(g, { kind: 'claude' });
+  g.responses.push(settledIdle, paneRead(BG_CONTROL));
+  assert.equal((await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', g.log], { exec: g.exec })).exit, 0);
+});
+
+test('056de846: claudeBackgroundWork reads the status bar only — every variant seen live, and what it must not match', () => {
+  assert.equal(claudeBackgroundWork(BG_LIVE), '1 shell, 1 monitor');
+  assert.equal(claudeBackgroundWork(BG_LIVE_PLURAL), '4 shells, 1 monitor');
+  assert.equal(claudeBackgroundWork(BG_LIVE_SHELLS_ONLY), '3 shells');
+  assert.equal(claudeBackgroundWork(fixturePane('claude-statusbar-live-1shell.txt')), '1 shell');
+  assert.equal(claudeBackgroundWork(BG_LIVE_AGENT_PANEL), '4 shells, 2 monitors', 'a subagent panel draws below the mode line');
+  assert.equal(claudeBackgroundWork(BG_CONTROL), null);
+  const livePane = BG_LIVE.trimEnd();
+  // Not measured live: a feedback survey and a wrapped mode line are shaped here.
+  const survey = ['', '────────────────────────────────────────', '  How is Claude doing this session? (optional)', '  1: Bad    2: Fine   3: Good   0: Dismiss'].join('\n');
+  assert.equal(claudeBackgroundWork(`${livePane}${survey}`), '1 shell, 1 monitor', 'a rule drawn under the status bar is not the composer');
+  assert.equal(claudeBackgroundWork(livePane.replace('1 shell, 1 monitor', '1 shell,\n  1 monitor')), '1 shell, 1 monitor', 'a wrap at the space still reads');
+  const quoted = `${BG_SEGMENT}\n● Bash(node --test)\n${BG_CONTROL}`;
+  assert.equal(claudeBackgroundWork(quoted), null, 'text above the composer is transcript');
+  const exited = `${livePane}\n\nResume this session with:\nclaude --resume 37680e5b-7c3f-4647-b516-40184218248b\nPS X:\\fixture\\lane>`;
+  assert.equal(claudeBackgroundWork(exited), null, 'a frame left in scrollback under Claude\'s exit footer is dead');
+  const barePane = ['● Ran node --test', `  ${BG_SEGMENT}`, 'PS X:\\fixture\\lane>'].join('\n');
+  assert.equal(claudeBackgroundWork(barePane), null, 'no composer, no status bar');
+  const deep = livePane.replace(BG_SEGMENT, ['  line one', '  line two', '  line three', `  ${BG_SEGMENT}`].join('\n'));
+  assert.equal(claudeBackgroundWork(deep), null, 'the limit: the segment past the first three lines below the composer is not read');
 });

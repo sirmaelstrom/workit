@@ -1,0 +1,40 @@
+      2518 +
+      2519 +// What keeps a herdr-settled non-codex lane from settling: live background work
+      2520 +// in its status bar, or a pane that could not be read (an unread pane must not
+      2521 +// make a live segment look absent). Both end at the deadline as exit 4.
+      2522 +function settleHold(plan, kind) {
+      2523 +  if (readsCodexTui(kind)) return null;
+      2524 +  if (!plan.ok) return { state: 'timeout', paneUnread: true };
+      2525 +  if (plan.background) return { state: 'settled-background-live', background: plan.background };
+      2526 +  return null;
+      2527 +}
+      2528 +
+      2529  export function capacityBanner(text) {
+      2530    const lines = responseText(text).split(/\r?\n/).filter((line) => line.trim() !== '');
+      2531    const liveFooter = LIVE_TUI.some((pattern) => lines.slice(-2).some((line) => pattern.test(line)));
+
+● Update(scripts\lane.mjs)
+  ⎿  Added 4 lines, removed 1 line
+      1556      // conductor waits again rather than reading a mid-turn lane as finished.
+      1557      // The interval runs from the first settled reading: a second reading taken
+      1558      // sooner, because the deadline cut the sleep short, confirms nothing.
+      1559 -    const settled = waited.code === 0 && ['idle', 'done'].includes(stateAfter);
+      1559 +    // A herdr-settled Claude lane whose status bar still shows background work
+      1560 +    // has not handed back: keep polling, and at the deadline say why.
+      1561 +    const hold = waited.code === 0 && ['idle', 'done'].includes(stateAfter) ? settleHold(plan, lane.kind) : null;
+      1562 +    const settled = waited.code === 0 && ['idle', 'done'].includes(stateAfter) && !hold;
+      1563      if (!settled) unconfirmedAt = null;
+      1564      else if (unconfirmedAt === null) unconfirmedAt = observedAt;
+      1565      const confirmed = settled && (lane.kind !== 'codex' || observedAt - unconfirmedAt >= SETTLE_CONFIRM_MS);
+
+✢ Architecting… (2m 41s · ↓ 18.2k tokens)
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚡ Sonnet 5.5 │ 🌿 fix/lane-wait-claude-background-live ●1 ?1 │ workit-wt-fix-lane-wait-claude-background-live │ ▓▓░░░░░░░░ 15% │ $1.43 │ +86 -2
+  ⏵⏵ bypass permissions on · 4 shells, 1 monitor · /tasks to see subagents · ← for agents
+
+  ● main
+  ◯ general-purpose  Sleep agent one for fixture                                                                                                                                                                                        54s · ↓ 43.9k tokens
+  ◯ general-purpose  Sleep agent two for fixture                                                                                                                                                                                         9s · ↓ 44.2k tokens
