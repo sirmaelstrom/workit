@@ -70,8 +70,13 @@ export function selfHosted({ repoRemote, pluginRoot, read }) {
   return plugin !== null && plugin === String(repoRemote).toLowerCase();
 }
 
-// The highest-version installPath recorded for the plugin key, or null.
-export function resolvePluginRoot({ installedPluginsPath, pluginKey = 'workit@workit', read, env = {}, platform = process.platform }) {
+// The installPath the session uses for the plugin key, or null: among the
+// user-scope entries and the project/local entries of `projectPath`, the most
+// specific scope wins (local > project > user), then the highest version.
+const SCOPE_RANK = { local: 3, project: 2, user: 1 };
+const samePath = (a, b) => norm(a) === norm(b);
+const norm = (path) => String(path ?? '').replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
+export function resolvePluginRoot({ installedPluginsPath, pluginKey = 'workit@workit', projectPath = null, read, env = {}, platform = process.platform }) {
   let path = installedPluginsPath;
   if (!path) {
     const home = platform === 'win32' ? env.USERPROFILE : env.HOME;
@@ -84,7 +89,8 @@ export function resolvePluginRoot({ installedPluginsPath, pluginKey = 'workit@wo
   } catch (error) {
     throw new ConductError(2, `${path} cannot be read: ${error.message}`);
   }
-  const best = [...entries].sort((a, b) => compareVersions(b.version, a.version))[0];
+  const applies = (entry) => entry.scope === 'user' || (SCOPE_RANK[entry.scope] && projectPath && samePath(entry.projectPath, projectPath));
+  const best = entries.filter(applies).sort((a, b) => (SCOPE_RANK[b.scope] - SCOPE_RANK[a.scope]) || compareVersions(b.version, a.version))[0];
   return best?.installPath ?? null;
 }
 

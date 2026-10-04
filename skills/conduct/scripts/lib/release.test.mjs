@@ -67,6 +67,14 @@ test('resolvePluginRoot: the highest-version installPath; the default path comes
   assert.equal(resolvePluginRoot({ installedPluginsPath: '/after.json', pluginKey: 'other@x', read }), null);
 });
 
+test('C1-14 resolvePluginRoot respects scope: another project\'s install never wins; this project\'s does', () => {
+  const entry = (scope, version, projectPath) => ({ scope, version, installPath: `<home>/cache/workit/${version}`, ...(projectPath ? { projectPath } : {}) });
+  const table = JSON.stringify({ version: 2, plugins: { 'workit@workit': [entry('user', '1.27.17'), entry('project', '1.28.0', '/other/repo'), entry('project', '1.27.16', '/this/repo')] } });
+  const read = files({ '/p.json': table });
+  assert.equal(resolvePluginRoot({ installedPluginsPath: '/p.json', read }), '<home>/cache/workit/1.27.17');
+  assert.equal(resolvePluginRoot({ installedPluginsPath: '/p.json', projectPath: '/this/repo/', read }), '<home>/cache/workit/1.27.16');
+});
+
 const wp = (state) => ({ id: 'WP', state });
 const run = (over = {}) => ({ intent: { release: CONFIG.release }, authority: { release: true }, wps: [wp('merged'), wp('merged')], ...over });
 

@@ -15,5 +15,12 @@
     "scripts/run-log.mjs",
     "skills/slim-review/scripts/pr-review.mjs"
   ],
+  "trivialExclude": [
+    "skills/**/SKILL.md",
+    "reference/templates/**",
+    "agents/**",
+    "commands/**",
+    ".claude-plugin/**"
+  ],
   "laneSuite": "Zero dependencies and a short suite: run the full node --test before the PR boundary; the conductor runs it once more at the candidate head."
 }
