@@ -62,6 +62,22 @@ For deep specs, parse the `--review` flag. If not specified, auto-select:
 
 **Lite specs** default to self-review only. Pass `--review=full` to *additionally* run the Phase 8 council against the single `spec.md` (see *Council Review* in the Spec Lite section) — worth it when the change is well-understood but you still want a diverse-model pass on a decision gate. `--review=light`/`none` are no-ops on lite; self-review is already its floor.
 
+### Conductor flags
+
+`/conduct` invokes this skill with two more flags. Neither changes what the pipeline produces; they say where it writes and whether the operator has already answered the review gate.
+
+- **`--workshop <abs>`** — an absolute path. Phase 1b (deep) and Setup step 2 (lite) create the workshop at that path instead of deriving `{workspace}/data/outputs/workshops/{slug}`; the slug is the path's basename. Wherever this skill says `{workshop_path}` or `{spec-dir}`, it means this path.
+- **`--preapproved "<ref>"`** — the operator's approval, given earlier and recorded, covers this spec's review gate. `<ref>` is quoted because it holds spaces. It is one of: `spine:<anchor uuid>@<answeredAt> by <answer.by>` (a Spine receipt answer), `core:<run>/touches/1.json` (a core touch record), or `core:<run>/touches/<n>-authority.json` (an approval with a narrowed grant, checked by the conductor: read its `scope` and keep the spec inside it; the goal text stays verbatim). A value that is empty, or begins with neither `spine:` nor `core:`, is ignored: the gate stops as it would without the flag.
+
+With `--preapproved`:
+- **Deep, Phase 4:** still write and render `review-gate.json`, set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Phase 6 without stopping at `**STOP HERE.**`.
+- **Lite, Present for Review:** print the summary, record the same `gate`, and continue to Final Output without waiting.
+- **`--review=none`:** crosses Phase 4 and Present for Review the same way, records the same `gate`, and skips only the `review-gate.json` emission, as it already does without the flag.
+- **Council unavailable:** the Phase 8 and lite council branches continue on the self-review floor and record `"council": "unavailable"` in `meta.json`; they do not stop.
+- The flag skips no review wave: the fresh-eyes loop, the council and the final wave still run at whatever `--review` level applies. It only answers the gate that waits for a person.
+
+Without these flags, every gate and stop in this skill is unchanged.
+
 ---
 
 ## Spec Deep (`--depth=deep`)
@@ -81,7 +97,7 @@ If the project is ambiguous, ask. If the scope is ambiguous, make your best gues
 
 #### 1b. Scaffold Workshop
 
-Create `{workspace}/data/outputs/workshops/{slug}/` (under the workspace root's data-outputs tree, never a cwd-relative `./outputs/`) with `meta.json`:
+Create `{workspace}/data/outputs/workshops/{slug}/` (under the workspace root's data-outputs tree, never a cwd-relative `./outputs/`) with `meta.json`. With `--workshop <abs>` (§ Conductor flags), create that path instead and take the slug from its basename:
 ```json
 {
   "title": "{title}",
@@ -97,7 +113,7 @@ Create `{workspace}/data/outputs/workshops/{slug}/` (under the workspace root's 
 
 #### 1c. Explore Codebase
 
-Before writing anything, ground yourself in the actual code. Use the Agent tool to launch an Explore agent:
+Before writing anything, ground yourself in the actual code. Use the Agent tool to launch an Explore agent when available; with no Explore agent, read the target's tree with your own tools. Either way, find:
 
 - Directory structure of the target project
 - Key entry points, config files, package.json/cargo.toml etc.
@@ -114,7 +130,7 @@ Read CORRECTIONS.md
 ```
 A corrections file captures cross-project lessons from past failures — every entry was learned the hard way. Internalize the relevant entries and inject them as constraints or must-nots in Stage 4. Skip this step if your project has no such file.
 
-Then search the KB for prior work on this topic:
+Then search the KB for prior work on this topic, when available (with no KB tool, skip this and say so):
 ```
 kb_search("relevant terms from the intent")
 ```
@@ -257,7 +273,9 @@ The renderer:
 
 After the renderer succeeds, point the operator at `review-gate.html` (one line — do not paste the chat-side markdown summary into the response that already shows it). The HTML and the chat-side markdown are redundant; the HTML is the recommended triage surface, the chat-side markdown is the fallback for environments without an open browser.
 
-**STOP HERE.** Wait for human input. Do not proceed to decomposition without explicit approval.
+**With `--preapproved "<ref>"` (§ Conductor flags):** the gate is already answered. Set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Phase 6 without stopping. The `review-gate.json` above is still written and rendered, except under `--review=none`, which skips it as before.
+
+**Without `--preapproved`: STOP HERE.** Wait for human input. Do not proceed to decomposition without explicit approval.
 
 ### Phase 5: Revision (if needed)
 
@@ -284,7 +302,10 @@ After approval, run stages 5-6:
 - Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/work-package.md`
 - Output: `work-packages/wp-{NN}-{slug}.md` for each package + `work-packages/_orchestrator.md`
 - Use the `_orchestrator.template.md` template from `${CLAUDE_PLUGIN_ROOT}/reference/templates/`
-- All 6 required fields per WP (precondition, goal, files, verification, failure criteria, boundary)
+- Required fields per WP: the 6 core ones (precondition, goal, files, verification, failure criteria, boundary) plus three that `/conduct`'s scheduler reads. `spec-validate` rejects a WP missing any of them; the rule and each field's form live in `${CLAUDE_PLUGIN_ROOT}/reference/patterns/work-package.md`:
+  - **Files** as bullets that begin `- Create ` or `- Modify ` with the path as the first backticked token (a WP with no such bullet parses to an empty file set and runs alone).
+  - `**Review tier:** T0|T1|T2`.
+  - `**Runtime exercise:**` — the surface and the check, or `none: <why>`.
 - Tag each WP: `execution: autonomous` or `execution: review-needed` (HITL flag)
 - Dependency order (which WPs must complete before others can start)
 - Spec-level constraints in orchestrator (from constraints.md)
@@ -358,7 +379,7 @@ The `spec` profile is **config-owned** — its membership lives in `models.json`
 
 The tool returns a JSON summary with each model's status and lens filename; the files land in `{workshop_path}/reviews/review-1/` (one `review-lens-{model}.md` per lens). Read those in 8b.
 
-> **If the council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): the self-review floor from Phase 7 is your ship gate — note the gap explicitly in the Phase-9 summary and let the operator decide whether to proceed or defer. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, self-review is the floor.)
+> **If the council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): the self-review floor from Phase 7 is your ship gate — note the gap explicitly in the Phase-9 summary and let the operator decide whether to proceed or defer. **With `--preapproved`:** don't stop to let the operator decide — continue on the self-review floor and record `"council": "unavailable"` in `meta.json`. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, self-review is the floor.)
 
 If the **council** call fails, retry it once; if it still fails, see the unavailability note above — fall back to the self-review floor and record the gap.
 
@@ -420,10 +441,10 @@ A compressed specification for well-understood changes. Produces a single `spec.
 ### Setup
 
 1. **Parse intent** — extract what, which project, slug (same as deep spec Phase 1a)
-2. **Scaffold workshop** — create directory + `meta.json` with status `"captured"`. Mark cost tracking: `node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase lite --event start`
+2. **Scaffold workshop** — create directory (at `--workshop <abs>` when given, § Conductor flags) + `meta.json` with status `"captured"`. Mark cost tracking: `node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase lite --event start`
 3. **Quick explore** — read key files likely affected. ≤5 files, no Explore agent. If you're reaching for a wider survey, the depth was wrong — upgrade to deep.
 4. **Read CORRECTIONS.md** — non-negotiable regardless of depth
-5. **KB search** — one `kb_search` query for prior work on this topic
+5. **KB search** — one `kb_search` query for prior work on this topic, when available (with no KB tool, skip and say so)
 
 ### Write spec.md
 
@@ -453,11 +474,13 @@ By default lite stops at self-review. If the operator passed `--review=full`, ru
 
 - One `council_review` MCP call with `surface: "spec"`, `profile: "spec"` (the same config-owned roster as Phase 8a — Anthropic lenses via `claude -p` + external lenses; never pass an explicit `models:` list). The collector inlines the root `spec.md` as the artifacts block (`collectSpecFiles` fallback, verified 2026-07-06), so every lens reviews the real content instead of an empty block that makes gemini hallucinate.
 
-Synthesize as in Phase 8b — convergence across vendor families is high-confidence, weight codex, dedupe, apply Critical/Major — then re-run the self-review scan to confirm the amendments introduced nothing new. If the council MCP is unavailable, note the gap and fall back to the self-review floor.
+Synthesize as in Phase 8b — convergence across vendor families is high-confidence, weight codex, dedupe, apply Critical/Major — then re-run the self-review scan to confirm the amendments introduced nothing new. If the council MCP is unavailable, note the gap and fall back to the self-review floor. With `--preapproved`, also record `"council": "unavailable"` in `meta.json`.
 
 ### Present for Review
 
 Show a brief summary with flagged items. Wait for approval. Apply revisions if needed.
+
+**With `--preapproved "<ref>"` (§ Conductor flags):** print the summary, set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Final Output without waiting.
 
 ### Final Output
 

@@ -355,8 +355,9 @@ const COV_CONSTRAINTS = [
   '- **E1 — stop and ask.**', '',
 ].join('\n');
 
-// A complete WP — all six required fields — so the coverage assertion is not
-// masked by an unrelated work-package error. The tags under test live in the
+// A complete WP — the six core fields plus the three /conduct reads (Review tier,
+// Runtime exercise, a Create/Modify Files bullet) — so the coverage assertion is
+// not masked by an unrelated work-package error. The tags under test live in the
 // Boundary, which is the point: execution-hygiene rules belong there.
 const COV_WP = [
   '# WP-01: the only package', '',
@@ -366,7 +367,82 @@ const COV_WP = [
   '**Verification:** `npm test` exits 0.', '',
   '**Failure Criteria:** If the test hangs, the loop has no exit path.', '',
   '**Boundary:** Do not do the other thing (MN1). Escalate per E1.', '',
+  '**Review tier:** T1', '',
+  '**Runtime exercise:** none: no runtime behavior changes.', '',
 ].join('\n');
+
+// --- the WP fields /conduct reads (D19.25) -----------------------------------
+//
+// Review tier, Runtime exercise and a Create/Modify Files bullet are required of
+// every deep WP: the conductor's scheduler parses them, and a WP without them
+// parses to an empty file set and a silent T1. Each case swaps one piece of the
+// complete COV_WP and asserts exit 1 naming the field.
+
+function validateWp(wp) {
+  return runValidator(makeCoverageWorkshop({ wp }), { env: NO_ROOT });
+}
+
+test('conductor fields: a WP with all three passes and the pass line counts 9 fields', () => {
+  const { status, out } = validateWp(COV_WP);
+  assert.equal(status, 0, `a complete WP must validate, got:\n${out}`);
+  assert.match(out, /all 9 required fields present/);
+});
+
+test('conductor fields: a missing **Review tier:** is an error naming the field', () => {
+  const { status, out } = validateWp(COV_WP.replace('**Review tier:** T1\n\n', ''));
+  assert.equal(status, 1);
+  assert.match(out, /Missing \*\*Review tier:\*\* field/);
+  assert.doesNotMatch(out, /all \d+ required fields present/);
+});
+
+test('conductor fields: a tier outside T0|T1|T2 is an error naming the value', () => {
+  for (const bad of ['T3', 'high', 'T']) {
+    const { status, out } = validateWp(COV_WP.replace('**Review tier:** T1', `**Review tier:** ${bad}`));
+    assert.equal(status, 1, `tier "${bad}" must be refused`);
+    assert.match(out, new RegExp(`Review tier:\\*\\* value "${bad}" is not T0, T1 or T2`));
+  }
+});
+
+test('conductor fields: each tier T0, T1 and T2 is accepted, with or without trailing text', () => {
+  for (const good of ['T0', 'T1', 'T2 (adds tests that pin the contract)']) {
+    const { status, out } = validateWp(COV_WP.replace('**Review tier:** T1', `**Review tier:** ${good}`));
+    assert.equal(status, 0, `tier "${good}" must be accepted, got:\n${out}`);
+  }
+});
+
+test('conductor fields: **Review tier:** may share the Execution line', () => {
+  const shared = COV_WP.replace('**Review tier:** T1\n\n', '')
+    .replace('**Precondition:**', '**Execution:** review-needed · **Review tier:** T2 (adds tests) · **Lane model:** Sonnet\n\n**Precondition:**');
+  const { status, out } = validateWp(shared);
+  assert.equal(status, 0, `a tier mid-line must be read, got:\n${out}`);
+});
+
+test('conductor fields: a missing or empty **Runtime exercise:** is an error naming the field', () => {
+  const gone = validateWp(COV_WP.replace(/\*\*Runtime exercise:\*\*.*\n?/, ''));
+  assert.equal(gone.status, 1);
+  assert.match(gone.out, /Missing or empty \*\*Runtime exercise:\*\* field/);
+  const empty = validateWp(COV_WP.replace('**Runtime exercise:** none: no runtime behavior changes.', '**Runtime exercise:**'));
+  assert.equal(empty.status, 1, 'a label with no text is not a runtime exercise');
+  assert.match(empty.out, /Missing or empty \*\*Runtime exercise:\*\* field/);
+});
+
+test('conductor fields: a Runtime exercise whose text continues on the next lines counts', () => {
+  const wrapped = COV_WP.replace('**Runtime exercise:** none: no runtime behavior changes.', '**Runtime exercise:**\nnone: no runtime behavior changes.');
+  assert.equal(validateWp(wrapped).status, 0);
+});
+
+test('conductor fields: a Files field with only prose bullets is an error naming Files', () => {
+  const { status, out } = validateWp(COV_WP.replace('- Modify `src/thing.ts`.', '- the thing module, `src/thing.ts`\n- some tests'));
+  assert.equal(status, 1);
+  assert.match(out, /\*\*Files:\*\* has no bullet beginning "- Create " or "- Modify "/);
+});
+
+test('conductor fields: a Create/Modify bullet after the next field label is not a Files bullet', () => {
+  const stray = COV_WP.replace('- Modify `src/thing.ts`.', '- prose only').replace('**Boundary:** ', '**Boundary:**\n- Modify `src/elsewhere.ts` is out of scope. ');
+  const { status, out } = validateWp(stray);
+  assert.equal(status, 1, 'the Files list ends at the next **<Field>:** label, so a later bullet does not count');
+  assert.match(out, /\*\*Files:\*\* has no bullet/);
+});
 
 test('constraint coverage: a declared tag referenced nowhere is named in the warning', () => {
   const workshop = makeCoverageWorkshop({

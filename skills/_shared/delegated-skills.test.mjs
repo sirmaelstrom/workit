@@ -25,10 +25,16 @@ const SKILLS_DIR = join(PLUGIN_ROOT, 'skills');
 // scheduler -> the delegates it names in prose.
 // chart: the § Delegation table (`task` resolves by direct execution and
 // delegates to no skill, so it has no entry). burn-down: the per-item loop hands
-// claim/closeout to pickup, and mid-item exits to handoff.
+// claim/closeout to pickup, and mid-item exits to handoff. conduct: § What it
+// reuses names spec (the spec and WPs), pickup (the claim discipline),
+// slim-review (the paired review) and burn-down (the tiers and the gate). The
+// non-vacuous check below is weak for `spec`: `body.includes('spec')` also matches
+// `spec-validate`, `specification` or `respect`, so it cannot fail for `spec` while
+// the body says any of those.
 const SCHEDULERS = {
   chart: ['grill-me', 'prototype', 'parallel-explore', 'ubiquitous-language'],
   'burn-down': ['pickup', 'handoff'],
+  conduct: ['spec', 'pickup', 'slim-review', 'burn-down'],
 };
 
 test('every delegated skill exists as skills/<name>/SKILL.md', () => {

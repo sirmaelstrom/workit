@@ -635,6 +635,37 @@ function validateTargets(meta) {
   }
 }
 
+// The three fields beyond the 6 core ones that every deep WP carries. A WP missing one
+// is undispatchable by /conduct: no Files bullet parses to an empty file set, no tier
+// defaults silently, no runtime surface goes unnamed. Returns one message per problem.
+const CONDUCTOR_FIELD_COUNT = 3;
+function conductorFieldProblems(content) {
+  const problems = [];
+  const lines = content.split(/\r?\n/);
+  const labelLine = /^\*\*[^*]+:\*\*/;
+
+  // The label may share a line (`**Execution:** … · **Review tier:** T2 (…)`); the value is the first token after it.
+  const tier = /\*\*Review tier:\*\*\s*(\S*)/.exec(content);
+  if (!tier) problems.push('Missing **Review tier:** field (T0, T1 or T2).');
+  else if (!/^T[012](?!\w)/.test(tier[1])) problems.push(`**Review tier:** value "${tier[1]}" is not T0, T1 or T2.`);
+
+  // A field's lines: its own line's text, then the lines up to the next field label or heading.
+  const fieldLines = (label, stop) => {
+    const start = lines.findIndex((l) => l.startsWith(`**${label}:**`));
+    if (start < 0) return [];
+    const rest = lines.slice(start + 1);
+    const end = rest.findIndex(stop);
+    return [lines[start].slice(label.length + 5), ...(end < 0 ? rest : rest.slice(0, end))];
+  };
+  if (!fieldLines('Runtime exercise', (l) => labelLine.test(l) || /^#/.test(l)).join('').trim()) {
+    problems.push('Missing or empty **Runtime exercise:** field (a surface and a check, or "none: <why>").');
+  }
+  if (!fieldLines('Files', (l) => labelLine.test(l)).some((l) => /^- (Create|Modify) [^`]*`[^`]+`/.test(l))) {
+    problems.push('**Files:** has no bullet beginning "- Create " or "- Modify " with a backticked path.');
+  }
+  return problems;
+}
+
 function validateWorkPackages() {
   const wpDir = join(workshopPath, 'work-packages');
   if (!existsSync(wpDir)) return;
@@ -681,8 +712,16 @@ function validateWorkPackages() {
 
     if (missingFields.length > 0) {
       error(wpFile, `Missing ${missingFields.length} required field(s): ${missingFields.join(', ')}. Work packages need all 6 fields to be independently dispatchable. Missing fields create ambiguity that agents resolve differently.`);
-    } else {
-      ok(`${wpFile}: all 6 required fields present`);
+    }
+
+    // The fields /conduct's scheduler reads (reference/patterns/work-package.md): the same
+    // forms its parser accepts, so a WP this passes is not parsed as empty.
+    const conductorProblems = conductorFieldProblems(content);
+    for (const problem of conductorProblems) {
+      error(wpFile, `${problem} Required for every deep WP: /conduct reads it (see reference/patterns/work-package.md).`);
+    }
+    if (missingFields.length === 0 && conductorProblems.length === 0) {
+      ok(`${wpFile}: all ${REQUIRED_WP_FIELDS.length + CONDUCTOR_FIELD_COUNT} required fields present`);
     }
 
     // Vague verification in WP (skip code blocks and blockquotes)

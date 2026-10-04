@@ -29,4 +29,11 @@ never ran — the exit path from WP-01 is not reaching the state transition. If
 a dead-letter queue or a new table (MN1), and do not change the attempt count
 established in WP-01.
 
+**Review tier:** T1 (one module, adds a seam test over the persisted row)
+
+**Runtime exercise:** CLI/worker — exhaust the budget with the fixture client and
+quote the persisted job row (`status="failed"`, non-empty `failureReason`); on the
+pre-change tree the row stays `queued`, which is what the check would show if the
+terminal write were missing.
+
 **Commit:** `feat(export): mark exhausted jobs failed with a reason`
