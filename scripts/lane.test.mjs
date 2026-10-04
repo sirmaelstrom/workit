@@ -4648,7 +4648,7 @@ test('4f55ea42: start stamps the lane before the agent launches, and prompt stam
   assert.equal(readState(g).lanes['lane-a'].promptedAt, '2026-10-04T02:18:04.729Z');
 });
 
-test('4f55ea42: findCodexRollout takes the newest rollout for this worktree begun since the start', async (t) => {
+test('4f55ea42: findCodexRollout takes the earliest TUI rollout for this worktree begun since the start', async (t) => {
   const f = fixture(t);
   const deps = { env: { CODEX_HOME: join(f.dir, 'codex-home') }, home: () => f.dir, now: () => Date.parse('2026-10-04T03:00:00Z'), platform: process.platform, list: (dir) => readdirSync(dir), readBytes: undefined };
   // The real reader, through runLane's default, is what the wait tests drive;
