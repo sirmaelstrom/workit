@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS,
+  chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv,
 } from './lanes.mjs';
 import { dispatchable } from './schedule.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
@@ -24,6 +24,7 @@ const SESSION_ID = JSON.parse(CLAUDE_JSON).session_id;
 const COST = JSON.parse(CLAUDE_JSON).total_cost_usd;
 const THREAD_ID = JSON.parse(CODEX_JSONL.split('\n')[0]).thread_id;
 const SHA40 = 'a'.repeat(40);
+const IDENTITY = '2026-10-04T18:00:00.0000000Z claude.exe';
 const T0 = Date.parse('2026-10-04T18:00:00.000Z');
 
 // A run in a temp dir: state with one WP, and deps whose exec answers from a
@@ -47,7 +48,8 @@ function lanes(t, { agent = 'claude', herdr = false, backend = 'exec', model = '
   writeFileSync(join(runDir, 'state.json'), JSON.stringify(state));
   const calls = [];
   const spawns = [];
-  const table = {};
+  // pid 4242 is the lane's agent, with this identity, on either platform.
+  const table = Object.fromEntries(['linux', 'win32'].map((platform) => [identityArgv(4242, platform).join(' '), { code: 0, stdout: `${IDENTITY}\n`, stderr: '' }]));
   let clock = T0;
   const deps = {
     exec: (program, args) => {
@@ -296,29 +298,142 @@ test('lane deadline (D19.17): past it, a running lane blocks on either backend',
 test('occupancy until exit (C1-1, C1-2): a deadline block at cap 1 keeps the slot until the stop confirms exit', (t) => {
   const deadline = new Date(T0 + 120 * 60 * 1000).toISOString();
   for (const platform of ['win32', 'linux']) {
-    const e = lanes(t, { wpLane: { pid: 4242, startedAt: new Date(T0).toISOString(), deadline } });
+    const e = lanes(t, { wpLane: { pid: 4242, identity: IDENTITY, startedAt: new Date(T0).toISOString(), deadline } });
     e.deps.platform = platform;
     e.tick(121 * 60 * 1000);
     const blocked = e.record(e.backend().wait(e.wp)[0], exit(0));
     assert.deepEqual([blocked.outcome, blocked.cause], ['block', 'deadline']);
-    const [kill, confirm] = blocked.patch.queue;
-    assert.deepEqual(kill.command, platform === 'win32' ? ['taskkill', '/PID', '4242', '/T', '/F'] : ['kill', '-TERM', '-4242']);
-    assert.deepEqual([kill.step, confirm.step, confirm.command.slice(2, 4)], ['stop', 'stop', ['lane', 'alive']]);
+    const [probe] = blocked.patch.queue;
+    assert.deepEqual([blocked.patch.queue.length, probe.step, probe.part, probe.command.slice(2, 4)], [1, 'stop', 'probe', ['lane', 'alive']]);
     apply(e.wp, { ...blocked.patch, state: 'blocked' });
     const rival = { id: 'WP-01', state: 'pending', files: ['a.mjs'], dependsOn: [] };
     const state = { intent: { lanesCap: 1 }, wps: [e.wp, rival], dispatchHalt: null };
     assert.deepEqual(dispatchable(state), [], 'blocked but still running: holds the slot');
+    // The probe saw our agent: the guarded kill and its confirmation follow.
+    const matched = e.record(probe, exit(0, '', '{"ok":true,"alive":true,"pid":4242,"owner":"running"}'));
+    const [kill, confirm] = matched.patch.queue;
+    assert.equal(kill.part, 'kill');
+    const killText = kill.command.join(' ');
+    assert.ok(platform === 'win32' ? killText.includes('taskkill /PID 4242 /T /F') && killText.includes(`$id -eq '${IDENTITY}'`) : kill.command.at(-1) === IDENTITY && killText.includes('kill -TERM'), killText);
     assert.equal(e.record(kill, exit(128, 'ERROR: not found')).outcome, 'continue');
-    const stillAlive = e.record(confirm, exit(0));
-    assert.deepEqual([stillAlive.outcome, stillAlive.patch.queue], ['block', []]);
-    apply(e.wp, stillAlive.patch);
-    assert.deepEqual(dispatchable(state), [], 'still alive after stop: holds the slot');
     const gone = e.record(confirm, exit(1));
     assert.deepEqual([gone.outcome, gone.patch.queue, gone.patch.lane.exitedAt], ['done', [], new Date(T0 + 121 * 60 * 1000).toISOString()]);
     apply(e.wp, gone.patch);
     assert.deepEqual(dispatchable(state).map((wp) => wp.id), ['WP-01']);
     assert.deepEqual(e.backend().stop(e.wp), [], 'an exited lane has nothing to stop');
   }
+});
+
+test('PID ownership (C2-1): a reused pid is never killed; the lane reads as exited', async (t) => {
+  const f = lanes(t, { wpLane: { pid: 4242, identity: IDENTITY, startedAt: new Date(T0).toISOString() } });
+  f.table[identityArgv(4242, 'linux').join(' ')] = ok('2026-10-04T19:59:59.0000000Z notepad.exe\n');
+  const alive = await runLaneVerb('alive', { runDir: f.runDir, wpId: 'WP-00', flags: {} }, f.deps);
+  assert.deepEqual([alive.code, JSON.parse(alive.out).owner], [1, 'reused']);
+  const [probe] = f.backend().stop(f.wp);
+  const routed = f.record(probe, { code: alive.code, stdout: alive.out, stderr: '' });
+  assert.deepEqual([routed.outcome, routed.patch.queue, Boolean(routed.patch.lane.exitedAt)], ['done', [], true]);
+  assert.match(routed.reason, /pid reused: not killed/);
+  // No identity to compare: unverified, never killed.
+  f.table[identityArgv(4242, 'linux').join(' ')] = ok('\n');
+  assert.equal(JSON.parse((await runLaneVerb('alive', { runDir: f.runDir, wpId: 'WP-00', flags: {} }, f.deps)).out).owner, 'unverified');
+  // The identity is recorded at spawn, through the executor.
+  const s = lanes(t, { wpLane: { worktree: '/wt', briefPath: '/b.md' } });
+  assert.equal((await runLaneVerb('spawn', { runDir: s.runDir, wpId: 'WP-00', flags: {}, state: s.saved() }, s.deps)).code, 0);
+  assert.equal(s.saved().wps[0].lane.identity, IDENTITY);
+  assert.ok(s.calls.includes(identityArgv(4242, 'linux').join(' ')));
+});
+
+test('cleanup survives an unconfirmed stop (C2-3): alive, alive, gone releases; alive x3 blocks as cleanup-unresolved, stop still queued', (t) => {
+  const e = lanes(t, { wpLane: { pid: 4242, identity: IDENTITY, startedAt: new Date(T0).toISOString() } });
+  const [, confirm] = e.backend().kill(e.wp);
+  for (let i = 1; i <= 2; i += 1) {
+    const again = e.record(confirm, exit(0));
+    assert.deepEqual([again.outcome, again.patch.lane.stopConfirms, again.patch.queue[0].waitMs, again.patch.queue[1]], ['wait', i, 10000, confirm]);
+    apply(e.wp, again.patch);
+  }
+  const released = e.record(confirm, exit(1));
+  assert.deepEqual([released.outcome, released.patch.lane.stopConfirms], ['done', 0]);
+  const stuck = lanes(t, { wpLane: { pid: 4242, identity: IDENTITY, startedAt: new Date(T0).toISOString() } });
+  let routed;
+  for (let i = 0; i < 3; i += 1) {
+    routed = stuck.record(confirm, exit(0));
+    apply(stuck.wp, routed.patch);
+  }
+  assert.deepEqual([routed.outcome, routed.cause], ['block', 'cleanup-unresolved']);
+  assert.deepEqual(routed.patch.queue, stuck.backend().stop(stuck.wp));
+  assert.equal(stuck.wp.lane.exitedAt, undefined, 'occupancy held');
+  // herdr: lane.mjs stop's exited-shell-blocked means the agent is gone.
+  const h = lanes(t, { backend: 'herdr', wpLane: { startedAt: new Date(T0).toISOString() } });
+  const shell = h.record(h.backend().stop(h.wp)[0], exit(1, '', '{"state":"exited-shell-blocked","resumeId":"x"}'));
+  assert.deepEqual([shell.outcome, Boolean(shell.patch.lane.exitedAt)], ['done', true]);
+});
+
+test('herdr restart (C2-2): stop, start, amendment, deadline at cap 1 keeps the slot and queues a second stop', (t) => {
+  const h = lanes(t, { backend: 'herdr', wpLane: { paneId: 'w1:p1', briefPath: '/b.md' } });
+  const b = h.backend();
+  apply(h.wp, h.record(b.start(h.wp)[0], ok('{}')).patch);
+  apply(h.wp, h.record(b.stop(h.wp)[0], ok('{}')).patch);
+  assert.ok(h.wp.lane.exitedAt);
+  h.tick(10 * 60 * 1000);
+  apply(h.wp, h.record(b.start(h.wp)[0], ok('{}')).patch);
+  assert.equal(h.wp.lane.exitedAt, null, 'a successful restart clears the exit marker');
+  assert.equal(h.wp.lane.deadline, new Date(T0 + 130 * 60 * 1000).toISOString());
+  h.tick(10 * 60 * 1000);
+  apply(h.wp, h.record(b.prompt(h.wp, { amendment: true })[0], ok('{}')).patch);
+  assert.equal(h.wp.lane.deadline, new Date(T0 + 140 * 60 * 1000).toISOString());
+  const rival = { id: 'WP-01', state: 'pending', files: ['a.mjs'], dependsOn: [] };
+  apply(h.wp, { state: 'blocked' });
+  const state = { intent: { lanesCap: 1 }, wps: [h.wp, rival], dispatchHalt: null };
+  assert.deepEqual(dispatchable(state), [], 'the restarted lane holds its slot');
+  h.tick(121 * 60 * 1000);
+  const late = h.record(b.wait(h.wp)[0], exit(4));
+  assert.deepEqual([late.outcome, late.cause, late.patch.queue], ['block', 'deadline', b.stop(h.wp)]);
+  assert.equal(late.patch.queue.length, 1);
+});
+
+test('startup retries are bounded (C2-4): three re-arms, then an admission block holding no slot', (t) => {
+  const f = lanes(t, { backend: 'herdr', wpLane: { paneId: 'w1:p1' } });
+  const start = f.backend().start(f.wp)[0];
+  let routed;
+  let rearms = 0;
+  for (let i = 0; i < 1000; i += 1) {
+    routed = f.record(start, exit(7, 'admission refused'));
+    apply(f.wp, routed.patch);
+    if (routed.outcome !== 'wait') break;
+    rearms += 1;
+  }
+  assert.deepEqual([rearms, routed.outcome, routed.cause, routed.patch.queue], [3, 'block', 'admission', []]);
+  assert.deepEqual(dispatchable({ intent: { lanesCap: 1 }, wps: [{ ...f.wp, state: 'blocked' }, { id: 'WP-01', state: 'pending', files: ['a.mjs'], dependsOn: [] }], dispatchHalt: null }).map((wp) => wp.id), ['WP-01']);
+  // A start that succeeds resets the count.
+  assert.equal(f.record(start, ok('{}')).patch.lane.startRearms, 0);
+});
+
+test('start exit 3 (C2-8): the same structured dialog cause and one re-poll', (t) => {
+  const f = lanes(t, { backend: 'herdr', wpLane: { paneId: 'w1:p1' } });
+  const start = f.backend().start(f.wp)[0];
+  const dialog = exit(3, '', '{"state":"blocked","dialog":"Trust this folder?"}');
+  const first = f.record(start, dialog);
+  assert.deepEqual([first.outcome, first.cause, first.dialog, first.patch.queue[0].waitMs], ['wait', 'dialog', 'Trust this folder?', 60000]);
+  assert.deepEqual(first.patch.queue[1].command, f.backend().wait(f.wp)[0].command);
+  apply(f.wp, first.patch);
+  const second = f.record(start, dialog);
+  assert.deepEqual([second.outcome, second.cause, second.dialog], ['block', 'dialog', 'Trust this folder?']);
+});
+
+test('killed-lane cost (C2-9): recovered from the log or kept, marked incomplete', (t) => {
+  const result = (session, cost) => JSON.stringify({ session_id: session, total_cost_usd: cost });
+  const e = lanes(t, { wpLane: { pid: 4242, identity: IDENTITY, logPath: 'x.log', costUsd: 0.2 } });
+  const [, confirm] = e.backend().kill(e.wp);
+  const recovered = e.record(confirm, exit(1), { read: () => `${result('s1', 0.3)}\n` });
+  assert.deepEqual([recovered.patch.lane.costUsd, recovered.patch.lane.costComplete], [0.3, false]);
+  const kept = e.record(confirm, exit(1), { read: () => '' });
+  assert.deepEqual(['costUsd' in kept.patch.lane, kept.patch.lane.costComplete], [false, false]);
+  // A natural exit with a result is complete; a reused pid's is not.
+  const alive = e.backend().wait(e.wp)[0];
+  const natural = e.record(alive, exit(1, '', '{"ok":true,"alive":false,"owner":"gone"}'), { read: () => `${result('s1', 0.3)}\n` });
+  assert.equal(natural.patch.lane.costComplete, true);
+  const reused = e.record(alive, exit(1, '', '{"ok":true,"alive":false,"owner":"reused"}'), { read: () => `${result('s1', 0.3)}\n` });
+  assert.equal(reused.patch.lane.costComplete, false);
 });
 
 test('exec wait: alive 0 → wait 60 s then alive again; 1 → continue, with cost and session read through deps.read (D19.28)', (t) => {
@@ -736,7 +851,7 @@ test('exec: lane check passes a good report and fails a missing Debrief heading 
 });
 
 test('exec: lane alive exits 1 for a dead pid', async (t) => {
-  const live = lanes(t, { wpLane: { pid: 4242 } });
+  const live = lanes(t, { wpLane: { pid: 4242, identity: IDENTITY } });
   assert.equal((await runLaneVerb('alive', { runDir: live.runDir, wpId: 'WP-00', flags: {} }, live.deps)).code, 0);
   const dead = lanes(t, { wpLane: { pid: 999999 } });
   const result = await runLaneVerb('alive', { runDir: dead.runDir, wpId: 'WP-00', flags: {} }, dead.deps);
@@ -780,10 +895,31 @@ test('lane-brief.md carries the standing clauses byte-equal to codex-delegate, a
   }
   // The marker lines appear exactly as the reader accepts them (C1-7): the
   // brief's own example passes runtimeExerciseVerdict.
-  for (const verdict of ['exercised', 'vacuous', 'not exercised', 'no runtime surface']) assert.match(brief, new RegExp(`^Verdict: ${verdict}\\r?$`, 'm'));
-  const example = brief.split(/\r?\n/).find((line) => line.startsWith('Would have shown: '));
-  assert.ok(example);
-  assert.equal(runtimeExerciseVerdict(`## Runtime exercise\n\nVerdict: exercised\n${example}\n`, { runtimeExercise: 'CLI: x' }), 'exercised');
+  const lines = brief.split(/\r?\n/);
+  const shown = [lines.find((line) => line.startsWith('Verdict: ')), lines.find((line) => line.startsWith('Would have shown: '))];
+  assert.deepEqual(shown.map(Boolean), [true, true]);
+  // Filled in, the shape passes; copied as it stands it never does (C2-7).
+  assert.equal(runtimeExerciseVerdict(`## Runtime exercise\n\nVerdict: exercised\nWould have shown: exit 1\n`, { runtimeExercise: 'CLI: x' }), 'exercised');
+  assert.equal(runtimeExerciseVerdict(`## Runtime exercise\n\n${shown.join('\n')}\n`, { runtimeExercise: 'CLI: x' }), 'missing');
+  assert.equal(lines.filter((line) => /^Verdict: /.test(line)).length, 1);
+});
+
+test('duplicate verdicts (C2-7): more than one Verdict line is vacuous, naming them; a copy of the old four-line template no longer passes', () => {
+  const wp = { runtimeExercise: 'CLI: x' };
+  const copied = '## Runtime exercise\n\nVerdict: exercised\nVerdict: vacuous\nVerdict: not exercised\nVerdict: no runtime surface\n\nWould have shown: cat: hello.txt: No such file or directory\n';
+  assert.equal(runtimeExerciseVerdict(copied, wp), 'vacuous');
+  assert.equal(runtimeExerciseVerdict('## Runtime exercise\n\nVerdict: exercised\nVerdict: exercised\nWould have shown: x\n', wp), 'vacuous');
+});
+
+test('duplicate verdicts (C2-7): the lane check names the duplicates', async (t) => {
+  const f = lanes(t);
+  f.report(report({ runtime: 'Verdict: exercised\nVerdict: vacuous\nWould have shown: x' }));
+  const out = JSON.parse((await runLaneVerb('check', { runDir: f.runDir, wpId: 'WP-00', flags: { runtimeOnly: true } }, f.deps)).out);
+  assert.match(out.failures.join('; '), /vacuous: 2 Verdict lines \("Verdict: exercised", "Verdict: vacuous"\)/);
+});
+
+test('lane-brief.md: the runtime section, the no-/conduct line and every slot', () => {
+  const brief = readFileSync(join(REPO_ROOT, 'skills', 'conduct', 'templates', 'lane-brief.md'), 'utf8');
   assert.match(brief, /## Runtime exercise/);
   assert.match(brief, /Never invoke `\/conduct` from this lane/);
   for (const slot of ['<lane id>', '<quest id>', '<worktree path>', '<branch name>', '<base sha>', '<wp spec path>', '<lane contract path>', '<report path>', '<runtime exercise>']) {

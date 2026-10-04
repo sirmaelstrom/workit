@@ -84,6 +84,34 @@ test('paths (C1-12): case and dot-segment aliases conflict; a path leaving the r
   }
 });
 
+test('wave plan (C2-5): nested brackets in a name are not wave references; a WP in two waves is a parse error', (t) => {
+  const dir = workshop(t, {
+    'WP-01': { wave: 1, model: 'opus', body: '**Files:**\n- Create `a.mjs`\n' },
+    'WP-02': { wave: 2, model: 'opus', body: '**Files:**\n- Create `b.mjs`\n' },
+  }, { waveNames: { 'WP-02': 'follows [WP-01]' } });
+  const wps = parseWorkPackages(dir);
+  assert.deepEqual(wps.map((item) => [item.id, item.wave, item.dependsOn]), [['WP-01', 1, []], ['WP-02', 2, ['WP-01']]]);
+  assert.deepEqual(ids(dispatchable(run(wps.map((item) => ({ ...item, state: 'pending' }))))), ['WP-01']);
+  const twice = workshop(t, {
+    'WP-01': { wave: 1, model: 'opus', body: '**Files:**\n- Create `a.mjs`\n' },
+    'WP-02': { wave: 2, model: 'opus', body: '**Files:**\n- Create `b.mjs`\n' },
+  }, { waveNames: { 'WP-02': 'x] [WP-01: again' } });
+  assert.throws(() => parseWorkPackages(twice), (error) => error.code === 2 && /WP-01 is in two waves/.test(error.message));
+});
+
+test('paths (C2-6): drive prefixes refused; trailing dots and spaces dropped; a directory without a slash contains its files', (t) => {
+  for (const bad of ['C:x.mjs', 'C:../x.mjs', 'C:/x.mjs', 'c:\\x.mjs']) {
+    const dir = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: `**Files:**\n- Create \`${bad}\`\n` } });
+    assert.throws(() => parseWorkPackages(dir), (error) => error.code === 2 && error.message.includes(bad), bad);
+    assert.equal(filesDisjoint([bad], ['x.mjs']), false, bad);
+  }
+  assert.equal(filesDisjoint(['a.mjs.'], ['a.mjs']), false);
+  assert.equal(filesDisjoint(['src/lib. /a.mjs '], ['src/lib/a.mjs']), false);
+  assert.equal(filesDisjoint(['src/lib'], ['src/lib/a.mjs']), false);
+  assert.equal(filesDisjoint(['src/lib/a.mjs'], ['src/lib']), false);
+  assert.equal(filesDisjoint(['src/lib'], ['src/library.mjs']), true);
+});
+
 test('model labels (C1-15): an unknown inventory label fails at parse, naming the WP and the label', (t) => {
   const dir = workshop(t, { 'WP-01': { wave: 1, model: 'Opus 5.5', body: '**Files:**\n- Create `a.mjs`\n' } });
   assert.throws(() => parseWorkPackages(dir), (error) => error.code === 2 && /WP-01/.test(error.message) && /Opus 5\.5/.test(error.message));

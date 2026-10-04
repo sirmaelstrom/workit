@@ -8,20 +8,33 @@
 // - `patch.lane` merges into wps[].lane; `patch.queue` replaces the WP's
 //   queued actions; every other patch key replaces that field.
 // - `block`, `amend` and `done` always set `patch.queue`: `[]`, or only the
-//   cleanup still owed (the lane's `stop` actions). WP-04 runs that cleanup
-//   whatever the WP's state; a cleanup action's own record never changes it.
+//   cleanup still owed (the lane's stop actions). WP-04 runs a WP's queued
+//   cleanup whatever its state (blocked and refuted included); a cleanup
+//   action's own record never changes the WP's state.
 // - `done` carries cleanup only (a refuted lane's stop); it never carries work.
+//   `admit` exit 7 is `done` with `state: 'pending'` and `notBefore`: WP-04
+//   abandons that dispatch (the step array ends) and re-dispatches later.
 // - A `block` carries `cause`: 'error' | 'dialog' (with `dialog`, the parsed
-//   text) | 'needs-conductor' | 'deadline'.
-// - A lane occupies its slot and its files until its exit is observed
-//   (`lane.exitedAt`, set by exec `alive` exit 1 or a recorded stop), whatever
-//   the WP's state: WP-04 stops a herdr lane before it can release.
-// - `lane.startedAt`/`lane.deadline` are set by the first start and renewed
-//   only by a conductor amendment prompt; automatic retries (capacity
-//   re-send, dialog re-poll, start re-arm, plan-low fallback) never renew them.
+//   text) | 'needs-conductor' | 'deadline' | 'admission' | 'cleanup-unresolved'.
+//   'cleanup-unresolved' keeps its stop queued and its slot held: WP-04
+//   surfaces it, never finishes it silently.
+// - Occupancy is not the orchestrator's live states: a lane holds its slot and
+//   files until its exit is observed (`lane.exitedAt`), whatever the WP's
+//   state. WP-04 stops a herdr lane when its WP is merged, held or refuted.
+// - The build does not end while a pending WP waits on `notBefore`, or while
+//   any WP holds a slot or a queued cleanup. WP-04 passes its injected clock:
+//   `dispatchable(state, { now: deps.now() })`.
+// - Each successful start, and each conductor amendment prompt, sets
+//   `startedAt` and a fresh `deadline`, clears `exitedAt`, and resets the
+//   dialog, capacity and start-retry counters. Automatic retries (capacity
+//   re-send, dialog re-poll, refused start, plan-low fallback) renew nothing.
+// - `lane.dialogPolls` counts consecutive dialogs (wait or start exit 3): any
+//   other wait result resets it to 0; the second consecutive dialog blocks.
 // - `lane.fallback: 'claude'` records that a codex lane now runs claude in its
 //   pane (lane.mjs fallback replays the prompt); later herdr steps keep the
 //   pane and lane name, and nothing else reads it in v1.
+// - `lane.costComplete: false` marks a cost read from a lane that was killed or
+//   whose pid was reused: a lower bound, not the lane's spend.
 import { basename, dirname, join, resolve } from 'node:path';
 import { LANE_MODELS, laneModel } from './adapters.mjs';
 import { resolveProgram } from './exec.mjs';
@@ -31,6 +44,9 @@ import { EXIT_CODES as LANE_EXIT, reportShapeProblems } from '../../../../script
 const DEADLINE_MS = 120 * 60 * 1000;
 const POLL_MS = 60000;
 const DIALOG_WAIT_MS = 60000;
+const START_REARMS = 3;
+const STOP_CONFIRMS = 3;
+const STOP_WAIT_MS = 10000;
 export const ADMIT_BACKOFF_MS = 5 * 60 * 1000;
 const SHA = /^[0-9a-f]{40}$/;
 const VERDICT = /^Verdict: (exercised|vacuous|not exercised|no runtime surface)$/;
@@ -88,10 +104,35 @@ export function agentArgv(state, wp, { brief, sessionId = null }, deps) {
   return sessionId ? [...codex, 'resume', sessionId, prompt] : [...codex, prompt];
 }
 
-// Terminate a detached exec agent and its children. ASSUMPTION off win32: the
-// agent leads its own process group (spawnDetached's detached: true).
-function killArgv(pid, platform) {
-  return platform === 'win32' ? ['taskkill', '/PID', String(pid), '/T', '/F'] : ['kill', '-TERM', `-${pid}`];
+// A process's identity: its creation time and image name, so a reused pid is
+// never mistaken for the lane's agent.
+const PS = (script) => ['powershell', '-NoProfile', '-NonInteractive', '-Command', script];
+const psIdentity = (pid) => `$p = Get-CimInstance Win32_Process -Filter ProcessId=${Number(pid)}; $id = if ($p) { $p.CreationDate.ToUniversalTime().ToString('o') + ' ' + $p.Name } else { '' }`;
+const SH_IDENTITY = 'id=$(echo $(ps -o lstart=,comm= -p "$1"))';
+
+export function identityArgv(pid, platform) {
+  return platform === 'win32' ? PS(`${psIdentity(pid)}; Write-Output $id`) : ['sh', '-c', `${SH_IDENTITY}; echo "$id"`, 'sh', String(pid)];
+}
+
+export function readIdentity(pid, deps) {
+  const [program, ...args] = identityArgv(pid, deps.platform ?? process.platform);
+  const result = deps.exec(program, args);
+  const id = result.code === 0 ? String(result.stdout).trim().replace(/\s+/g, ' ') : '';
+  return id || null;
+}
+
+// Terminate the lane's agent and its children, only when the pid still has
+// the identity recorded at spawn; otherwise print why and exit 3. The check
+// and the kill run in one executor process. ASSUMPTION: the residual window
+// is that process's gap between its identity query and the kill (one
+// executor round trip, under a second here). ASSUMPTION off win32: the agent
+// leads its own process group (spawnDetached's detached: true).
+function guardedKillArgv(pid, identity, platform) {
+  const refuse = `pid ${pid} is not the lane's agent: not killed`;
+  if (platform === 'win32') {
+    return PS(`${psIdentity(pid)}; if ($id -and $id -eq '${identity.replace(/'/g, "''")}') { taskkill /PID ${Number(pid)} /T /F; exit $LASTEXITCODE } else { Write-Output '${refuse}'; exit 3 }`);
+  }
+  return ['sh', '-c', `${SH_IDENTITY}; if [ -n "$id" ] && [ "$id" = "$2" ]; then kill -TERM -- "-$1"; else echo "${refuse}"; exit 3; fi`, 'sh', String(pid), identity];
 }
 
 export function laneBackend(state, deps, backend) {
@@ -108,6 +149,7 @@ export function laneBackend(state, deps, backend) {
     shellAction('create', { part: 'fetch', instruction: 'Fetch origin.', command: ['git', '-C', repo, 'fetch', 'origin'] }),
     shellAction('base', { instruction: 'Resolve the base sha.', command: ['git', '-C', repo, 'rev-parse', `origin/${fallbackBranch}`] }),
   ];
+  const confirmAction = (wp) => shellAction('stop', { part: 'confirm', instruction: 'Confirm the lane agent exited.', command: conduct('alive', wp) });
   // Outcome first (D19.16): the report check precedes every other check.
   const reportCheck = (wp, extra) => shellAction('check', { part: 'report', instruction: 'Check the report\'s outcome and runtime exercise.', command: conduct('check', wp, extra) });
   if (backend === 'herdr') {
@@ -183,12 +225,18 @@ export function laneBackend(state, deps, backend) {
       prLookup(wp),
       shellAction('check', { part: 'pr', instruction: 'Check the PR.', command: conduct('check', wp, ['--pr', '{pr.number}']) }),
     ],
-    // Terminate the recorded pid, then confirm it is gone: the slot is
-    // released only by the confirmation (alive exit 1).
-    stop: (wp) => (wp.lane?.exitedAt || !Number.isInteger(wp.lane?.pid) ? [] : [
-      shellAction('stop', { part: 'kill', instruction: 'Terminate the lane agent.', command: killArgv(wp.lane.pid, deps.platform ?? process.platform) }),
-      shellAction('stop', { part: 'confirm', instruction: 'Confirm the lane agent exited.', command: conduct('alive', wp) }),
-    ]),
+    // First probe the pid's identity (`alive`); only a match queues the kill
+    // (itself guarded by the same identity) and its confirmation. A mismatch,
+    // or no identity, kills nothing and records the lane as exited. Only a
+    // confirmation (alive exit 1) releases the slot.
+    stop: (wp) => (wp.lane?.exitedAt || !Number.isInteger(wp.lane?.pid) ? []
+      : [shellAction('stop', { part: 'probe', instruction: 'Check the pid is still the lane agent.', command: conduct('alive', wp) })]),
+    kill: (wp) => [
+      shellAction('stop', {
+        part: 'kill', instruction: 'Terminate the lane agent if the pid is still its own.', command: guardedKillArgv(wp.lane.pid, wp.lane.identity, deps.platform ?? process.platform),
+      }),
+      confirmAction(wp),
+    ],
   };
 }
 
@@ -224,7 +272,9 @@ function reportSection(text, title) {
 function readRuntimeExercise(reportText, wp) {
   const section = reportSection(reportText, 'Runtime exercise');
   if (!section) return { verdict: 'missing', problem: 'no "## Runtime exercise" heading' };
-  const verdict = section.lines.map((line) => VERDICT.exec(line.text)).find(Boolean)?.[1];
+  const verdicts = section.lines.map((line) => VERDICT.exec(line.text)).filter(Boolean).map((match) => match[1]);
+  const verdict = verdicts[0];
+  if (verdicts.length > 1) return { verdict: 'vacuous', problem: `${verdicts.length} Verdict lines (${verdicts.map((value) => `"Verdict: ${value}"`).join(', ')}); write exactly one` };
   if (!verdict) return { verdict: 'missing', problem: 'no line reading exactly "Verdict: exercised", "Verdict: vacuous", "Verdict: not exercised" or "Verdict: no runtime surface"' };
   if (/^none\b/i.test(String(wp?.runtimeExercise ?? '').trim())) return { verdict: 'no-surface', problem: null };
   if (verdict === 'not exercised' || verdict === 'no runtime surface') return { verdict: 'not-exercised', problem: `"Verdict: ${verdict}", but the WP names a runtime surface` };
@@ -314,9 +364,20 @@ const amend = (reason, patch = {}) => ({ outcome: 'amend', reason, patch: { queu
 const done = (reason, patch = {}) => ({ outcome: 'done', reason, patch: { queue: [], ...patch } });
 const iso = (ms) => new Date(ms).toISOString();
 
-function startedPatch(deps, startedAt = null) {
+// A successful start or conductor amendment: a fresh deadline, the exit
+// marker cleared, every retry counter reset.
+function freshStart(deps, startedAt = null) {
   const at = startedAt ? Date.parse(startedAt) : deps.now();
-  return { startedAt: iso(at), deadline: iso(at + DEADLINE_MS) };
+  return { startedAt: iso(at), deadline: iso(at + DEADLINE_MS), exitedAt: null, dialogPolls: 0, capacityResent: false, startRearms: 0, stopConfirms: 0 };
+}
+
+// A dialog (wait or start exit 3) gets one re-poll after 60 s (it may clear
+// itself); a second consecutive one blocks. The conductor never answers it.
+function dialogRoute(wp, result, retry) {
+  const dialog = String(parseStdout(result)?.dialog ?? said(result));
+  const polls = (wp.lane?.dialogPolls ?? 0) + 1;
+  if (polls > 1) return block(`dialog: ${dialog}`, { lane: { dialogPolls: polls } }, 'dialog', { dialog });
+  return { outcome: 'wait', reason: `dialog: ${dialog}`, cause: 'dialog', dialog, patch: { lane: { dialogPolls: polls }, queue: [waitAction(DIALOG_WAIT_MS), ...retry] } };
 }
 
 const expired = (wp, deps) => Boolean(wp.lane?.deadline) && deps.now() > Date.parse(wp.lane.deadline);
@@ -350,20 +411,23 @@ export function recordLaneStep(state, wp, action, result, deps) {
       }
       return proceed({ lane: { name: lane.name, worktree: lane.worktree, branch: lane.branch, briefPath: lane.briefPath, logPath: lane.logPath } });
     }
-    case 'start':
+    case 'start': {
       // A start refused for memory re-arms start, never create (lane.mjs
-      // refuses a create once the branch or worktree path exists).
+      // refuses a create once the branch or worktree path exists), at most
+      // START_REARMS times; nothing runs, so the block holds no slot.
       if (result.code === LANE_EXIT.admitRefused) {
-        if (expired(wp, deps)) return deadlineBlock(wp, backend);
-        return { outcome: 'wait', reason: `start refused: ${said(result)}`, patch: { queue: [waitAction(POLL_MS), ...backend.start(wp)] } };
+        const rearms = (wp.lane?.startRearms ?? 0) + 1;
+        if (rearms > START_REARMS) return block(`start refused ${rearms} times: ${said(result)}`, { lane: { startRearms: rearms } }, 'admission');
+        return { outcome: 'wait', reason: `start refused: ${said(result)}`, patch: { lane: { startRearms: rearms }, queue: [waitAction(POLL_MS), ...backend.start(wp)] } };
       }
-      if (!ok) return block(said(result));
-      return proceed(wp.lane?.deadline ? {} : { lane: startedPatch(deps, parseStdout(result)?.startedAt) });
+      if (result.code === LANE_EXIT.blocked) return dialogRoute(wp, result, backend.wait(wp));
+      return ok ? proceed({ lane: freshStart(deps, parseStdout(result)?.startedAt) }) : block(said(result));
+    }
     case 'prompt':
       if (!ok) return block(said(result));
-      // Only a conductor amendment renews the deadline and the retry allowances.
+      // Only a conductor amendment renews the deadline and the counters.
       if (action.part === 'resend') return proceed();
-      return proceed({ lane: { ...startedPatch(deps, parseStdout(result)?.startedAt), capacityResent: false, dialogPolls: 0 } });
+      return proceed({ lane: freshStart(deps, parseStdout(result)?.startedAt) });
     case 'fallback':
       return ok ? proceed({ lane: { fallback: 'claude' } }) : block(said(result));
     case 'wait':
@@ -373,7 +437,7 @@ export function recordLaneStep(state, wp, action, result, deps) {
     case 'pr-lookup':
       return recordPrLookup(wp, lane, result, deps);
     case 'stop':
-      return recordStop(wp, action, result, deps);
+      return recordStop(state, wp, action, result, deps);
     default:
       throw new ConductError(2, `recordLaneStep has no route for step ${action.step}`);
   }
@@ -387,14 +451,8 @@ function recordHerdrWait(state, wp, result, deps, backend) {
   switch (result.code) {
     case LANE_EXIT.timeout:
       return { outcome: 'wait', reason: 'lane running', patch: { lane: { dialogPolls: 0 }, queue: [waitAction(0), ...backend.wait(wp)] } };
-    case LANE_EXIT.blocked: {
-      // A dialog gets one re-poll after 60 s (it may clear itself); a second
-      // consecutive one blocks. The conductor never answers a dialog.
-      const dialog = String(parseStdout(result)?.dialog ?? said(result));
-      const polls = (wp.lane?.dialogPolls ?? 0) + 1;
-      if (polls > 1) return block(`dialog: ${dialog}`, { lane: { dialogPolls: polls } }, 'dialog', { dialog });
-      return { outcome: 'wait', reason: `dialog: ${dialog}`, cause: 'dialog', dialog, patch: { lane: { dialogPolls: polls }, queue: [waitAction(DIALOG_WAIT_MS), ...backend.wait(wp)] } };
-    }
+    case LANE_EXIT.blocked:
+      return dialogRoute(wp, result, backend.wait(wp));
     case LANE_EXIT.planLow: {
       const fallback = shellAction('fallback', {
         instruction: 'Hand the lane to claude.',
@@ -417,24 +475,43 @@ function recordExecWait(state, wp, result, deps, backend) {
     return { outcome: 'wait', reason: 'lane running', patch: { queue: [waitAction(POLL_MS), ...backend.wait(wp)] } };
   }
   if (result.code !== 1) return block(said(result));
-  // The agent exited: its exit is observed, and the log holds its session id
-  // and, for claude, its cost. A log with no result keeps the known cost.
+  return proceed({ lane: exitedLane(state, wp, deps, parseStdout(result)?.owner === 'gone') });
+}
+
+// The lane's exit is observed. The exec log holds its session id and, for
+// claude, its cost: complete only when the agent ended on its own (not killed,
+// pid not reused); a log with no result keeps the known cost.
+function exitedLane(state, wp, deps, natural) {
+  const lane = { exitedAt: iso(deps.now()), stopConfirms: 0 };
+  if (wp.lane?.backend === 'herdr') return lane;
   const log = readLog(deps, wp.lane?.logPath ?? laneLayout(state, wp).logPath);
   const claude = state.intent.agent === 'claude';
   const last = lastWith(log, claude ? 'session_id' : 'thread_id');
-  const patch = { lane: { exitedAt: iso(deps.now()), sessionId: (claude ? last?.session_id : last?.thread_id) ?? wp.lane?.sessionId ?? null } };
-  const cost = claude ? laneCost(log) : null;
-  if (cost !== null) patch.lane.costUsd = cost;
-  return proceed(patch);
+  lane.sessionId = (claude ? last?.session_id : last?.thread_id) ?? wp.lane?.sessionId ?? null;
+  if (!claude) return lane;
+  const cost = laneCost(log);
+  if (cost !== null) lane.costUsd = cost;
+  lane.costComplete = natural && cost !== null;
+  return lane;
 }
 
-function recordStop(wp, action, result, deps) {
-  if (action.part === 'kill') return proceed(); // a pid already gone fails here; the confirmation decides
-  if (action.part === 'confirm') {
-    if (result.code === 1) return done('lane stopped', { lane: { exitedAt: iso(deps.now()) } });
-    return block(result.code === 0 ? `lane agent pid ${wp.lane?.pid} still runs after stop` : said(result));
+// A stop is confirmed by `alive` exit 1 (exec) or a clean `lane.mjs stop`,
+// whose `exited-shell-blocked` also means the agent is gone (herdr). An
+// unconfirmed stop is re-confirmed after 10 s, up to STOP_CONFIRMS times;
+// then it blocks as 'cleanup-unresolved' with its stop still queued.
+function recordStop(state, wp, action, result, deps) {
+  if (action.part === 'kill') return proceed(); // exit 3 (not our pid) or a gone pid: the confirmation decides
+  const out = parseStdout(result);
+  if (action.part === 'probe' && result.code === 0) return proceed({ queue: laneBackend(state, deps, 'exec').kill(wp) }, `pid ${wp.lane?.pid} is the lane agent: killing it`);
+  const gone = action.part === 'stop' ? result.code === 0 || out?.state === 'exited-shell-blocked' : result.code === 1;
+  if (gone) return done(`lane stopped${out?.owner && out.owner !== 'gone' ? ` (pid ${out.owner}: not killed)` : ''}`, { lane: exitedLane(state, wp, deps, false) });
+  const confirms = (wp.lane?.stopConfirms ?? 0) + 1;
+  const why = action.part !== 'stop' && result.code === 0 ? `lane agent pid ${wp.lane?.pid} still runs after stop` : `stop: ${said(result)}`;
+  if (confirms >= STOP_CONFIRMS) {
+    const backend = laneBackend(state, deps, wp.lane?.backend ?? 'exec');
+    return block(`cleanup unresolved after ${confirms} confirmations: ${why}`, { lane: { stopConfirms: confirms }, queue: backend.stop(wp) }, 'cleanup-unresolved');
   }
-  return result.code === 0 ? done('lane stopped', { lane: { exitedAt: iso(deps.now()) } }) : block(`stop: ${said(result)}`);
+  return { outcome: 'wait', reason: why, patch: { lane: { stopConfirms: confirms }, queue: [waitAction(STOP_WAIT_MS), action] } };
 }
 
 function recordCheck(wp, action, result, backend) {
@@ -484,11 +561,21 @@ export async function runLaneVerb(sub, { runDir, wpId, flags = {}, state = null 
   if (!wp) return reply(2, { ok: false, error: `no WP ${wpId} in this run` });
   if (sub === 'alive') {
     if (!Number.isInteger(wp.lane?.pid)) return reply(2, { ok: false, error: `${wpId} has no lane pid` });
-    const alive = deps.pidAlive(wp.lane.pid);
-    return reply(alive ? 0 : 1, { ok: true, alive, pid: wp.lane.pid });
+    const owner = laneOwner(wp, deps);
+    return reply(owner === 'running' ? 0 : 1, { ok: true, alive: owner === 'running', pid: wp.lane.pid, owner });
   }
   if (sub === 'spawn') return spawnLane(current, wp, flags, deps);
   return checkLane(current, wp, flags, deps);
+}
+
+// Who holds the lane's pid: 'running' (the agent, by its recorded identity),
+// 'gone', 'reused' (another process), or 'unverified' (no identity to compare).
+// Only 'running' counts as the lane still running.
+function laneOwner(wp, deps) {
+  if (!deps.pidAlive(wp.lane.pid)) return 'gone';
+  const now = wp.lane.identity ? readIdentity(wp.lane.pid, deps) : null;
+  if (!now) return 'unverified';
+  return now === wp.lane.identity ? 'running' : 'reused';
 }
 
 // One lane process per WP. The pending action is the replay key: running the
@@ -501,7 +588,7 @@ function spawnLane(state, wp, flags, deps) {
   const actionId = pending?.command?.includes('spawn') && pending.command.includes(wp.id) ? pending.id : null;
   const saved = wp.lane?.spawn;
   if (actionId && saved?.actionId === actionId) return reply(0, { ok: true, pid: saved.pid, startedAt: saved.startedAt, logPath: saved.logPath, replayed: true });
-  if (Number.isInteger(wp.lane?.pid) && !wp.lane?.exitedAt && deps.pidAlive(wp.lane.pid)) {
+  if (Number.isInteger(wp.lane?.pid) && !wp.lane?.exitedAt && laneOwner(wp, deps) === 'running') {
     return reply(5, { ok: false, error: `lane spawn refused: ${wp.id}'s agent pid ${wp.lane.pid} is still running; stop it first` });
   }
   const brief = typeof flags.amend === 'string' ? flags.amend : wp.lane?.briefPath ?? lane.briefPath;
@@ -531,7 +618,10 @@ function spawnLane(state, wp, flags, deps) {
     return reply(5, { ok: false, error: `lane spawn failed: ${why}`, logPath });
   }
   const startedAt = deps.timestamp();
-  wp.lane = { ...wp.lane, pid, logPath, startedAt, exitedAt: null, spawn: { actionId, pid, startedAt, logPath } };
+  // The identity every later alive and stop compares against (null: unreadable,
+  // so the lane is never killed and reads as exited).
+  const identity = readIdentity(pid, deps);
+  wp.lane = { ...wp.lane, pid, identity, logPath, startedAt, exitedAt: null, spawn: { actionId, pid, startedAt, logPath } };
   appendEvent(state, deps, { step: flags.amend === undefined ? 'start' : 'prompt', event: 'spawned', data: { wpId: wp.id, pid, resumed: Boolean(sessionId) } });
   saveState(state, deps);
   return reply(0, { ok: true, pid, startedAt, logPath });

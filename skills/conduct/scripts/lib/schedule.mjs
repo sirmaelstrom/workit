@@ -62,11 +62,14 @@ export function parseFiles(text, where = 'Files') {
   return files;
 }
 
-// `a\b/../c/` → `a/c/`; null when the path is absolute or leaves the repo.
+// `a\b/../c/` → `a/c/`; null when the path is absolute, drive-qualified
+// (`C:x`, `C:../x`) or leaves the repo. Trailing dots and spaces are dropped
+// from each segment, as Windows does (`a.mjs.` is `a.mjs`).
 function normalizePath(path) {
   const slashed = String(path).replace(/\\/g, '/');
-  if (/^([A-Za-z]:)?\//.test(slashed)) return null;
-  const normal = posix.normalize(slashed);
+  if (/^[A-Za-z]:/.test(slashed) || slashed.startsWith('/')) return null;
+  const segments = slashed.split('/').map((segment) => (segment === '.' || segment === '..' ? segment : segment.replace(/[. ]+$/, '')));
+  const normal = posix.normalize(segments.join('/'));
   return normal === '..' || normal.startsWith('../') || normal === '.' || normal === './' ? null : normal;
 }
 
@@ -106,13 +109,30 @@ function inventory(orchestrator) {
   return byId;
 }
 
-// `Wave N: [WP-01: name] [WP-02: name]`: a WP is the id opening a bracket,
-// never an id inside a name.
+// The top-level `[…]` entries of a line; brackets nested in a name stay inside.
+function topLevelEntries(text) {
+  const entries = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '[' && depth++ === 0) start = i + 1;
+    else if (text[i] === ']' && depth > 0 && --depth === 0) entries.push(text.slice(start, i));
+  }
+  return entries;
+}
+
+// `Wave N: [WP-01: name] [WP-02: name]`: a WP is the id opening a top-level
+// entry, never an id inside a name. A WP in two waves is a parse error.
 function waves(orchestrator) {
   const byId = new Map();
   for (const line of section(orchestrator, 'Wave Plan')) {
     const match = /^Wave (\d+):(.*)$/.exec(line.trim());
-    if (match) for (const [, id] of match[2].matchAll(/\[\s*(WP-\d+)\b/g)) byId.set(id, Number(match[1]));
+    for (const entry of match ? topLevelEntries(match[2]) : []) {
+      const id = /^\s*(WP-\d+)\b/.exec(entry)?.[1];
+      if (!id) continue;
+      if (byId.has(id)) throw new ConductError(2, `${id} is in two waves of the orchestrator's ## Wave Plan (${byId.get(id)} and ${match[1]})`);
+      byId.set(id, Number(match[1]));
+    }
   }
   return byId;
 }
@@ -155,8 +175,11 @@ export function filesDisjoint(a, b) {
   const left = fold(a);
   const right = fold(b);
   if (left.includes(null) || right.includes(null)) return false;
-  const contains = (dir, path) => dir.endsWith('/') && path.startsWith(dir);
-  return !left.some((x) => right.some((y) => x === y || contains(x, y) || contains(y, x)));
+  // A path conflicts with itself and with anything under it, slash or not:
+  // `src/lib` may be a directory.
+  const bare = (path) => path.replace(/\/$/, '');
+  const overlaps = (x, y) => x === y || y.startsWith(`${x}/`);
+  return !left.map(bare).some((x) => right.map(bare).some((y) => overlaps(x, y) || overlaps(y, x)));
 }
 
 // The pending WPs that may start now, in id order, within the lane cap. A WP
