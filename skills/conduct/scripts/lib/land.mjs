@@ -344,7 +344,8 @@ export function parsePages(text) {
       if (depth++ === 0) start = i;
     } else if ((c === '}' || c === ']') && --depth === 0) pages.push(JSON.parse(text.slice(start, i + 1)));
   }
-  if (depth !== 0 || inString) throw new Error('a page is truncated');
+  // An unfinished string can only sit inside a page, so it leaves depth > 0.
+  if (depth !== 0) throw new Error('a page is truncated');
   return pages;
 }
 
