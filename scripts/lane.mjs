@@ -73,6 +73,8 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            ask (a)…(f): at most six options per ask, no letter twice.
   resume   <name> [--timeout <ms>] [--plan-floor <pct>]
            Waits --until idle --until done, never bare; honours --plan-floor.
+           One read, no poll loop: a codex lane whose rollout shows its turn
+           still running exits 4 as settled-turn-live.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
   stop     <name> [--timeout <ms>]  Stops the lane agent; a late shell/banner
            check is accepted only after the live-TUI veto. A Claude lane gone
@@ -1962,8 +1964,18 @@ async function resumeLane(opts, deps, state) {
     };
   }
   // One settled reading, not a poll loop: a lane that settled with background
-  // work live is a timeout the conductor answers with `lane wait`.
-  const { state: holdState = null, ...held } = settleHold(plan, lane.kind) ?? {};
+  // work live is a timeout the conductor answers with `lane wait`. A codex
+  // lane gets the same single rollout read `wait` makes (herdr reads `done`
+  // between tool calls); no rollout found leaves herdr's reading alone.
+  let settleSource = null;
+  let turnHold = null;
+  if (lane.kind === 'codex') {
+    const rolloutPath = findCodexRollout(deps, lane);
+    const turn = rolloutPath ? codexTurnState(deps, rolloutPath, lane.promptedAt ?? null) : null;
+    settleSource = turn ? 'rollout' : 'polls';
+    if (turn && !turn.ended) turnHold = { state: 'settled-turn-live', turnEvent: turn.event, turnEventAt: turn.at };
+  }
+  const { state: holdState = null, ...held } = settleHold(plan, lane.kind) ?? turnHold ?? {};
   if (holdState) {
     return {
       exit: EXIT.TIMEOUT,
@@ -1973,8 +1985,13 @@ async function resumeLane(opts, deps, state) {
   }
   return {
     exit: EXIT.OK,
-    output: { state: statusAfter, notice: 'status is not evidence — run lane check', ...warning },
-    row: { ...laneInstrumentation(opts.name, lane, statusAfter), ...meter, ...warning },
+    output: {
+      state: statusAfter,
+      ...(settleSource ? { settle: settleSource } : {}),
+      notice: 'status is not evidence — run lane check',
+      ...warning,
+    },
+    row: { ...laneInstrumentation(opts.name, lane, statusAfter), ...meter, ...(settleSource ? { settleSource } : {}), ...warning },
   };
 }
 
