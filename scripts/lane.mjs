@@ -6,9 +6,13 @@
 
 import {
   appendFileSync,
+  closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   rmSync,
   statSync,
@@ -16,6 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -1040,6 +1045,9 @@ async function startLane(opts, deps, state) {
   required(opts, 'pane', 'kind', 'model', 'reasoning');
   if (!opts.name) usage('start needs <name>');
   if (!['claude', 'codex'].includes(opts.kind)) usage('start --kind must be claude or codex');
+  // Taken before the agent launches: a codex session's rollout is born while
+  // the TUI loads, and `wait` finds it as the newest rollout since this stamp.
+  const startRequestedAt = deps.timestamp();
 
   let native = [...opts.agentArgs];
   let warning = null;
@@ -1212,6 +1220,7 @@ async function startLane(opts, deps, state) {
       base: prior.base ?? existing.base ?? null,
       path: prior.path ?? existing.path ?? null,
       promptSignature: promptSignature ?? existing.promptSignature ?? null,
+      startRequestedAt,
       ...(paneSplitFrom ? { paneSplitFrom } : {}),
     };
   });
@@ -1381,6 +1390,9 @@ async function promptLane(opts, deps, state) {
   const verifyCodex = !queued && lane.kind === 'codex' && Boolean(lane.pane) && opts.verb === 'prompt';
   let readyFrame = verifyCodex ? await waitForCodexReady(deps, lane.pane, CODEX_LOAD_TIMEOUT_MS) : null;
   const promptArgs = ['agent', 'prompt', opts.name, wire, ...(queued ? [] : ['--wait', '--until', 'working'])];
+  // Stamped before the first send: the turn this prompt starts (or steers)
+  // ends with a task_complete later than this, and `wait` asks for exactly that.
+  const promptedAt = deps.timestamp();
   const failIfRefused = (result) => {
     if (result.code !== 0 && !isTimeoutFailure(result)) {
       const detail = result.stderr.trim() || result.stdout.trim();
@@ -1430,7 +1442,7 @@ async function promptLane(opts, deps, state) {
   }
   if (delivery === 'unknown') delivery = 'unverified';
   await mergeState(deps, opts.log, state, (draft) => {
-    draft.lanes[opts.name] = { ...(draft.lanes[opts.name] ?? lane), promptFile: file };
+    draft.lanes[opts.name] = { ...(draft.lanes[opts.name] ?? lane), promptFile: file, promptedAt };
   });
   const rulingRecord = ruling ? { amendment: true, ruling: ruling.ruling === 'none' ? 'none' : ruling.receipt } : {};
   return {
@@ -1490,6 +1502,8 @@ async function waitLane(opts, deps, state) {
   // is not a finished turn: the state must hold on a second poll
   // SETTLE_CONFIRM_MS later. Claude lanes settle on one poll.
   let unconfirmedAt = null;
+  let rolloutPath = null;
+  let settleSource = null;
 
   while (true) {
     const pollStarted = deps.now();
@@ -1560,8 +1574,20 @@ async function waitLane(opts, deps, state) {
     // sooner, because the deadline cut the sleep short, confirms nothing.
     // A herdr-settled Claude lane whose status bar still shows background work
     // has not handed back: keep polling, and at the deadline say why.
-    const hold = waited.code === 0 && ['idle', 'done'].includes(stateAfter) ? settleHold(plan, lane.kind) : null;
-    const settled = waited.code === 0 && ['idle', 'done'].includes(stateAfter) && !hold;
+    // A codex lane whose rollout shows its turn still running has not handed
+    // back either, whatever herdr reads. No rollout found keeps the two-poll
+    // settle alone, and the verdict says which evidence it rests on.
+    const herdrSettled = waited.code === 0 && ['idle', 'done'].includes(stateAfter);
+    let hold = herdrSettled ? settleHold(plan, lane.kind) : null;
+    if (herdrSettled && !hold && lane.kind === 'codex') {
+      rolloutPath ??= findCodexRollout(deps, lane);
+      const turn = rolloutPath ? codexTurnState(deps, rolloutPath, lane.promptedAt ?? null) : null;
+      settleSource = turn ? 'rollout' : 'polls';
+      if (turn && !turn.ended) {
+        hold = { state: 'settled-turn-live', turnEvent: turn.event, turnEventAt: turn.at };
+      }
+    }
+    const settled = herdrSettled && !hold;
     if (!settled) unconfirmedAt = null;
     else if (unconfirmedAt === null) unconfirmedAt = observedAt;
     const confirmed = settled && (lane.kind !== 'codex' || observedAt - unconfirmedAt >= SETTLE_CONFIRM_MS);
@@ -1570,7 +1596,7 @@ async function waitLane(opts, deps, state) {
       continue;
     }
     if (confirmed) {
-      if (lane.kind === 'codex') polls.settleConfirmed = true;
+      if (lane.kind === 'codex') Object.assign(polls, { settleConfirmed: true, settleSource });
       if (plan.capacity) {
         return settle({
           exit: EXIT.CAPACITY,
@@ -1582,6 +1608,7 @@ async function waitLane(opts, deps, state) {
         exit: EXIT.OK,
         output: {
           state: stateAfter,
+          ...(lane.kind === 'codex' ? { settle: settleSource } : {}),
           notice: 'status is not evidence — run lane check',
           ...warning,
         },
@@ -2562,6 +2589,135 @@ export function claudeBackgroundWork(text, { signature = null, patterns = DEFAUL
 // What keeps a herdr-settled non-codex lane from settling: live background work
 // in its status bar, or a pane that could not be read (an unread pane must not
 // make a live segment look absent). Both end at the deadline as exit 4.
+// --- codex turn state from the session rollout ----------------------------
+// herdr's agent_status reads `done` for minutes while codex works between tool
+// calls, steadily enough that a second poll confirms it. The rollout journal is
+// codex's own record: a turn is over when its last turn event is task_complete
+// or turn_aborted, written after the lane's last prompt.
+const ROLLOUT_HEAD_BYTES = 16 * 1024;
+const ROLLOUT_TAIL_BYTES = 256 * 1024;
+const ROLLOUT_MAX_DAYS = 14;
+const TURN_EVENTS = new Set(['task_started', 'task_complete', 'turn_aborted']);
+
+function readFileBytes(path, { bytes, fromEnd = false }) {
+  const fd = openSync(path, 'r');
+  try {
+    const size = fstatSync(fd).size;
+    const length = Math.min(bytes, size);
+    const start = fromEnd ? size - length : 0;
+    const buffer = Buffer.alloc(length);
+    readSync(fd, buffer, 0, length, start);
+    return { text: buffer.toString('utf8'), start };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function codexSessionsRoot(deps) {
+  const home = deps.env.CODEX_HOME || join(deps.home(), '.codex');
+  return join(home, 'sessions');
+}
+
+// Codex files a rollout under its LOCAL date, so the scan spans a day either
+// side of the UTC dates between `since` and now.
+function rolloutDayDirs(root, sinceMs, nowMs) {
+  const day = 86_400_000;
+  const first = Math.max(sinceMs - day, nowMs - ROLLOUT_MAX_DAYS * day);
+  const dirs = [];
+  for (let at = first; at <= nowMs + day; at += day) {
+    const date = new Date(at);
+    const parts = [
+      String(date.getUTCFullYear()),
+      String(date.getUTCMonth() + 1).padStart(2, '0'),
+      String(date.getUTCDate()).padStart(2, '0'),
+    ];
+    dirs.push(join(root, ...parts));
+  }
+  return dirs;
+}
+
+// The lane's own rollout: the EARLIEST interactive (codex-tui) session whose
+// session_meta.cwd is the lane's worktree and which began at or after the
+// lane's start was requested. Review seats and lenses run `codex exec` in the
+// same worktree (originator codex_exec), and any later session there began
+// after the lane's own, so neither the newest match nor a non-TUI session is
+// the lane. null when there is none yet.
+export function findCodexRollout(deps, lane) {
+  const sinceMs = lane.startRequestedAt ? Date.parse(lane.startRequestedAt) : NaN;
+  if (!lane.path || !Number.isFinite(sinceMs)) return null;
+  const fold = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
+  const want = fold(resolve(lane.path));
+  let best = null;
+  for (const dir of rolloutDayDirs(codexSessionsRoot(deps), sinceMs, deps.now())) {
+    let names;
+    try {
+      names = deps.list(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!/^rollout-.*\.jsonl$/.test(name)) continue;
+      const path = join(dir, name);
+      let head;
+      try {
+        head = deps.readBytes(path, { bytes: ROLLOUT_HEAD_BYTES }).text;
+      } catch {
+        continue;
+      }
+      const firstLine = head.split('\n', 1)[0];
+      if (!firstLine.includes('"session_meta"') || !firstLine.includes('"originator":"codex-tui"')) continue;
+      const cwd = /"cwd":("(?:[^"\\]|\\.)*")/.exec(firstLine);
+      const stamp = /"timestamp":"([^"]+)"/.exec(firstLine);
+      if (!cwd || !stamp) continue;
+      let cwdValue;
+      try {
+        cwdValue = JSON.parse(cwd[1]);
+      } catch {
+        continue;
+      }
+      if (fold(resolve(cwdValue)) !== want) continue;
+      // Ordered by the session's own UTC stamp: the filename is local time,
+      // which repeats an hour at a DST fall-back.
+      const at = Date.parse(stamp[1]);
+      if (!(at >= sinceMs)) continue;
+      if (!best || at < best.at || (at === best.at && name < best.name)) best = { name, path, at };
+    }
+  }
+  return best?.path ?? null;
+}
+
+// { ended, event, at } from the rollout's last turn event, or null when the
+// rollout cannot be read. A tail with no turn event is a turn still running: an
+// idle session writes nothing after its task_complete, so a finished turn's
+// event is always inside the tail.
+export function codexTurnState(deps, path, promptedAt = null) {
+  let read;
+  try {
+    read = deps.readBytes(path, { bytes: ROLLOUT_TAIL_BYTES, fromEnd: true });
+  } catch {
+    return null;
+  }
+  const lines = read.text.split('\n');
+  if (read.start > 0) lines.shift();
+  let last = null;
+  for (let index = lines.length - 1; index >= 0 && !last; index--) {
+    const line = lines[index];
+    if (!line.includes('task_') && !line.includes('turn_aborted')) continue;
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type === 'event_msg' && TURN_EVENTS.has(entry.payload?.type)) {
+        last = { event: entry.payload.type, at: entry.timestamp ?? null };
+      }
+    } catch {
+      // a line still being written, or not JSON
+    }
+  }
+  if (!last) return { ended: false, event: null, at: null };
+  const promptMs = promptedAt ? Date.parse(promptedAt) : NaN;
+  const afterPrompt = !Number.isFinite(promptMs) || Date.parse(last.at) >= promptMs;
+  return { ended: last.event !== 'task_started' && afterPrompt, ...last };
+}
+
 function settleHold(plan, kind) {
   if (readsCodexTui(kind)) return null;
   if (!plan.ok) return { state: 'timeout', paneUnread: true };
@@ -2653,6 +2809,9 @@ export async function runLane(argv, overrides = {}) {
     touch: (path) => utimesSync(path, new Date(), new Date()),
     warn: (message) => console.error(message),
     append: (path, value) => appendFileSync(path, value, 'utf8'),
+    list: (path) => readdirSync(path),
+    readBytes: readFileBytes,
+    home: () => homedir(),
     env: process.env,
     platform: process.platform,
     now: () => Date.now(),
