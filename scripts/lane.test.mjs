@@ -4415,6 +4415,76 @@ test('056de846 amend 1: a retained frame under a shell prompt, with no exit foot
   assert.equal((await clockedWait(g, '3000')).output.state, 'settled-background-live', 'a signature recorded, but the frame is the last thing drawn: still live');
 });
 
+test('056de846 amend 2: a declared prompt regex clears a retained frame whose prompt it alone matches', async (t) => {
+  // A custom prompt no default shape matches, and a lane with no recorded signature.
+  const CUSTOM = '» build-box ~';
+  const DECLARED = '^» build-box';
+  const pane = `${BG_LIVE.trimEnd()}\n${CUSTOM}`;
+  const settledIdle = { code: 0, stdout: '{"result":{"state":"idle"}}', stderr: '' };
+  const waitArgs = (f, extra) => ['wait', 'lane-a', '--until', 'idle', '--until', 'done', '--timeout', '10000', ...extra, '--log', f.log];
+  const clock = () => { let now = 0; return { now: () => now, sleep: async (ms) => { now += Math.max(ms, 1); } }; };
+
+  assert.equal(claudeBackgroundWork(pane, { patterns: [new RegExp(DECLARED)] }), null, 'the declared pattern');
+  assert.equal(claudeBackgroundWork(pane), '1 shell, 1 monitor', 'declared nowhere: the limit, a timeout and never a false settle');
+
+  const byFlag = fixture(t);
+  seedLane(byFlag, { kind: 'claude' });
+  pushPolls(byFlag, pane, 1);
+  const flagged = await runLane(waitArgs(byFlag, ['--prompt-regex', DECLARED]), { exec: byFlag.exec, ...clock() });
+  assert.deepEqual([flagged.exit, flagged.output.state], [0, 'done'], '--prompt-regex, wait');
+
+  const byEnv = fixture(t);
+  seedLane(byEnv, { kind: 'claude' });
+  pushPolls(byEnv, pane, 1);
+  const enved = await runLane(waitArgs(byEnv, []), { exec: byEnv.exec, env: { LANE_PROMPT_REGEX: DECLARED }, ...clock() });
+  assert.deepEqual([enved.exit, enved.output.state], [0, 'done'], 'LANE_PROMPT_REGEX, wait');
+
+  const byResume = fixture(t);
+  seedLane(byResume, { kind: 'claude' });
+  byResume.responses.push(settledIdle, paneRead(pane));
+  const resumed = await runLane(['resume', 'lane-a', '--timeout', '1000', '--prompt-regex', DECLARED, '--log', byResume.log], { exec: byResume.exec });
+  assert.deepEqual([resumed.exit, resumed.output.state], [0, 'idle'], '--prompt-regex, resume');
+
+  const none = fixture(t);
+  seedLane(none, { kind: 'claude' });
+  pushPolls(none, pane, 20);
+  assert.equal((await runLane(['wait', 'lane-a', '--until', 'idle', '--until', 'done', '--timeout', '3000', '--log', none.log], { exec: none.exec, env: {}, ...clock() })).output.state, 'settled-background-live', 'no declared regex: still live');
+});
+
+test('056de846 amend 2: an unusable declared regex gives wait and resume no new failure — it falls back to the default shapes', async (t) => {
+  const BAD_ENV = { LANE_PROMPT_REGEX: '([unclosed' };
+  const defaultPrompt = `${BG_LIVE.trimEnd()}\nPS X:\\fixture\\lane>`;
+  const settledIdle = { code: 0, stdout: '{"result":{"state":"idle"}}', stderr: '' };
+  const clock = () => { let now = 0; return { now: () => now, sleep: async (ms) => { now += Math.max(ms, 1); } }; };
+  const wait = (f, timeout) => runLane(['wait', 'lane-a', '--until', 'idle', '--until', 'done', '--timeout', timeout, '--log', f.log], { exec: f.exec, env: BAD_ENV, ...clock() });
+
+  const live = fixture(t);
+  seedLane(live, { kind: 'claude' });
+  pushPolls(live, BG_LIVE, 20);
+  const heldWait = await wait(live, '3000');
+  assert.deepEqual([heldWait.exit, heldWait.output.state, heldWait.output.error], [4, 'settled-background-live', undefined], 'wait: a live frame still holds, no usage error');
+
+  const dead = fixture(t);
+  seedLane(dead, { kind: 'claude' });
+  pushPolls(dead, defaultPrompt, 1);
+  const deadWait = await wait(dead, '10000');
+  assert.deepEqual([deadWait.exit, deadWait.output.state], [0, 'done'], 'wait: the default shapes still clear a dead frame');
+
+  for (const [pane, exit, state] of [[BG_LIVE, 4, 'settled-background-live'], [defaultPrompt, 0, 'idle']]) {
+    const f = fixture(t);
+    seedLane(f, { kind: 'claude' });
+    f.responses.push(settledIdle, paneRead(pane));
+    const result = await runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, env: BAD_ENV });
+    assert.deepEqual([result.exit, result.output.state, result.output.error], [exit, state, undefined], `resume, ${state}`);
+  }
+
+  // Already so before this change: the flag is refused at parse time, before herdr.
+  const flag = fixture(t);
+  seedLane(flag, { kind: 'claude' });
+  const refused = await runLane(['wait', 'lane-a', '--timeout', '1000', '--prompt-regex', '([unclosed', '--log', flag.log], { exec: flag.exec });
+  assert.deepEqual([refused.exit, flag.calls.length], [2, 0]);
+});
+
 test('056de846: claudeBackgroundWork reads the status bar only — every variant seen live, and what it must not match', () => {
   assert.equal(claudeBackgroundWork(BG_LIVE), '1 shell, 1 monitor');
   assert.equal(claudeBackgroundWork(BG_LIVE_PLURAL), '4 shells, 1 monitor');
