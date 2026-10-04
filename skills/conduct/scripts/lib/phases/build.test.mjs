@@ -202,6 +202,7 @@ async function conductVerb(h, action) {
 function herdrVerb(h, action) {
   const id = action.wpId;
   const verb = action.command[2];
+  if (verb === 'admit') return { code: h.herdrAdmit?.[id]?.length ? h.herdrAdmit[id].shift() : 0, stdout: '', stderr: 'below the free-memory floor' };
   if (verb === 'create') return ok(JSON.stringify({ paneId: `pane-${id}`, path: `${h.repo}-wt-demo-${id.toLowerCase()}`, branch: `conduct/demo/${id.toLowerCase()}` }));
   if (verb === 'start') return ok(JSON.stringify({ startedAt: h.deps.timestamp() }));
   if (verb === 'prompt') {
@@ -209,7 +210,10 @@ function herdrVerb(h, action) {
     writeReport(h, id, h.spawns[id] > 1);
     return ok();
   }
-  if (verb === 'wait') return { code: h.herdrWait?.[id]?.length ? h.herdrWait[id].shift() : 0, stdout: '', stderr: '' };
+  if (verb === 'wait') {
+    const code = h.herdrWait?.[id]?.length ? h.herdrWait[id].shift() : 0;
+    return { code, stdout: code === 3 ? JSON.stringify({ dialog: 'Do you trust the files in this folder?' }) : '', stderr: '' };
+  }
   return ok();
 }
 
@@ -235,7 +239,7 @@ function shellResult(h, action) {
     case 'rebase/pre-head': return ok(`${h.head(id)}\n`);
     case 'rebase/post-heads': return ok(`${h.bump(id)}\n${'e'.repeat(40)}\n`);
     case 'merge/merge-commit': return ok(JSON.stringify({ mergeCommit: { oid: mergeSha(id) } }));
-    case 'spend/spend': return ok(`${h.spendUsd ?? 1}\n`);
+    case 'spend/spend': return ok(Array.isArray(h.spendOut) && h.spendOut.length ? h.spendOut.shift() : `${h.spendUsd ?? 1}\n`);
     case 'gate-cmd/gate-cmd': return { code: h.gateCmdCode?.[id]?.length ? h.gateCmdCode[id].shift() : 0, stdout: '', stderr: 'gate output' };
     default: return ok();
   }
@@ -272,7 +276,7 @@ function author(h, action) {
 
 function tool(h, action) {
   switch (action.tool) {
-    case 'spine_receipt': return structuredClone(RECEIPT);
+    case 'spine_receipt': return { ...structuredClone(RECEIPT), questId: action.args.questId, outcome: action.args.outcome };
     case 'spine_update': return { ok: true, applied: Object.keys(action.args) };
     case 'spine_quest': return h.spineQuest ? h.spineQuest(action) : { quests: [{ id: ANCHOR, latestReceipt: null }] };
     case 'council_review': return { models: { 'gpt-6.1-sol': { status: 'success' } } };
@@ -549,7 +553,7 @@ test('rulings before escalation (D19.3): an escalation opens one blocked touch w
   await drive(h, { until: () => h.state.wps[2].state === 'merged' });
   assert.equal(h.state.touches.length, 1);
   const [touch] = h.state.touches;
-  assert.deepEqual(touch.options.map((o) => [o.key, o.label]), [['a', '- (a) keep the old flag name'], ['b', '- (b) rename the flag to --since']]);
+  assert.deepEqual(touch.options.map((o) => [o.key, o.label]), [['a', 'keep the old flag name'], ['b', 'rename the flag to --since']]);
   assert.equal(touch.wpId, 'WP-02');
   assert.equal(touch.suspendedStep, 'check');
   assert.equal(h.wp('WP-02').state, 'blocked');
@@ -976,15 +980,16 @@ test('gate command: exit 1 at the rebased head → an amendment and no merge act
   assert.ok(!h.trace.some((a) => a.step === 'merge'));
 });
 
-test('gate command after a no-op rebase: the amended head gets a full review (round + 1), not a refused delta that blocks the WP', async (t) => {
+test('gate command after a no-op rebase: the amended head gets its delta review (the fixed land.mjs predicate), never a block', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   h.gateCmdCode = { 'WP-02': [1] };
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
   h.answer = (a) => (a.part === 'post-heads' ? ok(`${h.head(a.wpId)}\n${'e'.repeat(40)}\n`) : undefined);
   assert.equal(await drive(h), null);
   assert.equal(h.wp('WP-02').state, 'merged', h.wp('WP-02').reason);
   assert.equal(h.wp('WP-02').rebases[0].from, h.wp('WP-02').rebases[0].to, 'the first rebase was a no-op');
   const posts = of(h, 'WP-02').filter((a) => a.step === 'post');
-  assert.deepEqual(posts.map((a) => [a.land.round, a.land.scope]), [[1, 'full'], [2, 'full']]);
+  assert.deepEqual(posts.map((a) => [a.land.round, a.land.scope]), [[1, 'full'], [2, 'delta']]);
 });
 
 test('tier from the recipe file (D17, D19.11): contractPaths or an added test raise T1 to T2; neither stays T1; WP-00 at depth none too', async (t) => {
@@ -1057,9 +1062,355 @@ test('fail closed on owner unverified (WP-02 additions): an unreadable identity 
   assert.equal(nextWp.step, 'wait', 'polled again, not checked');
   assert.equal(await drive(h), null);
   const polls = of(h, 'WP-02').filter((a) => a.step === 'wait' && a.kind === 'shell').length;
-  assert.equal(polls, 4, 'polled until the pid was gone');
-  assert.ok(h.events().some((e) => e.event === 'owner-unverified'));
+  // The third read's record already sees the pid dead (pidAlive false): affirmative evidence.
+  assert.equal(polls, 3, 'polled until the pid was gone');
+  assert.ok(h.events().some((e) => e.event === 'liveness-uncertain' && e.data.owner === 'unverified'));
   assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+// ---- amendment 1 (council round 1 on #156) ----
+
+const aliveOf = (a) => a.kind === 'shell' && a.command?.[1]?.endsWith('conduct.mjs') && a.command[2] === 'lane' && a.command[3] === 'alive';
+const pendingAfter = async (h, result) => {
+  h.trace.at(-1) !== h.state.pending && h.trace.push(h.state.pending);
+  await recordPending(h, result);
+};
+
+test('liveness (C1-1): unparseable or empty `lane alive` output on a wait keeps the slot and polls again', async (t) => {
+  for (const stdout of ['not json', '']) {
+    const h = harness(t, { wps: [TWO[0], TWO[1]] });
+    h.life = { 'WP-02': 5 };
+    await drive(h, { until: (a) => aliveOf(a) && a.wpId === 'WP-02' });
+    await pendingAfter(h, { code: 1, stdout, stderr: '' });
+    assert.equal(h.wp('WP-02').lane.exitedAt ?? null, null, `${JSON.stringify(stdout)}: still occupying`);
+    const again = await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
+    assert.ok(aliveOf(again), `${JSON.stringify(stdout)}: polled again, not checked (${again.step}/${again.part})`);
+  }
+});
+
+test('liveness (C1-1): unparseable output on a stop probe and on a stop confirmation keeps the slot and asks again', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.life = { 'WP-02': 9 };
+  await drive(h, { until: (a) => aliveOf(a) && a.wpId === 'WP-02' });
+  h.tick(121 * 60000);
+  await pendingAfter(h, await perform(h, h.state.pending));
+  assert.equal(h.wp('WP-02').reason, 'lane deadline');
+  const probe = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'stop' });
+  assert.equal(probe.part, 'probe');
+  await pendingAfter(h, { code: 1, stdout: '{"ok":tru', stderr: '' });
+  assert.equal(h.wp('WP-02').lane.exitedAt ?? null, null, 'probe: still occupying');
+  assert.equal((await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) })).part, 'probe', 'probe: asked again');
+  const confirm = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.part === 'confirm' });
+  await pendingAfter(h, { code: 1, stdout: '', stderr: '' });
+  assert.equal(h.wp('WP-02').lane.exitedAt ?? null, null, 'confirm: still occupying');
+  const next = await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
+  assert.equal(next.part, 'confirm', 'confirm: asked again');
+  assert.ok(confirm);
+});
+
+test('liveness (C1-1, split 4): past the deadline the third uncertain read blocks the WP visibly, slot held and stop queued', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.life = { 'WP-02': 9 };
+  await drive(h, { until: (a) => aliveOf(a) && a.wpId === 'WP-02' });
+  h.tick(121 * 60000);
+  for (let read = 1; read <= 3; read += 1) {
+    if (read > 1) await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
+    assert.ok(aliveOf(h.state.pending), `read ${read} is a poll`);
+    await pendingAfter(h, { code: 1, stdout: JSON.stringify({ ok: true, alive: false, pid: 4202, owner: 'unverified' }), stderr: '' });
+  }
+  const wp = h.wp('WP-02');
+  assert.equal(wp.state, 'blocked');
+  assert.match(wp.reason, /lane liveness unverifiable past the deadline: 3 reads/);
+  assert.equal(wp.lane.exitedAt ?? null, null, 'the slot is held');
+  assert.deepEqual(wp.queue.map((a) => `${a.kind}/${a.step}/${a.part ?? ''}`), ['wait/stop/', 'shell/stop/probe']);
+});
+
+test('gate cap (C1-2): the third gate-driven amendment blocks the WP with the last gate cause as its reason', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.gateCmdCode = { 'WP-02': [1, 1, 1] };
+  assert.equal(await drive(h), null);
+  assert.equal(of(h, 'WP-02').filter((a) => a.part === 'amendment').length, 2);
+  assert.equal(h.wp('WP-02').state, 'blocked');
+  assert.match(h.wp('WP-02').reason, /^the gate command exited 1 at the rebased head: gate output \(after 2 gate amendments\)$/);
+});
+
+test('no CI at head (C1-2): with CI the gate waits out the window, then blocks "CI did not complete at head"; with none it blocks at once; never an amendment', async (t) => {
+  const noRuns = [/^gh api repos\/o\/r\/commits\/\w+\/check-runs/, () => ({ code: 1, stdout: '', stderr: 'gh: No commit found for SHA (HTTP 422)' })];
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.rules.unshift(noRuns);
+  h.onPerform = (a) => { if (a.part === 'gate') h.tick(10 * 60000); };
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'blocked');
+  assert.equal(h.wp('WP-02').reason, 'CI did not complete at head');
+  assert.ok(!h.trace.some((a) => a.part === 'amendment'));
+  assert.equal(h.trace.filter((a) => a.part === 'gate').length, 4, 'gated at 0, 10, 20 and 30 minutes');
+  assert.equal(h.state.mergeLock, null);
+  const none = harness(t, { wps: [TWO[0], TWO[1]] });
+  none.state.intent.ciWorkflows = 0;
+  none.rules.unshift(noRuns);
+  assert.equal(await drive(none), null);
+  assert.match(none.wp('WP-02').reason, /no CI workflow/);
+  assert.equal(none.trace.filter((a) => a.part === 'gate').length, 1);
+});
+
+test('budget before amendment prompts (C1-2, C1-5): an over-budget amendment is not prompted; (a) needs "budget <USD>" above spend; metering continues', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [TWO[0], TWO[1]] });
+  h.gateCmdCode = { 'WP-02': [1] };
+  h.spendOut = ['1\n', '30\n', '30\n'];
+  await drive(h, { until: (a) => a.part === 'announce' });
+  const brief = of(h, 'WP-02').find((a) => a.part === 'amendment');
+  assert.ok(brief);
+  assert.ok(!of(h, 'WP-02').slice(of(h, 'WP-02').indexOf(brief)).some((a) => a.step === 'prompt'), 'not prompted while over budget');
+  assert.match(h.state.touches[0].question, /Spend is \$30 against the \$25 budget \(metered by the spend adapter\)/);
+  assert.equal(h.state.touches[0].allowFreeText, true);
+  for (const [text, refused] of [[null, /needs the text "budget <USD>"/], ['budget 20', /above the current spend of \$30/]]) {
+    await recordPending(h, {});
+    answerCore(h, 1, 'a', text);
+    const again = await step(h);
+    h.trace.push(again);
+    assert.equal(again.part, 'announce');
+    assert.match(again.instruction, refused);
+    assert.equal(h.state.authority.budgetUsd, 25);
+  }
+  await recordPending(h, {});
+  answerCore(h, 1, 'a', 'continue; budget $50');
+  assert.equal(await drive(h), null);
+  assert.equal(h.state.authority.budgetUsd, 50);
+  assert.deepEqual(h.state.authority.budgetSource.touch, 1);
+  assert.equal(h.trace.filter((a) => a.step === 'spend').length, 3, 'metered again before the resumed prompt');
+  assert.equal(h.state.build.resumed, undefined);
+  assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+test('owed adjudication (C1-3): findings → guard escalation → answer (b) → the conductor replies refuted, then every thread resolves', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [2] };
+  h.reports = { 'WP-02': ['report-built.md', 'report-guard.md'] };
+  h.rulings = [{ escalate: true, why: 'is the deleted test a weakening?' }];
+  h.unresolved = () => h.resolved < 2;
+  await drive(h, { until: (a) => a.part === 'announce' });
+  assert.deepEqual(h.state.touches[0].options.map((o) => o.label), ['confirmed', 'refuted', 'judgment']);
+  await recordPending(h, {});
+  answerCore(h, 1, 'b');
+  assert.equal(await drive(h), null);
+  const all = of(h, 'WP-02');
+  const guard = all.find((a) => a.part === 'reply' && a.command.includes('4177234275'));
+  assert.equal(flagOf(guard.command, 'verdict'), 'refuted');
+  assert.equal(flagOf(guard.command, 'adjudicator'), 'conductor');
+  assert.equal(all.filter((a) => a.part === 'amendment').length, 1, 'the lane is not amended for a guard answer');
+  assert.deepEqual(all.find((a) => a.step === 'thread-ids').land.commentIds, ['4177234272', '4177234275']);
+  assert.equal(all.filter((a) => a.step === 'resolve').length, 2);
+  assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+test('owed adjudication (C1-3): findings → needs conductor → ruling → built → the owed replies and resolves still run', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3] };
+  h.reports = { 'WP-02': ['report-built.md', 'report-needs-conductor.md', 'report-amendment.md'] };
+  h.unresolved = () => h.resolved < 3;
+  assert.equal(await drive(h), null);
+  const all = of(h, 'WP-02');
+  assert.deepEqual(all.filter((a) => a.part === 'amendment').map((a) => a.amendment.kind), ['findings', 'ruling']);
+  assert.ok(h.events().some((e) => e.event === 'adjudicated' && e.data.rows.length === 3));
+  assert.equal(all.filter((a) => a.part === 'reply').length, 3);
+  assert.equal(all.filter((a) => a.step === 'resolve').length, 3);
+  assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+test('spend parse (C1-4, C1-15): empty, blank, negative or non-numeric meter output halts with no dispatch; an unset WORKIT_SPEND_CMD is reported, never run', async (t) => {
+  for (const out of ['', '  \n', '-1\n', 'n/a\n', '1e3\n']) {
+    const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
+    h.spendOut = [out];
+    assert.equal(await drive(h), null);
+    assert.ok(!h.trace.some((a) => a.wpId), `${JSON.stringify(out)}: nothing dispatched`);
+    assert.match(h.state.touches[0].question, /output is unreadable/, JSON.stringify(out));
+    assert.ok(h.state.dispatchHalt);
+  }
+  const unset = harness(t, { spend: true, env: {} });
+  assert.equal(await drive(unset), null);
+  assert.ok(!unset.trace.some((a) => a.step === 'spend' || a.wpId));
+  assert.match(unset.state.touches[0].question, /WORKIT_SPEND_CMD is not set/);
+});
+
+test('halt reasons (C1-12): a budget answer clears only the budget halt; dispatch waits for the merged-tree anomaly\'s own answer', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [...TWO, { id: 'WP-04', files: ['lib/x.mjs'], dependsOn: ['WP-01'] }] });
+  h.life = { 'WP-02': 1, 'WP-03': 1 };
+  h.treeMismatch = 'WP-02';
+  h.gateCmdCode = { 'WP-03': [1] };
+  h.spendOut = ['1\n', '1\n', '30\n'];
+  await drive(h, { until: () => h.state.touches.length === 2 && h.state.pending?.part === 'announce' });
+  assert.deepEqual(h.state.touches.map((touch) => touch.build), ['merged', 'budget']);
+  await recordPending(h, {});
+  answerCore(h, 2, 'a', 'budget 60');
+  await drive(h, { until: () => h.wp('WP-03').state === 'merged' && isWait(h.state.pending ?? {}) });
+  assert.match(h.state.dispatchHalt.reason, /merged tree differs/);
+  assert.ok(!h.trace.some((a) => a.wpId === 'WP-04'), 'no dispatch while the anomaly is open');
+  h.state.pending = null;
+  h.trace.pop();
+  answerCore(h, 1, 'a');
+  assert.equal(await drive(h), null);
+  assert.equal(h.state.dispatchHalt, null);
+  assert.equal(h.wp('WP-04').state, 'merged');
+});
+
+test('blocked drops failed work (C1-6): a failed diff or amend-diff blocks, and the next next() does not emit it again', async (t) => {
+  for (const part of ['diff', 'amend-diff']) {
+    const h = harness(t, { wps: [TWO[0], TWO[1]] });
+    if (part === 'amend-diff') {
+      h.findings = { 'WP-02': [3] };
+      h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+      h.unresolved = () => h.resolved < 3;
+    }
+    h.answer = (a) => (a.part === part ? { code: 1, stdout: '', stderr: 'gh: HTTP 502' } : undefined);
+    assert.equal(await drive(h), null, part);
+    assert.equal(h.wp('WP-02').state, 'blocked');
+    assert.equal(h.trace.filter((a) => a.part === part).length, 1, `${part}: emitted once`);
+    assert.deepEqual(h.wp('WP-02').queue, []);
+  }
+});
+
+test('fallback (C1-7): after a successful claude fallback the PR\'s author is claude, so a managed review claims two lenses with no single-lens exception', async (t) => {
+  const h = harness(t, { herdr: true, wps: [TWO[0], TWO[1]] });
+  h.state.intent.agent = 'codex';
+  h.herdrWait = { 'WP-02': [6, 0] };
+  h.answer = (a) => (a.part === 'managed' ? ok(JSON.stringify({ mode: 'managed' })) : undefined);
+  await drive(h, { until: (a) => a.step === 'post' });
+  assert.ok(of(h, 'WP-02').some((a) => a.step === 'fallback'));
+  assert.equal(h.wp('WP-02').agent, 'claude');
+  const claim = of(h, 'WP-02').find((a) => a.part === 'claim');
+  assert.ok(!claim.command.includes('--single-lens'), claim.command.join(' '));
+  assert.deepEqual(of(h, 'WP-02').filter((a) => a.part === 'lens').map((a) => flagOf(a.command, 'lens')), ['codex', 'astra']);
+});
+
+test('recovery paths (C1-9): an inspect action the gate asks for is emitted and its verdict recorded; admission backoff; one dialog re-poll, then a touch', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  let asked = false;
+  h.answer = (a) => {
+    if (a.part !== 'gate' || asked) return undefined;
+    asked = true;
+    const head = h.head('WP-02');
+    return { code: 5, stdout: JSON.stringify({ ok: false, pending: false, blocked: false, head, failures: ['post-cap tail needs an inspection'], causes: ['inspect'],
+      inspect: { tail: `${'1'.repeat(7)}..${head.slice(0, 7)}`, head, files: ['lib/lanes.mjs'], review: { round: 1, scope: 'full', since: null }, findingsHash: 'f'.repeat(64), anchor: 'review-1' } }), stderr: '' };
+  };
+  assert.equal(await drive(h), null);
+  const inspect = h.trace.find((a) => a.kind === 'inspect');
+  assert.equal(inspect.step, 'gate');
+  assert.deepEqual(inspect.command.slice(0, 4), ['git', '-C', h.wp('WP-02').lane.worktree, 'diff']);
+  assert.deepEqual(h.wp('WP-02').inspections.map((entry) => entry.verdict), ['addresses-findings']);
+  assert.equal(h.trace.filter((a) => a.part === 'gate').length, 2);
+  assert.equal(h.wp('WP-02').state, 'merged');
+
+  const admit = harness(t, { herdr: true, wps: [TWO[0], TWO[1]] });
+  admit.herdrAdmit = { 'WP-02': [7] };
+  admit.onPerform = (a) => { if (a.yield) admit.tick(a.waitMs); };
+  assert.equal(await drive(admit), null);
+  const admits = admit.trace.filter((a) => a.step === 'admit' && a.kind === 'shell');
+  assert.equal(admits.length, 2);
+  const backoff = admit.trace.slice(admit.trace.indexOf(admits[0]), admit.trace.indexOf(admits[1])).filter(isWait);
+  assert.deepEqual(backoff.map((a) => [a.step, a.waitMs]), [['admit', 300000]]);
+  assert.equal(admit.wp('WP-02').state, 'merged');
+
+  const once = harness(t, { herdr: true, wps: [TWO[0], TWO[1]] });
+  once.herdrWait = { 'WP-02': [3, 0] };
+  assert.equal(await drive(once), null);
+  assert.equal(once.state.touches.length, 0);
+  assert.equal(once.trace.filter((a) => a.wpId === 'WP-02' && a.step === 'wait' && a.kind === 'shell').length, 2);
+  const twice = harness(t, { herdr: true, wps: [TWO[0], TWO[1]] });
+  twice.herdrWait = { 'WP-02': [3, 3] };
+  await drive(twice, { until: (a) => a.part === 'announce' });
+  assert.equal(twice.state.touches[0].build, 'dialog');
+  assert.match(twice.state.touches[0].question, /Do you trust the files in this folder\?/);
+  assert.equal(twice.wp('WP-02').state, 'blocked');
+  await recordPending(twice, {});
+  answerCore(twice, 1, 'a');
+  assert.equal(await drive(twice), null);
+  const lane = twice.trace.filter((a) => a.command?.[1]?.endsWith('lane.mjs')).map((a) => a.command[2]);
+  assert.ok(lane.every((verb) => ['admit', 'create', 'start', 'prompt', 'wait', 'check', 'stop'].includes(verb)), lane.join(','));
+  assert.equal(twice.wp('WP-02').state, 'merged');
+});
+
+test('CI pending (C1-9): a pending record at a new head resets pendingSince', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  const pending = (head) => {
+    const runs = JSON.parse(fixture('land', 'check-runs-green.json'));
+    if (h.pendingHeads.has(head)) runs.check_runs[0].status = 'in_progress';
+    return JSON.stringify(runs);
+  };
+  // Every rebased head has CI still running.
+  h.pendingHeads = new Set();
+  h.answer = (a) => (a.part === 'post-heads' ? (h.pendingHeads.add(h.bump(a.wpId)), ok(`${h.head(a.wpId)}\n${'e'.repeat(40)}\n`)) : undefined);
+  h.checkRuns = pending;
+  h.onPerform = (a) => { if (a.part === 'gate') h.tick(60000); };
+  const sinces = [];
+  h.onEmit = (a) => { if (a.part === 'gate' && h.wp('WP-02').gate) sinces.push([h.wp('WP-02').gate.head, h.wp('WP-02').gate.pendingSince]); };
+  await drive(h, { until: () => sinces.length === 1 });
+  // The next gate sees a stale base: a rebase moves the head, and CI is pending there too.
+  h.stale = 1;
+  await drive(h, { until: () => sinces.length >= 2 && sinces.at(-1)[0] !== sinces[0][0] });
+  const first = sinces[0];
+  const last = sinces.at(-1);
+  assert.ok(first[1], 'set at the first pending');
+  assert.notEqual(last[0], first[0], 'a new head');
+  assert.ok(last[1] && Date.parse(last[1]) > Date.parse(first[1]), `reset at the new head: ${first[1]} → ${last[1]}`);
+});
+
+test('spine acknowledgements (C1-10): another quest, another outcome or state, or no receipt uuid is a check failure (exit 2)', async (t) => {
+  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1]] });
+  const receipt = await drive(h, { until: (a) => a.tool === 'spine_receipt' && a.step === 'receipt' });
+  const good = { ...structuredClone(RECEIPT), questId: receipt.args.questId, outcome: 'completed' };
+  for (const bad of [{ ...good, questId: '11111111-0000-4000-8000-000000000000' }, { ...good, outcome: 'paused' }, { ...good, id: 'not-a-uuid' }, { error: 'boom' }]) {
+    await assert.rejects(recordPending(h, bad), { code: 2 }, JSON.stringify(bad).slice(0, 80));
+  }
+  await recordPending(h, good);
+  const update = await step(h);
+  assert.equal(update.tool, 'spine_update');
+  await assert.rejects(recordPending(h, { questId: update.args.questId, workState: 'open' }), { code: 2, message: /workState is open/ });
+  await recordPending(h, { questId: update.args.questId, workState: 'done', horizon: 'landed' });
+});
+
+test('retry reason and amendment marker (C1-11, C1-13): a missing table re-prompts with its reason; an unchanged brief is refused', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3] };
+  h.reports = { 'WP-02': ['report-built.md', 'report-built.md', 'report-amendment.md'] };
+  h.unresolved = () => h.resolved < 3;
+  const first = await drive(h, { until: (a) => a.part === 'amendment' });
+  const initial = readFileSync(first.outPath, 'utf8');
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /marker line: Amendment 1: review round 1: 3 finding\(s\)/ });
+  writeFileSync(first.outPath, `${first.marker}\n${initial}`);
+  await recordPending(h, {});
+  const retry = await drive(h, { until: (a) => a.part === 'amendment' && a.amendment.n === 2 });
+  assert.match(retry.instruction, /its last check failed: the report has no ## Amendment table/);
+  assert.match(retry.instruction, /Still owed: review round 1 posted 3 finding\(s\)/);
+  assert.match(retry.marker, /^Amendment 2: the report has no ## Amendment table/);
+  await recordPending(h, author(h, retry));
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+test('comment-id reconciliation (C1-16): a council table missing C1-3 re-prompts naming it', async (t) => {
+  const h = harness(t, { council: true, wps: [TWO[0], { ...TWO[1], tier: 'T2' }] });
+  h.synth = [{ findings: 3, seats: ['gpt-6.1-sol'] }];
+  h.reports = { 'WP-02': ['report-built.md', 'report-council-amendment.md'] };
+  const retry = await drive(h, { until: (a) => a.part === 'amendment' && a.amendment.n === 2 });
+  assert.match(retry.instruction, /the ## Amendment table has no row for C1-3/);
+  assert.ok(!h.events().some((e) => e.event === 'adjudicated'));
+});
+
+test('core touch visibility (split 2): the action after an escalation is a wait naming the touch file and its answer command, before other work', async (t) => {
+  const h = harness(t);
+  h.reports = { 'WP-02': ['report-needs-conductor.md'] };
+  h.rulings = [{ escalate: true, why: 'operator call' }];
+  h.life = { 'WP-03': 2 };
+  await drive(h, { until: (a) => a.step === 'ruling' });
+  await pendingAfter(h, author(h, h.state.pending));
+  const announce = await step(h);
+  assert.equal(announce.kind, 'wait');
+  assert.equal(announce.part, 'announce');
+  assert.ok(announce.instruction.includes(join(h.runDir, 'touches', '1.md')), announce.instruction);
+  assert.match(announce.instruction, /answer --run .* --touch 1 --key <a\|b>/);
+  await recordPending(h, {});
+  const after = await step(h);
+  assert.notEqual(after.part, 'announce', 'once per touch');
 });
 
 const strip = (h, value) => JSON.parse(JSON.stringify(value).replaceAll(JSON.stringify(h.dir).slice(1, -1), '<dir>'));
@@ -1096,6 +1447,14 @@ test('fixture paths: no file under __fixtures__/build matches either Must 8 rege
   for (const insert of [['C:', 'Users', 'someone', 'x'].join('\\'), ['D:', 'Development', 'x'].join('/'), ['', 'Users', 'someone', ''].join('/')]) {
     assert.ok(PRIVATE_PATHS.some((p) => p.test(`text ${insert} text`)), insert);
   }
+});
+
+test('synthetic receipt fixture (C1-8): the spine_receipt success shape with made-up ids, no money and no locators', () => {
+  const text = fixture('build', 'spine-receipt-result.json');
+  const receipt = JSON.parse(text);
+  assert.deepEqual(Object.keys(receipt), ['id', 'questId', 'outcome', 'did', 'stoppedAt', 'producedArtifacts', 'coherence', 'resolution', 'source', 'createdAt', 'question', 'ask', 'answer']);
+  for (const id of [receipt.id, receipt.questId]) assert.match(id, /^00000000-0000-4000-8000-0000000000\w\w$/);
+  assert.ok(!/\$\d|data\/outputs|projects\/|\bpane\b/.test(text), text);
 });
 
 test('RUN_SLOTS: every run-level slot of the 0026be4 template matches a prefix; per-lane placeholders do not', () => {

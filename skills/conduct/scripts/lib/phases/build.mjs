@@ -11,11 +11,12 @@
 // remaining time (waits yield, D17).
 //
 // Fields this phase adds (optional; every reader tolerates their absence):
-// state.build { contract, spendOk, resumed }; wps[] stage, amendment,
-// checkAmends, asks, replyIds, rulingSeq, deferredBy, changedPaths, gateCmd,
-// cleanup; touches[] build (why the build opened it), applied, waitLeftMs; a
-// queued wait's remainingMs; an emitted action's wpId and, on the one
-// yielding wait, `yield: true`.
+// state.build { contract, halts, spendOkFor }; authority.budgetSource; wps[]
+// stage, amendment, checkAmends, gateAmends, owed, asks, replyIds, rulingSeq,
+// deferredBy, changedPaths, gateCmd, noCi, cleanup, lane.uncertain; touches[]
+// build (why the build opened it), applied, announced, waitLeftMs, guard,
+// spendUsd; a queued wait's remainingMs; an emitted action's wpId and, on a
+// yielding wait, `yield: true`; a spend action's budgetFor.
 import { join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
@@ -25,7 +26,7 @@ import {
   deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
   recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
 } from '../land.mjs';
-import { READ_BACK_WAIT_MS, conductScript, openTouch, recordTouch, touchAction } from '../touch.mjs';
+import { READ_BACK_WAIT_MS, answerCommand, conductScript, openTouch, recordTouch, touchAction, writeTouchFiles } from '../touch.mjs';
 
 // The lane-contract template's run-level slot prefixes (D17). `<repo A` also
 // matches `<repo A worktrees: …>`; a `<repo B` line is deleted in a
@@ -38,6 +39,12 @@ const LANE_STEPS = new Set(['admit', 'create', 'base', 'start', 'prompt', 'fallb
 const LAND_STEPS = new Set(['review', 'post', 'council', 'reply', 'thread-ids', 'resolve', 'rebase', 'gate', 'merge', 'merged']);
 const WAIT_MS = 60000;
 const CLEANUP_RETRY_MS = 300000;
+const GATE_AMENDS = 2;
+const UNCERTAIN_BLOCK = 3;
+const NO_CI_WINDOW_MS = 30 * 60000;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ASK_MARKER = /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\([a-f]\)(?:\*\*|__)?\s*/i;
+const GUARD_VERDICTS = ['confirmed', 'refuted', 'judgment'];
 const FILL = { '{pr.number}': (wp) => wp.pr?.number, '{pr.head}': (wp) => wp.pr?.head, '{merge.sha}': (wp) => wp.merge?.sha };
 
 const lower = (wp) => wp.id.toLowerCase();
@@ -192,12 +199,16 @@ const AMEND_TEXT = {
     : `review round ${a.round} posted ${a.findings ?? 'an unknown number of'} finding(s) as PR review comments; the lane adjudicates each in an ## Amendment table keyed by its comment id.`),
 };
 
+// A retry renders the failed expectation whatever the amendment's kind; the
+// marker line is what `record` looks for, so an unchanged brief is refused.
 function amendmentBrief(state, wp, amendment) {
   const outPath = wp.lane?.briefPath ?? laneLayout(state, wp).briefPath;
   const kind = AMEND_TEXT[amendment.kind] ? amendment.kind : 'check';
+  const retry = amendment.retryReason && kind !== 'check' ? `${AMEND_TEXT.check({ reason: amendment.retryReason })} Still owed: ` : '';
+  const marker = `Amendment ${amendment.n}: ${amendment.retryReason ?? amendment.reason}`;
   return {
-    kind: 'author', step: 'brief', part: 'amendment', outPath, amendment, expects: { type: 'file' },
-    instruction: `Rewrite ${outPath} as amendment ${amendment.n} for ${wp.id}'s lane (same worktree, same report ${laneLayout(state, wp).reportPath}): ${AMEND_TEXT[kind](amendment)} The lane appends ## Amendment ${amendment.n} to its report (lane contract § Finish, step 4). Record {}.`,
+    kind: 'author', step: 'brief', part: 'amendment', outPath, amendment, marker, expects: { type: 'file' },
+    instruction: `Rewrite ${outPath} as amendment ${amendment.n} for ${wp.id}'s lane (same worktree, same report ${laneLayout(state, wp).reportPath}): ${retry}${AMEND_TEXT[kind](amendment)} The lane appends ## Amendment ${amendment.n} to its report (lane contract § Finish, step 4). Start the file with this line, verbatim: ${marker}. Record {}.`,
   };
 }
 
@@ -206,7 +217,7 @@ function rulingAction(state, wp, { asks = null, row = null }) {
   wp.rulingSeq = Math.max(wp.rulingSeq ?? 0, (wp.rulings ?? []).length) + 1;
   const n = wp.rulingSeq;
   const file = `rulings/${lower(wp)}-${n}.json`;
-  const keys = row ? ['confirmed', 'refuted', 'judgment'] : (asks ?? []).map((ask) => ask.key);
+  const keys = row ? GUARD_VERDICTS : (asks ?? []).map((ask) => ask.key);
   const outPath = join(state.runDir, file);
   const what = row ? `the guard row for comment ${row.comment} (the lane's evidence: ${row.evidence})` : `${wp.id}'s ## Needs conductor asks: ${(asks ?? []).map((ask) => ask.text).join(' / ')}`;
   return {
@@ -248,28 +259,86 @@ function buildTouch(state, deps, why, fields) {
 
 const option = (key, label, consequence) => ({ key, label: String(label).slice(0, 120), consequence: String(consequence).slice(0, 240) });
 
-function haltTouch(state, deps, reason, why) {
-  state.dispatchHalt = { reason, since: deps.timestamp() };
-  buildTouch(state, deps, why, {
-    question: `DO: decide whether conduct ${state.slug} dispatches more lanes. ${reason}. EXPECT: (a) dispatch resumes; (b) no new lane starts, the live ones finish, and the build ends.`,
-    options: [option('a', 'Resume dispatch', 'New lanes start again.'), option('b', 'End the build', 'Live lanes finish; nothing new is dispatched.')],
+// Run-level halt reasons (budget, a merged-tree anomaly) are kept as a set:
+// an answer clears only its own, and dispatch resumes when none is left.
+function syncHalt(state, deps) {
+  const halts = state.build.halts ?? [];
+  state.dispatchHalt = halts.length ? { reason: halts.map((halt) => halt.reason).join('; '), since: state.dispatchHalt?.since ?? deps.timestamp() } : null;
+}
+
+function haltTouch(state, deps, reason, why, spendUsd = null) {
+  const halts = (state.build.halts ??= []);
+  if (why === 'budget' && halts.some((halt) => halt.kind === 'budget')) return;
+  const budget = why === 'budget';
+  const touch = buildTouch(state, deps, why, {
+    question: budget
+      ? `DO: decide whether conduct ${state.slug} spends more. ${reason}. EXPECT: (a) answered with the text "budget <USD>" above the current spend raises the ceiling to it, and metering continues; (b) no new lane or amendment prompt starts, the live work stops, and the build ends.`
+      : `DO: decide whether conduct ${state.slug} dispatches more lanes. ${reason}. EXPECT: (a) this halt is cleared; dispatch resumes once no other halt is open; (b) no new lane starts, the live ones finish, and the build ends.`,
+    options: budget
+      ? [option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; metering continues against it.'), option('b', 'End the build', 'Nothing new is prompted; the build ends.')]
+      : [option('a', 'Resume dispatch', 'This halt is cleared.'), option('b', 'End the build', 'Live lanes finish; nothing new is dispatched.')],
+    allowFreeText: budget,
   });
+  touch.spendUsd = spendUsd;
+  halts.push({ kind: why, reason, touch: touch.n });
+  syncHalt(state, deps);
 }
 
 function escalate(state, wp, deps, { why, asks = null, row = null }) {
-  const options = row ? ['confirmed', 'refuted', 'judgment'].map((v, i) => option('abc'[i], v, `Reply ${v} to comment ${row.comment}, through the lane.`))
-    : (asks?.length ? asks.map((ask) => option(ask.key, ask.text, `The lane is amended with (${ask.key}) and resumes at its check.`)) : [option('a', 'Resume the lane', 'The lane is amended with your text.')]);
+  const label = (ask) => ask.text.replace(ASK_MARKER, '');
+  const options = row ? GUARD_VERDICTS.map((v, i) => option('abc'[i], v, `The conductor replies ${v} to comment ${row.comment}; resolution resumes.`))
+    : (asks?.length ? asks.map((ask) => option(ask.key, label(ask), `The lane is amended with (${ask.key}) and resumes at its check.`)) : [option('a', 'Resume the lane', 'The lane is amended with your text.')]);
   const verbatim = row ? `the guard row for comment ${row.comment}: ${row.evidence}` : (asks ?? []).map((ask) => ask.text).join(' / ');
-  buildTouch(state, deps, row ? 'guard' : 'ask', {
-    question: `DO: settle ${wp.id}'s fork; the conductor escalated it (${why}). The lane's words, verbatim: ${verbatim}. EXPECT: ${wp.id}'s lane is amended with your answer verbatim and resumes at its check.`.slice(0, 2000),
+  const expect = row ? `the conductor posts your verdict on comment ${row.comment} (adjudicator conductor) and resolves the threads` : `${wp.id}'s lane is amended with your answer verbatim and resumes at its check`;
+  const touch = buildTouch(state, deps, row ? 'guard' : 'ask', {
+    question: `DO: settle ${wp.id}'s fork; the conductor escalated it (${why}). The lane's words, verbatim: ${verbatim}. EXPECT: ${expect}.`.slice(0, 2000),
     options, wpId: wp.id, suspendedStep: 'check',
   });
-  setState(state, wp, 'blocked', `escalated to the operator: ${why}`, deps);
-  wp.stage = null;
+  if (row) touch.guard = row;
+  block(state, wp, deps, `escalated to the operator: ${why}`);
 }
 
-// An answered build touch acts once: a WP touch amends its lane; a run touch's
-// (a) clears dispatchHalt and (b) leaves it set.
+// An unusable answer re-opens the touch with a refusal, so it stays answerable.
+function refuse(state, touch, why, deps) {
+  Object.assign(touch, { status: 'open', answer: null, refusal: why, tty: false, waiting: false, announced: false, applied: false });
+  appendEvent(state, deps, { step: 'touch', event: 'answer-refused', data: { n: touch.n, why } });
+  if (!spineOn(state)) writeTouchFiles(state, touch, deps);
+}
+
+// A run touch's (a) clears its own halt: for the budget only with "budget
+// <USD>" above the spend at the halt, which becomes authority.budgetUsd.
+function answerRunTouch(state, touch, deps) {
+  const { key, text } = touch.answer;
+  const halt = (state.build.halts ?? []).find((entry) => entry.touch === touch.n);
+  if (key === 'b') {
+    if (halt) halt.ended = true;
+    return;
+  }
+  if (touch.build === 'budget') {
+    const usd = Number(/\bbudget\s+\$?(\d+(?:\.\d+)?)\b/i.exec(text ?? '')?.[1]);
+    if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, `(a) needs the text "budget <USD>" above the current spend of $${touch.spendUsd ?? 'unknown'}`, deps);
+    state.authority.budgetUsd = usd;
+    state.authority.budgetSource = { touch: touch.n, by: touch.answer.by, answeredAt: touch.answer.answeredAt, text };
+  }
+  state.build.halts = (state.build.halts ?? []).filter((entry) => entry !== halt);
+  syncHalt(state, deps);
+}
+
+// A guard ruling the operator made goes through the conductor reply path, then
+// the owed resolution resumes.
+function answerGuard(state, wp, touch, deps) {
+  const verdict = GUARD_VERDICTS['abc'.indexOf(touch.answer.key)];
+  const row = touch.guard;
+  wp.rulings = [...(wp.rulings ?? []), { n: null, file: touch.file, ruled: verdict, escalate: false, touch: touch.n }];
+  wp.replyIds = [...(wp.replyIds ?? []), row.comment];
+  setState(state, wp, 'review', `operator ruled ${verdict} on comment ${row.comment} (touch ${touch.n})`, deps);
+  wp.queue = [...wp.queue, ...guardReply(state, wp, row, verdict), ...(wp.owed?.queue ?? [])];
+  if (wp.owed) wp.owed.queue = [];
+  wp.stage = 'resolve';
+}
+
+// An answered build touch acts once: a WP touch amends its lane (a guard
+// touch replies instead); a run touch clears or ends its own halt.
 function applyAnswers(state, deps) {
   for (const touch of state.touches ?? []) {
     if (!touch.build || touch.status !== 'answered' || touch.applied) continue;
@@ -277,15 +346,13 @@ function applyAnswers(state, deps) {
     const { key, text } = touch.answer;
     appendEvent(state, deps, { step: 'touch', event: 'answer-applied', data: { n: touch.n, key, wpId: touch.wpId } });
     if (!touch.wpId) {
-      if (key === 'a') {
-        state.dispatchHalt = null;
-        if (touch.build === 'budget') state.build.resumed = true;
-      }
+      answerRunTouch(state, touch, deps);
       continue;
     }
     const wp = state.wps.find((candidate) => candidate.id === touch.wpId);
     if (!wp || wp.state !== 'blocked' || (touch.build === 'dialog' && key === 'b')) continue;
-    startAmendment(state, wp, deps, { kind: 'answer', reason: `operator answer ${key} to touch ${touch.n}`, tag: touch.tag, key, text, answer: touch.answer });
+    if (touch.build === 'guard') answerGuard(state, wp, touch, deps);
+    else startAmendment(state, wp, deps, { kind: 'answer', reason: `operator answer ${key} to touch ${touch.n}`, tag: touch.tag, key, text, answer: touch.answer });
   }
 }
 
@@ -296,7 +363,7 @@ const openBuildTouches = (state) => (state.touches ?? []).filter((touch) => touc
 function startAmendment(state, wp, deps, { retry = false, answer = null, ...fields }) {
   const prev = wp.amendment;
   const n = (prev?.n ?? 0) + 1;
-  wp.amendment = retry && prev ? { ...prev, n, reason: fields.reason } : { n, since: wp.pr?.head ?? null, adjudicated: false, ...fields, kind: fields.kind ?? 'check' };
+  wp.amendment = retry && prev ? { ...prev, n, retryReason: fields.reason } : { n, since: wp.pr?.head ?? null, ...fields, kind: fields.kind ?? 'check' };
   setState(state, wp, 'amending', fields.reason, deps);
   wp.stage = 'wait';
   wp.queue = [...(wp.queue ?? []), amendmentBrief(state, wp, wp.amendment), ...backendOf(state, wp, deps).prompt(wp, { amendment: true, answer })];
@@ -309,9 +376,19 @@ function checkFailed(state, wp, deps, reason) {
   startAmendment(state, wp, deps, { retry: true, kind: 'check', reason });
 }
 
+// At most GATE_AMENDS gate-driven amendments per WP; the next blocks with the
+// last gate cause as its reason.
+function gateAmend(state, wp, deps, reason) {
+  if ((wp.gateAmends ?? 0) >= GATE_AMENDS) return block(state, wp, deps, `${reason} (after ${GATE_AMENDS} gate amendments)`);
+  wp.gateAmends = (wp.gateAmends ?? 0) + 1;
+  return startAmendment(state, wp, deps, { kind: 'gate', reason });
+}
+
+// A blocked WP keeps only its owed cleanup (the lane's stop); failed work is dropped.
 function block(state, wp, deps, reason) {
   setState(state, wp, 'blocked', reason, deps);
   wp.stage = null;
+  wp.queue = (wp.queue ?? []).filter((action) => action.step === 'stop');
 }
 
 function merged(state, wp, deps) {
@@ -352,7 +429,21 @@ function findingsAmendment(state, wp, deps) {
   const reviewDir = String(review.reviewId ?? '');
   const council = reviewDir.startsWith(join(state.runDir, 'council'));
   const ids = council ? Array.from({ length: review.findings }, (_, i) => `C${review.round}-${i + 1}`) : null;
+  // The adjudication is owed until the table is read, whatever amendments come between.
+  wp.owed = { adjudicate: true, round: review.round, findings: review.findings, ids, queue: [] };
   startAmendment(state, wp, deps, { kind: 'findings', reason: `review round ${review.round}: ${review.findings ?? 'unknown'} finding(s)`, round: review.round, findings: review.findings, ids, reviewDir });
+}
+
+// Every finding the review raised has a row: a council id each, or as many
+// PR-comment rows as findings posted.
+function unreconciled(owed, rows) {
+  const ids = rows.map((row) => String(row.comment).replace(/^#/, ''));
+  if (owed?.ids) {
+    const missing = owed.ids.filter((id) => !ids.includes(id));
+    return missing.length ? `the ## Amendment table has no row for ${missing.join(', ')}` : null;
+  }
+  const posted = ids.filter((id) => /^\d+$/.test(id)).length;
+  return Number.isInteger(owed?.findings) && posted < owed.findings ? `the ## Amendment table has ${posted} PR-comment row(s) for ${owed.findings} posted finding(s)` : null;
 }
 
 // The amended report's table feeds recordAdjudication (step adjudicate): its
@@ -362,12 +453,14 @@ function adjudicate(state, wp, deps) {
   let adjudication;
   try {
     if (!rows.length) throw new ConductError(2, 'the report has no ## Amendment table (| Comment | Verdict | Evidence | Commit |)');
+    const gap = unreconciled(wp.owed, rows);
+    if (gap) throw new ConductError(2, gap);
     adjudication = recordAdjudication(state, wp, rows);
   } catch (error) {
     if (!(error instanceof ConductError)) throw error;
     return checkFailed(state, wp, deps, error.message);
   }
-  wp.amendment.adjudicated = true;
+  wp.owed.adjudicate = false;
   wp.reviews = adjudication.patch.reviews;
   wp.replyIds = adjudication.actions.filter((a) => a.part === 'reply').map((a) => a.command[a.command.indexOf('--comment-id') + 1]);
   appendEvent(state, deps, { step: 'adjudicate', event: 'adjudicated', data: { wpId: wp.id, rows: rows.map((row) => ({ comment: row.comment, verdict: row.verdict })) } });
@@ -395,7 +488,7 @@ function expand(state, wp, deps) {
     case 'wait': return go(backend.wait(wp), 'check');
     case 'check': return go(backend.check(wp), 'checked');
     case 'checked': {
-      const findings = wp.reviews?.length && wp.amendment?.kind === 'findings' && !wp.amendment.adjudicated;
+      const findings = Boolean(wp.reviews?.length && wp.owed?.adjudicate);
       if (findings && !adjudicate(state, wp, deps)) return undefined;
       wp.checkAmends = 0;
       if (wp.state !== 'pr') setState(state, wp, 'pr', null, deps);
@@ -411,11 +504,7 @@ function expand(state, wp, deps) {
     case 'delta': {
       // One delta pass per full review; a later tail is the gate's post-cap inspection.
       const since = wp.amendment?.since;
-      if (!since || since === wp.pr?.head) return go([], 'land');
-      // Commits on top of a rebase's start (a no-op rebase included) are not a
-      // delta deltaReviewActions accepts: a full review (round + 1) is owed.
-      if ((wp.rebases ?? []).some((rebase) => rebase.from === since)) return go([prDiff(state)], null);
-      if ((wp.reviews ?? []).at(-1)?.scope !== 'full') return go([], 'land');
+      if (!since || since === wp.pr?.head || (wp.reviews ?? []).at(-1)?.scope !== 'full') return go([], 'land');
       return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
     }
     case 'land':
@@ -493,18 +582,31 @@ function deferrals(state, deps) {
   }
 }
 
-// Before each dispatch: the metered spend, or the lane-only lower bound (D16, D19.28).
-function budgetGate(state, deps) {
-  if (state.build.resumed) return null;
+// Before each dispatch and each lane prompt that costs money (`purpose` is
+// 'dispatch' or the WP id): the metered spend, or the lane-only lower bound
+// (D16, D19.28). Returns null (go), a spend action, 'halted' or 'ended'.
+const paid = (action) => action.kind === 'shell' && ['prompt', 'fallback'].includes(action.step);
+
+function budgetGate(state, deps, purpose) {
+  const halt = (state.build.halts ?? []).find((entry) => entry.kind === 'budget');
+  if (halt) return halt.ended ? 'ended' : 'halted';
   const budget = state.authority?.budgetUsd ?? 0;
   if (state.adapters?.spend?.on) {
-    if (state.build.spendOk) return null;
-    return shell('spend', 'spend', shellArgv(`${deps.env?.WORKIT_SPEND_CMD} ${state.createdAt}`, deps.platform),
-      { instruction: 'Run this exact argv; it prints the run\'s spend in USD. Record its { code, stdout, stderr }.' });
+    if (!deps.env?.WORKIT_SPEND_CMD) {
+      haltTouch(state, deps, 'The spend adapter is on, but WORKIT_SPEND_CMD is not set, so spend is unknown (metered by the spend adapter)', 'budget');
+      return 'halted';
+    }
+    if (state.build.spendOkFor === purpose) {
+      state.build.spendOkFor = null;
+      return null;
+    }
+    return shell('spend', 'spend', shellArgv(`${deps.env.WORKIT_SPEND_CMD} ${state.createdAt}`, deps.platform),
+      { budgetFor: purpose, instruction: 'Run this exact argv; it prints the run\'s spend in USD. Record its { code, stdout, stderr }.' });
   }
   const sum = state.wps.reduce((total, wp) => total + (Number(wp.lane?.costUsd) || 0), 0);
-  if (sum >= budget) haltTouch(state, deps, `Spend is $${sum} against the $${budget} budget (unmetered, lane-only lower bound)`, 'budget');
-  return null;
+  if (sum < budget) return null;
+  haltTouch(state, deps, `Spend is $${sum} against the $${budget} budget (unmetered, lane-only lower bound)`, 'budget', sum);
+  return 'halted';
 }
 
 function dispatch(state, wp, deps) {
@@ -515,7 +617,6 @@ function dispatch(state, wp, deps) {
   wp.commit = /^\*\*Commit:\*\*\s*`([^`]+)`/m.exec(readText(deps, wp.specPath ?? '') ?? '')?.[1] ?? null;
   Object.assign(wp, { queue: [], stage: 'admit', checkAmends: 0, dispatchedAt: deps.timestamp() });
   setState(state, wp, 'dispatched', null, deps);
-  state.build.spendOk = false;
   fill(state, wp, deps);
   return wp.queue.length ? emitHead(wp) : null;
 }
@@ -523,7 +624,17 @@ function dispatch(state, wp, deps) {
 function workAction(state, deps) {
   for (const wp of byDispatch(state)) {
     fill(state, wp, deps);
-    if (wp.queue.length && wp.queue[0].kind !== 'wait') return emitHead(wp);
+    if (!wp.queue.length || wp.queue[0].kind === 'wait') continue;
+    if (paid(wp.queue[0])) {
+      const gate = budgetGate(state, deps, wp.id);
+      if (gate === 'ended') {
+        block(state, wp, deps, 'the budget was reached and the operator ended the build');
+        continue;
+      }
+      if (gate === 'halted') continue;
+      if (gate) return gate;
+    }
+    return emitHead(wp);
   }
   if (spineOn(state)) {
     for (const touch of openBuildTouches(state)) {
@@ -532,10 +643,10 @@ function workAction(state, deps) {
     }
   }
   if (state.dispatchHalt || !dispatchable(state, { now: deps.now() }).length) return null;
-  const spend = budgetGate(state, deps);
-  if (spend) return spend;
-  const ready = dispatchable(state, { now: deps.now() });
-  return ready.length ? dispatch(state, ready[0], deps) : workAction(state, deps);
+  const gate = budgetGate(state, deps, 'dispatch');
+  if (gate === 'halted' || gate === 'ended') return workAction(state, deps);
+  if (gate) return gate;
+  return dispatch(state, dispatchable(state, { now: deps.now() })[0], deps);
 }
 
 // Everything that is waiting, with what is left of its wait.
@@ -550,14 +661,15 @@ function yielders(state, deps) {
   for (const touch of openBuildTouches(state)) {
     const core = !spineOn(state);
     if (core || touch.waiting) {
-      const note = core ? `${touch.tag} is open: show the operator ${join(state.runDir, touch.file)}; they answer from their own terminal` : `${touch.tag}: no answer yet`;
+      const refused = touch.refusal ? ` (their last answer could not be used: ${touch.refusal})` : '';
+      const note = core ? `${touch.tag} is open: show the operator ${join(state.runDir, touch.file)}; they answer from their own terminal${refused}` : `${touch.tag}: no answer yet`;
       out.push({ ms: touch.waitLeftMs ?? READ_BACK_WAIT_MS, touch, step: 'touch', note });
     }
   }
   return out;
 }
 
-function release(state, y) {
+function release(y) {
   if (y.wp) y.wp.queue.shift();
   if (y.touch) {
     y.touch.waitLeftMs = null;
@@ -573,10 +685,17 @@ function settled(state, deps) {
 }
 
 export function next(state, deps) {
-  state.build ??= { contract: null, spendOk: false, resumed: false };
+  state.build ??= { contract: null, halts: [] };
   if (!state.build.contract) return contractAction(state, deps);
   applyAnswers(state, deps);
   deferrals(state, deps);
+  // A core touch is announced before any other work, once per opening.
+  const unseen = spineOn(state) ? null : openBuildTouches(state).find((touch) => touch.status === 'open' && !touch.announced);
+  if (unseen) {
+    unseen.announced = true;
+    return { kind: 'wait', step: 'touch', part: 'announce', yield: true, waitMs: 0,
+      instruction: `Stop and show the operator ${join(state.runDir, unseen.file)}: ${unseen.tag} is open${unseen.refusal ? ` again (${unseen.refusal})` : ''}. They answer from their own terminal: ${answerCommand(state, unseen)}. Then record {}.` };
+  }
   for (let pass = 0; pass < 8; pass += 1) {
     const action = workAction(state, deps);
     if (action) return action;
@@ -585,7 +704,7 @@ export function next(state, deps) {
     const waiting = yielders(state, deps);
     const due = waiting.filter((y) => y.ms <= 0);
     if (due.length) {
-      due.forEach((y) => release(state, y));
+      due.forEach(release);
       continue;
     }
     if (waiting.length) {
@@ -618,16 +737,19 @@ function recordYield(state, action) {
     if (spineOn(state) && !touch.waiting) continue;
     const left = (touch.waitLeftMs ?? READ_BACK_WAIT_MS) - action.waitMs;
     if (left > 0) touch.waitLeftMs = left;
-    else release(state, { touch });
+    else release({ touch });
   }
 }
 
-function recordSpend(state, result, deps) {
-  const usd = result.code === 0 ? Number(String(result.stdout ?? '').trim()) : NaN;
+// Only a non-empty, finite, non-negative number is a spend; anything else
+// halts dispatch (fail closed).
+function recordSpend(state, action, result, deps) {
+  const text = String(result.stdout ?? '').trim();
+  const usd = result.code === 0 && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text) ? Number(text) : NaN;
   const budget = state.authority?.budgetUsd ?? 0;
-  if (!Number.isFinite(usd)) return haltTouch(state, deps, `The spend command's output is unreadable (exit ${result.code}: ${lines(result.stderr || result.stdout)[0] ?? ''}), so spend is unknown (metered by the spend adapter)`, 'budget');
-  if (usd >= budget) return haltTouch(state, deps, `Spend is $${usd} against the $${budget} budget (metered by the spend adapter)`, 'budget');
-  state.build.spendOk = true;
+  if (!Number.isFinite(usd)) return haltTouch(state, deps, `The spend command's output is unreadable (exit ${result.code}: ${JSON.stringify(text.slice(0, 80))}${result.stderr ? `, ${lines(result.stderr)[0]}` : ''}), so spend is unknown (metered by the spend adapter)`, 'budget');
+  if (usd >= budget) return haltTouch(state, deps, `Spend is $${usd} against the $${budget} budget (metered by the spend adapter)`, 'budget', usd);
+  state.build.spendOkFor = action.budgetFor ?? 'dispatch';
   return undefined;
 }
 
@@ -637,6 +759,8 @@ function recordRuling(state, wp, action, deps) {
   if (value?.escalate === true) {
     if (typeof value.why !== 'string' || !value.why.trim()) throw new ConductError(2, `ruling ${file}: an escalation needs a non-empty why`);
     wp.rulings = [...(wp.rulings ?? []), { n, file, ruled: null, escalate: true }];
+    // The rest of the owed adjudication (other replies and rulings) waits for the answer.
+    if (row) wp.owed = { ...(wp.owed ?? {}), queue: wp.queue.slice(1) };
     wp.queue = [];
     return escalate(state, wp, deps, { why: value.why, asks, row });
   }
@@ -658,14 +782,18 @@ function recordOwn(state, wp, action, result, deps) {
     wp.queue.shift();
     return true;
   };
-  const toolFailed = (r) => !r || typeof r !== 'object' || r.error || r.isError;
   switch (action.step === 'review' || action.step === 'council' ? `${action.step}/${action.part}` : action.step) {
     case 'flip':
-    case 'receipt':
-      if (toolFailed(result)) throw new ConductError(2, `${action.tool} failed: ${JSON.stringify(result?.error ?? result).slice(0, 200)}`);
+    case 'receipt': {
+      const failed = spineAckFailure(action, result);
+      if (failed) throw new ConductError(2, `${action.tool}: ${failed}`);
       return ok();
+    }
     case 'brief':
       if (!deps.exists(action.outPath)) throw new ConductError(2, `the brief ${action.outPath} was not written`);
+      if (action.marker && !(readText(deps, action.outPath) ?? '').includes(action.marker)) {
+        throw new ConductError(2, `the brief ${action.outPath} does not carry amendment ${action.amendment.n}'s marker line: ${action.marker}`);
+      }
       return ok();
     case 'ruling': return recordRuling(state, wp, action, deps) ?? true;
     case 'council/meta':
@@ -678,7 +806,7 @@ function recordOwn(state, wp, action, result, deps) {
       if (result.code === 0) return ok();
       if (mergeLockFor(state, wp) === 'mine') state.mergeLock = null;
       wp.queue = [];
-      return startAmendment(state, wp, deps, { kind: 'gate', reason: `the gate command exited ${result.code} at the rebased head: ${lines(result.stderr || result.stdout)[0] ?? ''}` }) ?? true;
+      return gateAmend(state, wp, deps, `the gate command exited ${result.code} at the rebased head: ${lines(result.stderr || result.stdout)[0] ?? ''}`) ?? true;
     case 'review/diff':
     case 'review/amend-diff': {
       if (result.code !== 0) return block(state, wp, deps, `${action.command.slice(0, 3).join(' ')} failed: ${lines(result.stderr)[0] ?? `exit ${result.code}`}`) ?? true;
@@ -707,20 +835,68 @@ function recordOwn(state, wp, action, result, deps) {
   }
 }
 
-// Fail closed (WP-02 additions, D21): `owner: unverified` from a lane this
-// build has not seen exit still holds its slot and Files; poll until the pid
-// is gone. Past the deadline the recorder blocks and queues the stop.
-function unverified(state, wp, action, result, deps) {
+// A spine acknowledgement must answer what was asked: no error, the same
+// quest, the same outcome/state when it carries one, and a receipt uuid.
+function spineAckFailure(action, result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result) || result.error || result.isError) return `failed: ${JSON.stringify(result?.error ?? result).slice(0, 200)}`;
+  const asked = String(action.args.questId);
+  if (result.questId !== undefined && !(String(result.questId).startsWith(asked) || asked.startsWith(String(result.questId)))) return `answered for quest ${result.questId}, not ${asked}`;
+  for (const key of ['outcome', 'workState', 'horizon', 'currentPhase']) {
+    if (action.args[key] !== undefined && result[key] !== undefined && result[key] !== action.args[key]) return `${key} is ${result[key]}, not ${action.args[key]}`;
+  }
+  if (action.tool === 'spine_receipt' && !UUID.test(String(result.id ?? ''))) return `no receipt uuid in the result (id ${JSON.stringify(result.id)})`;
+  return null;
+}
+
+// Liveness needs affirmative evidence (WP-02 additions, D21): only a parsed
+// `owner` of gone or reused, or a dead pid, lets an exit-1 `lane alive` record
+// an exit. Anything else (unparseable, empty, unverified with the pid alive)
+// keeps the slot and Files and polls again; past the deadline the third
+// consecutive uncertain read blocks the WP visibly, its stop still queued.
+function liveness(state, wp, action, result, deps) {
   if (wp.lane?.backend !== 'exec' || !['wait', 'stop'].includes(action.step) || action.part === 'kill') return null;
+  if (result.code !== 1) {
+    wp.lane.uncertain = 0;
+    return null;
+  }
   let owner = null;
   try {
-    owner = JSON.parse(result.stdout)?.owner;
-  } catch { /* not alive's output */ }
-  if (owner !== 'unverified') return null;
-  if (action.step === 'wait' && wp.lane.deadline && deps.now() > Date.parse(wp.lane.deadline)) return { ...result, code: 0 };
-  appendEvent(state, deps, { step: action.step, event: 'owner-unverified', data: { wpId: wp.id, pid: wp.lane.pid } });
-  wp.queue = [waitSpec(action.step, WAIT_MS, `${wp.id}'s pid ${wp.lane.pid} cannot be verified: poll until it is gone.`), ...wp.queue];
+    owner = JSON.parse(result.stdout)?.owner ?? null;
+  } catch { /* unparseable: no evidence either way */ }
+  if (owner === 'gone' || owner === 'reused' || !Number.isInteger(wp.lane.pid) || !deps.pidAlive(wp.lane.pid)) {
+    wp.lane.uncertain = 0;
+    return null;
+  }
+  const count = (wp.lane.uncertain ?? 0) + 1;
+  wp.lane.uncertain = count;
+  appendEvent(state, deps, { step: action.step, event: 'liveness-uncertain', data: { wpId: wp.id, pid: wp.lane.pid, owner, count } });
+  if (count >= UNCERTAIN_BLOCK && wp.lane.deadline && deps.now() > Date.parse(wp.lane.deadline)) {
+    const reason = `lane liveness unverifiable past the deadline: ${count} reads (${owner ? `owner ${owner}` : 'unparseable lane alive output'}); pid ${wp.lane.pid} keeps its slot`;
+    if (LIVE_STATES.includes(wp.state) || wp.state === 'blocked') block(state, wp, deps, reason);
+    else wp.cleanup = reason;
+    wp.queue = [waitSpec('stop', CLEANUP_RETRY_MS, reason), ...backendOf(state, wp, deps).stop(wp)];
+    return 'polling';
+  }
+  wp.queue = [waitSpec(action.step, WAIT_MS, `${wp.id}'s pid ${wp.lane.pid} is not shown exited: poll again.`), ...wp.queue];
   return 'polling';
+}
+
+// "No CI at head" is not lane-fixable (C1-2): on a repo with CI it waits out
+// the pending window, then blocks "CI did not complete at head"; with no CI
+// it blocks at once. The gate JSON is still recorded.
+function noCi(state, wp, action, result, out, deps) {
+  if (out.outcome !== 'amend' || action.step !== 'gate' || action.part !== 'gate') return out;
+  let gate = null;
+  try {
+    gate = JSON.parse(result.stdout);
+  } catch { /* the recorder already judged it */ }
+  if (!gate?.failures?.includes('no CI at head') || (gate.causes ?? []).some((cause) => cause !== 'ci')) return out;
+  if (!(state.intent.ciWorkflows > 0)) return { ...out, outcome: 'block', reason: 'no CI at head: the repo has no CI workflow that can gate a PR' };
+  const since = wp.noCi?.head === gate.head ? Date.parse(wp.noCi.since) : deps.now();
+  if (deps.now() - since >= NO_CI_WINDOW_MS) return { ...out, outcome: 'block', reason: 'CI did not complete at head', patch: { ...out.patch, noCi: null } };
+  const { mergeLock, ...patch } = out.patch;
+  const again = Object.fromEntries(Object.entries(action).filter(([key]) => !['id', 'phase', 'wpId'].includes(key)));
+  return { outcome: 'wait', waitMs: WAIT_MS, reason: 'no CI run at head yet', patch: { ...patch, noCi: { head: gate.head, since: new Date(since).toISOString() }, queue: [again, ...wp.queue.slice(1)] } };
 }
 
 function applyPatch(state, wp, patch, reason, deps) {
@@ -741,6 +917,8 @@ function route(state, wp, action, out, deps) {
   if (!Object.hasOwn(patch, 'queue')) wp.queue.shift();
   switch (out.outcome) {
     case 'continue': {
+      // After a fallback, the agent now running is the PR's author for reviewer choice.
+      if (action.step === 'fallback' && patch.lane?.fallback) wp.agent = patch.lane.fallback;
       // A land patch that replaces the queue moves the stage with it.
       if (patch.queue?.some((a) => a.step === 'rebase' && a.part === 'fetch')) wp.stage = 'gate';
       else if (patch.queue?.some((a) => ['review', 'post'].includes(a.step) || (a.step === 'council' && a.part === 'review'))) {
@@ -770,7 +948,7 @@ function route(state, wp, action, out, deps) {
       wp.queue.push(...backendOf(state, wp, deps).stop(wp));
       return;
     case 'amend':
-      return LANE_STEPS.has(action.step) ? checkFailed(state, wp, deps, out.reason) : startAmendment(state, wp, deps, { kind: 'gate', reason: out.reason });
+      return LANE_STEPS.has(action.step) ? checkFailed(state, wp, deps, out.reason) : gateAmend(state, wp, deps, out.reason);
     case 'block':
       // A cleanup action's record never changes the WP's state.
       if (cleanup) {
@@ -801,20 +979,19 @@ function route(state, wp, action, out, deps) {
 }
 
 export function record(state, action, result = {}, deps) {
-  state.build ??= { contract: null, spendOk: false, resumed: false };
+  state.build ??= { contract: null, halts: [] };
   if (action.step === 'contract') return recordContract(state, action, deps);
   if (action.yield) return recordYield(state, action);
   if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result);
-  if (action.step === 'spend') return recordSpend(state, result, deps);
+  if (action.step === 'spend') return recordSpend(state, action, result, deps);
   const wp = state.wps.find((candidate) => candidate.id === action.wpId);
   if (!wp) throw new ConductError(2, `action ${action.id} names no WP of this run (${action.wpId})`);
   if (recordOwn(state, wp, action, result, deps) !== undefined) return undefined;
   const recorderDeps = { exec: deps.exec, read: deps.read, now: deps.now, platform: deps.platform, env: deps.env, pluginRoot: deps.pluginRoot };
   if (LANE_STEPS.has(action.step)) {
-    const checked = unverified(state, wp, action, result, deps);
-    if (checked === 'polling') return undefined;
-    return route(state, wp, action, recordLaneStep(state, wp, action, checked ?? result, recorderDeps), deps);
+    if (liveness(state, wp, action, result, deps) === 'polling') return undefined;
+    return route(state, wp, action, recordLaneStep(state, wp, action, result, recorderDeps), deps);
   }
-  if (LAND_STEPS.has(action.step)) return route(state, wp, action, recordLandStep(state, wp, action, result, recorderDeps), deps);
+  if (LAND_STEPS.has(action.step)) return route(state, wp, action, noCi(state, wp, action, result, recordLandStep(state, wp, action, result, recorderDeps), deps), deps);
   throw new ConductError(2, `the build has no route for step ${action.step}`);
 }

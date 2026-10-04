@@ -177,7 +177,7 @@ const latestRound = (wp) => Math.max(0, ...(wp.reviews ?? []).map((review) => re
 // One delta pass, before any rebase, so --since names an ancestor. A T2 WP
 // with the council on gets a council round dispatched as scope 'delta'.
 export function deltaReviewActions(state, wp, sinceHead, { report = null, changedPaths = [] } = {}) {
-  if ((wp.rebases ?? []).some((rebase) => rebase.from === sinceHead)) {
+  if ((wp.rebases ?? []).some((rebase) => rebase.from === sinceHead && rebase.from !== rebase.to)) {
     throw new ConductError(2, `${wp.id}: no delta review after a rebase (${sinceHead.slice(0, 7)} is not an ancestor of the rebased head); a full review is owed`);
   }
   const round = latestRound(wp) + 1;

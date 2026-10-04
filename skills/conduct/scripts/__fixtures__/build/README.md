@@ -5,7 +5,10 @@ Inputs for `lib/phases/build.test.mjs`. The `fixture paths` test greps every fil
 ## Copied
 
 - `lane-contract.template.md`: `git show 0026be4:reference/templates/lane-contract.template.md`, unchanged. The lane-contract test reads this copy, never the working tree's template, so a later template edit cannot change it (D17).
-- `spine-receipt-result.json`: the goal-conductor run's `run/fixtures/spine-receipt-result.json`, verbatim: a real `spine_receipt` success result (receipt 9722037a, top-level `id` the receipt's uuid string). The `receipt` step's recorded result.
+
+## Synthetic
+
+- `spine-receipt-result.json`: **synthetic, contract-valid** data shaped after a real `spine_receipt` success result (the same keys and types; the top-level `id` is the receipt's uuid string). The uuids, prose and locator are made up; no money, hosts or paths. The tests set its `questId` and `outcome` to what each `receipt` action asked for, since the build checks the acknowledgement against the request.
 
 ## Authored (not program output)
 
