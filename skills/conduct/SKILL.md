@@ -24,7 +24,7 @@ You drive a one-shot state machine, `${CLAUDE_SKILL_DIR}/scripts/conduct.mjs`. E
 
 ## The loop
 
-1. **Start.** Run `node "${CLAUDE_SKILL_DIR}/scripts/conduct.mjs" intake --goal "<goal>" --repo <abs> …` with the flags above (declare adapters first, § Adapters). It prints `{ ok, runDir, action }`. Exit 2 is a refusal (§ Refusals) and writes nothing.
+1. **Start.** Run `node "${CLAUDE_SKILL_DIR}/scripts/conduct.mjs" intake --goal "<goal>" --repo <abs> …` with the flags above (declare adapters first, § Adapters). It prints `{ ok, runDir, action }`. The first action is touch 1 (with the Spine adapter, it first reads the anchor quest). Exit 2 is a refusal (§ Refusals) and writes nothing.
 2. **Perform the action.** Every action has an `id`, a `kind`, an `instruction` a person could follow, and an `expects` field. What you do depends on `kind`:
    - `shell`: run its `command` argv exactly as given, from `cwd` and with `env` added when present. Record `{ "code": <exit>, "stdout": "…", "stderr": "…" }`. The `lane`, `land` and `analyze` verbs (`lane spawn`, `lane check`, `land gate`, `land merged`, `analyze`) reach you only this way: `next` never runs a program, so every check is a `shell` action whose printed result you record. `land gate` exits 6 while CI is still running; that is a wait.
    - `agent-tool`: call the named MCP `tool` with `args` and record its raw JSON result. These are emitted only for an adapter that is on.
