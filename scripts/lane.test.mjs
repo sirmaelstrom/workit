@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 
@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
-  reportShapeProblems, runLane, scrapePlanMeter,
+  reportShapeProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -4505,4 +4505,158 @@ test('056de846: claudeBackgroundWork reads the status bar only — every variant
   assert.equal(claudeBackgroundWork(barePane), null, 'no composer, no status bar');
   const deep = livePane.replace(BG_SEGMENT, ['  line one', '  line two', '  line three', `  ${BG_SEGMENT}`].join('\n'));
   assert.equal(claudeBackgroundWork(deep), null, 'the limit: the segment past the first three lines below the composer is not read');
+});
+
+// --- quest 4f55ea42: a codex lane settles on its rollout's turn events, not on
+// herdr's agent_status, which read `done` for 16 minutes inside one codex turn
+// (AE lane ae-attr: task_started 02:14:11Z, a steer prompt 02:18:04Z,
+// task_complete 02:34:23Z, herdr `done` from 02:18Z).
+const rolloutLine = (timestamp, payload, type = 'event_msg') => JSON.stringify({ timestamp, type, payload });
+const sessionMeta = (cwd, timestamp) => JSON.stringify({
+  timestamp, type: 'session_meta', payload: { id: 'fixture', timestamp, cwd, base_instructions: { text: 'x'.repeat(4000) } },
+});
+// Codex files the rollout under its local date: 21:05 local on 10-03 is 02:05Z on 10-04.
+function writeRollout(f, cwd, lines, name = 'rollout-2026-10-03T21-05-01-fixture.jsonl', day = ['2026', '10', '03']) {
+  const dir = join(f.dir, 'codex-home', 'sessions', ...day);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, name);
+  writeFileSync(path, `${[sessionMeta(cwd, '2026-10-04T02:05:05.572Z'), ...lines].join('\n')}\n`, 'utf8');
+  return path;
+}
+const AE_TURN = [
+  rolloutLine('2026-10-04T02:14:11.531Z', { type: 'task_started', turn_id: 't2' }),
+  rolloutLine('2026-10-04T02:18:22.880Z', { type: 'item_completed' }),
+  rolloutLine('2026-10-04T02:18:27.000Z', { type: 'message', role: 'user' }, 'response_item'),
+  rolloutLine('2026-10-04T02:24:44.000Z', { type: 'token_count' }),
+];
+const AE_COMPLETE = rolloutLine('2026-10-04T02:34:23.858Z', { type: 'task_complete', turn_id: 't2', last_agent_message: 'task_started is quoted here' });
+const AE_LANE = { startRequestedAt: '2026-10-04T02:04:30.000Z', promptedAt: '2026-10-04T02:18:04.729Z' };
+const rolloutWait = (f, timeout = '10000', start = Date.parse('2026-10-04T02:20:28Z')) => {
+  let clock = start;
+  return runLane(['wait', 'lane-a', '--until', 'idle', '--until', 'done', '--timeout', timeout, '--log', f.log], {
+    exec: f.exec, now: () => clock, sleep: async (ms) => { clock += Math.max(ms, 1); },
+    env: { CODEX_HOME: join(f.dir, 'codex-home') },
+  });
+};
+const herdrDoneThroughout = (f, polls = 40) => {
+  for (let poll = 0; poll < polls; poll++) f.responses.push(DONE_POLL, WORKING_READ);
+};
+
+test('4f55ea42: herdr reading done all through a running codex turn does not end the wait', async (t) => {
+  const f = fixture(t);
+  seedLane(f, AE_LANE);
+  writeRollout(f, f.dir, AE_TURN);
+  herdrDoneThroughout(f);
+  const result = await rolloutWait(f);
+  assert.equal(result.exit, 4, JSON.stringify(result.output));
+  assert.deepEqual(
+    [result.output.state, result.output.turnEvent, result.output.turnEventAt],
+    ['settled-turn-live', 'task_started', '2026-10-04T02:14:11.531Z'],
+  );
+  assert.equal(result.row.settleConfirmed, undefined);
+});
+
+test('4f55ea42: the task_complete after the steer prompt ends the wait, on rollout evidence', async (t) => {
+  const f = fixture(t);
+  seedLane(f, AE_LANE);
+  writeRollout(f, f.dir, [...AE_TURN, AE_COMPLETE, rolloutLine('2026-10-04T02:34:24.000Z', { type: 'token_count' })]);
+  herdrDoneThroughout(f);
+  const result = await rolloutWait(f, '10000', Date.parse('2026-10-04T02:35:00Z'));
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual([result.output.state, result.output.settle], ['done', 'rollout']);
+  assert.deepEqual([result.row.settleConfirmed, result.row.settleSource, result.row.pollCount], [true, 'rollout', 2]);
+});
+
+test('4f55ea42: a turn end older than the last prompt is the previous turn, and turn_aborted ends a turn', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { ...AE_LANE, promptedAt: '2026-10-04T02:40:00.000Z' });
+  writeRollout(f, f.dir, [...AE_TURN, AE_COMPLETE]);
+  herdrDoneThroughout(f);
+  const stale = await rolloutWait(f, '10000', Date.parse('2026-10-04T02:40:01Z'));
+  assert.equal(stale.exit, 4, 'the prompt at 02:40 has not started its turn yet');
+  assert.deepEqual([stale.output.state, stale.output.turnEvent], ['settled-turn-live', 'task_complete']);
+
+  const g = fixture(t);
+  seedLane(g, AE_LANE);
+  writeRollout(g, g.dir, [...AE_TURN, rolloutLine('2026-10-04T02:30:00.000Z', { type: 'turn_aborted', reason: 'interrupted' })]);
+  herdrDoneThroughout(g);
+  const aborted = await rolloutWait(g, '10000', Date.parse('2026-10-04T02:31:00Z'));
+  assert.equal(aborted.exit, 0, JSON.stringify(aborted.output));
+  assert.equal(aborted.output.settle, 'rollout');
+});
+
+test('4f55ea42: no rollout for the worktree keeps the two-poll settle and says so', async (t) => {
+  const f = fixture(t);
+  seedLane(f, AE_LANE);
+  writeRollout(f, join(f.dir, 'some-other-worktree'), AE_TURN);
+  herdrDoneThroughout(f);
+  const result = await rolloutWait(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual([result.output.settle, result.row.settleSource], ['polls', 'polls']);
+
+  // A lane record from before this change (no start or prompt stamp) never scans.
+  const g = fixture(t);
+  seedLane(g);
+  writeRollout(g, g.dir, AE_TURN);
+  herdrDoneThroughout(g);
+  const legacy = await rolloutWait(g);
+  assert.deepEqual([legacy.exit, legacy.output.settle], [0, 'polls']);
+});
+
+test('4f55ea42: start stamps the lane before the agent launches, and prompt stamps each send', async (t) => {
+  const f = fixture(t);
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a","state":"idle"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"focused":true}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"conductor","pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  // The stamp names which side of `herdr agent start` it was taken on.
+  const started = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, timestamp: () => (agentStartCall(f) ? 'after-agent-start' : 'before-agent-start') },
+  );
+  assert.equal(started.exit, 0, JSON.stringify(started.output));
+  assert.equal(readState(f).lanes['lane-a'].startRequestedAt, 'before-agent-start');
+
+  const g = fixture(t);
+  const prompt = join(g.dir, 'brief.md');
+  writeFileSync(prompt, 'brief', 'utf8');
+  seedLane(g);
+  g.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    CODEX_READY_READ,
+    { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
+    codexDeliveredRead(resolve(prompt)),
+  );
+  const prompted = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', g.log], { exec: g.exec, timestamp: () => '2026-10-04T02:18:04.729Z' });
+  assert.equal(prompted.exit, 0, JSON.stringify(prompted.output));
+  assert.equal(readState(g).lanes['lane-a'].promptedAt, '2026-10-04T02:18:04.729Z');
+});
+
+test('4f55ea42: findCodexRollout takes the newest rollout for this worktree begun since the start', async (t) => {
+  const f = fixture(t);
+  const deps = { env: { CODEX_HOME: join(f.dir, 'codex-home') }, home: () => f.dir, now: () => Date.parse('2026-10-04T03:00:00Z'), platform: process.platform, list: (dir) => readdirSync(dir), readBytes: undefined };
+  // The real reader, through runLane's default, is what the wait tests drive;
+  // this test reaches the export directly with a plain file reader.
+  deps.readBytes = (path, { bytes, fromEnd = false }) => {
+    const text = readFileSync(path, 'utf8');
+    const start = fromEnd ? Math.max(0, text.length - bytes) : 0;
+    return { text: fromEnd ? text.slice(start) : text.slice(0, bytes), start };
+  };
+  const lane = { path: f.dir, startRequestedAt: '2026-10-04T02:04:30.000Z' };
+  assert.equal(findCodexRollout(deps, lane), null, 'no sessions dir at all');
+  const older = writeRollout(f, f.dir, AE_TURN, 'rollout-2026-10-03T21-05-01-fixture.jsonl');
+  writeRollout(f, join(f.dir, 'elsewhere'), AE_TURN, 'rollout-2026-10-03T21-30-00-other.jsonl');
+  assert.equal(findCodexRollout(deps, lane), older);
+  const newer = writeRollout(f, f.dir, AE_TURN, 'rollout-2026-10-04T01-00-00-newer.jsonl', ['2026', '10', '04']);
+  assert.equal(findCodexRollout(deps, lane), newer, 'the newest match wins, across day directories');
+  assert.equal(findCodexRollout(deps, { ...lane, startRequestedAt: '2026-10-04T02:10:00.000Z' }), null, 'a session begun before the lane start is another lane\'s');
+  assert.equal(findCodexRollout(deps, { path: f.dir }), null, 'no stamp, no scan');
+
+  // A last line still being written is skipped, not misread.
+  const partial = `${readFileSync(newer, 'utf8')}{"timestamp":"2026-10-04T02:40:00Z","type":"event_msg","payload":{"type":"task_comp`;
+  writeFileSync(newer, partial, 'utf8');
+  assert.deepEqual(codexTurnState(deps, newer, null), { ended: false, event: 'task_started', at: '2026-10-04T02:14:11.531Z' });
+  assert.equal(codexTurnState(deps, join(f.dir, 'missing.jsonl')), null);
 });
