@@ -64,13 +64,14 @@ export function parseFiles(text, where = 'Files') {
 
 // `a\b/../c/` → `a/c/`; null when the path is absolute, drive-qualified
 // (`C:x`, `C:../x`) or leaves the repo. Trailing dots and spaces are dropped
-// from each segment, as Windows does (`a.mjs.` is `a.mjs`).
+// from each segment, as Windows does (`a.mjs.` is `a.mjs`). Containment is checked
+// after normalization: `.../x` becomes `/x`, which is absolute, so it is refused too.
 function normalizePath(path) {
   const slashed = String(path).replace(/\\/g, '/');
   if (/^[A-Za-z]:/.test(slashed) || slashed.startsWith('/')) return null;
   const segments = slashed.split('/').map((segment) => (segment === '.' || segment === '..' ? segment : segment.replace(/[. ]+$/, '')));
   const normal = posix.normalize(segments.join('/'));
-  return normal === '..' || normal.startsWith('../') || normal === '.' || normal === './' ? null : normal;
+  return normal === '..' || normal.startsWith('../') || normal.startsWith('/') || normal === '.' || normal === './' ? null : normal;
 }
 
 function repoPath(path, where) {
@@ -137,6 +138,34 @@ function waves(orchestrator) {
   return byId;
 }
 
+// A WP's tier: what it declares, not what it quotes. Fenced blocks, `>` lines and inline
+// code spans are dropped first (skills/spec-validate/scripts/validate.mjs does the same):
+// a fence closes only on the same character with a run at least as long as its opener, a
+// span is delimited by equal-length backtick runs, and a span that is the label's own value
+// (**Review tier:** `T2`) is the value. The value is the first token after the label and must
+// be T0, T1 or T2. No declaration is T1; a value outside the three, or two different values,
+// is a parse error.
+function reviewTier(text, where) {
+  let fence = null;
+  const prose = text.split(/\r?\n/).filter((line) => {
+    if (fence) {
+      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1];
+      if (close && close[0] === fence.char && close.length >= fence.len) fence = null;
+      return false;
+    }
+    const open = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
+    if (open) { fence = { char: (open[1] ?? open[2])[0], len: (open[1] ?? open[2]).length }; return false; }
+    return !/^\s*>/.test(line);
+  }).map((line) => line
+    .replace(/(\*\*Review tier:\*\*\s*)(`+)\s*([^`\s]+)\s*\2(?!`)/g, '$1$3')
+    .replace(/(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, '')).join('\n');
+  const values = new Set([...prose.matchAll(/\*\*Review tier:\*\*\s*(\S*)/g)].map((match) => match[1].replace(/[,;.]$/, '')));
+  const bad = [...values].find((value) => !/^T[012]$/.test(value));
+  if (bad !== undefined) throw new ConductError(2, `${where}: **Review tier:** value "${bad}" is not T0, T1 or T2`);
+  if (values.size > 1) throw new ConductError(2, `${where}: conflicting **Review tier:** declarations (${[...values].join(', ')})`);
+  return values.size ? [...values][0] : 'T1';
+}
+
 export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(path, 'utf8'), list = readdirSync } = {}) {
   const dir = join(workshopDir, 'work-packages');
   const orchestrator = read(join(dir, '_orchestrator.md'));
@@ -150,10 +179,10 @@ export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(p
     if (!heading) throw new ConductError(2, `${specPath} has no "# WP-<n>: <name>" heading`);
     const id = heading[1];
     if (!waveOf.has(id)) throw new ConductError(2, `${id} is not in the orchestrator's ## Wave Plan`);
-    const tier = /\*\*Review tier:\*\*\s*(T\d)\b/.exec(text);
+    const tier = reviewTier(text, id);
     return {
       id, name: rows.get(id)?.name || heading[2].trim(), specPath, wave: waveOf.get(id), files: parseFiles(text, id),
-      precondition: fieldText(lines, 'Precondition') ?? '', tier: tier ? tier[1] : 'T1',
+      precondition: fieldText(lines, 'Precondition') ?? '', tier,
       model: rows.get(id)?.model ?? 'opus', runtimeExercise: fieldText(lines, 'Runtime exercise') ?? '',
     };
   });

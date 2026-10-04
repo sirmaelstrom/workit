@@ -4,20 +4,26 @@
 
 **When to use:** Inside any spec that has more than one logical step. Every work package follows this structure.
 
-## The 6 Required Fields
+## The Required Fields: the 6 core fields, plus Review tier and Runtime exercise
 
 1. **Precondition** — What must be true before starting this package. May reference prior packages or external state.
 2. **Goal** — What this package accomplishes. One clear statement.
-3. **Files** — Exact paths. Create, modify, or delete. Nothing else gets touched.
+3. **Files** — Exact paths. Create, modify, or delete. Nothing else gets touched. Write it as bullets that begin `- Create ` or `- Modify `, with the path as the first backticked token on the line; `/conduct`'s scheduler reads a WP's file set only from that form. Brace groups expand (`lib/{a,b}.mjs` is two paths), a trailing `/` names a directory, and the list ends at the next line that begins with a `**<Field>:**` label. Every other backticked token, on those lines or elsewhere, is a reference, not a file the WP writes. Paths are repo-relative and written in full. There is no `Delete` verb: write a deletion as ``- Modify `path` (delete)`` and a rename as two `- Modify` bullets (the old path, then the new one), so a deleted path stays in the WP's file set and in conflict detection.
 4. **Verification** — Concrete command or check proving it works. Not "it should work" — a specific test, build command, or observable behavior.
 5. **Failure Criteria** — "If X happens, the problem is Y." Gives the agent (or reviewer) diagnostic footholds.
 6. **Boundary** — What is explicitly OUT OF SCOPE for this package. Prevents drift.
 7. **Commit** — Conventional commit message. Forces you to name what changed.
+8. **Review tier** — `T0`, `T1` or `T2`, required for every deep WP: `**Review tier:** T2 (<why>)`. The first token after the label is the value. `/conduct` reads it to pick the review (the tiers are `skills/burn-down/SKILL.md` § Per item step 3; this pattern doesn't restate them), and it may raise a tier at PR time but never lowers one. The field may share a line with another label, as in `**Execution:** review-needed · **Review tier:** T1`.
+9. **Runtime exercise** — required for every deep WP: the surface the change runs on and the check that exercises it (a CLI run against a real input, a service probed, a page loaded), or `none: <why>` when no runtime behavior changes. `/conduct` hands it to the lane, which must quote the check's output under `## Runtime exercise` in its report, so a WP with no surface named gets a lane that guesses. A check that cannot fail is vacuous; say what it would show if the change were broken.
 
 Write each field as a bold label — `**Precondition:**`, `**Goal:**`, … — or as a
 heading (`## Precondition`). `spec-validate` and `execute-wp` both look for the
 field name; the colon-inside (`**Field:**`) and colon-outside (`**Field**:`)
-forms are equivalent. The first six are required; **Commit** is recommended.
+forms are equivalent for the six core fields. **Review tier**, **Runtime exercise**
+and the **Files** bullets are read by `/conduct`'s parser, which takes only the
+bold-label form (`**Files:**`, `**Runtime exercise:**`, `**Review tier:**`), and
+`spec-validate` rejects a WP that lacks them. The first six, plus those three, are
+required; **Commit** is recommended.
 
 ## File-Per-Package Structure
 

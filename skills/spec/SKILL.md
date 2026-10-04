@@ -62,6 +62,40 @@ For deep specs, parse the `--review` flag. If not specified, auto-select:
 
 **Lite specs** default to self-review only. Pass `--review=full` to *additionally* run the Phase 8 council against the single `spec.md` (see *Council Review* in the Spec Lite section) — worth it when the change is well-understood but you still want a diverse-model pass on a decision gate. `--review=light`/`none` are no-ops on lite; self-review is already its floor.
 
+### Conductor flags
+
+`/conduct` invokes this skill with two more flags. Neither changes what the pipeline produces; they say where it writes and whether the operator has already answered the review gate.
+
+- **`--workshop <abs>`** — an absolute path; quote it in every command that uses it. Phase 1b (deep) and Setup step 2 (lite) create the workshop at that path instead of deriving `{workspace}/data/outputs/workshops/{slug}`, or use it as it is: the directory may already exist, because the conductor creates the run dir inside it first. Existing content is not an error; don't overwrite it. The slug is the path's basename. Wherever this skill says `{workshop_path}` or `{spec-dir}`, it means this path. The invoker starts you in the target repo's root, so Phase 1a takes the project from the current directory and doesn't ask.
+- **`--preapproved "<ref>"`** — the operator's approval, given earlier and recorded, covers this spec's review gate. `<ref>` is quoted because it holds spaces. It is one of the three forms below, and it comes only from the invoker's argument: **never write, guess or reconstruct a ref.**
+
+#### Verifying a `--preapproved` ref
+
+Before any gate is crossed, check the ref against the record it names. Every step is yours to perform; nothing else reads it.
+
+0. **Bind it to this run.** The run's state is `<workshop>/run/state.json` (the `--workshop` layout); read it for `runId`. No readable state, or no `runId`, means the ref can't be bound to a run.
+1. **`spine:<anchor uuid>@<answeredAt> by <by>`.** Read the quest with the Spine quest-read tool (`spine_quest`). The ref is valid only when the quest's **latest** receipt has outcome `answered`, its `answer.answeredAt` equals `<answeredAt>`, its `answer.by` equals `<by>` and begins `operator:`, and its question carries this run's correlation prefix `(run <runId>/` after the `[conduct <slug> touch <n>]` tag (the bare tag isn't enough: it is shared by every run of the same goal). A superseded receipt (a later one exists), an unanswered one, or one not attributed to an operator is not an approval. If a later receipt supersedes the approval, stop: the conductor re-files the touch, an extra touch that the run analysis counts. With no Spine tool to read it, the ref can't be verified.
+2. **`core:<path>`.** The path resolves to a file under `<workshop>/run/touches/`, which exists, parses as JSON, and has one of the two shapes the conductor writes. Validate each against its own shape:
+   - a touch record `touches/<n>.json` (any `<n>`: a re-asked touch after an ambiguous grant is `touches/2.json`): `status` is `answered`, `tty` is `true`, `answer.by` begins `operator:`, and `kind` is `preapproval` or the re-ask (`blocked` with a question about the "(c) answer to touch <m>"; any other blocked touch is not an approval);
+   - an authority record `touches/<n>-authority.json` (the checked grant after a "change it" answer): `{ merge, release, budgetUsd, scope, validated: true, touch, grant, answer }` with `validated` `true`, a non-empty `scope`, and an `answer` whose `key` is `c` and whose `by` begins `operator:`.
+
+   A file that is missing, unreadable, outside `<workshop>/run/touches/`, of another shape, or with an empty `answer` is not an approval.
+   
+   **The answer must approve.** The conductor maps the answer key to authority: `a` approves as proposed, `b` approves with every PR held, `c` approves a checked grant (recorded as the authority record, never as the touch record), and **`d` declines** the run. So a touch record or a Spine answer is an approval only with key `a` or `b`, and an authority record only with key `c`. A decline, or any other key, is a stop.
+3. **Scope.** When the record carries `scope` (the authority record), keep the goal for context but write the spec, the WPs and every assumption **only inside the scope**. List whatever the goal asks beyond it under an `Out of scope` heading (a short list in `problem-statement.md`, or in lite's Problem section) and never plan it. The goal text stays verbatim: the conductor passes it unchanged even under a narrowed grant. A touch record or a Spine answer carries no `scope`: it approves the goal as written. An `[ASSUMPTION: …]` that would widen the scope is not written.
+4. **Any failed check keeps the normal stop** (the gate waits for a person, as without the flag) and prints one line naming the check that failed: `Gate not preapproved: <the check>`. An empty value, or one beginning with neither `spine:` nor `core:`, fails step 1 or 2 the same way.
+
+With a verified `--preapproved`:
+- **Deep, Phase 4:** still write and render `review-gate.json`, set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Phase 6 without stopping at `**STOP HERE.**`.
+- **Lite, Present for Review:** print the summary, record the same `gate`, and continue to Final Output without waiting.
+- **`--review=none`:** crosses Phase 4 and Present for Review the same way, records the same `gate`, and skips only the `review-gate.json` emission, as it already does without the flag.
+- **Council unavailable:** the Phase 8 and lite council branches continue on the self-review floor and record `"council": "unavailable"` in `meta.json`; they do not stop.
+- **No sub-agent for the fresh-eyes reviewer:** Phase 7a continues on the self-review floor and records `"fresh-eyes": "unavailable"` in `meta.json`; it does not stop.
+- The flag skips no review wave: the fresh-eyes loop, the council and the final wave still run at whatever `--review` level applies. It only answers the gate that waits for a person.
+- `[ASSUMPTION: …]` flags no longer reach a person at the gate. List every one on the `**Assumptions:**` line of the final output (Phase 9 / lite Final Output).
+
+Without these flags, every gate and stop in this skill is unchanged.
+
 ---
 
 ## Spec Deep (`--depth=deep`)
@@ -77,11 +111,11 @@ Extract from the intent:
 - **Which project(s)** this touches — check your projects directory for matching repos
 - **Slug** — kebab-case, ≤40 chars
 
-If the project is ambiguous, ask. If the scope is ambiguous, make your best guess and flag it as `[ASSUMPTION: A1]` — the human will correct at the review gate.
+If the project is ambiguous, ask (with `--workshop`, take it from the current directory and don't ask: § Conductor flags). If the scope is ambiguous, make your best guess and flag it as `[ASSUMPTION: A1]` — the human will correct at the review gate (under a verified `--preapproved` there is no such gate: the flags are listed on the final output's `**Assumptions:**` line instead).
 
 #### 1b. Scaffold Workshop
 
-Create `{workspace}/data/outputs/workshops/{slug}/` (under the workspace root's data-outputs tree, never a cwd-relative `./outputs/`) with `meta.json`:
+Create `{workspace}/data/outputs/workshops/{slug}/` (under the workspace root's data-outputs tree, never a cwd-relative `./outputs/`) with `meta.json`. With `--workshop <abs>` (§ Conductor flags), create that path instead and take the slug from its basename:
 ```json
 {
   "title": "{title}",
@@ -97,7 +131,7 @@ Create `{workspace}/data/outputs/workshops/{slug}/` (under the workspace root's 
 
 #### 1c. Explore Codebase
 
-Before writing anything, ground yourself in the actual code. Use the Agent tool to launch an Explore agent:
+Before writing anything, ground yourself in the actual code. Use the Agent tool to launch an Explore agent when available; with no Explore agent, read the target's tree with your own tools. Either way, find:
 
 - Directory structure of the target project
 - Key entry points, config files, package.json/cargo.toml etc.
@@ -114,7 +148,7 @@ Read CORRECTIONS.md
 ```
 A corrections file captures cross-project lessons from past failures — every entry was learned the hard way. Internalize the relevant entries and inject them as constraints or must-nots in Stage 4. Skip this step if your project has no such file.
 
-Then search the KB for prior work on this topic:
+Then search the KB for prior work on this topic, when available (with no KB tool, skip this and say so):
 ```
 kb_search("relevant terms from the intent")
 ```
@@ -257,7 +291,9 @@ The renderer:
 
 After the renderer succeeds, point the operator at `review-gate.html` (one line — do not paste the chat-side markdown summary into the response that already shows it). The HTML and the chat-side markdown are redundant; the HTML is the recommended triage surface, the chat-side markdown is the fallback for environments without an open browser.
 
-**STOP HERE.** Wait for human input. Do not proceed to decomposition without explicit approval.
+**With a verified `--preapproved "<ref>"` (§ Conductor flags, *Verifying a `--preapproved` ref*):** the gate is already answered. Set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Phase 6 without stopping. The `review-gate.json` above is still written and rendered, except under `--review=none`, which skips it as before.
+
+**Without `--preapproved`, or when its ref doesn't verify: STOP HERE.** Wait for human input. Do not proceed to decomposition without explicit approval.
 
 ### Phase 5: Revision (if needed)
 
@@ -284,7 +320,10 @@ After approval, run stages 5-6:
 - Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/work-package.md`
 - Output: `work-packages/wp-{NN}-{slug}.md` for each package + `work-packages/_orchestrator.md`
 - Use the `_orchestrator.template.md` template from `${CLAUDE_PLUGIN_ROOT}/reference/templates/`
-- All 6 required fields per WP (precondition, goal, files, verification, failure criteria, boundary)
+- Required fields per WP: the 6 core ones (precondition, goal, files, verification, failure criteria, boundary) plus three that `/conduct`'s scheduler reads. `spec-validate` rejects a WP missing any of them; the rule and each field's form live in `${CLAUDE_PLUGIN_ROOT}/reference/patterns/work-package.md`:
+  - **Files** as bullets that begin `- Create ` or `- Modify ` with the path as the first backticked token (a WP with no such bullet parses to an empty file set and runs alone).
+  - `**Review tier:** T0|T1|T2`.
+  - `**Runtime exercise:**` — the surface and the check, or `none: <why>`.
 - Tag each WP: `execution: autonomous` or `execution: review-needed` (HITL flag)
 - Dependency order (which WPs must complete before others can start)
 - Spec-level constraints in orchestrator (from constraints.md)
@@ -301,7 +340,7 @@ Iteratively review the work packages using fresh-eyes Opus sub-agents until conv
 
 #### 7a. Fresh-Eyes Wave
 
-Launch an Opus sub-agent using the Agent tool (`model: opus`): the fresh-eyes verdict is a gate nothing re-checks, so it goes to the higher tier. The full prompt template lives in `${CLAUDE_SKILL_DIR}/reference/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads.
+Launch an Opus sub-agent using the Agent tool (`model: opus`): the fresh-eyes verdict is a gate nothing re-checks, so it goes to the higher tier. The full prompt template lives in `${CLAUDE_SKILL_DIR}/reference/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads. With a verified `--preapproved`, if no sub-agent is available for this reviewer, continue on the self-review floor and record `"fresh-eyes": "unavailable"` in `meta.json`; without `--preapproved`, nothing changes.
 
 #### 7b. Fix Findings
 
@@ -358,7 +397,7 @@ The `spec` profile is **config-owned** — its membership lives in `models.json`
 
 The tool returns a JSON summary with each model's status and lens filename; the files land in `{workshop_path}/reviews/review-1/` (one `review-lens-{model}.md` per lens). Read those in 8b.
 
-> **If the council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): the self-review floor from Phase 7 is your ship gate — note the gap explicitly in the Phase-9 summary and let the operator decide whether to proceed or defer. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, self-review is the floor.)
+> **If the council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): the self-review floor from Phase 7 is your ship gate — note the gap explicitly in the Phase-9 summary and let the operator decide whether to proceed or defer. **With a verified `--preapproved`:** don't stop to let the operator decide — continue on the self-review floor and record `"council": "unavailable"` in `meta.json`. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, self-review is the floor.)
 
 If the **council** call fails, retry it once; if it still fails, see the unavailability note above — fall back to the self-review floor and record the gap.
 
@@ -382,7 +421,7 @@ Run one more Opus fresh-eyes wave (same prompt and model as 7a) to verify the co
 
 Then run the spec-validate script (bundled in this plugin):
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/skills/spec-validate/scripts/validate.mjs" {workshop_path}
+node "${CLAUDE_PLUGIN_ROOT}/skills/spec-validate/scripts/validate.mjs" "{workshop_path}"
 ```
 
 Report: validation result (errors/warnings/passes) + final wave verdict.
@@ -394,10 +433,11 @@ Present the completed spec summary:
 ```markdown
 ## ✅ Spec Complete: {title}
 
-**Workshop:** `workshops/{slug}/`
+**Workshop:** `{workshop_path}` (the `--workshop` path when given, else `{workspace}/data/outputs/workshops/{slug}/`)
 **Packages:** {N} WPs
 **Estimated execution:** {autonomous WPs} autonomous, {review WPs} need review
 **Dependency order:** {summary}
+**Assumptions:** {every `[ASSUMPTION: …]` flag, one line each; required with `--preapproved`, where no gate shows them to a person}
 **Review:** {review_level} — {N} fresh-eyes waves, {N} council lenses, {N} amendments applied
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 **Cost:** {total $ and tokens, from cost-report}
@@ -420,10 +460,10 @@ A compressed specification for well-understood changes. Produces a single `spec.
 ### Setup
 
 1. **Parse intent** — extract what, which project, slug (same as deep spec Phase 1a)
-2. **Scaffold workshop** — create directory + `meta.json` with status `"captured"`. Mark cost tracking: `node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase lite --event start`
+2. **Scaffold workshop** — create directory (at `--workshop <abs>` when given, § Conductor flags) + `meta.json` with status `"captured"`. Mark cost tracking: `node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state "{workshop}/cost-log.json" --phase lite --event start`
 3. **Quick explore** — read key files likely affected. ≤5 files, no Explore agent. If you're reaching for a wider survey, the depth was wrong — upgrade to deep.
 4. **Read CORRECTIONS.md** — non-negotiable regardless of depth
-5. **KB search** — one `kb_search` query for prior work on this topic
+5. **KB search** — one `kb_search` query for prior work on this topic, when available (with no KB tool, skip and say so)
 
 ### Write spec.md
 
@@ -453,18 +493,20 @@ By default lite stops at self-review. If the operator passed `--review=full`, ru
 
 - One `council_review` MCP call with `surface: "spec"`, `profile: "spec"` (the same config-owned roster as Phase 8a — Anthropic lenses via `claude -p` + external lenses; never pass an explicit `models:` list). The collector inlines the root `spec.md` as the artifacts block (`collectSpecFiles` fallback, verified 2026-07-06), so every lens reviews the real content instead of an empty block that makes gemini hallucinate.
 
-Synthesize as in Phase 8b — convergence across vendor families is high-confidence, weight codex, dedupe, apply Critical/Major — then re-run the self-review scan to confirm the amendments introduced nothing new. If the council MCP is unavailable, note the gap and fall back to the self-review floor.
+Synthesize as in Phase 8b — convergence across vendor families is high-confidence, weight codex, dedupe, apply Critical/Major — then re-run the self-review scan to confirm the amendments introduced nothing new. If the council MCP is unavailable, note the gap and fall back to the self-review floor. With a verified `--preapproved`, also record `"council": "unavailable"` in `meta.json`.
 
 ### Present for Review
 
 Show a brief summary with flagged items. Wait for approval. Apply revisions if needed.
 
+**With a verified `--preapproved "<ref>"` (§ Conductor flags, *Verifying a `--preapproved` ref*):** print the summary, set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Final Output without waiting.
+
 ### Final Output
 
 Update `meta.json` status to `"ready"`. Close cost tracking and generate the report:
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase lite --event end
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-log.json
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state "{workshop}/cost-log.json" --phase lite --event end
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state "{workshop}/cost-log.json"
 ```
 
 > **The report reads the SESSION's transcripts, not the workshop's.** The
@@ -480,9 +522,10 @@ node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-
 ```markdown
 ## ✅ Spec Complete: {title}
 
-**Workshop:** `workshops/{slug}/`
+**Workshop:** `{workshop_path}` (the `--workshop` path when given, else `{workspace}/data/outputs/workshops/{slug}/`)
 **Depth:** lite — single document
 **Review:** {self-review only | self-review + council: N lenses, N amendments applied}
+**Assumptions:** {every `[ASSUMPTION: …]` flag, one line each; required with `--preapproved`, where no gate shows them to a person}
 **Cost:** {total $ and tokens, from cost-report}
 
 Ready for execution.
@@ -508,12 +551,12 @@ State file: `{workshop}/cost-log.json`. Collection reads subagent transcripts po
 
 At the START of each deep-pipeline phase, run:
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase phase-N-<slug> --event start
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state "{workshop}/cost-log.json" --phase phase-N-<slug> --event start
 ```
 Phase names: `phase-1-setup` … `phase-9-final` (matching this document's Phase 1-9 headings). At Phase 9, close the final phase and generate the report:
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state {workshop}/cost-log.json --phase phase-9-final --event end
-node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-log.json
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" mark --state "{workshop}/cost-log.json" --phase phase-9-final --event end
+node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state "{workshop}/cost-log.json"
 ```
 Include the printed markdown table in the Phase 9 final output.
 

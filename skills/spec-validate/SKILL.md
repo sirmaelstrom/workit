@@ -16,7 +16,7 @@ This skill bundles a validation script at `scripts/validate.mjs` that performs d
 - **Vague verification detection** — phrases like "should work", "looks good", "functions properly" that aren't actually verifiable
 - **Constraint completeness** — all four categories present (musts, must-nots, preferences, escalation triggers)
 - **Constraint coverage** — every declared D/M/MN/E tag reaches a V-criterion or a work package; the ones that reach neither are named
-- **Work package field coverage** — all 6 required fields (precondition, goal, files, verification, failure criteria, boundary)
+- **Work package field coverage** — the 6 core fields (precondition, goal, files, verification, failure criteria, boundary) plus the three `/conduct` reads: `**Review tier:**` (`T0|T1|T2`), `**Runtime exercise:**` (non-empty) and at least one `- Create`/`- Modify` Files bullet
 - **Pipeline consistency** — meta.json status matches which artifacts actually exist
 
 ## Running Validation
@@ -98,7 +98,7 @@ done
 ### work-packages/
 - _orchestrator.md present with Wave Plan, Package Inventory, Gate Commands sections
 - Spec-level constraints in orchestrator
-- Each work package has all 6 required fields
+- Each work package has the 6 core fields plus `**Review tier:**` (`T0|T1|T2`), `**Runtime exercise:**` and at least one `- Create`/`- Modify` Files bullet (`reference/patterns/work-package.md`)
 - No vague verification in individual work packages
 
 ### Pipeline consistency

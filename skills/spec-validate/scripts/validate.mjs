@@ -18,7 +18,7 @@
  */
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { join, basename, isAbsolute } from 'node:path';
+import { join, basename, isAbsolute, posix } from 'node:path';
 
 let workshopPath = null;
 let cliWorkspaceRoot = null;
@@ -635,6 +635,80 @@ function validateTargets(meta) {
   }
 }
 
+// The three fields beyond the 6 core ones that every deep WP carries. A WP missing one
+// is undispatchable by /conduct: no Files bullet parses to an empty file set, no tier
+// defaults silently, no runtime surface goes unnamed. Returns one message per problem.
+const CONDUCTOR_FIELD_COUNT = 3;
+
+// What a WP declares, not what it quotes: fenced blocks, `>` lines and inline code spans
+// are dropped before a tier is read. A fence closes only on the same character with a run at
+// least as long as its opener, and a span is delimited by equal-length backtick runs
+// (CommonMark). A span that is the label's own value (**Review tier:** `T2`) is the value.
+// skills/conduct/scripts/lib/schedule.mjs does the same (no import across skills;
+// validate.test.mjs runs both parsers over the same WPs).
+function unquoted(text) {
+  let fence = null;
+  return text.split(/\r?\n/).filter((line) => {
+    if (fence) {
+      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1];
+      if (close && close[0] === fence.char && close.length >= fence.len) fence = null;
+      return false;
+    }
+    const open = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
+    if (open) { fence = { char: (open[1] ?? open[2])[0], len: (open[1] ?? open[2]).length }; return false; }
+    return !/^\s*>/.test(line);
+  }).map((line) => line
+    .replace(/(\*\*Review tier:\*\*\s*)(`+)\s*([^`\s]+)\s*\2(?!`)/g, '$1$3')
+    .replace(/(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, '')).join('\n');
+}
+
+const expandBraces = (token) => {
+  const m = /\{([^{}]*)\}/.exec(token);
+  return m ? m[1].split(',').flatMap((alt) => expandBraces(token.slice(0, m.index) + alt + token.slice(m.index + m[0].length))) : [token];
+};
+
+// The scheduler refuses these paths, normalized the same way (trailing dots and spaces dropped
+// per segment, as Windows does): absolute, drive-qualified, escaping the repo, or empty.
+// Containment is checked after normalization: `.../x` becomes `/x`.
+function badFilesPath(path) {
+  const slashed = path.replace(/\\/g, '/');
+  const segments = slashed.split('/').map((segment) => (segment === '.' || segment === '..' ? segment : segment.replace(/[. ]+$/, '')));
+  const normal = posix.normalize(segments.join('/'));
+  return /^[A-Za-z]:/.test(slashed) || slashed.startsWith('/') || normal === '..' || normal.startsWith('../') || normal.startsWith('/') || normal === '.' || normal === './';
+}
+
+function conductorFieldProblems(content) {
+  const problems = [];
+  const lines = content.split(/\r?\n/);
+  const labelLine = /^\*\*[^*]+:\*\*/;
+  // `**Files**:` (colon outside the bold) passes the core-field check but not /conduct's parser.
+  const spelled = (label) => (new RegExp(`^\\*\\*${label}\\*\\*:`, 'm').test(content) ? ` "**${label}**:" has its colon outside the bold; /conduct reads only "**${label}:**".` : '');
+
+  // The label may share a line (`**Execution:** … · **Review tier:** T2 (…)`); the value is the first token after it.
+  const declared = [...unquoted(content).matchAll(/\*\*Review tier:\*\*\s*(\S*)/g)].map((m) => m[1].replace(/[,;.]$/, ''));
+  if (!declared.length) problems.push(`Missing **Review tier:** field (T0, T1 or T2).${spelled('Review tier')}`);
+  for (const value of new Set(declared)) if (!/^T[012]$/.test(value)) problems.push(`**Review tier:** value "${value}" is not T0, T1 or T2.`);
+  if (new Set(declared).size > 1) problems.push(`Conflicting **Review tier:** declarations: ${[...new Set(declared)].join(' and ')}.`);
+
+  // A field's lines: its own line's text, then the lines up to the next field label or heading.
+  const fieldLines = (label, stop, ownLine) => {
+    const start = lines.findIndex((l) => l.startsWith(`**${label}:**`));
+    if (start < 0) return [];
+    const rest = lines.slice(start + 1);
+    const end = rest.findIndex(stop);
+    return [...(ownLine ? [lines[start].slice(label.length + 5)] : []), ...(end < 0 ? rest : rest.slice(0, end))];
+  };
+  if (!fieldLines('Runtime exercise', (l) => labelLine.test(l) || /^#/.test(l), true).join('').trim()) {
+    problems.push(`Missing or empty **Runtime exercise:** field (a surface and a check, or "none: <why>").${spelled('Runtime exercise')}`);
+  }
+  // Only bullets on the lines after the label count, as in the scheduler: `**Files:**- Modify …` has none.
+  const bullets = fieldLines('Files', (l) => labelLine.test(l), false).filter((l) => /^- (Create|Modify) /.test(l)).map((l) => /`([^`]+)`/.exec(l)?.[1]);
+  if (!bullets.some((token) => token !== undefined)) problems.push(`**Files:** has no bullet beginning "- Create " or "- Modify " with a backticked path on a line after the label.${spelled('Files')}`);
+  const bad = bullets.filter((token) => token !== undefined).map((token) => token.trim()).flatMap(expandBraces).filter(badFilesPath);
+  if (bad.length) problems.push(`**Files:** paths must be repo-relative (no absolute or drive path, no ".." escape, not empty): ${bad.map((p) => `"${p}"`).join(', ')}.`);
+  return problems;
+}
+
 function validateWorkPackages() {
   const wpDir = join(workshopPath, 'work-packages');
   if (!existsSync(wpDir)) return;
@@ -681,8 +755,16 @@ function validateWorkPackages() {
 
     if (missingFields.length > 0) {
       error(wpFile, `Missing ${missingFields.length} required field(s): ${missingFields.join(', ')}. Work packages need all 6 fields to be independently dispatchable. Missing fields create ambiguity that agents resolve differently.`);
-    } else {
-      ok(`${wpFile}: all 6 required fields present`);
+    }
+
+    // The fields /conduct's scheduler reads (reference/patterns/work-package.md): the same
+    // forms its parser accepts, so a WP this passes is not parsed as empty.
+    const conductorProblems = conductorFieldProblems(content);
+    for (const problem of conductorProblems) {
+      error(wpFile, `${problem} Required for every deep WP: /conduct reads it (see reference/patterns/work-package.md).`);
+    }
+    if (missingFields.length === 0 && conductorProblems.length === 0) {
+      ok(`${wpFile}: all ${REQUIRED_WP_FIELDS.length + CONDUCTOR_FIELD_COUNT} required fields present`);
     }
 
     // Vague verification in WP (skip code blocks and blockquotes)

@@ -32,4 +32,10 @@ Stop and escalate if `storage.put()` turns out to be called from more than one
 site (E1) — the budget assumes a single call path, and a second caller changes
 the design rather than the implementation.
 
+**Review tier:** T1 (one module, adds tests that pin the retry count)
+
+**Runtime exercise:** CLI/worker — run the export worker against the always-failing
+fixture client and quote the `put` call count (5); the pre-change tree at the base
+commit loops forever, which is what the check would show if the cap were missing.
+
 **Commit:** `feat(export): cap retries at MAX_ATTEMPTS`
