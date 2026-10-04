@@ -4,11 +4,12 @@
 import { basename } from 'node:path';
 import { ConductError } from '../state.mjs';
 
-// spine_author is idempotent per (campaign, key), so a bare `wp-01` would
-// reuse another run's quest: the key carries the run's slug. One function
-// serves the quests, the seams and the result mapping.
+// spine_author is idempotent per (campaign, key), so a bare `wp-01`, or one
+// keyed by the goal's slug alone, would reuse another run's quest: the key
+// carries the slug and the run id (persisted, so stable within the run). One
+// function serves the quests, the seams and the result mapping.
 export function questKey(state, wp) {
-  return `${state.slug}-${wp.id}`.toLowerCase();
+  return `${state.slug}-${state.runId}-${wp.id}`.toLowerCase();
 }
 
 function resumeNote(wp) {

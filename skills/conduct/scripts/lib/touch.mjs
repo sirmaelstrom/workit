@@ -160,7 +160,13 @@ export function recordTouch(state, touch, action, result) {
     key: latest.answer.key, text: latest.answer.text, by: latest.answer.by, answeredAt: latest.answer.answeredAt,
     source: 'spine', receiptId: typeof latest.id === 'string' ? latest.id : null,
   };
-  if (!String(answer.by ?? '').startsWith('operator:')) acceptAnswer(touch, answer);
+  // Not the operator's: refused as an answer (no authority), and the touch is
+  // re-filed so it stays answerable. The caller exits 3 for this read.
+  if (!String(answer.by ?? '').startsWith('operator:')) {
+    touch.status = 'open';
+    touch.refusal = `the answer by ${answer.by ?? 'nobody'} is not operator-attributed`;
+    return { refused: touch.refusal };
+  }
   // An operator's typed answer with no key is option (c), when the touch has it.
   if (!answer.key && answer.text && touch.allowFreeText && touch.options.some((option) => option.key === 'c')) answer.key = 'c';
   if (!touch.options.some((option) => option.key === answer.key)) {

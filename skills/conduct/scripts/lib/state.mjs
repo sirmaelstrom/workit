@@ -5,14 +5,14 @@ import { join, dirname, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 export const SCHEMA_VERSION = 1;
-// A lock whose holder is gone, or older than this, is stale. Every verb is
-// one-shot and bounded, so no live writer holds the lock this long (ASSUMPTION).
+// A lock held from another host (whose pid cannot be checked) older than this
+// is stale. Every verb is one-shot and bounded (ASSUMPTION).
 export const LOCK_STALE_MS = 60000;
 const LOCK_POLL_MS = 50;
 
 export class ConductError extends Error {
-  constructor(code, message) {
-    super(message);
+  constructor(code, message, options) {
+    super(message, options);
     this.code = code;
   }
 }
@@ -96,60 +96,106 @@ export function loadState(runDir, deps) {
   return state;
 }
 
+function readLock(path, deps) {
+  try {
+    return JSON.parse(deps.read(path));
+  } catch {
+    return null;
+  }
+}
+
+// Stale only when the holder is shown gone: a dead pid on this host. Age
+// decides only for a holder on another host, whose pid cannot be checked.
+function lockIsStale(holder, deps) {
+  if (holder.host === deps.hostname) return !deps.pidAlive(holder.pid);
+  return deps.now() - Date.parse(holder.at) > LOCK_STALE_MS;
+}
+
 // One writer at a time: every state transaction (load, change, save) runs
-// under an O_EXCL lock file beside state.json. A holder that is not alive, or
-// a lock older than LOCK_STALE_MS, is stale and is taken over.
+// under a lock file beside state.json. The lock is a hard link to a complete
+// temp file, so it never exists half-written, and `link` fails if a lock is
+// already there. An unreadable lock is contention, never stale. Release
+// removes the lock only while it still carries this writer's token. Two
+// contenders that both judge one dead holder's lock stale can race on the
+// takeover (accepted for v1: it needs a crash and two contenders; ASSUMPTION).
 export async function withStateLock(runDir, deps, fn) {
   const path = join(runDir, 'state.lock');
+  const token = randomBytes(8).toString('hex');
+  const temp = `${path}.${token}.tmp`;
   const waitMs = deps.lockWaitMs ?? 2000;
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      deps.writeNew(path, JSON.stringify({ pid: deps.pid, at: deps.timestamp() }));
-      break;
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      let holder = null;
+  try {
+    deps.write(temp, JSON.stringify({ pid: deps.pid, host: deps.hostname, at: deps.timestamp(), token }));
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new ConductError(2, `no run directory at ${runDir}`);
+    throw error;
+  }
+  try {
+    for (let attempt = 0; ; attempt += 1) {
       try {
-        holder = JSON.parse(deps.read(path));
-      } catch {
-        // Unreadable: treated as stale below.
+        deps.link(temp, path);
+        break;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        const holder = readLock(path, deps);
+        if (holder && lockIsStale(holder, deps)) {
+          deps.remove(path);
+          continue;
+        }
+        if (attempt * LOCK_POLL_MS >= waitMs) {
+          throw new ConductError(2, holder
+            ? `the run is locked by pid ${holder.pid} on ${holder.host} since ${holder.at}; retry`
+            : `the run's lock ${path} is unreadable; retry, or remove it if no conductor verb is running`);
+        }
+        await deps.sleep(LOCK_POLL_MS);
       }
-      const stale = !holder || !deps.pidAlive(holder.pid) || deps.now() - Date.parse(holder.at) > LOCK_STALE_MS;
-      if (stale) {
-        deps.remove(path);
-        continue;
-      }
-      if (attempt * LOCK_POLL_MS >= waitMs) throw new ConductError(2, `the run is locked by pid ${holder.pid} since ${holder.at}; retry`);
-      await deps.sleep(LOCK_POLL_MS);
     }
+  } finally {
+    deps.remove(temp);
   }
   try {
     return await fn();
   } finally {
-    deps.remove(path);
+    if (readLock(path, deps)?.token === token) deps.remove(path);
   }
 }
 
 // Events are staged on the state object and written by saveState, each line
-// stamped with the transaction's `rev` and a random `txn`. They are appended
-// before state.json is replaced, so a failed save can leave orphan lines;
-// readEvents is the recovery rule that drops them.
+// stamped with the transaction's `rev` and a random `txn`. The lines are
+// appended before state.json is replaced; the txn is committed only when the
+// state carrying it in `txns` lands. readEvents keeps committed lines only.
 const staged = new WeakMap();
+
+// A trailing line without its newline is a crash mid-append. That save never
+// committed, so the fragment is cut off before anything is appended after it.
+function repairTail(path, deps) {
+  if (!deps.exists(path)) return;
+  const text = deps.read(path);
+  if (text === '' || text.endsWith('\n')) return;
+  deps.truncate(path, Buffer.byteLength(text.slice(0, text.lastIndexOf('\n') + 1)));
+}
 
 export function saveState(state, deps) {
   const path = statePath(state.runDir);
+  const events = join(state.runDir, 'events.jsonl');
   const lines = staged.get(state) ?? [];
   staged.delete(state);
   state.rev = (state.rev ?? 0) + 1;
   const txn = randomBytes(6).toString('hex');
+  state.txns = [...(state.txns ?? []), txn];
   if (lines.length) {
-    deps.append(join(state.runDir, 'events.jsonl'), lines.map((line) => `${JSON.stringify({ ...line, rev: state.rev, txn })}\n`).join(''));
+    repairTail(events, deps);
+    deps.append(events, lines.map((line) => `${JSON.stringify({ ...line, rev: state.rev, txn })}\n`).join(''));
   }
   // Temp file then rename, so a crash mid-write never leaves half a state.json
   // (ASSUMPTION: rename within one directory replaces the file whole).
   const temp = `${path}.${deps.pid}.${txn}.tmp`;
-  deps.write(temp, `${JSON.stringify(state, null, 2)}\n`);
-  deps.rename(temp, path);
+  try {
+    deps.write(temp, `${JSON.stringify(state, null, 2)}\n`);
+    deps.rename(temp, path);
+  } catch (error) {
+    deps.remove(temp);
+    throw error;
+  }
 }
 
 export function appendEvent(state, deps, { actionId = null, step = null, seam, kind = null, event, source = 'next', data = {}, phase = state.phase }) {
@@ -169,11 +215,20 @@ export function appendEvent(state, deps, { actionId = null, step = null, seam, k
   staged.get(state).push(line);
 }
 
-// The recovery rule: a rev's events are the lines of the LAST transaction
-// written with that rev, and a rev past the saved state's is an orphan.
+// The recovery rule: an event is visible only when its txn was committed,
+// i.e. is in the saved state's `txns`. A torn trailing line is dropped as a
+// crash artifact; a bad line anywhere else is corruption and exits 2.
 export function readEvents(runDir, deps, state = loadState(runDir, deps)) {
   const path = join(runDir, 'events.jsonl');
-  const lines = deps.exists(path) ? deps.read(path).split('\n').filter(Boolean).map((line) => JSON.parse(line)) : [];
-  const lastTxn = new Map(lines.map((line) => [line.rev, line.txn]));
-  return lines.filter((line) => line.rev <= (state.rev ?? 0) && lastTxn.get(line.rev) === line.txn);
+  if (!deps.exists(path)) return [];
+  const rows = deps.read(path).split('\n');
+  rows.pop(); // '' after the final newline, or a torn trailing line
+  const committed = new Set(state.txns ?? []);
+  return rows.map((row, i) => {
+    try {
+      return JSON.parse(row);
+    } catch {
+      throw new ConductError(2, `events.jsonl line ${i + 1} is not valid JSON`);
+    }
+  }).filter((line) => committed.has(line.txn));
 }

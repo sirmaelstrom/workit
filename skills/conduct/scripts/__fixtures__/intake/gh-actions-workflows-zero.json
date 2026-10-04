@@ -2,9 +2,12 @@
   "command": [
     "gh",
     "api",
-    "repos/sirmaelstrom/workit/actions/workflows"
+    "--paginate",
+    "repos/sirmaelstrom/workit/actions/workflows",
+    "--jq",
+    ".workflows[]"
   ],
   "code": 0,
-  "stdout": "{\"total_count\":0,\"workflows\":[]}",
+  "stdout": "",
   "stderr": ""
 }

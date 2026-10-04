@@ -110,13 +110,16 @@ function recordGrant(state, touch, deps) {
   }
   const checked = validateGrant(grant, proposal(state), state.intent.goal);
   if (!checked.ok) throw new ConductError(2, `grant ${path}: ${checked.problems.join('; ')}`);
-  // The record /spec --preapproved names: the validated grant, rewritten with
-  // the answer it came from, so a narrowed scope reaches the spec.
+  // The authored grant stays as written, so a retry after a failed save
+  // re-validates the same input. The record /spec --preapproved names is a
+  // separate file, a copy of the authority this record commits; state.json's
+  // `authority` stays the authority (a file saying `validated: true` is not).
   const { merge, release, budgetUsd, scope } = grant;
-  deps.write(path, `${JSON.stringify({ merge, release, budgetUsd, scope, validated: true, touch: touch.n, answer: touch.answer }, null, 2)}\n`);
+  const published = `touches/${touch.n}-authority.json`;
+  deps.write(join(state.runDir, published), `${JSON.stringify({ merge, release, budgetUsd, scope, validated: true, touch: touch.n, grant: `touches/${touch.n}-grant.json`, answer: touch.answer }, null, 2)}\n`);
   state.authority = {
-    merge: grant.merge, release: grant.release, budgetUsd: grant.budgetUsd, scope: grant.scope,
-    metered: state.authority.metered, notes: text, grant: `touches/${touch.n}-grant.json`,
+    merge, release, budgetUsd, scope,
+    metered: state.authority.metered, notes: text, grant: `touches/${touch.n}-grant.json`, record: published,
   };
   state.phase = 'spec';
 }
@@ -139,6 +142,7 @@ function applyAnswer(state, touch) {
 export function record(state, action, result, deps) {
   const touch = state.touches[action.touch.n - 1];
   if (action.step === 'grant') return recordGrant(state, touch, deps);
-  recordTouch(state, touch, action, result);
+  const outcome = recordTouch(state, touch, action, result);
   if (touch.status === 'answered') applyAnswer(state, touch);
+  return outcome;
 }

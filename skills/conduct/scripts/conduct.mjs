@@ -3,9 +3,9 @@
 // does one bounded thing, writes state, appends to events.jsonl and exits; the
 // agent running the skill drives the loop: intake → [next → act → record]*.
 // `next` never runs a program: it hands the agent an action to perform.
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendFileSync, readdirSync, rmSync, linkSync, truncateSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { isatty } from 'node:tty';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -134,8 +134,8 @@ async function emitAfterRecord(state, deps, id) {
   try {
     return await emit(state, deps);
   } catch (error) {
-    const recorded = error instanceof ConductError ? error : new ConductError(1, `after recording ${id}: ${error.message}`);
-    recorded.details = { recorded: id };
+    const recorded = error instanceof ConductError ? error : new ConductError(1, `after recording ${id}: ${error.message}`, { cause: error });
+    recorded.details = { ...(recorded.details ?? {}), recorded: id };
     throw recorded;
   }
 }
@@ -159,10 +159,12 @@ function parseJson(text) {
 }
 
 // Workflows that can gate a PR: active, and defined in the repo. Dynamic
-// workflows (Dependabot, CodeQL default setup, pages) are not counted.
-function gatingWorkflows(listing) {
-  if (!Array.isArray(listing?.workflows)) return null;
-  return listing.workflows.filter((workflow) => workflow.state === 'active' && String(workflow.path).startsWith('.github/workflows/')).length;
+// workflows (Dependabot, CodeQL default setup, pages) are not counted. The
+// listing is every page (`--paginate`), one workflow object per line.
+function gatingWorkflows(stdout) {
+  const workflows = stdout.split('\n').filter((line) => line.trim()).map(parseJson);
+  if (workflows.some((workflow) => !workflow)) return null;
+  return workflows.filter((workflow) => workflow.state === 'active' && String(workflow.path).startsWith('.github/workflows/')).length;
 }
 
 function intakeOptions(flags) {
@@ -197,7 +199,7 @@ async function intake(tokens, deps) {
   const top = deps.exec('git', ['-C', resolve(flags.repo), 'rev-parse', '--show-toplevel']);
   if (top.code !== 0 || !top.stdout.trim()) refuse(1, `${resolve(flags.repo)} has no work-tree root`);
   const repoPath = resolve(top.stdout.trim());
-  if (options.spine && !/^[0-9a-f]{8}/i.test(typeof flags.anchor === 'string' ? flags.anchor : '')) {
+  if (options.spine && !/^[0-9a-f]{8}[0-9a-f-]*$/i.test(typeof flags.anchor === 'string' ? flags.anchor : '')) {
     refuse(7, '--adapter spine needs --anchor <quest id> (a uuid or a prefix of at least 8 hex characters): the touches need a quest to carry them');
   }
   // The raw origin URL, before any insteadOf rewrite.
@@ -213,9 +215,9 @@ async function intake(tokens, deps) {
   if (typeof repoInfo?.nameWithOwner !== 'string') refuse(2, `gh repo view ${ownerName} printed no nameWithOwner`);
   const remote = repoInfo.nameWithOwner;
   // A failed or unreadable workflow count is stored as null and treated as zero.
-  const workflows = deps.exec('gh', ['api', `repos/${remote}/actions/workflows`]);
-  const ciWorkflows = workflows.code === 0 ? gatingWorkflows(parseJson(workflows.stdout)) : null;
-  const ciError = workflows.code !== 0 ? workflows.stderr : ciWorkflows === null ? 'no workflows array in the workflows listing' : null;
+  const workflows = deps.exec('gh', ['api', '--paginate', `repos/${remote}/actions/workflows`, '--jq', '.workflows[]']);
+  const ciWorkflows = workflows.code === 0 ? gatingWorkflows(workflows.stdout) : null;
+  const ciError = workflows.code !== 0 ? workflows.stderr : ciWorkflows === null ? 'a workflows listing line is not JSON' : null;
   const { adapters, agents } = detectAdapters({
     env: deps.env, exec: deps.exec, exists: deps.exists, declared: options.declared, forcedOff: options.forcedOff,
     platform: deps.platform, resolveCodex: deps.resolveCodex,
@@ -253,7 +255,7 @@ async function intake(tokens, deps) {
       spec: { depth: null, reviewLevel: null, gate: null, gateCommand: null },
       wps: [],
       release: { state: 'pending', reason: null, base: null, worktree: null, branch: null, pr: null, gate: null, merge: null },
-      mergeLock: null, dispatchHalt: null, handover: null, sentBack: null, pending: null, lastRecorded: null, seq: 0, rev: 0,
+      mergeLock: null, dispatchHalt: null, handover: null, sentBack: null, pending: null, lastRecorded: null, seq: 0, rev: 0, txns: [],
     };
     appendEvent(state, deps, { step: 'intake', event: 'intake', source: 'next', data: { remote, ciWorkflows, ciError } });
     saveState(state, deps);
@@ -311,7 +313,7 @@ async function record(tokens, deps) {
       return { out: { ok: true, phase: state.phase, action, answered: false } };
     }
     const handler = await loadModule(deps, `lib/phases/${action.phase}.mjs`, `phase handler ${action.phase}`);
-    await handler.record(state, action, result, deps);
+    const outcome = await handler.record(state, action, result, deps);
     state.pending = null;
     state.lastRecorded = id;
     appendEvent(state, deps, {
@@ -320,7 +322,11 @@ async function record(tokens, deps) {
       data: state.phase === action.phase ? {} : { phase: state.phase },
     });
     saveState(state, deps);
-    return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id) } };
+    const next = await emitAfterRecord(state, deps, id);
+    // A refused answer (not operator-attributed) is recorded as a refusal:
+    // exit 3, no authority, and the next action re-files the touch.
+    if (outcome?.refused) return { code: 3, out: { ok: false, refused: outcome.refused, recorded: id, phase: state.phase, action: next } };
+    return { out: { ok: true, phase: state.phase, action: next } };
   });
 }
 
@@ -357,26 +363,33 @@ async function status(tokens, deps) {
 async function analyze(tokens, deps) {
   const { runDir } = openRun(parseFlags(tokens), deps);
   const module = await loadModule(deps, 'lib/analyze.mjs', 'module');
-  return { out: await module.analyzeRun(runDir, { exec: deps.exec, read: deps.read, write: deps.write }) };
+  // readEvents (lib/state.mjs) needs exists and read; the analysis reads events through it.
+  return { out: await module.analyzeRun(runDir, { exec: deps.exec, read: deps.read, write: deps.write, exists: deps.exists }) };
 }
 
 // lane/land: conduct.mjs parses --run and --wp; every other flag reaches the
-// sub-verb camelCased, and the sub-verb validates its own flags.
-function subVerb(relPath, exportName, subs) {
+// sub-verb camelCased, and the sub-verb validates its own flags. A sub-verb
+// in `writers` writes state: conduct.mjs runs it inside the run's lock and
+// hands it the state loaded under that lock, which it saves with saveState.
+// The others only read and print, and get no lock.
+function subVerb(relPath, exportName, subs, writers = []) {
   return async ([sub, ...tokens], deps) => {
     if (!subs.includes(sub)) throw new ConductError(2, `sub-verb must be one of ${subs.join(', ')} (got ${sub ?? 'none'})`);
     const flags = parseFlags(tokens);
-    const { runDir } = openRun(flags, deps);
     const wpId = stringFlag(flags, 'wp');
     const rest = Object.fromEntries(Object.entries(flags).filter(([name]) => name !== 'run' && name !== 'wp').map(([name, value]) => [camelCase(name), value]));
-    const module = await loadModule(deps, relPath, 'module');
-    return module[exportName](sub, { runDir, wpId, flags: rest }, deps);
+    const call = async (runDir, state) => {
+      const module = await loadModule(deps, relPath, 'module');
+      return module[exportName](sub, { runDir, wpId, flags: rest, ...(state ? { state } : {}) }, deps);
+    };
+    if (writers.includes(sub)) return transact(flags, deps, (state) => call(runDirFlag(flags), state));
+    return call(openRun(flags, deps).runDir);
   };
 }
 
 const VERBS = {
   intake, next, record, answer, status, analyze,
-  lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check']),
+  lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
 };
 
@@ -386,7 +399,8 @@ export async function runConduct(argv, overrides = {}) {
     exec: execute,
     read: (path) => readFileSync(path, 'utf8'),
     write: (path, value) => writeFileSync(path, value, 'utf8'),
-    writeNew: (path, value) => writeFileSync(path, value, { encoding: 'utf8', flag: 'wx' }),
+    link: linkSync,
+    truncate: truncateSync,
     remove: (path) => rmSync(path, { force: true }),
     exists: existsSync,
     mkdir: (path) => mkdirSync(path, { recursive: true }),
@@ -397,6 +411,7 @@ export async function runConduct(argv, overrides = {}) {
     platform: process.platform,
     home: homedir(),
     pid: process.pid,
+    hostname: hostname(),
     now: () => Date.now(),
     timestamp: () => new Date().toISOString(),
     sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
@@ -423,7 +438,8 @@ export async function runConduct(argv, overrides = {}) {
     return { code, stdout: typeof out === 'string' ? out : JSON.stringify(out), stderr: '' };
   } catch (error) {
     if (!(error instanceof ConductError)) throw error;
-    return { code: error.code, stdout: JSON.stringify({ ok: false, error: error.message, ...(error.details ?? {}) }), stderr: `conduct: ${error.message}\n` };
+    const cause = error.cause ? `${error.cause.stack ?? error.cause}\n` : '';
+    return { code: error.code, stdout: JSON.stringify({ ok: false, error: error.message, ...(error.details ?? {}) }), stderr: `conduct: ${error.message}\n${cause}` };
   }
 }
 

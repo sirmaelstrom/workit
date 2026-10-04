@@ -2,12 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync, appendFileSync, renameSync,
+  linkSync, truncateSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runConduct } from './conduct.mjs';
-import { STEPS, STEP_SEAM, resolveRunDir, readEvents } from './lib/state.mjs';
+import { STEPS, STEP_SEAM, ConductError, resolveRunDir, readEvents, saveState, appendEvent, withStateLock } from './lib/state.mjs';
 import { detectAdapters, laneModel } from './lib/adapters.mjs';
 import { resolveRecipe, recipeArgv } from './lib/recipe.mjs';
 import { shellArgv, spawnDetached, pidAlive } from './lib/exec.mjs';
@@ -30,6 +31,7 @@ const RUN_ID = 'abcd1234';
 const ANCHOR = '93427349';
 const ANCHOR_UUID = '93427349-2540-4d97-8437-db3af451caf2';
 const ANSWERED_AT = '2026-09-27T15:56:42.000Z';
+const WORKFLOWS = 'gh api --paginate repos/sirmaelstrom/workit/actions/workflows --jq .workflows[]';
 
 // Real WP-01 handlers; the build phase (a later WP) is a stub that is done.
 const FAKE_BUILD = { next: () => ({ kind: 'done' }), record: () => {} };
@@ -61,7 +63,7 @@ function fixture(t, deps = {}) {
     [`git -C ${repo} config --get remote.origin.url`]: { code: 0, stdout: 'https://github.com/sirmaelstrom/workit.git\n', stderr: '' },
     'gh auth status --hostname github.com': captured('gh-auth-status.json'),
     'gh repo view sirmaelstrom/workit --json nameWithOwner,defaultBranchRef': captured('gh-repo-view.json'),
-    'gh api repos/sirmaelstrom/workit/actions/workflows': captured('gh-actions-workflows.json'),
+    [WORKFLOWS]: captured('gh-actions-workflows.json'),
     'claude --version': { code: 0, stdout: '2.1.289 (Claude Code)\n', stderr: '' },
     'codex --version': { code: 1, stdout: '', stderr: 'spawnSync codex ENOENT' },
   };
@@ -199,6 +201,7 @@ test('intake refuses <case>: exit 2 and the runs root stays empty', async (t) =>
     ['refusal 7: spine without anchor', (f) => intake(f, ['--adapter', 'spine'])],
     ['refusal 7: empty anchor (C13)', (f) => intake(f, ['--adapter', 'spine', '--anchor', ''])],
     ['refusal 7: anchor shorter than 8 hex (C13)', (f) => intake(f, ['--adapter', 'spine', '--anchor', '9342'])],
+    ['refusal 7: anchor with non-hex after the prefix (D12)', (f) => intake(f, ['--adapter', 'spine', '--anchor', '93427349zzz'])],
     ['recipe missing bump', (f) => {
       const { bump, ...rest } = RECIPE;
       return intake(f, ['--release', recipeFile(f, rest)]);
@@ -404,8 +407,17 @@ test('record refuses unattributed answer', async (t) => {
   const { runDir, readBack } = await toSpineReadBack(f);
   const result = fixtureJson('spine-quest-answered.json');
   result.quests[0].latestReceipt.answer = { by: 'agent:claude', key: 'a' };
-  assert.equal((await record(f, runDir, readBack.id, result)).code, 3);
-  assert.equal(readState(runDir).touches[0].status, 'filed');
+  const refused = await record(f, runDir, readBack.id, result);
+  assert.equal(refused.code, 3);
+  assert.match(out(refused).refused, /agent:claude is not operator-attributed/);
+  const touch = readState(runDir).touches[0];
+  assert.equal(touch.answer, null);
+  assert.equal(readState(runDir).phase, 'preapproval');
+  // D7: the refusal does not block: the next `next` re-files the touch, never /spec.
+  const next = out(await f.run(['next', '--run', runDir])).action;
+  assert.equal(next.tool, 'spine_receipt');
+  assert.ok(next.args.question.startsWith(`[conduct fixture-run touch 1] (run ${RUN_ID}/2) Your previous answer could not be used (the answer by agent:claude is not operator-attributed)`), next.args.question);
+  assert.deepEqual(out(refused).action, next);
 });
 
 test('anchor resolution: spine reads the anchor first; spine off starts at preapproval', async (t) => {
@@ -461,7 +473,7 @@ test('touch 1 budget label (D19.28)', async (t) => {
 
 test('no CI offers hold only (D19.13)', async (t) => {
   const f = fixture(t);
-  f.table['gh api repos/sirmaelstrom/workit/actions/workflows'] = captured('gh-actions-workflows-zero.json');
+  f.table[WORKFLOWS] = captured('gh-actions-workflows-zero.json');
   const { runDir, grant } = await toGrant(f, 'merge them anyway');
   const state = readState(runDir);
   assert.equal(state.intent.ciWorkflows, 0);
@@ -484,7 +496,7 @@ test('structured grant (c) (D19.1)', async (t) => {
   writeFileSync(grant.outPath, JSON.stringify(granted));
   assert.equal((await record(f, runDir, grant.id, {})).code, 0);
   const state = readState(runDir);
-  assert.deepEqual(state.authority, { ...granted, metered: false, notes: text, grant: 'touches/1-grant.json' });
+  assert.deepEqual(state.authority, { ...granted, metered: false, notes: text, grant: 'touches/1-grant.json', record: 'touches/1-authority.json' });
   assert.equal(state.phase, 'spec');
 
   for (const [bad, field] of [[{ ...granted, budgetUsd: 30 }, /budgetUsd/], [{ ...granted, release: true }, /release/]]) {
@@ -530,19 +542,23 @@ test('touch-opened event: one per touch, spine on and off', async (t) => {
 });
 
 test('interim deep mint', async (t) => {
-  // Goal `rc1` gives slug `rc1`, so the run's keys are the real fixture's `rc1-wp-01` … `rc1-wp-06`.
   const f = fixture(t);
   const { runDir, spec } = await toSpineSpec(f, [], 'rc1');
+  // The fixture file is the conductor's verbatim spine_author capture, keyed
+  // `rc1-wp-01` … by the run that minted it. Its keys are rewritten here, in
+  // memory only, to this run's keys before mapping; ids and shape stay real.
   const minted = fixtureJson('spine-author-result.json');
   const wps = minted.quests.map((quest, i) => ({
     id: `WP-0${i + 1}`, name: `wp ${i + 1}`, specPath: `wp-0${i + 1}.md`, tier: 'T2',
     precondition: `pre ${i + 1}`, verification: `verify ${i + 1}`,
   }));
+  const keys = wps.map((wp) => `rc1-${RUN_ID}-${wp.id.toLowerCase()}`);
+  minted.quests.forEach((quest, i) => { quest.key = keys[i]; });
   const mint = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir: readState(runDir).workshopDir, wps })).action;
   assert.equal(mint.tool, 'spine_author');
   assert.deepEqual(mint.args.campaign, { title: fixtureJson('spine-quest-answered.json').quests[0].campaign.title });
-  assert.deepEqual(mint.args.quests.map((quest) => quest.key), minted.quests.map((quest) => quest.key));
-  assert.deepEqual(mint.args.seams.map((seam) => seam.to), minted.quests.map((quest) => quest.key));
+  assert.deepEqual(mint.args.quests.map((quest) => quest.key), keys);
+  assert.deepEqual(mint.args.seams.map((seam) => seam.to), keys);
   assert.ok(mint.args.seams.every((seam) => seam.from === ANCHOR_UUID && seam.type === 'decomposition'));
   // C21: the resume note carries what the consumer reads.
   assert.match(mint.args.quests[0].resumeNote, /^wp-01\.md · precondition: pre 1 · verification: verify 1 · review tier: T2 · runtime exercise: /);
@@ -552,10 +568,16 @@ test('interim deep mint', async (t) => {
   assert.equal(state.phase, 'build');
 });
 
-test('C4: mint keys carry the run slug, so two runs in one campaign never share a key', () => {
+test('C4, D4: mint keys carry the slug and run id: distinct across runs of one goal, stable within a run', async (t) => {
   const wp = { id: 'WP-01' };
-  assert.equal(questKey({ slug: 'goal-one' }, wp), 'goal-one-wp-01');
-  assert.notEqual(questKey({ slug: 'goal-one' }, wp), questKey({ slug: 'goal-two' }, wp));
+  assert.equal(questKey({ slug: 'goal-one', runId: 'abcd1234' }, wp), 'goal-one-abcd1234-wp-01');
+  assert.notEqual(questKey({ slug: 'goal-one', runId: 'abcd1234' }, wp), questKey({ slug: 'goal-two', runId: 'abcd1234' }, wp));
+  assert.notEqual(questKey({ slug: 'same-goal', runId: '11111111' }, wp), questKey({ slug: 'same-goal', runId: '22222222' }, wp));
+  // One run, read twice from disk: the same keys.
+  const f = fixture(t);
+  const { runDir } = out(await intake(f));
+  assert.equal(questKey(readState(runDir), wp), questKey(readState(runDir), wp));
+  assert.equal(questKey(readState(runDir), wp), `fixture-run-${RUN_ID}-wp-01`);
 });
 
 test('C24: a deep spec result listing a WP id twice is refused', async (t) => {
@@ -754,10 +776,37 @@ test('analyze/lane/land missing module: exit 4 naming the module; sub-verb I/O (
   }
   let received;
   const lanes = { runLaneVerb: (...args) => { received = args.slice(0, 2); return { code: 5, out: '{"ok":false}' }; } };
-  const result = await f.run(['lane', 'spawn', '--run', runDir, '--wp', 'WP-01', '--amend', 'brief.md', '--some-flag', 'x'], { importModule: loaderWith({ 'lib/lanes.mjs': lanes }) });
-  assert.deepEqual(received, ['spawn', { runDir, wpId: 'WP-01', flags: { amend: 'brief.md', someFlag: 'x' } }]);
+  const result = await f.run(['lane', 'check', '--run', runDir, '--wp', 'WP-01', '--amend', 'brief.md', '--some-flag', 'x'], { importModule: loaderWith({ 'lib/lanes.mjs': lanes }) });
+  assert.deepEqual(received, ['check', { runDir, wpId: 'WP-01', flags: { amend: 'brief.md', someFlag: 'x' } }]);
   assert.equal(result.code, 5);
   assert.equal(result.stdout, '{"ok":false}');
+});
+
+test('D6: lane spawn, the sub-verb that writes state, runs inside the run lock with the state loaded under it', async (t) => {
+  const f = fixture(t);
+  const runDir = seedRun(f);
+  let seen;
+  const lanes = {
+    runLaneVerb: (sub, args, deps) => {
+      seen = { sub, lockHeld: existsSync(join(runDir, 'state.lock')), slug: args.state?.slug, flags: args.flags };
+      args.state.wps.push({ id: 'WP-01', lane: { pid: 4242 } });
+      saveState(args.state, deps);
+      return { code: 0, out: '{"ok":true}' };
+    },
+  };
+  const result = await f.run(['lane', 'spawn', '--run', runDir, '--wp', 'WP-01', '--amend', 'brief.md'], { importModule: loaderWith({ 'lib/lanes.mjs': lanes }) });
+  assert.equal(result.code, 0, result.stdout);
+  assert.deepEqual(seen, { sub: 'spawn', lockHeld: true, slug: 'seeded', flags: { amend: 'brief.md' } });
+  assert.equal(readState(runDir).wps[0].lane.pid, 4242);
+  assert.equal(existsSync(join(runDir, 'state.lock')), false);
+});
+
+test('D10: analyze hands its module the deps readEvents needs', async (t) => {
+  const f = fixture(t);
+  const { runDir } = out(await intake(f));
+  const analysis = { analyzeRun: (dir, deps) => ({ ok: true, events: readEvents(dir, deps).map((line) => line.event) }) };
+  const result = out(await f.run(['analyze', '--run', runDir], { importModule: loaderWith({ 'lib/analyze.mjs': analysis }) }));
+  assert.deepEqual(result.events, ['intake', 'touch-opened', 'emitted']);
 });
 
 test('missing phase handler: exit 4 naming the phase', async (t) => {
@@ -817,7 +866,7 @@ test('C5: an answer racing a record is serialized by the state lock, never lost;
   assert.equal((await f.run(answerArgv, { stdinIsTTY: true })).code, 0);
   assert.equal(readState(runDir).touches[0].status, 'answered');
 
-  writeFileSync(join(runDir, 'state.lock'), JSON.stringify({ pid: 999999, at: '2026-10-04T18:00:00.000Z' }));
+  writeFileSync(join(runDir, 'state.lock'), JSON.stringify({ pid: 999999, host: hostname(), at: '2026-10-04T18:00:00.000Z', token: 'dead' }));
   const takenOver = await f.run(['next', '--run', runDir], { importModule: loaderWith({ 'lib/phases/build.mjs': shellHandler({}) }), pidAlive: () => false });
   assert.equal(takenOver.code, 0, takenOver.stdout);
   assert.equal(existsSync(join(runDir, 'state.lock')), false);
@@ -862,8 +911,8 @@ test('C10: a (c) grant reaches /spec through the --preapproved ref, narrowed sco
   const { runDir, grant } = await toGrant(f, 'only the hello subcommand');
   writeFileSync(grant.outPath, JSON.stringify({ merge: true, release: false, budgetUsd: 10, scope: 'only the hello subcommand' }));
   const spec = out(await record(f, runDir, grant.id, {})).action;
-  assert.deepEqual(spec.skillArgv, [GOAL, '--workshop', readState(runDir).workshopDir, '--preapproved', `core:${runDir}/touches/1-grant.json`]);
-  const target = JSON.parse(readFileSync(join(runDir, 'touches', '1-grant.json'), 'utf8'));
+  assert.deepEqual(spec.skillArgv, [GOAL, '--workshop', readState(runDir).workshopDir, '--preapproved', `core:${runDir}/touches/1-authority.json`]);
+  const target = JSON.parse(readFileSync(join(runDir, 'touches', '1-authority.json'), 'utf8'));
   assert.equal(target.scope, 'only the hello subcommand');
   assert.equal(target.validated, true);
   assert.equal(target.answer.key, 'c');
@@ -886,7 +935,7 @@ test('C11: an operator answer with no usable key re-files the touch; a typed ans
 
 test('C12: only workflows that can gate a PR count as CI', async (t) => {
   const f = fixture(t);
-  f.table['gh api repos/sirmaelstrom/workit/actions/workflows'] = captured('gh-actions-workflows-dependabot-only.json');
+  f.table[WORKFLOWS] = captured('gh-actions-workflows-dependabot-only.json');
   const first = out(await intake(f));
   assert.equal(readState(first.runDir).intent.ciWorkflows, 0);
   assert.deepEqual(first.action.touch.options.map((option) => option.key), ['b', 'c', 'd']);
@@ -985,6 +1034,149 @@ test('C24: --text keeps a value that starts with --; --agent names the missing a
   assert.match(out(refused).error, /refusal 5: --agent codex is not available: spawnSync codex ENOENT/);
 });
 
+// ---- Amendment 2: council round 2 findings (ids D1–D12) ----
+
+function lockDeps(dir, more = {}) {
+  return {
+    write: (path, value) => writeFileSync(path, value), read: (path) => readFileSync(path, 'utf8'), exists: existsSync,
+    link: linkSync, remove: (path) => rmSync(path, { force: true }), pidAlive, pid: process.pid, hostname: hostname(),
+    now: () => Date.now(), timestamp: () => new Date().toISOString(), sleep: async () => {}, lockWaitMs: 0, ...more,
+  };
+}
+function tempDir(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-a2-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+test('D1: an unreadable lock is contention, never stale; the lock is linked whole', async (t) => {
+  const dir = tempDir(t);
+  writeFileSync(join(dir, 'state.lock'), '');
+  await assert.rejects(withStateLock(dir, lockDeps(dir), async () => 'ran'), /unreadable/);
+  assert.equal(readFileSync(join(dir, 'state.lock'), 'utf8'), '');
+  rmSync(join(dir, 'state.lock'));
+  let atLink;
+  const deps = lockDeps(dir, { link: (from, to) => { atLink = JSON.parse(readFileSync(from, 'utf8')); linkSync(from, to); } });
+  assert.equal(await withStateLock(dir, deps, async () => JSON.parse(readFileSync(join(dir, 'state.lock'), 'utf8')).token), atLink.token);
+  assert.deepEqual(readdirSync(dir), []);
+});
+
+test('D1: age never evicts a live holder on this host; a holder on another host ages out', async (t) => {
+  const dir = tempDir(t);
+  const live = { pid: process.pid, host: hostname(), at: '2020-01-01T00:00:00.000Z', token: 'live' };
+  writeFileSync(join(dir, 'state.lock'), JSON.stringify(live));
+  await assert.rejects(withStateLock(dir, lockDeps(dir), async () => 'ran'), /locked by pid/);
+  assert.equal(JSON.parse(readFileSync(join(dir, 'state.lock'), 'utf8')).token, 'live');
+  writeFileSync(join(dir, 'state.lock'), JSON.stringify({ ...live, host: 'elsewhere' }));
+  assert.equal(await withStateLock(dir, lockDeps(dir), async () => 'ran'), 'ran');
+});
+
+test('D1: release never removes a successor\'s lock', async (t) => {
+  const dir = tempDir(t);
+  const successor = JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), token: 'successor' });
+  await withStateLock(dir, lockDeps(dir), async () => { writeFileSync(join(dir, 'state.lock'), successor); });
+  assert.equal(readFileSync(join(dir, 'state.lock'), 'utf8'), successor);
+});
+
+test('D12: a writer polls a held lock and takes it once the holder releases', async (t) => {
+  const dir = tempDir(t);
+  writeFileSync(join(dir, 'state.lock'), JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), token: 'held' }));
+  let polls = 0;
+  const deps = lockDeps(dir, { lockWaitMs: 1000, sleep: async () => { polls += 1; rmSync(join(dir, 'state.lock')); } });
+  assert.equal(await withStateLock(dir, deps, async () => 'ran'), 'ran');
+  assert.equal(polls, 1);
+});
+
+test('D2: a failed save\'s event stays invisible after an event-free retry of its rev; history stays visible; no temp is left', (t) => {
+  const dir = tempDir(t);
+  const deps = { ...lockDeps(dir), append: (path, value) => appendFileSync(path, value), rename: renameSync, truncate: truncateSync };
+  const load = () => JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
+  const first = { runDir: dir, phase: 'build', seq: 0, rev: 0, txns: [] };
+  appendEvent(first, deps, { event: 'kept' });
+  saveState(first, deps);
+  const failing = load();
+  appendEvent(failing, deps, { event: 'orphan' });
+  assert.throws(() => saveState(failing, { ...deps, rename: () => { throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); } }), /EPERM/);
+  assert.deepEqual(readdirSync(dir).filter((name) => name.endsWith('.tmp')), []);
+  saveState(load(), deps); // the retry of rev 2 carries no events
+  const later = load();
+  appendEvent(later, deps, { event: 'later' });
+  saveState(later, deps);
+  assert.deepEqual(rawEvents(dir).map((line) => line.event), ['kept', 'orphan', 'later']);
+  assert.deepEqual(readEvents(dir, fsDeps, load()).map((line) => line.event), ['kept', 'later']);
+});
+
+test('D5: a torn trailing event line is dropped and cut before the next append; corruption elsewhere exits 2', (t) => {
+  const dir = tempDir(t);
+  const deps = { ...lockDeps(dir), append: (path, value) => appendFileSync(path, value), rename: renameSync, truncate: truncateSync };
+  const load = () => JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'));
+  const state = { runDir: dir, phase: 'build', seq: 0, rev: 0, txns: [] };
+  appendEvent(state, deps, { event: 'one' });
+  saveState(state, deps);
+  appendFileSync(join(dir, 'events.jsonl'), '{"ts":"2026-10-04T19:00:00.000Z","ev');
+  assert.deepEqual(readEvents(dir, fsDeps, load()).map((line) => line.event), ['one']);
+  const next = load();
+  appendEvent(next, deps, { event: 'two' });
+  saveState(next, deps);
+  assert.deepEqual(readEvents(dir, fsDeps, load()).map((line) => line.event), ['one', 'two']);
+  writeFileSync(join(dir, 'events.jsonl'), `not json\n${readFileSync(join(dir, 'events.jsonl'), 'utf8')}`);
+  assert.throws(() => readEvents(dir, fsDeps, load()), (error) => error.code === 2 && /line 1 is not valid JSON/.test(error.message));
+});
+
+test('D3: a grant record whose save failed is retried from the authored grant, which stays as written', async (t) => {
+  const f = fixture(t);
+  const { runDir, grant } = await toGrant(f, 'cap it at $10');
+  const authored = JSON.stringify({ merge: true, release: false, budgetUsd: 10, scope: GOAL });
+  writeFileSync(grant.outPath, authored);
+  let failures = 1;
+  const rename = (from, to) => {
+    if (failures-- > 0) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+    return renameSync(from, to);
+  };
+  await assert.rejects(record(f, runDir, grant.id, {}, { rename }), /EPERM/);
+  assert.equal(readFileSync(grant.outPath, 'utf8'), authored);
+  const retried = await record(f, runDir, grant.id, {});
+  assert.equal(retried.code, 0, retried.stdout);
+  assert.equal(readFileSync(grant.outPath, 'utf8'), authored);
+  assert.equal(readState(runDir).authority.record, 'touches/1-authority.json');
+});
+
+test('D8: a post-record failure keeps its details and its cause', async (t) => {
+  const f = fixture(t);
+  const { runDir, spec } = await toCoreSpec(f);
+  const result = { depth: 'none', workshopDir: readState(runDir).workshopDir, gateCommand: 'node --test' };
+  const detailed = Object.assign(new ConductError(2, 'handler says no'), { details: { hint: 'look here' } });
+  const g = await record(f, runDir, spec.id, result, { importModule: loaderWith({ 'lib/phases/build.mjs': { next: () => { throw detailed; }, record: () => {} } }) });
+  assert.deepEqual([out(g).hint, out(g).recorded], ['look here', spec.id]);
+  const h = await record(f, runDir, spec.id, result, { importModule: loaderWith({ 'lib/phases/build.mjs': { next: () => { throw new TypeError('boom'); }, record: () => {} } }) });
+  assert.equal(h.code, 1);
+  assert.match(h.stderr, /TypeError: boom\n\s+at /);
+});
+
+test('D9: next, record and answer on a missing run dir exit 2, structured', async (t) => {
+  const f = fixture(t);
+  const missing = join(f.dir, 'no-such-run');
+  for (const argv of [['next', '--run', missing], ['record', '--run', missing, '--action', '1-x', '--result', '{}'], ['answer', '--run', missing, '--touch', '1', '--key', 'a']]) {
+    const result = await f.run(argv, { stdinIsTTY: true });
+    assert.equal(result.code, 2, argv[0]);
+    assert.match(out(result).error, /no run directory at/);
+  }
+});
+
+test('D11: workflow discovery reads every page', async (t) => {
+  const f = fixture(t);
+  const [, dependabot] = captured('gh-actions-workflows.json').stdout.split('\n');
+  const ci = captured('gh-actions-workflows.json').stdout.split('\n')[0];
+  const pageOne = `${Array(100).fill(dependabot).join('\n')}\n`;
+  f.table[WORKFLOWS] = { code: 0, stdout: `${pageOne}${ci}\n`, stderr: '' };
+  f.table[WORKFLOWS.replace(' --paginate', '')] = { code: 0, stdout: pageOne, stderr: '' };
+  assert.equal(readState(out(await intake(f)).runDir).intent.ciWorkflows, 1);
+});
+
+test('D12: samePath takes a bare Git Bash drive', () => {
+  assert.equal(samePath('/d', 'D:\\', 'win32'), true);
+});
+
 const PRIVATE_PATHS = [/[A-Za-z]:[\\/]+(Users|Development)\b/i, /[\\/]Users[\\/][^\\/\s"]+[\\/]/];
 // C9: host names and LAN URLs. A dotless host is a LAN name; private IPv4
 // ranges, `localhost:` and `.local` names are LAN addresses.
@@ -992,7 +1184,7 @@ const HOST_SHAPES = [
   /:\/\/[a-z0-9-]+(?=[:/\s"]|$)/i,
   /:\/\/(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/,
   /\blocalhost:\d/i,
-  /:\/\/[a-z0-9.-]+\.local\b/i,
+  /:\/\/[a-z0-9.-]+\.(local|lan|internal|home\.arpa)\b/i,
 ];
 const privatePathHits = (text) => [...PRIVATE_PATHS, ...HOST_SHAPES].filter((pattern) => pattern.test(text)).map(String);
 
@@ -1011,6 +1203,9 @@ test('fixture paths: no private-path, host-name or LAN-URL shapes under __fixtur
     ['http:', '', ['192', '168', '1', '5'].join('.')].join('/'),
     ['localhost', '8080'].join(':'),
     ['http:', '', ['printer', 'local'].join('.')].join('/'),
+    ['http:', '', ['nas', 'lan'].join('.')].join('/'),
+    ['https:', '', ['build', 'internal'].join('.')].join('/'),
+    ['http:', '', ['router', 'home', 'arpa'].join('.')].join('/'),
   ];
   for (const [i, insert] of inserts.entries()) {
     const copy = join(dir, `copy-${i}.json`);
