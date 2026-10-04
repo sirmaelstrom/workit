@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv,
+  chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
 } from './lanes.mjs';
 import { dispatchable } from './schedule.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
@@ -341,6 +341,19 @@ test('PID ownership (C2-1): a reused pid is never killed; the lane reads as exit
   assert.equal((await runLaneVerb('spawn', { runDir: s.runDir, wpId: 'WP-00', flags: {}, state: s.saved() }, s.deps)).code, 0);
   assert.equal(s.saved().wps[0].lane.identity, IDENTITY);
   assert.ok(s.calls.includes(identityArgv(4242, 'linux').join(' ')));
+});
+
+test('guarded kill (C2-1): the win32 script\'s string literals are closed, an identity\'s quote doubled', () => {
+  for (const identity of [IDENTITY, "2026-10-04T18:00:00Z o'brien.exe"]) {
+    const [program, ...args] = guardedKillArgv(4242, identity, 'win32');
+    const script = args.at(-1);
+    assert.equal(program, 'powershell');
+    // Doubled quotes are escapes; what remains must pair up.
+    assert.equal(script.replace(/''/g, '').split("'").length % 2, 1, script);
+    assert.ok(script.includes(`'${identity.replace(/'/g, "''")}'`), script);
+  }
+  const posix = guardedKillArgv(4242, IDENTITY, 'linux');
+  assert.deepEqual(posix.slice(-2), ['4242', IDENTITY], 'identity passed as an argument, never spliced into the script');
 });
 
 test('cleanup survives an unconfirmed stop (C2-3): alive, alive, gone releases; alive x3 blocks as cleanup-unresolved, stop still queued', (t) => {

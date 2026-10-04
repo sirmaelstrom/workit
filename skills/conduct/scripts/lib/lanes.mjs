@@ -127,10 +127,12 @@ export function readIdentity(pid, deps) {
 // is that process's gap between its identity query and the kill (one
 // executor round trip, under a second here). ASSUMPTION off win32: the agent
 // leads its own process group (spawnDetached's detached: true).
-function guardedKillArgv(pid, identity, platform) {
-  const refuse = `pid ${pid} is not the lane's agent: not killed`;
+export function guardedKillArgv(pid, identity, platform) {
+  const refuse = `pid ${pid} is not the lane agent: not killed`;
   if (platform === 'win32') {
-    return PS(`${psIdentity(pid)}; if ($id -and $id -eq '${identity.replace(/'/g, "''")}') { taskkill /PID ${Number(pid)} /T /F; exit $LASTEXITCODE } else { Write-Output '${refuse}'; exit 3 }`);
+    // Every literal is single-quoted with its quotes doubled: PowerShell's rule.
+    const quote = (text) => `'${String(text).replace(/'/g, "''")}'`;
+    return PS(`${psIdentity(pid)}; if ($id -and $id -eq ${quote(identity)}) { taskkill /PID ${Number(pid)} /T /F; exit $LASTEXITCODE } else { Write-Output ${quote(refuse)}; exit 3 }`);
   }
   return ['sh', '-c', `${SH_IDENTITY}; if [ -n "$id" ] && [ "$id" = "$2" ]; then kill -TERM -- "-$1"; else echo "${refuse}"; exit 3; fi`, 'sh', String(pid), identity];
 }
