@@ -58,7 +58,7 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            default already matches idle|done|blocked). A codex lane's idle/done
            must hold on a second poll 3 s later. A turn that ended on codex's
            "Selected model is at capacity" banner exits 8 (retryable). A Claude
-           lane whose status bar still shows background work (`· 1 shell ·`) is
+           lane whose status bar still shows background work ("· 1 shell ·") is
            not settled: at the deadline it exits 4 as settled-background-live.
            stdout is the verdict alone; the row counts pollCount and pollTimeouts.
   check    <name> --expect-commit | --expect-file <path>[:needle] | --expect-pr <n>
