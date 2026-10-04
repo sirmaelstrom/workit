@@ -13,7 +13,8 @@
 // Fields this phase adds (optional; every reader tolerates their absence):
 // state.build { contract, halts, spendOkFor }; authority.budgetSource; wps[]
 // stage, amendment, checkAmends, gateAmends, owed, asks, replyIds, rulingSeq,
-// deferredBy, changedPaths, gateCmd, noCi, cleanup, lane.uncertain; touches[]
+// deferredBy, changedPaths, gateCmd, noCi, cleanup, lane.uncertain,
+// lane.livenessHeld; halts[] kinds budget | meter | merged; touches[]
 // build (why the build opened it), applied, announced, waitLeftMs, guard,
 // spendUsd; a queued wait's remainingMs; an emitted action's wpId and, on a
 // yielding wait, `yield: true`; a spend action's budgetFor.
@@ -272,16 +273,30 @@ function haltTouch(state, deps, reason, why, spendUsd = null) {
   const budget = why === 'budget';
   const touch = buildTouch(state, deps, why, {
     question: budget
-      ? `DO: decide whether conduct ${state.slug} spends more. ${reason}. EXPECT: (a) answered with the text "budget <USD>" above the current spend raises the ceiling to it, and metering continues; (b) no new lane or amendment prompt starts, the live work stops, and the build ends.`
+      ? `DO: decide whether conduct ${state.slug} spends more. ${reason}. EXPECT: (a) answered with the text "budget <USD>" above the current spend raises the ceiling to it, and metering continues; (b) no new paid lane work (no dispatch, lane start, prompt or fallback); work already at a PR boundary may still be reviewed and landed, and the build ends.`
       : `DO: decide whether conduct ${state.slug} dispatches more lanes. ${reason}. EXPECT: (a) this halt is cleared; dispatch resumes once no other halt is open; (b) no new lane starts, the live ones finish, and the build ends.`,
     options: budget
-      ? [option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; metering continues against it.'), option('b', 'End the build', 'Nothing new is prompted; the build ends.')]
+      ? [option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; metering continues against it.'), option('b', 'Stop new paid lane work', 'No dispatch, start, prompt or fallback; PRs already up may still land.')]
       : [option('a', 'Resume dispatch', 'This halt is cleared.'), option('b', 'End the build', 'Live lanes finish; nothing new is dispatched.')],
     allowFreeText: budget,
   });
   touch.spendUsd = spendUsd;
   halts.push({ kind: why, reason, touch: touch.n });
   syncHalt(state, deps);
+}
+
+// An unreadable or unset meter is its own halt reason: only a successful
+// spend read clears it, re-tried every READ_BACK_WAIT_MS (no budget answer does).
+function meterHalt(state, deps, reason) {
+  const halts = (state.build.halts ??= []);
+  const meter = halts.find((halt) => halt.kind === 'meter');
+  if (meter) {
+    Object.assign(meter, { reason, waitLeftMs: READ_BACK_WAIT_MS });
+    return syncHalt(state, deps);
+  }
+  halts.push({ kind: 'meter', reason, waitLeftMs: READ_BACK_WAIT_MS });
+  haltTouch(state, deps, reason, 'budget');
+  return syncHalt(state, deps);
 }
 
 function escalate(state, wp, deps, { why, asks = null, row = null }) {
@@ -315,7 +330,8 @@ function answerRunTouch(state, touch, deps) {
     return;
   }
   if (touch.build === 'budget') {
-    const usd = Number(/\bbudget\s+\$?(\d+(?:\.\d+)?)\b/i.exec(text ?? '')?.[1]);
+    // `budget <USD>`: digits with optional thousands commas, `$` and decimals ("budget $1,500" → 1500).
+    const usd = Number(/\bbudget\s+\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)(?![\w.,])/i.exec(text ?? '')?.[1]?.replaceAll(',', ''));
     if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, `(a) needs the text "budget <USD>" above the current spend of $${touch.spendUsd ?? 'unknown'}`, deps);
     state.authority.budgetUsd = usd;
     state.authority.budgetSource = { touch: touch.n, by: touch.answer.by, answeredAt: touch.answer.answeredAt, text };
@@ -330,11 +346,22 @@ function answerGuard(state, wp, touch, deps) {
   const verdict = GUARD_VERDICTS['abc'.indexOf(touch.answer.key)];
   const row = touch.guard;
   wp.rulings = [...(wp.rulings ?? []), { n: null, file: touch.file, ruled: verdict, escalate: false, touch: touch.n }];
-  wp.replyIds = [...(wp.replyIds ?? []), row.comment];
   setState(state, wp, 'review', `operator ruled ${verdict} on comment ${row.comment} (touch ${touch.n})`, deps);
-  wp.queue = [...wp.queue, ...guardReply(state, wp, row, verdict), ...(wp.owed?.queue ?? [])];
+  wp.queue = [...wp.queue, ...conductorVerdict(state, wp, row, verdict, deps), ...(wp.owed?.queue ?? [])];
   if (wp.owed) wp.owed.queue = [];
   wp.stage = 'resolve';
+}
+
+// The conductor's verdict on a guard row: a PR comment gets the conductor
+// reply (then its resolve); a council finding has no PR comment, so the
+// verdict is recorded as an `adjudicated` event and nothing is posted.
+function conductorVerdict(state, wp, row, verdict, deps) {
+  if (/^C\d+-\d+$/.test(row.comment)) {
+    appendEvent(state, deps, { step: 'adjudicate', event: 'adjudicated', data: { wpId: wp.id, rows: [{ comment: row.comment, verdict, adjudicator: 'conductor' }] } });
+    return [];
+  }
+  wp.replyIds = [...(wp.replyIds ?? []), row.comment];
+  return guardReply(state, wp, row, verdict);
 }
 
 // An answered build touch acts once: a WP touch amends its lane (a guard
@@ -350,6 +377,14 @@ function applyAnswers(state, deps) {
       continue;
     }
     const wp = state.wps.find((candidate) => candidate.id === touch.wpId);
+    // An unverifiable lane is released only on the operator's word; the WP keeps its state.
+    if (wp && touch.build === 'liveness') {
+      if (key === 'a') {
+        Object.assign(wp.lane, { exitedAt: deps.timestamp(), livenessHeld: false, uncertain: 0 });
+        wp.queue = wp.queue.filter((action) => action.step !== 'stop');
+      }
+      continue;
+    }
     if (!wp || wp.state !== 'blocked' || (touch.build === 'dialog' && key === 'b')) continue;
     if (touch.build === 'guard') answerGuard(state, wp, touch, deps);
     else startAmendment(state, wp, deps, { kind: 'answer', reason: `operator answer ${key} to touch ${touch.n}`, tag: touch.tag, key, text, answer: touch.answer });
@@ -376,8 +411,9 @@ function checkFailed(state, wp, deps, reason) {
   startAmendment(state, wp, deps, { retry: true, kind: 'check', reason });
 }
 
-// At most GATE_AMENDS gate-driven amendments per WP; the next blocks with the
-// last gate cause as its reason.
+// At most GATE_AMENDS gate-driven amendments per WP (gate command, land gate
+// and rebase-conflict amendments alike); the next blocks with the last gate
+// cause as its reason.
 function gateAmend(state, wp, deps, reason) {
   if ((wp.gateAmends ?? 0) >= GATE_AMENDS) return block(state, wp, deps, `${reason} (after ${GATE_AMENDS} gate amendments)`);
   wp.gateAmends = (wp.gateAmends ?? 0) + 1;
@@ -436,14 +472,17 @@ function findingsAmendment(state, wp, deps) {
 
 // Every finding the review raised has a row: a council id each, or as many
 // PR-comment rows as findings posted.
+// Ids are normalized (`#`, case, whitespace) and must be unique; distinct ids
+// are counted against the findings, and known council ids must all appear.
 function unreconciled(owed, rows) {
-  const ids = rows.map((row) => String(row.comment).replace(/^#/, ''));
+  const ids = rows.map((row) => String(row.comment).trim().replace(/^#/, '').toUpperCase());
+  const twice = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+  if (twice.length) return `the ## Amendment table lists ${twice.join(', ')} more than once`;
   if (owed?.ids) {
-    const missing = owed.ids.filter((id) => !ids.includes(id));
-    return missing.length ? `the ## Amendment table has no row for ${missing.join(', ')}` : null;
+    const missing = owed.ids.filter((id) => !ids.includes(id.toUpperCase()));
+    if (missing.length) return `the ## Amendment table has no row for ${missing.join(', ')}`;
   }
-  const posted = ids.filter((id) => /^\d+$/.test(id)).length;
-  return Number.isInteger(owed?.findings) && posted < owed.findings ? `the ## Amendment table has ${posted} PR-comment row(s) for ${owed.findings} posted finding(s)` : null;
+  return Number.isInteger(owed?.findings) && ids.length < owed.findings ? `the ## Amendment table has ${ids.length} distinct id(s) for ${owed.findings} finding(s)` : null;
 }
 
 // The amended report's table feeds recordAdjudication (step adjudicate): its
@@ -582,26 +621,29 @@ function deferrals(state, deps) {
   }
 }
 
-// Before each dispatch and each lane prompt that costs money (`purpose` is
-// 'dispatch' or the WP id): the metered spend, or the lane-only lower bound
-// (D16, D19.28). Returns null (go), a spend action, 'halted' or 'ended'.
-const paid = (action) => action.kind === 'shell' && ['prompt', 'fallback'].includes(action.step);
+// Before each dispatch and each paid lane action (`purpose` is 'dispatch' or
+// the WP id): a start (exec `lane spawn` carries the first prompt), a prompt
+// or a fallback. The metered spend, or the lane-only lower bound (D16,
+// D19.28). Returns null (go), a spend action, 'halted' or 'ended'.
+const paid = (action) => action.kind === 'shell' && ['start', 'prompt', 'fallback'].includes(action.step);
+const budgetEnded = (state) => (state.build.halts ?? []).some((entry) => entry.kind === 'budget' && entry.ended);
+const spendAction = (state, deps, purpose) => shell('spend', 'spend', shellArgv(`${deps.env.WORKIT_SPEND_CMD} ${state.createdAt}`, deps.platform),
+  { budgetFor: purpose, instruction: 'Run this exact argv; it prints the run\'s spend in USD. Record its { code, stdout, stderr }.' });
 
 function budgetGate(state, deps, purpose) {
-  const halt = (state.build.halts ?? []).find((entry) => entry.kind === 'budget');
-  if (halt) return halt.ended ? 'ended' : 'halted';
+  if (budgetEnded(state)) return 'ended';
+  if ((state.build.halts ?? []).some((entry) => entry.kind === 'budget' || entry.kind === 'meter')) return 'halted';
   const budget = state.authority?.budgetUsd ?? 0;
   if (state.adapters?.spend?.on) {
     if (!deps.env?.WORKIT_SPEND_CMD) {
-      haltTouch(state, deps, 'The spend adapter is on, but WORKIT_SPEND_CMD is not set, so spend is unknown (metered by the spend adapter)', 'budget');
+      meterHalt(state, deps, 'The spend adapter is on, but WORKIT_SPEND_CMD is not set, so spend is unknown (metered by the spend adapter)');
       return 'halted';
     }
     if (state.build.spendOkFor === purpose) {
       state.build.spendOkFor = null;
       return null;
     }
-    return shell('spend', 'spend', shellArgv(`${deps.env.WORKIT_SPEND_CMD} ${state.createdAt}`, deps.platform),
-      { budgetFor: purpose, instruction: 'Run this exact argv; it prints the run\'s spend in USD. Record its { code, stdout, stderr }.' });
+    return spendAction(state, deps, purpose);
   }
   const sum = state.wps.reduce((total, wp) => total + (Number(wp.lane?.costUsd) || 0), 0);
   if (sum < budget) return null;
@@ -624,11 +666,11 @@ function dispatch(state, wp, deps) {
 function workAction(state, deps) {
   for (const wp of byDispatch(state)) {
     fill(state, wp, deps);
-    if (!wp.queue.length || wp.queue[0].kind === 'wait') continue;
+    if (!wp.queue.length || wp.queue[0].kind === 'wait' || wp.lane?.livenessHeld) continue;
     if (paid(wp.queue[0])) {
       const gate = budgetGate(state, deps, wp.id);
       if (gate === 'ended') {
-        block(state, wp, deps, 'the budget was reached and the operator ended the build');
+        block(state, wp, deps, 'the budget was reached and the operator stopped new paid lane work');
         continue;
       }
       if (gate === 'halted') continue;
@@ -641,6 +683,12 @@ function workAction(state, deps) {
       const spec = touchAction(state, touch);
       if (spec && spec.kind !== 'wait') return spec;
     }
+  }
+  // A meter halt re-reads the spend when its wait is over.
+  const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
+  if (meter && meter.waitLeftMs <= 0 && !budgetEnded(state)) {
+    meter.waitLeftMs = READ_BACK_WAIT_MS;
+    if (deps.env?.WORKIT_SPEND_CMD) return spendAction(state, deps, 'meter');
   }
   if (state.dispatchHalt || !dispatchable(state, { now: deps.now() }).length) return null;
   const gate = budgetGate(state, deps, 'dispatch');
@@ -666,6 +714,8 @@ function yielders(state, deps) {
       out.push({ ms: touch.waitLeftMs ?? READ_BACK_WAIT_MS, touch, step: 'touch', note });
     }
   }
+  const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
+  if (meter && !budgetEnded(state)) out.push({ ms: meter.waitLeftMs, meter, step: 'spend', note: `the spend meter is re-read: ${meter.reason}` });
   return out;
 }
 
@@ -675,13 +725,26 @@ function release(y) {
     y.touch.waitLeftMs = null;
     y.touch.waiting = false;
   }
+  if (y.meter) y.meter.waitLeftMs = 0;
 }
 
+// A core touch is announced before any other work, once per opening.
+function announce(state) {
+  const unseen = spineOn(state) ? null : openBuildTouches(state).find((touch) => touch.status === 'open' && !touch.announced);
+  if (!unseen) return null;
+  unseen.announced = true;
+  return { kind: 'wait', step: 'touch', part: 'announce', yield: true, waitMs: 0,
+    instruction: `Stop and show the operator ${join(state.runDir, unseen.file)}: ${unseen.tag} is open${unseen.refusal ? ` again (${unseen.refusal})` : ''}. They answer from their own terminal: ${answerCommand(state, unseen)}. Then record {}.` };
+}
+
+// The build ends when nothing is live, queued, occupying a lane, waiting on a
+// WP's touch or on a meter re-read (unless budget (b) stopped paid work).
 function settled(state, deps) {
   const now = deps.now();
   const busy = state.wps.some((wp) => LIVE_STATES.includes(wp.state) || laneOccupied(wp) || wp.queue?.length
     || (wp.state === 'pending' && wp.notBefore && Date.parse(wp.notBefore) > now));
-  return !busy && !openBuildTouches(state).some((touch) => touch.wpId) && !dispatchable(state, { now }).length;
+  const metering = (state.build.halts ?? []).some((entry) => entry.kind === 'meter') && !budgetEnded(state);
+  return !busy && !metering && !openBuildTouches(state).some((touch) => touch.wpId) && !dispatchable(state, { now }).length;
 }
 
 export function next(state, deps) {
@@ -689,15 +752,14 @@ export function next(state, deps) {
   if (!state.build.contract) return contractAction(state, deps);
   applyAnswers(state, deps);
   deferrals(state, deps);
-  // A core touch is announced before any other work, once per opening.
-  const unseen = spineOn(state) ? null : openBuildTouches(state).find((touch) => touch.status === 'open' && !touch.announced);
-  if (unseen) {
-    unseen.announced = true;
-    return { kind: 'wait', step: 'touch', part: 'announce', yield: true, waitMs: 0,
-      instruction: `Stop and show the operator ${join(state.runDir, unseen.file)}: ${unseen.tag} is open${unseen.refusal ? ` again (${unseen.refusal})` : ''}. They answer from their own terminal: ${answerCommand(state, unseen)}. Then record {}.` };
-  }
+  const first = announce(state);
+  if (first) return first;
   for (let pass = 0; pass < 8; pass += 1) {
     const action = workAction(state, deps);
+    // Scheduling can open a touch (the budget): its announce goes first, and
+    // the prepared action is derived again from the queue at the next `next`.
+    const opened = announce(state);
+    if (opened) return opened;
     if (action) return action;
     // A run touch (no wpId) still open stays open into the showcase (D16).
     if (settled(state, deps)) break;
@@ -739,6 +801,8 @@ function recordYield(state, action) {
     if (left > 0) touch.waitLeftMs = left;
     else release({ touch });
   }
+  const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
+  if (meter) meter.waitLeftMs = Math.max(0, meter.waitLeftMs - action.waitMs);
 }
 
 // Only a non-empty, finite, non-negative number is a spend; anything else
@@ -747,9 +811,12 @@ function recordSpend(state, action, result, deps) {
   const text = String(result.stdout ?? '').trim();
   const usd = result.code === 0 && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text) ? Number(text) : NaN;
   const budget = state.authority?.budgetUsd ?? 0;
-  if (!Number.isFinite(usd)) return haltTouch(state, deps, `The spend command's output is unreadable (exit ${result.code}: ${JSON.stringify(text.slice(0, 80))}${result.stderr ? `, ${lines(result.stderr)[0]}` : ''}), so spend is unknown (metered by the spend adapter)`, 'budget');
+  if (!Number.isFinite(usd)) return meterHalt(state, deps, `The spend command's output is unreadable (exit ${result.code}: ${JSON.stringify(text.slice(0, 80))}${result.stderr ? `, ${lines(result.stderr)[0]}` : ''}), so spend is unknown (metered by the spend adapter)`);
+  // Only a successful read clears the meter halt.
+  state.build.halts = (state.build.halts ?? []).filter((entry) => entry.kind !== 'meter');
+  syncHalt(state, deps);
   if (usd >= budget) return haltTouch(state, deps, `Spend is $${usd} against the $${budget} budget (metered by the spend adapter)`, 'budget', usd);
-  state.build.spendOkFor = action.budgetFor ?? 'dispatch';
+  state.build.spendOkFor = action.budgetFor === 'meter' ? 'dispatch' : action.budgetFor ?? 'dispatch';
   return undefined;
 }
 
@@ -769,8 +836,7 @@ function recordRuling(state, wp, action, deps) {
   wp.rulings = [...(wp.rulings ?? []), { n, file, ruled: value.ruled, escalate: false }];
   wp.queue.shift();
   if (row) {
-    wp.replyIds = [...(wp.replyIds ?? []), row.comment];
-    wp.queue = [...guardReply(state, wp, row, value.ruled), ...wp.queue];
+    wp.queue = [...conductorVerdict(state, wp, row, value.ruled, deps), ...wp.queue];
     return undefined;
   }
   return startAmendment(state, wp, deps, { kind: 'ruling', reason: `ruling ${file}: (${value.ruled})`, ruled: value.ruled, evidence: value.evidence });
@@ -838,9 +904,15 @@ function recordOwn(state, wp, action, result, deps) {
 // A spine acknowledgement must answer what was asked: no error, the same
 // quest, the same outcome/state when it carries one, and a receipt uuid.
 function spineAckFailure(action, result) {
-  if (!result || typeof result !== 'object' || Array.isArray(result) || result.error || result.isError) return `failed: ${JSON.stringify(result?.error ?? result).slice(0, 200)}`;
-  const asked = String(action.args.questId);
-  if (result.questId !== undefined && !(String(result.questId).startsWith(asked) || asked.startsWith(String(result.questId)))) return `answered for quest ${result.questId}, not ${asked}`;
+  if (!result || typeof result !== 'object' || Array.isArray(result) || result.error !== undefined || result.isError || result.ok === false || result.success === false) {
+    return `failed: ${JSON.stringify(result?.error ?? result).slice(0, 200)}`;
+  }
+  // A carried quest id is a uuid or a hex prefix of 8+, and prefixes the one asked for (either way).
+  const asked = String(action.args.questId).toLowerCase();
+  const carried = String(result.questId ?? '').toLowerCase();
+  if (result.questId !== undefined && (!(UUID.test(carried) || /^[0-9a-f]{8,}$/.test(carried)) || !(carried.startsWith(asked) || asked.startsWith(carried)))) {
+    return `answered for quest ${JSON.stringify(result.questId)}, not ${asked}`;
+  }
   for (const key of ['outcome', 'workState', 'horizon', 'currentPhase']) {
     if (action.args[key] !== undefined && result[key] !== undefined && result[key] !== action.args[key]) return `${key} is ${result[key]}, not ${action.args[key]}`;
   }
@@ -848,52 +920,61 @@ function spineAckFailure(action, result) {
   return null;
 }
 
-// Liveness needs affirmative evidence (WP-02 additions, D21): only a parsed
-// `owner` of gone or reused, or a dead pid, lets an exit-1 `lane alive` record
-// an exit. Anything else (unparseable, empty, unverified with the pid alive)
-// keeps the slot and Files and polls again; past the deadline the third
-// consecutive uncertain read blocks the WP visibly, its stop still queued.
+// Liveness needs affirmative evidence (WP-02 additions, D21): a running read
+// (exit 0), or an exit-1 read with a parsed `owner` of gone or reused or a
+// dead pid, is certain and resets the count. An exit-1 read with anything
+// else (unparseable, empty, unverified with the pid alive) keeps the slot and
+// Files and polls again; only reads past the deadline count, and the third
+// blocks the WP once, visibly: slot, Files and stop held, no more polling,
+// and a touch whose answer is the only release. An error read (any other
+// exit) is the recorder's and never resets the count.
 function liveness(state, wp, action, result, deps) {
   if (wp.lane?.backend !== 'exec' || !['wait', 'stop'].includes(action.step) || action.part === 'kill') return null;
-  if (result.code !== 1) {
-    wp.lane.uncertain = 0;
-    return null;
-  }
   let owner = null;
   try {
     owner = JSON.parse(result.stdout)?.owner ?? null;
   } catch { /* unparseable: no evidence either way */ }
-  if (owner === 'gone' || owner === 'reused' || !Number.isInteger(wp.lane.pid) || !deps.pidAlive(wp.lane.pid)) {
+  if (result.code === 0 || (result.code === 1 && (owner === 'gone' || owner === 'reused' || !Number.isInteger(wp.lane.pid) || !deps.pidAlive(wp.lane.pid)))) {
     wp.lane.uncertain = 0;
     return null;
   }
-  const count = (wp.lane.uncertain ?? 0) + 1;
+  if (result.code !== 1) return null;
+  const past = Boolean(wp.lane.deadline) && deps.now() > Date.parse(wp.lane.deadline);
+  const count = (wp.lane.uncertain ?? 0) + (past ? 1 : 0);
   wp.lane.uncertain = count;
-  appendEvent(state, deps, { step: action.step, event: 'liveness-uncertain', data: { wpId: wp.id, pid: wp.lane.pid, owner, count } });
-  if (count >= UNCERTAIN_BLOCK && wp.lane.deadline && deps.now() > Date.parse(wp.lane.deadline)) {
-    const reason = `lane liveness unverifiable past the deadline: ${count} reads (${owner ? `owner ${owner}` : 'unparseable lane alive output'}); pid ${wp.lane.pid} keeps its slot`;
-    if (LIVE_STATES.includes(wp.state) || wp.state === 'blocked') block(state, wp, deps, reason);
-    else wp.cleanup = reason;
-    wp.queue = [waitSpec('stop', CLEANUP_RETRY_MS, reason), ...backendOf(state, wp, deps).stop(wp)];
+  appendEvent(state, deps, { step: action.step, event: 'liveness-uncertain', data: { wpId: wp.id, pid: wp.lane.pid, owner, count, pastDeadline: past } });
+  if (count < UNCERTAIN_BLOCK) {
+    wp.queue = [waitSpec(action.step, WAIT_MS, `${wp.id}'s pid ${wp.lane.pid} is not shown exited: poll again.`), ...wp.queue];
     return 'polling';
   }
-  wp.queue = [waitSpec(action.step, WAIT_MS, `${wp.id}'s pid ${wp.lane.pid} is not shown exited: poll again.`), ...wp.queue];
+  const reason = `lane liveness unverifiable past the deadline: ${count} reads (${owner ? `owner ${owner}` : 'unparseable lane alive output'}); pid ${wp.lane.pid} keeps its slot`;
+  if (LIVE_STATES.includes(wp.state) || wp.state === 'blocked') block(state, wp, deps, reason);
+  else wp.cleanup = reason;
+  wp.lane.livenessHeld = true;
+  wp.queue = backendOf(state, wp, deps).stop(wp);
+  buildTouch(state, deps, 'liveness', {
+    question: `DO: check whether ${wp.id}'s lane agent (pid ${wp.lane.pid}) still runs; the conductor cannot verify it. ${reason}. EXPECT: (a) you confirm the process is gone: its slot and Files are released; (b) they stay held.`,
+    options: [option('a', 'The process is gone: release the slot', 'Its slot and Files are released; the WP keeps its state.'), option('b', 'Keep the slot held', 'Nothing runs for it.')],
+    wpId: wp.id, suspendedStep: 'stop',
+  });
   return 'polling';
 }
 
-// "No CI at head" is not lane-fixable (C1-2): on a repo with CI it waits out
-// the pending window, then blocks "CI did not complete at head"; with no CI
-// it blocks at once. The gate JSON is still recorded.
-function noCi(state, wp, action, result, out, deps) {
+// "No CI at head" is not lane-fixable (C1-2, C2-8). No CI workflow (0): stop
+// at once. Known CI (> 0) or an unread count (null): wait out 30 minutes per
+// head from the first absent-or-pending observation (land's pendingSince when
+// it has one), then stop. Stopping blocks, or holds when the run has no merge
+// authority (the operator merges). The gate JSON is still recorded.
+function noCi(state, wp, action, out, deps) {
   if (out.outcome !== 'amend' || action.step !== 'gate' || action.part !== 'gate') return out;
-  let gate = null;
-  try {
-    gate = JSON.parse(result.stdout);
-  } catch { /* the recorder already judged it */ }
+  const gate = out.patch?.gate;
   if (!gate?.failures?.includes('no CI at head') || (gate.causes ?? []).some((cause) => cause !== 'ci')) return out;
-  if (!(state.intent.ciWorkflows > 0)) return { ...out, outcome: 'block', reason: 'no CI at head: the repo has no CI workflow that can gate a PR' };
-  const since = wp.noCi?.head === gate.head ? Date.parse(wp.noCi.since) : deps.now();
-  if (deps.now() - since >= NO_CI_WINDOW_MS) return { ...out, outcome: 'block', reason: 'CI did not complete at head', patch: { ...out.patch, noCi: null } };
+  const hold = state.authority?.merge !== true;
+  const stop = (reason) => ({ ...out, outcome: hold ? 'held' : 'block', reason: hold ? `held at PR: ${reason}` : reason, patch: { ...out.patch, noCi: null } });
+  const count = state.intent.ciWorkflows;
+  if (count === 0) return stop('no CI at head: the repo has no CI workflow that can gate a PR');
+  const since = Date.parse(gate.pendingSince ?? (wp.noCi?.head === gate.head ? wp.noCi.since : new Date(deps.now()).toISOString()));
+  if (deps.now() - since >= NO_CI_WINDOW_MS) return stop(count > 0 ? 'CI did not complete at head' : 'CI state unknown: the workflow count could not be read');
   const { mergeLock, ...patch } = out.patch;
   const again = Object.fromEntries(Object.entries(action).filter(([key]) => !['id', 'phase', 'wpId'].includes(key)));
   return { outcome: 'wait', waitMs: WAIT_MS, reason: 'no CI run at head yet', patch: { ...patch, noCi: { head: gate.head, since: new Date(since).toISOString() }, queue: [again, ...wp.queue.slice(1)] } };
@@ -992,6 +1073,6 @@ export function record(state, action, result = {}, deps) {
     if (liveness(state, wp, action, result, deps) === 'polling') return undefined;
     return route(state, wp, action, recordLaneStep(state, wp, action, result, recorderDeps), deps);
   }
-  if (LAND_STEPS.has(action.step)) return route(state, wp, action, noCi(state, wp, action, result, recordLandStep(state, wp, action, result, recorderDeps), deps), deps);
+  if (LAND_STEPS.has(action.step)) return route(state, wp, action, noCi(state, wp, action, recordLandStep(state, wp, action, result, recorderDeps), deps), deps);
   throw new ConductError(2, `the build has no route for step ${action.step}`);
 }

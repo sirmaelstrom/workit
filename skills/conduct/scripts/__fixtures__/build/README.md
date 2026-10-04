@@ -16,4 +16,6 @@ Inputs for `lib/phases/build.test.mjs`. The `fixture paths` test greps every fil
 - `report-amendment.md`: a built report with an `## Amendment 1` table of three rows (fixed, refuted, judgment); the comment ids are the first comments of `__fixtures__/land/review-threads-145.json`'s threads.
 - `report-council-amendment.md`: the same with council ids `C1-1`, `C1-2`.
 - `report-guard.md`: an `## Amendment 1` table with a `conductor` row (slim-review's test-weakening guard).
+- `report-council-guard.md`: a council table (`C1-1`, `C1-2`) whose second row is a `conductor` row.
+- `report-duplicate-ids.md`: a table naming `123`/`#123` and `C1-3`/`c1-3` twice each (the same ids after normalization).
 - `conduct.json`: a target repo's `.workit/conduct.json` with `contractPaths` and `laneSuite`.

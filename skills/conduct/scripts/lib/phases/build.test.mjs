@@ -29,6 +29,7 @@ const fixture = (dir, name) => readFileSync(join(FIXTURES, dir, name), 'utf8');
 const T0 = Date.parse('2026-10-04T18:00:00.000Z');
 const IDENTITY = '2026-10-04T18:00:00.0000000Z claude.exe';
 const ANCHOR = '2ff76fa2-ce43-4a3c-88d0-16e2dbc0750c';
+const QUEST = (id) => `00000000-0000-4000-8000-0000000000${id.slice(3).padStart(2, '0')}`;
 const BASE = 'b'.repeat(40);
 const LIVE = ['dispatched', 'pr', 'review', 'amending', 'gate'];
 const CLAUDE_LOG = fixture('lanes', 'claude-p-ok.json');
@@ -73,7 +74,7 @@ function harness(t, opts = {}) {
     writeFileSync(specPath, `# ${spec.id}: name ${spec.id}\n\n**Commit:** \`feat: ${spec.id}\`\n`);
     const wp = wpRecord({ id: spec.id, name: `name ${spec.id}`, specPath, wave: spec.wave ?? 2, files: spec.files, dependsOn: spec.dependsOn ?? [],
       tier: spec.tier ?? 'T1', runtimeExercise: 'CLI: cat hello.txt prints hi' });
-    return { ...wp, questId: opts.spine ? (spec.id === 'WP-00' ? ANCHOR : `quest-${spec.id.toLowerCase()}`) : null, state: spec.state ?? 'pending' };
+    return { ...wp, questId: opts.spine ? (spec.id === 'WP-00' ? ANCHOR : QUEST(spec.id)) : null, state: spec.state ?? 'pending' };
   });
   const on = (value) => ({ on: Boolean(value), evidence: 'probed', detail: 'fake' });
   const state = {
@@ -1026,8 +1027,8 @@ test('depth none: one WP-00 lane from <run>/wp-00.md; spine on → a completed r
 test('depth deep, spine on: each WP merges with a completed receipt and a done/landed update on its own quest', async (t) => {
   const h = harness(t, { spine: true, wps: [TWO[0], TWO[1]] });
   assert.equal(await drive(h), null);
-  assert.deepEqual(h.trace.filter((a) => a.step === 'receipt').map((a) => [a.tool, a.args.questId]), [['spine_receipt', 'quest-wp-02'], ['spine_update', 'quest-wp-02']]);
-  assert.deepEqual(h.trace.find((a) => a.tool === 'spine_update' && a.step === 'receipt').args, { questId: 'quest-wp-02', workState: 'done', horizon: 'landed' });
+  assert.deepEqual(h.trace.filter((a) => a.step === 'receipt').map((a) => [a.tool, a.args.questId]), [['spine_receipt', QUEST('WP-02')], ['spine_update', QUEST('WP-02')]]);
+  assert.deepEqual(h.trace.find((a) => a.tool === 'spine_update' && a.step === 'receipt').args, { questId: QUEST('WP-02'), workState: 'done', horizon: 'landed' });
 });
 
 test('action ids and seams (D18, D19.15): every action is <seq>-<step> with a STEPS step and seam STEP_SEAM[step], except the herdr --runtime-only check', async (t) => {
@@ -1122,7 +1123,60 @@ test('liveness (C1-1, split 4): past the deadline the third uncertain read block
   assert.equal(wp.state, 'blocked');
   assert.match(wp.reason, /lane liveness unverifiable past the deadline: 3 reads/);
   assert.equal(wp.lane.exitedAt ?? null, null, 'the slot is held');
-  assert.deepEqual(wp.queue.map((a) => `${a.kind}/${a.step}/${a.part ?? ''}`), ['wait/stop/', 'shell/stop/probe']);
+  assert.deepEqual(wp.queue.map((a) => `${a.kind}/${a.step}/${a.part ?? ''}`), ['shell/stop/probe'], 'the stop stays queued');
+  assert.equal(h.state.touches.at(-1).build, 'liveness');
+  // The block is the visible stop: no more polling, no repeated block event.
+  const from = h.trace.length;
+  await drive(h, { until: () => h.trace.length >= from + 6 });
+  assert.ok(!h.trace.slice(from).some((a) => a.wpId === 'WP-02'), 'nothing more is emitted for WP-02');
+  assert.equal(h.events().filter((e) => e.event === 'wp-state' && e.data.wpId === 'WP-02' && /liveness unverifiable/.test(e.data.reason ?? '')).length, 1);
+  // The operator's (a) is the release: the slot frees, the state stays.
+  h.state.pending = null;
+  h.trace.pop();
+  answerCore(h, h.state.touches.length, 'a');
+  assert.equal(await drive(h), null);
+  assert.ok(h.wp('WP-02').lane.exitedAt);
+  assert.equal(h.wp('WP-02').state, 'blocked');
+});
+
+test('liveness (C2-9): only reads past the deadline count; the block comes on the third of them', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.life = { 'WP-02': 20 };
+  const unverified = { code: 1, stdout: JSON.stringify({ ok: true, alive: false, pid: 4202, owner: 'unverified' }), stderr: '' };
+  await drive(h, { until: (a) => aliveOf(a) && a.wpId === 'WP-02' });
+  for (let read = 1; read <= 2; read += 1) {
+    if (read > 1) await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
+    await pendingAfter(h, unverified);
+  }
+  assert.equal(h.wp('WP-02').lane.uncertain, 0, 'pre-deadline reads do not count');
+  h.tick(121 * 60000);
+  for (let read = 1; read <= 3; read += 1) {
+    await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
+    assert.ok(aliveOf(h.state.pending), `post-deadline read ${read} is a poll`);
+    await pendingAfter(h, unverified);
+    assert.equal(h.wp('WP-02').state === 'blocked', read === 3, `read ${read}`);
+  }
+});
+
+test('liveness (C2-9): an uncertain stop read on a terminal WP sets wps[].cleanup and leaves its state', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  assert.equal(await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'merged' }) !== null, true);
+  await pendingAfter(h, await perform(h, h.state.pending));
+  const wp = h.wp('WP-02');
+  assert.equal(wp.state, 'merged');
+  // The lane turns out not to be observed exited, past its deadline.
+  Object.assign(wp.lane, { exitedAt: null, deadline: new Date(T0 - 60000).toISOString() });
+  wp.queue = [];
+  h.life = { 'WP-02': 9 };
+  h.lifeByPid.set(4202, 9);
+  for (let read = 1; read <= 3; read += 1) {
+    const probe = await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
+    assert.equal(probe.part, 'probe');
+    await pendingAfter(h, { code: 1, stdout: 'not json', stderr: '' });
+  }
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.match(h.wp('WP-02').cleanup, /lane liveness unverifiable past the deadline: 3 reads \(unparseable lane alive output\)/);
+  assert.equal(h.wp('WP-02').lane.exitedAt ?? null, null);
 });
 
 test('gate cap (C1-2): the third gate-driven amendment blocks the WP with the last gate cause as its reason', async (t) => {
@@ -1156,28 +1210,30 @@ test('no CI at head (C1-2): with CI the gate waits out the window, then blocks "
 test('budget before amendment prompts (C1-2, C1-5): an over-budget amendment is not prompted; (a) needs "budget <USD>" above spend; metering continues', async (t) => {
   const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [TWO[0], TWO[1]] });
   h.gateCmdCode = { 'WP-02': [1] };
-  h.spendOut = ['1\n', '30\n', '30\n'];
+  h.spendOut = ['1\n', '1\n', '30\n', '30\n'];
   await drive(h, { until: (a) => a.part === 'announce' });
   const brief = of(h, 'WP-02').find((a) => a.part === 'amendment');
   assert.ok(brief);
   assert.ok(!of(h, 'WP-02').slice(of(h, 'WP-02').indexOf(brief)).some((a) => a.step === 'prompt'), 'not prompted while over budget');
   assert.match(h.state.touches[0].question, /Spend is \$30 against the \$25 budget \(metered by the spend adapter\)/);
   assert.equal(h.state.touches[0].allowFreeText, true);
-  for (const [text, refused] of [[null, /needs the text "budget <USD>"/], ['budget 20', /above the current spend of \$30/]]) {
+  assert.match(h.state.touches[0].question, /\(b\) no new paid lane work \(no dispatch, lane start, prompt or fallback\); work already at a PR boundary may still be reviewed and landed/);
+  const refusals = [[null, /needs the text "budget <USD>"/], ['budget 20', /above the current spend of \$30/], ['budget 1.5k', /needs the text "budget <USD>"/], ['budget 1,50', /needs the text/]];
+  for (const [text, refused] of refusals) {
     await recordPending(h, {});
     answerCore(h, 1, 'a', text);
     const again = await step(h);
     h.trace.push(again);
-    assert.equal(again.part, 'announce');
+    assert.equal(again.part, 'announce', String(text));
     assert.match(again.instruction, refused);
     assert.equal(h.state.authority.budgetUsd, 25);
   }
   await recordPending(h, {});
-  answerCore(h, 1, 'a', 'continue; budget $50');
+  answerCore(h, 1, 'a', 'continue; budget $1,500');
   assert.equal(await drive(h), null);
-  assert.equal(h.state.authority.budgetUsd, 50);
+  assert.equal(h.state.authority.budgetUsd, 1500);
   assert.deepEqual(h.state.authority.budgetSource.touch, 1);
-  assert.equal(h.trace.filter((a) => a.step === 'spend').length, 3, 'metered again before the resumed prompt');
+  assert.equal(h.trace.filter((a) => a.step === 'spend').length, 4, 'metered again before the resumed prompt');
   assert.equal(h.state.build.resumed, undefined);
   assert.equal(h.wp('WP-02').state, 'merged');
 });
@@ -1220,16 +1276,38 @@ test('owed adjudication (C1-3): findings → needs conductor → ruling → buil
 test('spend parse (C1-4, C1-15): empty, blank, negative or non-numeric meter output halts with no dispatch; an unset WORKIT_SPEND_CMD is reported, never run', async (t) => {
   for (const out of ['', '  \n', '-1\n', 'n/a\n', '1e3\n']) {
     const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
-    h.spendOut = [out];
-    assert.equal(await drive(h), null);
+    h.spendOut = [out, out];
+    // The meter halt re-reads after its wait; stop at that second read.
+    await drive(h, { until: () => h.trace.filter((a) => a.step === 'spend').length === 2 });
     assert.ok(!h.trace.some((a) => a.wpId), `${JSON.stringify(out)}: nothing dispatched`);
     assert.match(h.state.touches[0].question, /output is unreadable/, JSON.stringify(out));
-    assert.ok(h.state.dispatchHalt);
+    assert.deepEqual(h.state.build.halts.map((halt) => halt.kind), ['meter', 'budget']);
+    assert.equal(h.state.pending.budgetFor, 'meter');
   }
   const unset = harness(t, { spend: true, env: {} });
-  assert.equal(await drive(unset), null);
-  assert.ok(!unset.trace.some((a) => a.step === 'spend' || a.wpId));
+  await drive(unset, { until: () => unset.trace.length >= 6 });
+  assert.ok(unset.state.build.halts.some((halt) => halt.kind === 'meter'));
+  assert.ok(!unset.trace.some((a) => (a.step === 'spend' && !isWait(a)) || a.wpId));
   assert.match(unset.state.touches[0].question, /WORKIT_SPEND_CMD is not set/);
+});
+
+test('meter halt (C2-3): a budget answer never clears an unreadable meter; only a successful read resumes dispatch', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [TWO[0], TWO[1]] });
+  h.spendOut = ['\n', '\n'];
+  await drive(h, { until: (a) => a.part === 'announce' });
+  await recordPending(h, {});
+  answerCore(h, 1, 'a', 'budget 40');
+  await drive(h, { until: () => h.trace.filter((a) => a.step === 'spend').length === 2 });
+  assert.equal(h.state.authority.budgetUsd, 40, 'the raise is recorded');
+  assert.deepEqual(h.state.build.halts.map((halt) => halt.kind), ['meter'], 'the meter halt survives the budget answer');
+  assert.match(h.state.dispatchHalt.reason, /output is unreadable/);
+  assert.ok(!h.trace.some((a) => a.wpId), 'no dispatch before a successful read');
+  await recordPending(h, await perform(h, h.state.pending));
+  assert.ok(h.state.build.halts.some((halt) => halt.kind === 'meter'), 'a second unreadable read keeps it');
+  // The next re-read succeeds ("1"): the halt clears and dispatch resumes.
+  assert.equal(await drive(h), null);
+  assert.deepEqual(h.state.build.halts, []);
+  assert.equal(h.wp('WP-02').state, 'merged');
 });
 
 test('halt reasons (C1-12): a budget answer clears only the budget halt; dispatch waits for the merged-tree anomaly\'s own answer', async (t) => {
@@ -1237,7 +1315,7 @@ test('halt reasons (C1-12): a budget answer clears only the budget halt; dispatc
   h.life = { 'WP-02': 1, 'WP-03': 1 };
   h.treeMismatch = 'WP-02';
   h.gateCmdCode = { 'WP-03': [1] };
-  h.spendOut = ['1\n', '1\n', '30\n'];
+  h.spendOut = ['1\n', '1\n', '1\n', '1\n', '30\n'];
   await drive(h, { until: () => h.state.touches.length === 2 && h.state.pending?.part === 'announce' });
   assert.deepEqual(h.state.touches.map((touch) => touch.build), ['merged', 'budget']);
   await recordPending(h, {});
@@ -1411,6 +1489,140 @@ test('core touch visibility (split 2): the action after an escalation is a wait 
   await recordPending(h, {});
   const after = await step(h);
   assert.notEqual(after.part, 'announce', 'once per touch');
+});
+
+// ---- amendment 2 (delta council round 2 on #156) ----
+
+test('start is paid (C2-1): every exec start is emitted right after a spend read made for that WP', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
+  h.life = { 'WP-02': 1, 'WP-03': 1 };
+  assert.equal(await drive(h), null);
+  const starts = h.trace.filter((a) => a.step === 'start');
+  assert.equal(starts.length, 2);
+  for (const start of starts) {
+    const before = h.trace[h.trace.indexOf(start) - 1];
+    assert.equal(before.step, 'spend', `${start.wpId}: the action before its start`);
+    assert.equal(before.budgetFor, start.wpId);
+  }
+});
+
+test('budget (b) (C2-1, C2-2): no start after (b) for a second WP, which blocks with the reason; a WP at its PR boundary still lands', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
+  h.life = { 'WP-02': 2, 'WP-03': 1 };
+  h.spendOut = ['1\n', '1\n', '1\n', '30\n'];
+  await drive(h, { until: (a) => a.part === 'announce' });
+  assert.match(h.state.touches[0].question, /\(b\) no new paid lane work \(no dispatch, lane start, prompt or fallback\); work already at a PR boundary may still be reviewed and landed/);
+  assert.equal(h.state.touches[0].options[1].label, 'Stop new paid lane work');
+  await recordPending(h, {});
+  answerCore(h, 1, 'b');
+  assert.equal(await drive(h), null);
+  assert.ok(!h.trace.some((a) => a.wpId === 'WP-03' && a.step === 'start'), 'WP-03 never started');
+  assert.equal(h.wp('WP-03').state, 'blocked');
+  assert.equal(h.wp('WP-03').reason, 'the budget was reached and the operator stopped new paid lane work');
+  assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+test('touch announce (C2-7): a touch opened while scheduling is announced next, before a yield, another action or the release', async (t) => {
+  for (const lanes of [1, 2]) {
+    const h = harness(t, { budget: 0.5, lanes });
+    h.life = { 'WP-02': 0, 'WP-03': 0 };
+    let seen = 0;
+    const late = [];
+    h.onEmit = (a) => {
+      if (h.state.touches.length > seen && a.part !== 'announce') late.push(`${a.id} ${a.kind}/${a.step}`);
+      seen = h.state.touches.length;
+    };
+    assert.equal(await drive(h), null);
+    assert.ok(h.state.touches.length >= 1, `lanes ${lanes}: a budget touch opened`);
+    assert.deepEqual(late, [], `lanes ${lanes}: emitted before the announce`);
+    // One lane: the halt opens as WP-03 is about to dispatch, with nothing else live, so the release follows it.
+    if (lanes === 1) assert.equal(h.trace.at(-1).part, 'announce', 'the announce precedes the release');
+  }
+});
+
+test('spine acknowledgements (C2-4): ok:false, success:false, an empty or too-short quest id are failures', async (t) => {
+  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1]] });
+  const receipt = await drive(h, { until: (a) => a.tool === 'spine_receipt' && a.step === 'receipt' });
+  const good = { ...structuredClone(RECEIPT), questId: receipt.args.questId, outcome: 'completed' };
+  for (const bad of [{ ...good, ok: false }, { ...good, success: false }, { ...good, questId: '' }, { ...good, questId: '0' }, { ...good, questId: 'zzzzzzzz' }]) {
+    await assert.rejects(recordPending(h, bad), { code: 2 }, JSON.stringify(bad).slice(0, 60));
+  }
+  await recordPending(h, { ...good, questId: receipt.args.questId.slice(0, 8) });
+  const update = await step(h);
+  await assert.rejects(recordPending(h, { ok: false, questId: update.args.questId, workState: 'done', horizon: 'landed' }), { code: 2, message: /failed/ });
+  await recordPending(h, { questId: update.args.questId, workState: 'done', horizon: 'landed' });
+});
+
+test('adjudication ids are unique (C2-5): a slim or a council table naming one id twice re-prompts with the reason', async (t) => {
+  const slim = harness(t, { wps: [TWO[0], TWO[1]] });
+  slim.findings = { 'WP-02': [2] };
+  slim.reports = { 'WP-02': ['report-built.md', 'report-duplicate-ids.md'] };
+  const retry = await drive(slim, { until: (a) => a.part === 'amendment' && a.amendment.n === 2 });
+  assert.match(retry.instruction, /the ## Amendment table lists 123, C1-3 more than once/);
+  assert.ok(!slim.trace.some((a) => a.part === 'reply'));
+  const council = harness(t, { council: true, wps: [TWO[0], { ...TWO[1], tier: 'T2' }] });
+  council.synth = [{ findings: 3, seats: ['gpt-6.1-sol'] }];
+  council.reports = { 'WP-02': ['report-built.md', 'report-duplicate-ids.md'] };
+  const again = await drive(council, { until: (a) => a.part === 'amendment' && a.amendment.n === 2 });
+  assert.match(again.instruction, /lists 123, C1-3 more than once/);
+  assert.ok(!council.events().some((e) => e.event === 'adjudicated'));
+});
+
+test('council guard rows (C2-6): an answered escalation on C1-2 is recorded as adjudicated, with no reply --comment-id C1-2', async (t) => {
+  const h = harness(t, { council: true, wps: [TWO[0], { ...TWO[1], tier: 'T2' }] });
+  h.synth = [{ findings: 2, seats: ['gpt-6.1-sol'] }];
+  h.reports = { 'WP-02': ['report-built.md', 'report-council-guard.md'] };
+  h.rulings = [{ escalate: true, why: 'only the operator can rule on a deleted test' }];
+  await drive(h, { until: (a) => a.part === 'announce' });
+  await recordPending(h, {});
+  answerCore(h, 1, 'b');
+  assert.equal(await drive(h), null);
+  assert.ok(!h.trace.some((a) => a.step === 'reply' || a.step === 'thread-ids' || a.step === 'resolve'));
+  const verdicts = h.events().filter((e) => e.event === 'adjudicated').flatMap((e) => e.data.rows);
+  assert.deepEqual(verdicts.at(-1), { comment: 'C1-2', verdict: 'refuted', adjudicator: 'conductor' });
+  assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+test('no CI (C2-8): an unread workflow count waits, then blocks as unknown; the window is 30 minutes from the first absent-or-pending read; hold authority holds', async (t) => {
+  const noRuns = [/^gh api repos\/o\/r\/commits\/\w+\/check-runs/, () => ({ code: 1, stdout: '', stderr: 'gh: No commit found for SHA (HTTP 422)' })];
+  const unknown = harness(t, { wps: [TWO[0], TWO[1]] });
+  unknown.state.intent.ciWorkflows = null;
+  unknown.rules.unshift(noRuns);
+  unknown.onPerform = (a) => { if (a.part === 'gate') unknown.tick(10 * 60000); };
+  assert.equal(await drive(unknown), null);
+  assert.equal(unknown.wp('WP-02').reason, 'CI state unknown: the workflow count could not be read');
+  assert.equal(unknown.trace.filter((a) => a.part === 'gate').length, 4);
+
+  const empty = harness(t, { wps: [TWO[0], TWO[1]] });
+  empty.checkRuns = () => JSON.stringify({ total_count: 0, check_runs: [] });
+  const times = [];
+  empty.onPerform = (a) => {
+    if (a.part !== 'gate') return;
+    times.push(empty.deps.now());
+    empty.tick(60000);
+  };
+  assert.equal(await drive(empty), null);
+  assert.equal(empty.wp('WP-02').reason, 'CI did not complete at head');
+  assert.equal((times.at(-1) - times[0]) / 60000, 30, 'blocked at 30 minutes after the first read, not 40');
+
+  const hold = harness(t, { merge: false, wps: [TWO[0], TWO[1]] });
+  hold.state.intent.ciWorkflows = 0;
+  hold.rules.unshift(noRuns);
+  assert.equal(await drive(hold), null);
+  assert.equal(hold.wp('WP-02').state, 'held');
+  assert.equal(hold.wp('WP-02').reason, 'held at PR: no CI at head: the repo has no CI workflow that can gate a PR');
+  assert.deepEqual(hold.wp('WP-02').gate.failures, ['no CI at head']);
+  assert.equal(hold.state.mergeLock, null);
+});
+
+test('gate cap on the landing route (C2-10): repeated lane-fixable land gate failures block at the third', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.unresolved = () => true;
+  assert.equal(await drive(h), null);
+  assert.equal(of(h, 'WP-02').filter((a) => a.part === 'amendment').length, 2);
+  assert.equal(h.trace.filter((a) => a.part === 'gate').length, 3);
+  assert.equal(h.wp('WP-02').state, 'blocked');
+  assert.equal(h.wp('WP-02').reason, 'unresolved review threads (after 2 gate amendments)');
 });
 
 const strip = (h, value) => JSON.parse(JSON.stringify(value).replaceAll(JSON.stringify(h.dir).slice(1, -1), '<dir>'));
