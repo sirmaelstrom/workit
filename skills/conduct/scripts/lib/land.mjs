@@ -3,8 +3,9 @@
 // exact head, and the merge. Burn-down's gate (skills/burn-down/SKILL.md § Per
 // item step 4) and slim-review's script are driven here, never restated.
 //
-// Every function returns actions or a recorder outcome; nothing here runs a
-// program except gateCheck, recordRebase and runLandVerb, through deps.exec.
+// Every function returns actions or a recorder outcome. Programs run only in
+// gateCheck, runLandVerb, recordRebase and recordLandStep (git, for a rebase
+// record or a full review's changed files), always through the injected exec.
 // A recorder `patch` holds WP fields, except `mergeLock` and `dispatchHalt`,
 // which are run-level. Optional fields this module adds: action `land` (the
 // review metadata its recorder reads back), action `files` (reply bodies),
