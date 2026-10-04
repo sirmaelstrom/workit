@@ -7,8 +7,9 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv,
+  chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS,
 } from './lanes.mjs';
+import { dispatchable } from './schedule.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
 import { reportShapeProblems } from '../../../../scripts/lane.mjs';
 
@@ -77,6 +78,11 @@ const LOG = (f) => join(f.runDir, 'lane-runner.jsonl');
 const BRIEF = (f) => join(f.runDir, 'lane-wp-00.md');
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' });
 const exit = (code, stderr = '', stdout = '') => ({ code, stdout, stderr });
+// WP-04's reading of a patch (lanes.mjs header): lane merges, the rest replace.
+function apply(wp, { lane, ...fields }) {
+  if (lane) wp.lane = { ...wp.lane, ...lane };
+  Object.assign(wp, fields);
+}
 const allSteps = (backend, wp) => ['admit', 'create', 'start', 'prompt', 'wait', 'check', 'stop'].flatMap((step) => backend[step](wp, { amendment: true }));
 
 function report({ outcome = 'built', runtime = 'Verdict: exercised\nWould have shown: cat prints nothing; exit 1', pr = '#7 · abcdef1', claims = 'None', extra = '' } = {}) {
@@ -198,9 +204,13 @@ test('step arrays: both create arrays are fetch, rev-parse origin/<default>, cre
 test('recordLaneStep: create records the worktree and brief on both backends, never lane.path (D20)', (t) => {
   const h = lanes(t, { backend: 'herdr' });
   const herdrCreate = h.backend().create(h.wp).at(-1);
-  const created = { workspaceId: 'w1', paneId: 'w1:p1', path: join(h.dir, 'projects', 'repo-wt-demo-wp-00'), branch: 'conduct/demo/wp-00' };
+  // A pane id in the shape herdr really issues (captured `herdr agent list`).
+  const [agent] = JSON.parse(fixture('herdr-agent-list.json')).result.agents;
+  assert.match(agent.pane_id, /^w[0-9A-Za-z]+:p\d+$/);
+  const created = { workspaceId: agent.workspace_id, paneId: agent.pane_id, path: join(h.dir, 'projects', 'repo-wt-demo-wp-00'), branch: 'conduct/demo/wp-00' };
   const patch = h.record(herdrCreate, ok(JSON.stringify(created))).patch.lane;
-  assert.deepEqual([patch.paneId, patch.worktree, patch.branch, patch.briefPath], ['w1:p1', created.path, 'conduct/demo/wp-00', BRIEF(h)]);
+  assert.deepEqual([patch.paneId, patch.worktree, patch.branch, patch.briefPath], [agent.pane_id, created.path, 'conduct/demo/wp-00', BRIEF(h)]);
+  assert.deepEqual(h.backend().start({ ...h.wp, lane: { ...h.wp.lane, ...patch } })[0].command.slice(4, 6), ['--pane', agent.pane_id]);
   assert.equal('path' in patch, false);
   assert.equal(h.record(herdrCreate, exit(2, 'lane: log x', '{"error":"branch already exists"}')).outcome, 'block');
   const e = lanes(t);
@@ -212,10 +222,17 @@ test('recordLaneStep: create records the worktree and brief on both backends, ne
   assert.deepEqual([lane.worktree, lane.briefPath, 'path' in lane], [worktree, BRIEF(e), false]);
 });
 
-test('recordLaneStep: admit exit 7 → wait, the WP back to pending', (t) => {
+test('admission refusal backs off (C1-11): admit exit 7 → done, pending, notBefore 5 minutes on; dispatchable waits for it', (t) => {
   const f = lanes(t, { backend: 'herdr' });
   const result = f.record(f.backend().admit(f.wp)[0], exit(7, '', '{"admitted":false}'));
-  assert.deepEqual([result.outcome, result.patch.state], ['wait', 'pending']);
+  const notBefore = new Date(T0 + ADMIT_BACKOFF_MS).toISOString();
+  assert.deepEqual([result.outcome, result.patch.state, result.patch.notBefore, result.patch.queue], ['done', 'pending', notBefore, []]);
+  assert.equal(ADMIT_BACKOFF_MS, 5 * 60 * 1000);
+  const wp = { ...f.wp, lane: null, files: ['a.mjs'], dependsOn: [], state: 'pending', notBefore };
+  const state = { intent: { lanesCap: 2 }, wps: [wp], dispatchHalt: null };
+  assert.deepEqual(dispatchable(state, { now: T0 + 60000 }).map((item) => item.id), []);
+  assert.deepEqual(dispatchable(state, { now: T0 + ADMIT_BACKOFF_MS }).map((item) => item.id), ['WP-00']);
+  assert.deepEqual(f.record(f.backend().admit(f.wp)[0], ok('{"admitted":true}')).patch, { notBefore: null });
 });
 
 test('start exit 7 re-arms start (D20)', (t) => {
@@ -270,7 +287,38 @@ test('lane deadline (D19.17): past it, a running lane blocks on either backend',
   const wait = h.backend().wait(h.wp)[0];
   assert.equal(h.record(wait, exit(4)).outcome, 'wait');
   h.tick(121 * 60 * 1000);
-  assert.deepEqual([h.record(wait, exit(4)).outcome, h.record(wait, exit(4)).reason], ['block', 'lane deadline']);
+  const blocked = h.record(wait, exit(4));
+  assert.deepEqual([blocked.outcome, blocked.reason, blocked.cause], ['block', 'lane deadline', 'deadline']);
+  assert.deepEqual(blocked.patch.queue, h.backend().stop(h.wp));
+  assert.equal(blocked.patch.queue[0].command[2], 'stop');
+});
+
+test('occupancy until exit (C1-1, C1-2): a deadline block at cap 1 keeps the slot until the stop confirms exit', (t) => {
+  const deadline = new Date(T0 + 120 * 60 * 1000).toISOString();
+  for (const platform of ['win32', 'linux']) {
+    const e = lanes(t, { wpLane: { pid: 4242, startedAt: new Date(T0).toISOString(), deadline } });
+    e.deps.platform = platform;
+    e.tick(121 * 60 * 1000);
+    const blocked = e.record(e.backend().wait(e.wp)[0], exit(0));
+    assert.deepEqual([blocked.outcome, blocked.cause], ['block', 'deadline']);
+    const [kill, confirm] = blocked.patch.queue;
+    assert.deepEqual(kill.command, platform === 'win32' ? ['taskkill', '/PID', '4242', '/T', '/F'] : ['kill', '-TERM', '-4242']);
+    assert.deepEqual([kill.step, confirm.step, confirm.command.slice(2, 4)], ['stop', 'stop', ['lane', 'alive']]);
+    apply(e.wp, { ...blocked.patch, state: 'blocked' });
+    const rival = { id: 'WP-01', state: 'pending', files: ['a.mjs'], dependsOn: [] };
+    const state = { intent: { lanesCap: 1 }, wps: [e.wp, rival], dispatchHalt: null };
+    assert.deepEqual(dispatchable(state), [], 'blocked but still running: holds the slot');
+    assert.equal(e.record(kill, exit(128, 'ERROR: not found')).outcome, 'continue');
+    const stillAlive = e.record(confirm, exit(0));
+    assert.deepEqual([stillAlive.outcome, stillAlive.patch.queue], ['block', []]);
+    apply(e.wp, stillAlive.patch);
+    assert.deepEqual(dispatchable(state), [], 'still alive after stop: holds the slot');
+    const gone = e.record(confirm, exit(1));
+    assert.deepEqual([gone.outcome, gone.patch.queue, gone.patch.lane.exitedAt], ['done', [], new Date(T0 + 121 * 60 * 1000).toISOString()]);
+    apply(e.wp, gone.patch);
+    assert.deepEqual(dispatchable(state).map((wp) => wp.id), ['WP-01']);
+    assert.deepEqual(e.backend().stop(e.wp), [], 'an exited lane has nothing to stop');
+  }
 });
 
 test('exec wait: alive 0 → wait 60 s then alive again; 1 → continue, with cost and session read through deps.read (D19.28)', (t) => {
@@ -287,10 +335,121 @@ test('exec wait: alive 0 → wait 60 s then alive again; 1 → continue, with co
   assert.deepEqual([done.patch.lane.costUsd, done.patch.lane.sessionId], [COST, SESSION_ID]);
   assert.deepEqual(reads, [join('nowhere', 'lane-wp-00.log')]);
   assert.equal(f.record(alive, exit(2, 'no pid')).outcome, 'block');
+  assert.equal(done.patch.lane.exitedAt, new Date(T0).toISOString());
   // codex: the thread id, no cost.
   const c = lanes(t, { agent: 'codex', wpLane: { pid: 4242, logPath: 'x.log' } });
   const codexDone = c.record(c.backend().wait(c.wp)[0], exit(1), { read: () => CODEX_JSONL });
   assert.deepEqual([codexDone.patch.lane.sessionId, 'costUsd' in codexDone.patch.lane], [THREAD_ID, false]);
+});
+
+test('cost (C1-6): a session\'s total is cumulative, so each session\'s latest total, summed; a log with no result keeps the known cost', (t) => {
+  // Measured shape: run 1 then `--resume` of the same session, which
+  // reported run 1's cost plus its own.
+  const run = (session, cost) => JSON.stringify({ type: 'result', session_id: session, total_cost_usd: cost });
+  const resumed = `${run('s1', 0.073835)}\nstderr noise\n${run('s1', 0.078269)}\n`;
+  assert.equal(laneCost(resumed), 0.078269);
+  assert.equal(laneCost(`${resumed}${run('s2', 0.5)}\n`), 0.078269 + 0.5);
+  assert.equal(laneCost('no result here\n'), null);
+  const f = lanes(t, { wpLane: { pid: 4242, logPath: 'x.log', costUsd: 0.25 } });
+  const alive = f.backend().wait(f.wp)[0];
+  const once = f.record(alive, exit(1), { read: () => resumed });
+  const again = f.record(alive, exit(1), { read: () => resumed });
+  assert.deepEqual([once.patch.lane.costUsd, again.patch.lane.costUsd], [0.078269, 0.078269], 'recording twice does not double count');
+  const empty = f.record(alive, exit(1), { read: () => 'conduct: lane spawn failed: x\n' });
+  assert.equal('costUsd' in empty.patch.lane, false, 'never overwritten with null');
+});
+
+test('lane spawn (C1-1): a replayed spawn action returns its saved pid; a spawn or amendment while the pid runs is refused', async (t) => {
+  const f = lanes(t, { wpLane: { worktree: '/wt', briefPath: '/b.md', logPath: join('x', 'lane.log') } });
+  const start = { id: '7-start', step: 'start', command: f.backend().start(f.wp)[0].command };
+  f.state.pending = start;
+  writeFileSync(join(f.runDir, 'state.json'), JSON.stringify(f.state));
+  const first = await runLaneVerb('spawn', { runDir: f.runDir, wpId: 'WP-00', flags: {}, state: f.saved() }, f.deps);
+  assert.equal(first.code, 0, first.out);
+  // The verb saved, then the conductor crashed before `record`: the agent
+  // runs the same pending action again.
+  const replay = await runLaneVerb('spawn', { runDir: f.runDir, wpId: 'WP-00', flags: {}, state: f.saved() }, f.deps);
+  assert.equal(replay.code, 0, replay.out);
+  assert.deepEqual([JSON.parse(replay.out).pid, JSON.parse(replay.out).startedAt, JSON.parse(replay.out).replayed], [4242, JSON.parse(first.out).startedAt, true]);
+  assert.equal(f.spawns.length, 1, 'one agent');
+  // A distinct action while pid 4242 runs: refused, naming the pid.
+  const later = f.saved();
+  later.pending = { id: '9-start', step: 'start', command: start.command };
+  const distinct = await runLaneVerb('spawn', { runDir: f.runDir, wpId: 'WP-00', flags: {}, state: later }, f.deps);
+  assert.deepEqual([distinct.code, /pid 4242 is still running/.test(JSON.parse(distinct.out).error)], [5, true]);
+  later.pending = { id: '10-prompt', step: 'prompt', command: [...start.command, '--amend', '/b.md'] };
+  const amendment = await runLaneVerb('spawn', { runDir: f.runDir, wpId: 'WP-00', flags: { amend: '/b.md' }, state: later }, f.deps);
+  assert.equal(amendment.code, 5);
+  assert.equal(f.spawns.length, 1);
+  // Once the exit is observed, an amendment spawns, even if the pid number was reused.
+  later.wps[0].lane.exitedAt = new Date(T0).toISOString();
+  later.wps[0].lane.sessionId = SESSION_ID;
+  const resumed = await runLaneVerb('spawn', { runDir: f.runDir, wpId: 'WP-00', flags: { amend: '/b.md' }, state: later }, f.deps);
+  assert.equal(resumed.code, 0, resumed.out);
+  assert.deepEqual([f.spawns.length, f.saved().wps[0].lane.exitedAt], [2, null]);
+});
+
+test('fences (C1-3): a marker inside a longer or mixed-character fence is not read', () => {
+  const wp = { runtimeExercise: 'CLI: x' };
+  const wrap = (open, close, inner = '```') => `## Runtime exercise\n\n${open}\n${inner}\nVerdict: exercised\nWould have shown: x\n${inner}\n${close}\n`;
+  assert.equal(runtimeExerciseVerdict(wrap('````', '````'), wp), 'missing');
+  assert.equal(runtimeExerciseVerdict(wrap('~~~', '~~~'), wp), 'missing');
+  assert.equal(runtimeExerciseVerdict(wrap('~~~', '~~~', '````'), wp), 'missing');
+  // A closer needs the opener's character and at least its length.
+  assert.equal(runtimeExerciseVerdict('## Runtime exercise\n\n````\n```\nVerdict: exercised\nWould have shown: x\n', wp), 'missing');
+  assert.equal(runtimeExerciseVerdict('## Runtime exercise\n\n```\nquoted\n```\nVerdict: exercised\nWould have shown: x\n', wp), 'exercised');
+});
+
+test('diagnostics (C1-7): a failing runtime exercise names the missing heading or marker', async (t) => {
+  const f = lanes(t);
+  const check = async (text) => {
+    f.report(text);
+    return JSON.parse((await runLaneVerb('check', { runDir: f.runDir, wpId: 'WP-00', flags: { runtimeOnly: true } }, f.deps)).out).failures.join('; ');
+  };
+  assert.match(await check(report({ runtime: null })), /missing: no "## Runtime exercise" heading/);
+  assert.match(await check(report({ runtime: '- Verdict: exercised' })), /missing: no line reading exactly "Verdict: exercised"/);
+  assert.match(await check(report({ runtime: 'Verdict: exercised' })), /vacuous: "Verdict: exercised" with no "Would have shown:/);
+});
+
+test('queue ownership (C1-8): every block, amend and done sets patch.queue; a failed fetch leaves no create action queued', (t) => {
+  const e = lanes(t, { wpLane: { pid: 4242 } });
+  const fetch = e.backend().create(e.wp)[0];
+  const failed = e.record(fetch, exit(128, 'fatal: could not read from remote'));
+  assert.deepEqual([failed.outcome, failed.patch.queue], ['block', []]);
+  const results = [];
+  for (const name of ['exec', 'herdr']) {
+    const f = lanes(t, { backend: name, wpLane: { paneId: 'w1:p1', briefPath: '/b.md', pid: 4242 } });
+    for (const act of allSteps(f.backend(), f.wp)) {
+      for (const result of [exit(1, 'boom'), exit(2, 'usage'), exit(5, '', '{"ok":false,"outcome":"built","failures":["x"]}'), ok('[]')]) {
+        results.push([act, f.record(act, result)]);
+      }
+    }
+  }
+  const terminal = results.filter(([, routed]) => ['block', 'amend', 'done'].includes(routed.outcome));
+  assert.ok(terminal.length > 20, String(terminal.length));
+  for (const [act, routed] of terminal) assert.ok(Array.isArray(routed.patch.queue), `${act.step}/${act.part}: ${routed.outcome}`);
+  // done carries cleanup only (C1-13).
+  for (const [, routed] of terminal.filter(([, r]) => r.outcome === 'done')) assert.ok(routed.patch.queue.every((act) => act.step === 'stop'));
+});
+
+test('outcome first (C1-9): the report check precedes the shape check on herdr; a malformed refuted report is still refuted', async (t) => {
+  const h = lanes(t, { backend: 'herdr' });
+  assert.deepEqual(h.backend().check(h.wp).map((act) => act.part ?? act.step), ['report', 'shape', 'pr-lookup', 'pr']);
+  const e = lanes(t);
+  e.report('## Outcome\n\nrefuted: the premise fails\n');
+  const result = await runLaneVerb('check', { runDir: e.runDir, wpId: 'WP-00', flags: {} }, e.deps);
+  assert.deepEqual([result.code, JSON.parse(result.out).outcome], [0, 'refuted']);
+  assert.deepEqual(e.calls, [], 'no shape, commit or PR check on a refuted report');
+});
+
+test('failure reasons (C1-14): no lane.mjs log banner, the structured error field only', (t) => {
+  const h = lanes(t, { backend: 'herdr' });
+  const create = h.backend().create(h.wp).at(-1);
+  const banner = 'lane: log /run/lane-runner.jsonl (resolved from --log)';
+  assert.equal(h.record(create, exit(2, banner, '{"error":"branch already exists: conduct/demo/wp-00"}')).reason, 'branch already exists: conduct/demo/wp-00');
+  const shape = h.backend().check(h.wp)[1];
+  const failed = h.record(shape, exit(5, banner, '{"ok":false,"failedExpectation":"--expect-report r.md: ## Debrief is missing","evidence":{"path":"r.md"}}'));
+  assert.equal(failed.reason, 'shape check: --expect-report r.md: ## Debrief is missing');
 });
 
 test('herdr wait exits map to outcomes (D17, D19.17)', (t) => {
@@ -300,12 +459,9 @@ test('herdr wait exits map to outcomes (D17, D19.17)', (t) => {
   assert.equal(f.record(wait, ok('{"state":"done"}')).outcome, 'continue');
   for (const code of [1, 2]) {
     const result = f.record(wait, exit(code, `lane: daemon said no (${code})`));
-    assert.equal(result.outcome, 'block');
+    assert.deepEqual([result.outcome, result.cause], ['block', 'error']);
     assert.match(result.reason, new RegExp(`daemon said no \\(${code}\\)`));
   }
-  const blocked = f.record(wait, exit(3, '', '{"state":"blocked","dialog":"Allow this command?"}'));
-  assert.equal(blocked.outcome, 'block');
-  assert.match(blocked.reason, /Allow this command\?/);
   const timeout = f.record(wait, exit(4));
   assert.equal(timeout.outcome, 'wait');
   assert.deepEqual([timeout.patch.queue[0].kind, timeout.patch.queue[0].waitMs], ['wait', 0]);
@@ -317,6 +473,48 @@ test('herdr wait exits map to outcomes (D17, D19.17)', (t) => {
   const capacity = f.record(wait, exit(8));
   assert.equal(capacity.outcome, 'continue');
   assert.deepEqual(capacity.patch.queue[0].command, ['node', LANE(f), 'prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--amendment', '--no-ruling', '--log', LOG(f)]);
+});
+
+test('wait exit 3 (C1-4, C1-10): a structured dialog cause, one re-poll after 60 s, the second consecutive dialog blocks', (t) => {
+  const f = lanes(t, { backend: 'herdr', wpLane: { briefPath: '/b.md' } });
+  const wait = f.backend().wait(f.wp)[0];
+  const dialogResult = exit(3, 'lane: log x (resolved from --log)', '{"state":"blocked","dialog":"Allow this command?"}');
+  const first = f.record(wait, dialogResult);
+  assert.deepEqual([first.outcome, first.cause, first.dialog, first.patch.lane.dialogPolls], ['wait', 'dialog', 'Allow this command?', 1]);
+  assert.deepEqual([first.patch.queue[0].kind, first.patch.queue[0].waitMs], ['wait', 60000]);
+  assert.deepEqual(first.patch.queue[1].command, wait.command);
+  apply(f.wp, first.patch);
+  // The count is on the WP: a replay of the same record cannot reset it.
+  const second = f.record(wait, dialogResult);
+  assert.deepEqual([second.outcome, second.cause, second.dialog, second.patch.queue], ['block', 'dialog', 'Allow this command?', []]);
+  // A poll in between that is not a dialog resets the count.
+  apply(f.wp, f.record(wait, exit(4)).patch);
+  assert.equal(f.record(wait, dialogResult).outcome, 'wait');
+});
+
+test('capacity recovery is bounded and never renews the deadline (C1-5)', (t) => {
+  const deadline = new Date(T0 + 120 * 60 * 1000).toISOString();
+  const f = lanes(t, { backend: 'herdr', wpLane: { briefPath: '/b.md', startedAt: new Date(T0).toISOString(), deadline } });
+  const wait = f.backend().wait(f.wp)[0];
+  const first = f.record(wait, exit(8));
+  assert.deepEqual([first.outcome, first.patch.lane.capacityResent, first.patch.queue[0].part], ['continue', true, 'resend']);
+  apply(f.wp, first.patch);
+  // The automatic re-send renews nothing.
+  assert.deepEqual(f.record(first.patch.queue[0], ok('{}')).patch, {});
+  const second = f.record(wait, exit(8));
+  assert.deepEqual([second.outcome, second.cause, second.patch.queue], ['block', 'error', []]);
+  // A conductor amendment renews the deadline and the allowance.
+  const amendment = f.backend().prompt(f.wp, { amendment: true })[0];
+  f.tick(30 * 60 * 1000);
+  const renewed = f.record(amendment, ok('{}')).patch.lane;
+  assert.deepEqual([renewed.capacityResent, renewed.deadline], [false, new Date(T0 + 150 * 60 * 1000).toISOString()]);
+  // Past the deadline the deadline wins over every recovery route.
+  const late = lanes(t, { backend: 'herdr', wpLane: { briefPath: '/b.md', deadline } });
+  late.tick(121 * 60 * 1000);
+  for (const code of [3, 4, 6, 8]) {
+    const result = late.record(late.backend().wait(late.wp)[0], exit(code, '', '{"dialog":"x"}'));
+    assert.deepEqual([result.outcome, result.cause], ['block', 'deadline'], `exit ${code}`);
+  }
 });
 
 // ---------------------------------------------------------------- check and PR
@@ -382,8 +580,8 @@ test('herdr: each action\'s argv, every one with --log (D17, D19.17)', (t) => {
   assert.deepEqual(b.start(f.wp)[0].command, lane('start', 'demo-wp-00', '--pane', 'w1:p1', '--kind', 'claude', '--model', 'claude-opus-5-5', '--reasoning', 'high'));
   assert.deepEqual(b.prompt(f.wp)[0].command, lane('prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md'));
   assert.deepEqual(b.check(f.wp).map((act) => act.command), [
-    lane('check', 'demo-wp-00', '--expect-report', join(f.runDir, 'lane-wp-00-report.md')),
     ['node', CONDUCT(f), 'lane', 'check', '--run', f.runDir, '--wp', 'WP-00', '--runtime-only'],
+    lane('check', 'demo-wp-00', '--expect-report', join(f.runDir, 'lane-wp-00-report.md')),
     ['gh', 'pr', 'list', '--repo', 'o/r', '--head', 'conduct/demo/wp-00', '--state', 'all', '--json', 'number,headRefOid,state'],
     lane('check', 'demo-wp-00', '--expect-pr', '{pr.number}'),
   ]);
@@ -580,8 +778,12 @@ test('lane-brief.md carries the standing clauses byte-equal to codex-delegate, a
   for (const clause of [earlyExit, clauseAfter('**Follow-ups destination.**'), clauseAfter('**Boundary question.**')]) {
     assert.ok(brief.includes(`\`${clause}\``), clause.slice(0, 40));
   }
-  assert.match(brief, /^- `Verdict: exercised`, `Verdict: vacuous`, `Verdict: not exercised` or `Verdict: no runtime surface`/m);
-  assert.match(brief, /^- `Would have shown: /m);
+  // The marker lines appear exactly as the reader accepts them (C1-7): the
+  // brief's own example passes runtimeExerciseVerdict.
+  for (const verdict of ['exercised', 'vacuous', 'not exercised', 'no runtime surface']) assert.match(brief, new RegExp(`^Verdict: ${verdict}\\r?$`, 'm'));
+  const example = brief.split(/\r?\n/).find((line) => line.startsWith('Would have shown: '));
+  assert.ok(example);
+  assert.equal(runtimeExerciseVerdict(`## Runtime exercise\n\nVerdict: exercised\n${example}\n`, { runtimeExercise: 'CLI: x' }), 'exercised');
   assert.match(brief, /## Runtime exercise/);
   assert.match(brief, /Never invoke `\/conduct` from this lane/);
   for (const slot of ['<lane id>', '<quest id>', '<worktree path>', '<branch name>', '<base sha>', '<wp spec path>', '<lane contract path>', '<report path>', '<runtime exercise>']) {

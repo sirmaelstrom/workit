@@ -16,10 +16,16 @@ If the line above is empty, the WP named no runtime surface: name the surface yo
 
 > **Runtime verification is part of done.** A change that alters runtime behavior is exercised at runtime before the PR boundary, and the report quotes the command and what was observed. A runtime check must be able to fail: say what it would have shown if the change were broken, or run it once against the pre-change tree — otherwise it is vacuous and is reported as such. Where the claim is visual, one screenshot per claim, of the critical state only; evidence is a few decisive pictures, never a gallery. Code-only verification of a runtime change is reported as **not exercised at runtime**, never as done.
 
-Write the evidence under `## Runtime exercise` in your report: the command(s), what you observed (quoted), and what the same check showed or would show on the pre-change tree. The conductor reads only two lines of that section, each at the start of a line:
+Write the evidence under `## Runtime exercise` in your report: the command(s), what you observed (quoted), and what the same check showed or would show on the pre-change tree. The conductor reads only two lines of that section. Each starts its own line, with no bullet, bold, backticks or trailing punctuation, outside any code block. The verdict line is exactly one of these four:
 
-- `Verdict: exercised`, `Verdict: vacuous`, `Verdict: not exercised` or `Verdict: no runtime surface`: exactly one, verbatim.
-- `Would have shown: <what the check prints or does when the change is broken, or the pre-change run's output>`: required with `Verdict: exercised`. A check you can't fill this line for is `Verdict: vacuous`.
+Verdict: exercised
+Verdict: vacuous
+Verdict: not exercised
+Verdict: no runtime surface
+
+With Verdict: exercised, add a line shaped like this example, with your own text after the colon (what the check prints or does when the change is broken, or the pre-change run's output). A check you can't fill this line for is Verdict: vacuous.
+
+Would have shown: cat: hello.txt: No such file or directory
 
 ## Standing clauses
 

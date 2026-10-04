@@ -68,6 +68,37 @@ test('filesDisjoint: equal after normalizing, and a directory contains its files
   assert.equal(filesDisjoint(['a/b.mjs'], ['a/b.mjs.bak']), true);
 });
 
+test('paths (C1-12): case and dot-segment aliases conflict; a path leaving the repository is refused at parse', (t) => {
+  assert.equal(filesDisjoint(['src/Worker.mjs'], ['src/worker.mjs']), false);
+  assert.equal(filesDisjoint(['src/../README.md'], ['README.md']), false);
+  assert.equal(filesDisjoint(['./src/a.mjs'], ['src/A.MJS']), false);
+  assert.equal(filesDisjoint(['SRC/'], ['src/x.mjs']), false);
+  assert.equal(filesDisjoint(['../outside.mjs'], ['inside.mjs']), false, 'an escaping path conflicts with everything');
+  const shared = [wp('WP-01', 'pending', ['src/Worker.mjs']), wp('WP-02', 'pending', ['src/worker.mjs'])];
+  assert.deepEqual(ids(dispatchable(run(shared))), ['WP-01']);
+  const dir = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: '**Files:**\n- Create `src/../lib/./a.mjs`\n- Modify `docs\\b.md`\n' } });
+  assert.deepEqual(parseWorkPackages(dir)[0].files, ['lib/a.mjs', 'docs/b.md']);
+  for (const bad of ['../x.mjs', '/etc/passwd', 'C:/x.mjs', 'a/../../x.mjs']) {
+    const escaping = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: `**Files:**\n- Create \`${bad}\`\n` } });
+    assert.throws(() => parseWorkPackages(escaping), (error) => error.code === 2 && error.message.includes('WP-01') && error.message.includes(bad), bad);
+  }
+});
+
+test('model labels (C1-15): an unknown inventory label fails at parse, naming the WP and the label', (t) => {
+  const dir = workshop(t, { 'WP-01': { wave: 1, model: 'Opus 5.5', body: '**Files:**\n- Create `a.mjs`\n' } });
+  assert.throws(() => parseWorkPackages(dir), (error) => error.code === 2 && /WP-01/.test(error.message) && /Opus 5\.5/.test(error.message));
+  const known = workshop(t, { 'WP-01': { wave: 1, model: 'Sonnet', body: '**Files:**\n- Create `a.mjs`\n' } });
+  assert.equal(parseWorkPackages(known)[0].model, 'Sonnet');
+});
+
+test('wave plan (C1-17): a WP id inside another WP\'s name is not wave membership', (t) => {
+  const dir = workshop(t, {
+    'WP-01': { wave: 1, model: 'opus', body: '**Files:**\n- Create `a.mjs`\n' },
+    'WP-02': { wave: 2, model: 'opus', body: '**Files:**\n- Create `b.mjs`\n' },
+  }, { waveNames: { 'WP-02': 'follows WP-01' } });
+  assert.deepEqual(parseWorkPackages(dir).map((item) => [item.id, item.wave]), [['WP-01', 1], ['WP-02', 2]]);
+});
+
 test('empty files fail safe (D18)', (t) => {
   assert.equal(filesDisjoint([], ['x.mjs']), false);
   assert.equal(filesDisjoint(['x.mjs'], []), false);
@@ -141,13 +172,13 @@ test('dispatchable: a WP depending on a held, blocked or refuted WP is never dis
 
 // A workshop in a temp dir: an orchestrator naming each WP's wave and model,
 // and one wp-*.md per WP with the given body.
-function workshop(t, wps, { modelColumn = true } = {}) {
+function workshop(t, wps, { modelColumn = true, waveNames = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'workit-schedule-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const packages = join(dir, 'work-packages');
   mkdirSync(packages);
   const entries = Object.entries(wps);
-  const plan = [...new Set(entries.map(([, spec]) => spec.wave))].map((wave) => `Wave ${wave}: ${entries.filter(([, spec]) => spec.wave === wave).map(([id]) => `[${id}: x]`).join(' ')}`);
+  const plan = [...new Set(entries.map(([, spec]) => spec.wave))].map((wave) => `Wave ${wave}: ${entries.filter(([, spec]) => spec.wave === wave).map(([id]) => `[${id}: ${waveNames[id] ?? 'x'}]`).join(' ')}`);
   const rows = entries.map(([id, spec]) => (modelColumn ? `| ${id}: name ${id} | ${spec.wave} | p | s | ${spec.model} |` : `| ${id}: name ${id} | ${spec.wave} | p | s |`));
   const header = modelColumn ? ['| Package | Wave | Project | Spec | Model |', '|---|---|---|---|---|'] : ['| Package | Wave | Project | Spec |', '|---|---|---|---|'];
   writeFileSync(join(packages, '_orchestrator.md'), ['# O', '', '## Wave Plan', '', ...plan, '', '## Package Inventory', '', ...header, ...rows, ''].join('\n'));

@@ -3,6 +3,25 @@
 // turns each action's result into a routed outcome. Two backends: herdr
 // drives scripts/lane.mjs through its CLI; exec is git worktree plus a
 // detached headless agent, which `lane spawn` starts and records by pid.
+//
+// Contract for WP-04 (the recorder's result):
+// - `patch.lane` merges into wps[].lane; `patch.queue` replaces the WP's
+//   queued actions; every other patch key replaces that field.
+// - `block`, `amend` and `done` always set `patch.queue`: `[]`, or only the
+//   cleanup still owed (the lane's `stop` actions). WP-04 runs that cleanup
+//   whatever the WP's state; a cleanup action's own record never changes it.
+// - `done` carries cleanup only (a refuted lane's stop); it never carries work.
+// - A `block` carries `cause`: 'error' | 'dialog' (with `dialog`, the parsed
+//   text) | 'needs-conductor' | 'deadline'.
+// - A lane occupies its slot and its files until its exit is observed
+//   (`lane.exitedAt`, set by exec `alive` exit 1 or a recorded stop), whatever
+//   the WP's state: WP-04 stops a herdr lane before it can release.
+// - `lane.startedAt`/`lane.deadline` are set by the first start and renewed
+//   only by a conductor amendment prompt; automatic retries (capacity
+//   re-send, dialog re-poll, start re-arm, plan-low fallback) never renew them.
+// - `lane.fallback: 'claude'` records that a codex lane now runs claude in its
+//   pane (lane.mjs fallback replays the prompt); later herdr steps keep the
+//   pane and lane name, and nothing else reads it in v1.
 import { basename, dirname, join, resolve } from 'node:path';
 import { LANE_MODELS, laneModel } from './adapters.mjs';
 import { resolveProgram } from './exec.mjs';
@@ -11,6 +30,8 @@ import { EXIT_CODES as LANE_EXIT, reportShapeProblems } from '../../../../script
 
 const DEADLINE_MS = 120 * 60 * 1000;
 const POLL_MS = 60000;
+const DIALOG_WAIT_MS = 60000;
+export const ADMIT_BACKOFF_MS = 5 * 60 * 1000;
 const SHA = /^[0-9a-f]{40}$/;
 const VERDICT = /^Verdict: (exercised|vacuous|not exercised|no runtime surface)$/;
 
@@ -67,6 +88,12 @@ export function agentArgv(state, wp, { brief, sessionId = null }, deps) {
   return sessionId ? [...codex, 'resume', sessionId, prompt] : [...codex, prompt];
 }
 
+// Terminate a detached exec agent and its children. ASSUMPTION off win32: the
+// agent leads its own process group (spawnDetached's detached: true).
+function killArgv(pid, platform) {
+  return platform === 'win32' ? ['taskkill', '/PID', String(pid), '/T', '/F'] : ['kill', '-TERM', `-${pid}`];
+}
+
 export function laneBackend(state, deps, backend) {
   const repo = resolve(state.intent.repo.path);
   const fallbackBranch = state.intent.repo.defaultBranch ?? 'main';
@@ -81,6 +108,8 @@ export function laneBackend(state, deps, backend) {
     shellAction('create', { part: 'fetch', instruction: 'Fetch origin.', command: ['git', '-C', repo, 'fetch', 'origin'] }),
     shellAction('base', { instruction: 'Resolve the base sha.', command: ['git', '-C', repo, 'rev-parse', `origin/${fallbackBranch}`] }),
   ];
+  // Outcome first (D19.16): the report check precedes every other check.
+  const reportCheck = (wp, extra) => shellAction('check', { part: 'report', instruction: 'Check the report\'s outcome and runtime exercise.', command: conduct('check', wp, extra) });
   if (backend === 'herdr') {
     const laneMjs = (verb, args, log) => ['node', join(pluginRoot, 'scripts', 'lane.mjs'), verb, ...args, '--log', log];
     return {
@@ -103,14 +132,15 @@ export function laneBackend(state, deps, backend) {
       },
       // Every prompt after the first is an amendment. A spine answer's receipt
       // is named only when a resolver can resolve it; otherwise the brief
-      // quotes the answer (rulingCarried: 'brief').
-      prompt: (wp, { amendment = false, answer = null } = {}) => {
+      // quotes the answer (rulingCarried: 'brief'). `resend` marks the
+      // automatic capacity re-send, which renews nothing.
+      prompt: (wp, { amendment = false, answer = null, resend = false } = {}) => {
         const lane = laneLayout(state, wp);
         const args = [lane.name, '--file', wp.lane.briefPath];
         const byReceipt = Boolean(answer?.receiptId && deps.env?.WORKIT_RECEIPT_RESOLVER);
         if (amendment) args.push('--amendment', ...(byReceipt ? ['--ruling-receipt', answer.receiptId, '--quest', state.intent.anchor] : ['--no-ruling']));
         return [shellAction('prompt', {
-          instruction: 'Send the lane its brief.', command: laneMjs('prompt', args, lane.runnerLog),
+          instruction: 'Send the lane its brief.', command: laneMjs('prompt', args, lane.runnerLog), ...(resend ? { part: 'resend' } : {}),
           ...(amendment && answer && !byReceipt ? { data: { rulingCarried: 'brief' } } : {}),
         })];
       },
@@ -121,13 +151,15 @@ export function laneBackend(state, deps, backend) {
       check: (wp) => {
         const lane = laneLayout(state, wp);
         return [
+          { ...reportCheck(wp, ['--runtime-only']), seam: 'runtime-exercise' },
           shellAction('check', { part: 'shape', instruction: 'Check the report\'s shape.', command: laneMjs('check', [lane.name, '--expect-report', lane.reportPath], lane.runnerLog) }),
-          shellAction('check', { part: 'report', seam: 'runtime-exercise', instruction: 'Check the report\'s outcome and runtime exercise.', command: conduct('check', wp, ['--runtime-only']) }),
           prLookup(wp),
           shellAction('check', { part: 'pr', instruction: 'Check the PR.', command: laneMjs('check', [lane.name, '--expect-pr', '{pr.number}'], lane.runnerLog) }),
         ];
       },
-      stop: (wp) => [shellAction('stop', { instruction: 'Stop the lane agent.', command: laneMjs('stop', [laneLayout(state, wp).name], laneLayout(state, wp).runnerLog) })],
+      stop: (wp) => (wp.lane?.exitedAt ? [] : [shellAction('stop', {
+        part: 'stop', instruction: 'Stop the lane agent.', command: laneMjs('stop', [laneLayout(state, wp).name], laneLayout(state, wp).runnerLog),
+      })]),
     };
   }
   return {
@@ -147,41 +179,64 @@ export function laneBackend(state, deps, backend) {
       : []),
     wait: (wp) => [shellAction('wait', { instruction: 'Ask whether the lane agent still runs.', command: conduct('alive', wp) })],
     check: (wp) => [
-      shellAction('check', { part: 'report', instruction: 'Check the lane report.', command: conduct('check', wp) }),
+      reportCheck(wp, []),
       prLookup(wp),
       shellAction('check', { part: 'pr', instruction: 'Check the PR.', command: conduct('check', wp, ['--pr', '{pr.number}']) }),
     ],
-    // An exec lane is checked only after its process exited: nothing to stop.
-    stop: () => [],
+    // Terminate the recorded pid, then confirm it is gone: the slot is
+    // released only by the confirmation (alive exit 1).
+    stop: (wp) => (wp.lane?.exitedAt || !Number.isInteger(wp.lane?.pid) ? [] : [
+      shellAction('stop', { part: 'kill', instruction: 'Terminate the lane agent.', command: killArgv(wp.lane.pid, deps.platform ?? process.platform) }),
+      shellAction('stop', { part: 'confirm', instruction: 'Confirm the lane agent exited.', command: conduct('alive', wp) }),
+    ]),
   };
 }
 
-// The lines of the level-2 section `title` (fenced lines marked), or null.
-function reportSection(text, title) {
-  let fenced = false;
-  const lines = String(text ?? '').split(/\r?\n/).map((raw) => {
-    const fence = /^ {0,3}(```|~~~)/.test(raw);
-    if (fence) fenced = !fenced;
-    return { text: raw.replace(/\s+$/, ''), fenced: fenced || fence };
+// Every line, with fenced lines marked. A fence closes only on the character
+// that opened it, at least as long, with nothing after it (CommonMark).
+function markLines(text) {
+  let fence = null;
+  return String(text ?? '').split(/\r?\n/).map((raw) => {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
+    let fenced = fence !== null;
+    if (marker && fence === null) {
+      fence = marker[1];
+      fenced = true;
+    } else if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && marker[2].trim() === '') {
+      fence = null;
+      fenced = true;
+    }
+    return { text: raw.replace(/\s+$/, ''), fenced };
   });
+}
+
+// The unfenced lines of the level-2 section `title`, or null.
+function reportSection(text, title) {
+  const lines = markLines(text);
   const start = lines.findIndex((line) => !line.fenced && (line.text === `## ${title}` || line.text.startsWith(`## ${title}:`)));
   if (start < 0) return null;
   const end = lines.findIndex((line, i) => i > start && !line.fenced && /^#{1,2}\s/.test(line.text));
   return { heading: lines[start].text, lines: lines.slice(start + 1, end < 0 ? lines.length : end).filter((line) => !line.fenced) };
 }
 
-// D19.23: only two anchored markers are read; prose never is.
-export function runtimeExerciseVerdict(reportText, wp) {
+// D19.23: only two anchored markers are read; prose never is. `problem`
+// names what a failing report lacks.
+function readRuntimeExercise(reportText, wp) {
   const section = reportSection(reportText, 'Runtime exercise');
-  const verdict = section?.lines.map((line) => VERDICT.exec(line.text)).find(Boolean)?.[1];
-  if (!verdict) return 'missing';
-  if (/^none\b/i.test(String(wp?.runtimeExercise ?? '').trim())) return 'no-surface';
-  if (verdict === 'not exercised' || verdict === 'no runtime surface') return 'not-exercised';
-  if (verdict === 'vacuous') return 'vacuous';
-  return section.lines.some((line) => /^Would have shown:\s*\S/.test(line.text)) ? 'exercised' : 'vacuous';
+  if (!section) return { verdict: 'missing', problem: 'no "## Runtime exercise" heading' };
+  const verdict = section.lines.map((line) => VERDICT.exec(line.text)).find(Boolean)?.[1];
+  if (!verdict) return { verdict: 'missing', problem: 'no line reading exactly "Verdict: exercised", "Verdict: vacuous", "Verdict: not exercised" or "Verdict: no runtime surface"' };
+  if (/^none\b/i.test(String(wp?.runtimeExercise ?? '').trim())) return { verdict: 'no-surface', problem: null };
+  if (verdict === 'not exercised' || verdict === 'no runtime surface') return { verdict: 'not-exercised', problem: `"Verdict: ${verdict}", but the WP names a runtime surface` };
+  if (verdict === 'vacuous') return { verdict: 'vacuous', problem: '"Verdict: vacuous"' };
+  return section.lines.some((line) => /^Would have shown:\s*\S/.test(line.text))
+    ? { verdict: 'exercised', problem: null }
+    : { verdict: 'vacuous', problem: '"Verdict: exercised" with no "Would have shown: <what a broken change shows>" line' };
 }
 
-const VERDICT_PASSES = new Set(['exercised', 'no-surface']);
+export function runtimeExerciseVerdict(reportText, wp) {
+  return readRuntimeExercise(reportText, wp).verdict;
+}
 
 // D19.16, D20: `## Outcome` + first body line, or `## Outcome: <value>`.
 export function parseOutcome(reportText) {
@@ -202,16 +257,29 @@ function reportPr(text) {
   return { number: Number(/#?(\d+)\b/.exec(body)?.[1] ?? NaN) || null, head: /\b([0-9a-f]{7,40})\b/.exec(body)?.[1] ?? null };
 }
 
-// The last JSON object in a lane log (stdout and stderr share the file).
-function lastJson(text, key) {
-  const objects = String(text ?? '').split(/\r?\n/).filter((line) => line.trim().startsWith('{')).map((line) => {
+// The JSON objects in a lane log (stdout and stderr share the file).
+function logObjects(text) {
+  return String(text ?? '').split(/\r?\n/).filter((line) => line.trim().startsWith('{')).map((line) => {
     try {
       return JSON.parse(line);
     } catch {
       return null;
     }
-  }).filter((value) => value && (!key || value[key] !== undefined));
-  return objects.at(-1) ?? null;
+  }).filter(Boolean);
+}
+
+const lastWith = (text, key) => logObjects(text).filter((value) => value[key] !== undefined).at(-1) ?? null;
+
+// A claude session's total_cost_usd is cumulative across `--resume`
+// invocations (measured: a resumed haiku session reported the first run's
+// cost plus its own). So the lane's cost is each session's latest total,
+// summed over sessions; null when the log holds no result.
+export function laneCost(logText) {
+  const latest = new Map();
+  for (const value of logObjects(logText)) {
+    if (typeof value.session_id === 'string' && typeof value.total_cost_usd === 'number') latest.set(value.session_id, value.total_cost_usd);
+  }
+  return latest.size ? [...latest.values()].reduce((sum, cost) => sum + cost, 0) : null;
 }
 
 function readLog(deps, path) {
@@ -230,63 +298,74 @@ function parseStdout(result) {
   }
 }
 
-// A failure's words: stderr, then stdout's `error` (lane.mjs prints its error
-// there and only a log line on stderr) or stdout itself.
+// A failure's words for a brief or an ask: stderr without lane.mjs's routine
+// `lane: log …` banner, then stdout's structured field (`error`,
+// `failedExpectation`, lane check's `failures`) or stdout itself.
 function said(result) {
-  const error = parseStdout(result)?.error;
-  return [String(result.stderr ?? '').trim(), error ?? String(result.stdout ?? '').trim()].filter(Boolean).join(' | ') || `exit ${result.code}`;
+  const out = parseStdout(result);
+  const detail = out?.error ?? out?.failedExpectation ?? (Array.isArray(out?.failures) ? out.failures.join('; ') : null) ?? String(result.stdout ?? '').trim();
+  const stderr = String(result.stderr ?? '').split(/\r?\n/).filter((line) => line.trim() && !line.startsWith('lane: log ')).join(' ').trim();
+  return [stderr, typeof detail === 'string' ? detail : JSON.stringify(detail)].filter(Boolean).join(' | ') || `exit ${result.code}`;
 }
-const block = (reason, patch = {}) => ({ outcome: 'block', reason, patch });
+
+const proceed = (patch = {}, reason = null) => ({ outcome: 'continue', reason, patch });
+const block = (reason, patch = {}, cause = 'error', extra = {}) => ({ outcome: 'block', reason, cause, ...extra, patch: { queue: [], ...patch } });
+const amend = (reason, patch = {}) => ({ outcome: 'amend', reason, patch: { queue: [], ...patch } });
+const done = (reason, patch = {}) => ({ outcome: 'done', reason, patch: { queue: [], ...patch } });
+const iso = (ms) => new Date(ms).toISOString();
 
 function startedPatch(deps, startedAt = null) {
   const at = startedAt ? Date.parse(startedAt) : deps.now();
-  return { startedAt: new Date(at).toISOString(), deadline: new Date(at + DEADLINE_MS).toISOString() };
+  return { startedAt: iso(at), deadline: iso(at + DEADLINE_MS) };
 }
 
-// The lane is still running: past the deadline it blocks, else it yields.
-// A herdr wait already polled for 60 s, so its yield is 0 ms.
-function stillRunning(wp, deps, retry, waitMs) {
-  if (wp.lane?.deadline && deps.now() > Date.parse(wp.lane.deadline)) return block('lane deadline', { queue: [] });
-  return { outcome: 'wait', reason: 'lane running', patch: { queue: [waitAction(waitMs), ...retry] } };
-}
+const expired = (wp, deps) => Boolean(wp.lane?.deadline) && deps.now() > Date.parse(wp.lane.deadline);
+// Past the deadline: stop the lane, then block. The stop is owed cleanup.
+const deadlineBlock = (wp, backend) => block('lane deadline', { queue: backend.stop(wp) }, 'deadline');
 
-// D19.15, D20: one result interface. `patch.lane` merges into wps[].lane;
-// `patch.queue` replaces the WP's queued actions; other keys replace fields.
+// D19.15, D20: one result interface (the contract is in the header).
 export function recordLaneStep(state, wp, action, result, deps) {
-  if (action.kind === 'wait') return { outcome: 'continue', reason: null, patch: {} };
+  if (action.kind === 'wait') return proceed();
   const lane = laneLayout(state, wp);
   const backend = laneBackend(state, deps, wp.lane?.backend ?? 'exec');
   const ok = result.code === 0;
   switch (action.step) {
     case 'admit':
-      if (result.code === LANE_EXIT.admitRefused) return { outcome: 'wait', reason: `admission refused: ${said(result)}`, patch: { state: 'pending', queue: [] } };
-      return ok ? { outcome: 'continue', reason: null, patch: {} } : block(said(result));
+      if (result.code === LANE_EXIT.admitRefused) {
+        const notBefore = iso(deps.now() + ADMIT_BACKOFF_MS);
+        return done(`admission refused (${said(result)}); not dispatched before ${notBefore}`, { state: 'pending', notBefore });
+      }
+      return ok ? proceed({ notBefore: null }) : block(said(result));
     case 'base': {
       const sha = String(result.stdout ?? '').trim();
-      return ok && SHA.test(sha) ? { outcome: 'continue', reason: null, patch: { lane: { base: sha } } } : block(`base sha: ${said(result)}`);
+      return ok && SHA.test(sha) ? proceed({ lane: { base: sha } }) : block(`base sha: ${said(result)}`);
     }
     case 'create': {
       if (!ok) return block(said(result));
-      if (action.part === 'fetch') return { outcome: 'continue', reason: null, patch: {} };
+      if (action.part === 'fetch') return proceed();
       if (action.part === 'lane') {
         const created = parseStdout(result);
         if (!created?.paneId || !created?.path) return block(`lane.mjs create printed no paneId/path: ${said(result)}`);
-        return { outcome: 'continue', reason: null, patch: { lane: { name: lane.name, paneId: created.paneId, worktree: created.path, branch: created.branch ?? lane.branch, briefPath: lane.briefPath } } };
+        return proceed({ lane: { name: lane.name, paneId: created.paneId, worktree: created.path, branch: created.branch ?? lane.branch, briefPath: lane.briefPath } });
       }
-      return { outcome: 'continue', reason: null, patch: { lane: { name: lane.name, worktree: lane.worktree, branch: lane.branch, briefPath: lane.briefPath, logPath: lane.logPath } } };
+      return proceed({ lane: { name: lane.name, worktree: lane.worktree, branch: lane.branch, briefPath: lane.briefPath, logPath: lane.logPath } });
     }
     case 'start':
-    case 'prompt': {
       // A start refused for memory re-arms start, never create (lane.mjs
       // refuses a create once the branch or worktree path exists).
-      if (action.step === 'start' && result.code === LANE_EXIT.admitRefused) {
+      if (result.code === LANE_EXIT.admitRefused) {
+        if (expired(wp, deps)) return deadlineBlock(wp, backend);
         return { outcome: 'wait', reason: `start refused: ${said(result)}`, patch: { queue: [waitAction(POLL_MS), ...backend.start(wp)] } };
       }
       if (!ok) return block(said(result));
-      return { outcome: 'continue', reason: null, patch: { lane: startedPatch(deps, parseStdout(result)?.startedAt) } };
-    }
+      return proceed(wp.lane?.deadline ? {} : { lane: startedPatch(deps, parseStdout(result)?.startedAt) });
+    case 'prompt':
+      if (!ok) return block(said(result));
+      // Only a conductor amendment renews the deadline and the retry allowances.
+      if (action.part === 'resend') return proceed();
+      return proceed({ lane: { ...startedPatch(deps, parseStdout(result)?.startedAt), capacityResent: false, dialogPolls: 0 } });
     case 'fallback':
-      return ok ? { outcome: 'continue', reason: null, patch: { lane: { fallback: 'claude' } } } : block(said(result));
+      return ok ? proceed({ lane: { fallback: 'claude' } }) : block(said(result));
     case 'wait':
       return wp.lane?.backend === 'herdr' ? recordHerdrWait(state, wp, result, deps, backend) : recordExecWait(state, wp, result, deps, backend);
     case 'check':
@@ -294,42 +373,68 @@ export function recordLaneStep(state, wp, action, result, deps) {
     case 'pr-lookup':
       return recordPrLookup(wp, lane, result, deps);
     case 'stop':
-      return ok ? { outcome: 'done', reason: 'lane stopped', patch: {} } : block(`stop: ${said(result)}`);
+      return recordStop(wp, action, result, deps);
     default:
       throw new ConductError(2, `recordLaneStep has no route for step ${action.step}`);
   }
 }
 
 function recordHerdrWait(state, wp, result, deps, backend) {
-  const name = laneLayout(state, wp).name;
+  if (result.code === LANE_EXIT.ok) return proceed({ lane: { dialogPolls: 0 } });
+  if (result.code === LANE_EXIT.error || result.code === LANE_EXIT.usage) return block(said(result));
+  // Every route below recovers; an expired deadline comes first.
+  if (expired(wp, deps)) return deadlineBlock(wp, backend);
   switch (result.code) {
-    case LANE_EXIT.ok: return { outcome: 'continue', reason: null, patch: {} };
-    case LANE_EXIT.timeout: return stillRunning(wp, deps, backend.wait(wp), 0);
+    case LANE_EXIT.timeout:
+      return { outcome: 'wait', reason: 'lane running', patch: { lane: { dialogPolls: 0 }, queue: [waitAction(0), ...backend.wait(wp)] } };
+    case LANE_EXIT.blocked: {
+      // A dialog gets one re-poll after 60 s (it may clear itself); a second
+      // consecutive one blocks. The conductor never answers a dialog.
+      const dialog = String(parseStdout(result)?.dialog ?? said(result));
+      const polls = (wp.lane?.dialogPolls ?? 0) + 1;
+      if (polls > 1) return block(`dialog: ${dialog}`, { lane: { dialogPolls: polls } }, 'dialog', { dialog });
+      return { outcome: 'wait', reason: `dialog: ${dialog}`, cause: 'dialog', dialog, patch: { lane: { dialogPolls: polls }, queue: [waitAction(DIALOG_WAIT_MS), ...backend.wait(wp)] } };
+    }
     case LANE_EXIT.planLow: {
       const fallback = shellAction('fallback', {
         instruction: 'Hand the lane to claude.',
-        command: ['node', join(deps.pluginRoot ?? state.pluginRoot, 'scripts', 'lane.mjs'), 'fallback', name, '--to', 'claude', '--model', LANE_MODELS.claude.opus, '--reasoning', 'high', '--log', laneLayout(state, wp).runnerLog],
+        command: ['node', join(deps.pluginRoot ?? state.pluginRoot, 'scripts', 'lane.mjs'), 'fallback', laneLayout(state, wp).name, '--to', 'claude',
+          '--model', LANE_MODELS.claude.opus, '--reasoning', 'high', '--log', laneLayout(state, wp).runnerLog],
       });
-      return { outcome: 'continue', reason: 'plan low: falling back to claude', patch: { queue: [fallback, ...backend.wait(wp)] } };
+      return proceed({ queue: [fallback, ...backend.wait(wp)] }, 'plan low: falling back to claude');
     }
     case LANE_EXIT.capacity:
-      return { outcome: 'continue', reason: 'capacity: re-sending the brief once', patch: { queue: [...backend.prompt(wp, { amendment: true }), ...backend.wait(wp)] } };
+      if (wp.lane?.capacityResent) return block(`capacity again after the one re-send: ${said(result)}`);
+      return proceed({ lane: { capacityResent: true }, queue: [...backend.prompt(wp, { amendment: true, resend: true }), ...backend.wait(wp)] }, 'capacity: re-sending the brief once');
     default:
-      // 1 error, 2 usage, 3 a dialog blocks the lane (WP-04 opens a touch).
       return block(said(result));
   }
 }
 
 function recordExecWait(state, wp, result, deps, backend) {
-  if (result.code === 0) return stillRunning(wp, deps, backend.wait(wp), POLL_MS);
+  if (result.code === 0) {
+    if (expired(wp, deps)) return deadlineBlock(wp, backend);
+    return { outcome: 'wait', reason: 'lane running', patch: { queue: [waitAction(POLL_MS), ...backend.wait(wp)] } };
+  }
   if (result.code !== 1) return block(said(result));
-  // The agent exited: read its session id and, for claude, its cost.
+  // The agent exited: its exit is observed, and the log holds its session id
+  // and, for claude, its cost. A log with no result keeps the known cost.
   const log = readLog(deps, wp.lane?.logPath ?? laneLayout(state, wp).logPath);
   const claude = state.intent.agent === 'claude';
-  const last = lastJson(log, claude ? 'session_id' : 'thread_id');
-  const patch = { lane: { sessionId: (claude ? last?.session_id : last?.thread_id) ?? wp.lane?.sessionId ?? null } };
-  if (claude) patch.lane.costUsd = typeof last?.total_cost_usd === 'number' ? last.total_cost_usd : null;
-  return { outcome: 'continue', reason: null, patch };
+  const last = lastWith(log, claude ? 'session_id' : 'thread_id');
+  const patch = { lane: { exitedAt: iso(deps.now()), sessionId: (claude ? last?.session_id : last?.thread_id) ?? wp.lane?.sessionId ?? null } };
+  const cost = claude ? laneCost(log) : null;
+  if (cost !== null) patch.lane.costUsd = cost;
+  return proceed(patch);
+}
+
+function recordStop(wp, action, result, deps) {
+  if (action.part === 'kill') return proceed(); // a pid already gone fails here; the confirmation decides
+  if (action.part === 'confirm') {
+    if (result.code === 1) return done('lane stopped', { lane: { exitedAt: iso(deps.now()) } });
+    return block(result.code === 0 ? `lane agent pid ${wp.lane?.pid} still runs after stop` : said(result));
+  }
+  return result.code === 0 ? done('lane stopped', { lane: { exitedAt: iso(deps.now()) } }) : block(`stop: ${said(result)}`);
 }
 
 function recordCheck(wp, action, result, backend) {
@@ -338,14 +443,14 @@ function recordCheck(wp, action, result, backend) {
     if (!checked) return block(`lane check printed no JSON: ${said(result)}`);
     const patch = { runtimeVerdict: checked.verdict ?? null };
     // Outcome first (D19.16): nothing after the report check runs unless built.
-    if (checked.outcome === 'refuted') return { outcome: 'done', reason: 'refuted', patch: { ...patch, state: 'refuted', queue: backend.stop(wp) } };
-    if (checked.outcome === 'needs-conductor') return block('needs conductor', { ...patch, asks: checked.asks ?? [], queue: [] });
-    if (checked.outcome === 'missing') return { outcome: 'amend', reason: `report: ${(checked.failures ?? []).join('; ') || '## Outcome missing'}`, patch: { ...patch, queue: [] } };
-    if (result.code === 5) return { outcome: 'amend', reason: (checked.failures ?? []).join('; '), patch: { ...patch, queue: [] } };
-    return result.code === 0 ? { outcome: 'continue', reason: null, patch } : block(said(result), patch);
+    if (checked.outcome === 'refuted') return done('refuted', { ...patch, state: 'refuted', queue: backend.stop(wp) });
+    if (checked.outcome === 'needs-conductor') return block('needs conductor', { ...patch, asks: checked.asks ?? [] }, 'needs-conductor');
+    if (checked.outcome === 'missing') return amend(`report: ${(checked.failures ?? []).join('; ') || '## Outcome missing'}`, patch);
+    if (result.code === 5) return amend((checked.failures ?? []).join('; '), patch);
+    return result.code === 0 ? proceed(patch) : block(said(result), patch);
   }
-  if (result.code === 0) return { outcome: 'continue', reason: null, patch: {} };
-  if (result.code === 5) return { outcome: 'amend', reason: `${action.part} check: ${said(result)}`, patch: { queue: [] } };
+  if (result.code === 0) return proceed();
+  if (result.code === 5) return amend(`${action.part} check: ${said(result)}`);
   return block(said(result));
 }
 
@@ -355,14 +460,14 @@ function recordPrLookup(wp, lane, result, deps) {
   if (!Array.isArray(prs)) return block(`gh pr list printed no JSON array: ${said(result)}`);
   const branch = wp.lane?.branch ?? lane.branch;
   // Every later action carries {pr.number}: with no PR they are dropped.
-  if (prs.length === 0) return { outcome: 'amend', reason: `no PR for ${branch}`, patch: { queue: [] } };
+  if (prs.length === 0) return amend(`no PR for ${branch}`);
   const pr = prs.find((candidate) => candidate.state === 'OPEN') ?? prs[0];
   const found = { number: pr.number, head: pr.headRefOid };
   const claimed = reportPr(readLog(deps, lane.reportPath));
   if (claimed.number !== found.number || !claimed.head || !found.head?.startsWith(claimed.head)) {
-    return { outcome: 'amend', reason: `the report's ## PR says #${claimed.number ?? '?'} at ${claimed.head ?? '?'}; GitHub has #${found.number} at ${found.head}`, patch: { pr: found, queue: [] } };
+    return amend(`the report's ## PR says #${claimed.number ?? '?'} at ${claimed.head ?? '?'}; GitHub has #${found.number} at ${found.head}`, { pr: found });
   }
-  return { outcome: 'continue', reason: null, patch: { pr: found } };
+  return proceed({ pr: found });
 }
 
 const SUB_FLAGS = { spawn: ['amend'], alive: [], check: ['pr', 'runtimeOnly'] };
@@ -386,14 +491,24 @@ export async function runLaneVerb(sub, { runDir, wpId, flags = {}, state = null 
   return checkLane(current, wp, flags, deps);
 }
 
+// One lane process per WP. The pending action is the replay key: running the
+// same spawn action again returns its saved result and spawns nothing. Any
+// other spawn while the recorded pid runs (its exit unobserved) is refused.
 function spawnLane(state, wp, flags, deps) {
   const lane = laneLayout(state, wp);
-  const brief = typeof flags.amend === 'string' ? flags.amend : wp.lane?.briefPath ?? lane.briefPath;
   if (flags.amend !== undefined && typeof flags.amend !== 'string') return reply(2, { ok: false, error: 'lane spawn --amend <brief> needs a path' });
+  const pending = state.pending;
+  const actionId = pending?.command?.includes('spawn') && pending.command.includes(wp.id) ? pending.id : null;
+  const saved = wp.lane?.spawn;
+  if (actionId && saved?.actionId === actionId) return reply(0, { ok: true, pid: saved.pid, startedAt: saved.startedAt, logPath: saved.logPath, replayed: true });
+  if (Number.isInteger(wp.lane?.pid) && !wp.lane?.exitedAt && deps.pidAlive(wp.lane.pid)) {
+    return reply(5, { ok: false, error: `lane spawn refused: ${wp.id}'s agent pid ${wp.lane.pid} is still running; stop it first` });
+  }
+  const brief = typeof flags.amend === 'string' ? flags.amend : wp.lane?.briefPath ?? lane.briefPath;
   const cwd = wp.lane?.worktree ?? lane.worktree;
   const logPath = wp.lane?.logPath ?? lane.logPath;
-  const sessionId = flags.amend === undefined ? null : wp.lane?.sessionId
-    ?? lastJson(readLog(deps, logPath), state.intent.agent === 'claude' ? 'session_id' : 'thread_id')?.[state.intent.agent === 'claude' ? 'session_id' : 'thread_id'];
+  const idKey = state.intent.agent === 'claude' ? 'session_id' : 'thread_id';
+  const sessionId = flags.amend === undefined ? null : wp.lane?.sessionId ?? lastWith(readLog(deps, logPath), idKey)?.[idKey];
   if (flags.amend !== undefined && !sessionId) return reply(2, { ok: false, error: `${wp.id} has no session id to resume (none in ${logPath})` });
   let program = null;
   let pid = null;
@@ -416,7 +531,7 @@ function spawnLane(state, wp, flags, deps) {
     return reply(5, { ok: false, error: `lane spawn failed: ${why}`, logPath });
   }
   const startedAt = deps.timestamp();
-  wp.lane = { ...wp.lane, pid, logPath, startedAt };
+  wp.lane = { ...wp.lane, pid, logPath, startedAt, exitedAt: null, spawn: { actionId, pid, startedAt, logPath } };
   appendEvent(state, deps, { step: flags.amend === undefined ? 'start' : 'prompt', event: 'spawned', data: { wpId: wp.id, pid, resumed: Boolean(sessionId) } });
   saveState(state, deps);
   return reply(0, { ok: true, pid, startedAt, logPath });
@@ -427,16 +542,17 @@ function checkLane(state, wp, flags, deps) {
   const failures = [];
   const text = deps.exists(lane.reportPath) ? deps.read(lane.reportPath) : null;
   const { outcome, asks } = text === null ? { outcome: 'missing', asks: [] } : parseOutcome(text);
-  const verdict = runtimeExerciseVerdict(text, wp);
+  const { verdict, problem } = readRuntimeExercise(text, wp);
+  // Outcome first: only a built report gets the shape and runtime checks.
   if (outcome !== 'built') {
     if (outcome === 'missing') failures.push(text === null ? `no report at ${lane.reportPath}` : 'the report has no ## Outcome (built | refuted | stopped: needs conductor)');
     return reply(failures.length ? 5 : 0, { ok: !failures.length, outcome, verdict, failures, asks });
   }
-  if (!VERDICT_PASSES.has(verdict)) failures.push(`runtime exercise: ${verdict}`);
+  if (problem) failures.push(`runtime exercise ${verdict}: ${problem}`);
   if (!flags.runtimeOnly) {
     failures.push(...reportShapeProblems(text));
     const ahead = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'rev-list', '--count', `${wp.lane?.base}..HEAD`]);
-    if (ahead.code !== 0 || !(Number(ahead.stdout.trim()) >= 1)) failures.push(`the branch has no commit past base ${wp.lane?.base}: ${said(ahead)}`);
+    if (ahead.code !== 0 || !(Number(ahead.stdout.trim()) >= 1)) failures.push(`the branch has no commit past base ${wp.lane?.base} (${ahead.code === 0 ? `${ahead.stdout.trim()} commits` : said(ahead)})`);
     if (flags.pr !== undefined) {
       if (!/^\d+$/.test(String(flags.pr))) return reply(2, { ok: false, error: `--pr needs a PR number, got ${flags.pr}` });
       const view = deps.exec('gh', ['pr', 'view', String(flags.pr), '--repo', state.intent.repo.remote, '--json', 'headRefName,state,body']);
@@ -445,7 +561,7 @@ function checkLane(state, wp, flags, deps) {
       else {
         if (pr.headRefName !== (wp.lane?.branch ?? lane.branch)) failures.push(`PR #${flags.pr} head is ${pr.headRefName}, not ${wp.lane?.branch ?? lane.branch}`);
         if (pr.state !== 'OPEN' && pr.state !== 'MERGED') failures.push(`PR #${flags.pr} is ${pr.state}`);
-        failures.push(...reportShapeProblems(pr.body ?? '').map((problem) => `PR body: ${problem}`));
+        failures.push(...reportShapeProblems(pr.body ?? '').map((p) => `PR body: ${p}`));
       }
     }
   }
