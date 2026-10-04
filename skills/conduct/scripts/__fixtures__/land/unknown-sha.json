@@ -1,0 +1,6 @@
+{
+  "command": "gh api repos/sirmaelstrom/workit/commits/0000000000000000000000000000000000000001/check-runs?per_page=100 --paginate",
+  "code": 1,
+  "stdout": "{\"message\":\"No commit found for SHA: 0000000000000000000000000000000000000001\",\"documentation_url\":\"https://docs.github.com/rest/checks/runs#list-check-runs-for-a-git-reference\",\"status\":\"422\"}",
+  "stderr": "gh: No commit found for SHA: 0000000000000000000000000000000000000001 (HTTP 422)\n"
+}
