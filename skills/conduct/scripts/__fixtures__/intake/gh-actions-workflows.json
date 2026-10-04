@@ -1,0 +1,10 @@
+{
+  "command": [
+    "gh",
+    "api",
+    "repos/sirmaelstrom/workit/actions/workflows"
+  ],
+  "code": 0,
+  "stdout": "{\"total_count\":2,\"workflows\":[{\"id\":299230721,\"node_id\":\"W_kwDOS_8yoc4R1eYB\",\"name\":\"CI\",\"path\":\".github/workflows/ci.yml\",\"state\":\"active\",\"created_at\":\"2026-06-20T01:33:04.000-05:00\",\"updated_at\":\"2026-06-20T01:33:04.000-05:00\",\"url\":\"https://api.github.com/repos/sirmaelstrom/workit/actions/workflows/299230721\",\"html_url\":\"https://github.com/sirmaelstrom/workit/blob/main/.github/workflows/ci.yml\",\"badge_url\":\"https://github.com/sirmaelstrom/workit/workflows/CI/badge.svg\"},{\"id\":299230749,\"node_id\":\"W_kwDOS_8yoc4R1eYd\",\"name\":\"Dependabot Updates\",\"path\":\"dynamic/dependabot/dependabot-updates\",\"state\":\"active\",\"created_at\":\"2026-06-20T01:33:16.000-05:00\",\"updated_at\":\"2026-06-20T01:33:16.000-05:00\",\"url\":\"https://api.github.com/repos/sirmaelstrom/workit/actions/workflows/299230749\",\"html_url\":\"https://github.com/sirmaelstrom/workit/actions/workflows/dependabot/dependabot-updates\",\"badge_url\":\"https://github.com/sirmaelstrom/workit/actions/workflows/dependabot/dependabot-updates/badge.svg\"}]}",
+  "stderr": ""
+}

@@ -1,0 +1,10 @@
+{
+  "command": [
+    "gh",
+    "auth",
+    "status"
+  ],
+  "code": 0,
+  "stdout": "github.com\n  ✓ Logged in to github.com account sirmaelstrom (keyring)\n  - Active account: true\n  - Git operations protocol: https\n  - Token: gho_************************************\n  - Token scopes: 'gist', 'read:org', 'repo', 'user', 'workflow'\n",
+  "stderr": ""
+}

@@ -1,0 +1,10 @@
+{
+  "command": [
+    "gh",
+    "api",
+    "repos/sirmaelstrom/workit/actions/workflows"
+  ],
+  "code": 0,
+  "stdout": "{\"total_count\":0,\"workflows\":[]}",
+  "stderr": ""
+}

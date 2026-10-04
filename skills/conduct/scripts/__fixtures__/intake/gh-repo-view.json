@@ -1,0 +1,13 @@
+{
+  "command": [
+    "gh",
+    "repo",
+    "view",
+    "sirmaelstrom/workit",
+    "--json",
+    "nameWithOwner,defaultBranchRef"
+  ],
+  "code": 0,
+  "stdout": "{\"defaultBranchRef\":{\"name\":\"main\"},\"nameWithOwner\":\"sirmaelstrom/workit\"}\n",
+  "stderr": ""
+}
