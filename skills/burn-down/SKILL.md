@@ -103,8 +103,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      one paired review of the whole PR, with the lane report's uncertainty
      passed to both lenses; the lane adjudicates every finding in one batch
      (fix with a control, refute with a quoted observation, or `judgment`), and
-     the conductor re-reads only the refutations; after a nontrivial amendment,
-     one delta-only pass per lens (`lens --since <reviewed head>`). There is no
+     the conductor re-reads only the refutations; after a nontrivial amendment
+     (one that changes an executable line), one delta-only pass per lens
+     (`lens --since <reviewed head>`). There is no
      second full-PR review and no third round at T1; a fix made after the delta
      pass is checked by its seen-failing control. The cap binds manual T1,
      `babysit`, and Observatory's pr-review beat (observatory#765); all three
@@ -157,6 +158,26 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    later with no in-band answer, and recorded "on operator go" in the receipt —
    failure-audit quest e8e289e1).** Then close out via `pickup`'s closeout:
    `done` + `landed` + artifacts, with `ripple` in the response as the read-back.
+
+   **The merge gate is checked at the exact head being merged**: review done
+   at the tier, CI green at that head, `threads --unresolved` exit 0, and the
+   squash tree equal to the head that was checked. Under the T1 cap the merged
+   head may differ from the last reviewed head in two named cases only:
+   - **post-cap:** a fix made after the delta pass, which the cap forbids
+     reviewing again;
+   - **trivial:** an amendment that changes no executable line (docs,
+     comments, test-only additions), for which no delta pass is owed.
+
+   Either merges on the fix's control seen red then green at that head, CI at
+   that head, and the conductor's own read of the tail diff, and the row
+   records `unreviewed tail <reviewed>..<merged> (post-cap|trivial)`. Any other
+   gap, such as an executable amendment after the full round with no delta
+   pass, gets the delta pass before the merge. T2 adds two checks. When the
+   base branch moved during review, test the tree that will land (rebase and
+   re-run, or run the suite on the merge result) rather than the reviewed
+   branch alone. And the row names how each challenge escalation ("Human
+   review required") was disposed of, including any confirmation of an
+   operator ruling that the challenge asks for.
 
    **A red gate names an oracle; re-derive WHICH one per red step before
    monitoring anything.** A CI red is reached through several steps that may
