@@ -1,0 +1,6 @@
+{"ts":"2026-10-01T11:30:00.000Z","repo":"acme/app","pr":10,"lens":"codex","model":"m","reasoning":"high","wall_ms":1000,"p1":0,"p2":2,"p3":1,"examined":2,"coverage":"examined 2 of 2 changed files","attempt":1,"run_id":"r-a"}
+{"ts":"2026-10-01T11:40:00.000Z","repo":"acme/app","pr":10,"lens":"astra","model":"m","reasoning":"high","wall_ms":1000,"p1":1,"p2":0,"p3":0,"examined":2,"coverage":"examined 2 of 2 changed files","attempt":1,"run_id":"r-a"}
+{"ts":"2026-10-01T11:50:00.000Z","repo":"acme/app","pr":10,"comment_id":1,"lens":"codex","verdict":"confirmed"}
+{"ts":"2026-10-01T11:51:00.000Z","repo":"acme/app","pr":10,"comment_id":2,"lens":"astra","verdict":"refuted","head":"abc","severity":"P1","scope":"full","adjudicator":"lane"}
+{"ts":"2026-10-01T12:30:00.000Z","repo":"acme/app","pr":12,"lens":"codex","model":"m","reasoning":"high","wall_ms":1000,"p1":0,"p2":0,"p3":0,"examined":1,"coverage":"examined 1 of 1 changed files","attempt":1,"run_id":"r-b"}
+{"ts":"2026-10-01T12:00:00.000Z","repo":"acme/app","pr":99,"lens":"codex","model":"m","reasoning":"high","wall_ms":1000,"p1":3,"p2":0,"p3":0,"examined":1,"coverage":"examined 1 of 1 changed files","attempt":1,"run_id":"r-c"}
