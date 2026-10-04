@@ -717,6 +717,13 @@ test('every review runs before the rebase: deltaReviewActions → rebaseActions,
   assert.throws(() => deltaReviewActions(makeState(), rebased, HEAD), /no delta review after a rebase/);
 });
 
+test('a no-op rebase (from === to) leaves its since-head delta-reviewable', () => {
+  const noop = makeWp({ reviewMode: 'standalone', rebases: [{ from: HEAD, to: HEAD, equivalent: true }] });
+  const delta = deltaReviewActions(makeState(), noop, HEAD);
+  assert.ok(delta.some((a) => a.step === 'post'));
+  assert.ok(delta.filter((a) => a.part === 'lens').every((a) => a.command.includes('--since') && a.command.includes(HEAD)));
+});
+
 test('t2Actions: council off → every available lens and no other; on → council_review, synthesize, challenge', () => {
   const off = t2Actions(makeState(), makeWp({ reviewMode: 'standalone' }), { round: 1 });
   assert.deepEqual(off.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]), ['codex', 'astra', 'opus']);
