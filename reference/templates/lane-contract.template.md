@@ -33,6 +33,7 @@ List the callers of any function you add a check to, and every construct in your
 
 ## Setup (step 0)
 
+- **The premise check (rule 15):** re-derive each premise the brief states, quote one command and its output per premise under `## Premise check`, and only then edit.
 - <repo A worktrees: dependency copy / restore / one-time build, with the exact command>
 - <repo B worktrees: …>
 - **Long foreground batches go to the background from the start** — a full suite, a corpus walk, a container build, anything that can outlive the tool timeout runs with `run_in_background` (or in the pane) and you read its captured output afterwards; state the per-run cost in your report.
@@ -52,9 +53,10 @@ List the callers of any function you add a check to, and every construct in your
    - `## Negative controls` (verbatim)
    - `## Assertions` (each with its refuting command and output, or ASSUMPTION)
    - `## Tests` (commands + counts)
-   - `## Runtime exercise` (rule 14: the command, the observed output quoted, and what the same check showed or would show on the pre-change tree or a broken change, or "not exercised at runtime: <why>"). The conductor's parser reads only two marker lines, each at the start of a line:
+   - `## Runtime exercise` (rule 14: the command, the observed output quoted, and what the same check showed or would show on the pre-change tree or a broken change, or "not exercised at runtime: <why>"). The conductor's parser reads only two marker lines, each at the start of a line, outside any code fence, with no bullet, bold or trailing punctuation, and the section holds one `Verdict:` line (two count as vacuous):
      - `Verdict: exercised` | `Verdict: vacuous` | `Verdict: not exercised` | `Verdict: no runtime surface`. Exactly one, verbatim.
      - `Would have shown: <what the check prints or does when the change is broken, or the pre-change run's output>`. Required when the verdict is `exercised`. A check you can't fill this line for is `vacuous`.
+     A `refuted` outcome (rule 15) needs no PR: the conductor reads `## Outcome` before it looks for one.
    - `## PR` (number + head SHA)
    - `## Needs conductor` (lettered asks only) and `## Ratify` (decisions you made that you want confirmed)
    - `## Debrief` — two headings, both required, "None" is an answer and a missing heading is not:

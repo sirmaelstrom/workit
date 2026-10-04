@@ -137,6 +137,24 @@ function waves(orchestrator) {
   return byId;
 }
 
+// A WP's tier: what it declares, not what it quotes. Fenced blocks, `>` lines and inline
+// code spans are dropped first (skills/spec-validate/scripts/validate.mjs does the same);
+// the value is the first token after the label and must be T0, T1 or T2. No declaration
+// is T1; a value outside the three, or two different values, is a parse error.
+function reviewTier(text, where) {
+  let fence = null;
+  const prose = text.split(/\r?\n/).filter((line) => {
+    const mark = /^\s*(```|~~~)/.exec(line)?.[1];
+    if (mark && (!fence || fence === mark)) { fence = fence ? null : mark; return false; }
+    return !fence && !/^\s*>/.test(line);
+  }).map((line) => line.replace(/`[^`\n]*`/g, '')).join('\n');
+  const values = new Set([...prose.matchAll(/\*\*Review tier:\*\*\s*(\S*)/g)].map((match) => match[1].replace(/[,;.]$/, '')));
+  const bad = [...values].find((value) => !/^T[012]$/.test(value));
+  if (bad !== undefined) throw new ConductError(2, `${where}: **Review tier:** value "${bad}" is not T0, T1 or T2`);
+  if (values.size > 1) throw new ConductError(2, `${where}: conflicting **Review tier:** declarations (${[...values].join(', ')})`);
+  return values.size ? [...values][0] : 'T1';
+}
+
 export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(path, 'utf8'), list = readdirSync } = {}) {
   const dir = join(workshopDir, 'work-packages');
   const orchestrator = read(join(dir, '_orchestrator.md'));
@@ -150,10 +168,10 @@ export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(p
     if (!heading) throw new ConductError(2, `${specPath} has no "# WP-<n>: <name>" heading`);
     const id = heading[1];
     if (!waveOf.has(id)) throw new ConductError(2, `${id} is not in the orchestrator's ## Wave Plan`);
-    const tier = /\*\*Review tier:\*\*\s*(T\d)\b/.exec(text);
+    const tier = reviewTier(text, id);
     return {
       id, name: rows.get(id)?.name || heading[2].trim(), specPath, wave: waveOf.get(id), files: parseFiles(text, id),
-      precondition: fieldText(lines, 'Precondition') ?? '', tier: tier ? tier[1] : 'T1',
+      precondition: fieldText(lines, 'Precondition') ?? '', tier,
       model: rows.get(id)?.model ?? 'opus', runtimeExercise: fieldText(lines, 'Runtime exercise') ?? '',
     };
   });

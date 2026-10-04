@@ -20,6 +20,7 @@ import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'nod
 import { fileURLToPath } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
+import { parseWorkPackages } from '../../conduct/scripts/lib/schedule.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VALIDATOR = join(__dirname, '..', 'scripts', 'validate.mjs');
@@ -442,6 +443,105 @@ test('conductor fields: a Create/Modify bullet after the next field label is not
   const { status, out } = validateWp(stray);
   assert.equal(status, 1, 'the Files list ends at the next **<Field>:** label, so a later bullet does not count');
   assert.match(out, /\*\*Files:\*\* has no bullet/);
+});
+
+// --- a quoted tier is not a declaration; Files parity with the scheduler (workit#155 C1-2, C1-3, C1-12) ---
+
+const REAL_TIER = '**Review tier:** T1\n\n';
+const withTier = (tier) => COV_WP.replace(REAL_TIER, tier);
+
+test('tier: a fenced, inline-code or quoted tier alone is not a declaration', () => {
+  for (const quoted of ['```\n**Review tier:** T0\n```\n\n', 'Example: `**Review tier:** T0`\n\n', '> **Review tier:** T0\n\n']) {
+    const { status, out } = validateWp(withTier(quoted));
+    assert.equal(status, 1, `quoted tier must not satisfy the field:\n${quoted}`);
+    assert.match(out, /Missing \*\*Review tier:\*\* field/);
+  }
+});
+
+test('tier: a quoted T0 before a real T2 leaves the real declaration standing', () => {
+  const { status, out } = validateWp(withTier('```\n**Review tier:** T0\n```\n\n> **Review tier:** T0\n\n**Review tier:** T2\n\n'));
+  assert.equal(status, 0, `the real T2 is the declaration, got:\n${out}`);
+});
+
+test('tier: two different real declarations are an error naming both; an example token is not a value', () => {
+  const conflict = validateWp(withTier('**Review tier:** T0\n\n**Review tier:** T2\n\n'));
+  assert.equal(conflict.status, 1);
+  assert.match(conflict.out, /Conflicting \*\*Review tier:\*\* declarations: T0 and T2/);
+  const example = validateWp(withTier('**Review tier:** T0|T1|T2\n\n'));
+  assert.equal(example.status, 1, 'T0|T1|T2 is the grammar, not a tier');
+  assert.match(example.out, /value "T0\|T1\|T2" is not T0, T1 or T2/);
+});
+
+test('files: a same-line **Files:**- Modify bullet is not counted (the scheduler does not count it)', () => {
+  const { status, out } = validateWp(COV_WP.replace('**Files:**\n- Modify `src/thing.ts`.', '**Files:**- Modify `src/thing.ts`.'));
+  assert.equal(status, 1);
+  assert.match(out, /\*\*Files:\*\* has no bullet/);
+});
+
+test('files: absolute, drive, escaping and empty paths are errors (the scheduler refuses them)', () => {
+  for (const bad of ['/etc/thing.ts', 'C:/x/thing.ts', 'C:\\x\\thing.ts', '../outside.ts', 'a/../../outside.ts', ' ', '{ok.ts,/abs.ts}']) {
+    const { status, out } = validateWp(COV_WP.replace('- Modify `src/thing.ts`.', `- Modify \`${bad}\``));
+    assert.equal(status, 1, `path "${bad}" must be refused`);
+    assert.match(out, /\*\*Files:\*\* paths must be repo-relative/);
+  }
+  assert.equal(validateWp(COV_WP.replace('- Modify `src/thing.ts`.', '- Modify `lib/{a,b}.mjs`\n- Create `docs/`')).status, 0, 'brace groups and directories are fine');
+});
+
+test('colon-outside labels get a diagnostic naming the required spelling', () => {
+  const files = validateWp(COV_WP.replace('**Files:**\n', '**Files**:\n'));
+  assert.equal(files.status, 1);
+  assert.match(files.out, /"\*\*Files\*\*:" has its colon outside the bold; \/conduct reads only "\*\*Files:\*\*"/);
+  const tier = validateWp(COV_WP.replace('**Review tier:** T1', '**Review tier**: T1'));
+  assert.match(tier.out, /"\*\*Review tier\*\*:" has its colon outside the bold/);
+  const exercise = validateWp(COV_WP.replace('**Runtime exercise:**', '**Runtime exercise**:'));
+  assert.match(exercise.out, /"\*\*Runtime exercise\*\*:" has its colon outside the bold/);
+});
+
+// Parity: the validator and the scheduler (skills/conduct/scripts/lib/schedule.mjs) read the same WP.
+// Test-only import across skills; production code in neither skill imports the other.
+function parity(wpText) {
+  const dir = makeCoverageWorkshop({ wp: wpText });
+  writeFileSync(join(dir, 'work-packages', '_orchestrator.md'), [
+    '# O', '', '## Wave Plan', '', 'Wave 1: [WP-01: x]', '', '## Gate Commands', '', 'Wave 1: npm test', '',
+    '## Package Inventory', '', '| Package | Wave | Project | Spec | Model |', '|---|---|---|---|---|',
+    '| WP-01: x | 1 | svc-a | [wp-01.md](wp-01.md) | - |', '', 'Musts: minimal.', '',
+  ].join('\n'));
+  const validator = runValidator(dir, { env: NO_ROOT });
+  try {
+    return { validator, wp: parseWorkPackages(dir)[0] };
+  } catch (error) {
+    return { validator, error: error.message };
+  }
+}
+
+test('parity: a WP the validator accepts, the scheduler reads with files and the declared tier', () => {
+  for (const [name, text, tier] of [
+    ['complete', COV_WP, 'T1'],
+    ['quoted T0 before a real T2', withTier('```\n**Review tier:** T0\n```\n\n**Review tier:** T2\n\n'), 'T2'],
+    ['mid-line tier', COV_WP.replace(REAL_TIER, '').replace('**Precondition:**', '**Execution:** review-needed · **Review tier:** T0 (docs)\n\n**Precondition:**'), 'T0'],
+  ]) {
+    const { validator, wp, error } = parity(text);
+    assert.equal(validator.status, 0, `${name}: validator`);
+    assert.equal(error, undefined, `${name}: scheduler parse`);
+    assert.deepEqual([wp.files, wp.tier], [['src/thing.ts'], tier], name);
+  }
+});
+
+test('parity: a WP the validator rejects, the scheduler also refuses or reads as having no file set or fenced tier', () => {
+  const sameLine = parity(COV_WP.replace('**Files:**\n- Modify `src/thing.ts`.', '**Files:**- Modify `src/thing.ts`.'));
+  assert.equal(sameLine.validator.status, 1);
+  assert.deepEqual(sameLine.wp.files, [], 'the scheduler reads no file set from a same-line bullet');
+  for (const bad of ['/etc/thing.ts', 'C:/x/thing.ts', '../outside.ts', ' ']) {
+    const result = parity(COV_WP.replace('- Modify `src/thing.ts`.', `- Modify \`${bad}\``));
+    assert.equal(result.validator.status, 1, `validator refuses "${bad}"`);
+    assert.match(result.error ?? '', /is not a path inside the repository/, `scheduler refuses "${bad}"`);
+  }
+  const fenced = parity(withTier('```\n**Review tier:** T0\n```\n\n'));
+  assert.equal(fenced.validator.status, 1);
+  assert.equal(fenced.wp.tier, 'T1', 'the scheduler does not take the fenced T0');
+  const conflict = parity(withTier('**Review tier:** T0\n\n**Review tier:** T2\n\n'));
+  assert.equal(conflict.validator.status, 1);
+  assert.match(conflict.error ?? '', /conflicting \*\*Review tier:\*\* declarations/);
 });
 
 test('constraint coverage: a declared tag referenced nowhere is named in the warning', () => {

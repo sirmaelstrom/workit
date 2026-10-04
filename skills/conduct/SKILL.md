@@ -1,6 +1,6 @@
 ---
 name: conduct
-description: "Take a stated goal end to end: spec, parallel lanes, review, merge, analysis, in two touches. Trigger: /conduct, 'take this goal end to end'. Not for one quest (pickup) or a queue (burn-down)."
+description: "Take a goal end to end: spec, parallel lanes, review, merge, analysis, two touches. Trigger: /conduct. Not for one quest (pickup) or a queue (burn-down)."
 ---
 
 # Conduct — take a stated goal end to end
@@ -28,25 +28,33 @@ You drive a one-shot state machine, `${CLAUDE_SKILL_DIR}/scripts/conduct.mjs`. E
 2. **Perform the action.** Every action has an `id`, a `kind`, an `instruction` a person could follow, and an `expects` field. What you do depends on `kind`:
    - `shell`: run its `command` argv exactly as given, from `cwd` and with `env` added when present. Record `{ "code": <exit>, "stdout": "…", "stderr": "…" }`. The `lane`, `land` and `analyze` verbs (`lane spawn`, `lane check`, `land gate`, `land merged`, `analyze`) reach you only this way: `next` never runs a program, so every check is a `shell` action whose printed result you record. `land gate` exits 6 while CI is still running; that is a wait.
    - `agent-tool`: call the named MCP `tool` with `args` and record its raw JSON result. These are emitted only for an adapter that is on.
-   - `skill`: invoke the named skill with `skillArgv`, one argument per element (`skillArgs` is its display form). For `/spec`, record the JSON its `expects` names, composed from its report.
+   - `skill`: invoke the named skill with `skillArgv`, one argument per element (`skillArgs` is its display form), **from the target repo's root** (cwd = the run's `--repo`): `/spec` takes its project from the cwd and doesn't ask. For `/spec`, record the JSON the action's `instruction` describes, composed from its report: `depth`, `workshopDir`, `reviewLevel`, and the `gateCommand` (depth `none` or `lite`) or the `wps` (depth `deep`) when the instruction names them. `expects.fields` lists only the minimum.
    - `author`: write the file at `outPath`: from `template` with the `slots` filled, or as the instruction describes (the grant at `touches/1-grant.json` from the operator's (c) text, a ruling at `rulings/<wp>-<n>.json` for a lane's question, a lane brief, an amendment). Record `{}`.
    - `inspect`: the one judgment step at the merge gate. Run the diff argv in `command` (the post-cap tail: commits added after the last review), read it against the findings the action names, and record `{ "verdict": "addresses-findings" | "unrelated-change", "tail": "<the action's tail>", "head": "<the action's head>" }`. `unrelated-change` holds the PR.
    - `touch`: stop and tell the operator what the instruction says. Record `{}` after they have answered; an unanswered touch returns the same action with `answered: false`.
    - `wait`: wait `waitMs`, record `{}`, then run `next`.
    - `done`: the run is over. A `done` action is never recorded.
-3. **Record it.** `conduct.mjs record --run <dir> --action <id> --result '<json>'` (or `--result-file <path>`). It prints `{ ok, phase, action }`, the next action: loop to step 2. Re-recording the last recorded id is a no-op; any other id that isn't the pending one is exit 5. `--manual` marks a step you did by hand, so the analysis counts it as crossed by hand rather than owned by the skill. Exit 2 is an invalid result; fix it and record again. Exit 3 is a refused answer, and the next action re-files the touch.
+3. **Record it.** `conduct.mjs record --run <dir> --action <id> --result '<json>'` (or `--result-file <path>`). It prints `{ ok, phase, action }`, the next action: loop to step 2. Re-recording the last recorded id is a no-op; any other id that isn't the pending one is exit 5. `--manual` marks a step you did by hand, so the analysis counts it as crossed by hand rather than owned by the skill. Exit 2 is an invalid result; fix it and record again. Exit 3 is a refused answer, and the next action re-files the touch. **A failure that prints `recorded: <id>`** (exit 1, or the failing step's own code) means the record landed durably and a later step failed: don't record again with a different result. Run `next` (or re-send the same record, a no-op replay) to get the next action.
 4. **Resume.** `conduct.mjs next --run <dir>` returns the pending action again. `conduct.mjs status --run <dir>` prints a summary.
 
-**A new plugin root.** After a self-hosted release (§ Self-hosted runs) a verb can exit 2 naming a new plugin root. Re-run it with that root's `skills/conduct/scripts/conduct.mjs`, and re-read that root's SKILL.md, in particular its close section: the text you loaded is the old version.
+**Exit 4** means this installed version lacks a phase handler or module the run needs (the verb names the path, e.g. `lib/analyze.mjs`): the later phases ship in a later version. Stop and report the path; don't write state by hand to get past it.
+
+**A new plugin root.** After a self-hosted release (§ Self-hosted runs) a verb can exit 2 naming a new plugin root. Re-run it with that root's `skills/conduct/scripts/conduct.mjs`, and re-read that root's SKILL.md before the analyze and showcase steps: the text you loaded is the old version.
+
+**Where a run lives.** The workshop is `<runs-root>/<slug>/` with `--runs-root`; else `<workspace>/data/outputs/workshops/<slug>/` under `WORKIT_WORKSPACE_ROOT` or the nearest ancestor of `--repo` holding both `projects/` and `data/`; else `~/.workit/runs/<slug>/`. The run dir is `<workshop>/run/`: `state.json`, `events.jsonl`, `touches/`, `rulings/`, the run's lane contract `_lane-contract.md`, per-WP lane briefs and reports (`lane-<wp>.md`, `lane-<wp>-report.md`), `reviews/`, `council/` and, at the end, `run-analysis.md`. `/spec` writes its workshop files beside it. Lane worktrees sit beside the repo, never in the run dir.
 
 ## Adapters
 
 The **core** runs with `git`, `gh` and one lane-agent CLI. An adapter replaces a core mechanism with a richer one when present.
 
-- **Declared by you.** A script can't see your MCP tools, so pass `--adapter spine` only when `spine_receipt` and `spine_author` are callable in your own tool list, `--adapter council` only for `council_review`, `--adapter kb` only for `kb_search`, and `--adapter verify` only when the workit `verify` skill covers the repo's surface. Intake records each with its evidence (`declared`).
-- **Probed.** `intake` probes herdr (`HERDR_ENV=1` and `herdr agent list` exits 0; used only for a repo inside a projects tree), `notify` and `spend` (their env command is set and resolves), and the agent CLIs.
+- **Declared by you.** A script can't see your MCP tools, so declare an adapter only when **every** tool it needs is callable in your own tool list; a partial set means the adapter isn't declared. Intake records each declaration with its evidence (`declared`).
+  - `spine`: `spine_quest`, `spine_update`, `spine_receipt`, `spine_author`.
+  - `council`: `council_review`, `council_synthesize`, `council_challenge`.
+  - `kb`: `kb_search`, `kb_save`.
+  - `verify`: the workit `verify` skill, when it covers the repo's surface.
+- **Probed.** `intake` probes herdr (`HERDR_ENV=1` and `herdr agent list` exits 0; used only for a repo inside a projects tree), `notify` and `spend`, and the agent CLIs. `notify` and `spend` are optional shell strings in `WORKIT_NOTIFY_CMD` and `WORKIT_SPEND_CMD`; each is on when set and its program resolves, and off otherwise (on Windows a string holding a double quote is refused). `WORKIT_NOTIFY_CMD` runs after a merge and receives the PR number, the merge sha and a revert command in `WORKIT_NOTIFY_PR`, `WORKIT_NOTIFY_SHA` and `WORKIT_NOTIFY_REVERT`. `WORKIT_SPEND_CMD` is run with the run's start time (ISO) appended and prints the USD spent since then.
 - **`--no-adapter <name>`** forces the core path for one adapter; the names are `herdr`, `notify`, `spend`, `spine`, `council`, `kb` and `verify`. For a run on the core path alone, declare none and pass `--no-adapter herdr --no-adapter notify --no-adapter spend`. `claude` and `codex` are agents, not adapters; `--no-adapter claude` is a usage error.
-- **kb has no script path.** With kb declared, run `kb_search` on the goal at intake and `kb_save` of the run's decision record at close, as your own steps.
+- **kb has no script path.** With kb declared, run `kb_search` on the goal at intake and, once the showcase is answered, `kb_save` of the run's decision record (what the run decided and why, the alternatives it rejected, and the run dir), as your own steps.
 - **spine needs `--anchor`.** Choose or author the goal's quest first, then run intake with its id.
 
 ## Touches
@@ -64,13 +72,13 @@ The **core** runs with `git`, `gh` and one lane-agent CLI. An adapter replaces a
 
 > **Runtime verification is part of done.** A change that alters runtime behavior is exercised at runtime before the PR boundary, and the report quotes the command and what was observed. A runtime check must be able to fail: say what it would have shown if the change were broken, or run it once against the pre-change tree — otherwise it is vacuous and is reported as such. Where the claim is visual, one screenshot per claim, of the critical state only; evidence is a few decisive pictures, never a gallery. Code-only verification of a runtime change is reported as **not exercised at runtime**, never as done.
 
-Every lane brief carries this rule. Each WP's `**Runtime exercise:**` field names the surface (a CLI run against a real input, a service probed, a page loaded, or `none: <why>`) and the check; an empty field means the lane names the surface itself. The lane writes the evidence under `## Runtime exercise` in its report, with a `Verdict:` line and, for `exercised`, a `Would have shown:` line. A missing section, `not exercised` for a WP that names a surface, or a `vacuous` check (unless the WP says `none`) fails the lane's check, and the lane gets an amendment before review. The workit `verify` skill is an optional adapter: when it covers the repo's surface, a WP's runtime exercise may name it, and its verdict artifact is the evidence.
+Every lane brief carries this rule. Each WP's `**Runtime exercise:**` field names the surface (a CLI run against a real input, a service probed, a page loaded, or `none: <why>`) and the check; an empty field means the lane names the surface itself, and it doesn't authorize `no runtime surface`: only a field that begins `none:` does. The lane writes the evidence under `## Runtime exercise` in its report, with a `Verdict:` line and, for `exercised`, a `Would have shown:` line. A missing section, `not exercised` for a WP that names a surface, or a `vacuous` check (unless the WP says `none`) fails the lane's check, and the lane gets an amendment before review. The workit `verify` skill is an optional adapter: when it covers the repo's surface, a WP's runtime exercise may name it, and its verdict artifact is the evidence.
 
 ## Self-recovery before a blocked stop
 
 Try these first. A blocked touch is for what they can't settle.
 
-- **A failed review seat:** re-run it once; then use a non-Grok seat outside the author's family.
+- **A failed review seat:** re-run it once; then use a seat outside the author's model family, never one the operator excluded.
 - **Red CI:** name the oracle that failed, and rerun a flake. CI still running is a `wait`, never a failure.
 - **A stuck lane:** read its pane or log, re-arm the wait, then amend. A lane keeps its slot and its files until its process is observed exited, so don't start another WP on its files while it runs.
 - **A harness dialog** (a `block` with cause `dialog`): the verb re-polls once after about a minute, then blocks. **Never answer a harness dialog yourself**: not by sending keys, not by approving. It goes to the operator in the blocked touch.

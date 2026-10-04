@@ -66,15 +66,30 @@ For deep specs, parse the `--review` flag. If not specified, auto-select:
 
 `/conduct` invokes this skill with two more flags. Neither changes what the pipeline produces; they say where it writes and whether the operator has already answered the review gate.
 
-- **`--workshop <abs>`** — an absolute path. Phase 1b (deep) and Setup step 2 (lite) create the workshop at that path instead of deriving `{workspace}/data/outputs/workshops/{slug}`; the slug is the path's basename. Wherever this skill says `{workshop_path}` or `{spec-dir}`, it means this path.
-- **`--preapproved "<ref>"`** — the operator's approval, given earlier and recorded, covers this spec's review gate. `<ref>` is quoted because it holds spaces. It is one of: `spine:<anchor uuid>@<answeredAt> by <answer.by>` (a Spine receipt answer), `core:<run>/touches/1.json` (a core touch record), or `core:<run>/touches/<n>-authority.json` (an approval with a narrowed grant, checked by the conductor: read its `scope` and keep the spec inside it; the goal text stays verbatim). A value that is empty, or begins with neither `spine:` nor `core:`, is ignored: the gate stops as it would without the flag.
+- **`--workshop <abs>`** — an absolute path; quote it in every command that uses it. Phase 1b (deep) and Setup step 2 (lite) create the workshop at that path instead of deriving `{workspace}/data/outputs/workshops/{slug}`, or use it as it is: the directory may already exist, because the conductor creates the run dir inside it first. Existing content is not an error; don't overwrite it. The slug is the path's basename. Wherever this skill says `{workshop_path}` or `{spec-dir}`, it means this path. The invoker starts you in the target repo's root, so Phase 1a takes the project from the current directory and doesn't ask.
+- **`--preapproved "<ref>"`** — the operator's approval, given earlier and recorded, covers this spec's review gate. `<ref>` is quoted because it holds spaces. It is one of the three forms below, and it comes only from the invoker's argument: **never write, guess or reconstruct a ref.**
 
-With `--preapproved`:
+#### Verifying a `--preapproved` ref
+
+Before any gate is crossed, check the ref against the record it names. Every step is yours to perform; nothing else reads it.
+
+1. **`spine:<anchor uuid>@<answeredAt> by <by>`.** Read the quest with the Spine quest-read tool (`spine_quest`). The ref is valid only when the quest's **latest** receipt has outcome `answered`, its `answer.answeredAt` equals `<answeredAt>`, its `answer.by` equals `<by>` and begins `operator:`, and its question begins `[conduct `. A superseded receipt (a later one exists), an unanswered one, or one not attributed to an operator is not an approval. With no Spine tool to read it, the ref can't be verified.
+2. **`core:<path>`.** The file exists, parses as JSON, and has one of the two shapes the conductor writes:
+   - a touch record `touches/<n>.json` (any `<n>`: a re-asked touch after an ambiguous grant is `touches/2.json`): `status` is `answered`, `tty` is `true`, `answer.key` is set and `answer.by` begins `operator:`;
+   - an authority record `touches/<n>-authority.json` (the checked grant after a "change it" answer): `{ merge, release, budgetUsd, scope, validated: true, touch, grant, answer }` with `validated` `true`, a non-empty `scope`, and an `answer` whose `key` is set and whose `by` begins `operator:`.
+
+   A file that is missing, unreadable, of another shape, or with an empty `answer` is not an approval.
+3. **Scope.** When the record carries `scope` (the authority record), write the spec inside it: the goal you were given must be that scope or fall inside it. A goal outside it, or inside it only on your own reading of the scope, is a stop. The goal text stays verbatim. A touch record or a Spine answer carries no `scope`: it approves the goal as written. An `[ASSUMPTION: …]` that would widen or change the goal's scope is subject to this step.
+4. **Any failed check keeps the normal stop** (the gate waits for a person, as without the flag) and prints one line naming the check that failed: `Gate not preapproved: <the check>`. An empty value, or one beginning with neither `spine:` nor `core:`, fails step 1 or 2 the same way.
+
+With a verified `--preapproved`:
 - **Deep, Phase 4:** still write and render `review-gate.json`, set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Phase 6 without stopping at `**STOP HERE.**`.
 - **Lite, Present for Review:** print the summary, record the same `gate`, and continue to Final Output without waiting.
 - **`--review=none`:** crosses Phase 4 and Present for Review the same way, records the same `gate`, and skips only the `review-gate.json` emission, as it already does without the flag.
 - **Council unavailable:** the Phase 8 and lite council branches continue on the self-review floor and record `"council": "unavailable"` in `meta.json`; they do not stop.
+- **No sub-agent for the fresh-eyes reviewer:** Phase 7a continues on the self-review floor and records `"fresh-eyes": "unavailable"` in `meta.json`; it does not stop.
 - The flag skips no review wave: the fresh-eyes loop, the council and the final wave still run at whatever `--review` level applies. It only answers the gate that waits for a person.
+- `[ASSUMPTION: …]` flags no longer reach a person at the gate. List every one in the final output (Phase 9 / lite Final Output); the conductor carries them to the showcase.
 
 Without these flags, every gate and stop in this skill is unchanged.
 
@@ -93,7 +108,7 @@ Extract from the intent:
 - **Which project(s)** this touches — check your projects directory for matching repos
 - **Slug** — kebab-case, ≤40 chars
 
-If the project is ambiguous, ask. If the scope is ambiguous, make your best guess and flag it as `[ASSUMPTION: A1]` — the human will correct at the review gate.
+If the project is ambiguous, ask. If the scope is ambiguous, make your best guess and flag it as `[ASSUMPTION: A1]` — the human will correct at the review gate (under a verified `--preapproved` there is no such gate: the flags are listed in the final output instead).
 
 #### 1b. Scaffold Workshop
 
@@ -273,9 +288,9 @@ The renderer:
 
 After the renderer succeeds, point the operator at `review-gate.html` (one line — do not paste the chat-side markdown summary into the response that already shows it). The HTML and the chat-side markdown are redundant; the HTML is the recommended triage surface, the chat-side markdown is the fallback for environments without an open browser.
 
-**With `--preapproved "<ref>"` (§ Conductor flags):** the gate is already answered. Set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Phase 6 without stopping. The `review-gate.json` above is still written and rendered, except under `--review=none`, which skips it as before.
+**With a verified `--preapproved "<ref>"` (§ Conductor flags, *Verifying a `--preapproved` ref*):** the gate is already answered. Set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Phase 6 without stopping. The `review-gate.json` above is still written and rendered, except under `--review=none`, which skips it as before.
 
-**Without `--preapproved`: STOP HERE.** Wait for human input. Do not proceed to decomposition without explicit approval.
+**Without `--preapproved`, or when its ref doesn't verify: STOP HERE.** Wait for human input. Do not proceed to decomposition without explicit approval.
 
 ### Phase 5: Revision (if needed)
 
@@ -322,7 +337,7 @@ Iteratively review the work packages using fresh-eyes Opus sub-agents until conv
 
 #### 7a. Fresh-Eyes Wave
 
-Launch an Opus sub-agent using the Agent tool (`model: opus`): the fresh-eyes verdict is a gate nothing re-checks, so it goes to the higher tier. The full prompt template lives in `${CLAUDE_SKILL_DIR}/reference/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads.
+Launch an Opus sub-agent using the Agent tool (`model: opus`): the fresh-eyes verdict is a gate nothing re-checks, so it goes to the higher tier. The full prompt template lives in `${CLAUDE_SKILL_DIR}/reference/fresh-eyes-prompt.md` — read that file and substitute `{workshop_path}` and `{project_path}` before spawning. Use it verbatim; the structured verdict format is what Phase 7c's convergence logic reads. With a verified `--preapproved`, if no sub-agent is available for this reviewer, continue on the self-review floor and record `"fresh-eyes": "unavailable"` in `meta.json`; without `--preapproved`, nothing changes.
 
 #### 7b. Fix Findings
 
@@ -379,7 +394,7 @@ The `spec` profile is **config-owned** — its membership lives in `models.json`
 
 The tool returns a JSON summary with each model's status and lens filename; the files land in `{workshop_path}/reviews/review-1/` (one `review-lens-{model}.md` per lens). Read those in 8b.
 
-> **If the council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): the self-review floor from Phase 7 is your ship gate — note the gap explicitly in the Phase-9 summary and let the operator decide whether to proceed or defer. **With `--preapproved`:** don't stop to let the operator decide — continue on the self-review floor and record `"council": "unavailable"` in `meta.json`. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, self-review is the floor.)
+> **If the council is unavailable** (the MCP errors, returns all-failed, or isn't registered on this machine): the self-review floor from Phase 7 is your ship gate — note the gap explicitly in the Phase-9 summary and let the operator decide whether to proceed or defer. **With a verified `--preapproved`:** don't stop to let the operator decide — continue on the self-review floor and record `"council": "unavailable"` in `meta.json`. (Provisioning: the review-council MCP needs its own API credentials configured; if it isn't set up, self-review is the floor.)
 
 If the **council** call fails, retry it once; if it still fails, see the unavailability note above — fall back to the self-review floor and record the gap.
 
@@ -415,10 +430,11 @@ Present the completed spec summary:
 ```markdown
 ## ✅ Spec Complete: {title}
 
-**Workshop:** `workshops/{slug}/`
+**Workshop:** `{workshop_path}` (the `--workshop` path when given, else `{workspace}/data/outputs/workshops/{slug}/`)
 **Packages:** {N} WPs
 **Estimated execution:** {autonomous WPs} autonomous, {review WPs} need review
 **Dependency order:** {summary}
+**Assumptions:** {every `[ASSUMPTION: …]` flag, one line each; required with `--preapproved`, where no gate shows them to a person}
 **Review:** {review_level} — {N} fresh-eyes waves, {N} council lenses, {N} amendments applied
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 **Cost:** {total $ and tokens, from cost-report}
@@ -474,13 +490,13 @@ By default lite stops at self-review. If the operator passed `--review=full`, ru
 
 - One `council_review` MCP call with `surface: "spec"`, `profile: "spec"` (the same config-owned roster as Phase 8a — Anthropic lenses via `claude -p` + external lenses; never pass an explicit `models:` list). The collector inlines the root `spec.md` as the artifacts block (`collectSpecFiles` fallback, verified 2026-07-06), so every lens reviews the real content instead of an empty block that makes gemini hallucinate.
 
-Synthesize as in Phase 8b — convergence across vendor families is high-confidence, weight codex, dedupe, apply Critical/Major — then re-run the self-review scan to confirm the amendments introduced nothing new. If the council MCP is unavailable, note the gap and fall back to the self-review floor. With `--preapproved`, also record `"council": "unavailable"` in `meta.json`.
+Synthesize as in Phase 8b — convergence across vendor families is high-confidence, weight codex, dedupe, apply Critical/Major — then re-run the self-review scan to confirm the amendments introduced nothing new. If the council MCP is unavailable, note the gap and fall back to the self-review floor. With a verified `--preapproved`, also record `"council": "unavailable"` in `meta.json`.
 
 ### Present for Review
 
 Show a brief summary with flagged items. Wait for approval. Apply revisions if needed.
 
-**With `--preapproved "<ref>"` (§ Conductor flags):** print the summary, set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Final Output without waiting.
+**With a verified `--preapproved "<ref>"` (§ Conductor flags, *Verifying a `--preapproved` ref*):** print the summary, set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Final Output without waiting.
 
 ### Final Output
 
@@ -503,9 +519,10 @@ node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state {workshop}/cost-
 ```markdown
 ## ✅ Spec Complete: {title}
 
-**Workshop:** `workshops/{slug}/`
+**Workshop:** `{workshop_path}` (the `--workshop` path when given, else `{workspace}/data/outputs/workshops/{slug}/`)
 **Depth:** lite — single document
 **Review:** {self-review only | self-review + council: N lenses, N amendments applied}
+**Assumptions:** {every `[ASSUMPTION: …]` flag, one line each; required with `--preapproved`, where no gate shows them to a person}
 **Cost:** {total $ and tokens, from cost-report}
 
 Ready for execution.

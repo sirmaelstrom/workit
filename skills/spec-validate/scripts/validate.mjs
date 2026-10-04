@@ -18,7 +18,7 @@
  */
 
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { join, basename, isAbsolute } from 'node:path';
+import { join, basename, isAbsolute, posix } from 'node:path';
 
 let workshopPath = null;
 let cliWorkspaceRoot = null;
@@ -639,30 +639,60 @@ function validateTargets(meta) {
 // is undispatchable by /conduct: no Files bullet parses to an empty file set, no tier
 // defaults silently, no runtime surface goes unnamed. Returns one message per problem.
 const CONDUCTOR_FIELD_COUNT = 3;
+
+// What a WP declares, not what it quotes: fenced blocks, `>` lines and inline code spans
+// are dropped before a tier is read. skills/conduct/scripts/lib/schedule.mjs does the same
+// (no import across skills; validate.test.mjs runs both parsers over the same WPs).
+function unquoted(text) {
+  let fence = null;
+  return text.split(/\r?\n/).filter((line) => {
+    const mark = /^\s*(```|~~~)/.exec(line)?.[1];
+    if (mark && (!fence || fence === mark)) { fence = fence ? null : mark; return false; }
+    return !fence && !/^\s*>/.test(line);
+  }).map((line) => line.replace(/`[^`\n]*`/g, '')).join('\n');
+}
+
+const expandBraces = (token) => {
+  const m = /\{([^{}]*)\}/.exec(token);
+  return m ? m[1].split(',').flatMap((alt) => expandBraces(token.slice(0, m.index) + alt + token.slice(m.index + m[0].length))) : [token];
+};
+
+// The scheduler refuses these paths: absolute, drive-qualified, escaping the repo, or empty.
+function badFilesPath(path) {
+  const slashed = path.trim().replace(/\\/g, '/');
+  const normal = posix.normalize(slashed || '.');
+  return /^[A-Za-z]:/.test(slashed) || slashed.startsWith('/') || normal === '..' || normal.startsWith('../') || normal === '.' || normal === './';
+}
+
 function conductorFieldProblems(content) {
   const problems = [];
   const lines = content.split(/\r?\n/);
   const labelLine = /^\*\*[^*]+:\*\*/;
+  // `**Files**:` (colon outside the bold) passes the core-field check but not /conduct's parser.
+  const spelled = (label) => (new RegExp(`^\\*\\*${label}\\*\\*:`, 'm').test(content) ? ` "**${label}**:" has its colon outside the bold; /conduct reads only "**${label}:**".` : '');
 
   // The label may share a line (`**Execution:** … · **Review tier:** T2 (…)`); the value is the first token after it.
-  const tier = /\*\*Review tier:\*\*\s*(\S*)/.exec(content);
-  if (!tier) problems.push('Missing **Review tier:** field (T0, T1 or T2).');
-  else if (!/^T[012](?!\w)/.test(tier[1])) problems.push(`**Review tier:** value "${tier[1]}" is not T0, T1 or T2.`);
+  const declared = [...unquoted(content).matchAll(/\*\*Review tier:\*\*\s*(\S*)/g)].map((m) => m[1].replace(/[,;.]$/, ''));
+  if (!declared.length) problems.push(`Missing **Review tier:** field (T0, T1 or T2).${spelled('Review tier')}`);
+  for (const value of new Set(declared)) if (!/^T[012]$/.test(value)) problems.push(`**Review tier:** value "${value}" is not T0, T1 or T2.`);
+  if (new Set(declared).size > 1) problems.push(`Conflicting **Review tier:** declarations: ${[...new Set(declared)].join(' and ')}.`);
 
   // A field's lines: its own line's text, then the lines up to the next field label or heading.
-  const fieldLines = (label, stop) => {
+  const fieldLines = (label, stop, ownLine) => {
     const start = lines.findIndex((l) => l.startsWith(`**${label}:**`));
     if (start < 0) return [];
     const rest = lines.slice(start + 1);
     const end = rest.findIndex(stop);
-    return [lines[start].slice(label.length + 5), ...(end < 0 ? rest : rest.slice(0, end))];
+    return [...(ownLine ? [lines[start].slice(label.length + 5)] : []), ...(end < 0 ? rest : rest.slice(0, end))];
   };
-  if (!fieldLines('Runtime exercise', (l) => labelLine.test(l) || /^#/.test(l)).join('').trim()) {
-    problems.push('Missing or empty **Runtime exercise:** field (a surface and a check, or "none: <why>").');
+  if (!fieldLines('Runtime exercise', (l) => labelLine.test(l) || /^#/.test(l), true).join('').trim()) {
+    problems.push(`Missing or empty **Runtime exercise:** field (a surface and a check, or "none: <why>").${spelled('Runtime exercise')}`);
   }
-  if (!fieldLines('Files', (l) => labelLine.test(l)).some((l) => /^- (Create|Modify) [^`]*`[^`]+`/.test(l))) {
-    problems.push('**Files:** has no bullet beginning "- Create " or "- Modify " with a backticked path.');
-  }
+  // Only bullets on the lines after the label count, as in the scheduler: `**Files:**- Modify …` has none.
+  const bullets = fieldLines('Files', (l) => labelLine.test(l), false).filter((l) => /^- (Create|Modify) /.test(l)).map((l) => /`([^`]+)`/.exec(l)?.[1]);
+  if (!bullets.some(Boolean)) problems.push(`**Files:** has no bullet beginning "- Create " or "- Modify " with a backticked path on a line after the label.${spelled('Files')}`);
+  const bad = bullets.filter(Boolean).flatMap(expandBraces).filter(badFilesPath);
+  if (bad.length) problems.push(`**Files:** paths must be repo-relative (no absolute or drive path, no ".." escape, not empty): ${bad.map((p) => `"${p}"`).join(', ')}.`);
   return problems;
 }
 

@@ -81,7 +81,7 @@ Wave 3: npx tsc --noEmit && npx vitest run
 <!-- Keep this section in a conductor-run spec: `/conduct`'s scheduler reads WP file
      sets only from this form. Pattern: reference/patterns/work-package.md -->
 
-A WP's file set is read only from the bullet lines directly under its `**Files:**` label that begin `- Create ` or `- Modify `, taking the first backticked token on each such line. The list ends at the next line that begins with a `**<Field>:**` label. Brace groups expand (`lib/{a,b}.mjs` is two paths); a token ending in `/` is a directory. Every other backticked token is a reference, not a file the WP writes. Paths are repo-relative and written in full. Two WPs may run in parallel only when their file sets are disjoint, so a WP with no such bullet runs alone.
+A WP's file set is read only from the bullet lines directly under its `**Files:**` label that begin `- Create ` or `- Modify `, taking the first backticked token on each such line. The list ends at the next line that begins with a `**<Field>:**` label. Brace groups expand (`lib/{a,b}.mjs` is two paths); a token ending in `/` is a directory. Every other backticked token is a reference, not a file the WP writes. Paths are repo-relative and written in full. There is no `Delete` verb: write a deletion as `- Modify \`path\` (delete)` and a rename as two `- Modify` bullets (the old path, then the new one). Two WPs may run in parallel only when their file sets are disjoint, so a WP with no such bullet runs alone.
 
 <!-- ================================================================
      SPEC-LEVEL CONSTRAINTS (optional but recommended)

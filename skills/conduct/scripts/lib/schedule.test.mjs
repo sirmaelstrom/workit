@@ -164,6 +164,24 @@ test('parseWorkPackages: tier defaults to T1, a missing Model column to opus, a 
   assert.deepEqual([wp.tier, wp.model, wp.runtimeExercise], ['T1', 'opus', '']);
 });
 
+// A tier a WP quotes does not supply or lower its tier (workit#155 C1-2).
+const tierOf = (t, body) => parseWorkPackages(workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: `**Files:**\n- Create \`a.mjs\`\n\n${body}` } }))[0].tier;
+
+test('tier: a quoted tier does not count (fence, inline code, blockquote); a real declaration after it wins', (t) => {
+  assert.equal(tierOf(t, '```\n**Review tier:** T0\n```\n'), 'T1', 'a fenced tier alone is no declaration');
+  assert.equal(tierOf(t, 'Write `**Review tier:** T0|T1|T2` here.\n'), 'T1', 'an inline-code tier alone is no declaration');
+  assert.equal(tierOf(t, '> **Review tier:** T0\n'), 'T1', 'a quoted tier alone is no declaration');
+  assert.equal(tierOf(t, '```\n**Review tier:** T0\n```\n> **Review tier:** T0\nExample: `**Review tier:** T0`\n\n**Review tier:** T2\n'), 'T2', 'quoted T0 before a real T2: T2 wins');
+  assert.equal(tierOf(t, '**Execution:** review-needed · **Review tier:** T2 (adds tests) · **Lane model:** x\n'), 'T2', 'the mid-line form stands');
+});
+
+test('tier: two different real declarations, or a value outside T0|T1|T2, is a parse error', (t) => {
+  assert.throws(() => tierOf(t, '**Review tier:** T0\n\n**Review tier:** T2\n'), /conflicting \*\*Review tier:\*\* declarations \(T0, T2\)/);
+  assert.throws(() => tierOf(t, '**Review tier:** T3\n'), /value "T3" is not T0, T1 or T2/);
+  assert.throws(() => tierOf(t, '**Review tier:** T0|T1|T2\n'), /value "T0\|T1\|T2" is not T0, T1 or T2/);
+  assert.equal(tierOf(t, '**Review tier:** T2\n\n**Review tier:** T2,\n'), 'T2', 'the same value twice is one declaration');
+});
+
 const wp = (id, state, files, dependsOn = []) => ({ id, state, files, dependsOn });
 const run = (wps, lanesCap = 2, extra = {}) => ({ intent: { lanesCap }, wps, dispatchHalt: null, ...extra });
 const ids = (wps) => wps.map((item) => item.id);
