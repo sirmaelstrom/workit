@@ -613,7 +613,8 @@ test('action ids and seams (D18, D19.15)', async (t) => {
 });
 
 test('shell result shape (D18)', async (t) => {
-  const cases = [['exit0', { stdout: '' }], ['exit0', { code: 1, stdout: '', stderr: '' }], ['json', { code: 0, stdout: 'not json', stderr: '' }]];
+  // The no-code case expects valid JSON on stdout, so only the code check can refuse it.
+  const cases = [['json', { stdout: '{}' }], ['exit0', { code: 1, stdout: '', stderr: '' }], ['json', { code: 0, stdout: 'not json', stderr: '' }]];
   for (const [type, result] of cases) {
     const f = fixture(t);
     const runDir = seedRun(f);
