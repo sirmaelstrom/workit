@@ -434,9 +434,12 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
     const [added, deleted, ...path] = row.split(/\t/);
     return { path: path.join('\t'), lines: (Number(added) || 0) + (Number(deleted) || 0), binary: added === '-' };
   });
-  const production = rows.filter((row) => !trivialPath(row.path, notTrivial));
-  if (rows.length && !production.length) return { tail: `${key} (trivial)` };
-  const changes = production.map((row) => row.path).join(', ') || 'file modes';
+  const nonTrivial = rows.filter((row) => !trivialPath(row.path, notTrivial));
+  if (rows.length && !nonTrivial.length) return { tail: `${key} (trivial)` };
+  const changes = nonTrivial.map((row) => row.path).join(', ') || 'file modes';
+  // The cap and the inspection read production code; tests and fixtures are
+  // never trivial, and their fixes carry their own seen-failing controls.
+  const production = nonTrivial.filter((row) => !isTestPath(row.path) && !/(^|\/)(__fixtures__|fixtures|testdata)\//.test(norm(row.path)));
   if (anchor.scope !== 'delta') return { failure: `review does not cover head: tail ${key} changes ${changes}`, cause: 'review' };
   const listed = exec('git', ['-C', wt, 'rev-list', key]);
   if (listed.code !== 0) return { failure: `tail ${key} commits unreadable: ${first(listed.stderr)}`, cause: 'infra' };

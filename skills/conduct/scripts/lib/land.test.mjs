@@ -252,6 +252,11 @@ test('C1-1 post-cap bounds: more than 400 production lines, or a file outside th
   assert.deepEqual([big.ok, big.causes], [false, ['out-of-bounds']]);
   assert.match(gate(makeState(), postCapWp(inspected()), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/other.mjs'] }).failures.join(), /outside the WP's Files: lib\/other\.mjs/);
   assert.equal(gate(makeState(), postCapWp(inspected()), { ...TAIL, tailLines: 400 }).ok, true);
+  // Test lines do not count toward the cap, and a test file is still not trivial.
+  const withTest = gate(makeState(), postCapWp(inspected()), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/x.test.mjs'], tailLines: 300 });
+  assert.deepEqual([withTest.ok, withTest.unreviewedTail], [true, `${D}..${HEAD} (post-cap)`]);
+  assert.deepEqual(gate(makeState(), postCapWp(), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/x.test.mjs'] }).inspect.files, ['lib/x.mjs']);
+  assert.equal(gate(makeState(), olderReview(), { tailFiles: ['lib/x.test.mjs'] }).ok, false);
 });
 
 test('post-cap after an equivalent rebase: the tail is computed against the pre-rebase from', () => {
