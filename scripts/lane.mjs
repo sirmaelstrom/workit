@@ -2596,7 +2596,6 @@ export function claudeBackgroundWork(text, { signature = null, patterns = DEFAUL
 // or turn_aborted, written after the lane's last prompt.
 const ROLLOUT_HEAD_BYTES = 16 * 1024;
 const ROLLOUT_TAIL_BYTES = 256 * 1024;
-const ROLLOUT_SINCE_SLACK_MS = 60_000;
 const ROLLOUT_MAX_DAYS = 14;
 const TURN_EVENTS = new Set(['task_started', 'task_complete', 'turn_aborted']);
 
@@ -2637,11 +2636,14 @@ function rolloutDayDirs(root, sinceMs, nowMs) {
   return dirs;
 }
 
-// The newest rollout whose session_meta.cwd is the lane's worktree and which
-// began after the lane's start was requested. null when there is none yet.
+// The lane's own rollout: the EARLIEST interactive (codex-tui) session whose
+// session_meta.cwd is the lane's worktree and which began at or after the
+// lane's start was requested. Review seats and lenses run `codex exec` in the
+// same worktree (originator codex_exec), and any later session there began
+// after the lane's own, so neither the newest match nor a non-TUI session is
+// the lane. null when there is none yet.
 export function findCodexRollout(deps, lane) {
-  const anchor = lane.startRequestedAt ?? lane.promptedAt ?? null;
-  const sinceMs = anchor ? Date.parse(anchor) : NaN;
+  const sinceMs = lane.startRequestedAt ? Date.parse(lane.startRequestedAt) : NaN;
   if (!lane.path || !Number.isFinite(sinceMs)) return null;
   const fold = (value) => (deps.platform === 'win32' ? value.toLowerCase() : value);
   const want = fold(resolve(lane.path));
@@ -2654,7 +2656,7 @@ export function findCodexRollout(deps, lane) {
       continue;
     }
     for (const name of names) {
-      if (!/^rollout-.*\.jsonl$/.test(name) || (best && name <= best.name)) continue;
+      if (!/^rollout-.*\.jsonl$/.test(name) || (best && name >= best.name)) continue;
       const path = join(dir, name);
       let head;
       try {
@@ -2663,7 +2665,7 @@ export function findCodexRollout(deps, lane) {
         continue;
       }
       const firstLine = head.split('\n', 1)[0];
-      if (!firstLine.includes('"session_meta"')) continue;
+      if (!firstLine.includes('"session_meta"') || !firstLine.includes('"originator":"codex-tui"')) continue;
       const cwd = /"cwd":("(?:[^"\\]|\\.)*")/.exec(firstLine);
       const stamp = /"timestamp":"([^"]+)"/.exec(firstLine);
       if (!cwd || !stamp) continue;
@@ -2674,7 +2676,7 @@ export function findCodexRollout(deps, lane) {
         continue;
       }
       if (fold(resolve(cwdValue)) !== want) continue;
-      if (!(Date.parse(stamp[1]) >= sinceMs - ROLLOUT_SINCE_SLACK_MS)) continue;
+      if (!(Date.parse(stamp[1]) >= sinceMs)) continue;
       best = { name, path };
     }
   }

@@ -4512,15 +4512,16 @@ test('056de846: claudeBackgroundWork reads the status bar only — every variant
 // (AE lane ae-attr: task_started 02:14:11Z, a steer prompt 02:18:04Z,
 // task_complete 02:34:23Z, herdr `done` from 02:18Z).
 const rolloutLine = (timestamp, payload, type = 'event_msg') => JSON.stringify({ timestamp, type, payload });
-const sessionMeta = (cwd, timestamp) => JSON.stringify({
-  timestamp, type: 'session_meta', payload: { id: 'fixture', timestamp, cwd, base_instructions: { text: 'x'.repeat(4000) } },
+const sessionMeta = (cwd, timestamp, originator = 'codex-tui') => JSON.stringify({
+  timestamp, type: 'session_meta', payload: { id: 'fixture', timestamp, cwd, originator, base_instructions: { text: 'x'.repeat(4000) } },
 });
 // Codex files the rollout under its local date: 21:05 local on 10-03 is 02:05Z on 10-04.
-function writeRollout(f, cwd, lines, name = 'rollout-2026-10-03T21-05-01-fixture.jsonl', day = ['2026', '10', '03']) {
+function writeRollout(f, cwd, lines, name = 'rollout-2026-10-03T21-05-01-fixture.jsonl', day = ['2026', '10', '03'], meta = {}) {
   const dir = join(f.dir, 'codex-home', 'sessions', ...day);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, name);
-  writeFileSync(path, `${[sessionMeta(cwd, '2026-10-04T02:05:05.572Z'), ...lines].join('\n')}\n`, 'utf8');
+  const head = sessionMeta(cwd, meta.timestamp ?? '2026-10-04T02:05:05.572Z', meta.originator);
+  writeFileSync(path, `${[head, ...lines].join('\n')}\n`, 'utf8');
   return path;
 }
 const AE_TURN = [
@@ -4585,6 +4586,19 @@ test('4f55ea42: a turn end older than the last prompt is the previous turn, and 
   assert.equal(aborted.output.settle, 'rollout');
 });
 
+test('4f55ea42 review: a completed review session in the same worktree does not settle the lane\'s running turn', async (t) => {
+  const f = fixture(t);
+  seedLane(f, AE_LANE);
+  writeRollout(f, f.dir, AE_TURN);
+  const done = [rolloutLine('2026-10-04T02:19:00.000Z', { type: 'task_started' }), rolloutLine('2026-10-04T02:20:00.000Z', { type: 'task_complete' })];
+  writeRollout(f, f.dir, done, 'rollout-2026-10-03T21-18-30-lens.jsonl', undefined, { timestamp: '2026-10-04T02:18:30.000Z', originator: 'codex_exec' });
+  writeRollout(f, f.dir, done, 'rollout-2026-10-03T21-18-40-tui.jsonl', undefined, { timestamp: '2026-10-04T02:18:40.000Z' });
+  herdrDoneThroughout(f);
+  const result = await rolloutWait(f);
+  assert.equal(result.exit, 4, JSON.stringify(result.output));
+  assert.deepEqual([result.output.state, result.output.turnEvent], ['settled-turn-live', 'task_started']);
+});
+
 test('4f55ea42: no rollout for the worktree keeps the two-poll settle and says so', async (t) => {
   const f = fixture(t);
   seedLane(f, AE_LANE);
@@ -4646,13 +4660,16 @@ test('4f55ea42: findCodexRollout takes the newest rollout for this worktree begu
   };
   const lane = { path: f.dir, startRequestedAt: '2026-10-04T02:04:30.000Z' };
   assert.equal(findCodexRollout(deps, lane), null, 'no sessions dir at all');
-  const older = writeRollout(f, f.dir, AE_TURN, 'rollout-2026-10-03T21-05-01-fixture.jsonl');
-  writeRollout(f, join(f.dir, 'elsewhere'), AE_TURN, 'rollout-2026-10-03T21-30-00-other.jsonl');
-  assert.equal(findCodexRollout(deps, lane), older);
-  const newer = writeRollout(f, f.dir, AE_TURN, 'rollout-2026-10-04T01-00-00-newer.jsonl', ['2026', '10', '04']);
-  assert.equal(findCodexRollout(deps, lane), newer, 'the newest match wins, across day directories');
-  assert.equal(findCodexRollout(deps, { ...lane, startRequestedAt: '2026-10-04T02:10:00.000Z' }), null, 'a session begun before the lane start is another lane\'s');
-  assert.equal(findCodexRollout(deps, { path: f.dir }), null, 'no stamp, no scan');
+  writeRollout(f, join(f.dir, 'elsewhere'), AE_TURN, 'rollout-2026-10-03T21-04-50-other.jsonl', undefined, { timestamp: '2026-10-04T02:04:50.000Z' });
+  writeRollout(f, f.dir, AE_TURN, 'rollout-2026-10-03T21-04-55-exec.jsonl', undefined, { timestamp: '2026-10-04T02:04:55.000Z', originator: 'codex_exec' });
+  const own = writeRollout(f, f.dir, AE_TURN, 'rollout-2026-10-03T21-05-01-fixture.jsonl');
+  assert.equal(findCodexRollout(deps, lane), own, 'another cwd and a codex exec session are not the lane');
+  // A later interactive session in the same worktree, even under the next day's directory, is not the lane's.
+  writeRollout(f, f.dir, AE_TURN, 'rollout-2026-10-04T01-00-00-later.jsonl', ['2026', '10', '04'], { timestamp: '2026-10-04T06:00:00.000Z' });
+  assert.equal(findCodexRollout(deps, lane), own, 'the earliest session since the start is the lane\'s own');
+  assert.equal(findCodexRollout(deps, { ...lane, startRequestedAt: '2026-10-04T02:10:00.000Z' }), join(f.dir, 'codex-home', 'sessions', '2026', '10', '04', 'rollout-2026-10-04T01-00-00-later.jsonl'), 'a session begun before the lane start is another lane\'s');
+  assert.equal(findCodexRollout(deps, { path: f.dir, promptedAt: '2026-10-04T02:18:04.729Z' }), null, 'no start stamp, no scan');
+  const newer = own;
 
   // A last line still being written is skipped, not misread.
   const partial = `${readFileSync(newer, 'utf8')}{"timestamp":"2026-10-04T02:40:00Z","type":"event_msg","payload":{"type":"task_comp`;
