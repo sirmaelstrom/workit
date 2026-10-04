@@ -4685,3 +4685,90 @@ test('4f55ea42: findCodexRollout takes the earliest TUI rollout for this worktre
   assert.deepEqual(codexTurnState(deps, newer, null), { ended: false, event: 'task_started', at: '2026-10-04T02:14:11.531Z' });
   assert.equal(codexTurnState(deps, join(f.dir, 'missing.jsonl')), null);
 });
+
+// --- quest e8a1db7f: `lane resume` reads the same rollout `wait` does, once.
+const rolloutResume = (f, now = '2026-10-04T02:20:28Z') => runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], {
+  exec: f.exec, now: () => Date.parse(now), env: { CODEX_HOME: join(f.dir, 'codex-home') },
+});
+const herdrWaits = (f) => f.calls.filter((call) => call.args[0] === 'agent' && call.args[1] === 'wait');
+
+test('e8a1db7f: herdr reading done while the rollout\'s turn is running does not resume — exit 4 settled-turn-live', async (t) => {
+  const f = fixture(t);
+  seedLane(f, AE_LANE);
+  writeRollout(f, f.dir, AE_TURN);
+  f.responses.push(DONE_POLL, WORKING_READ);
+  const result = await rolloutResume(f);
+  assert.equal(result.exit, 4, JSON.stringify(result.output));
+  assert.deepEqual(
+    [result.output.state, result.output.turnEvent, result.output.turnEventAt],
+    ['settled-turn-live', 'task_started', '2026-10-04T02:14:11.531Z'],
+  );
+  assert.deepEqual(
+    [result.row.state, result.row.turnEvent, result.row.turnEventAt],
+    ['settled-turn-live', 'task_started', '2026-10-04T02:14:11.531Z'],
+  );
+  assert.equal(lastRow(f).state, 'settled-turn-live');
+
+  // A turn end older than the lane's last prompt is the previous turn.
+  const g = fixture(t);
+  seedLane(g, { ...AE_LANE, promptedAt: '2026-10-04T02:40:00.000Z' });
+  writeRollout(g, g.dir, [...AE_TURN, AE_COMPLETE]);
+  g.responses.push(DONE_POLL, WORKING_READ);
+  const stale = await rolloutResume(g, '2026-10-04T02:40:01Z');
+  assert.deepEqual([stale.exit, stale.output.state, stale.output.turnEvent], [4, 'settled-turn-live', 'task_complete']);
+});
+
+test('e8a1db7f: a task_complete or turn_aborted after the last prompt resumes, and the verdict names the rollout', async (t) => {
+  for (const [label, end] of [
+    ['task_complete', AE_COMPLETE],
+    ['turn_aborted', rolloutLine('2026-10-04T02:30:00.000Z', { type: 'turn_aborted', reason: 'interrupted' })],
+  ]) {
+    const f = fixture(t);
+    seedLane(f, AE_LANE);
+    writeRollout(f, f.dir, [...AE_TURN, end]);
+    f.responses.push(DONE_POLL, WORKING_READ);
+    const result = await rolloutResume(f, '2026-10-04T02:35:00Z');
+    assert.equal(result.exit, 0, `${label}: ${JSON.stringify(result.output)}`);
+    assert.deepEqual([result.output.state, result.output.settle, result.row.settleSource], ['done', 'rollout', 'rollout'], label);
+    assert.equal(result.row.turnEvent, undefined, label);
+  }
+});
+
+test('e8a1db7f: no rollout for the worktree keeps herdr\'s reading and says it rests on it alone', async (t) => {
+  const f = fixture(t);
+  seedLane(f, AE_LANE);
+  writeRollout(f, join(f.dir, 'some-other-worktree'), AE_TURN);
+  f.responses.push(DONE_POLL, WORKING_READ);
+  const result = await rolloutResume(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual([result.output.state, result.output.settle, result.row.settleSource], ['done', 'polls', 'polls']);
+
+  // A lane record from before 4f55ea42 (no start stamp) never scans.
+  const g = fixture(t);
+  seedLane(g);
+  writeRollout(g, g.dir, AE_TURN);
+  g.responses.push(DONE_POLL, WORKING_READ);
+  const legacy = await rolloutResume(g);
+  assert.deepEqual([legacy.exit, legacy.output.settle], [0, 'polls']);
+});
+
+test('e8a1db7f: resume stays one herdr wait and one pane read on the turn-live path', async (t) => {
+  const f = fixture(t);
+  seedLane(f, AE_LANE);
+  writeRollout(f, f.dir, AE_TURN);
+  // More herdr answers than a single pass consumes: a loop would take them.
+  for (let poll = 0; poll < 10; poll++) f.responses.push(DONE_POLL, WORKING_READ);
+  const result = await rolloutResume(f);
+  assert.equal(result.output.state, 'settled-turn-live');
+  assert.equal(herdrWaits(f).length, 1);
+  assert.deepEqual(f.calls.map((call) => call.args.slice(0, 2).join(' ')), ['agent wait', 'agent read']);
+});
+
+test('e8a1db7f: a Claude lane never reads a rollout — resume is unchanged', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { ...AE_LANE, kind: 'claude' });
+  writeRollout(f, f.dir, AE_TURN);
+  f.responses.push({ code: 0, stdout: '{"result":{"state":"idle"}}', stderr: '' }, paneRead(BG_CONTROL));
+  const result = await rolloutResume(f);
+  assert.deepEqual([result.exit, result.output.state, result.output.settle, result.row.settleSource], [0, 'idle', undefined, undefined]);
+});
