@@ -83,13 +83,14 @@ const REF = /(?<![\w./-])(?:([\w.-]+(?:\/[\w.-]+)?)#(\d+)|([\w.-]+(?:\/[\w.-]+)?
 /** One reference's identity: the PR key, else the commit, else the unresolved spelling and number. */
 const refId = (ref) => ref.key ?? (ref.commit ? `${ref.repo}@${ref.commit}` : `?${ref.spelling}#${ref.pr}`);
 
-/** Every PR or commit named in `text`. A bare `#n` takes the previous ref's repo, else `inherit`. */
+/** Every PR or commit named in `text`. A bare `#n` takes the previous ref's repo and spelling, else `inherit`. */
 function refsIn(text, inherit, resolve) {
   const refs = [];
   let repo = inherit;
+  let spelling = null;
   for (const m of text.replace(/\([^)]*\)/g, ' ').matchAll(REF)) {
-    const spelling = m[1] ?? m[3] ?? null;
-    if (spelling) repo = resolve(spelling);
+    const written = m[1] ?? m[3];
+    if (written) [repo, spelling] = [resolve(written), written];
     const pr = m[2] ?? m[5];
     const ref = { repo, spelling, ...(pr ? { pr: Number(pr) } : { commit: m[4] }) };
     if (repo && pr) ref.key = keyOf(repo, pr);

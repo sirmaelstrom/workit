@@ -94,6 +94,9 @@ test('parser: distinct unresolved references stay distinct; the same one twice i
   assert.deepEqual(two.introducers.map((ref) => ref.pr), [1, 2]);
   assert.deepEqual(parse('Escape: introduced by ghost#1 and ghost#1; review missed it').introducers.map((ref) => ref.pr), [1]);
   assert.deepEqual(parse('Escape: introduced by ghost#7 and phantom#7; review missed it').introducers.map((ref) => ref.spelling), ['ghost', 'phantom']);
+  // A bare #n inheriting an unresolved repo inherits its spelling too, so the two #2s stay distinct.
+  const bare = parse('Escape: introduced by ghost#1 and #2, phantom#1 and #2; review missed it');
+  assert.deepEqual(bare.introducers.map((ref) => [ref.spelling, ref.pr]), [['ghost', 1], ['ghost', 2], ['phantom', 1], ['phantom', 2]]);
   const commits = parse('Escape: introduced by heathdev-me/observatory 8709d1e and heathdev-me/observatory 1a2b3c4d; review unreviewed');
   assert.deepEqual(commits.introducers.map((ref) => ref.commit), ['8709d1e', '1a2b3c4d']);
 });
