@@ -49,6 +49,9 @@ test('parser: a bare #n inherits the previous introducer\'s repo', () => {
   const parsed = parse('Escape: introduced by sirmaelstrom/family-coordination-app#51 (meal-plan `DateTime.Today`) and #54 (dashboard `DateTime.Today`); unreviewed. Both PRs have zero reviews and zero review comments (`gh pr view <n> --json reviews`, `gh api …/pulls/<n>/comments`).', FCA);
   assert.deepEqual(keys(parsed), [`${FCA}#51`, `${FCA}#54`]);
   assert.equal(parsed.verdict, 'unreviewed');
+  // Parsed as if the fix PR lived in another repo, so "previous introducer's repo" and
+  // "the fix PR's repo" differ: the boundary the inheritance rule is about.
+  assert.deepEqual(keys(parse('Escape: introduced by sirmaelstrom/family-coordination-app#51 and #54; unreviewed', WORKIT)), [`${FCA}#51`, `${FCA}#54`]);
   // Before any named repo, a bare #n takes the fixing PR's own repo.
   assert.deepEqual(keys(parse('Escape: introduced by #12; review saw it', WORKIT)), [`${WORKIT}#12`]);
 });
