@@ -33,7 +33,7 @@ export function next(state) {
     skillArgv: [state.intent.goal, '--workshop', state.workshopDir, '--preapproved', ref],
     skillArgs: `${state.intent.goal} --workshop ${state.workshopDir} --preapproved "${ref}"`,
     expects: { type: 'json', fields: ['depth', 'workshopDir'] },
-    instruction: 'Invoke the skill with skillArgv, one argument per element. /spec reports in prose; record a JSON object you compose from its report: { "depth": "none|lite|deep", "workshopDir": "<the workshop it wrote to>", "reviewLevel": "<its review level, if any>", "gateCommand": "<the repo\'s gate command; required for none and lite>", "wps": [<deep only: one record per WP, with its precondition and verification>] }.',
+    instruction: 'Invoke the skill with skillArgv, one argument per element. /spec reports in prose; record a JSON object you compose from its report: { "depth": "none|lite|deep", "workshopDir": "<the workshop it wrote to>", "reviewLevel": "<its review level, if any>", "gateCommand": "<the repo\'s gate command; required for none and lite>" }. A deep run\'s WPs come from work-packages/ in the workshop; the record carries no list of them.',
   };
 }
 

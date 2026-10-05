@@ -13,12 +13,16 @@ const SEAMS = [...new Set(Object.values(STEP_SEAM))].filter((seam) => seam && se
 const NAMES = [...SEAMS, ...Object.keys(ALIASES)];
 const canonical = (name) => ALIASES[name] ?? name;
 
-// An explicit `seam: <name>` wins; otherwise a seam only when the text names
-// exactly one distinct accepted seam; otherwise null.
+// An explicit `seam: <token>` decides alone: its whole token (a trailing . , ;
+// is punctuation) must be an accepted name, else null. Without it, a seam
+// only when the text names exactly one distinct accepted seam; otherwise null.
 export function namedSeam(text) {
   const words = String(text ?? '');
-  const explicit = /\bseam:\s*([a-z-]+)/i.exec(words)?.[1]?.toLowerCase();
-  if (explicit && NAMES.includes(explicit)) return canonical(explicit);
+  const explicit = /\bseam:\s*(\S+)/i.exec(words);
+  if (explicit) {
+    const token = explicit[1].replace(/[.,;]+$/, '').toLowerCase();
+    return NAMES.includes(token) ? canonical(token) : null;
+  }
   const named = new Set(NAMES.filter((name) => new RegExp(`(^|[^\\w-])${name}([^\\w-]|$)`, 'i').test(words)).map(canonical));
   return named.size === 1 ? [...named][0] : null;
 }

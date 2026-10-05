@@ -101,7 +101,7 @@ async function start(h, extra = []) {
 const idOfWorktree = (path) => (/-release$/.test(path) ? 'release' : /-(wp-\d+)$/.exec(path)?.[1].toUpperCase());
 const prOf = (id) => (id === 'release' ? 200 : 100 + num(id));
 const idOfPr = (n) => (Number(n) === 200 ? 'release' : `WP-${String(Number(n) - 100).padStart(2, '0')}`);
-const headOf = (h, id) => (id === 'release' ? RELEASE_HEAD : h.head(id));
+const headOf = (h, id) => (id === 'release' ? h.releaseHead?.() ?? RELEASE_HEAD : h.head(id));
 const mergeSha = (id) => (id === 'release' ? sha('d', 99) : sha('d', num(id)));
 
 // [regex over "program args…", (h, match, input) → result]; h.rules first.
@@ -520,6 +520,15 @@ test('release bumps (M2): checked before emission — no slot, a duplicate slot,
       config.release.bump = [{ file: '.claude-plugin/plugin.json', jsonPath: 'version' }, { file: '.claude-plugin/plugin.json', jsonPath: 'version' }];
       writeFileSync(join(repo, '.workit', 'conduct.json'), JSON.stringify(config));
     }, /^bump plan edits \.claude-plugin\/plugin\.json twice$/],
+    // C2-1: one file under two spellings is still one file.
+    ['one file by two paths', (repo) => {
+      const config = JSON.parse(readFileSync(join(repo, '.workit', 'conduct.json'), 'utf8'));
+      config.release.bump = [{ file: '.claude-plugin/plugin.json', jsonPath: 'version' }, { file: './.claude-plugin/plugin.json', jsonPath: 'version' }];
+      writeFileSync(join(repo, '.workit', 'conduct.json'), JSON.stringify(config));
+    }, /^bump plan edits \.\/\.claude-plugin\/plugin\.json twice$/],
+    // C2-2: the only expected-spacing slot is a nested field, not jsonPath.
+    ['a unique slot on the wrong field', (repo) => writeFileSync(join(repo, '.claude-plugin', 'plugin.json'), '{"name":"scratch","version":"0.1.0","nested":{"version": "0.1.0"}}\n'),
+      /^bump: \.claude-plugin\/plugin\.json: slot does not edit version$/],
   ];
   for (const [name, edit, reason] of cases) {
     const h = seam(t, { depth: 'none' });
@@ -552,6 +561,37 @@ test('release merge-commit lookup (U1): {code:1, stderr:"HTTP 502 Bad Gateway"} 
   const state = h.state();
   assert.deepEqual([state.release.state, state.release.reason, state.mergeLock, state.phase],
     ['failed', 'merge: merge-commit failed (exit 1): HTTP 502 Bad Gateway', null, 'analyze']);
+  // C2-8: the squash landed, so the release PR is merged, unconfirmed; not open.
+  h.pending = out(result).action;
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  assert.match(section(h.analysis(), 'Escapes'), /^run PRs: #100 WP-00 merged, #200 release merged \(merge commit unconfirmed\)$/m);
+});
+
+test('release CI deadline (C2-4): one 30-minute window per head from the earliest absent-or-pending reading; a new head restarts it', async (t) => {
+  const green = JSON.parse(text('land', 'check-runs-green.json'));
+  const pending = ok(JSON.stringify({ ...green, check_runs: green.check_runs.map((run) => ({ ...run, status: 'in_progress', conclusion: null })) }));
+  const missing = { code: 1, stdout: '', stderr: 'gh: No commit found for SHA (HTTP 422)' };
+  const minutes = (h, from) => (h.clock - from) / 60000;
+  const cases = [
+    ['missing, then pending at 29', (m) => (m < 29 ? missing : pending), [30, 33]],
+    ['pending, then missing at 29', (m) => (m < 29 ? pending : missing), [30, 33]],
+    ['missing; a new head at 20', (m) => missing, [50, 53], 20],
+  ];
+  for (const [name, reading, [low, high], newHeadAt] of cases) {
+    const h = await nonePath(t, { h: { waitClock: true } });
+    let firstAt = null;
+    h.releaseHead = () => (newHeadAt && firstAt !== null && minutes(h, firstAt) >= newHeadAt ? 'f'.repeat(40) : RELEASE_HEAD);
+    h.checkRuns = (s) => {
+      if (s !== RELEASE_HEAD && s !== 'f'.repeat(40)) return ok(JSON.stringify(green));
+      firstAt ??= h.clock;
+      return reading(minutes(h, firstAt));
+    };
+    await drive(h, { until: (a) => a.step === 'analyze' });
+    const state = h.state();
+    assert.deepEqual([state.release.state, state.release.reason, state.mergeLock], ['failed', 'land gate: CI did not complete at head', null], name);
+    const elapsed = minutes(h, firstAt);
+    assert.ok(elapsed >= low && elapsed < high, `${name}: failed after ${elapsed} minutes`);
+  }
 });
 
 test('release CI window (Split 3): no CI at the release head waits 30 minutes per head; CI appearing after 10 minutes continues, none by 30 fails the release', async (t) => {
@@ -909,7 +949,8 @@ test('touch filings (C1-2): a showcase filing acknowledged with ok:false, succes
     assert.equal(state.pending.id, filing.id);
     assert.deepEqual(out(await h.run(['next', '--run', h.runDir])).action, filing);
   }
-  const filed = out(await h.run(['record', '--run', h.runDir, '--action', filing.id, '--result', JSON.stringify(good)]));
+  // C2-10: `error: null` is no error.
+  const filed = out(await h.run(['record', '--run', h.runDir, '--action', filing.id, '--result', JSON.stringify({ ...good, error: null })]));
   assert.equal(filed.action.tool, 'spine_quest');
   assert.deepEqual([h.state().touches[1].status, h.state().touches[1].receiptId], ['filed', good.id]);
 });
@@ -932,6 +973,12 @@ test('runtime ownership (C1-3): the runtime row cites the verdict-storing checks
   assert.equal((await owned.run(['analyze', '--run', owned.runDir])).code, 0);
   assert.equal(row(owned.analysis(), 'runtime-exercise'), '- runtime-exercise: not exercised');
   assert.match(section(owned.analysis(), 'Runtime exercise'), /^- WP-00: missing /m);
+  // C2-7: a verdict whose producing record cannot be read is by hand, never owned.
+  state.wps[0].runtimeVerdict = 'exercised';
+  state.wps[0].runtimeVerdictBy = { actionId: null };
+  writeFileSync(path, JSON.stringify(state));
+  assert.equal((await owned.run(['analyze', '--run', owned.runDir])).code, 0);
+  assert.equal(row(owned.analysis(), 'runtime-exercise'), '- runtime-exercise: by hand (provenance unread)');
 });
 
 test('send-back seam (M3): `seam: <name>` wins; otherwise exactly one named seam; aliases map to spec; touches is never taken', () => {
@@ -943,6 +990,13 @@ test('send-back seam (M3): `seam: <name>` wins; otherwise exactly one named seam
   assert.equal(namedSeam('seam: touches'), null);
   assert.equal(namedSeam('too many touches'), null);
   assert.equal(namedSeam(null), null);
+  // C2-3: an explicit form decides alone, on its whole token.
+  assert.equal(namedSeam('seam: bogus; the release failed'), null);
+  assert.equal(namedSeam('seam: touches - the merge-gate wait was long'), null);
+  assert.equal(namedSeam('seam: merge-gate2'), null);
+  assert.equal(namedSeam('seam: merge-gate.x'), null);
+  assert.equal(namedSeam('seam: merge-gate.'), 'merge-gate');
+  assert.equal(namedSeam('seam: release, the bump was wrong'), 'release');
 });
 
 test('failure showcase (U4): a blocked WP and an open run touch are named in the question with their reasons', async (t) => {
@@ -961,6 +1015,8 @@ test('failure showcase (U4): a blocked WP and an open run touch are named in the
   assert.ok(question.includes('Release: not-exercised (incomplete build)'));
   assert.ok(!/conductor names here by hand/.test(question), 'no agent-facing placeholder');
   assert.match(question, /write `seam: <name>`/);
+  // C2-8: merged, then blocked by the post-merge tree check: still merged.
+  assert.match(section(h.analysis(), 'Escapes'), /^run PRs: #100 WP-00 merged \(post-merge check failed\)$/m);
 });
 
 test('fixture paths: no file under __fixtures__/seam matches either Must 8 regex', () => {

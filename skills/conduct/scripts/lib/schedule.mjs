@@ -182,7 +182,7 @@ export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(p
     const tier = reviewTier(text, id);
     return {
       id, name: rows.get(id)?.name || heading[2].trim(), specPath, wave: waveOf.get(id), files: parseFiles(text, id),
-      precondition: fieldText(lines, 'Precondition') ?? '', tier,
+      precondition: fieldText(lines, 'Precondition') ?? '', verification: fieldText(lines, 'Verification'), tier,
       model: rows.get(id)?.model ?? 'opus', runtimeExercise: fieldText(lines, 'Runtime exercise') ?? '',
     };
   });

@@ -67,9 +67,12 @@ function touches(state, events) {
 // The runtime-exercise row's evidence: the recorded events of the checks that
 // stored each WP's verdict (wps[].runtimeVerdictBy). A `missing` verdict is
 // not an exercise.
+// A verdict whose producing record cannot be read (no action id, no event)
+// counts as by hand, never as owned.
 function runtimeEvidence(state, events) {
-  const ids = new Set(state.wps.filter((wp) => wp.runtimeVerdict && wp.runtimeVerdict !== 'missing').map((wp) => wp.runtimeVerdictBy?.actionId).filter(Boolean));
-  return events.filter((e) => e.event === 'recorded' && ids.has(e.actionId));
+  const recorded = new Map(events.filter((e) => e.event === 'recorded').map((e) => [e.actionId, e]));
+  return state.wps.filter((wp) => wp.runtimeVerdict && wp.runtimeVerdict !== 'missing')
+    .map((wp) => recorded.get(wp.runtimeVerdictBy?.actionId) ?? { actionId: null, event: 'provenance unread', source: 'manual' });
 }
 
 // Keyed on each event's `seam` field (D19.15): owned when every event came
@@ -125,8 +128,12 @@ function catches(state, events) {
 function escapes(state, exec) {
   const since = String(state.createdAt).slice(0, 10);
   const r = state.release ?? {};
-  const prs = [...state.wps.filter((wp) => wp.pr?.number).map((wp) => `#${wp.pr.number} ${wp.id} ${wp.state === 'merged' ? 'merged' : `open (${wp.state})`}`),
-    ...(r.pr?.number ? [`#${r.pr.number} release ${r.merge?.sha ? 'merged' : `open (${r.state})`}`] : [])];
+  // A merge sha means merged, whatever happened after; a squash whose
+  // merge-commit lookup failed is merged but unconfirmed.
+  const wpStatus = (wp) => (wp.merge?.sha ? `merged${wp.state === 'blocked' ? ' (post-merge check failed)' : ''}` : `open (${wp.state})`);
+  const releaseStatus = r.merge?.sha ? 'merged' : r.squashed ? 'merged (merge commit unconfirmed)' : `open (${r.state})`;
+  const prs = [...state.wps.filter((wp) => wp.pr?.number).map((wp) => `#${wp.pr.number} ${wp.id} ${wpStatus(wp)}`),
+    ...(r.pr?.number ? [`#${r.pr.number} release ${releaseStatus}`] : [])];
   const runPrs = `run PRs: ${prs.join(', ') || 'none'}`;
   const read = exec('node', [join(state.pluginRoot, 'scripts', 'escape-reader.mjs'), '--repo', state.intent.repo.remote, '--since', since]);
   let out = null;

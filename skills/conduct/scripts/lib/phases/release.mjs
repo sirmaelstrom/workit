@@ -15,6 +15,7 @@ import { bumpPlan, releaseEligible, resolvePluginRoot, selfHosted } from '../rel
 import { mergeActions, mergeLockFor, recordLandStep } from '../land.mjs';
 import { conductScript, openTouch, recordTouch, touchAction } from '../touch.mjs';
 import { firstLine } from '../adapters.mjs';
+import { samePath } from './spec.mjs';
 
 const SEAM = 'release';
 const WAIT_MS = 60000;
@@ -66,19 +67,32 @@ function bumpAction(state, edit, original) {
     expects: { type: 'file' }, instruction: `Edit ${path} in place: replace the key of slots (its exact text, once) with its value, and change nothing else. Record {}.` };
 }
 
-// The plan's edits, each one checkable before it is emitted: a file edited
-// once, its slot present exactly once in the file's current text.
+// True when replacing the slot in `original` changes exactly jsonPath, to
+// `to`, and nothing else in the parsed JSON.
+function editsOnly(original, text, jsonPath, to) {
+  try {
+    const before = JSON.parse(original);
+    return setAt(before, jsonPath, to) && JSON.stringify(before) === JSON.stringify(JSON.parse(text));
+  } catch {
+    return false;
+  }
+}
+
+// The plan's edits, each one checkable before it is emitted: each file once
+// (by canonical destination), its slot present exactly once in the file's
+// current text, and the replacement editing exactly jsonPath.
 function bumpActions(state, deps, plan) {
-  const files = plan.edits.map((edit) => edit.file);
-  const twice = files.find((file, i) => files.indexOf(file) !== i);
-  if (twice) return { failure: `bump plan edits ${twice} twice` };
+  const wt = state.release.worktree;
+  const twice = plan.edits.find((edit, i) => plan.edits.slice(0, i).some((prior) => samePath(resolve(wt, prior.file), resolve(wt, edit.file), deps.platform)));
+  if (twice) return { failure: `bump plan edits ${twice.file} twice` };
   const actions = [];
   for (const edit of plan.edits) {
     const key = edit.jsonPath.split('.').at(-1);
     const slotted = { ...edit, slot: `"${key}": "${edit.from}"`, value: `"${key}": "${edit.to}"` };
-    const original = deps.read(join(state.release.worktree, edit.file));
+    const original = deps.read(join(wt, edit.file));
     const n = occurrences(original, slotted.slot);
     if (n !== 1) return { failure: `bump: ${edit.file}: slot occurs ${n} times` };
+    if (!editsOnly(original, original.replace(slotted.slot, () => slotted.value), edit.jsonPath, edit.to)) return { failure: `bump: ${edit.file}: slot does not edit ${edit.jsonPath}` };
     actions.push(bumpAction(state, slotted, original));
   }
   return { actions };
@@ -237,18 +251,24 @@ function anomaly(state, deps, reason) {
   state.release.anomaly = { reason, touch: touch.n };
 }
 
-// No CI run at the release head (WP-04's C2-8 rule): wait 30 minutes per head
-// from the first absent-or-pending observation, still holding the lock, then
-// fail. A release is never held.
+// No CI, or CI still pending, at the release head (WP-04's C2-8 rule): one
+// 30-minute window per head, from the earliest absent-or-pending observation
+// (release.noCi.since or land's gate.pendingSince, whichever came first),
+// still holding the lock; then fail. A new head starts a new window. A
+// release is never held.
 function noCi(state, action, out, deps) {
   const gate = out.patch?.gate;
-  if (action.step !== 'gate' || !['amend', 'block'].includes(out.outcome) || !gate?.failures?.includes('no CI at head') || (gate.causes ?? []).some((cause) => cause !== 'ci')) return out;
+  if (action.step !== 'gate' || !gate) return out;
+  const absent = ['amend', 'block'].includes(out.outcome) && gate.failures?.includes('no CI at head') && (gate.causes ?? []).every((cause) => cause === 'ci');
+  if (!absent && !(out.outcome === 'wait' && gate.pending)) return out;
   const r = state.release;
-  const since = Date.parse(gate.pendingSince ?? (r.noCi?.head === gate.head ? r.noCi.since : new Date(deps.now()).toISOString()));
+  const seen = [r.noCi?.head === gate.head ? r.noCi.since : null, gate.pendingSince, new Date(deps.now()).toISOString()].filter(Boolean).map(Date.parse);
+  const since = Math.min(...seen);
+  r.noCi = { head: gate.head, since: new Date(since).toISOString() };
   if (deps.now() - since >= NO_CI_WINDOW_MS) return { ...out, outcome: 'block', reason: 'CI did not complete at head' };
+  if (!absent) return out;
   const again = Object.fromEntries(Object.entries(action).filter(([key]) => !['id', 'phase'].includes(key)));
-  return { outcome: 'wait', waitMs: WAIT_MS, reason: 'no CI run at the release head yet',
-    patch: { gate, noCi: { head: gate.head, since: new Date(since).toISOString() }, queue: [again, ...r.queue.slice(1)] } };
+  return { outcome: 'wait', waitMs: WAIT_MS, reason: 'no CI run at the release head yet', patch: { gate, queue: [again, ...r.queue.slice(1)] } };
 }
 
 function recordLand(state, action, result, deps) {
@@ -261,6 +281,8 @@ function recordLand(state, action, result, deps) {
     else r[key] = value;
   }
   if (!Object.hasOwn(patch, 'queue')) r.queue.shift();
+  // The squash landed even if the merge-commit lookup after it fails.
+  if (action.part === 'squash' && out.outcome === 'continue') r.squashed = true;
   if (out.outcome === 'continue' || out.outcome === 'done') return;
   if (out.outcome === 'wait') {
     if (r.queue[0]?.kind !== 'wait') r.queue.unshift(wait(action.step, out.waitMs ?? WAIT_MS, out.reason ?? ''));
@@ -279,17 +301,7 @@ function recordBump(action, deps) {
   if (count !== 1) throw new ConductError(2, `bump ${file}: the slot text ${slot} occurs ${count} times; the slot-form edit needs exactly one`);
   const text = deps.read(action.outPath);
   if (text !== original.replace(slot, () => value)) throw new ConductError(2, `bump ${file}: the file must be the original with only ${slot} replaced by ${value}`);
-  let before;
-  let after;
-  try {
-    before = JSON.parse(original);
-    after = JSON.parse(text);
-  } catch (error) {
-    throw new ConductError(2, `bump ${file} does not parse after the edit: ${error.message}`);
-  }
-  if (!setAt(before, jsonPath, to) || JSON.stringify(before) !== JSON.stringify(after)) {
-    throw new ConductError(2, `bump ${file}: the edit must change only ${jsonPath}, to ${to}`);
-  }
+  if (!editsOnly(original, text, jsonPath, to)) throw new ConductError(2, `bump ${file}: the edit must parse and change only ${jsonPath}, to ${to}`);
 }
 
 export function record(state, action, result = {}, deps) {

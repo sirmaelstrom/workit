@@ -110,7 +110,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // quest, the same outcome/state when it carries one, and a receipt uuid.
 // Every spine_receipt and spine_update the conductor emits is checked here.
 export function spineAckFailure(action, result) {
-  if (!result || typeof result !== 'object' || Array.isArray(result) || result.error !== undefined || result.isError || result.ok === false || result.success === false) {
+  if (!result || typeof result !== 'object' || Array.isArray(result) || result.error != null || result.isError || result.ok === false || result.success === false) {
     return `failed: ${JSON.stringify(result?.error ?? result).slice(0, 200)}`;
   }
   // A carried quest id is a uuid or a hex prefix of 8+, and prefixes the one asked for (either way).

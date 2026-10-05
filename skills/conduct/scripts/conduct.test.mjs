@@ -564,7 +564,7 @@ test('mint from the workshop: parseWorkPackages supplies the WPs, each keeping i
   assert.deepEqual(mint.args.seams.map((seam) => seam.to), keys);
   assert.ok(mint.args.seams.every((seam) => seam.from === ANCHOR_UUID && seam.type === 'decomposition'));
   // C21: the resume note carries what the consumer reads.
-  assert.match(mint.args.quests[0].resumeNote, /wp-01-state-intake-protocol\.md · precondition: .+ · verification: see the WP · review tier: T2 · runtime exercise: /);
+  assert.match(mint.args.quests[0].resumeNote, /wp-01-state-intake-protocol\.md · precondition: .+ · verification: - `node --test` from the worktree root passes \(whole suite, the gate\)\.\n- `intake refuses <case>`[^]+ · review tier: T2 · runtime exercise: /);
   let state = readState(runDir);
   assert.deepEqual(state.wps.map((wp) => [wp.id, wp.wave]), [['WP-01', 1], ['WP-02', 2], ['WP-03', 2], ['WP-04', 3], ['WP-05', 3], ['WP-06', 4]]);
   assert.deepEqual(state.wps.find((wp) => wp.id === 'WP-04').dependsOn, ['WP-02', 'WP-03']);
