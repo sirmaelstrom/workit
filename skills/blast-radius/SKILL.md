@@ -1,6 +1,6 @@
 ---
 name: blast-radius
-description: "Find what a change could break somewhere else before it ships, beyond the diff, and prove the one fact it's safe because of by running real code instead of writing it up. Trigger: 'blast radius of X', 'what could this break', 'impact analysis', reviewing a small diff you don't trust, or pre-PR on a change that touches a contract, wire format, or shared surface."
+description: "Find what a change could break somewhere else before it ships, beyond the diff, and prove the one fact it's safe because of by running real code instead of writing it up. User-invoked only: type /blast-radius (the model never starts it from a phrase); worth it on a small diff you don't trust, or pre-PR on a change that touches a contract, wire format, or shared surface."
 disable-model-invocation: true
 ---
 
