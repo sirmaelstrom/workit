@@ -56,7 +56,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
 
 ## Per item
 
-1. **Pick it up** — invoke `pickup` with the item's quest. It claims the quest
+1. **Pick it up** — call the Skill tool with `workit:pickup` and the item's
+   quest id as its argument (naming the skill in prose is not the call; this
+   sentence is the A/B arm of quest 55d44b84). It claims the quest
    (flip `currentPhase` before the first edit, `promote: true` if the queue row
    says so, read `applied[]` instead of re-reading the board) and it owns the
    closeout shape. Do not restate any of that here.
