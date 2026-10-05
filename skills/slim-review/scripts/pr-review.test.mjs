@@ -44,6 +44,7 @@ import {
   cmdClaim,
   cmdRecognise,
   cmdRounds,
+  cmdInflight,
   cmdRecover,
   buildReviewerPrompt,
   defaultCodexExe,
@@ -3791,6 +3792,78 @@ test('rounds CLI refuses a short or missing --head before anything runs', () => 
     }
     assert.equal(status, 2, args.join(' '));
     assert.match(stderr, /rounds needs --head <full 40-character sha>/);
+  }
+});
+
+// --- inflight: the merge gate's read of a pipeline review still running ----
+
+async function runInflight({ attempts = [], head = RH1, makeClient } = {}) {
+  let result;
+  await withCoordinatedInstall({ fake: coordinatorFake({ attempts }) }, async ({ home }) => {
+    const out = collector();
+    await cmdInflight(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), head },
+      { ...out.deps, env: {}, homeDir: home, ...(makeClient ? { makeClient } : {}) },
+    );
+    result = { line: out.line(), deaths: out.deaths };
+  });
+  return result;
+}
+
+test('inflight lists only unended attempts on this head and exits 9 when any is in flight', async () => {
+  const r = await runInflight({
+    head: RH1.toUpperCase(),
+    attempts: [
+      { head_sha: RH1, attempt: 1, origin: 'beat', state: 'posted', ended_at: '2026-10-05T12:34:41Z' },
+      { head_sha: RH2, attempt: 1, origin: 'beat', state: 'lens_running', ended_at: null },
+      { head_sha: RH1, attempt: 2, origin: 'beat', state: 'lens_running', ended_at: null },
+    ],
+  });
+  assert.deepEqual(r.line, { outcome: 'ok', retry: 'stop', mode: 'managed', inflight: [{ attempt: 2, origin: 'beat', state: 'lens_running' }] });
+  assert.equal(r.deaths.length, 1);
+  assert.equal(r.deaths[0].code, 9);
+});
+
+test('inflight: every attempt on the head ended (or none exists) is exit 0 with an empty list', async () => {
+  for (const attempts of [[], [{ head_sha: RH1, attempt: 1, origin: 'session', state: 'posted', ended_at: '2026-10-05T21:13:30Z' }]]) {
+    const r = await runInflight({ attempts });
+    assert.deepEqual(r.line, { outcome: 'ok', retry: 'stop', mode: 'managed', inflight: [] });
+    assert.deepEqual(r.deaths, []);
+  }
+});
+
+test('inflight: a standalone repository has no pipeline review and reads no coordinator', async () => {
+  await withProfile({}, async (home) => {
+    const out = collector();
+    await cmdInflight(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), head: RH1 },
+      { ...out.deps, env: {}, homeDir: home, makeClient: () => { throw new Error('no client for a standalone repo'); } },
+    );
+    assert.deepEqual(out.line(), { outcome: 'ok', retry: 'stop', mode: 'standalone', inflight: [] });
+    assert.deepEqual(out.deaths, []);
+  });
+});
+
+test('inflight: an unreadable status is refused, never read as nothing in flight', async () => {
+  const r = await runInflight({
+    makeClient: () => ({ readStatus: async () => ({ ok: false, code: 'coordinator-unreachable', source: 'client', message: 'ECONNREFUSED' }) }),
+  });
+  assert.deepEqual(r.line, { outcome: 'refused', reason: 'coordinator-unreachable', retry: 'stop' });
+  assert.equal(r.deaths[0].code, 1);
+});
+
+test('inflight CLI refuses a short or missing --head before anything runs', () => {
+  for (const args of [['inflight', '--pr', '5', '--repo', 'o/r', '--head', 'abc1234'], ['inflight', '--pr', '5', '--repo', 'o/r']]) {
+    let status = 0;
+    let stderr = '';
+    try {
+      execFileSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      status = err.status;
+      stderr = String(err.stderr);
+    }
+    assert.equal(status, 2, args.join(' '));
+    assert.match(stderr, /inflight needs --head <full 40-character sha>/);
   }
 });
 

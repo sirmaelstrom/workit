@@ -174,8 +174,12 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    `done` + `landed` + artifacts, with `ripple` in the response as the read-back.
 
    **The merge gate is checked at the exact head being merged**: review done
-   at the tier, CI green at that head, `threads --unresolved` exit 0, and the
-   squash tree equal to the head that was checked. Under the T1 cap the merged
+   at the tier, CI green at that head, no pipeline review of that head still
+   in flight (`pr-review.mjs inflight --head <sha>` exit 0; exit 9 means wait
+   for it to post), `threads --unresolved` exit 0, and the squash tree equal
+   to the head that was checked. Mark a draft PR ready before the gate, never
+   in the same step as the merge: a ready PR is what a pipeline review picks
+   up, and a review that posts after the merge goes unread. Under the T1 cap the merged
    head may differ from the last reviewed head in two named cases only:
    - **post-cap:** a fix made after the delta pass, which the cap forbids
      reviewing again;

@@ -142,9 +142,28 @@ function escapes(state, exec) {
     out = read.code === 0 ? JSON.parse(read.stdout) : null;
   } catch { /* unreadable: not measured */ }
   const tally = out?.ok ? out.tally?.overall : null;
-  if (!tally) return [`not measured: escape-reader exit ${read.code}: ${firstLine(read.stderr) || firstLine(read.stdout)}`, runPrs];
+  const swept = postMergeThreads(state, exec);
+  if (!tally) return [`not measured: escape-reader exit ${read.code}: ${firstLine(read.stderr) || firstLine(read.stdout)}`, runPrs, ...swept];
   return [`repo-wide since ${since}: saw ${tally.saw}, missed ${tally.missed}, unreviewed ${tally.unreviewed}, unparsed ${tally.unparsed} (${out.lines} Escape lines)`,
-    runPrs, 'Run-scoped attribution is a follow-up.'];
+    runPrs, 'Run-scoped attribution is a follow-up.', ...swept];
+}
+
+// A review that posts after its PR merged leaves open threads nobody reads.
+// The gate's in-flight wait narrows that window; this sweep reads what is left
+// on every merged PR, so each thread reaches the showcase for a verdict.
+function postMergeThreads(state, exec) {
+  const script = join(state.pluginRoot, 'skills', 'slim-review', 'scripts', 'pr-review.mjs');
+  const rows = mergedPrs(state).map(({ id, pr, wp }) => {
+    const r = exec('node', [script, 'threads', '--pr', String(pr), '--repo', state.intent.repo.remote, '--unresolved']);
+    const flight = wp.postMerge?.inflightAtMerge ? `; review in flight at merge: ${wp.postMerge.inflightAtMerge}` : '';
+    if (r.code === 0) return flight ? `  - ${id} PR #${pr}: no unresolved threads${flight}` : null;
+    if (r.code === 8) {
+      const open = String(r.stdout ?? '').split(/\r?\n/).filter((line) => /^#\d+/.test(line.trim())).length;
+      return `  - ${id} PR #${pr}: ${open} unresolved thread(s) after the merge; give each a verdict${flight}`;
+    }
+    return `  - ${id} PR #${pr}: threads not read (exit ${r.code}): ${firstLine(r.stderr) || firstLine(r.stdout)}${flight}`;
+  }).filter(Boolean);
+  return [`post-merge threads: ${rows.length ? `${rows.length} merged PR(s) need a read` : 'none open on any merged PR'}`, ...rows];
 }
 
 function preapproval(state) {

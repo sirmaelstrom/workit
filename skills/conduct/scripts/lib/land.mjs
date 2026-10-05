@@ -286,13 +286,17 @@ function lockFailure(state, wp) {
 }
 
 // The push lease is pinned to the PR head the rebase started from, so a
-// commit pushed to the branch since then is never overwritten.
+// commit pushed to the branch since then is never overwritten. The PR is
+// readied here, under the lock the fetch takes and before the gate, never back
+// to back with the merge: a ready PR is what a pipeline review picks up, and the
+// gate waits for that review.
 export function rebaseActions(state, wp) {
   if (mergeLockFor(state, wp) === 'other') return [waitAction('rebase', 'yield', `Wait: ${state.mergeLock.wpId} holds the merge lock.`)];
   const git = (part, ...args) => shell('rebase', part, ['git', '-C', wp.lane.worktree, ...args]);
   const base = `origin/${defaultOf(state)}`;
   return [
     git('fetch', 'fetch', 'origin'),
+    shell('rebase', 'ready', ['gh', 'pr', 'ready', String(wp.pr.number), '--repo', repoOf(state)]),
     git('pre-head', 'rev-parse', 'HEAD'),
     git('rebase', 'rebase', base),
     git('post-heads', 'rev-parse', 'HEAD', base),
@@ -431,6 +435,19 @@ function ciCondition(state, wp, head, { exec, now }) {
   return waited >= NO_CI_MS ? { failure: `expected check missing at head: ${absent.join(', ')}`, cause: 'ci-missing-check' } : { pending: true };
 }
 
+// A pipeline review of the head that has not ended: wait for it to post, so its
+// threads are read at this gate and not after the merge. It shares CI's
+// pending clock and blocks at the same deadline; an unreadable answer is infra.
+function inflightCondition(state, wp, head, { exec, now }) {
+  const r = exec('node', [prReview(state), 'inflight', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--head', head]);
+  if (r.code === 0) return {};
+  if (r.code !== 9) return { failure: `in-flight review unreadable (exit ${r.code}): ${first(r.stderr) || first(r.stdout)}`, cause: 'infra' };
+  const since = wp.gate?.head === head && wp.gate?.pendingSince ? Date.parse(wp.gate.pendingSince) : null;
+  const waited = since === null ? 0 : now() - since;
+  if (waited >= PENDING_BLOCK_MS) return { failure: `a pipeline review of head is still in flight: ${first(r.stderr)}`, cause: 'review-inflight', blocked: true };
+  return { pending: true };
+}
+
 // The repo config on the base branch, so a PR cannot widen its own trivial set.
 function notTrivialPatterns(state, wt, exec) {
   const shown = exec('git', ['-C', wt, 'show', `origin/${defaultOf(state)}:.workit/conduct.json`]);
@@ -541,7 +558,8 @@ function reviewCondition(wp, head, exec, notTrivial) {
 }
 
 // The merge gate at the exact head. Every condition runs and every failure is
-// listed with its cause; `pending` only when running CI is the sole reason ok is false.
+// listed with its cause; `pending` only when running CI or an in-flight pipeline
+// review of the head is the sole reason ok is false (`pendingOn` names which).
 export function gateCheck(state, wp, { exec, now }) {
   const wt = wp.lane.worktree;
   const failures = [];
@@ -575,13 +593,16 @@ export function gateCheck(state, wp, { exec, now }) {
   const threads = exec('node', [prReview(state), 'threads', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--unresolved']);
   if (threads.code === 8) fail('unresolved review threads', 'threads');
   else if (threads.code !== 0) fail(`threads unreadable (exit ${threads.code}): ${first(threads.stderr)}`, 'infra');
+  const flight = head ? inflightCondition(state, wp, head, { exec, now }) : {};
+  if (flight.failure) fail(flight.failure, flight.cause);
   const config = notTrivialPatterns(state, wt, exec);
   if (config.failure) fail(config.failure, 'infra');
   const review = head ? reviewCondition(wp, head, exec, config.patterns ?? DEFAULT_NOT_TRIVIAL.map(globRegex)) : { failure: 'review coverage not read: no head', cause: 'infra' };
   if (review.failure) fail(review.failure, review.cause);
-  const ok = failures.length === 0 && !ci.pending;
+  const pendingOn = [...(ci.pending ? ['ci'] : []), ...(flight.pending ? ['review'] : [])];
+  const ok = failures.length === 0 && pendingOn.length === 0;
   return {
-    ok, pending: !ok && failures.length === 0, blocked: ci.blocked === true, head, failures, causes: [...causes],
+    ok, pending: !ok && failures.length === 0, pendingOn, blocked: ci.blocked === true || flight.blocked === true, head, failures, causes: [...causes],
     unreviewedTail: review.tail ?? null, needsFullReview: review.needsFullReview === true, staleBase: causes.has('stale-base'),
     ...(review.inspect ? { inspect: review.inspect } : {}),
   };
@@ -592,7 +613,6 @@ export function mergeActions(state, wp, head) {
   const pr = String(wp.pr.number);
   const repo = repoOf(state);
   return [
-    shell('merge', 'ready', ['gh', 'pr', 'ready', pr, '--repo', repo]),
     shell('merge', 'squash', ['gh', 'pr', 'merge', pr, '--repo', repo, '--squash', '--match-head-commit', head,
       ...(wp.commit ? ['--subject', `${wp.commit} (#${pr})`] : [])]),
     shell('merge', 'merge-commit', ['gh', 'pr', 'view', pr, '--repo', repo, '--json', 'mergeCommit'], { expects: { type: 'json' } }),
@@ -716,6 +736,9 @@ function recordThreadIds(state, wp, action, r) {
 
 function recordRebaseStep(state, wp, action, r, deps) {
   if (action.kind === 'wait') return result('continue');
+  if (action.part === 'ready') {
+    return r.code === 0 || /already/i.test(r.stderr) ? result('continue') : result('block', `ready failed (exit ${r.code}): ${first(r.stderr)}`);
+  }
   if (action.part === 'fetch') {
     const lock = mergeLockFor(state, wp);
     if (lock === 'other') return { ...result('wait', `merge lock held by ${state.mergeLock.wpId}`, { queue: wp.queue ?? [] }), waitMs: WAIT_MS };
@@ -792,7 +815,10 @@ function recordGate(state, wp, action, r, deps) {
   if (r.code === 0) {
     return state.authority?.merge === true ? result('continue', null, { ...recorded, retries: 0 }) : result('held', 'gate passed; no merge authority', { ...recorded, retries: 0 });
   }
-  if (r.code === 6) return { ...result('wait', 'CI is still running at head', { ...recorded, retries: 0, queue: [requeue(action), ...rest(wp, action)] }), waitMs: WAIT_MS };
+  if (r.code === 6) {
+    const reason = (gate.pendingOn ?? ['ci']).map((on) => (on === 'review' ? 'a pipeline review of head is in flight' : 'CI is still running at head')).join('; ');
+    return { ...result('wait', reason, { ...recorded, retries: 0, queue: [requeue(action), ...rest(wp, action)] }), waitMs: WAIT_MS };
+  }
   const causes = new Set(gate.causes ?? []);
   const reason = gate.failures.join('; ');
   if (causes.has('infra')) {
@@ -848,7 +874,10 @@ function landOutcome(state, wp, action, r, deps) {
       return sha ? result('continue', null, { merge: { sha } }) : result('block', 'gh pr view printed no mergeCommit.oid');
     }
     case 'merged': {
-      if (r.code === 0) return result('done');
+      if (r.code === 0) {
+        const inflightAtMerge = parseJson(r.stdout)?.inflightAtMerge;
+        return inflightAtMerge ? result('done', `merged with a pipeline review of the head in flight: ${inflightAtMerge}`, { postMerge: { inflightAtMerge } }) : result('done');
+      }
       const reason = parseJson(r.stdout)?.reason ?? `land merged exit ${r.code}: ${first(r.stderr) || first(r.stdout)}`;
       if (r.code === 5 && reason === TREE_MISMATCH) return result('block', reason, { dispatchHalt: { reason, since: new Date(deps.now()).toISOString() } });
       return result('block', reason);
@@ -900,7 +929,13 @@ export async function runLandVerb(sub, { runDir, wpId, flags = {} }, deps) {
   const wt = wp.lane.worktree;
   const fetch = deps.exec('git', ['-C', wt, 'fetch', 'origin']);
   const diff = deps.exec('git', ['-C', wt, 'diff', '--quiet', head, flags.mergeSha]);
-  if (fetch.code === 0 && diff.code === 0) return { code: 0, out: { ok: true, head, mergeSha: flags.mergeSha } };
+  if (fetch.code === 0 && diff.code === 0) {
+    // The gate waited for in-flight reviews, but one can be claimed between the
+    // gate and the merge: name it, so its threads are read after the merge.
+    const flight = deps.exec('node', [prReview(state), 'inflight', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--head', head]);
+    const inflightAtMerge = flight.code === 9 ? first(flight.stderr) : flight.code === 0 ? null : `not read (exit ${flight.code}): ${first(flight.stderr)}`;
+    return { code: 0, out: { ok: true, head, mergeSha: flags.mergeSha, ...(inflightAtMerge ? { inflightAtMerge } : {}) } };
+  }
   const reason = fetch.code === 0 && diff.code === 1 ? TREE_MISMATCH : `tree compare failed: ${first(fetch.code ? fetch.stderr : diff.stderr)}`;
   return { code: 5, out: { ok: false, head, mergeSha: flags.mergeSha, reason } };
 }

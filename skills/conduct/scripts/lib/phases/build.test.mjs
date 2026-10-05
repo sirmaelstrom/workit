@@ -137,6 +137,7 @@ const BASE_RULES = [
   [/^gh api repos\/o\/r\/commits\/\w+\/status\?per_page=100 --paginate$/, () => ok(fixture('land', 'commit-status-green.json'))],
   [/^gh api repos\/o\/r\/branches\/main\/protection\/required_status_checks$/, () => ok(fixture('land', 'required-checks.json'))],
   [/^node \S+pr-review\.mjs threads --pr (\d+)/, (h, m) => ({ code: h.unresolved?.(m[1]) ? 8 : 0, stdout: '', stderr: '' })],
+  [/^node \S+pr-review\.mjs inflight --pr (\d+)/, (h, m) => (h.inflight?.(m[1]) ? { code: 9, stdout: '', stderr: 'review attempt(s) still in flight (beat #1 lens_running)' } : ok())],
   [/^git -C \S+ show origin\/main:\.workit\/conduct\.json$/, () => ({ code: 128, stdout: '', stderr: "fatal: path '.workit/conduct.json' does not exist in 'origin/main'" })],
   [/^git -C \S+ diff --no-color --no-ext-diff --no-textconv (\w+) (\w+)$/, (h, m) => ok(`diff ${m[1]} ${m[2]}\n`)],
   [/^git -C \S+ patch-id --verbatim$/, (h, m, input) => ok(`${h.patchId ? h.patchId(input) : 'f'.repeat(40)} x\n`)],

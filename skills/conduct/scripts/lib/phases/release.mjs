@@ -137,7 +137,11 @@ function expand(state, deps) {
       ], 'gate');
     }
     case 'gate':
-      return go([{ ...shell('gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', 'release']), step: 'gate' }], 'merge');
+      // Readied before the gate, never back to back with the merge (land.mjs rebaseActions).
+      return go([
+        shell('ready', ['gh', 'pr', 'ready', String(r.pr.number), '--repo', remote]),
+        { ...shell('gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', 'release']), step: 'gate' },
+      ], 'merge');
     case 'merge': {
       if (!r.gate?.ok) return go([], 'gate');
       const actions = mergeActions(state, view(state), r.gate.head);
@@ -323,7 +327,7 @@ export function record(state, action, result = {}, deps) {
     }
     if (result.code !== 0) return fail(state, deps, action, result);
     if (lock === 'free') state.mergeLock = { wpId: 'release', since: new Date(deps.now()).toISOString() };
-  } else if (result.code !== 0) return fail(state, deps, action, result);
+  } else if (result.code !== 0 && !(action.part === 'ready' && /already/i.test(result.stderr ?? ''))) return fail(state, deps, action, result);
   const value = String(result.stdout ?? '').trim();
   if (action.part === 'base') {
     if (!/^[0-9a-f]{40}$/.test(value)) return finish(state, deps, 'failed', `base: not a commit sha: ${firstLine(value)}`);
