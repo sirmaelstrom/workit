@@ -74,7 +74,7 @@ function makeWp(over = {}) {
 // `tailFiles` answers the tail diffs: with --no-renames each entry is its own
 // row; without it, a `renames` pair collapses to its destination (git's default).
 function gateExec(o = {}) {
-  const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, threads = 0,
+  const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, threads = 0, inflight = 0,
     config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], diffQuiet = 0, patchIds = {}, diffs = {}, pr = {} } = o;
   const calls = [];
   const exec = (program, args, options = {}) => {
@@ -91,6 +91,9 @@ function gateExec(o = {}) {
     if (program === 'gh' && /\/status\?/.test(args[1])) return status;
     if (program === 'gh' && /required_status_checks$/.test(args[1])) return required;
     if (program === 'node' && args[1] === 'threads') return { code: threads, stdout: '', stderr: threads ? 'open threads' : '' };
+    if (program === 'node' && args[1] === 'inflight') {
+      return { code: inflight, stdout: '', stderr: inflight === 9 ? '1 review attempt(s) of 1111111 still in flight (beat #1 lens_running); merge after it posts.' : inflight ? 'coordinator-unreachable' : '' };
+    }
     if (program === 'git' && args[2] === 'show') return config === null ? { code: 128, stdout: '', stderr: 'fatal: path \'.workit/conduct.json\' does not exist in \'origin/main\'' } : ok(config);
     const rows = has('--no-renames') ? tailFiles : tailFiles.filter((file) => !Object.hasOwn(renames, file));
     if (program === 'git' && args[2] === 'diff' && has('--quiet') && has('--no-renames')) return { code: tailFiles.length ? 1 : 0, stdout: '', stderr: '' };
@@ -116,7 +119,39 @@ const GATE_PENDING = { code: 6, stdout: gateJson({ pending: true }), stderr: '' 
 
 test('gateCheck: ok for green CI, threads exit 0, a review at head, a fresh base and the lock held', () => {
   const out = gate(makeState(), makeWp());
-  assert.deepEqual(out, { ok: true, pending: false, blocked: false, head: HEAD, failures: [], causes: [], unreviewedTail: null, needsFullReview: false, staleBase: false });
+  assert.deepEqual(out, { ok: true, pending: false, pendingOn: [], blocked: false, head: HEAD, failures: [], causes: [], unreviewedTail: null, needsFullReview: false, staleBase: false });
+});
+
+test('gateCheck: a pipeline review of the head still in flight is pending, then blocks at the CI deadline', () => {
+  const exec = gateExec({ inflight: 9 });
+  const fresh = gateCheck(makeState(), makeWp({ gate: { head: HEAD, pendingSince: minutesAgo(2) } }), { exec, now: () => NOW });
+  assert.deepEqual([fresh.ok, fresh.pending, fresh.pendingOn, fresh.failures], [false, true, ['review'], []]);
+  assert.ok(exec.calls.some((c) => c.program === 'node' && c.args[1] === 'inflight' && c.args.includes('--head') && c.args.at(-1) === HEAD), 'the gate asks about the exact head');
+  const late = gate(makeState(), makeWp({ gate: { head: HEAD, pendingSince: minutesAgo(31) } }), { inflight: 9 });
+  assert.deepEqual([late.ok, late.pending, late.blocked, late.causes], [false, false, true, ['review-inflight']]);
+  assert.match(late.failures[0], /still in flight/);
+  const both = gate(makeState(), makeWp(), { inflight: 9, ci: ZERO });
+  assert.deepEqual([both.pending, both.pendingOn], [true, ['ci', 'review']]);
+});
+
+test('gateCheck: a review that posts and ends between the gate\'s reads is caught by the threads read', () => {
+  // The review ends (inflight 0) and its threads appear at that moment: only a
+  // threads read after the in-flight read can see them.
+  const base = gateExec();
+  let posted = false;
+  const exec = (program, args, options) => {
+    if (program === 'node' && args[1] === 'inflight') posted = true;
+    if (program === 'node' && args[1] === 'threads') return { code: posted ? 8 : 0, stdout: '', stderr: '' };
+    return base(program, args, options);
+  };
+  const out = gateCheck(makeState(), makeWp(), { exec, now: () => NOW });
+  assert.deepEqual([out.ok, out.failures], [false, ['unresolved review threads']]);
+});
+
+test('gateCheck: an in-flight answer it cannot read is infra, never "nothing in flight"', () => {
+  const out = gate(makeState(), makeWp(), { inflight: 1 });
+  assert.deepEqual([out.ok, out.pending, out.causes], [false, false, ['infra']]);
+  assert.match(out.failures[0], /^in-flight review unreadable \(exit 1\): coordinator-unreachable/);
 });
 
 test('gateCheck: one failed run fails, naming it', () => {
@@ -497,7 +532,7 @@ test('release PR (D17, D20): --wp release is T0 under the release lock; merged d
   const exec = gateExec();
   const merged = await runLandVerb('merged', { runDir: RUN, wpId: 'release', flags: { mergeSha: sha('m') } }, verbDeps(releaseState(null), exec));
   assert.equal(merged.code, 0);
-  assert.deepEqual(exec.calls.at(-1).args, ['-C', join('/', 'projects', 'workit-wt-fixture-release'), 'diff', '--quiet', HEAD, sha('m')]);
+  assert.deepEqual(exec.calls.find((c) => c.program === 'git' && c.args[2] === 'diff').args, ['-C', join('/', 'projects', 'workit-wt-fixture-release'), 'diff', '--quiet', HEAD, sha('m')]);
 });
 
 const PRIVATE_PATHS = [/[A-Za-z]:[\\/]+(Users|Development)\b/i, /[\\/]Users[\\/][^\\/\s"]+[\\/]/];
@@ -513,22 +548,21 @@ test('fixture paths: no private-path shapes under __fixtures__/land; no loopback
   assert.ok(text.replace('<coordinator-url>', ['http:', '', '127.0.0.1:3100'].join('/')).includes('://127.'));
 });
 
-test('mergeActions: ready, squash at --match-head-commit, the merge commit, then land merged with a literal {merge.sha}', () => {
+test('mergeActions: squash at --match-head-commit, the merge commit, then land merged with a literal {merge.sha}; never a ready', () => {
   const actions = mergeActions(makeState(), makeWp(), HEAD);
   assert.deepEqual(actions.map((a) => a.command), [
-    ['gh', 'pr', 'ready', '7', '--repo', 'sirmaelstrom/workit'],
     ['gh', 'pr', 'merge', '7', '--repo', 'sirmaelstrom/workit', '--squash', '--match-head-commit', HEAD],
     ['gh', 'pr', 'view', '7', '--repo', 'sirmaelstrom/workit', '--json', 'mergeCommit'],
     ['node', join(PLUGIN, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'land', 'merged', '--run', RUN, '--wp', 'WP-01', '--merge-sha', '{merge.sha}'],
   ]);
-  assert.deepEqual(actions.map((a) => a.step), ['merge', 'merge', 'merge', 'merged']);
+  assert.deepEqual(actions.map((a) => a.step), ['merge', 'merge', 'merged']);
   assert.deepEqual(mergeActions(makeState({ authority: { merge: false } }), makeWp(), HEAD), []);
-  assert.equal(mergeActions(makeState({ intent: { ...makeState().intent, merge: false, hold: true } }), makeWp(), HEAD).length, 4);
+  assert.equal(mergeActions(makeState({ intent: { ...makeState().intent, merge: false, hold: true } }), makeWp(), HEAD).length, 3);
   assert.deepEqual(mergeActions(makeState({ mergeLock: { wpId: 'WP-02' } }), makeWp(), HEAD), []);
 });
 
 test('C1-12 the squash subject is the WP\'s Commit line when the record carries it', () => {
-  const [, squash] = mergeActions(makeState(), makeWp({ commit: 'feat(conduct): landing (2ff76fa2 WP-03)' }), HEAD);
+  const [squash] = mergeActions(makeState(), makeWp({ commit: 'feat(conduct): landing (2ff76fa2 WP-03)' }), HEAD);
   assert.deepEqual(squash.command.slice(-2), ['--subject', 'feat(conduct): landing (2ff76fa2 WP-03) (#7)']);
 });
 
@@ -553,6 +587,20 @@ test('land merged: an empty diff is code 0, a non-empty one 5 (tree mismatch), n
   assert.match(failed.out.reason, /^tree compare failed/);
   assert.equal((await runLandVerb('merged', { runDir: RUN, wpId: 'WP-01', flags: {} }, verbDeps(state, gateExec()))).code, 2);
   assert.equal((await runLandVerb('merge', { runDir: RUN, wpId: 'WP-01', flags: { mergeSha: sha('m') } }, verbDeps(state, gateExec()))).code, 2);
+});
+
+test('land merged names a pipeline review still in flight at the merged head, and the recorder carries it as done with a reason', async () => {
+  const state = makeState({ wps: [makeWp({ gate: { head: HEAD } })] });
+  const flight = await runLandVerb('merged', { runDir: RUN, wpId: 'WP-01', flags: { mergeSha: sha('m') } }, verbDeps(state, gateExec({ inflight: 9 })));
+  assert.equal(flight.code, 0);
+  assert.match(flight.out.inflightAtMerge, /still in flight \(beat #1 lens_running\)/);
+  const unread = await runLandVerb('merged', { runDir: RUN, wpId: 'WP-01', flags: { mergeSha: sha('m') } }, verbDeps(state, gateExec({ inflight: 1 })));
+  assert.match(unread.out.inflightAtMerge, /^not read \(exit 1\)/);
+  const merged = { kind: 'shell', step: 'merged', part: 'merged', command: ['node'] };
+  const out = recordLandStep(makeState(), makeWp(), merged, ok(JSON.stringify(flight.out)), {});
+  assert.equal(out.outcome, 'done');
+  assert.match(out.reason, /^merged with a pipeline review of the head in flight: /);
+  assert.deepEqual(out.patch.postMerge, { inflightAtMerge: flight.out.inflightAtMerge });
 });
 
 const agents = (claude, codex) => ({ claude: { on: claude }, codex: { on: codex } });
@@ -899,7 +947,7 @@ test('recordLandStep outcomes (D19.15)', () => {
   assert.deepEqual([amend.outcome, amend.reason, amend.patch.mergeLock, amend.patch.queue], ['amend', 'unresolved review threads', null, []]);
   assert.equal(recordLandStep(state, wp, GATE_ACTION, gateResult({ blocked: true, causes: ['ci'] }), { now: () => NOW }).outcome, 'block');
   const stale = recordLandStep(state, wp, GATE_ACTION, gateResult({ staleBase: true, causes: ['stale-base'] }), { now: () => NOW });
-  assert.deepEqual([stale.outcome, stale.patch.queue.map((a) => a.part).slice(0, 2)], ['continue', ['fetch', 'pre-head']]);
+  assert.deepEqual([stale.outcome, stale.patch.queue.map((a) => a.part).slice(0, 3)], ['continue', ['fetch', 'ready', 'pre-head']]);
   const full = recordLandStep(state, { ...wp, reviewMode: 'standalone' }, GATE_ACTION, gateResult({ needsFullReview: true, causes: ['full-review'] }), { now: () => NOW });
   assert.equal(full.outcome, 'continue');
   assert.deepEqual([full.patch.queue.at(-1).land.round, full.patch.queue.at(-1).land.scope, full.patch.mergeLock], [2, 'full', null]);
@@ -916,7 +964,7 @@ test('recordLandStep outcomes (D19.15)', () => {
   assert.deepEqual([yielded.outcome, yielded.patch.queue, Object.hasOwn(yielded.patch, 'mergeLock')], ['wait', [fetch], false]);
   const taken = recordLandStep(makeState({ mergeLock: null }), wp, fetch, ok(), { now: () => NOW });
   assert.deepEqual(taken.patch.mergeLock, { wpId: 'WP-01', since: new Date(NOW).toISOString() });
-  const mergeCommit = mergeActions(state, wp, HEAD)[2];
+  const mergeCommit = mergeActions(state, wp, HEAD)[1];
   assert.deepEqual(recordLandStep(state, wp, mergeCommit, ok(fixtureText('pr-view-150-merge-commit.json')), {}).patch, { merge: { sha: '37e79605735904eac875b000ad1b2ca55885db89' } });
 });
 
@@ -977,7 +1025,7 @@ test('C1-1/C2-13 the inspection: the gate queues it (validated), its record bind
 test('C1-11 a rebase conflict queues the abort; the abort\'s record is the amendment', () => {
   const state = makeState();
   const wp = makeWp();
-  const [, , rebase] = rebaseActions(state, wp);
+  const [, , , rebase] = rebaseActions(state, wp);
   const conflict = recordLandStep(state, wp, rebase, { code: 1, stdout: 'CONFLICT (content)', stderr: '' }, {});
   assert.deepEqual([conflict.outcome, Object.hasOwn(conflict.patch, 'mergeLock')], ['continue', false]);
   const [abort] = conflict.patch.queue;
@@ -996,17 +1044,31 @@ test('C1-20 a full review whose changed files cannot be read blocks', () => {
   assert.equal(unknownTier.patch.queue[0].tool, 'council_review');
 });
 
-test('rebaseActions: fetch, pre-head, rebase, post-heads, push --force-with-lease, then a wait; post-heads records the rebase', () => {
+test('rebaseActions: fetch (takes the lock), ready, pre-head, rebase, post-heads, push --force-with-lease, then a wait; post-heads records the rebase', () => {
   const state = makeState();
   const actions = rebaseActions(state, makeWp());
-  assert.deepEqual(actions.map((a) => a.part), ['fetch', 'pre-head', 'rebase', 'post-heads', 'push', 'ci-wait']);
-  assert.deepEqual(actions[3].command, ['git', '-C', WT, 'rev-parse', 'HEAD', 'origin/main']);
+  assert.deepEqual(actions.map((a) => a.part), ['fetch', 'ready', 'pre-head', 'rebase', 'post-heads', 'push', 'ci-wait']);
+  assert.deepEqual(actions[1].command, ['gh', 'pr', 'ready', '7', '--repo', 'sirmaelstrom/workit']);
+  assert.deepEqual(actions[4].command, ['git', '-C', WT, 'rev-parse', 'HEAD', 'origin/main']);
   assert.equal(actions.at(-1).kind, 'wait');
   const from = sha('f');
   const wp = makeWp({ rebaseFrom: from });
   const exec = gateExec({ patchIds: { [`diff ${BASE} ${from}\n`]: 'p', [`diff ${sha('9')} ${HEAD}\n`]: 'p' } });
-  const out = recordLandStep(state, wp, actions[3], ok(`${HEAD}\n${sha('9')}\n`), { exec });
+  const out = recordLandStep(state, wp, actions[4], ok(`${HEAD}\n${sha('9')}\n`), { exec });
   assert.deepEqual(out.patch.rebases.map((r) => [r.from, r.to, r.newBase, r.equivalent]), [[from, HEAD, sha('9'), true]]);
+});
+
+test('the ready step: an already-ready PR continues; any other failure blocks', () => {
+  const [, ready] = rebaseActions(makeState(), makeWp());
+  assert.equal(recordLandStep(makeState(), makeWp(), ready, ok(), {}).outcome, 'continue');
+  assert.equal(recordLandStep(makeState(), makeWp(), ready, { code: 1, stdout: '', stderr: 'pull request #7 is already "ready for review"' }, {}).outcome, 'continue');
+  const failed = recordLandStep(makeState(), makeWp(), ready, { code: 1, stdout: '', stderr: 'HTTP 502' }, {});
+  assert.deepEqual([failed.outcome, failed.reason], ['block', 'ready failed (exit 1): HTTP 502']);
+});
+
+test('a gate pending only on an in-flight review waits, and says so', () => {
+  const out = recordLandStep(makeState(), makeWp(), GATE_ACTION, { code: 6, stdout: JSON.stringify({ ok: false, pending: true, pendingOn: ['review'], head: HEAD, failures: [], causes: [] }), stderr: '' }, { now: () => NOW });
+  assert.deepEqual([out.outcome, out.reason, out.waitMs, out.patch.queue[0].step], ['wait', 'a pipeline review of head is in flight', 60000, 'gate']);
 });
 
 test('tierFor (D19.11): raise only, on a contract path or a test file', () => {

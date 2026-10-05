@@ -2225,6 +2225,52 @@ export async function cmdRounds(opts, {
 }
 
 /**
+ * `inflight --repo --pr --head` — is a pipeline review of this exact head
+ * still running?
+ *
+ * A merge gate asks before it merges, so a review claimed on the head posts
+ * its threads before the merge instead of after it. A standalone repository
+ * has no coordinator and no pipeline review: `ok` with `inflight: []`. On a
+ * managed one the coordinator's /status lists every attempt, and an attempt on
+ * this head with no `ended_at` is in flight. Exit 0 when none is, 9 when one
+ * is. A status that cannot be read is refused, never read as "none in flight".
+ */
+export async function cmdInflight(opts, {
+  log = console.log,
+  die = fail,
+  env = process.env,
+  homeDir,
+  makeClient = createClient,
+} = {}) {
+  const refuse = (reason, extra, message) => {
+    emitOutcome({ outcome: 'refused', reason, ...extra }, log);
+    die(1, message);
+  };
+  const head = String(opts.head).toLowerCase();
+  const mode = resolveManaged({ repo: opts.repo, env, homeDir });
+  if (mode.mode === MANAGED_MODES.standalone) return emitOutcome({ outcome: 'ok', mode: 'standalone', inflight: [] }, log);
+  const resolved = resolveCoordinator({ env, homeDir });
+  if (mode.mode !== MANAGED_MODES.managed || !resolved.ok) {
+    refuse(resolved.reason ?? MANAGED_MODES.configMissing, { directory: mode.directory }, resolved.message ?? `${opts.repo} cannot be classified, so no attempt was read.`);
+    return undefined;
+  }
+  const client = makeClient({ coordinator: resolved.coordinator, token: resolved.token });
+  const status = await client.readStatus({ repo: opts.repo, pr: Number(opts.pr) });
+  if (!status.ok) {
+    refuse(status.code, status.source === 'coordinator' ? { coordinator_code: status.code } : {}, status.message);
+    return undefined;
+  }
+  const inflight = (status.body?.attempts ?? [])
+    .filter((row) => String(row.head_sha ?? '').toLowerCase() === head && (row.ended_at === null || row.ended_at === undefined))
+    .map((row) => ({ attempt: row.attempt, origin: row.origin ?? null, state: row.state }));
+  const line = emitOutcome({ outcome: 'ok', mode: 'managed', inflight }, log);
+  if (inflight.length) {
+    die(9, `${inflight.length} review attempt(s) of ${head.slice(0, 7)} still in flight (${inflight.map((row) => `${row.origin ?? 'unknown'} #${row.attempt} ${row.state}`).join(', ')}); merge after it posts.`);
+  }
+  return line;
+}
+
+/**
  * `recover <abandon|not-delivered|withdraw> --attempt-ref <file> --reason "<why>"`
  *
  * The operator's half of the R endpoints. None of them allocates anything.
@@ -3347,11 +3393,15 @@ On a managed repository (see below), the coordinated flow replaces steps 2 and 3
            read-only: the head's review round under the cap —
            {outcome:"ok", round: full|reviewed|delta|capped, since?, last?, problem}
            or {outcome:"refused", reason}
+  inflight --pr <n> --repo owner/name --head <full sha>
+           read-only: the review attempts on this head that have not ended —
+           {outcome:"ok", mode, inflight:[{attempt, origin, state}]}; exit 9 when
+           any is in flight, 0 when none is (a standalone repo has none)
   recover abandon|not-delivered|withdraw --attempt-ref <file> --reason "<why>"
            [--force-unverified "<why>"]   the operator's recovery arcs
 
 Coordinated output:
-  managed, identity, manifest, claim, recognise, rounds, recover, and lens / post under
+  managed, identity, manifest, claim, recognise, rounds, inflight, recover, and lens / post under
   --attempt-ref print exactly one JSON line on stdout ({outcome, reason?, retry,
   …}) with every diagnostic on stderr. Their exit codes are for humans and
   non-contractual: 0 ok, 1 refused, 3 no usable handback, 4 a gh call failed.
@@ -3554,6 +3604,10 @@ function main(argv) {
       // posted markers' heads: a short sha would never read as `reviewed`.
       if (!/^[0-9a-f]{40}$/i.test(String(opts.head ?? ''))) fail(2, 'rounds needs --head <full 40-character sha>');
       return cmdRounds(opts);
+    case 'inflight':
+      if (!opts.repo) fail(2, 'inflight needs --repo owner/name');
+      if (!/^[0-9a-f]{40}$/i.test(String(opts.head ?? ''))) fail(2, 'inflight needs --head <full 40-character sha>');
+      return cmdInflight(opts);
     case 'recover':
       if (!['abandon', 'not-delivered', 'withdraw'].includes(opts.recoverAction)) {
         fail(2, 'recover needs one of abandon, not-delivered, withdraw');

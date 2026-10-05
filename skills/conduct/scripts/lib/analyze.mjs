@@ -131,7 +131,8 @@ function escapes(state, exec) {
   const r = state.release ?? {};
   // A merge sha means merged, whatever happened after; a squash whose
   // merge-commit lookup failed is merged but unconfirmed.
-  const wpStatus = (wp) => (wp.merge?.sha ? `merged${wp.state === 'blocked' ? ' (post-merge check failed)' : ''}` : `open (${wp.state})`);
+  const wpStatus = (wp) => (wp.merge?.sha ? `merged${wp.state === 'blocked' ? ' (post-merge check failed)' : ''}`
+    : wp.squashed ? 'merged (merge commit unconfirmed)' : `open (${wp.state})`);
   const releaseStatus = r.merge?.sha ? 'merged' : r.squashed ? 'merged (merge commit unconfirmed)' : `open (${r.state})`;
   const prs = [...state.wps.filter((wp) => wp.pr?.number).map((wp) => `#${wp.pr.number} ${wp.id} ${wpStatus(wp)}`),
     ...(r.pr?.number ? [`#${r.pr.number} release ${releaseStatus}`] : [])];
@@ -142,9 +143,33 @@ function escapes(state, exec) {
     out = read.code === 0 ? JSON.parse(read.stdout) : null;
   } catch { /* unreadable: not measured */ }
   const tally = out?.ok ? out.tally?.overall : null;
-  if (!tally) return [`not measured: escape-reader exit ${read.code}: ${firstLine(read.stderr) || firstLine(read.stdout)}`, runPrs];
+  const swept = postMergeThreads(state, exec);
+  if (!tally) return [`not measured: escape-reader exit ${read.code}: ${firstLine(read.stderr) || firstLine(read.stdout)}`, runPrs, ...swept];
   return [`repo-wide since ${since}: saw ${tally.saw}, missed ${tally.missed}, unreviewed ${tally.unreviewed}, unparsed ${tally.unparsed} (${out.lines} Escape lines)`,
-    runPrs, 'Run-scoped attribution is a follow-up.'];
+    runPrs, 'Run-scoped attribution is a follow-up.', ...swept];
+}
+
+// A review that posts after its PR merged leaves open threads nobody reads.
+// The gate's in-flight wait narrows that window; this sweep reads what is left
+// on every merged PR, so each thread reaches the showcase for a verdict.
+function postMergeThreads(state, exec) {
+  const script = join(state.pluginRoot, 'skills', 'slim-review', 'scripts', 'pr-review.mjs');
+  // Every PR that merged, whatever happened after: a failed post-merge check
+  // and an unconfirmed release merge commit still landed code.
+  const r = state.release ?? {};
+  const landed = [...state.wps.filter((wp) => (wp.merge?.sha || wp.squashed) && wp.pr?.number).map((wp) => ({ id: wp.id, pr: wp.pr.number, wp })),
+    ...((r.merge?.sha || r.squashed) && r.pr?.number ? [{ id: 'release', pr: r.pr.number, wp: r }] : [])];
+  const rows = landed.map(({ id, pr, wp }) => {
+    const r = exec('node', [script, 'threads', '--pr', String(pr), '--repo', state.intent.repo.remote, '--unresolved']);
+    const flight = wp.postMerge?.inflightAtMerge ? `; review in flight at merge: ${wp.postMerge.inflightAtMerge}` : '';
+    if (r.code === 0) return flight ? `  - ${id} PR #${pr}: no unresolved threads${flight}` : null;
+    if (r.code === 8) {
+      const open = String(r.stdout ?? '').split(/\r?\n/).filter((line) => /^#\d+/.test(line.trim())).length;
+      return `  - ${id} PR #${pr}: ${open} unresolved thread(s) after the merge; give each a verdict${flight}`;
+    }
+    return `  - ${id} PR #${pr}: threads not read (exit ${r.code}): ${firstLine(r.stderr) || firstLine(r.stdout)}${flight}`;
+  }).filter(Boolean);
+  return [`post-merge threads: ${rows.length ? `${rows.length} merged PR(s) need a read` : 'none open on any merged PR'}`, ...rows];
 }
 
 function preapproval(state) {

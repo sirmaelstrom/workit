@@ -143,6 +143,7 @@ const RULES = [
     return ok(`findings ${h.findings[id]?.length ? h.findings[id].shift() : 0}\n`);
   }],
   [/^node \S+pr-review\.mjs threads /, () => ok()],
+  [/^node \S+pr-review\.mjs inflight /, () => ok()],
   [/^node \S+pr-review\.mjs (uncertainty|lens|reply) /, () => ok()],
   [/^gh api graphql -f query=query/, () => ok(text('land', 'review-threads-145.json'))],
   [/^gh api graphql -f query=mutation/, () => ok('{}')],
@@ -362,7 +363,7 @@ const of = (h, id) => h.trace.filter((a) => a.wpId === id);
 const key = (a) => `${a.step}/${a.part ?? ''}`;
 const section = (analysis, title) => analysis.split(/^## /m).find((part) => part.startsWith(`${title}\n`)) ?? '';
 const row = (analysis, seamRow) => section(analysis, 'Seam coverage').split('\n').find((line) => line.startsWith(`- ${seamRow}:`)) ?? '';
-const merges = (h) => h.trace.filter((a) => a.step === 'merge' && a.part === 'ready');
+const merges = (h) => h.trace.filter((a) => a.step === 'merge' && a.part === 'squash');
 // The touch-opened events written before the analysis ran (it runs while the
 // analyze action is pending, before the showcase opens).
 function openedBeforeAnalysis(h) {
@@ -404,9 +405,9 @@ test('portability: every adapter off, a three-WP deep run from intake to closed;
   const reviews = mine.filter((a) => ['review', 'post'].includes(a.step));
   assert.ok(reviews.length > 0 && firstRebase > 0, 'the second WP was reviewed and rebased');
   assert.ok(reviews.every((a) => mine.indexOf(a) < firstRebase), 'every review action precedes the rebase');
-  const ready = mine.findIndex((a) => key(a) === 'merge/ready');
-  const tail = mine.slice(firstRebase, ready).filter((a) => a.kind !== 'wait').map(key);
-  assert.deepEqual(tail, ['rebase/fetch', 'rebase/pre-head', 'rebase/rebase', 'rebase/post-heads', 'rebase/push', 'gate-cmd/gate-cmd', 'gate/gate']);
+  const squash = mine.findIndex((a) => key(a) === 'merge/squash');
+  const tail = mine.slice(firstRebase, squash).filter((a) => a.kind !== 'wait').map(key);
+  assert.deepEqual(tail, ['rebase/fetch', 'rebase/ready', 'rebase/pre-head', 'rebase/rebase', 'rebase/post-heads', 'rebase/push', 'gate-cmd/gate-cmd', 'gate/gate']);
   // The second merge waited for the first: its rebase starts after the first merged.
   assert.ok(h.trace.indexOf(mine[firstRebase]) > h.trace.findIndex((a) => a.wpId === first && a.step === 'merged'));
   const wp = state.wps.find((candidate) => candidate.id === second);
@@ -427,8 +428,8 @@ test('release PR (D16, D17, D19): base rev-parse, slot-form bumps, no review, la
   const release = h.trace.filter((a) => a.phase === 'release');
   assert.deepEqual(release.filter((a) => a.kind !== 'wait').map(key), [
     'release/fetch', 'release/base', 'release/worktree', 'release/bump', 'release/bump',
-    'release/add', 'release/commit', 'release/head', 'release/push', 'release/pr', 'gate/gate',
-    'merge/ready', 'merge/squash', 'merge/merge-commit', 'merged/merged', 'release/after', 'release/verify',
+    'release/add', 'release/commit', 'release/head', 'release/push', 'release/pr', 'release/ready', 'gate/gate',
+    'merge/squash', 'merge/merge-commit', 'merged/merged', 'release/after', 'release/verify',
   ]);
   assert.ok(release.every((a) => a.seam === 'release'));
   assert.deepEqual(release.find((a) => a.part === 'base').command.slice(-2), ['rev-parse', 'origin/main']);
@@ -570,8 +571,12 @@ test('release merge-commit lookup (U1): {code:1, stderr:"HTTP 502 Bad Gateway"} 
     ['failed', 'merge: merge-commit failed (exit 1): HTTP 502 Bad Gateway', null, 'analyze']);
   // C2-8: the squash landed, so the release PR is merged, unconfirmed; not open.
   h.pending = out(result).action;
+  // A review posts on the release PR after its squash: the sweep must read it.
+  h.rules = [[/^node \S+pr-review\.mjs threads --pr 200 /, () => ({ code: 8, stdout: '1 of 1 thread(s)\n\n#4190000001  package.json:3  [OPEN]  replies:0\n', stderr: '' })], ...(h.rules ?? [])];
   await drive(h, { until: (a) => a.step === 'showcase' });
   assert.match(section(h.analysis(), 'Escapes'), /^run PRs: #100 WP-00 merged, #200 release merged \(merge commit unconfirmed\)$/m);
+  // The unconfirmed release is swept too: its squash landed.
+  assert.match(section(h.analysis(), 'Escapes'), /^ {2}- release PR #200: 1 unresolved thread\(s\) after the merge; give each a verdict$/m);
 });
 
 test('release CI deadline (C2-4): one 30-minute window per head from the earliest absent-or-pending reading; a new head restarts it', async (t) => {
@@ -780,6 +785,17 @@ test('depth none: one WP-00 lane from <run>/wp-00.md, no mint action, through cl
   assert.equal(row(h.analysis(), 'wp-mint'), '- wp-mint: not exercised');
 });
 
+test('the analysis sweeps merged PRs: a review that posted after WP-02 merged leaves open threads, named for a verdict', async (t) => {
+  const merged = (h, id) => h.state().wps.find((wp) => wp.id === id)?.state === 'merged';
+  const late = [/^node \S+pr-review\.mjs threads --pr 102 /, (h) => (merged(h, 'WP-02')
+    ? { code: 8, stdout: '2 of 2 thread(s)\n\n#4185360149  lib/a.mjs:3  [OPEN]  replies:0\n#4185360162  lib/a.mjs:9  [OPEN]  replies:0\n', stderr: '' }
+    : ok())];
+  const { h } = await portability(t, { h: { rules: [late] } });
+  const escapes = section(h.analysis(), 'Escapes');
+  assert.match(escapes, /^post-merge threads: 1 merged PR\(s\) need a read$/m);
+  assert.match(escapes, /^ {2}- WP-02 PR #102: 2 unresolved thread\(s\) after the merge; give each a verdict$/m);
+});
+
 test('the analysis: headings in order; seam rows; runtime exercise from an amended report; escapes labeled with the run PRs; unmetered lower bound; resume equals the uninterrupted next', async (t) => {
   const { h } = await portability(t, { h: { reports: { 'WP-03': ['seam/report-no-runtime.md', 'build/report-built.md'] } } });
   const analysis = h.analysis();
@@ -792,6 +808,7 @@ test('the analysis: headings in order; seam rows; runtime exercise from an amend
   assert.equal(h.spawns['WP-03'], 2, 'WP-03 was amended once for its missing section');
   assert.match(section(analysis, 'Escapes'), /^repo-wide since 2026-10-04: saw 1, missed 1, unreviewed 0, unparsed 0 \(2 Escape lines\)$/m);
   assert.match(section(analysis, 'Escapes'), /^run PRs: #101 WP-01 merged, #102 WP-02 merged, #103 WP-03 merged, #200 release merged$/m);
+  assert.match(section(analysis, 'Escapes'), /^post-merge threads: none open on any merged PR$/m);
   // U2: the spine-off mint is evidence of its own.
   assert.equal(row(analysis, 'wp-mint'), '- wp-mint: owned (minted)');
   // C1-3: the runtime row cites the checks that stored each verdict.
