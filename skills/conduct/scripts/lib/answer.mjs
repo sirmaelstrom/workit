@@ -73,7 +73,8 @@ export function parseAnswerOutput(stdout, tag) {
 export function lookupAnswer(state, touch, deps, timeoutMs = LOOKUP_TIMEOUT_MS) {
   const tag = correlation(state, touch);
   const [program, ...args] = answerArgv(deps.env?.[ANSWER_ENV], state.intent.anchor, tag);
-  const result = deps.exec(program, args, { timeout: Math.max(1000, Math.min(LOOKUP_TIMEOUT_MS, timeoutMs)) });
+  // execFileSync reads a timeout of 0 as none, so the floor is 1 ms.
+  const result = deps.exec(program, args, { timeout: Math.max(1, Math.min(LOOKUP_TIMEOUT_MS, timeoutMs)) });
   if (result.code !== 0) throw new ConductError(1, `${ANSWER_ENV} exited ${result.code}: ${String(result.stderr ?? '').trim().split(/\r?\n/)[0] ?? ''}`);
   return { tag, receipt: parseAnswerOutput(result.stdout, tag) };
 }
@@ -108,8 +109,10 @@ export async function awaitAnswer(flags, deps) {
   const deadline = deps.now() + timeout;
   let failures = 0;
   for (;;) {
+    const left = deadline - deps.now();
+    if (left <= 0) return { code: 4, out: { ok: false, answered: false, timeout: true, touch: touch.n } };
     try {
-      const { tag, receipt } = lookupAnswer(state, touch, deps, deadline - deps.now());
+      const { tag, receipt } = lookupAnswer(state, touch, deps, left);
       failures = 0;
       if (receipt) return { out: { ok: true, answered: true, receipt, tag, touch: touch.n } };
     } catch (error) {

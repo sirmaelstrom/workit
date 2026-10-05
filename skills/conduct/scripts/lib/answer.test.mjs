@@ -119,7 +119,11 @@ test('every lookup is bounded: 30 s at most, never past the waiter deadline, and
   assert.deepEqual(once.timeouts, [LOOKUP_TIMEOUT_MS]);
   const near = verbDeps([{ code: 0, stdout: 'null' }]);
   await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '2000', 'timeout-ms': '5000' }, near.deps);
-  assert.ok(near.timeouts.every((ms) => ms >= 1000 && ms <= 5000), JSON.stringify(near.timeouts));
+  assert.ok(near.timeouts.every((ms) => ms >= 1 && ms <= 5000), JSON.stringify(near.timeouts));
+  // Less than a second left: the lookup gets only what is left, never past the deadline.
+  const tight = verbDeps([{ code: 0, stdout: 'null' }]);
+  await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '50', 'timeout-ms': '200' }, tight.deps);
+  assert.ok(tight.timeouts.length > 0 && tight.timeouts.every((ms) => ms >= 1 && ms <= 200), JSON.stringify(tight.timeouts));
   const started = Date.now();
   const killed = execute(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { timeout: 500 });
   assert.notEqual(killed.code, 0);
