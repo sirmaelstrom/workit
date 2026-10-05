@@ -1,8 +1,11 @@
-// Phase mint: with spine on and a deep spec, one spine_author call mints a
+// Phase mint: a deep spec's WP list comes from its workshop through
+// parseWorkPackages; with spine on, one spine_author call then mints a
 // confident quest per WP under the anchor's campaign. Depth none|lite reuses
 // the anchor as WP-00's quest; spine off mints nothing.
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import { ConductError } from '../state.mjs';
+import { parseWorkPackages } from '../schedule.mjs';
+import { wpRecord } from './spec.mjs';
 
 // spine_author is idempotent per (campaign, key), so a bare `wp-01`, or one
 // keyed by the goal's slug alone, would reuse another run's quest: the key
@@ -17,7 +20,26 @@ function resumeNote(wp) {
     `review tier: ${wp.tier}`, `runtime exercise: ${wp.runtimeExercise || 'unnamed'}`].join(' · ');
 }
 
-export function next(state) {
+// The workshop's WPs replace the spec record's list, each keeping its wave,
+// files, tier and dependencies. A WP the scheduler cannot parse is a spec
+// defect: `next` exits 2 naming it and writes nothing, and runs again once the
+// workshop is fixed. A workshop with no orchestrator keeps the spec record's
+// list (conduct.test.mjs pins that path).
+function workshopWps(state, deps) {
+  if (state.spec.depth !== 'deep' || !deps.exists(join(state.workshopDir, 'work-packages', '_orchestrator.md'))) return;
+  let parsed;
+  try {
+    parsed = parseWorkPackages(state.workshopDir, { read: deps.read, list: deps.list });
+  } catch (error) {
+    if (!(error instanceof ConductError)) throw error;
+    throw new ConductError(2, `spec defect in ${state.workshopDir}: ${error.message}. Fix the work package, then run next again.`);
+  }
+  const prior = new Map(state.wps.map((wp) => [wp.id, wp]));
+  state.wps = parsed.map((wp) => wpRecord({ ...wp, verification: prior.get(wp.id)?.verification ?? null }));
+}
+
+export function next(state, deps) {
+  workshopWps(state, deps);
   if (!state.adapters.spine?.on || state.spec.depth !== 'deep') {
     if (state.adapters.spine?.on) state.wps[0].questId = state.intent.anchor;
     state.phase = 'build';

@@ -1,0 +1,6 @@
+{
+  "command": "node scripts/escape-reader.mjs --repo example/scratch --since 2026-10-04",
+  "code": 0,
+  "stdout": "{\"ok\":true,\"census\":{\"example/scratch\":{\"prs\":3,\"withEscapeLine\":2,\"pending\":0,\"closedUnmerged\":0}},\"tally\":{\"overall\":{\"saw\":1,\"missed\":1,\"unreviewed\":0,\"unparsed\":0},\"byRepo\":{\"example/scratch\":{\"saw\":1,\"missed\":1,\"unreviewed\":0,\"unparsed\":0}}},\"lines\":2,\"escapes\":[{\"fix\":{\"repo\":\"example/scratch\",\"pr\":7,\"url\":\"https://github.com/example/scratch/pull/7\",\"state\":\"MERGED\",\"mergedAt\":\"2026-10-04T20:00:00Z\"},\"raw\":\"Escape: introduced by example/scratch#5; review missed it\",\"verdict\":\"missed\",\"parse\":\"plain\",\"introducers\":[{\"repo\":\"example/scratch\",\"spelling\":\"example/scratch\",\"pr\":5,\"key\":\"example/scratch#5\"}],\"repeatedLines\":0},{\"fix\":{\"repo\":\"example/scratch\",\"pr\":6,\"url\":\"https://github.com/example/scratch/pull/6\",\"state\":\"MERGED\",\"mergedAt\":\"2026-10-04T18:30:00Z\"},\"raw\":\"Escape: introduced by example/scratch#4; review saw it\",\"verdict\":\"saw\",\"parse\":\"plain\",\"introducers\":[{\"repo\":\"example/scratch\",\"spelling\":\"example/scratch\",\"pr\":4,\"key\":\"example/scratch#4\"}],\"repeatedLines\":0}],\"pending\":[],\"unparsed\":[]}\n",
+  "stderr": ""
+}

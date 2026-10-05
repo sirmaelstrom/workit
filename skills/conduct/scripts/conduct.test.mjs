@@ -541,29 +541,36 @@ test('touch-opened event: one per touch, spine on and off', async (t) => {
   }
 });
 
-test('interim deep mint', async (t) => {
+test('mint from the workshop: parseWorkPackages supplies the WPs, each keeping its wave', async (t) => {
   const f = fixture(t);
   const { runDir, spec } = await toSpineSpec(f, [], 'rc1');
-  // The fixture file is the conductor's verbatim spine_author capture, keyed
+  // The workshop fixture (six WPs, waves 1-4) is copied into this run's
+  // workshop. The spec record's own `wps` is a placeholder the mint replaces.
+  const workshopDir = readState(runDir).workshopDir;
+  const source = join(HERE, '__fixtures__', 'lanes', 'workshop', 'work-packages');
+  mkdirSync(join(workshopDir, 'work-packages'), { recursive: true });
+  for (const name of readdirSync(source)) writeFileSync(join(workshopDir, 'work-packages', name), readFileSync(join(source, name)));
+  // The spine_author fixture is the conductor's verbatim capture, keyed
   // `rc1-wp-01` … by the run that minted it. Its keys are rewritten here, in
   // memory only, to this run's keys before mapping; ids and shape stay real.
   const minted = fixtureJson('spine-author-result.json');
-  const wps = minted.quests.map((quest, i) => ({
-    id: `WP-0${i + 1}`, name: `wp ${i + 1}`, specPath: `wp-0${i + 1}.md`, tier: 'T2',
-    precondition: `pre ${i + 1}`, verification: `verify ${i + 1}`,
-  }));
-  const keys = wps.map((wp) => `rc1-${RUN_ID}-${wp.id.toLowerCase()}`);
+  const ids = ['WP-01', 'WP-02', 'WP-03', 'WP-04', 'WP-05', 'WP-06'];
+  const keys = ids.map((id) => `rc1-${RUN_ID}-${id.toLowerCase()}`);
   minted.quests.forEach((quest, i) => { quest.key = keys[i]; });
-  const mint = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir: readState(runDir).workshopDir, wps })).action;
+  const mint = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir, wps: [{ id: 'WP-01', verification: 'verify 1' }] })).action;
   assert.equal(mint.tool, 'spine_author');
   assert.deepEqual(mint.args.campaign, { title: fixtureJson('spine-quest-answered.json').quests[0].campaign.title });
   assert.deepEqual(mint.args.quests.map((quest) => quest.key), keys);
   assert.deepEqual(mint.args.seams.map((seam) => seam.to), keys);
   assert.ok(mint.args.seams.every((seam) => seam.from === ANCHOR_UUID && seam.type === 'decomposition'));
   // C21: the resume note carries what the consumer reads.
-  assert.match(mint.args.quests[0].resumeNote, /^wp-01\.md · precondition: pre 1 · verification: verify 1 · review tier: T2 · runtime exercise: /);
+  assert.match(mint.args.quests[0].resumeNote, /wp-01-state-intake-protocol\.md · precondition: .+ · verification: verify 1 · review tier: T2 · runtime exercise: /);
+  let state = readState(runDir);
+  assert.deepEqual(state.wps.map((wp) => [wp.id, wp.wave]), [['WP-01', 1], ['WP-02', 2], ['WP-03', 2], ['WP-04', 3], ['WP-05', 3], ['WP-06', 4]]);
+  assert.deepEqual(state.wps.find((wp) => wp.id === 'WP-04').dependsOn, ['WP-02', 'WP-03']);
+  assert.ok(state.wps.every((wp) => wp.files.length > 0 && wp.tier === 'T2' && wp.state === 'pending'));
   assert.equal((await record(f, runDir, mint.id, minted)).code, 0);
-  const state = readState(runDir);
+  state = readState(runDir);
   assert.deepEqual(state.wps.map((wp) => wp.questId), minted.quests.map((quest) => quest.id));
   assert.equal(state.phase, 'build');
 });

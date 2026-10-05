@@ -1,0 +1,766 @@
+// The conductor end to end, through runConduct only: intake → touch 1 → spec
+// → mint → build → release → analyze → showcase. These scenarios are
+// SCRIPTED. A fake agent answers every action from a script, and a fake
+// executor answers every program, so they prove the conductor against an
+// authored /spec output (the three-WP workshop under __fixtures__/seam/) and
+// authored lane reports. The real producer → consumer run, with the installed
+// skill invoking /spec for real, is RC-1 Phase E (D19.26).
+//
+// Every conduct.mjs shell action (lane spawn/alive/check, land gate/merged,
+// analyze) runs in-process through runConduct with the same fakes, from the
+// plugin root its argv names. No network, no sleeps: a wait is recorded,
+// never slept.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { runConduct } from './conduct.mjs';
+import { STEPS, readEvents } from './lib/state.mjs';
+import { shellArgv } from './lib/exec.mjs';
+import { correlation } from './lib/touch.mjs';
+import { SEAM_ROWS } from './lib/analyze.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const FIX = join(HERE, '__fixtures__');
+const SEAM = join(FIX, 'seam');
+const T0 = Date.parse('2026-10-04T18:00:00.000Z');
+const GOAL = 'seam run';
+const ANCHOR = 'a0a0a0a0-0000-4000-8000-000000000001';
+const IDENTITY = 'Sun Oct 4 18:00:00 2026 claude';
+const BASE = 'b'.repeat(40);
+const RELEASE_HEAD = 'e'.repeat(40);
+const LANE_COST = 0.25;
+const LIVE = ['dispatched', 'pr', 'review', 'amending', 'gate'];
+const OFF = ['herdr', 'notify', 'spend', 'spine', 'council', 'kb', 'verify'].flatMap((name) => ['--no-adapter', name]);
+const PRIVATE_PATHS = [/[A-Za-z]:[\\/]+(Users|Development)\b/i, /[\\/]Users[\\/][^\\/\s"]+[\\/]/];
+
+const text = (...parts) => readFileSync(join(FIX, ...parts), 'utf8');
+const captured = (...parts) => JSON.parse(text(...parts));
+const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' });
+const sha = (prefix, n) => `${prefix}${String(n).padStart(39, '0')}`;
+const num = (id) => Number(id.slice(3));
+const out = (result) => JSON.parse(result.stdout);
+// A synthetic `claude -p --output-format json` result line: the exec lane's cost.
+const LANE_LOG = (n) => `${JSON.stringify({ type: 'result', subtype: 'success', session_id: `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`, total_cost_usd: LANE_COST })}\n`;
+
+// ---- the harness ----
+
+function seam(t, opts = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'workit-seam-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const repo = join(dir, opts.herdr ? 'projects' : 'src', 'repo');
+  cpSync(join(SEAM, 'repo'), repo, { recursive: true });
+  const plugin = join(dir, 'plugin');
+  for (const sub of [['reference', 'templates'], ['skills', 'conduct', 'templates'], ['.claude-plugin']]) mkdirSync(join(plugin, ...sub), { recursive: true });
+  cpSync(join(FIX, 'build', 'lane-contract.template.md'), join(plugin, 'reference', 'templates', 'lane-contract.template.md'));
+  cpSync(join(HERE, '..', 'templates', 'lane-brief.md'), join(plugin, 'skills', 'conduct', 'templates', 'lane-brief.md'));
+  writeFileSync(join(plugin, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'workit', homepage: `https://github.com/example/${opts.selfHosted ? 'scratch' : 'plugin'}` }));
+  const home = join(dir, 'home');
+  mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+  const h = {
+    dir, repo, plugin, home, runs: join(dir, 'runs'), runDir: null, trace: [], calls: [], heads: {}, life: {}, spawns: {}, reports: {}, findings: {},
+    answers: { preapproval: { key: 'a' }, showcase: { key: 'a' }, blocked: { key: 'a' }, ...opts.answers }, rulings: [], codes: [], seq: 0,
+    depth: opts.depth ?? 'deep', gateCommand: opts.gateCommand ?? 'node --version', clock: T0, ...opts.h,
+  };
+  h.installed = (snapshot) => writeFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'),
+    text('seam', `installed-plugins-${snapshot}.json`).replaceAll('<plugins>', join(dir, 'plugins').replaceAll('\\', '/')));
+  h.installed('before');
+  h.head = (id) => h.heads[id] ?? sha('a', num(id));
+  h.bump = (id) => (h.heads[id] = sha('c', (h.seq += 1) * 100 + num(id)));
+  h.deps = {
+    exec: (program, args, options = {}) => fakeExec(h, program, args, options),
+    env: { HOME: home, ...(opts.herdr ? { HERDR_ENV: '1' } : {}), ...opts.env }, platform: 'linux', home, stdinIsTTY: false, pluginRoot: plugin,
+    now: () => h.clock, timestamp: () => new Date((h.clock += 1000)).toISOString(), newRunId: () => 'abcd1234', lockWaitMs: 0,
+    sleep: async () => {}, resolveCodex: () => 'codex', spawnDetached: (program, args, options) => fakeSpawn(h, options),
+    pidAlive: (pid) => (h.life[`WP-${String(pid - 4200).padStart(2, '0')}`] ?? 0) > 0,
+  };
+  h.run = (argv, more = {}) => runConduct(argv, { ...h.deps, ...more });
+  h.state = () => JSON.parse(readFileSync(join(h.runDir, 'state.json'), 'utf8'));
+  h.events = () => readEvents(h.runDir, { exists: existsSync, read: (path) => readFileSync(path, 'utf8') }, h.state());
+  h.wp = (id) => h.state().wps.find((wp) => wp.id === id);
+  h.analysis = () => readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
+  return h;
+}
+
+async function start(h, extra = []) {
+  const result = await h.run(['intake', '--goal', GOAL, '--repo', h.repo, '--runs-root', h.runs, ...extra]);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  h.runDir = out(result).runDir;
+  h.pending = out(result).action;
+}
+
+const idOfWorktree = (path) => (/-release$/.test(path) ? 'release' : /-(wp-\d+)$/.exec(path)?.[1].toUpperCase());
+const prOf = (id) => (id === 'release' ? 200 : 100 + num(id));
+const idOfPr = (n) => (Number(n) === 200 ? 'release' : `WP-${String(Number(n) - 100).padStart(2, '0')}`);
+const headOf = (h, id) => (id === 'release' ? RELEASE_HEAD : h.head(id));
+const mergeSha = (id) => (id === 'release' ? sha('d', 99) : sha('d', num(id)));
+
+// [regex over "program args…", (h, match, input) → result]; h.rules first.
+const RULES = [
+  [/^git -C \S+ rev-parse --is-inside-work-tree$/, () => ok('true\n')],
+  [/^git -C (\S+) rev-parse --show-toplevel$/, (h, m) => ok(`${m[1]}\n`)],
+  [/^git -C \S+ config --get remote\.origin\.url$/, () => ok('https://github.com/example/scratch.git\n')],
+  [/^gh auth status --hostname github\.com$/, () => ok('github.com\n  ✓ Logged in (synthetic)\n')],
+  [/^gh repo view example\/scratch --json nameWithOwner,defaultBranchRef$/, () => ok(JSON.stringify({ nameWithOwner: 'example/scratch', defaultBranchRef: { name: 'main' } }))],
+  [/^gh api --paginate repos\/example\/scratch\/actions\/workflows --jq \.workflows\[\]$/, () => ok(`${JSON.stringify({ state: 'active', path: '.github/workflows/ci.yml' })}\n`)],
+  [/^claude --version$/, () => ok('2.1.0 (Claude Code)\n')],
+  [/^codex --version$/, () => ({ code: 1, stdout: '', stderr: 'codex: not found' })],
+  [/^herdr agent list$/, () => ok('[]')],
+  [/^sh -c command -v "\$1" sh (\S+)$/, (h, m) => ok(`/bin/${m[1]}\n`)],
+  [/^sh -c id=/, () => ok(`${IDENTITY}\n`)],
+  [/^git -C \S+ rev-parse origin\/main$/, () => ok(`${BASE}\n`)],
+  [/^git -C (\S+) worktree add (\S+) -b \S+ origin\/main$/, (h, m) => {
+    // The release worktree carries the bump files, as a checkout of origin/main would.
+    if (idOfWorktree(m[2]) === 'release') cpSync(join(m[1], '.claude-plugin'), join(m[2], '.claude-plugin'), { recursive: true });
+    return ok();
+  }],
+  [/^git -C \S+ rev-list --count \S+\.\.HEAD$/, () => ok('1\n')],
+  [/^gh pr list --repo example\/scratch --head conduct\/\S+\/(wp-\d+) --state all --json number,headRefOid,state$/, (h, m) => {
+    const id = m[1].toUpperCase();
+    return ok(JSON.stringify([{ number: prOf(id), headRefOid: h.head(id), state: 'OPEN' }]));
+  }],
+  [/^gh pr view (\d+) --repo example\/scratch --json headRefName,state,body$/, (h, m) => {
+    const id = idOfPr(m[1]);
+    return ok(JSON.stringify({ headRefName: `conduct/seam-run/${id.toLowerCase()}`, state: 'OPEN', body: readFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), 'utf8') }));
+  }],
+  [/^gh pr view (\d+) --repo example\/scratch --json headRefOid,baseRefName,state$/, (h, m) => ok(JSON.stringify({ headRefOid: headOf(h, idOfPr(m[1])), baseRefName: 'main', state: 'OPEN' }))],
+  [/^gh pr view (\d+) --repo example\/scratch --json mergeCommit$/, (h, m) => ok(JSON.stringify({ mergeCommit: { oid: mergeSha(idOfPr(m[1])) } }))],
+  [/^gh pr diff (\d+) --repo example\/scratch --name-only$/, (h, m) => ok(h.diff?.[idOfPr(m[1])] ?? 'src/x.mjs\n')],
+  [/^gh pr (ready|merge) /, () => ok()],
+  [/^gh pr create --draft --repo example\/scratch /, () => ok('https://github.com/example/scratch/pull/200\n')],
+  [/^node \S+pr-review\.mjs managed /, () => ok(JSON.stringify({ mode: 'standalone' }))],
+  [/^node \S+pr-review\.mjs post --pr (\d+)/, (h, m) => {
+    const id = idOfPr(m[1]);
+    return ok(`findings ${h.findings[id]?.length ? h.findings[id].shift() : 0}\n`);
+  }],
+  [/^node \S+pr-review\.mjs threads /, () => ok()],
+  [/^node \S+pr-review\.mjs (uncertainty|lens|reply) /, () => ok()],
+  [/^gh api graphql -f query=query/, () => ok(text('land', 'review-threads-145.json'))],
+  [/^gh api graphql -f query=mutation/, () => ok('{}')],
+  [/^git -C (\S+) rev-parse HEAD$/, (h, m) => ok(`${headOf(h, idOfWorktree(m[1]))}\n`)],
+  [/^git -C (\S+) rev-parse HEAD origin\/main$/, (h, m) => ok(`${h.bump(idOfWorktree(m[1]))}\n${'9'.repeat(40)}\n`)],
+  [/^git -C \S+ (fetch origin|rebase origin\/main|push |add |commit )/, () => ok()],
+  [/^git -C \S+ merge-base --is-ancestor /, () => ok()],
+  [/^git -C \S+ diff --no-color --no-ext-diff --no-textconv (\w+) (\w+)$/, (h, m) => ok(`diff ${m[1]} ${m[2]}\n`)],
+  [/^git -C \S+ patch-id --verbatim$/, () => ok(`${'f'.repeat(40)} x\n`)],
+  [/^git -C \S+ diff --quiet (?:--no-renames )?(\w+) (\w+)$/, (h, m) => ({ code: h.treeMismatch === m[2] ? 1 : 0, stdout: '', stderr: '' })],
+  [/^git -C \S+ diff --name-only \S+ \S+$/, (h) => ok(h.amendDiff ?? 'src/x.mjs\n')],
+  [/^git -C \S+ diff --no-color --output=/, () => ok()],
+  [/^git -C \S+ show origin\/main:\.workit\/conduct\.json$/, () => ({ code: 128, stdout: '', stderr: "fatal: path '.workit/conduct.json' does not exist in 'origin/main'" })],
+  [/^gh api repos\/example\/scratch\/commits\/(\w+)\/check-runs\?per_page=100 --paginate$/, (h, m) => (h.checkRuns ? h.checkRuns(m[1]) : ok(text('land', 'check-runs-green.json')))],
+  [/^gh api repos\/example\/scratch\/commits\/\w+\/status\?per_page=100 --paginate$/, () => ok(text('land', 'commit-status-green.json'))],
+  [/^gh api repos\/example\/scratch\/branches\/main\/protection\/required_status_checks$/, () => ok(text('land', 'required-checks.json'))],
+  [/^node \S+escape-reader\.mjs --repo example\/scratch --since (\S+)$/, () => {
+    const { code, stdout, stderr } = captured('seam', 'escape-reader.json');
+    return { code, stdout, stderr };
+  }],
+  [/^claude plugin update workit@workit$/, (h) => {
+    if (h.selfHosted) h.installed('after');
+    return { code: h.afterCode ?? 0, stdout: '', stderr: h.afterCode ? 'update failed (synthetic)' : '' };
+  }],
+  [/^node --test$/, (h) => ({ code: h.verifyCode ?? 0, stdout: '', stderr: h.verifyCode ? 'not ok 1 - synthetic' : '' })],
+  [/^sh -c /, (h, m, input, args) => ({ code: 0, stdout: /spend/.test(args.at(-1)) ? `${h.spendOut?.length ? h.spendOut.shift() : '1'}\n` : '', stderr: '' })],
+];
+
+function fakeExec(h, program, args, { input } = {}) {
+  const key = [program, ...args].join(' ');
+  h.calls.push(key);
+  for (const [pattern, answer] of [...(h.rules ?? []), ...RULES]) {
+    const match = pattern.exec(key);
+    if (match) return answer(h, match, input, args);
+  }
+  return { code: 127, stdout: '', stderr: `unexpected command: ${key}` };
+}
+
+// The lane writes its report (an amendment pushes a new head first).
+function writeReport(h, id, amended) {
+  if (amended) h.bump(id);
+  const name = h.reports[id]?.length ? h.reports[id].shift() : h.lastReport?.[id] ?? 'build/report-built.md';
+  (h.lastReport ??= {})[id] = name;
+  writeFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), text(name).replaceAll('{pr}', String(prOf(id))).replaceAll('{head}', h.head(id)));
+}
+
+function fakeSpawn(h, { logPath }) {
+  const id = /lane-(wp-\d+)\.log$/.exec(logPath)[1].toUpperCase();
+  h.spawns[id] = (h.spawns[id] ?? 0) + 1;
+  h.life[id] = h.lives?.[id] ?? 1;
+  writeFileSync(logPath, LANE_LOG(num(id)), { flag: 'a' });
+  writeReport(h, id, h.spawns[id] > 1);
+  return { pid: 4200 + num(id) };
+}
+
+function herdrVerb(h, action) {
+  const id = action.wpId;
+  const verb = action.command[2];
+  if (verb === 'create') return ok(JSON.stringify({ paneId: `pane-${id}`, path: `${h.repo}-wt-seam-run-${id.toLowerCase()}`, branch: `conduct/seam-run/${id.toLowerCase()}` }));
+  if (verb === 'start') return ok(JSON.stringify({ startedAt: h.deps.timestamp() }));
+  if (verb === 'prompt') {
+    h.spawns[id] = (h.spawns[id] ?? 0) + 1;
+    h.life[id] = h.lives?.[id] ?? 1;
+    writeReport(h, id, h.spawns[id] > 1);
+    return ok();
+  }
+  if (verb === 'wait') {
+    if ((h.life[id] ?? 0) > 0) {
+      h.life[id] -= 1;
+      return { code: 4, stdout: '', stderr: 'timeout' };
+    }
+    return ok();
+  }
+  return ok();
+}
+
+async function conductVerb(h, action) {
+  const root = resolve(dirname(action.command[1]), '..', '..', '..');
+  const argv = action.command.slice(2);
+  const result = await runConduct(argv, { ...h.deps, pluginRoot: root });
+  if (argv[0] === 'lane' && argv[1] === 'alive') {
+    const id = argv[argv.indexOf('--wp') + 1];
+    h.life[id] = Math.max(0, (h.life[id] ?? 0) - 1);
+  }
+  return { code: result.code, stdout: result.stdout, stderr: result.stderr };
+}
+
+function fill(action) {
+  let body = readFileSync(action.template, 'utf8');
+  for (const [slot, value] of Object.entries(action.slots)) {
+    if (action.part === 'bump') body = body.replace(slot, value);
+    else body = value === null ? body.split('\n').filter((line) => !line.includes(slot)).join('\n') : body.replaceAll(slot, value);
+  }
+  return action.append ? `${body}${action.append}` : body;
+}
+
+function author(h, action) {
+  if (action.step === 'ruling') {
+    const value = h.rulings.length ? h.rulings.shift() : { ruled: action.ruling.keys.at(-1), evidence: 'node --test: 12 pass' };
+    mkdirSync(dirname(action.outPath), { recursive: true });
+    writeFileSync(action.outPath, JSON.stringify(value));
+  } else if (action.step === 'council') {
+    mkdirSync(dirname(action.outPath), { recursive: true });
+    writeFileSync(action.outPath, JSON.stringify({ title: action.title }));
+  } else if (action.files) {
+    mkdirSync(action.outPath, { recursive: true });
+    for (const file of action.files) writeFileSync(file.path, `${file.verdict}\n`);
+  } else {
+    mkdirSync(dirname(action.outPath), { recursive: true });
+    writeFileSync(action.outPath, action.template ? fill(action) : action.instruction);
+  }
+  return {};
+}
+
+async function answerTouch(h, n) {
+  const touch = h.state().touches[n - 1];
+  const { key, text: words } = h.answers[touch.kind];
+  const result = await h.run(['answer', '--run', h.runDir, '--touch', String(n), '--key', key, ...(words ? ['--text', words] : [])], { stdinIsTTY: true });
+  assert.equal(result.code, 0, result.stdout);
+}
+
+function tool(h, action) {
+  const state = h.state();
+  switch (action.tool) {
+    case 'spine_quest': {
+      if (action.step === 'anchor') return { quests: [{ id: ANCHOR, campaign: { slug: 'seam', title: 'Seam campaign' }, latestReceipt: null }] };
+      const touch = state.touches.find((candidate) => candidate.status === 'filed');
+      const { key, text: words = null } = h.answers[touch.kind];
+      return { quests: [{ id: ANCHOR, latestReceipt: { outcome: 'answered', question: `${correlation(state, touch)} synthetic question`,
+        answer: { key, text: words, by: 'operator:seam', answeredAt: new Date(h.clock).toISOString() } } }] };
+    }
+    case 'spine_receipt': return { id: `00000000-0000-4000-8000-${String((h.seq += 1)).padStart(12, '0')}`, questId: action.args.questId, outcome: action.args.outcome };
+    case 'spine_update': return { ok: true, questId: action.args.questId };
+    case 'spine_author': return { quests: action.args.quests.map((quest, i) => ({ key: quest.key, id: `00000000-0000-4000-8000-00000000010${i + 1}` })) };
+    case 'council_review': return { models: { opus: { status: 'success' } } };
+    case 'council_synthesize': return { findings: h.council?.length ? h.council.shift() : 0, seats: ['opus'] };
+    case 'council_challenge': return { success: true };
+    default: throw new Error(`no fake for ${action.tool}`);
+  }
+}
+
+// The scripted /spec: the workshop it wrote, and the record it reports.
+function spec(h) {
+  const { workshopDir } = h.state();
+  if (h.depth === 'none') return { depth: 'none', workshopDir, gateCommand: h.gateCommand };
+  cpSync(join(SEAM, 'workshop'), workshopDir, { recursive: true });
+  h.onWorkshop?.(workshopDir);
+  return { depth: 'deep', workshopDir, wps: [{ id: 'WP-01' }] };
+}
+
+async function perform(h, action) {
+  const custom = h.custom?.(action);
+  if (custom !== undefined) return custom;
+  switch (action.kind) {
+    case 'touch':
+      await answerTouch(h, action.touch.n);
+      return {};
+    case 'wait':
+      if (action.part === 'announce') {
+        const open = h.state().touches.find((touch) => touch.status === 'open');
+        await answerTouch(h, open.n);
+      }
+      return {};
+    case 'author': return author(h, action);
+    case 'skill': return spec(h);
+    case 'agent-tool': return tool(h, action);
+    default: {
+      const { command } = action;
+      if (command[0] === 'node' && command[1].endsWith('conduct.mjs')) return conductVerb(h, action);
+      if (command[0] === 'node' && command[1].endsWith('lane.mjs')) {
+        h.calls.push(command.join(' '));
+        return herdrVerb(h, action);
+      }
+      const [program, ...args] = command;
+      return fakeExec(h, program, args);
+    }
+  }
+}
+
+// next → perform → record until `until(action)` (left pending) or done.
+async function drive(h, { until = () => false, max = 3000 } = {}) {
+  let action = h.pending;
+  h.pending = null;
+  for (let i = 0; i < max; i += 1) {
+    if (!action) {
+      const result = await h.run(['next', '--run', h.runDir]);
+      assert.equal(result.code, 0, result.stdout + result.stderr);
+      action = out(result).action;
+    }
+    if (action.kind === 'done') return action;
+    if (h.trace.at(-1)?.id !== action.id) {
+      h.trace.push(action);
+      h.onEmit?.(action);
+    }
+    if (until(action, h)) {
+      h.pending = action;
+      return action;
+    }
+    const result = await perform(h, action);
+    const recorded = await h.run(['record', '--run', h.runDir, '--action', action.id, '--result', JSON.stringify(result), ...(h.manual?.(action) ? ['--manual'] : [])]);
+    if (recorded.code !== 0) throw new Error(`record ${action.id} (${action.step}/${action.part}): exit ${recorded.code}: ${recorded.stdout} ${recorded.stderr}`);
+    h.onRecorded?.(action, out(recorded));
+    action = out(recorded).action;
+  }
+  throw new Error(`drive did not settle: ${h.trace.slice(-6).map((a) => `${a.id}/${a.part ?? ''}${a.wpId ? `@${a.wpId}` : ''}`).join(', ')}`);
+}
+
+const of = (h, id) => h.trace.filter((a) => a.wpId === id);
+const key = (a) => `${a.step}/${a.part ?? ''}`;
+const section = (analysis, title) => analysis.split(/^## /m).find((part) => part.startsWith(`${title}\n`)) ?? '';
+const row = (analysis, seamRow) => section(analysis, 'Seam coverage').split('\n').find((line) => line.startsWith(`- ${seamRow}:`)) ?? '';
+const merges = (h) => h.trace.filter((a) => a.step === 'merge' && a.part === 'ready');
+// The touch-opened events written before the analysis ran (it runs while the
+// analyze action is pending, before the showcase opens).
+function openedBeforeAnalysis(h) {
+  const events = h.events();
+  const analyze = events.findIndex((e) => e.event === 'emitted' && e.step === 'analyze');
+  assert.ok(analyze > 0);
+  return events.slice(0, analyze).filter((e) => e.event === 'touch-opened').length;
+}
+
+// A three-WP deep run to the showcase, adapters off, the release recipe on.
+async function portability(t, opts = {}) {
+  const h = seam(t, opts);
+  let most = 0;
+  h.onEmit = () => { most = Math.max(most, h.state().wps.filter((wp) => LIVE.includes(wp.state)).length); };
+  await start(h, OFF);
+  const done = await drive(h);
+  return { h, done, most: () => most };
+}
+
+// ---- the tests ----
+
+test('portability: every adapter off, a three-WP deep run from intake to closed; WP-02 ∥ WP-03; the second merge rebases, gates and lands at the rebased head', async (t) => {
+  const { h, done, most } = await portability(t, { h: { reports: { 'WP-03': ['seam/report-no-runtime.md', 'build/report-built.md'] }, lives: { 'WP-02': 2, 'WP-03': 2 } } });
+  assert.equal(done.kind, 'done');
+  const state = h.state();
+  assert.equal(state.phase, 'closed');
+  assert.deepEqual(state.wps.map((wp) => [wp.id, wp.wave, wp.state]), [['WP-01', 1, 'merged'], ['WP-02', 2, 'merged'], ['WP-03', 2, 'merged']]);
+  assert.equal(state.release.state, 'done');
+  // The touch went through `answer` with an injected TTY; then spec, mint, build.
+  assert.deepEqual(h.trace.slice(0, 2).map((a) => a.kind), ['touch', 'skill']);
+  assert.equal(h.trace.find((a) => a.phase === 'build').step, 'contract');
+  assert.ok(!h.trace.some((a) => a.kind === 'agent-tool'), 'no agent-tool action on the core path');
+  assert.ok(!h.calls.some((call) => /lane\.mjs/.test(call)), 'no lane.mjs argv executed');
+  assert.ok(most() >= 2, 'WP-02 and WP-03 were live at the same time');
+  const [first, second] = merges(h).map((a) => a.wpId).filter((id) => id !== 'WP-01');
+  assert.ok(first && second);
+  const mine = of(h, second);
+  const firstRebase = mine.findIndex((a) => a.step === 'rebase');
+  assert.ok(mine.filter((a) => ['review', 'post'].includes(a.step)).every((a) => mine.indexOf(a) < firstRebase), 'every review action precedes the rebase');
+  const ready = mine.findIndex((a) => key(a) === 'merge/ready');
+  const tail = mine.slice(firstRebase, ready).filter((a) => a.kind !== 'wait').map(key);
+  assert.deepEqual(tail, ['rebase/fetch', 'rebase/pre-head', 'rebase/rebase', 'rebase/post-heads', 'rebase/push', 'gate-cmd/gate-cmd', 'gate/gate']);
+  // The second merge waited for the first: its rebase starts after the first merged.
+  assert.ok(h.trace.indexOf(mine[firstRebase]) > h.trace.findIndex((a) => a.wpId === first && a.step === 'merged'));
+  const wp = state.wps.find((candidate) => candidate.id === second);
+  assert.equal(wp.gate.head, wp.rebases.at(-1).to, 'land gate ran at the rebased head');
+  assert.notEqual(wp.rebases.at(-1).to, wp.rebases.at(-1).from);
+});
+
+test('release PR (D16, D17, D19): base rev-parse, slot-form bumps, no review, land gate and merged --wp release; every release event carries seam release; the lock is the release\'s from fetch to merged (D20)', async (t) => {
+  const h = seam(t);
+  const lock = {};
+  h.onRecorded = (action) => {
+    if (action.phase === 'release' && action.part === 'fetch') lock.afterFetch = h.state().mergeLock;
+    if (action.phase === 'release' && action.step === 'gate') lock.gate = h.state().release.gate;
+    if (action.phase === 'release' && action.step === 'merged') lock.afterMerged = h.state().mergeLock;
+  };
+  await start(h, OFF);
+  await drive(h);
+  const release = h.trace.filter((a) => a.phase === 'release');
+  assert.deepEqual(release.filter((a) => a.kind !== 'wait').map(key), [
+    'release/fetch', 'release/base', 'release/worktree', 'release/bump', 'release/bump',
+    'release/add', 'release/commit', 'release/head', 'release/push', 'release/pr', 'gate/gate',
+    'merge/ready', 'merge/squash', 'merge/merge-commit', 'merged/merged', 'release/after', 'release/verify',
+  ]);
+  assert.ok(release.every((a) => a.seam === 'release'));
+  assert.deepEqual(release.find((a) => a.part === 'base').command.slice(-2), ['rev-parse', 'origin/main']);
+  const bumps = release.filter((a) => a.part === 'bump');
+  assert.deepEqual(bumps.map((a) => a.slots), [{ '"version": "0.1.0"': '"version": "0.1.1"' }, { '"version": "0.1.0"': '"version": "0.1.1"' }]);
+  assert.ok(bumps.every((a) => a.template === a.outPath && a.outPath.includes(`${'repo'}-wt-seam-run-release`)));
+  assert.ok(!release.some((a) => ['review', 'post', 'council'].includes(a.step)), 'no review: the release PR is T0');
+  assert.deepEqual(release.find((a) => a.step === 'gate').command.slice(-4), ['--run', h.runDir, '--wp', 'release']);
+  assert.deepEqual(release.find((a) => a.step === 'merged').command.slice(-6), ['--run', h.runDir, '--wp', 'release', '--merge-sha', sha('d', 99)]);
+  const events = h.events().filter((e) => release.some((a) => a.id === e.actionId));
+  assert.ok(events.length > 0 && events.every((e) => e.seam === 'release'));
+  assert.deepEqual(lock.afterFetch, { wpId: 'release', since: lock.afterFetch.since });
+  assert.ok(lock.gate.ok && !lock.gate.causes.includes('lock'), 'land gate --wp release passes condition (0)');
+  assert.equal(lock.afterMerged, null);
+  const state = h.state();
+  assert.deepEqual(state.release.version, { from: '0.1.0', to: '0.1.1' });
+  assert.match(state.release.gate.unreviewedTail, /\(T0\)$/);
+});
+
+test('hold at PR (D12): touch 1 (b) → WP-01 held, WP-02 and WP-03 deferred naming it, no merge action, release not-exercised (held), the showcase lists them, zero merges audited', async (t) => {
+  const h = seam(t, { answers: { preapproval: { key: 'b' } } });
+  await start(h, OFF);
+  const showcase = await drive(h, { until: (a) => a.step === 'showcase' });
+  const state = h.state();
+  assert.deepEqual(state.wps.map((wp) => wp.state), ['held', 'deferred', 'deferred']);
+  assert.match(state.wps[1].reason, /WP-01/);
+  assert.match(state.wps[2].reason, /WP-01/);
+  assert.ok(!h.trace.some((a) => ['merge', 'merged'].includes(a.step)), 'no merge action was ever emitted');
+  assert.deepEqual([state.release.state, state.release.reason], ['not-exercised', 'held']);
+  const question = state.touches.find((touch) => touch.kind === 'showcase').question;
+  assert.match(question, /Open PRs of held WPs: WP-01 https:\/\/github\.com\/example\/scratch\/pull\/101/);
+  assert.match(question, /Deferred WPs: WP-02: depends on WP-01, which is held; WP-03: depends on WP-01, which is held/);
+  assert.equal(showcase.kind, 'touch');
+  assert.match(section(h.analysis(), 'Pre-approval audit'), /^- merges: 0$/m);
+  assert.match(row(h.analysis(), 'release'), /^- release: not exercised/);
+  assert.match(section(h.analysis(), 'Seam coverage'), /^ {2}- release not exercised: held$/m);
+});
+
+test('release only after a complete build (D19.10): WP-03 refuted, WP-01 and WP-02 merged → not-exercised (incomplete build), no release worktree', async (t) => {
+  const h = seam(t, { h: { reports: { 'WP-03': ['build/report-refuted.md'] } } });
+  await start(h, OFF);
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  const state = h.state();
+  assert.deepEqual(state.wps.map((wp) => wp.state), ['merged', 'merged', 'refuted']);
+  assert.deepEqual([state.release.state, state.release.reason], ['not-exercised', 'incomplete build']);
+  assert.ok(!h.calls.some((call) => /worktree add \S+-release /.test(call)));
+  assert.ok(!h.trace.some((a) => a.phase === 'release'));
+  assert.equal(state.phase, 'showcase');
+});
+
+// A depth-none run (one WP-00 lane) to a stop condition.
+async function nonePath(t, opts = {}, extra = OFF) {
+  const h = seam(t, { depth: 'none', ...opts });
+  await start(h, extra);
+  return h;
+}
+
+test('release failures (D20): land gate --wp release code 5, a verify exit 1 and an after exit 1 each end the release failed, unlocked, at analyze; the analysis and the showcase name it', async (t) => {
+  const red = JSON.parse(text('land', 'check-runs-green.json'));
+  red.check_runs[0].conclusion = 'failure';
+  const cases = [
+    ['land gate', { checkRuns: (s) => ok(JSON.stringify(s === RELEASE_HEAD ? red : JSON.parse(text('land', 'check-runs-green.json')))) }, /^land gate: CI failed at head/],
+    ['verify', { verifyCode: 1 }, /^verify "node --test" exited 1: not ok 1 - synthetic$/],
+    ['after', { afterCode: 1 }, /^after "claude plugin update workit@workit" exited 1: update failed \(synthetic\)$/],
+  ];
+  for (const [name, patch, reason] of cases) {
+    const h = await nonePath(t, { h: patch });
+    const analyze = await drive(h, { until: (a) => a.step === 'analyze' });
+    const state = h.state();
+    assert.equal(state.release.state, 'failed', name);
+    assert.match(state.release.reason, reason, name);
+    assert.equal(state.mergeLock, null, name);
+    assert.equal(state.phase, 'analyze', name);
+    assert.equal(analyze.kind, 'shell');
+    await drive(h, { until: (a) => a.step === 'showcase' });
+    assert.ok(section(h.analysis(), 'Queue accounting').includes(`- release: failed: ${state.release.reason}`), name);
+    assert.ok(h.state().touches.find((touch) => touch.kind === 'showcase').question.includes(`Release: failed (${state.release.reason})`), name);
+  }
+});
+
+test('release failures (D20): a bump slot that occurs twice → record exits 2 and state.json is byte-identical', async (t) => {
+  const h = await nonePath(t);
+  const twice = { name: 'scratch', version: '0.1.0', plugins: [{ name: 'scratch', version: '0.1.0' }] };
+  writeFileSync(join(h.repo, '.claude-plugin', 'marketplace.json'), `${JSON.stringify(twice, null, 2)}\n`);
+  const bump = await drive(h, { until: (a) => a.part === 'bump' && a.outPath.endsWith('marketplace.json') });
+  const before = readFileSync(join(h.runDir, 'state.json'));
+  author(h, bump);
+  const result = await h.run(['record', '--run', h.runDir, '--action', bump.id, '--result', '{}']);
+  assert.equal(result.code, 2);
+  assert.match(out(result).error, /occurs 2 times/);
+  assert.ok(readFileSync(join(h.runDir, 'state.json')).equals(before));
+});
+
+test('release failures (D20): land merged --wp release code 5 → dispatchHalt and a blocked touch with no wpId; any answer fails the release', async (t) => {
+  const h = await nonePath(t, { h: { treeMismatch: sha('d', 99) } });
+  await drive(h, { until: (a) => a.kind === 'touch' && h.state().touches[a.touch.n - 1].kind === 'blocked' });
+  let state = h.state();
+  assert.ok(state.dispatchHalt);
+  const touch = state.touches.at(-1);
+  assert.deepEqual([touch.kind, touch.wpId], ['blocked', null]);
+  await drive(h, { until: (a) => a.step === 'analyze' });
+  state = h.state();
+  assert.equal(state.release.state, 'failed');
+  assert.match(state.release.reason, /squash tree differs.*operator answer \(a\)/);
+});
+
+test('plugin-root handover (D19.22): self-hosted → state.handover and the after snapshot\'s root; the old root exits 2 naming it, the new one emits analyze', async (t) => {
+  const h = await nonePath(t, { selfHosted: true, h: { selfHosted: true } });
+  const after = join(h.dir, 'plugins', 'workit', '0.1.1');
+  mkdirSync(join(after, 'skills', 'conduct'), { recursive: true });
+  writeFileSync(join(after, 'skills', 'conduct', 'SKILL.md'), '# placeholder\n');
+  await drive(h, { until: (a) => a.step === 'analyze' });
+  const state = h.state();
+  assert.equal(state.release.state, 'done');
+  assert.equal(state.pluginRoot.replaceAll('\\', '/'), after.replaceAll('\\', '/'));
+  assert.deepEqual(state.handover.from, h.plugin);
+  h.pending = null;
+  const old = await h.run(['next', '--run', h.runDir]);
+  assert.equal(old.code, 2);
+  assert.ok(out(old).error.includes(state.pluginRoot));
+  const fresh = out(await h.run(['next', '--run', h.runDir], { pluginRoot: state.pluginRoot })).action;
+  assert.equal(fresh.step, 'analyze');
+  assert.equal(fresh.command[1], join(state.pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs'));
+});
+
+test('analyze is a shell action (D19.20): no escape-reader call until the agent runs it', async (t) => {
+  const h = await nonePath(t);
+  const analyze = await drive(h, { until: (a) => a.step === 'analyze' });
+  assert.deepEqual([analyze.kind, analyze.step, analyze.seam], ['shell', 'analyze', 'run-analysis']);
+  assert.deepEqual(analyze.command, ['node', join(h.plugin, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'analyze', '--run', h.runDir]);
+  assert.equal(analyze.expects.type, 'exit0');
+  assert.ok(!h.calls.some((call) => /escape-reader/.test(call)));
+  assert.ok(!existsSync(join(h.runDir, 'run-analysis.md')));
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  assert.equal(h.calls.filter((call) => /escape-reader/.test(call)).length, 1);
+  assert.equal(h.state().phase, 'showcase');
+});
+
+test('analysis counts (D16, D17): recorded N equals the touch-opened events; an escalated ruling\'s blocked touch makes recorded: 2; --manual review steps read by hand', async (t) => {
+  const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-needs-conductor.md', 'build/report-built.md'] }, rulings: [{ escalate: true, why: 'only the operator can pick the flag name' }] } });
+  h.manual = (a) => ['review', 'post'].includes(a.step);
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  const analysis = h.analysis();
+  assert.equal(openedBeforeAnalysis(h), 2);
+  assert.match(section(analysis, 'Touches'), /^recorded: 2$/m);
+  assert.match(section(analysis, 'Touches'), /^- touch 2 \(blocked, WP-00\): answered \(a\)$/m);
+  assert.match(section(analysis, 'Touches'), /^showcase: opens after this file \(the total at close is 3\)$/m);
+  assert.match(row(analysis, 'review-tier'), /^- review-tier: by hand/);
+  assert.match(row(analysis, 'lane-dispatch'), /^- lane-dispatch: owned/);
+});
+
+test('not-exercised steps (D18): a "human review" gate command lists gate-cmd under merge-gate as not exercised, with the reason', async (t) => {
+  const h = await nonePath(t, { gateCommand: 'human review' });
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  assert.ok(!h.trace.some((a) => a.step === 'gate-cmd'));
+  assert.match(section(h.analysis(), 'Seam coverage'), /^- merge-gate: owned .*\n {2}- gate-cmd not exercised \(WP-00\): "human review" is not a command$/m);
+});
+
+test('spend on (D19.28): the audit reads metered with the spend reading', async (t) => {
+  const h = await nonePath(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' }, answers: { blocked: { key: 'a', text: 'budget 100' } }, h: { spendOut: ['30'] } },
+    ['--no-adapter', 'herdr', '--no-adapter', 'notify']);
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  const audit = section(h.analysis(), 'Pre-approval audit');
+  assert.match(audit, /^- budget: metered by the spend adapter; spend reading: \$30\.00 \(touch 2\)$/m);
+  assert.ok(!audit.includes('unmetered'));
+});
+
+test('judgment threads (D19.9): a judgment row\'s thread is listed under the audit and in the showcase question', async (t) => {
+  const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-amendment.md'] }, findings: { 'WP-00': [3] }, amendDiff: 'docs/notes.md\n' } });
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  const line = 'WP-00 PR #100 comment 4177261828: thread PRRT_kwDOS_8yoc6oxnvx resolved';
+  assert.ok(section(h.analysis(), 'Pre-approval audit').includes(`  - ${line}`), section(h.analysis(), 'Pre-approval audit'));
+  assert.ok(h.state().touches.find((touch) => touch.kind === 'showcase').question.includes(line));
+});
+
+test('adjudication evidence (C1-14, C2-6): a council WP\'s adjudication row reads from its adjudicated events alone', async (t) => {
+  const flags = ['herdr', 'notify', 'spend', 'spine', 'kb', 'verify'].flatMap((name) => ['--no-adapter', name]);
+  const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } },
+    [...flags, '--adapter', 'council']);
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  assert.ok(!h.trace.some((a) => ['reply', 'thread-ids', 'resolve'].includes(a.step)), 'a council WP emits no reply, thread-ids or resolve');
+  const adjudicated = h.events().filter((e) => e.event === 'adjudicated');
+  assert.equal(adjudicated.length, 1);
+  assert.equal(row(h.analysis(), 'adjudication'), '- adjudication: owned (adjudicated)');
+});
+
+test('send-back is terminal (D19.5): (c) naming merge-gate → sent-back with the seam and text; next is done; no later merge, release or lane event; replay 0, other id 5', async (t) => {
+  const words = 'The merge-gate let a stale base through; reopen from there.';
+  const h = await nonePath(t, { answers: { showcase: { key: 'c', text: words } } });
+  const done = await drive(h);
+  assert.equal(done.kind, 'done');
+  const state = h.state();
+  assert.equal(state.phase, 'sent-back');
+  assert.deepEqual(state.sentBack, { seam: 'merge-gate', text: words });
+  assert.equal(out(await h.run(['next', '--run', h.runDir])).action.kind, 'done');
+  const events = h.events();
+  const at = events.findIndex((e) => e.event === 'showcase-answered');
+  assert.ok(at > 0);
+  const LATE = new Set(['rebase', 'gate-cmd', 'gate', 'merge', 'merged', 'release', 'admit', 'create', 'start', 'prompt', 'wait', 'check', 'stop']);
+  assert.deepEqual(events.slice(at + 1).filter((e) => LATE.has(e.step)), []);
+  const count = events.length;
+  assert.equal((await h.run(['record', '--run', h.runDir, '--action', state.lastRecorded, '--result', '{}'])).code, 0);
+  assert.equal(h.events().length, count);
+  assert.equal((await h.run(['record', '--run', h.runDir, '--action', '1-preapproval', '--result', '{}'])).code, 5);
+});
+
+test('depth none: one WP-00 lane from <run>/wp-00.md, no mint action, through closed; the wp-mint row reads not exercised', async (t) => {
+  const h = await nonePath(t);
+  assert.equal((await drive(h)).kind, 'done');
+  const state = h.state();
+  assert.equal(state.phase, 'closed');
+  assert.deepEqual(state.wps.map((wp) => [wp.id, wp.specPath]), [['WP-00', join(h.runDir, 'wp-00.md')]]);
+  assert.ok(!h.trace.some((a) => a.step === 'mint'));
+  assert.equal(row(h.analysis(), 'wp-mint'), '- wp-mint: not exercised');
+});
+
+test('the analysis: headings in order; seam rows; runtime exercise from an amended report; escapes labeled with the run PRs; unmetered lower bound; resume equals the uninterrupted next', async (t) => {
+  const { h } = await portability(t, { h: { reports: { 'WP-03': ['seam/report-no-runtime.md', 'build/report-built.md'] } } });
+  const analysis = h.analysis();
+  assert.deepEqual([...analysis.matchAll(/^## (.+)$/gm)].map((m) => m[1]), ['Queue accounting', 'Touches', 'Seam coverage', 'Runtime exercise',
+    'Where the time went', 'Catches by watcher position', 'Escapes', 'Pre-approval audit', 'Recommendations']);
+  assert.deepEqual(section(analysis, 'Seam coverage').split('\n').filter((line) => line.startsWith('- ')).map((line) => line.slice(2).split(':')[0]), SEAM_ROWS);
+  const opened = openedBeforeAnalysis(h);
+  assert.match(section(analysis, 'Touches'), new RegExp(`^recorded: ${opened}$`, 'm'));
+  assert.match(section(analysis, 'Runtime exercise'), /^- WP-03: exercised \(field: CLI: `node src\/right\.mjs` prints `right`\.\)$/m);
+  assert.equal(h.spawns['WP-03'], 2, 'WP-03 was amended once for its missing section');
+  assert.match(section(analysis, 'Escapes'), /^repo-wide since 2026-10-04: saw 1, missed 1, unreviewed 0, unparsed 0 \(2 Escape lines\)$/m);
+  assert.match(section(analysis, 'Escapes'), /^run PRs: #101, #102, #103, #200$/m);
+  assert.match(section(analysis, 'Pre-approval audit'), /^- budget: unmetered; lane-only lower bound \$0\.75 /m);
+  assert.match(section(analysis, 'Pre-approval audit'), /^- merges: 4$/m);
+  for (const seamRow of ['spec-depth', 'workshop-scaffold', 'spec-review']) assert.match(row(analysis, seamRow), /^- \S+: owned \(\d+-spec\)$/);
+});
+
+test('resume mid-run: after the release PR merges, a fresh runConduct from the run dir emits what the uninterrupted run did', async (t) => {
+  const h = seam(t);
+  let expected = null;
+  h.onRecorded = (action, result) => {
+    if (action.phase === 'release' && action.step === 'merged') expected ??= result.action;
+  };
+  await start(h, OFF);
+  await drive(h, { until: () => expected !== null });
+  const resumed = await runConduct(['--resume', h.runDir], { ...h.deps });
+  assert.deepEqual(out(resumed).action, expected);
+  assert.deepEqual([expected.step, expected.part], ['release', 'after']);
+});
+
+test('spine + herdr: spine_author once, a receipt per WP stop, touches filed once and read back, lane steps through lane.mjs --log, the runtime-only check; notify env (D20); seams keyed on seam (D19.15)', async (t) => {
+  const notify = 'notify-cmd --channel conduct';
+  const h = seam(t, { herdr: true, env: { WORKIT_NOTIFY_CMD: notify } });
+  await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'spend']);
+  assert.equal((await drive(h)).kind, 'done');
+  const state = h.state();
+  assert.deepEqual(state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  assert.equal(h.trace.filter((a) => a.tool === 'spine_author').length, 1);
+  for (const wp of state.wps) {
+    const mine = of(h, wp.id);
+    assert.equal(mine.filter((a) => a.tool === 'spine_update' && a.args.currentPhase === 'build').length, 1, `${wp.id} flip`);
+    assert.equal(mine.filter((a) => a.tool === 'spine_receipt' && a.args.outcome === 'completed').length, 1, `${wp.id} merge receipt`);
+    assert.equal(mine.filter((a) => a.tool === 'spine_update' && a.args.workState === 'done').length, 1, `${wp.id} done`);
+  }
+  for (const touch of state.touches) {
+    const filings = h.trace.filter((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' && a.args.question.startsWith(touch.tag));
+    assert.equal(filings.length, 1, touch.tag);
+    const next = h.trace[h.trace.indexOf(filings[0]) + 1];
+    assert.deepEqual([next.tool, next.args.ids], ['spine_quest', [ANCHOR]]);
+  }
+  const herdr = h.trace.filter((a) => a.wpId && ['admit', 'start', 'prompt', 'wait', 'stop'].includes(a.step) && a.kind === 'shell');
+  assert.ok(herdr.length > 0 && herdr.every((a) => a.command[1].endsWith('lane.mjs') && a.command.includes('--log')));
+  for (const wp of state.wps) {
+    const checks = of(h, wp.id).filter((a) => a.step === 'check');
+    const runtime = checks.filter((a) => a.command.includes('--runtime-only'));
+    assert.ok(runtime.length >= 1 && runtime.every((a) => a.seam === 'runtime-exercise' && a.command[1].endsWith('conduct.mjs')));
+    for (const a of runtime) {
+      const shape = h.trace[h.trace.indexOf(a) + 1];
+      assert.deepEqual([shape.command[2], shape.command.includes('--expect-report')], ['check', true], 'the runtime-only check and lane.mjs check --expect-report run as a pair');
+    }
+  }
+  const notifies = h.trace.filter((a) => a.step === 'notify');
+  assert.equal(notifies.length, 3, 'one per WP merge; the release emits none');
+  for (const a of notifies) {
+    assert.deepEqual(a.command, shellArgv(notify, 'linux'));
+    assert.deepEqual(Object.keys(a.env).sort(), ['WORKIT_NOTIFY_PR', 'WORKIT_NOTIFY_REVERT', 'WORKIT_NOTIFY_SHA']);
+    assert.ok(!a.command.some((arg) => arg.includes(a.env.WORKIT_NOTIFY_SHA)));
+  }
+  // Seams keyed on the `seam` field: the runtime-only checks sit under runtime-exercise only.
+  const analysis = h.analysis();
+  const runtimeIds = h.trace.filter((a) => a.command?.includes('--runtime-only')).map((a) => a.id);
+  for (const id of runtimeIds) {
+    assert.ok(row(analysis, 'runtime-exercise').includes(id), id);
+    assert.ok(!row(analysis, 'lane-wait').split(/[(), ]+/).includes(id), id);
+  }
+  assert.match(row(analysis, 'lane-wait'), /\d+-wait/);
+  // Action ids, plus the release's own state event (no action id).
+  const releaseCites = row(analysis, 'release').replace(/^- release: owned \(|\)$/g, '').split(', ');
+  const releaseIds = releaseCites.filter((cite) => /^\d+-/.test(cite));
+  assert.deepEqual(releaseCites.filter((cite) => !/^\d+-/.test(cite)), ['release']);
+  assert.ok(releaseIds.length > 5 && releaseIds.every((id) => h.trace.find((a) => a.id === id)?.phase === 'release'), row(analysis, 'release'));
+  const opened = openedBeforeAnalysis(h);
+  assert.match(section(analysis, 'Touches'), new RegExp(`^recorded: ${opened}$`, 'm'));
+  for (const run of [h.trace]) {
+    for (const a of run) {
+      const [, step] = /^\d+-(.+)$/.exec(a.id);
+      assert.ok(STEPS.includes(step) && a.step === step, a.id);
+    }
+  }
+  assert.ok(h.events().every((e) => 'step' in e && 'seam' in e));
+});
+
+test('action ids (D18, D19.15): every action id in the portability run is <seq>-<step> with step in STEPS; every event carries step and seam', async (t) => {
+  const { h } = await portability(t);
+  for (const a of h.trace) {
+    const [, step] = /^\d+-(.+)$/.exec(a.id);
+    assert.ok(STEPS.includes(step) && a.step === step, a.id);
+  }
+  assert.ok(h.events().every((e) => 'step' in e && 'seam' in e));
+});
+
+test('mint switch: a workshop tier defect is a spec defect `next` names (exit 2), never a crash; fixed, the run goes on', async (t) => {
+  const h = seam(t);
+  h.onWorkshop = (workshopDir) => {
+    const path = join(workshopDir, 'work-packages', 'wp-02-left.md');
+    writeFileSync(path, readFileSync(path, 'utf8').replace('**Review tier:** T1', '**Review tier:** T5'));
+  };
+  await start(h, OFF);
+  const specAction = await drive(h, { until: (a) => a.kind === 'skill' });
+  const recorded = await h.run(['record', '--run', h.runDir, '--action', specAction.id, '--result', JSON.stringify(spec(h))]);
+  assert.equal(recorded.code, 2);
+  assert.match(out(recorded).error, /^spec defect in .+: WP-02: \*\*Review tier:\*\* value "T5" is not T0, T1 or T2\. Fix the work package, then run next again\.$/);
+  assert.equal(out(recorded).recorded, specAction.id);
+  assert.equal(h.state().phase, 'mint');
+  assert.equal((await h.run(['next', '--run', h.runDir])).code, 2);
+  const path = join(h.state().workshopDir, 'work-packages', 'wp-02-left.md');
+  writeFileSync(path, readFileSync(path, 'utf8').replace('T5', 'T1'));
+  const next = out(await h.run(['next', '--run', h.runDir])).action;
+  assert.equal(next.step, 'contract');
+  assert.deepEqual(h.state().wps.map((wp) => wp.id), ['WP-01', 'WP-02', 'WP-03']);
+});
+
+test('fixture paths: no file under __fixtures__/seam matches either Must 8 regex', () => {
+  const files = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) walk(path);
+      else files.push(path);
+    }
+  };
+  walk(SEAM);
+  assert.ok(files.length >= 12, files.join(', '));
+  for (const path of files) assert.deepEqual(PRIVATE_PATHS.filter((pattern) => pattern.test(readFileSync(path, 'utf8'))).map(String), [], path);
+  assert.ok(PRIVATE_PATHS.every((pattern) => pattern.test(['C:', 'Users', 'someone', 'x'].join('\\'))), 'the regexes still fire on a private path');
+});
