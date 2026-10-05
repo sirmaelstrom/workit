@@ -27,7 +27,7 @@ import {
   deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
   recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
 } from '../land.mjs';
-import { READ_BACK_WAIT_MS, answerCommand, conductScript, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles } from '../touch.mjs';
+import { READ_BACK_WAIT_MS, answerCommand, conductScript, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles } from '../touch.mjs';
 
 // The lane-contract template's run-level slot prefixes (D17). `<repo A` also
 // matches `<repo A worktrees: …>`; a `<repo B` line is deleted in a
@@ -680,7 +680,8 @@ function workAction(state, deps) {
   if (spineOn(state)) {
     for (const touch of openBuildTouches(state)) {
       const spec = touchAction(state, touch);
-      if (spec && spec.kind !== 'wait') return spec;
+      // A waiting touch is re-read by the yield below, or handed back when idle.
+      if (spec && !spec.handBack) return spec;
     }
   }
   // A meter halt re-reads the spend when its wait is over.
@@ -768,6 +769,9 @@ export function next(state, deps) {
       due.forEach(release);
       continue;
     }
+    // Nothing but spine touches to wait on (no lane poll, re-admission or meter
+    // re-read): only the operator can move the build, so it hands back.
+    if (waiting.length && spineOn(state) && waiting.every((y) => y.touch)) return handBackAction(state, waiting[0].touch);
     if (waiting.length) {
       const least = waiting.reduce((a, b) => (b.ms < a.ms ? b : a));
       return { kind: 'wait', step: least.step, part: 'yield', yield: true, waitMs: least.ms,

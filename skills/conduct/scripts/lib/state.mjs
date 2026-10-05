@@ -17,6 +17,10 @@ export class ConductError extends Error {
   }
 }
 
+// The touch seam: the analysis reports touches in their own section, so it is
+// never a seam row nor a send-back seam name.
+export const TOUCH_SEAM = 'operator-touch';
+
 // The step → seam map. STEPS is its key list, so the two cannot drift apart.
 // The seam is what the run analysis keys on; `null` is "no seam".
 export const STEP_SEAM = Object.freeze({
@@ -33,7 +37,7 @@ export const STEP_SEAM = Object.freeze({
   rebase: 'merge-gate', 'gate-cmd': 'merge-gate', gate: 'merge-gate', merge: 'merge-gate', merged: 'merge-gate',
   release: 'release',
   analyze: 'run-analysis',
-  preapproval: 'touches', grant: 'touches', showcase: 'touches', touch: 'touches',
+  preapproval: TOUCH_SEAM, grant: TOUCH_SEAM, showcase: TOUCH_SEAM, touch: TOUCH_SEAM,
   spend: null, notify: null, receipt: null, stop: null,
 });
 export const STEPS = Object.freeze(Object.keys(STEP_SEAM));

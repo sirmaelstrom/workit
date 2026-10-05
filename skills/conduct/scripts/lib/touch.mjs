@@ -64,12 +64,7 @@ export function touchAction(state, touch) {
       instruction: `Stop. Show the operator ${join(state.runDir, touch.file)} and ask them to run, in their own terminal: ${answerCommand(state, touch)}. Then record this action with {}.`,
     };
   }
-  if (touch.waiting) {
-    return {
-      ...base, kind: 'wait', part: 'read-back', waitMs: READ_BACK_WAIT_MS, expects: { type: 'none' },
-      instruction: `No attributed answer to ${touch.tag} yet: wait ${READ_BACK_WAIT_MS / 60000} minutes, record this action with {}, then run next.`,
-    };
-  }
+  if (touch.waiting) return handBackAction(state, touch);
   if (touch.status === 'filed') {
     return {
       ...base, kind: 'agent-tool', part: 'read-back', tool: 'spine_quest', args: { ids: [state.intent.anchor] },
@@ -89,6 +84,27 @@ export function touchAction(state, touch) {
       ask: { options: touch.options, allowFreeText: touch.allowFreeText },
     },
   };
+}
+
+// The spine hand-back: the read-back found no attributed answer, so the
+// conductor's turn ends here. It is never recorded (`record` returns it with
+// `answered: false`); `next` consumes it on resume and emits the read-back.
+export function handBackAction(state, touch) {
+  return {
+    step: touchStep(touch), kind: 'touch', part: 'hand-back', handBack: true,
+    touch: { n: touch.n, question: touch.question, options: touch.options }, expects: { type: 'none' },
+    instruction: `Stop and end your turn: ${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action and do not poll. Tell the operator it waits for their answer in the Dogan. When they have answered, resume with: node ${conductScript(state)} next --resume ${state.runDir} (its first action reads the answer back).`,
+  };
+}
+
+// `next` on a pending hand-back: the touch is read back again.
+export function resumeHandBack(state, deps) {
+  const action = state.pending;
+  const touch = state.touches[action.touch.n - 1];
+  touch.waiting = false;
+  touch.waitLeftMs = null;
+  state.pending = null;
+  appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'resumed', phase: action.phase, data: { n: touch.n } });
 }
 
 // A spine answer belongs to this run's filing only when its question starts

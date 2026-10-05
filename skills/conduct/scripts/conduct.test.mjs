@@ -604,11 +604,12 @@ test('spine touch is filed once', async (t) => {
   for (let read = 0; read < 3; read += 1) {
     const readBack = readState(runDir).pending;
     assert.equal(readBack.tool, 'spine_quest', `read ${read}`);
-    const wait = out(await record(f, runDir, readBack.id, pending)).action;
-    assert.equal(wait.kind, 'wait');
-    assert.equal(wait.waitMs, 300000);
-    assert.equal(out(await record(f, runDir, wait.id, {})).action.tool, 'spine_quest');
+    const back = out(await record(f, runDir, readBack.id, pending)).action;
+    assert.equal(back.kind, 'touch');
+    assert.equal(back.handBack, true);
+    assert.equal(out(await f.run(['next', '--resume', runDir])).action.tool, 'spine_quest');
   }
+  assert.equal(readState(runDir).touches[0].filings, 1);
   assert.equal(out(await record(f, runDir, readState(runDir).pending.id, fixtureJson('spine-quest-answered.json'))).phase, 'spec');
   assert.equal(readState(runDir).touches[0].answer.receiptId, null);
 
@@ -621,11 +622,10 @@ test('spine touch is filed once', async (t) => {
 test('delayed answer is correlated (D19.2)', async (t) => {
   const f = fixture(t);
   const { runDir, readBack } = await toSpineReadBack(f);
-  const wait = out(await record(f, runDir, readBack.id, fixtureJson('spine-quest-answered-touch-2.json'))).action;
+  const back = out(await record(f, runDir, readBack.id, fixtureJson('spine-quest-answered-touch-2.json'))).action;
   assert.equal(readState(runDir).phase, 'preapproval');
-  assert.equal(wait.kind, 'wait');
-  assert.equal(wait.waitMs, 300000);
-  const again = out(await record(f, runDir, wait.id, {})).action;
+  assert.equal(back.handBack, true);
+  const again = out(await f.run(['next', '--resume', runDir])).action;
   assert.equal(again.tool, 'spine_quest');
   assert.equal(out(await record(f, runDir, again.id, fixtureJson('spine-quest-answered.json'))).phase, 'spec');
 
@@ -666,9 +666,13 @@ test('action consumption (D19.19)', async (t) => {
   assert.equal((await record(f, runDir, '99-spec', {})).code, 5);
   const readBack = out(await record(f, runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f3' })).action;
   assert.equal((await record(f, runDir, first.action.id, {})).code, 5);
-  const wait = out(await record(f, runDir, readBack.id, { quests: [{ latestReceipt: null }] })).action;
-  assert.equal(wait.kind, 'wait');
-  assert.equal((await record(f, runDir, wait.id, {})).code, 0);
+  const back = out(await record(f, runDir, readBack.id, { quests: [{ latestReceipt: null }] })).action;
+  assert.equal(back.handBack, true);
+  // A hand-back is never consumed by record: the same action, answered: false.
+  const unchanged = await record(f, runDir, back.id, {});
+  assert.equal(unchanged.code, 0);
+  assert.deepEqual([out(unchanged).action, out(unchanged).answered], [back, false]);
+  assert.equal(readState(runDir).pending.id, back.id);
 
   const g = fixture(t);
   const closed = seedRun(g, { phase: 'closed' });
@@ -858,8 +862,8 @@ test('C3: a same-tag answer from another run of the goal is not this run\'s answ
   const f = fixture(t);
   const { runDir, receipt, readBack } = await toSpineReadBack(f);
   assert.ok(receipt.args.question.startsWith(`[conduct fixture-run touch 1] (run ${RUN_ID}/1) DO:`), receipt.args.question);
-  const wait = out(await record(f, runDir, readBack.id, fixtureJson('spine-quest-answered-stale.json'))).action;
-  assert.equal(wait.kind, 'wait');
+  const back = out(await record(f, runDir, readBack.id, fixtureJson('spine-quest-answered-stale.json'))).action;
+  assert.equal(back.handBack, true);
   const state = readState(runDir);
   assert.equal(state.phase, 'preapproval');
   assert.equal(state.touches[0].status, 'filed');

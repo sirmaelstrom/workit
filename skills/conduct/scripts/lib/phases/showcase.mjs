@@ -2,14 +2,14 @@
 // run; (c) send back ends it as `sent-back`, terminal like `closed` (D19.5):
 // nothing re-runs, and merged work and the release are never touched again.
 import { join } from 'node:path';
-import { ConductError, STEP_SEAM, appendEvent } from '../state.mjs';
+import { ConductError, STEP_SEAM, TOUCH_SEAM, appendEvent } from '../state.mjs';
 import { judgmentLine, judgmentThreads, mergedPrs } from '../analyze.mjs';
 import { openTouch, recordTouch, touchAction } from '../touch.mjs';
 
-// The seams an answer may name: the STEP_SEAM seams (not `touches`), the
+// The seams an answer may name: the STEP_SEAM seams (not TOUCH_SEAM), the
 // runtime-exercise row, and the analysis's three spec rows, which mean `spec`.
 const ALIASES = { 'spec-depth': 'spec', 'workshop-scaffold': 'spec', 'spec-review': 'spec' };
-const SEAMS = [...new Set(Object.values(STEP_SEAM))].filter((seam) => seam && seam !== 'touches').concat('runtime-exercise');
+const SEAMS = [...new Set(Object.values(STEP_SEAM))].filter((seam) => seam && seam !== TOUCH_SEAM).concat('runtime-exercise');
 const NAMES = [...SEAMS, ...Object.keys(ALIASES)];
 const canonical = (name) => ALIASES[name] ?? name;
 
