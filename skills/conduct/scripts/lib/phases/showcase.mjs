@@ -6,13 +6,21 @@ import { ConductError, STEP_SEAM, appendEvent } from '../state.mjs';
 import { judgmentLine, judgmentThreads, mergedPrs } from '../analyze.mjs';
 import { openTouch, recordTouch, touchAction } from '../touch.mjs';
 
-const SEAMS = [...new Set(Object.values(STEP_SEAM))].filter(Boolean);
+// The seams an answer may name: the STEP_SEAM seams (not `touches`), the
+// runtime-exercise row, and the analysis's three spec rows, which mean `spec`.
+const ALIASES = { 'spec-depth': 'spec', 'workshop-scaffold': 'spec', 'spec-review': 'spec' };
+const SEAMS = [...new Set(Object.values(STEP_SEAM))].filter((seam) => seam && seam !== 'touches').concat('runtime-exercise');
+const NAMES = [...SEAMS, ...Object.keys(ALIASES)];
+const canonical = (name) => ALIASES[name] ?? name;
 
-// The STEP_SEAM value the operator's text names first, or null.
+// An explicit `seam: <name>` wins; otherwise a seam only when the text names
+// exactly one distinct accepted seam; otherwise null.
 export function namedSeam(text) {
-  const at = SEAMS.map((seam) => ({ seam, i: String(text ?? '').search(new RegExp(`(^|[^\\w-])${seam}([^\\w-]|$)`, 'i')) }))
-    .filter((hit) => hit.i >= 0).sort((a, b) => a.i - b.i);
-  return at[0]?.seam ?? null;
+  const words = String(text ?? '');
+  const explicit = /\bseam:\s*([a-z-]+)/i.exec(words)?.[1]?.toLowerCase();
+  if (explicit && NAMES.includes(explicit)) return canonical(explicit);
+  const named = new Set(NAMES.filter((name) => new RegExp(`(^|[^\\w-])${name}([^\\w-]|$)`, 'i').test(words)).map(canonical));
+  return named.size === 1 ? [...named][0] : null;
 }
 
 function question(state) {
@@ -20,24 +28,25 @@ function question(state) {
   const list = (items, empty) => (items.length ? items.join('; ') : empty);
   const held = state.wps.filter((wp) => wp.state === 'held');
   const deferred = state.wps.filter((wp) => wp.state === 'deferred');
+  const stopped = state.wps.filter((wp) => ['refuted', 'blocked'].includes(wp.state));
   const open = (state.touches ?? []).filter((touch) => touch.kind === 'blocked' && touch.status !== 'answered');
   const r = state.release ?? {};
   return [
-    `DO: read ${join(state.runDir, 'run-analysis.md')} first, then the merged PRs, then the deliverable (${state.intent.repo.path}, ${state.intent.repo.remote} at origin/${state.intent.repo.defaultBranch ?? 'main'}), and accept, accept with notes, or send back conductor run ${state.slug}. EXPECT: (a) the run closes; (b) the run closes with your notes stored verbatim; (c) the run ends as sent-back: name the seam (${SEAMS.filter((s) => s !== 'touches').join(', ')}); nothing re-runs and merged work and the release are not touched; reopening is a new /conduct run whose goal cites ${state.runDir}.`,
+    `DO: read ${join(state.runDir, 'run-analysis.md')} first, then the merged PRs, then the deliverable (${state.intent.repo.path}, ${state.intent.repo.remote} at origin/${state.intent.repo.defaultBranch ?? 'main'}), and accept, accept with notes, or send back conductor run ${state.slug}. EXPECT: (a) the run closes; (b) the run closes with your notes stored verbatim; (c) the run ends as sent-back: write \`seam: <name>\` (one of ${SEAMS.join(', ')}) in your text; nothing re-runs and merged work and the release are not touched; reopening is a new /conduct run whose goal cites ${state.runDir}.`,
     `Merged PRs: ${list(mergedPrs(state).map((m) => `${m.id} ${url(m.pr)}`), 'none')}`,
     `Open PRs of held WPs: ${list(held.map((wp) => `${wp.id} ${wp.pr?.number ? url(wp.pr.number) : '(no PR)'} (${wp.reason ?? 'held'})`), 'none')}`,
     `Deferred WPs: ${list(deferred.map((wp) => `${wp.id}: ${wp.reason ?? 'no reason recorded'}`), 'none')}`,
+    `Refuted or blocked WPs: ${list(stopped.map((wp) => `${wp.id} ${wp.state}: ${wp.reason ?? 'no reason recorded'}${wp.pr?.number ? ` (${url(wp.pr.number)})` : ''}`), 'none')}`,
     `Judgment threads the conductor resolved: ${list(judgmentThreads(state).map(judgmentLine), 'none')}`,
     `Blocked touches still open: ${list(open.map((touch) => `touch ${touch.n}${touch.wpId ? ` (${touch.wpId})` : ''}`), 'none')}`,
-    `Release: ${r.state}${r.reason ? ` (${r.reason})` : ''}`,
-    'Assumptions: the spec\'s **Assumptions:** line from /spec\'s final output, which the conductor names here by hand.',
+    `Release: ${r.state}${r.reason ? ` (${r.reason})` : ''}${r.pr?.number ? ` ${url(r.pr.number)}` : ''}`,
   ].join('\n');
 }
 
 const OPTIONS = [
   { key: 'a', label: 'Accept', consequence: 'The run closes.' },
   { key: 'b', label: 'Accept with notes', consequence: 'Type your notes; they are stored verbatim and the run closes.' },
-  { key: 'c', label: 'Send back', consequence: 'Name the seam; the run ends as sent-back and a new /conduct run reopens the work.' },
+  { key: 'c', label: 'Send back', consequence: 'Write seam: <name>; the run ends as sent-back and a new /conduct run reopens the work.' },
 ];
 
 const showcaseTouch = (state) => (state.touches ?? []).find((touch) => touch.kind === 'showcase');

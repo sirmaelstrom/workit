@@ -14,13 +14,15 @@ import { recipeArgv } from '../recipe.mjs';
 import { bumpPlan, releaseEligible, resolvePluginRoot, selfHosted } from '../release.mjs';
 import { mergeActions, mergeLockFor, recordLandStep } from '../land.mjs';
 import { conductScript, openTouch, recordTouch, touchAction } from '../touch.mjs';
+import { firstLine } from '../adapters.mjs';
 
 const SEAM = 'release';
 const WAIT_MS = 60000;
+// No CI at the release head waits as long as a WP's does (WP-04's window).
+const NO_CI_WINDOW_MS = 30 * 60000;
 const LAND_STEPS = new Set(['rebase', 'gate', 'merge', 'merged']);
 const FILL = { '{pr.number}': (r) => r.pr?.number, '{pr.head}': (r) => r.pr?.head, '{merge.sha}': (r) => r.merge?.sha };
 
-const firstLine = (text) => String(text ?? '').split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? '';
 const shell = (part, command, extra = {}) => ({ kind: 'shell', step: 'release', seam: SEAM, part, command, expects: { type: 'none' },
   instruction: 'Run this exact argv (no shell), and record its { code, stdout, stderr }.', ...extra });
 const wait = (step, waitMs, instruction) => ({ kind: 'wait', step, seam: SEAM, waitMs, instruction: `${instruction} Wait ${waitMs / 1000} s, then record {}.` });
@@ -53,15 +55,33 @@ function setAt(object, jsonPath, value) {
   return true;
 }
 
+const occurrences = (text, slot) => text.split(slot).length - 1;
+
 // One slot-form edit per bump file: the exact `"<key>": "<from>"` text,
 // replaced once. The original is kept so the record can check the edit.
-function bumpAction(state, deps, edit) {
-  const r = state.release;
-  const path = join(r.worktree, edit.file);
-  const key = edit.jsonPath.split('.').at(-1);
+function bumpAction(state, edit, original) {
+  const path = join(state.release.worktree, edit.file);
   return { kind: 'author', step: 'release', seam: SEAM, part: 'bump', template: path, outPath: path,
-    slots: { [`"${key}": "${edit.from}"`]: `"${key}": "${edit.to}"` }, bump: { file: edit.file, jsonPath: edit.jsonPath, to: edit.to, original: deps.read(path) },
+    slots: { [edit.slot]: edit.value }, bump: { file: edit.file, jsonPath: edit.jsonPath, to: edit.to, original },
     expects: { type: 'file' }, instruction: `Edit ${path} in place: replace the key of slots (its exact text, once) with its value, and change nothing else. Record {}.` };
+}
+
+// The plan's edits, each one checkable before it is emitted: a file edited
+// once, its slot present exactly once in the file's current text.
+function bumpActions(state, deps, plan) {
+  const files = plan.edits.map((edit) => edit.file);
+  const twice = files.find((file, i) => files.indexOf(file) !== i);
+  if (twice) return { failure: `bump plan edits ${twice} twice` };
+  const actions = [];
+  for (const edit of plan.edits) {
+    const key = edit.jsonPath.split('.').at(-1);
+    const slotted = { ...edit, slot: `"${key}": "${edit.from}"`, value: `"${key}": "${edit.to}"` };
+    const original = deps.read(join(state.release.worktree, edit.file));
+    const n = occurrences(original, slotted.slot);
+    if (n !== 1) return { failure: `bump: ${edit.file}: slot occurs ${n} times` };
+    actions.push(bumpAction(state, slotted, original));
+  }
+  return { actions };
 }
 
 function expand(state, deps) {
@@ -87,7 +107,9 @@ function expand(state, deps) {
         return finish(state, deps, 'failed', `bump: ${error.message}`);
       }
       Object.assign(r, { version: { from: plan.from, to: plan.to }, commit: `chore(release): ${plan.to} (conduct ${state.slug})` });
-      return go(plan.edits.map((edit) => bumpAction(state, deps, edit)), 'commit');
+      const bumps = bumpActions(state, deps, plan);
+      if (bumps.failure) return finish(state, deps, 'failed', bumps.failure);
+      return go(bumps.actions, 'commit');
     }
     case 'commit': {
       const git = (part, ...args) => shell(part, ['git', '-C', r.worktree, ...args]);
@@ -106,7 +128,9 @@ function expand(state, deps) {
       if (!r.gate?.ok) return go([], 'gate');
       const actions = mergeActions(state, view(state), r.gate.head);
       if (!actions.length) return finish(state, deps, 'failed', 'merge: no merge authority, or the release does not hold the merge lock');
-      return go(actions.map((action) => ({ ...action, seam: SEAM })), 'after');
+      // `expects: none`: a failed merge step reaches the release's failure
+      // routing instead of record's JSON check (the merge-commit lookup).
+      return go(actions.map((action) => ({ ...action, seam: SEAM, expects: { type: 'none' } })), 'after');
     }
     case 'after':
     case 'verify': {
@@ -120,8 +144,18 @@ function expand(state, deps) {
   }
 }
 
+function installedVersion(root, deps) {
+  try {
+    return JSON.parse(deps.read(join(root, '.claude-plugin', 'plugin.json'))).version ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // After a self-hosted release the plugin is re-resolved and checked, and every
-// later verb must come from the new root (D19.22).
+// later verb must come from the new root (D19.22). The root must be the
+// released install: its plugin.json at the bump's version (an unchanged root
+// only after an in-place update), and the skill and its script present.
 function handover(state, deps) {
   if (!selfHosted({ repoRemote: state.intent.repo.remote, pluginRoot: state.pluginRoot, read: deps.read })) return finish(state, deps, 'done', null);
   let to;
@@ -129,11 +163,13 @@ function handover(state, deps) {
     to = resolvePluginRoot({ projectPath: state.intent.repo.path, read: deps.read, env: deps.env, platform: deps.platform });
   } catch (error) {
     if (!(error instanceof ConductError)) throw error;
-    return finish(state, deps, 'failed', `verify: ${error.message}`);
+    return finish(state, deps, 'failed', `handover: ${error.message}`);
   }
-  if (!to || !deps.exists(join(to, 'skills', 'conduct', 'SKILL.md'))) {
-    return finish(state, deps, 'failed', `verify: the re-resolved plugin root ${to ?? '(none installed)'} has no skills/conduct/SKILL.md`);
-  }
+  if (!to) return finish(state, deps, 'failed', 'handover: no installed plugin root resolves');
+  const version = installedVersion(to, deps);
+  if (version !== state.release.version?.to) return finish(state, deps, 'failed', `handover: installed version is ${version}, not ${state.release.version?.to}`);
+  const missing = [['skills', 'conduct', 'SKILL.md'], ['skills', 'conduct', 'scripts', 'conduct.mjs']].map((parts) => join(to, ...parts)).find((path) => !deps.exists(path));
+  if (missing) return finish(state, deps, 'failed', `handover: ${missing} is missing`);
   state.handover = { from: state.pluginRoot, to, at: deps.timestamp() };
   state.pluginRoot = to;
   appendEvent(state, deps, { step: 'release', event: 'handover', data: state.handover });
@@ -201,9 +237,23 @@ function anomaly(state, deps, reason) {
   state.release.anomaly = { reason, touch: touch.n };
 }
 
+// No CI run at the release head (WP-04's C2-8 rule): wait 30 minutes per head
+// from the first absent-or-pending observation, still holding the lock, then
+// fail. A release is never held.
+function noCi(state, action, out, deps) {
+  const gate = out.patch?.gate;
+  if (action.step !== 'gate' || !['amend', 'block'].includes(out.outcome) || !gate?.failures?.includes('no CI at head') || (gate.causes ?? []).some((cause) => cause !== 'ci')) return out;
+  const r = state.release;
+  const since = Date.parse(gate.pendingSince ?? (r.noCi?.head === gate.head ? r.noCi.since : new Date(deps.now()).toISOString()));
+  if (deps.now() - since >= NO_CI_WINDOW_MS) return { ...out, outcome: 'block', reason: 'CI did not complete at head' };
+  const again = Object.fromEntries(Object.entries(action).filter(([key]) => !['id', 'phase'].includes(key)));
+  return { outcome: 'wait', waitMs: WAIT_MS, reason: 'no CI run at the release head yet',
+    patch: { gate, noCi: { head: gate.head, since: new Date(since).toISOString() }, queue: [again, ...r.queue.slice(1)] } };
+}
+
 function recordLand(state, action, result, deps) {
   const r = state.release;
-  const out = recordLandStep(state, view(state), action, result, { exec: deps.exec, read: deps.read, now: deps.now });
+  const out = noCi(state, action, recordLandStep(state, view(state), action, result, { exec: deps.exec, read: deps.read, now: deps.now }), deps);
   const patch = out.patch ?? {};
   for (const [key, value] of Object.entries(patch)) {
     if (key === 'queue') r.queue = [...value];
@@ -220,16 +270,20 @@ function recordLand(state, action, result, deps) {
   return finish(state, deps, 'failed', `${action.step === 'gate' ? 'land gate' : action.step}: ${out.reason}`);
 }
 
+// The edit is textual: the file is the original with exactly the slot
+// replaced, byte for byte elsewhere, and it parses with only jsonPath changed.
 function recordBump(action, deps) {
   const { file, jsonPath, to, original } = action.bump;
-  const [slot] = Object.keys(action.slots);
-  const count = original.split(slot).length - 1;
+  const [[slot, value]] = Object.entries(action.slots);
+  const count = occurrences(original, slot);
   if (count !== 1) throw new ConductError(2, `bump ${file}: the slot text ${slot} occurs ${count} times; the slot-form edit needs exactly one`);
+  const text = deps.read(action.outPath);
+  if (text !== original.replace(slot, () => value)) throw new ConductError(2, `bump ${file}: the file must be the original with only ${slot} replaced by ${value}`);
   let before;
   let after;
   try {
     before = JSON.parse(original);
-    after = JSON.parse(deps.read(action.outPath));
+    after = JSON.parse(text);
   } catch (error) {
     throw new ConductError(2, `bump ${file} does not parse after the edit: ${error.message}`);
   }

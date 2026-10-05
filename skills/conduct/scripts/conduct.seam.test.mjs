@@ -9,7 +9,13 @@
 // Every conduct.mjs shell action (lane spawn/alive/check, land gate/merged,
 // analyze) runs in-process through runConduct with the same fakes, from the
 // plugin root its argv names. No network, no sleeps: a wait is recorded,
-// never slept.
+// never slept (a test that needs time to pass advances the injected clock).
+//
+// The self-hosted handover test proves the conductor's state after the
+// release (the root, the version, the files it checks) and that verbs from
+// the old root are refused. Running the next verb through the installed
+// copy's own conduct.mjs is proven by RC-1 Phase E (the installed skill run
+// from a fresh session), not here.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -21,6 +27,7 @@ import { STEPS, readEvents } from './lib/state.mjs';
 import { shellArgv } from './lib/exec.mjs';
 import { correlation } from './lib/touch.mjs';
 import { SEAM_ROWS } from './lib/analyze.mjs';
+import { namedSeam } from './lib/phases/showcase.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = join(HERE, '__fixtures__');
@@ -157,7 +164,7 @@ const RULES = [
     return { code, stdout, stderr };
   }],
   [/^claude plugin update workit@workit$/, (h) => {
-    if (h.selfHosted) h.installed('after');
+    if (h.selfHosted && h.installAfter !== false) h.installed('after');
     return { code: h.afterCode ?? 0, stdout: '', stderr: h.afterCode ? 'update failed (synthetic)' : '' };
   }],
   [/^node --test$/, (h) => ({ code: h.verifyCode ?? 0, stdout: '', stderr: h.verifyCode ? 'not ok 1 - synthetic' : '' })],
@@ -294,6 +301,7 @@ async function perform(h, action) {
       await answerTouch(h, action.touch.n);
       return {};
     case 'wait':
+      if (h.waitClock) h.clock += action.waitMs ?? 0;
       if (action.part === 'announce') {
         const open = h.state().touches.find((touch) => touch.status === 'open');
         await answerTouch(h, open.n);
@@ -386,7 +394,9 @@ test('portability: every adapter off, a three-WP deep run from intake to closed;
   assert.ok(first && second);
   const mine = of(h, second);
   const firstRebase = mine.findIndex((a) => a.step === 'rebase');
-  assert.ok(mine.filter((a) => ['review', 'post'].includes(a.step)).every((a) => mine.indexOf(a) < firstRebase), 'every review action precedes the rebase');
+  const reviews = mine.filter((a) => ['review', 'post'].includes(a.step));
+  assert.ok(reviews.length > 0 && firstRebase > 0, 'the second WP was reviewed and rebased');
+  assert.ok(reviews.every((a) => mine.indexOf(a) < firstRebase), 'every review action precedes the rebase');
   const ready = mine.findIndex((a) => key(a) === 'merge/ready');
   const tail = mine.slice(firstRebase, ready).filter((a) => a.kind !== 'wait').map(key);
   assert.deepEqual(tail, ['rebase/fetch', 'rebase/pre-head', 'rebase/rebase', 'rebase/post-heads', 'rebase/push', 'gate-cmd/gate-cmd', 'gate/gate']);
@@ -490,23 +500,81 @@ test('release failures (D20): land gate --wp release code 5, a verify exit 1 and
     assert.equal(analyze.kind, 'shell');
     await drive(h, { until: (a) => a.step === 'showcase' });
     assert.ok(section(h.analysis(), 'Queue accounting').includes(`- release: failed: ${state.release.reason}`), name);
-    assert.ok(h.state().touches.find((touch) => touch.kind === 'showcase').question.includes(`Release: failed (${state.release.reason})`), name);
+    // The failed release's PR link is in the question when the PR exists (U4).
+    const link = state.release.pr ? ` https://github.com/example/scratch/pull/${state.release.pr.number}` : '';
+    assert.ok(h.state().touches.find((touch) => touch.kind === 'showcase').question.includes(`Release: failed (${state.release.reason})${link}`), name);
+    if (name === 'land gate') assert.ok(link);
   }
 });
 
-test('release failures (D20): a bump slot that occurs twice → record exits 2 and state.json is byte-identical', async (t) => {
-  const h = await nonePath(t);
+test('release bumps (M2): checked before emission — no slot, a duplicate slot, a file edited twice → failed and unlocked; a reformatted edit → record exits 2, state.json byte-identical', async (t) => {
+  const plugin = (version) => ({ name: 'scratch', version, description: 'Placeholder plugin manifest for the seam fixture.', homepage: 'https://github.com/example/scratch' });
   const twice = { name: 'scratch', version: '0.1.0', plugins: [{ name: 'scratch', version: '0.1.0' }] };
-  writeFileSync(join(h.repo, '.claude-plugin', 'marketplace.json'), `${JSON.stringify(twice, null, 2)}\n`);
-  const bump = await drive(h, { until: (a) => a.part === 'bump' && a.outPath.endsWith('marketplace.json') });
+  const cases = [
+    ['compact JSON, no slot', (repo) => writeFileSync(join(repo, '.claude-plugin', 'plugin.json'), JSON.stringify(plugin('0.1.0'))), /^bump: \.claude-plugin\/plugin\.json: slot occurs 0 times$/],
+    ['duplicate slot', (repo) => writeFileSync(join(repo, '.claude-plugin', 'marketplace.json'), `${JSON.stringify(twice, null, 2)}\n`), /^bump: \.claude-plugin\/marketplace\.json: slot occurs 2 times$/],
+    ['a file edited twice', (repo) => {
+      const config = JSON.parse(readFileSync(join(repo, '.workit', 'conduct.json'), 'utf8'));
+      config.release.bump = [{ file: '.claude-plugin/plugin.json', jsonPath: 'version' }, { file: '.claude-plugin/plugin.json', jsonPath: 'version' }];
+      writeFileSync(join(repo, '.workit', 'conduct.json'), JSON.stringify(config));
+    }, /^bump plan edits \.claude-plugin\/plugin\.json twice$/],
+  ];
+  for (const [name, edit, reason] of cases) {
+    const h = seam(t, { depth: 'none' });
+    edit(h.repo);
+    await start(h, OFF);
+    await drive(h, { until: (a) => a.step === 'analyze' });
+    const state = h.state();
+    assert.deepEqual([state.release.state, state.mergeLock, state.phase], ['failed', null, 'analyze'], name);
+    assert.match(state.release.reason, reason, name);
+    assert.ok(!h.trace.some((a) => a.part === 'bump'), `${name}: no bump action was emitted`);
+  }
+  const h = await nonePath(t);
+  const bump = await drive(h, { until: (a) => a.part === 'bump' });
   const before = readFileSync(join(h.runDir, 'state.json'));
-  // The agent edits the right occurrence (plugins.0.version): only the
-  // slot's exactly-once rule can refuse this edit.
-  writeFileSync(bump.outPath, `${JSON.stringify({ ...twice, plugins: [{ name: 'scratch', version: '0.1.1' }] }, null, 2)}\n`);
+  // The right value, reformatted: the JSON check alone would accept it.
+  writeFileSync(bump.outPath, JSON.stringify(plugin('0.1.1')));
   const result = await h.run(['record', '--run', h.runDir, '--action', bump.id, '--result', '{}']);
   assert.equal(result.code, 2);
-  assert.match(out(result).error, /occurs 2 times/);
+  assert.match(out(result).error, /must be the original with only "version": "0\.1\.0" replaced/);
   assert.ok(readFileSync(join(h.runDir, 'state.json')).equals(before));
+});
+
+test('release merge-commit lookup (U1): {code:1, stderr:"HTTP 502 Bad Gateway"} through runConduct → release failed, lock released, phase analyze', async (t) => {
+  const h = await nonePath(t);
+  const lookup = await drive(h, { until: (a) => a.phase === 'release' && a.part === 'merge-commit' });
+  assert.equal(h.state().mergeLock.wpId, 'release');
+  const result = await h.run(['record', '--run', h.runDir, '--action', lookup.id, '--result', JSON.stringify({ code: 1, stdout: '', stderr: 'HTTP 502 Bad Gateway' })]);
+  assert.equal(result.code, 0, result.stdout);
+  assert.equal(out(result).action.step, 'analyze');
+  const state = h.state();
+  assert.deepEqual([state.release.state, state.release.reason, state.mergeLock, state.phase],
+    ['failed', 'merge: merge-commit failed (exit 1): HTTP 502 Bad Gateway', null, 'analyze']);
+});
+
+test('release CI window (Split 3): no CI at the release head waits 30 minutes per head; CI appearing after 10 minutes continues, none by 30 fails the release', async (t) => {
+  const zero = ok(text('land', 'check-runs-zero.json'));
+  const green = ok(text('land', 'check-runs-green.json'));
+  for (const appears of [12, null]) {
+    const h = await nonePath(t, { h: { waitClock: true } });
+    let firstAt = null;
+    h.checkRuns = (s) => {
+      if (s !== RELEASE_HEAD) return green;
+      firstAt ??= h.clock;
+      return appears !== null && h.clock - firstAt >= appears * 60000 ? green : zero;
+    };
+    await drive(h, { until: (a) => a.step === 'analyze' });
+    const state = h.state();
+    const gates = h.trace.filter((a) => a.phase === 'release' && a.step === 'gate' && a.kind === 'shell');
+    if (appears) {
+      assert.equal(state.release.state, 'done');
+      assert.ok(gates.length > 10, `${gates.length} gate reads across the window`);
+      assert.ok(h.events().some((e) => e.phase === 'release' && e.step === 'gate'));
+    } else {
+      assert.deepEqual([state.release.state, state.release.reason, state.mergeLock], ['failed', 'land gate: CI did not complete at head', null]);
+      assert.ok(h.clock - firstAt >= 30 * 60000 && h.clock - firstAt < 33 * 60000, `${(h.clock - firstAt) / 60000} minutes`);
+    }
+  }
 });
 
 test('release failures (D20): land merged --wp release code 5 → dispatchHalt and a blocked touch with no wpId; any answer fails the release', async (t) => {
@@ -522,12 +590,37 @@ test('release failures (D20): land merged --wp release code 5 → dispatchHalt a
   assert.match(state.release.reason, /squash tree differs.*operator answer \(a\)/);
 });
 
+// A fixture plugin install: plugin.json at `version`, SKILL.md and conduct.mjs.
+function install(root, version) {
+  mkdirSync(join(root, 'skills', 'conduct', 'scripts'), { recursive: true });
+  mkdirSync(join(root, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'workit', version }));
+  writeFileSync(join(root, 'skills', 'conduct', 'SKILL.md'), '# placeholder\n');
+  writeFileSync(join(root, 'skills', 'conduct', 'scripts', 'conduct.mjs'), '// placeholder: the installed copy; Phase E runs it\n');
+}
+
+test('plugin-root handover (M1): an update that left the old install (same root, old version) fails the release; the destination must carry the bump\'s version and conduct.mjs', async (t) => {
+  const h = await nonePath(t, { selfHosted: true, h: { selfHosted: true, installAfter: false } });
+  install(join(h.dir, 'plugins', 'workit', '0.1.0'), '0.1.0');
+  await drive(h, { until: (a) => a.step === 'analyze' });
+  let state = h.state();
+  assert.deepEqual([state.release.state, state.release.reason, state.handover, state.mergeLock], ['failed', 'handover: installed version is 0.1.0, not 0.1.1', null, null]);
+  const g = await nonePath(t, { selfHosted: true, h: { selfHosted: true } });
+  const after = join(g.dir, 'plugins', 'workit', '0.1.1');
+  install(after, '0.1.1');
+  rmSync(join(after, 'skills', 'conduct', 'scripts', 'conduct.mjs'));
+  await drive(g, { until: (a) => a.step === 'analyze' });
+  state = g.state();
+  assert.equal(state.release.state, 'failed');
+  assert.match(state.release.reason, /^handover: .+conduct\.mjs is missing$/);
+});
+
 test('plugin-root handover (D19.22): self-hosted → state.handover and the after snapshot\'s root; the old root exits 2 naming it, the new one emits analyze', async (t) => {
   const h = await nonePath(t, { selfHosted: true, h: { selfHosted: true } });
   const after = join(h.dir, 'plugins', 'workit', '0.1.1');
-  mkdirSync(join(after, 'skills', 'conduct'), { recursive: true });
-  writeFileSync(join(after, 'skills', 'conduct', 'SKILL.md'), '# placeholder\n');
+  install(after, '0.1.1');
   await drive(h, { until: (a) => a.step === 'analyze' });
+  assert.ok(existsSync(join(h.state().pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs')), 'the destination holds conduct.mjs');
   const state = h.state();
   assert.equal(state.release.state, 'done');
   assert.equal(state.pluginRoot.replaceAll('\\', '/'), after.replaceAll('\\', '/'));
@@ -574,13 +667,19 @@ test('not-exercised steps (D18): a "human review" gate command lists gate-cmd un
   assert.match(section(h.analysis(), 'Seam coverage'), /^- merge-gate: owned .*\n {2}- gate-cmd not exercised \(WP-00\): "human review" is not a command$/m);
 });
 
-test('spend on (D19.28): the audit reads metered with the spend reading', async (t) => {
-  const h = await nonePath(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' }, answers: { blocked: { key: 'a', text: 'budget 100' } }, h: { spendOut: ['30'] } },
-    ['--no-adapter', 'herdr', '--no-adapter', 'notify']);
-  await drive(h, { until: (a) => a.step === 'showcase' });
-  const audit = section(h.analysis(), 'Pre-approval audit');
-  assert.match(audit, /^- budget: metered by the spend adapter; spend reading: \$30\.00 \(touch 2\)$/m);
+test('spend on (D19.28, M4): a metered run that stays below budget shows its last reading in the audit; a halted one shows the reading after the halt', async (t) => {
+  const flags = ['--no-adapter', 'herdr', '--no-adapter', 'notify'];
+  const below = await nonePath(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' }, h: { spendOut: ['3.5', '4.25'] } }, flags);
+  await drive(below, { until: (a) => a.step === 'showcase' });
+  assert.ok(!below.state().touches.some((touch) => touch.kind === 'blocked'), 'no budget halt');
+  const last = below.state().build.lastSpend;
+  assert.equal(last.usd, 4.25);
+  const audit = section(below.analysis(), 'Pre-approval audit');
+  assert.ok(audit.includes(`- budget: metered by the spend adapter; spend reading: $4.25 (read ${last.at})`), audit);
   assert.ok(!audit.includes('unmetered'));
+  const halted = await nonePath(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' }, answers: { blocked: { key: 'a', text: 'budget 100' } }, h: { spendOut: ['30'] } }, flags);
+  await drive(halted, { until: (a) => a.step === 'showcase' });
+  assert.match(section(halted.analysis(), 'Pre-approval audit'), /^- budget: metered by the spend adapter; spend reading: \$1\.00 \(read \S+\)$/m);
 });
 
 test('judgment threads (D19.9): a judgment row\'s thread is listed under the audit and in the showcase question', async (t) => {
@@ -643,23 +742,41 @@ test('the analysis: headings in order; seam rows; runtime exercise from an amend
   assert.match(section(analysis, 'Runtime exercise'), /^- WP-03: exercised \(field: CLI: `node src\/right\.mjs` prints `right`\.\)$/m);
   assert.equal(h.spawns['WP-03'], 2, 'WP-03 was amended once for its missing section');
   assert.match(section(analysis, 'Escapes'), /^repo-wide since 2026-10-04: saw 1, missed 1, unreviewed 0, unparsed 0 \(2 Escape lines\)$/m);
-  assert.match(section(analysis, 'Escapes'), /^run PRs: #101, #102, #103, #200$/m);
+  assert.match(section(analysis, 'Escapes'), /^run PRs: #101 WP-01 merged, #102 WP-02 merged, #103 WP-03 merged, #200 release merged$/m);
+  // U2: the spine-off mint is evidence of its own.
+  assert.equal(row(analysis, 'wp-mint'), '- wp-mint: owned (minted)');
+  // C1-3: the runtime row cites the checks that stored each verdict.
+  const checks = h.state().wps.map((wp) => wp.runtimeVerdictBy.actionId);
+  assert.equal(row(analysis, 'runtime-exercise'), `- runtime-exercise: owned (${checks.join(', ')})`);
   assert.match(section(analysis, 'Pre-approval audit'), /^- budget: unmetered; lane-only lower bound \$0\.75 /m);
   assert.match(section(analysis, 'Pre-approval audit'), /^- merges: 4$/m);
   for (const seamRow of ['spec-depth', 'workshop-scaffold', 'spec-review']) assert.match(row(analysis, seamRow), /^- \S+: owned \(\d+-spec\)$/);
 });
 
-test('resume mid-run: after the release PR merges, a fresh runConduct from the run dir emits what the uninterrupted run did', async (t) => {
+test('resume (M5): stopped after the release PR merges, `--resume` from the run dir drives the rest of the run through the same {step, kind, part} sequence as the uninterrupted run', async (t) => {
+  const shape = (a) => ({ step: a.step, kind: a.kind, part: a.part ?? null });
+  const isMerged = (a) => a.phase === 'release' && a.step === 'merged';
+  // The uninterrupted run, and its tail after the release PR merged.
+  const whole = seam(t);
+  await start(whole, OFF);
+  assert.equal((await drive(whole)).kind, 'done');
+  const expected = whole.trace.slice(whole.trace.findIndex(isMerged) + 1).map(shape);
+  // The same run stopped once that merged is recorded, then resumed from the
+  // run dir by a fresh runConduct and driven to its end.
   const h = seam(t);
-  let expected = null;
-  h.onRecorded = (action, result) => {
-    if (action.phase === 'release' && action.step === 'merged') expected ??= result.action;
-  };
+  let merged = false;
+  h.onRecorded = (action) => { merged ||= isMerged(action); };
   await start(h, OFF);
-  await drive(h, { until: () => expected !== null });
+  await drive(h, { until: () => merged });
+  const stoppedAt = h.trace.length - 1;
   const resumed = await runConduct(['--resume', h.runDir], { ...h.deps });
-  assert.deepEqual(out(resumed).action, expected);
-  assert.deepEqual([expected.step, expected.part], ['release', 'after']);
+  assert.equal(resumed.code, 0);
+  h.pending = out(resumed).action;
+  assert.equal((await drive(h)).kind, 'done');
+  const tail = h.trace.slice(stoppedAt).map(shape);
+  assert.deepEqual(expected.map((a) => `${a.step}/${a.part}`), ['release/after', 'release/verify', 'analyze/null', 'showcase/null']);
+  assert.deepEqual(tail, expected);
+  assert.equal(h.state().phase, 'closed');
 });
 
 test('spine + herdr: spine_author once, a receipt per WP stop, touches filed once and read back, lane steps through lane.mjs --log, the runtime-only check; notify env (D20); seams keyed on seam (D19.15)', async (t) => {
@@ -743,7 +860,7 @@ test('mint switch: a workshop tier defect is a spec defect `next` names (exit 2)
   const specAction = await drive(h, { until: (a) => a.kind === 'skill' });
   const recorded = await h.run(['record', '--run', h.runDir, '--action', specAction.id, '--result', JSON.stringify(spec(h))]);
   assert.equal(recorded.code, 2);
-  assert.match(out(recorded).error, /^spec defect in .+: WP-02: \*\*Review tier:\*\* value "T5" is not T0, T1 or T2\. Fix the work package, then run next again\.$/);
+  assert.match(out(recorded).error, /^spec defect in .+: WP-02: \*\*Review tier:\*\* value "T5" is not T0, T1 or T2\. Fix the workshop, then run next again\.$/);
   assert.equal(out(recorded).recorded, specAction.id);
   assert.equal(h.state().phase, 'mint');
   assert.equal((await h.run(['next', '--run', h.runDir])).code, 2);
@@ -752,6 +869,96 @@ test('mint switch: a workshop tier defect is a spec defect `next` names (exit 2)
   const next = out(await h.run(['next', '--run', h.runDir])).action;
   assert.equal(next.step, 'contract');
   assert.deepEqual(h.state().wps.map((wp) => wp.id), ['WP-01', 'WP-02', 'WP-03']);
+});
+
+test('deep mint needs its workshop (C1-1): a missing orchestrator, or a workshop with no WP, is a spec defect; nothing mints from the record', async (t) => {
+  const cases = [
+    ['missing orchestrator', (dir) => rmSync(join(dir, 'work-packages', '_orchestrator.md')), /_orchestrator\.md is missing\. Fix the workshop, then run next again\.$/],
+    ['no work package', (dir) => { for (const name of readdirSync(join(dir, 'work-packages')).filter((n) => n.startsWith('wp-'))) rmSync(join(dir, 'work-packages', name)); },
+      /work-packages holds no wp-\*\.md work package\. Fix the workshop, then run next again\.$/],
+  ];
+  for (const [name, breakIt, message] of cases) {
+    const h = seam(t);
+    h.onWorkshop = breakIt;
+    await start(h, OFF);
+    const specAction = await drive(h, { until: (a) => a.kind === 'skill' });
+    const recorded = await h.run(['record', '--run', h.runDir, '--action', specAction.id, '--result', JSON.stringify({ ...spec(h), wps: [{ id: 'WP-01' }] })]);
+    assert.equal(recorded.code, 2, name);
+    assert.match(out(recorded).error, /^spec defect in /, name);
+    assert.match(out(recorded).error, message, name);
+    const state = h.state();
+    assert.deepEqual([state.phase, state.wps], ['mint', []], name);
+  }
+});
+
+test('touch filings (C1-2): a showcase filing acknowledged with ok:false, success:false, no receipt uuid, another quest or another outcome stays open and is re-emitted', async (t) => {
+  const h = seam(t, { depth: 'none' });
+  await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), ...['herdr', 'notify', 'spend'].flatMap((name) => ['--no-adapter', name])]);
+  const filing = await drive(h, { until: (a) => a.tool === 'spine_receipt' && a.args.question?.includes('touch 2]') });
+  const good = { id: '00000000-0000-4000-8000-0000000000aa', questId: ANCHOR, outcome: 'needs_input' };
+  const bad = [{ ...good, ok: false }, { ...good, success: false }, { questId: ANCHOR, outcome: 'needs_input' },
+    { ...good, questId: '11111111-0000-4000-8000-000000000001' }, { ...good, outcome: 'answered' }];
+  for (const result of bad) {
+    const recorded = await h.run(['record', '--run', h.runDir, '--action', filing.id, '--result', JSON.stringify(result)]);
+    assert.equal(recorded.code, 2, JSON.stringify(result));
+    assert.match(out(recorded).error, /^spine_receipt did not file \[conduct seam-run touch 2\]/);
+    const state = h.state();
+    assert.equal(state.touches[1].status, 'open');
+    assert.equal(state.pending.id, filing.id);
+    assert.deepEqual(out(await h.run(['next', '--run', h.runDir])).action, filing);
+  }
+  const filed = out(await h.run(['record', '--run', h.runDir, '--action', filing.id, '--result', JSON.stringify(good)]));
+  assert.equal(filed.action.tool, 'spine_quest');
+  assert.deepEqual([h.state().touches[1].status, h.state().touches[1].receiptId], ['filed', good.id]);
+});
+
+test('runtime ownership (C1-3): the runtime row cites the verdict-storing checks; a --manual check reads by hand, a missing verdict not exercised', async (t) => {
+  const manual = await nonePath(t);
+  manual.manual = (a) => a.step === 'check';
+  await drive(manual, { until: (a) => a.step === 'showcase' });
+  const id = manual.state().wps[0].runtimeVerdictBy.actionId;
+  assert.equal(row(manual.analysis(), 'runtime-exercise'), `- runtime-exercise: by hand (${id})`);
+  assert.match(row(manual.analysis(), 'lane-wait'), /^- lane-wait: by hand/);
+  // A stored `missing` verdict is not an exercise, whoever recorded it.
+  const owned = await nonePath(t);
+  await drive(owned, { until: (a) => a.step === 'showcase' });
+  assert.match(row(owned.analysis(), 'runtime-exercise'), /^- runtime-exercise: owned \(\d+-check\)$/);
+  const path = join(owned.runDir, 'state.json');
+  const state = JSON.parse(readFileSync(path, 'utf8'));
+  state.wps[0].runtimeVerdict = 'missing';
+  writeFileSync(path, JSON.stringify(state));
+  assert.equal((await owned.run(['analyze', '--run', owned.runDir])).code, 0);
+  assert.equal(row(owned.analysis(), 'runtime-exercise'), '- runtime-exercise: not exercised');
+  assert.match(section(owned.analysis(), 'Runtime exercise'), /^- WP-00: missing /m);
+});
+
+test('send-back seam (M3): `seam: <name>` wins; otherwise exactly one named seam; aliases map to spec; touches is never taken', () => {
+  assert.equal(namedSeam('The release notes are wrong; send back to merge-gate.'), null);
+  assert.equal(namedSeam('The release notes are wrong; seam: merge-gate.'), 'merge-gate');
+  assert.equal(namedSeam('reopen at the merge-gate'), 'merge-gate');
+  assert.equal(namedSeam('seam: spec-review — the council missed it'), 'spec');
+  assert.equal(namedSeam('the runtime-exercise row was vacuous'), 'runtime-exercise');
+  assert.equal(namedSeam('seam: touches'), null);
+  assert.equal(namedSeam('too many touches'), null);
+  assert.equal(namedSeam(null), null);
+});
+
+test('failure showcase (U4): a blocked WP and an open run touch are named in the question with their reasons', async (t) => {
+  // WP-00's merged tree differs: it blocks and a run-level touch opens, which
+  // the operator leaves unanswered into the showcase.
+  const h = await nonePath(t, { h: { treeMismatch: sha('d', 0) } });
+  h.custom = (a) => (a.kind === 'wait' && a.part === 'announce' ? {} : undefined);
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  const state = h.state();
+  assert.equal(state.wps[0].state, 'blocked');
+  const touch = state.touches.find((candidate) => candidate.kind === 'blocked');
+  assert.equal(touch.status, 'open');
+  const question = state.touches.find((candidate) => candidate.kind === 'showcase').question;
+  assert.ok(question.includes(`Blocked touches still open: touch ${touch.n}`), question);
+  assert.ok(question.includes('Refuted or blocked WPs: WP-00 blocked: merged tree differs from the checked head (https://github.com/example/scratch/pull/100)'), question);
+  assert.ok(question.includes('Release: not-exercised (incomplete build)'));
+  assert.ok(!/conductor names here by hand/.test(question), 'no agent-facing placeholder');
+  assert.match(question, /write `seam: <name>`/);
 });
 
 test('fixture paths: no file under __fixtures__/seam matches either Must 8 regex', () => {

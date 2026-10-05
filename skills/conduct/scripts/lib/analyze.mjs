@@ -4,6 +4,7 @@
 // the conductor replaces the Recommendations placeholder afterwards.
 import { join } from 'node:path';
 import { STEP_SEAM, loadState, readEvents } from './state.mjs';
+import { firstLine } from './adapters.mjs';
 
 const VERDICT_TEXT = { exercised: 'exercised', vacuous: 'vacuous', 'not-exercised': 'not exercised', 'no-surface': 'no runtime surface', missing: 'missing' };
 const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
@@ -14,7 +15,6 @@ export const SEAM_ROWS = Object.freeze([...new Set(Object.values(STEP_SEAM))].fi
 // A phase hand-over and a skipped step are not a seam crossed.
 const NOT_EVIDENCE = new Set(['phase', 'not-exercised']);
 
-const firstLine = (text) => String(text ?? '').split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? '';
 const usd = (n) => `$${Number(n).toFixed(2)}`;
 
 function duration(ms) {
@@ -64,19 +64,22 @@ function touches(state, events) {
     'Operator-initiated amendments are not counted: no verb records them (v1).'];
 }
 
+// The runtime-exercise row's evidence: the recorded events of the checks that
+// stored each WP's verdict (wps[].runtimeVerdictBy). A `missing` verdict is
+// not an exercise.
+function runtimeEvidence(state, events) {
+  const ids = new Set(state.wps.filter((wp) => wp.runtimeVerdict && wp.runtimeVerdict !== 'missing').map((wp) => wp.runtimeVerdictBy?.actionId).filter(Boolean));
+  return events.filter((e) => e.event === 'recorded' && ids.has(e.actionId));
+}
+
 // Keyed on each event's `seam` field (D19.15): owned when every event came
 // from next, by hand when any was recorded --manual, not exercised when none.
 function seamCoverage(state, events) {
   return SEAM_ROWS.flatMap((row) => {
     const seam = SPEC_ROWS.includes(row) ? 'spec' : row;
-    const evidence = events.filter((e) => e.seam === seam && !NOT_EVIDENCE.has(e.event));
-    const cites = [...new Set(evidence.map((e) => e.actionId ?? e.event))];
-    let status = !evidence.length ? 'not exercised' : evidence.some((e) => e.source === 'manual') ? 'by hand' : 'owned';
-    let cite = cites.join(', ');
-    if (row === 'runtime-exercise' && !evidence.length && state.wps.some((wp) => wp.runtimeVerdict)) {
-      status = 'owned';
-      cite = 'stored verdicts from lane check';
-    }
+    const evidence = row === 'runtime-exercise' ? runtimeEvidence(state, events) : events.filter((e) => e.seam === seam && !NOT_EVIDENCE.has(e.event));
+    const cite = [...new Set(evidence.map((e) => e.actionId ?? e.event))].join(', ');
+    const status = !evidence.length ? 'not exercised' : evidence.some((e) => e.source === 'manual') ? 'by hand' : 'owned';
     const skipped = events.filter((e) => e.event === 'not-exercised' && e.seam === seam)
       .map((e) => `  - ${e.data?.step ?? e.step} not exercised${e.data?.wpId ? ` (${e.data.wpId})` : ''}: ${e.data?.reason ?? 'no reason recorded'}`);
     return [`- ${row}: ${status}${cite ? ` (${cite})` : ''}`, ...skipped];
@@ -121,8 +124,10 @@ function catches(state, events) {
 // since the run's start day, with the run's own PRs listed beside it (D19.27).
 function escapes(state, exec) {
   const since = String(state.createdAt).slice(0, 10);
-  const prs = mergedPrs(state).map((m) => `#${m.pr}`);
-  const runPrs = `run PRs: ${prs.join(', ') || 'none merged'}`;
+  const r = state.release ?? {};
+  const prs = [...state.wps.filter((wp) => wp.pr?.number).map((wp) => `#${wp.pr.number} ${wp.id} ${wp.state === 'merged' ? 'merged' : `open (${wp.state})`}`),
+    ...(r.pr?.number ? [`#${r.pr.number} release ${r.merge?.sha ? 'merged' : `open (${r.state})`}`] : [])];
+  const runPrs = `run PRs: ${prs.join(', ') || 'none'}`;
   const read = exec('node', [join(state.pluginRoot, 'scripts', 'escape-reader.mjs'), '--repo', state.intent.repo.remote, '--since', since]);
   let out = null;
   try {
@@ -147,8 +152,11 @@ function preapproval(state) {
   const judgments = judgmentThreads(state);
   out.push(`- judgment threads: ${judgments.length}`, ...judgments.map((j) => `  - ${judgmentLine(j)}`));
   if (a.metered) {
-    const reading = (state.touches ?? []).filter((touch) => typeof touch.spendUsd === 'number').at(-1);
-    out.push(`- budget: metered by the spend adapter; spend reading: ${reading ? `${usd(reading.spendUsd)} (touch ${reading.n})` : 'none stored by the build'}`);
+    // The build's last successful reading, else the latest budget touch's snapshot.
+    const last = state.build?.lastSpend;
+    const touch = (state.touches ?? []).filter((candidate) => typeof candidate.spendUsd === 'number').at(-1);
+    const reading = typeof last?.usd === 'number' ? `${usd(last.usd)} (read ${last.at})` : touch ? `${usd(touch.spendUsd)} (touch ${touch.n})` : 'none stored';
+    out.push(`- budget: metered by the spend adapter; spend reading: ${reading}`);
   } else {
     const lower = state.wps.reduce((sum, wp) => sum + (Number(wp.lane?.costUsd) || 0), 0);
     out.push(`- budget: unmetered; lane-only lower bound ${usd(lower)} (exec claude lanes' total_cost_usd; codex and herdr lanes not counted)`);

@@ -3,7 +3,7 @@
 // confident quest per WP under the anchor's campaign. Depth none|lite reuses
 // the anchor as WP-00's quest; spine off mints nothing.
 import { basename, join } from 'node:path';
-import { ConductError } from '../state.mjs';
+import { ConductError, appendEvent } from '../state.mjs';
 import { parseWorkPackages } from '../schedule.mjs';
 import { wpRecord } from './spec.mjs';
 
@@ -20,26 +20,28 @@ function resumeNote(wp) {
     `review tier: ${wp.tier}`, `runtime exercise: ${wp.runtimeExercise || 'unnamed'}`].join(' · ');
 }
 
-// The workshop's WPs replace the spec record's list, each keeping its wave,
-// files, tier and dependencies. A WP the scheduler cannot parse is a spec
-// defect: `next` exits 2 naming it and writes nothing, and runs again once the
-// workshop is fixed. A workshop with no orchestrator keeps the spec record's
-// list (conduct.test.mjs pins that path).
+// A deep run's WPs come only from its workshop, each keeping its wave, files,
+// tier and dependencies. A missing orchestrator, a workshop with no WP, or a
+// WP the scheduler cannot parse is a spec defect: `next` exits 2 naming it and
+// writes nothing, and runs again once the workshop is fixed.
 function workshopWps(state, deps) {
-  if (state.spec.depth !== 'deep' || !deps.exists(join(state.workshopDir, 'work-packages', '_orchestrator.md'))) return;
+  const defect = (why) => new ConductError(2, `spec defect in ${state.workshopDir}: ${why}. Fix the workshop, then run next again.`);
+  const orchestrator = join(state.workshopDir, 'work-packages', '_orchestrator.md');
+  if (!deps.exists(orchestrator)) throw defect(`${orchestrator} is missing`);
   let parsed;
   try {
     parsed = parseWorkPackages(state.workshopDir, { read: deps.read, list: deps.list });
   } catch (error) {
     if (!(error instanceof ConductError)) throw error;
-    throw new ConductError(2, `spec defect in ${state.workshopDir}: ${error.message}. Fix the work package, then run next again.`);
+    throw defect(error.message);
   }
-  const prior = new Map(state.wps.map((wp) => [wp.id, wp]));
-  state.wps = parsed.map((wp) => wpRecord({ ...wp, verification: prior.get(wp.id)?.verification ?? null }));
+  if (!parsed.length) throw defect(`${join(state.workshopDir, 'work-packages')} holds no wp-*.md work package`);
+  state.wps = parsed.map(wpRecord);
+  appendEvent(state, deps, { step: 'mint', event: 'minted', data: { wps: parsed.length, source: 'workshop' } });
 }
 
 export function next(state, deps) {
-  workshopWps(state, deps);
+  if (state.spec.depth === 'deep') workshopWps(state, deps);
   if (!state.adapters.spine?.on || state.spec.depth !== 'deep') {
     if (state.adapters.spine?.on) state.wps[0].questId = state.intent.anchor;
     state.phase = 'build';

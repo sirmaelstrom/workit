@@ -71,11 +71,11 @@ export function record(state, action, result, deps) {
   if (depth !== 'deep' && (typeof gateCommand !== 'string' || !gateCommand.trim())) {
     throw new ConductError(2, `spec result needs a gateCommand for depth ${depth}`);
   }
-  if (depth === 'deep') {
-    // Interim: deep WPs come from the record's `wps` array until WP-06
-    // switches mint to parseWorkPackages(workshopDir).
-    if (!Array.isArray(result.wps) || result.wps.length === 0 || !result.wps.every((wp) => typeof wp?.id === 'string')) {
-      throw new ConductError(2, 'a deep spec result needs a non-empty wps array, each with an id');
+  // A deep run's WPs come from the workshop (mint, parseWorkPackages); a
+  // `wps` list in the record is optional and only checked for shape.
+  if (depth === 'deep' && result.wps !== undefined) {
+    if (!Array.isArray(result.wps) || !result.wps.every((wp) => typeof wp?.id === 'string')) {
+      throw new ConductError(2, 'a deep spec result\'s wps, when given, is an array of records with an id');
     }
     const ids = result.wps.map((wp) => wp.id.toLowerCase());
     const duplicate = ids.find((id, i) => ids.indexOf(id) !== i);
@@ -90,7 +90,7 @@ export function record(state, action, result, deps) {
     const text = deps.exists(specPath) ? deps.read(specPath) : '';
     state.wps = [wpRecord({ id: 'WP-00', name: state.intent.goal, specPath, runtimeExercise: runtimeExerciseField(text) })];
   } else {
-    state.wps = result.wps.map(wpRecord);
+    state.wps = [];
   }
   state.phase = 'mint';
 }

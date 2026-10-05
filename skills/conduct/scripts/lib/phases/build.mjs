@@ -27,7 +27,7 @@ import {
   deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
   recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
 } from '../land.mjs';
-import { READ_BACK_WAIT_MS, answerCommand, conductScript, openTouch, recordTouch, touchAction, writeTouchFiles } from '../touch.mjs';
+import { READ_BACK_WAIT_MS, answerCommand, conductScript, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles } from '../touch.mjs';
 
 // The lane-contract template's run-level slot prefixes (D17). `<repo A` also
 // matches `<repo A worktrees: …>`; a `<repo B` line is deleted in a
@@ -43,7 +43,6 @@ const CLEANUP_RETRY_MS = 300000;
 const GATE_AMENDS = 2;
 const UNCERTAIN_BLOCK = 3;
 const NO_CI_WINDOW_MS = 30 * 60000;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ASK_MARKER = /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\([a-f]\)(?:\*\*|__)?\s*/i;
 const GUARD_VERDICTS = ['confirmed', 'refuted', 'judgment'];
 const FILL = { '{pr.number}': (wp) => wp.pr?.number, '{pr.head}': (wp) => wp.pr?.head, '{merge.sha}': (wp) => wp.merge?.sha };
@@ -812,7 +811,8 @@ function recordSpend(state, action, result, deps) {
   const usd = result.code === 0 && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text) ? Number(text) : NaN;
   const budget = state.authority?.budgetUsd ?? 0;
   if (!Number.isFinite(usd)) return meterHalt(state, deps, `The spend command's output is unreadable (exit ${result.code}: ${JSON.stringify(text.slice(0, 80))}${result.stderr ? `, ${lines(result.stderr)[0]}` : ''}), so spend is unknown (metered by the spend adapter)`);
-  // Only a successful read clears the meter halt.
+  // Only a successful read clears the meter halt; it is kept for the audit.
+  state.build.lastSpend = { usd, at: deps.timestamp() };
   state.build.halts = (state.build.halts ?? []).filter((entry) => entry.kind !== 'meter');
   syncHalt(state, deps);
   if (usd >= budget) return haltTouch(state, deps, `Spend is $${usd} against the $${budget} budget (metered by the spend adapter)`, 'budget', usd);
@@ -899,25 +899,6 @@ function recordOwn(state, wp, action, result, deps) {
     default:
       return undefined;
   }
-}
-
-// A spine acknowledgement must answer what was asked: no error, the same
-// quest, the same outcome/state when it carries one, and a receipt uuid.
-function spineAckFailure(action, result) {
-  if (!result || typeof result !== 'object' || Array.isArray(result) || result.error !== undefined || result.isError || result.ok === false || result.success === false) {
-    return `failed: ${JSON.stringify(result?.error ?? result).slice(0, 200)}`;
-  }
-  // A carried quest id is a uuid or a hex prefix of 8+, and prefixes the one asked for (either way).
-  const asked = String(action.args.questId).toLowerCase();
-  const carried = String(result.questId ?? '').toLowerCase();
-  if (result.questId !== undefined && (!(UUID.test(carried) || /^[0-9a-f]{8,}$/.test(carried)) || !(carried.startsWith(asked) || asked.startsWith(carried)))) {
-    return `answered for quest ${JSON.stringify(result.questId)}, not ${asked}`;
-  }
-  for (const key of ['outcome', 'workState', 'horizon', 'currentPhase']) {
-    if (action.args[key] !== undefined && result[key] !== undefined && result[key] !== action.args[key]) return `${key} is ${result[key]}, not ${action.args[key]}`;
-  }
-  if (action.tool === 'spine_receipt' && !UUID.test(String(result.id ?? ''))) return `no receipt uuid in the result (id ${JSON.stringify(result.id)})`;
-  return null;
 }
 
 // Liveness needs affirmative evidence (WP-02 additions, D21): a running read

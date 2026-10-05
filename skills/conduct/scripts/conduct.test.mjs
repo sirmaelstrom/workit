@@ -110,7 +110,7 @@ function answer(f, runDir, key, { text, tty = true } = {}) {
 async function toSpineReadBack(f, extra = [], goal = GOAL) {
   const first = out(await intake(f, [...SPINE, ...extra], {}, goal));
   const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
-  const readBack = out(await record(f, first.runDir, receipt.id, { id: 'filed-receipt-uuid' })).action;
+  const readBack = out(await record(f, first.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' })).action;
   return { runDir: first.runDir, anchorAction: first.action, receipt, readBack };
 }
 async function toSpineSpec(f, extra = [], goal = GOAL) {
@@ -545,7 +545,7 @@ test('mint from the workshop: parseWorkPackages supplies the WPs, each keeping i
   const f = fixture(t);
   const { runDir, spec } = await toSpineSpec(f, [], 'rc1');
   // The workshop fixture (six WPs, waves 1-4) is copied into this run's
-  // workshop. The spec record's own `wps` is a placeholder the mint replaces.
+  // workshop; the spec record carries no `wps`.
   const workshopDir = readState(runDir).workshopDir;
   const source = join(HERE, '__fixtures__', 'lanes', 'workshop', 'work-packages');
   mkdirSync(join(workshopDir, 'work-packages'), { recursive: true });
@@ -557,14 +557,14 @@ test('mint from the workshop: parseWorkPackages supplies the WPs, each keeping i
   const ids = ['WP-01', 'WP-02', 'WP-03', 'WP-04', 'WP-05', 'WP-06'];
   const keys = ids.map((id) => `rc1-${RUN_ID}-${id.toLowerCase()}`);
   minted.quests.forEach((quest, i) => { quest.key = keys[i]; });
-  const mint = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir, wps: [{ id: 'WP-01', verification: 'verify 1' }] })).action;
+  const mint = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir })).action;
   assert.equal(mint.tool, 'spine_author');
   assert.deepEqual(mint.args.campaign, { title: fixtureJson('spine-quest-answered.json').quests[0].campaign.title });
   assert.deepEqual(mint.args.quests.map((quest) => quest.key), keys);
   assert.deepEqual(mint.args.seams.map((seam) => seam.to), keys);
   assert.ok(mint.args.seams.every((seam) => seam.from === ANCHOR_UUID && seam.type === 'decomposition'));
   // C21: the resume note carries what the consumer reads.
-  assert.match(mint.args.quests[0].resumeNote, /wp-01-state-intake-protocol\.md · precondition: .+ · verification: verify 1 · review tier: T2 · runtime exercise: /);
+  assert.match(mint.args.quests[0].resumeNote, /wp-01-state-intake-protocol\.md · precondition: .+ · verification: see the WP · review tier: T2 · runtime exercise: /);
   let state = readState(runDir);
   assert.deepEqual(state.wps.map((wp) => [wp.id, wp.wave]), [['WP-01', 1], ['WP-02', 2], ['WP-03', 2], ['WP-04', 3], ['WP-05', 3], ['WP-06', 4]]);
   assert.deepEqual(state.wps.find((wp) => wp.id === 'WP-04').dependsOn, ['WP-02', 'WP-03']);
@@ -639,7 +639,7 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   const second = openTouch(state, { kind: 'blocked', question: 'Q2', options }, deps);
   const filing = touchAction(state, first);
   assert.equal(filing.tool, 'spine_receipt');
-  recordTouch(state, first, filing, { id: 'r1' });
+  recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' });
   assert.equal(touchAction(state, second), null);
   assert.equal(second.status, 'open');
   recordTouch(state, first, touchAction(state, first), fixtureJson('spine-quest-answered.json'));
@@ -664,7 +664,7 @@ test('action consumption (D19.19)', async (t) => {
   assert.equal(replay.code, 0);
   assert.equal(events(runDir).length, lines);
   assert.equal((await record(f, runDir, '99-spec', {})).code, 5);
-  const readBack = out(await record(f, runDir, receipt.id, { id: 'filed' })).action;
+  const readBack = out(await record(f, runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f3' })).action;
   assert.equal((await record(f, runDir, first.action.id, {})).code, 5);
   const wait = out(await record(f, runDir, readBack.id, { quests: [{ latestReceipt: null }] })).action;
   assert.equal(wait.kind, 'wait');
@@ -691,7 +691,11 @@ test('action ids and seams (D18, D19.15)', async (t) => {
   const f = fixture(t);
   const flow = await toSpineSpec(f);
   const workshopDir = readState(flow.runDir).workshopDir;
-  const mint = out(await record(f, flow.runDir, flow.spec.id, { depth: 'deep', workshopDir, wps: [{ id: 'WP-01' }] })).action;
+  // A deep mint needs its workshop (WP-06 C1-1): the seam fixture's three WPs.
+  const source = join(HERE, '__fixtures__', 'seam', 'workshop', 'work-packages');
+  mkdirSync(join(workshopDir, 'work-packages'), { recursive: true });
+  for (const name of readdirSync(source)) writeFileSync(join(workshopDir, 'work-packages', name), readFileSync(join(source, name)));
+  const mint = out(await record(f, flow.runDir, flow.spec.id, { depth: 'deep', workshopDir })).action;
   const actions = [flow.anchorAction, flow.receipt, flow.readBack, flow.spec, mint];
   const emitted = events(flow.runDir).filter((line) => line.event === 'emitted');
   for (const action of actions) {
@@ -753,7 +757,12 @@ test('portability (WP-01 slice): every adapter off, no agent-tool action', async
   const f = fixture(t);
   const off = ['herdr', 'notify', 'spend', 'spine', 'council', 'kb', 'verify'].flatMap((name) => ['--no-adapter', name]);
   const { runDir, touchAction: touch, spec } = await toCoreSpec(f, off);
-  const after = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir: readState(runDir).workshopDir, wps: [{ id: 'WP-01' }] }));
+  // A deep mint needs its workshop (WP-06 C1-1): the seam fixture's three WPs.
+  const workshopDir = readState(runDir).workshopDir;
+  const source = join(HERE, '__fixtures__', 'seam', 'workshop', 'work-packages');
+  mkdirSync(join(workshopDir, 'work-packages'), { recursive: true });
+  for (const name of readdirSync(source)) writeFileSync(join(workshopDir, 'work-packages', name), readFileSync(join(source, name)));
+  const after = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir }));
   const kinds = [touch, spec, after.action].map((action) => action.kind);
   assert.ok(!kinds.includes('agent-tool'), kinds.join(','));
   assert.ok(!events(runDir).some((line) => line.kind === 'agent-tool'));
@@ -837,8 +846,12 @@ test('C1: a failed receipt filing is refused and the filing stays retryable', as
     assert.equal(state.touches[0].status, 'open');
     assert.equal(state.pending.id, receipt.id);
   }
-  assert.equal(out(await record(f, first.runDir, receipt.id, {})).action.tool, 'spine_quest');
-  assert.equal(readState(first.runDir).touches[0].receiptId, null);
+  // An unbound acknowledgement (no receipt uuid) is refused like a failure (C1-2 of WP-06).
+  assert.equal((await record(f, first.runDir, receipt.id, {})).code, 2);
+  assert.equal(readState(first.runDir).touches[0].status, 'open');
+  const uuid = '00000000-0000-4000-8000-0000000000f4';
+  assert.equal(out(await record(f, first.runDir, receipt.id, { id: uuid })).action.tool, 'spine_quest');
+  assert.equal(readState(first.runDir).touches[0].receiptId, uuid);
 });
 
 test('C3: a same-tag answer from another run of the goal is not this run\'s answer', async (t) => {
