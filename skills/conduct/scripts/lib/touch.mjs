@@ -18,6 +18,16 @@ function spineOn(state) {
   return state.adapters?.spine?.on === true;
 }
 
+// The answer adapter (lib/answer.mjs) reads every receipt on the anchor, so
+// with it on the read-back and the hand-back's waiter go through it.
+function answerOn(state) {
+  return state.adapters?.answer?.on === true;
+}
+
+export function awaitAnswerCommand(state, touch, { once = false } = {}) {
+  return ['node', conductScript(state), 'await-answer', '--run', state.runDir, '--touch', String(touch.n), ...(once ? ['--once'] : [])];
+}
+
 export function conductScript(state) {
   return join(state.pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs');
 }
@@ -73,6 +83,12 @@ export function touchAction(state, touch) {
     };
   }
   if (touch.waiting) return handBackAction(state, touch);
+  if (touch.status === 'filed' && answerOn(state)) {
+    return {
+      ...base, kind: 'shell', part: 'read-back', command: awaitAnswerCommand(state, touch, { once: true }),
+      expects: { type: 'json' }, instruction: 'Run this exact argv (no shell), and record its { code, stdout, stderr }.',
+    };
+  }
   if (touch.status === 'filed') {
     return {
       ...base, kind: 'agent-tool', part: 'read-back', tool: 'spine_quest', args: { ids: [state.intent.anchor] },
@@ -101,11 +117,24 @@ export function resumeCommand(state) {
 // The spine hand-back: the read-back found no attributed answer, so the
 // conductor's turn ends here. It is never recorded (`record` returns it with
 // `answered: false`); `next` consumes it on resume and emits the read-back.
+// With the answer adapter it carries a waiter: a background process that
+// exits when the answer lands, so the resume needs no operator command.
 export function handBackAction(state, touch) {
-  return {
+  const base = {
     step: touchStep(touch), kind: 'touch', part: 'hand-back', handBack: true,
     touch: { n: touch.n, question: touch.question, options: touch.options }, expects: { type: 'none' },
-    instruction: `Stop and end your turn: ${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action and do not poll. Tell the operator it waits for their answer in the Dogan. When they have answered, resume with: ${resumeCommand(state)} (its first action reads the answer back).`,
+  };
+  const waiting = `${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action and do not poll.`;
+  if (answerOn(state)) {
+    const command = awaitAnswerCommand(state, touch);
+    return {
+      ...base, waiter: { command, background: true },
+      instruction: `${waiting} Start the waiter argv (no shell) in the background: ${JSON.stringify(command)}. Tell the operator it waits for their answer in the Dogan, then end your turn. When the waiter exits, whatever its exit code, resume with: ${resumeCommand(state)} (its first action reads the answer back; an unanswered read hands back again with a new waiter).`,
+    };
+  }
+  return {
+    ...base,
+    instruction: `Stop and end your turn: ${waiting} Tell the operator it waits for their answer in the Dogan. When they have answered, resume with: ${resumeCommand(state)} (its first action reads the answer back).`,
   };
 }
 
@@ -176,12 +205,27 @@ export function acceptAnswer(touch, answer) {
   touch.waiting = false;
 }
 
+// `await-answer --once` prints { ok, answered, receipt }; a failed lookup is
+// refused, so the read-back stays pending and is run again.
+function answerLookup(action, result) {
+  let out;
+  try {
+    out = JSON.parse(result?.stdout ?? '');
+  } catch {
+    out = null;
+  }
+  if (result?.code !== 0 || out?.ok !== true) {
+    throw new ConductError(1, `the answer lookup failed (exit ${result?.code}): ${out?.error ?? String(result?.stderr ?? '').trim().split(/\r?\n/)[0] ?? ''}`);
+  }
+  return out.receipt ?? null;
+}
+
 export function recordTouch(state, touch, action, result) {
   if (action.kind === 'wait') {
     touch.waiting = false;
     return;
   }
-  if (action.kind !== 'agent-tool') return;
+  if (action.kind !== 'agent-tool' && !(action.kind === 'shell' && action.part === 'read-back')) return;
   if (action.part === 'receipt') {
     // A failed or unbound acknowledgement is refused: the touch stays open and
     // the filing action stays pending, so it is re-emitted and never filed.
@@ -193,8 +237,10 @@ export function recordTouch(state, touch, action, result) {
     touch.refusal = null;
     return;
   }
-  // The read-back: accept only an answered receipt to THIS run's filing.
-  const latest = result?.quests?.[0]?.latestReceipt;
+  // The read-back: accept only an answered receipt to THIS run's filing. The
+  // answer adapter's lookup finds it in any receipt; spine_quest shows only
+  // the latest, so a later receipt on the anchor hides it there.
+  const latest = action.kind === 'shell' ? answerLookup(action, result) : result?.quests?.[0]?.latestReceipt;
   const answered = latest?.outcome === 'answered' && latest.answer
     && typeof latest.question === 'string' && latest.question.startsWith(correlation(state, touch));
   if (!answered) {
