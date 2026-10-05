@@ -147,7 +147,11 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    contract, wire format, or shared surface can take a `blast-radius` pass —
    pre-ship impact analysis that hands review its proven safety fact instead of
    a plausible writeup. Optional, and cheapest exactly when T2 is about to
-   fire. Stop at the **PR boundary** — merge is the operator's go unless
+   fire. Every PR body carries `## Merge danger` with its `Door:` and
+   `Blast radius:` lines (the lane-contract template's § Finish spells out
+   the form); the ping-not-hold criterion *easily undone* is read from the
+   `Door:` line, and a `Door: one-way` PR is held whatever else it passes.
+   Stop at the **PR boundary** — merge is the operator's go unless
    they have said otherwise. One standing "said otherwise" exists: the
    **ping-not-hold merge lane** (`reference/patterns/ping-not-hold-merge-lane.md`)
    — a PR meeting ALL of that pattern's criteria (gate-green, easily undone,
