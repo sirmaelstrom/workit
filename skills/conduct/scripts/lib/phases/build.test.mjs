@@ -1342,7 +1342,7 @@ test('meter unset, spine (E6 C1-5): with WORKIT_SPEND_CMD unset the meter can ne
   assert.ok(!unset.trace.some((a) => a.wpId), 'nothing dispatched');
   const set = harness(t, { spine: true, spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
   set.spendOut = ['\n', '\n', '\n'];
-  await drive(set, { until: () => set.trace.filter((a) => a.step === 'spend' && !isWait(a)).length === 2 });
+  await drive(set, { until: (a) => a.handBack === true || set.trace.filter((s) => s.step === 'spend' && !isWait(s)).length === 2 });
   assert.ok(set.trace.some((a) => isWait(a) && a.yield), 'the meter re-read waits on the yield');
   assert.ok(!set.trace.some((a) => a.handBack), 'a recoverable meter is not handed back');
 });
