@@ -98,6 +98,20 @@ function gateCommands(state, deps) {
 
 const gateCommandFor = (state, wp, deps) => gateCommands(state, deps).get(state.spec?.depth === 'deep' ? wp.wave : null) ?? '';
 
+// The gate command's env, from .workit/conduct.json `gateEnv` (string values).
+// `{run}` and `{wp}` become the run slug and the WP id as lowercase
+// identifiers, so a repo can give the conductor's suite its own test database:
+// the gate runs under the merge lock, so one per run never runs twice at once.
+export function gateEnvFor(state, wp, config) {
+  const env = config.gateEnv;
+  if (env === undefined) return {};
+  if (!env || typeof env !== 'object' || Array.isArray(env) || Object.values(env).some((value) => typeof value !== 'string')) {
+    throw new ConductError(2, '.workit/conduct.json gateEnv must be an object of string values');
+  }
+  const ident = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.replaceAll('{run}', ident(state.slug)).replaceAll('{wp}', ident(wp.id))]));
+}
+
 // A gate command that cannot run as written is never run mis-quoted (D18, D19).
 function notRunnable(command, platform) {
   if (!String(command).trim()) return 'no gate command';
@@ -555,7 +569,19 @@ function expand(state, wp, deps) {
       if (why && wp.gateCmd?.reason !== why) appendEvent(state, deps, { step: 'gate-cmd', event: 'not-exercised', data: { wpId: wp.id, reason: why } });
       wp.gateCmd = why ? { state: 'not-exercised', reason: why } : { state: 'run', command };
       const gate = shell('gate', 'gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', wp.id]);
-      return go([...(why ? [] : [shell('gate-cmd', 'gate-cmd', shellArgv(command, deps.platform), { cwd: wp.lane.worktree })]), gate], 'merge');
+      if (why) return go([gate], 'merge');
+      const config = repoConfig(state, deps);
+      let env;
+      try {
+        env = gateEnvFor(state, wp, config);
+      } catch (error) {
+        if (!(error instanceof ConductError)) throw error;
+        if (mergeLockFor(state, wp) === 'mine') state.mergeLock = null;
+        return block(state, wp, deps, error.message);
+      }
+      // A suite longer than a foreground shell allows runs in the background (gateBackground).
+      const extra = { cwd: wp.lane.worktree, ...(Object.keys(env).length ? { env } : {}), ...(config.gateBackground === true ? { background: true } : {}) };
+      return go([shell('gate-cmd', 'gate-cmd', shellArgv(command, deps.platform), extra), gate], 'merge');
     }
     case 'merge': {
       if (!wp.gate?.ok) return go([], 'gate');

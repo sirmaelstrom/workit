@@ -26,7 +26,7 @@ You drive a one-shot state machine, `${CLAUDE_SKILL_DIR}/scripts/conduct.mjs`. E
 
 1. **Start.** Run `node "${CLAUDE_SKILL_DIR}/scripts/conduct.mjs" intake --goal "<goal>" --repo <abs> …` with the flags above (declare adapters first, § Adapters). It prints `{ ok, runDir, action }`. On the core path the first action is touch 1, a `touch`. With the Spine adapter the first action reads the anchor quest, and touch 1 follows as a receipt, a read-back and, while no answer is attributed, a hand-back (step 2, `touch`). Exit 2 is a refusal (§ Refusals) and writes nothing.
 2. **Perform the action.** Every action has an `id`, a `kind`, an `instruction` a person could follow, and an `expects` field. What you do depends on `kind`:
-   - `shell`: run its `command` argv exactly as given, from `cwd` and with `env` added when present. Record `{ "code": <exit>, "stdout": "…", "stderr": "…" }`. The `lane`, `land` and `analyze` verbs (`lane spawn`, `lane check`, `land gate`, `land merged`, `analyze`) reach you only this way: `next` never runs a program, so every check is a `shell` action whose printed result you record. `land gate` exits 6 while CI is still running or a pipeline review of the head is in flight; that is a wait.
+   - `shell`: run its `command` argv exactly as given, from `cwd` and with `env` added when present. Record `{ "code": <exit>, "stdout": "…", "stderr": "…" }`. `background: true` marks a command that can outlast a foreground shell (a repo's long gate suite): start it in the background, wait for it to exit, and record the same result. The `lane`, `land` and `analyze` verbs (`lane spawn`, `lane check`, `land gate`, `land merged`, `analyze`) reach you only this way: `next` never runs a program, so every check is a `shell` action whose printed result you record. `land gate` exits 6 while CI is still running or a pipeline review of the head is in flight; that is a wait.
    - `agent-tool`: call the named MCP `tool` with `args` and record its raw JSON result. These are emitted only for an adapter that is on.
    - `skill`: invoke the named skill with `skillArgv`, one argument per element (`skillArgs` is its display form), **from the target repo's root** (cwd = the run's `--repo`): `/spec` takes its project from the cwd and doesn't ask. For `/spec`, record the JSON the action's `instruction` describes, composed from its report: `depth`, `workshopDir`, `reviewLevel`, and the `gateCommand` (depth `none` or `lite`). A deep run's WPs come from `work-packages/` in the workshop, not from the record. `expects.fields` lists only the minimum. Under the pre-approval no gate shows the spec's `[ASSUMPTION: …]` flags to a person: read the `**Assumptions:**` line of `/spec`'s final output and carry those flags into the showcase by naming them when you present it.
    - `author`: write the file at `outPath`: from `template` with the `slots` filled, or as the instruction describes (the grant at `touches/1-grant.json` from the operator's (c) text, a ruling at `rulings/<wp>-<n>.json` for a lane's question, a lane brief, an amendment). Record `{}`.
@@ -98,6 +98,15 @@ Try these first. A blocked touch is for what they can't settle.
 - **A harness dialog** (a `block` with cause `dialog`): the verb re-polls once after about a minute, then blocks. **Never answer a harness dialog yourself**: not by sending keys, not by approving. It goes to the operator in the blocked touch.
 - **A council split:** you break the tie, inside the goal's bindings, and record why.
 - **A refuted premise:** a lane whose report says `refuted` ends its WP `refuted` and defers its dependents; that is a finding, not a failure to retry.
+
+## Repo config
+
+The target repo's `.workit/conduct.json` may carry, beside `release`:
+- `contractPaths`: globs that raise a WP to T2.
+- `trivialExclude`: globs a tail never counts as trivial.
+- `laneSuite`: the lane-isolation line of the lane contract.
+- `gateEnv`: env for the conductor's gate command. `{run}` and `{wp}` become the run slug and the WP id as lowercase identifiers. Use it for a repo whose suite needs its own database per runner.
+- `gateBackground: true`: the gate command's action carries `background: true`.
 
 ## Self-hosted runs
 

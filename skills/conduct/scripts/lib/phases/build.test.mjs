@@ -974,6 +974,28 @@ test('a WP whose squash landed but whose merge-commit lookup failed is still swe
   assert.match(analysis, /^run PRs: #102 WP-02 merged \(merge commit unconfirmed\)$/m);
 });
 
+test('repo config gateEnv and gateBackground: the gate command carries the expanded env and background: true; absent, neither', async (t) => {
+  const config = JSON.stringify({ gateEnv: { OBSERVATORY_TEST_DB: 'heathdev_observatory_test_conduct_{run}', LANE: '{wp}' }, gateBackground: true });
+  const h = harness(t, { config, gateCommand: 'npm test', wps: [TWO[0], TWO[1]] });
+  assert.equal(await drive(h), null);
+  const gate = of(h, 'WP-02').find((a) => a.step === 'gate-cmd');
+  assert.deepEqual(gate.env, { OBSERVATORY_TEST_DB: 'heathdev_observatory_test_conduct_demo', LANE: 'wp_02' });
+  assert.equal(gate.background, true);
+  assert.equal(gate.cwd, h.wp('WP-02').lane.worktree);
+  const plain = harness(t, { gateCommand: 'npm test', wps: [TWO[0], TWO[1]] });
+  assert.equal(await drive(plain), null);
+  const bare = of(plain, 'WP-02').find((a) => a.step === 'gate-cmd');
+  assert.deepEqual([Object.hasOwn(bare, 'env'), Object.hasOwn(bare, 'background')], [false, false]);
+});
+
+test('repo config gateEnv that is not an object of strings blocks the WP at its gate and releases the merge lock', async (t) => {
+  const h = harness(t, { config: JSON.stringify({ gateEnv: { OBSERVATORY_TEST_DB: 7 } }), gateCommand: 'npm test', wps: [TWO[0], TWO[1]] });
+  await drive(h, { until: (a, hh) => hh.wp('WP-02').state === 'blocked' });
+  assert.match(h.wp('WP-02').reason, /gateEnv must be an object of string values/);
+  assert.notEqual(h.state.mergeLock?.wpId, 'WP-02');
+  assert.ok(!of(h, 'WP-02').some((a) => a.step === 'gate-cmd'));
+});
+
 test('shell strings (D18, D19): the gate command is shellArgv on win32 and linux; "human review", empty and a win32 quote are not-exercised; linux runs the quote', async (t) => {
   for (const platform of ['win32', 'linux']) {
     const h = harness(t, { platform, gateCommand: 'node --test', wps: [TWO[0], TWO[1]], spend: true, notify: true, env: { WORKIT_SPEND_CMD: 'meter', WORKIT_NOTIFY_CMD: 'ping' } });
