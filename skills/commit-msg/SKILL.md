@@ -1,6 +1,6 @@
 ---
 name: commit-msg
-description: "Use when composing a git commit message with shell-active characters — backticks, markdown links, embedded quotes, multi-line code blocks — anything a HEREDOC could re-parse. Invoked by '/commit-msg', or whenever the drafted message contains any of these. Writes the message to a file (.git/COMMIT_EDITMSG, or a scratchpad path in a linked worktree) and commits via 'git commit -F' so the shell never sees the body."
+description: "Use when composing a git commit message with shell-active characters — backticks, markdown links, embedded quotes, multi-line code blocks — anything a HEREDOC could re-parse. Invoked by '/commit-msg', or whenever the drafted message contains any of these. Writes the message to a file and commits via 'git commit -F' so the shell never sees the body."
 ---
 
 # commit-msg — File-based git commit
