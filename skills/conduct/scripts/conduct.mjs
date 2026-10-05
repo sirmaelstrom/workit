@@ -29,12 +29,13 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   next --run <dir>                 (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
+  await-answer --run <dir> --touch <n> [--once] [--interval-ms <ms>] [--timeout-ms <ms>]
   status --run <dir>
   analyze --run <dir>
   lane <spawn|alive|check> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]`;
 
-const BOOLEAN_FLAGS = new Set(['manual']);
+const BOOLEAN_FLAGS = new Set(['manual', 'once']);
 const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
@@ -392,8 +393,14 @@ function subVerb(relPath, exportName, subs, writers = []) {
   };
 }
 
+// The answer adapter's lookup and wait (lib/answer.mjs): read-only, unlocked.
+async function awaitAnswerVerb(tokens, deps) {
+  const module = await loadModule(deps, 'lib/answer.mjs', 'module');
+  return module.awaitAnswer(parseFlags(tokens), deps);
+}
+
 const VERBS = {
-  intake, next, record, answer, status, analyze,
+  intake, next, record, answer, status, analyze, 'await-answer': awaitAnswerVerb,
   lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
 };

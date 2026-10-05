@@ -620,6 +620,38 @@ test('spine touch is filed once', async (t) => {
   assert.equal(readState(flow.runDir).touches[0].answer.receiptId, fixtureJson('spine-quest-answered-with-id.json').quests[0].latestReceipt.id);
 });
 
+test('answer adapter: hand-back → background waiter exits on the answer → resume reads it back, with no operator command and a later receipt on the anchor', async (t) => {
+  const quest = fixtureJson('spine-quest-answered.json').quests[0];
+  const tag = `[conduct fixture-run touch 1] (run ${RUN_ID}/1)`;
+  const f = fixture(t, { env: { WORKIT_TOUCH_ANSWER_CMD: JSON.stringify(['resolve', '{quest}', '{tag}']) } });
+  f.table['sh -c command -v "$1" sh resolve'] = { code: 0, stdout: '/usr/bin/resolve\n', stderr: '' };
+  const lookup = (receipt) => { f.table[`resolve ${quest.id} ${tag}`] = { code: 0, stdout: `${JSON.stringify(receipt)}\n`, stderr: '' }; };
+  // Run a shell action through the verb in-process, as the conductor would.
+  const runShell = async (action) => {
+    assert.equal(action.command[0], 'node');
+    const result = await f.run(action.command.slice(2));
+    return { code: result.code, stdout: result.stdout, stderr: result.stderr };
+  };
+  const { runDir, readBack } = await toSpineReadBack(f);
+  assert.equal(readState(runDir).adapters.answer.on, true);
+  assert.deepEqual([readBack.kind, readBack.part, readBack.command.at(-1)], ['shell', 'read-back', '--once']);
+
+  lookup(null);
+  const back = out(await record(f, runDir, readBack.id, await runShell(readBack))).action;
+  assert.deepEqual([back.handBack, back.waiter.background], [true, true]);
+
+  // The operator answers in the Dogan; a later receipt lands on the anchor too, but the lookup reads every receipt.
+  lookup(quest.latestReceipt);
+  const waited = await f.run([...back.waiter.command.slice(2), '--interval-ms', '0']);
+  assert.deepEqual([waited.code, out(waited).answered], [0, true]);
+
+  const again = out(await f.run(['next', '--resume', runDir])).action;
+  assert.deepEqual([again.kind, again.part], ['shell', 'read-back']);
+  const done = out(await record(f, runDir, again.id, await runShell(again)));
+  assert.equal(done.phase, 'spec');
+  assert.equal(readState(runDir).touches[0].answer.by, quest.latestReceipt.answer.by);
+});
+
 test('delayed answer is correlated (D19.2)', async (t) => {
   const f = fixture(t);
   const { runDir, readBack } = await toSpineReadBack(f);
