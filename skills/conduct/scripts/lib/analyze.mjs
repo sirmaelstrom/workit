@@ -131,7 +131,8 @@ function escapes(state, exec) {
   const r = state.release ?? {};
   // A merge sha means merged, whatever happened after; a squash whose
   // merge-commit lookup failed is merged but unconfirmed.
-  const wpStatus = (wp) => (wp.merge?.sha ? `merged${wp.state === 'blocked' ? ' (post-merge check failed)' : ''}` : `open (${wp.state})`);
+  const wpStatus = (wp) => (wp.merge?.sha ? `merged${wp.state === 'blocked' ? ' (post-merge check failed)' : ''}`
+    : wp.squashed ? 'merged (merge commit unconfirmed)' : `open (${wp.state})`);
   const releaseStatus = r.merge?.sha ? 'merged' : r.squashed ? 'merged (merge commit unconfirmed)' : `open (${r.state})`;
   const prs = [...state.wps.filter((wp) => wp.pr?.number).map((wp) => `#${wp.pr.number} ${wp.id} ${wpStatus(wp)}`),
     ...(r.pr?.number ? [`#${r.pr.number} release ${releaseStatus}`] : [])];
@@ -156,7 +157,7 @@ function postMergeThreads(state, exec) {
   // Every PR that merged, whatever happened after: a failed post-merge check
   // and an unconfirmed release merge commit still landed code.
   const r = state.release ?? {};
-  const landed = [...state.wps.filter((wp) => wp.merge?.sha && wp.pr?.number).map((wp) => ({ id: wp.id, pr: wp.pr.number, wp })),
+  const landed = [...state.wps.filter((wp) => (wp.merge?.sha || wp.squashed) && wp.pr?.number).map((wp) => ({ id: wp.id, pr: wp.pr.number, wp })),
     ...((r.merge?.sha || r.squashed) && r.pr?.number ? [{ id: 'release', pr: r.pr.number, wp: r }] : [])];
   const rows = landed.map(({ id, pr, wp }) => {
     const r = exec('node', [script, 'threads', '--pr', String(pr), '--repo', state.intent.repo.remote, '--unresolved']);

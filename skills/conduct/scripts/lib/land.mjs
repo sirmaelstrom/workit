@@ -871,7 +871,8 @@ function landOutcome(state, wp, action, r, deps) {
     case 'gate': return recordGate(state, wp, action, r, deps);
     case 'merge': {
       if (r.code !== 0 && !(action.part === 'ready' && /already/i.test(r.stderr))) return result('block', `${action.part} failed (exit ${r.code}): ${first(r.stderr)}`);
-      if (action.part !== 'merge-commit') return result('continue');
+      // The squash landed even if the merge-commit lookup after it fails.
+      if (action.part !== 'merge-commit') return result('continue', null, action.part === 'squash' ? { squashed: true } : {});
       const sha = parseJson(r.stdout)?.mergeCommit?.oid;
       return sha ? result('continue', null, { merge: { sha } }) : result('block', 'gh pr view printed no mergeCommit.oid');
     }
