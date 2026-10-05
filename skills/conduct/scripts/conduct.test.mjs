@@ -12,7 +12,7 @@ import { STEPS, STEP_SEAM, ConductError, resolveRunDir, readEvents, saveState, a
 import { detectAdapters, laneModel } from './lib/adapters.mjs';
 import { resolveRecipe, recipeArgv } from './lib/recipe.mjs';
 import { shellArgv, spawnDetached, pidAlive } from './lib/exec.mjs';
-import { openTouch, touchAction, recordTouch } from './lib/touch.mjs';
+import { openTouch, touchAction, recordTouch, handBackAction } from './lib/touch.mjs';
 import { validateGrant } from './lib/phases/preapproval.mjs';
 import { samePath } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
@@ -647,6 +647,32 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   const secondFiling = touchAction(state, second);
   assert.equal(secondFiling.tool, 'spine_receipt');
   assert.ok(secondFiling.args.question.startsWith('[conduct fixture-run touch 2]'));
+});
+
+test('hand-back resume command (E6 C1-2): the plugin root and the run dir are quoted, so paths with spaces stay one argument each', () => {
+  const pluginRoot = join(tmpdir(), 'Plugin Root');
+  const runDir = join(tmpdir(), 'Run Root', 'run');
+  const touch = { n: 1, kind: 'preapproval', tag: '[conduct g touch 1]', question: '[conduct g touch 1] Q', options: [] };
+  const action = handBackAction({ pluginRoot, runDir, intent: { anchor: ANCHOR_UUID } }, touch);
+  const script = join(pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs');
+  assert.ok(action.instruction.includes(`resume with: node "${script}" next --resume "${runDir}" (`), action.instruction);
+});
+
+test('legacy touch wait (E6 C1-7): a run dir whose pending action is the pre-change 300000 ms touch wait records it with {} and gets the read-back', async (t) => {
+  const f = fixture(t);
+  const { runDir, readBack } = await toSpineReadBack(f);
+  await record(f, runDir, readBack.id, { quests: [{ latestReceipt: null }] });
+  // Rewrite the pending hand-back into the shape 05151ab left on disk.
+  const state = readState(runDir);
+  state.pending = {
+    id: state.pending.id, phase: 'preapproval', step: 'preapproval', touch: { n: 1 }, kind: 'wait', part: 'read-back', waitMs: 300000,
+    expects: { type: 'none' }, instruction: 'No attributed answer to [conduct fixture-run touch 1] yet: wait 5 minutes, record this action with {}, then run next.', seam: 'touches',
+  };
+  writeFileSync(join(runDir, 'state.json'), JSON.stringify(state));
+  assert.equal(out(await f.run(['next', '--run', runDir])).action.kind, 'wait', 'next leaves a legacy wait pending');
+  const after = out(await record(f, runDir, state.pending.id, {})).action;
+  assert.deepEqual([after.tool, after.part], ['spine_quest', 'read-back']);
+  assert.equal(readState(runDir).touches[0].filings, 1);
 });
 
 test('action consumption (D19.19)', async (t) => {

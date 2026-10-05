@@ -770,8 +770,11 @@ export function next(state, deps) {
       continue;
     }
     // Nothing but spine touches to wait on (no lane poll, re-admission or meter
-    // re-read): only the operator can move the build, so it hands back.
-    if (waiting.length && spineOn(state) && waiting.every((y) => y.touch)) return handBackAction(state, waiting[0].touch);
+    // re-read that can act): only the operator can move the build, so it hands
+    // back. A meter with WORKIT_SPEND_CMD unset never re-reads; a set one does.
+    const touchYield = waiting.find((y) => y.touch);
+    const operatorOnly = (y) => y.touch || (y.meter && !deps.env?.WORKIT_SPEND_CMD);
+    if (spineOn(state) && touchYield && waiting.every(operatorOnly)) return handBackAction(state, touchYield.touch);
     if (waiting.length) {
       const least = waiting.reduce((a, b) => (b.ms < a.ms ? b : a));
       return { kind: 'wait', step: least.step, part: 'yield', yield: true, waitMs: least.ms,

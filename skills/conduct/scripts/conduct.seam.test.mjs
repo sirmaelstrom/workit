@@ -919,7 +919,7 @@ test('E6 hand-back (spine): no attributed answer → a touch-kind hand-back, nev
   assert.deepEqual(h.trace.map((a) => `${a.tool ?? a.kind}/${a.part ?? ''}`), ['spine_quest/', 'spine_receipt/receipt', 'spine_quest/read-back', 'touch/hand-back']);
   assert.deepEqual([back.kind, back.step, back.touch.n, back.seam], ['touch', 'preapproval', 1, 'operator-touch']);
   assert.match(back.instruction, /^Stop and end your turn: \[conduct seam-run touch 1\] is filed on quest a0a0a0a0-/);
-  assert.ok(back.instruction.includes(`next --resume ${h.runDir}`), back.instruction);
+  assert.ok(back.instruction.includes(`next --resume "${h.runDir}"`), back.instruction);
   // Recording a hand-back changes nothing: the same action, answered: false.
   const recorded = await h.run(['record', '--run', h.runDir, '--action', back.id, '--result', '{}']);
   assert.deepEqual([recorded.code, out(recorded).answered, out(recorded).action.id], [0, false, back.id]);
@@ -963,6 +963,24 @@ test('E6 hand-back (spine): the showcase touch hands back the same way; the resu
   assert.equal((await drive(h)).kind, 'done');
   assert.equal(h.state().phase, 'closed');
   assert.ok(!h.trace.some((a) => a.kind === 'wait' && a.touch), 'no touch-tagged wait');
+});
+
+test('E6 hand-back (spine): the release anomaly\'s touch hands back with seam release (its action and its resumed event); the resume reads back; any operator answer fails the release', async (t) => {
+  const h = await nonePath(t, { h: { treeMismatch: sha('d', 99) } }, SPINE_ONLY);
+  spineReplies(h);
+  h.reply = 'operator';
+  h.onEmit = (a) => { if (a.step === 'touch' && a.part === 'receipt') h.reply = 'none'; };
+  const back = await drive(h, { until: isHandBack });
+  assert.deepEqual([back.kind, back.step, back.part, back.seam], ['touch', 'touch', 'hand-back', 'release']);
+  assert.deepEqual([h.state().touches[back.touch.n - 1].kind, h.state().touches[back.touch.n - 1].wpId], ['blocked', null]);
+  const resumed = out(await h.run(['next', '--resume', h.runDir])).action;
+  assert.deepEqual([resumed.tool, resumed.part, resumed.seam], ['spine_quest', 'read-back', 'release']);
+  assert.deepEqual(h.events().filter((e) => e.event === 'resumed').map((e) => [e.actionId, e.seam]), [[back.id, 'release']]);
+  h.reply = 'operator';
+  h.pending = resumed;
+  await drive(h, { until: (a) => a.step === 'analyze' });
+  assert.equal(h.state().release.state, 'failed');
+  assert.match(h.state().release.reason, /squash tree differs.*operator answer \(a\)/);
 });
 
 test('action ids (D18, D19.15): every action id in the portability run is <seq>-<step> with step in STEPS; every event carries step and seam', async (t) => {

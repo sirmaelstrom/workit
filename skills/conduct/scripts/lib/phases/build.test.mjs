@@ -1332,6 +1332,21 @@ test('spend parse (C1-4, C1-15): empty, blank, negative or non-numeric meter out
   assert.match(unset.state.touches[0].question, /WORKIT_SPEND_CMD is not set/);
 });
 
+test('meter unset, spine (E6 C1-5): with WORKIT_SPEND_CMD unset the meter can never re-read, so the read-back budget touch hands back; a set command whose output is unreadable keeps its 5-minute re-read and never hands back', async (t) => {
+  const unset = harness(t, { spine: true, spend: true, env: {} });
+  const back = await drive(unset, { until: (a) => a.handBack === true, max: 30 });
+  assert.equal(back.touch.n, 1);
+  assert.match(unset.state.touches[0].question, /WORKIT_SPEND_CMD is not set/);
+  assert.ok(unset.state.build.halts.some((halt) => halt.kind === 'meter'));
+  assert.ok(!unset.trace.some(isWait), 'no yield poll before the hand-back');
+  assert.ok(!unset.trace.some((a) => a.wpId), 'nothing dispatched');
+  const set = harness(t, { spine: true, spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
+  set.spendOut = ['\n', '\n', '\n'];
+  await drive(set, { until: () => set.trace.filter((a) => a.step === 'spend' && !isWait(a)).length === 2 });
+  assert.ok(set.trace.some((a) => isWait(a) && a.yield), 'the meter re-read waits on the yield');
+  assert.ok(!set.trace.some((a) => a.handBack), 'a recoverable meter is not handed back');
+});
+
 test('meter halt (C2-3): a budget answer never clears an unreadable meter; only a successful read resumes dispatch', async (t) => {
   const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [TWO[0], TWO[1]] });
   h.spendOut = ['\n', '\n'];

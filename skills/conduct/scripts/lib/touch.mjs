@@ -93,11 +93,13 @@ export function handBackAction(state, touch) {
   return {
     step: touchStep(touch), kind: 'touch', part: 'hand-back', handBack: true,
     touch: { n: touch.n, question: touch.question, options: touch.options }, expects: { type: 'none' },
-    instruction: `Stop and end your turn: ${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action and do not poll. Tell the operator it waits for their answer in the Dogan. When they have answered, resume with: node ${conductScript(state)} next --resume ${state.runDir} (its first action reads the answer back).`,
+    instruction: `Stop and end your turn: ${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action and do not poll. Tell the operator it waits for their answer in the Dogan. When they have answered, resume with: node "${conductScript(state)}" next --resume "${state.runDir}" (its first action reads the answer back).`,
   };
 }
 
-// `next` on a pending hand-back: the touch is read back again.
+// `next` on a pending hand-back: the touch is read back again. The `resumed`
+// event carries the hand-back's own seam, as its emitted event does
+// (`release` for the release anomaly's touch, else TOUCH_SEAM).
 export function resumeHandBack(state, deps) {
   const action = state.pending;
   const touch = state.touches[action.touch.n - 1];
