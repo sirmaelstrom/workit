@@ -590,11 +590,13 @@ export function gateCheck(state, wp, { exec, now }) {
   // (1) CI, (2) threads, (3) review covers head.
   const ci = head ? ciCondition(state, wp, head, { exec, now }) : { failure: 'CI not read: no head', cause: 'infra' };
   if (ci.failure) fail(ci.failure, ci.cause);
+  // In flight first: a review that posts and ends between the two reads is
+  // then seen by the threads read, never missed by both.
+  const flight = head ? inflightCondition(state, wp, head, { exec, now }) : {};
+  if (flight.failure) fail(flight.failure, flight.cause);
   const threads = exec('node', [prReview(state), 'threads', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--unresolved']);
   if (threads.code === 8) fail('unresolved review threads', 'threads');
   else if (threads.code !== 0) fail(`threads unreadable (exit ${threads.code}): ${first(threads.stderr)}`, 'infra');
-  const flight = head ? inflightCondition(state, wp, head, { exec, now }) : {};
-  if (flight.failure) fail(flight.failure, flight.cause);
   const config = notTrivialPatterns(state, wt, exec);
   if (config.failure) fail(config.failure, 'infra');
   const review = head ? reviewCondition(wp, head, exec, config.patterns ?? DEFAULT_NOT_TRIVIAL.map(globRegex)) : { failure: 'review coverage not read: no head', cause: 'infra' };

@@ -153,7 +153,12 @@ function escapes(state, exec) {
 // on every merged PR, so each thread reaches the showcase for a verdict.
 function postMergeThreads(state, exec) {
   const script = join(state.pluginRoot, 'skills', 'slim-review', 'scripts', 'pr-review.mjs');
-  const rows = mergedPrs(state).map(({ id, pr, wp }) => {
+  // Every PR that merged, whatever happened after: a failed post-merge check
+  // and an unconfirmed release merge commit still landed code.
+  const r = state.release ?? {};
+  const landed = [...state.wps.filter((wp) => wp.merge?.sha && wp.pr?.number).map((wp) => ({ id: wp.id, pr: wp.pr.number, wp })),
+    ...((r.merge?.sha || r.squashed) && r.pr?.number ? [{ id: 'release', pr: r.pr.number, wp: r }] : [])];
+  const rows = landed.map(({ id, pr, wp }) => {
     const r = exec('node', [script, 'threads', '--pr', String(pr), '--repo', state.intent.repo.remote, '--unresolved']);
     const flight = wp.postMerge?.inflightAtMerge ? `; review in flight at merge: ${wp.postMerge.inflightAtMerge}` : '';
     if (r.code === 0) return flight ? `  - ${id} PR #${pr}: no unresolved threads${flight}` : null;

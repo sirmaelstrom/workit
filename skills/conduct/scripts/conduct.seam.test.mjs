@@ -571,8 +571,12 @@ test('release merge-commit lookup (U1): {code:1, stderr:"HTTP 502 Bad Gateway"} 
     ['failed', 'merge: merge-commit failed (exit 1): HTTP 502 Bad Gateway', null, 'analyze']);
   // C2-8: the squash landed, so the release PR is merged, unconfirmed; not open.
   h.pending = out(result).action;
+  // A review posts on the release PR after its squash: the sweep must read it.
+  h.rules = [[/^node \S+pr-review\.mjs threads --pr 200 /, () => ({ code: 8, stdout: '1 of 1 thread(s)\n\n#4190000001  package.json:3  [OPEN]  replies:0\n', stderr: '' })], ...(h.rules ?? [])];
   await drive(h, { until: (a) => a.step === 'showcase' });
   assert.match(section(h.analysis(), 'Escapes'), /^run PRs: #100 WP-00 merged, #200 release merged \(merge commit unconfirmed\)$/m);
+  // The unconfirmed release is swept too: its squash landed.
+  assert.match(section(h.analysis(), 'Escapes'), /^ {2}- release PR #200: 1 unresolved thread\(s\) after the merge; give each a verdict$/m);
 });
 
 test('release CI deadline (C2-4): one 30-minute window per head from the earliest absent-or-pending reading; a new head restarts it', async (t) => {

@@ -134,6 +134,20 @@ test('gateCheck: a pipeline review of the head still in flight is pending, then 
   assert.deepEqual([both.pending, both.pendingOn], [true, ['ci', 'review']]);
 });
 
+test('gateCheck: a review that posts and ends between the gate\'s reads is caught by the threads read', () => {
+  // The review ends (inflight 0) and its threads appear at that moment: only a
+  // threads read after the in-flight read can see them.
+  const base = gateExec();
+  let posted = false;
+  const exec = (program, args, options) => {
+    if (program === 'node' && args[1] === 'inflight') posted = true;
+    if (program === 'node' && args[1] === 'threads') return { code: posted ? 8 : 0, stdout: '', stderr: '' };
+    return base(program, args, options);
+  };
+  const out = gateCheck(makeState(), makeWp(), { exec, now: () => NOW });
+  assert.deepEqual([out.ok, out.failures], [false, ['unresolved review threads']]);
+});
+
 test('gateCheck: an in-flight answer it cannot read is infra, never "nothing in flight"', () => {
   const out = gate(makeState(), makeWp(), { inflight: 1 });
   assert.deepEqual([out.ok, out.pending, out.causes], [false, false, ['infra']]);
