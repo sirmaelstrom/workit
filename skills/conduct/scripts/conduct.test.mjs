@@ -7,12 +7,13 @@ import {
 import { tmpdir, hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { runConduct } from './conduct.mjs';
 import { STEPS, STEP_SEAM, ConductError, resolveRunDir, readEvents, saveState, appendEvent, withStateLock } from './lib/state.mjs';
 import { detectAdapters, laneModel } from './lib/adapters.mjs';
 import { resolveRecipe, recipeArgv } from './lib/recipe.mjs';
 import { shellArgv, spawnDetached, pidAlive } from './lib/exec.mjs';
-import { openTouch, touchAction, recordTouch, handBackAction } from './lib/touch.mjs';
+import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, resumeCommand, shellLiteral } from './lib/touch.mjs';
 import { validateGrant } from './lib/phases/preapproval.mjs';
 import { samePath } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
@@ -649,13 +650,49 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   assert.ok(secondFiling.args.question.startsWith('[conduct fixture-run touch 2]'));
 });
 
-test('hand-back resume command (E6 C1-2): the plugin root and the run dir are quoted, so paths with spaces stay one argument each', () => {
-  const pluginRoot = join(tmpdir(), 'Plugin Root');
-  const runDir = join(tmpdir(), 'Run Root', 'run');
-  const touch = { n: 1, kind: 'preapproval', tag: '[conduct g touch 1]', question: '[conduct g touch 1] Q', options: [] };
-  const action = handBackAction({ pluginRoot, runDir, intent: { anchor: ANCHOR_UUID } }, touch);
-  const script = join(pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs');
-  assert.ok(action.instruction.includes(`resume with: node "${script}" next --resume "${runDir}" (`), action.instruction);
+test('printed commands through a real shell (E6 C1-2, C2-1, C2-2): the resume and answer commands hand conduct.mjs the exact paths, with a space, $x, $(whoami) and a quote in them', (t) => {
+  const shell = process.platform === 'win32' ? ['pwsh', ['-NoProfile', '-Command']] : ['sh', ['-c']];
+  const probe = spawnSync(shell[0], [...shell[1], 'exit 0']);
+  if (probe.error) {
+    t.skip(`${shell[0]} is not available: ${probe.error.code}`);
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'workit-quote-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pluginRoot = join(dir, 'Plugin $x $(whoami) it\'s');
+  const runDir = join(dir, 'Run $x $(whoami) it\'s', 'run');
+  // A stand-in conduct.mjs that prints the arguments it received.
+  mkdirSync(join(pluginRoot, 'skills', 'conduct', 'scripts'), { recursive: true });
+  writeFileSync(join(pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'console.log(JSON.stringify(process.argv.slice(2)));\n');
+  const state = { pluginRoot, runDir, intent: { anchor: ANCHOR_UUID } };
+  const touch = { n: 1, kind: 'preapproval', tag: '[conduct g touch 1]', question: '[conduct g touch 1] Q', options: [{ key: 'a' }, { key: 'b' }] };
+  const run = (command) => {
+    const result = spawnSync(shell[0], [...shell[1], command], { encoding: 'utf8' });
+    assert.equal(result.status, 0, `${command}\n${result.stderr}`);
+    return JSON.parse(result.stdout);
+  };
+  const resume = /resume with: (.+) \(its first action/.exec(handBackAction(state, touch).instruction)[1];
+  assert.equal(resume, resumeCommand(state));
+  assert.deepEqual(run(resume), ['next', '--resume', runDir]);
+  // The operator fills the key; the placeholders are not shell syntax.
+  const answer = answerCommand(state, touch).replace(' --key <a|b> [--text "<text>"]', ' --key a');
+  assert.deepEqual(run(answer), ['answer', '--run', runDir, '--touch', '1', '--key', 'a']);
+  assert.equal(shellLiteral("it's", 'win32'), "'it''s'");
+  assert.equal(shellLiteral("it's", 'linux'), "'it'\\''s'");
+});
+
+test('answer outcomes (E6 C2-3): an operator answer with an invalid key exits 0 and re-files with the reason; keyless operator text is (c)', async (t) => {
+  const f = fixture(t);
+  const { runDir, readBack } = await toSpineReadBack(f);
+  const invalid = await record(f, runDir, readBack.id, answeredFor(runDir, 1, { key: 'z' }));
+  assert.equal(invalid.code, 0);
+  assert.equal(out(invalid).action.tool, 'spine_receipt');
+  assert.match(out(invalid).action.args.question, /\(run abcd1234\/2\) Your previous answer could not be used \(answer z is not one of a, b, c, d\)/);
+  const g = fixture(t);
+  const flow = await toSpineReadBack(g);
+  const free = out(await record(g, flow.runDir, flow.readBack.id, answeredFor(flow.runDir, 1, { key: null, text: 'budget 5' }))).action;
+  assert.equal(free.step, 'grant');
+  assert.equal(readState(flow.runDir).touches[0].answer.key, 'c');
 });
 
 test('legacy touch wait (E6 C1-7): a run dir whose pending action is the pre-change 300000 ms touch wait records it with {} and gets the read-back', async (t) => {

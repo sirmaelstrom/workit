@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { runConduct } from './conduct.mjs';
 import { STEPS, readEvents } from './lib/state.mjs';
 import { shellArgv } from './lib/exec.mjs';
-import { correlation } from './lib/touch.mjs';
+import { correlation, shellLiteral } from './lib/touch.mjs';
 import { SEAM_ROWS } from './lib/analyze.mjs';
 import { namedSeam } from './lib/phases/showcase.mjs';
 
@@ -919,7 +919,7 @@ test('E6 hand-back (spine): no attributed answer → a touch-kind hand-back, nev
   assert.deepEqual(h.trace.map((a) => `${a.tool ?? a.kind}/${a.part ?? ''}`), ['spine_quest/', 'spine_receipt/receipt', 'spine_quest/read-back', 'touch/hand-back']);
   assert.deepEqual([back.kind, back.step, back.touch.n, back.seam], ['touch', 'preapproval', 1, 'operator-touch']);
   assert.match(back.instruction, /^Stop and end your turn: \[conduct seam-run touch 1\] is filed on quest a0a0a0a0-/);
-  assert.ok(back.instruction.includes(`next --resume "${h.runDir}"`), back.instruction);
+  assert.ok(back.instruction.includes(`next --resume ${shellLiteral(h.runDir)}`), back.instruction);
   // Recording a hand-back changes nothing: the same action, answered: false.
   const recorded = await h.run(['record', '--run', h.runDir, '--action', back.id, '--result', '{}']);
   assert.deepEqual([recorded.code, out(recorded).answered, out(recorded).action.id], [0, false, back.id]);

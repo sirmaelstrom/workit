@@ -22,9 +22,17 @@ export function conductScript(state) {
   return join(state.pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs');
 }
 
+// One literal argument for the shell a printed command is run from:
+// PowerShell on win32 (inside single quotes, '' is one '), POSIX elsewhere
+// ('\'' closes the quote, adds an escaped ', reopens). Nothing inside expands.
+export function shellLiteral(value, platform = process.platform) {
+  const text = String(value);
+  return platform === 'win32' ? `'${text.replaceAll("'", "''")}'` : `'${text.replaceAll("'", "'\\''")}'`;
+}
+
 export function answerCommand(state, touch) {
   const keys = touch.options.map((option) => option.key).join('|');
-  return `node ${conductScript(state)} answer --run ${state.runDir} --touch ${touch.n} --key <${keys}> [--text "<text>"]`;
+  return `node ${shellLiteral(conductScript(state))} answer --run ${shellLiteral(state.runDir)} --touch ${touch.n} --key <${keys}> [--text "<text>"]`;
 }
 
 // touches/<n>.json is the record; touches/<n>.md is the operator's view.
@@ -86,6 +94,10 @@ export function touchAction(state, touch) {
   };
 }
 
+export function resumeCommand(state) {
+  return `node ${shellLiteral(conductScript(state))} next --resume ${shellLiteral(state.runDir)}`;
+}
+
 // The spine hand-back: the read-back found no attributed answer, so the
 // conductor's turn ends here. It is never recorded (`record` returns it with
 // `answered: false`); `next` consumes it on resume and emits the read-back.
@@ -93,7 +105,7 @@ export function handBackAction(state, touch) {
   return {
     step: touchStep(touch), kind: 'touch', part: 'hand-back', handBack: true,
     touch: { n: touch.n, question: touch.question, options: touch.options }, expects: { type: 'none' },
-    instruction: `Stop and end your turn: ${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action and do not poll. Tell the operator it waits for their answer in the Dogan. When they have answered, resume with: node "${conductScript(state)}" next --resume "${state.runDir}" (its first action reads the answer back).`,
+    instruction: `Stop and end your turn: ${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action and do not poll. Tell the operator it waits for their answer in the Dogan. When they have answered, resume with: ${resumeCommand(state)} (its first action reads the answer back).`,
   };
 }
 
