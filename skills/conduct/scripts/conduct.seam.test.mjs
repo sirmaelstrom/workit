@@ -456,6 +456,8 @@ test('hold at PR (D12): touch 1 (b) → WP-01 held, WP-02 and WP-03 deferred nam
   assert.match(question, /Deferred WPs: WP-02: depends on WP-01, which is held; WP-03: depends on WP-01, which is held/);
   assert.equal(showcase.kind, 'touch');
   assert.match(section(h.analysis(), 'Pre-approval audit'), /^- merges: 0$/m);
+  // U3: every run PR is listed with its status, the open held one included.
+  assert.match(section(h.analysis(), 'Escapes'), /^run PRs: #101 WP-01 open \(held\)$/m);
   assert.match(row(h.analysis(), 'release'), /^- release: not exercised/);
   assert.match(section(h.analysis(), 'Seam coverage'), /^ {2}- release not exercised: held$/m);
 });
