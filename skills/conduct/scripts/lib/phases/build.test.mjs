@@ -596,29 +596,53 @@ test('blocked recovery (D19.4): an answer amends the blocked lane verbatim; its 
   assert.deepEqual(afterBrief.slice(0, 3), ['prompt', 'wait', 'check']);
 });
 
-test('blocked recovery (D19.4): with dispatch exhausted the build stays in build, emitting only the read-back and its 300000 ms wait, until the answer', async (t) => {
+test('blocked recovery (D19.4), spine, idle build (E6): with no lane work left the build files the touch, reads it back and hands back, never a 300000 ms poll; next resumes at the read-back; the answer merges', async (t) => {
   const h = harness(t, { spine: true, wps: [TWO[0], TWO[1], { id: 'WP-04', files: ['x.mjs'], wave: 3, dependsOn: ['WP-02'] }] });
   h.reports = { 'WP-02': ['report-needs-conductor.md', 'report-built.md'] };
   h.rulings = [{ escalate: true, why: 'operator call' }];
   await drive(h, { until: (a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' });
   const from = h.trace.length - 1;
-  await drive(h, { until: () => h.trace.length >= from + 9 });
-  const quiet = h.trace.slice(from);
-  for (const a of quiet) {
-    assert.ok((a.kind === 'agent-tool' && ['spine_receipt', 'spine_quest'].includes(a.tool)) || (a.kind === 'wait' && a.waitMs === 300000), `${a.id} ${a.kind} ${a.tool ?? a.waitMs}`);
-  }
-  assert.equal(quiet.filter((a) => a.tool === 'spine_receipt').length, 1);
+  const back = await drive(h, { until: (a) => a.handBack === true, max: 10 });
+  assert.deepEqual(h.trace.slice(from).map((a) => a.tool ?? a.part), ['spine_receipt', 'spine_quest', 'hand-back']);
+  assert.deepEqual([back.kind, back.step, back.touch.n], ['touch', 'touch', 1]);
   assert.equal(h.state.phase, 'build');
   assert.equal(h.wp('WP-04').state, 'deferred');
-  // The operator answers (a) on the spine: the read-back carries it.
+  // A fresh runConduct `next` is the resume: the read-back, not a new filing; unanswered, it hands back again.
+  h.disk = true;
+  const resumed = await step(h);
+  assert.deepEqual([resumed.tool, resumed.part], ['spine_quest', 'read-back']);
+  assert.ok(h.events().some((e) => e.event === 'resumed' && e.actionId === back.id));
+  h.trace.push(resumed);
+  await recordPending(h, await perform(h, resumed));
+  assert.equal(h.current().pending.part, 'hand-back');
+  assert.equal(h.current().touches[0].filings, 1);
+  // The operator answers (a) on the spine: the next resume reads it back.
   h.spineQuest = () => {
     const result = JSON.parse(fixture('intake', 'spine-quest-answered.json'));
-    result.quests[0].latestReceipt.question = `${correlation(h.state, h.state.touches[0])} synthetic question`;
+    result.quests[0].latestReceipt.question = `${correlation(h.current(), h.current().touches[0])} synthetic question`;
     result.quests[0].latestReceipt.answer.key = 'a';
     return result;
   };
   assert.equal(await drive(h), null);
-  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  assert.deepEqual(h.current().wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  assert.ok(!h.trace.some((a) => a.kind === 'wait' && a.waitMs === 300000), 'no 300000 ms poll');
+});
+
+test('blocked recovery (D19.4), spine, live lane (E6): while WP-03 runs, the waiting touch is re-read on the yield cadence between WP-03\'s actions and never handed back; once WP-03 merges the build hands back', async (t) => {
+  const h = harness(t, { spine: true });
+  h.reports = { 'WP-02': ['report-needs-conductor.md', 'report-built.md'] };
+  h.rulings = [{ escalate: true, why: 'operator call' }];
+  h.life = { 'WP-03': 20 };
+  const backs = [];
+  h.onEmit = (a) => { if (a.handBack) backs.push(h.wp('WP-03').state); };
+  const back = await drive(h, { until: (a) => a.handBack === true });
+  assert.deepEqual(backs, ['merged'], 'the only hand-back comes after WP-03 merged');
+  const filed = indexWhere(h, (a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input');
+  const during = h.trace.slice(filed, h.trace.indexOf(back));
+  assert.ok(during.filter((a) => a.tool === 'spine_quest').length >= 2, 'the touch was read back again while WP-03 ran');
+  assert.ok(during.some((a) => a.kind === 'wait' && a.yield === true && /touch 1\]: no answer yet/.test(a.instruction)), 'yield waits name the touch');
+  assert.ok(during.some((a) => a.wpId === 'WP-03'), 'WP-03 kept going');
+  assert.equal(h.wp('WP-02').state, 'blocked');
 });
 
 test('runtime exercise required: a report with no Verdict line → an amendment re-prompt, not a review; the amended report → review', async (t) => {
@@ -1306,6 +1330,21 @@ test('spend parse (C1-4, C1-15): empty, blank, negative or non-numeric meter out
   assert.ok(unset.state.build.halts.some((halt) => halt.kind === 'meter'));
   assert.ok(!unset.trace.some((a) => (a.step === 'spend' && !isWait(a)) || a.wpId));
   assert.match(unset.state.touches[0].question, /WORKIT_SPEND_CMD is not set/);
+});
+
+test('meter unset, spine (E6 C1-5): with WORKIT_SPEND_CMD unset the meter can never re-read, so the read-back budget touch hands back; a set command whose output is unreadable keeps its 5-minute re-read and never hands back', async (t) => {
+  const unset = harness(t, { spine: true, spend: true, env: {} });
+  const back = await drive(unset, { until: (a) => a.handBack === true, max: 30 });
+  assert.equal(back.touch.n, 1);
+  assert.match(unset.state.touches[0].question, /WORKIT_SPEND_CMD is not set/);
+  assert.ok(unset.state.build.halts.some((halt) => halt.kind === 'meter'));
+  assert.ok(!unset.trace.some(isWait), 'no yield poll before the hand-back');
+  assert.ok(!unset.trace.some((a) => a.wpId), 'nothing dispatched');
+  const set = harness(t, { spine: true, spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
+  set.spendOut = ['\n', '\n', '\n'];
+  await drive(set, { until: (a) => a.handBack === true || set.trace.filter((s) => s.step === 'spend' && !isWait(s)).length === 2 });
+  assert.ok(set.trace.some((a) => isWait(a) && a.yield), 'the meter re-read waits on the yield');
+  assert.ok(!set.trace.some((a) => a.handBack), 'a recoverable meter is not handed back');
 });
 
 test('meter halt (C2-3): a budget answer never clears an unreadable meter; only a successful read resumes dispatch', async (t) => {

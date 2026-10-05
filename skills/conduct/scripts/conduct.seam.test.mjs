@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { runConduct } from './conduct.mjs';
 import { STEPS, readEvents } from './lib/state.mjs';
 import { shellArgv } from './lib/exec.mjs';
-import { correlation } from './lib/touch.mjs';
+import { correlation, shellLiteral } from './lib/touch.mjs';
 import { SEAM_ROWS } from './lib/analyze.mjs';
 import { namedSeam } from './lib/phases/showcase.mjs';
 
@@ -341,6 +341,13 @@ async function drive(h, { until = () => false, max = 3000 } = {}) {
     if (until(action, h)) {
       h.pending = action;
       return action;
+    }
+    // A spine hand-back ends the conductor's turn; the next turn resumes it.
+    if (action.handBack) {
+      const resumed = await h.run(['next', '--resume', h.runDir]);
+      assert.equal(resumed.code, 0, resumed.stdout + resumed.stderr);
+      action = out(resumed).action;
+      continue;
     }
     const result = await perform(h, action);
     const recorded = await h.run(['record', '--run', h.runDir, '--action', action.id, '--result', JSON.stringify(result), ...(h.manual?.(action) ? ['--manual'] : [])]);
@@ -883,6 +890,99 @@ test('spine + herdr: spine_author once, a receipt per WP stop, touches filed onc
   assert.ok(h.events().every((e) => 'step' in e && 'seam' in e));
 });
 
+// E6: the spine read-back's no-answer cases. `reply` picks what the next
+// touch read-back returns; 'operator' falls through to the scripted answer.
+function spineReplies(h) {
+  h.reply = 'none';
+  h.custom = (action) => {
+    if (action.tool !== 'spine_quest' || action.step === 'anchor' || h.reply === 'operator') return undefined;
+    const state = h.state();
+    const touch = state.touches.find((candidate) => candidate.status === 'filed');
+    const answer = { key: 'a', text: null, by: 'operator:seam', answeredAt: new Date(h.clock).toISOString() };
+    const latest = {
+      none: { outcome: 'needs_input', question: `${correlation(state, touch)} synthetic question`, answer: null },
+      stale: { outcome: 'answered', question: `${touch.tag} (run 00000000/${touch.filings}) synthetic question`, answer },
+      agent: { outcome: 'answered', question: `${correlation(state, touch)} synthetic question`, answer: { ...answer, by: 'agent:claude' } },
+    }[h.reply];
+    return { quests: [{ id: ANCHOR, latestReceipt: latest }] };
+  };
+}
+const SPINE_ONLY = ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'herdr', '--no-adapter', 'notify', '--no-adapter', 'spend'];
+const isHandBack = (a) => a.handBack === true;
+const needsInput = (h) => h.trace.filter((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input');
+
+test('E6 hand-back (spine): no attributed answer → a touch-kind hand-back, never a wait; record leaves it pending; next --resume reads back; stale or unattributed answers hand back again; the operator\'s answer reaches /spec', async (t) => {
+  const h = seam(t);
+  spineReplies(h);
+  await start(h, SPINE_ONLY);
+  const back = await drive(h, { until: isHandBack, max: 10 });
+  assert.deepEqual(h.trace.map((a) => `${a.tool ?? a.kind}/${a.part ?? ''}`), ['spine_quest/', 'spine_receipt/receipt', 'spine_quest/read-back', 'touch/hand-back']);
+  assert.deepEqual([back.kind, back.step, back.touch.n, back.seam], ['touch', 'preapproval', 1, 'operator-touch']);
+  assert.match(back.instruction, /^Stop and end your turn: \[conduct seam-run touch 1\] is filed on quest a0a0a0a0-/);
+  assert.ok(back.instruction.includes(`next --resume ${shellLiteral(h.runDir)}`), back.instruction);
+  // Recording a hand-back changes nothing: the same action, answered: false.
+  const recorded = await h.run(['record', '--run', h.runDir, '--action', back.id, '--result', '{}']);
+  assert.deepEqual([recorded.code, out(recorded).answered, out(recorded).action.id], [0, false, back.id]);
+  // The resume: the hand-back is consumed and the touch is read back, not re-filed.
+  const resumed = out(await h.run(['next', '--resume', h.runDir])).action;
+  assert.deepEqual([resumed.tool, resumed.part], ['spine_quest', 'read-back']);
+  assert.ok(h.events().some((e) => e.event === 'resumed' && e.actionId === back.id && e.seam === 'operator-touch'));
+  // Another run's answer to the same tag: hand back again, no new filing.
+  h.reply = 'stale';
+  h.pending = resumed;
+  assert.equal((await drive(h, { until: isHandBack, max: 5 })).part, 'hand-back');
+  assert.equal(needsInput(h).length, 1);
+  // An answer not stamped operator: is refused (exit 3) and re-filed; unanswered, it hands back.
+  h.reply = 'agent';
+  const read = out(await h.run(['next', '--resume', h.runDir])).action;
+  const refused = await h.run(['record', '--run', h.runDir, '--action', read.id, '--result', JSON.stringify(await perform(h, read))]);
+  assert.equal(refused.code, 3);
+  assert.equal(out(refused).action.tool, 'spine_receipt');
+  h.reply = 'none';
+  h.pending = out(refused).action;
+  assert.equal((await drive(h, { until: isHandBack, max: 5 })).part, 'hand-back');
+  assert.equal(h.state().touches[0].filings, 2);
+  // The operator answers: the next resume reads it back and the run reaches /spec.
+  h.reply = 'operator';
+  const spec = await drive(h, { until: (a) => a.kind === 'skill', max: 5 });
+  assert.equal(spec.step, 'spec');
+  assert.equal(h.state().touches[0].answer.by, 'operator:seam');
+  assert.ok(!h.trace.some((a) => a.kind === 'wait'), 'no wait at any touch');
+});
+
+test('E6 hand-back (spine): the showcase touch hands back the same way; the resumed read-back closes the run', async (t) => {
+  const h = seam(t);
+  spineReplies(h);
+  h.reply = 'operator';
+  await start(h, SPINE_ONLY);
+  h.onEmit = (a) => { if (a.step === 'showcase' && a.part === 'receipt') h.reply = 'none'; };
+  const back = await drive(h, { until: isHandBack });
+  assert.deepEqual([back.kind, back.step, back.part], ['touch', 'showcase', 'hand-back']);
+  assert.equal(h.trace.filter(isHandBack).length, 1, 'touch 1 was answered at its first read-back');
+  h.reply = 'operator';
+  assert.equal((await drive(h)).kind, 'done');
+  assert.equal(h.state().phase, 'closed');
+  assert.ok(!h.trace.some((a) => a.kind === 'wait' && a.touch), 'no touch-tagged wait');
+});
+
+test('E6 hand-back (spine): the release anomaly\'s touch hands back with seam release (its action and its resumed event); the resume reads back; any operator answer fails the release', async (t) => {
+  const h = await nonePath(t, { h: { treeMismatch: sha('d', 99) } }, SPINE_ONLY);
+  spineReplies(h);
+  h.reply = 'operator';
+  h.onEmit = (a) => { if (a.step === 'touch' && a.part === 'receipt') h.reply = 'none'; };
+  const back = await drive(h, { until: isHandBack });
+  assert.deepEqual([back.kind, back.step, back.part, back.seam], ['touch', 'touch', 'hand-back', 'release']);
+  assert.deepEqual([h.state().touches[back.touch.n - 1].kind, h.state().touches[back.touch.n - 1].wpId], ['blocked', null]);
+  const resumed = out(await h.run(['next', '--resume', h.runDir])).action;
+  assert.deepEqual([resumed.tool, resumed.part, resumed.seam], ['spine_quest', 'read-back', 'release']);
+  assert.deepEqual(h.events().filter((e) => e.event === 'resumed').map((e) => [e.actionId, e.seam]), [[back.id, 'release']]);
+  h.reply = 'operator';
+  h.pending = resumed;
+  await drive(h, { until: (a) => a.step === 'analyze' });
+  assert.equal(h.state().release.state, 'failed');
+  assert.match(h.state().release.reason, /squash tree differs.*operator answer \(a\)/);
+});
+
 test('action ids (D18, D19.15): every action id in the portability run is <seq>-<step> with step in STEPS; every event carries step and seam', async (t) => {
   const { h } = await portability(t);
   for (const a of h.trace) {
@@ -981,13 +1081,16 @@ test('runtime ownership (C1-3): the runtime row cites the verdict-storing checks
   assert.equal(row(owned.analysis(), 'runtime-exercise'), '- runtime-exercise: by hand (provenance unread)');
 });
 
-test('send-back seam (M3): `seam: <name>` wins; otherwise exactly one named seam; aliases map to spec; touches is never taken', () => {
+test('send-back seam (M3): `seam: <name>` wins; otherwise exactly one named seam; aliases map to spec; the touch seam (operator-touch, formerly touches) is never taken', () => {
   assert.equal(namedSeam('The release notes are wrong; send back to merge-gate.'), null);
   assert.equal(namedSeam('The release notes are wrong; seam: merge-gate.'), 'merge-gate');
   assert.equal(namedSeam('reopen at the merge-gate'), 'merge-gate');
   assert.equal(namedSeam('seam: spec-review — the council missed it'), 'spec');
   assert.equal(namedSeam('the runtime-exercise row was vacuous'), 'runtime-exercise');
   assert.equal(namedSeam('seam: touches'), null);
+  assert.equal(namedSeam('seam: operator-touch'), null);
+  assert.equal(namedSeam('the operator-touch was slow'), null);
+  assert.ok(!SEAM_ROWS.includes('operator-touch') && !SEAM_ROWS.includes('touches'));
   assert.equal(namedSeam('too many touches'), null);
   assert.equal(namedSeam(null), null);
   // C2-3: an explicit form decides alone, on its whole token.

@@ -16,7 +16,7 @@ import {
 } from './lib/state.mjs';
 import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
-import { acceptAnswer, touchStep, writeTouchFiles } from './lib/touch.mjs';
+import { acceptAnswer, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -263,8 +263,13 @@ async function intake(tokens, deps) {
   });
 }
 
+// `next` (and `--resume`) on a pending spine hand-back is the resume: the
+// hand-back is consumed and the touch is read back again.
 async function next(tokens, deps) {
-  return transact(parseFlags(tokens), deps, async (state) => ({ out: { ok: true, action: await emit(state, deps) } }));
+  return transact(parseFlags(tokens), deps, async (state) => {
+    if (state.pending?.handBack) resumeHandBack(state, deps);
+    return { out: { ok: true, action: await emit(state, deps) } };
+  });
 }
 
 function readResult(flags, deps) {
@@ -307,8 +312,8 @@ async function record(tokens, deps) {
     if (!action || action.id !== id) throw new ConductError(5, `action ${id} is not the pending action (${action?.id ?? 'none pending'})`);
     const result = readResult(flags, deps);
     if (action.kind === 'shell') checkShellResult(action, result);
-    // A core touch the operator has not answered yet stays pending: recording
-    // it again does not mint a new action.
+    // A core touch the operator has not answered yet, or a spine hand-back,
+    // stays pending: recording it does not mint a new action.
     if (action.kind === 'touch' && state.touches[action.touch.n - 1]?.status !== 'answered') {
       return { out: { ok: true, phase: state.phase, action, answered: false } };
     }

@@ -3,14 +3,15 @@
 // plus one escape-reader run through the executor. No session is spawned;
 // the conductor replaces the Recommendations placeholder afterwards.
 import { join } from 'node:path';
-import { STEP_SEAM, loadState, readEvents } from './state.mjs';
+import { STEP_SEAM, TOUCH_SEAM, loadState, readEvents } from './state.mjs';
 import { firstLine } from './adapters.mjs';
 
 const VERDICT_TEXT = { exercised: 'exercised', vacuous: 'vacuous', 'not-exercised': 'not exercised', 'no-surface': 'no runtime surface', missing: 'missing' };
 const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
 // Every STEP_SEAM seam (the one `spec` event is cited under three rows), then
-// runtime-exercise, which has no step of its own. `touches` and null are not seams.
-export const SEAM_ROWS = Object.freeze([...new Set(Object.values(STEP_SEAM))].filter((seam) => seam && seam !== 'touches')
+// runtime-exercise, which has no step of its own. TOUCH_SEAM (the Touches
+// section) and null are not seam rows.
+export const SEAM_ROWS = Object.freeze([...new Set(Object.values(STEP_SEAM))].filter((seam) => seam && seam !== TOUCH_SEAM)
   .flatMap((seam) => (seam === 'spec' ? SPEC_ROWS : [seam])).concat('runtime-exercise'));
 // A phase hand-over and a skipped step are not a seam crossed.
 const NOT_EVIDENCE = new Set(['phase', 'not-exercised']);
