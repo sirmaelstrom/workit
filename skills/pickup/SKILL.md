@@ -1,6 +1,6 @@
 ---
 name: pickup
-description: "Resume the current project's top roadmap quest from the Spine — read its resume note + cartridge artifacts, claim the quest on the board, and continue the work. Trigger on '/pickup', 'pick up where I left off', 'continue the quest', 'resume the roadmap work' (the work-resume sense; Claude Code's built-in /resume resumes SESSIONS — this resumes WORK). Optional arg: a quest short-id or project name to pick up something other than the default."
+description: "Resume the current project's top roadmap quest from the Spine — read its resume note + cartridge artifacts, claim the quest on the board, and continue the work. Trigger on '/pickup', 'pick up where I left off', 'continue the quest', 'resume the roadmap work'. Optional arg: a quest short-id or project name to pick up something other than the default."
 ---
 
 # Pickup — one-command quest re-entry

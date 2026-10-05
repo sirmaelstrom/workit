@@ -54,6 +54,7 @@ Grouped by what they're for:
 | `diagnose` | Force environmental / process / config / code-path hypotheses into an explicit verification flow before editing. |
 | `blast-radius` | Pre-ship impact analysis: find what a change breaks beyond the diff, then prove the one fact it's safe because of by running real code — anything below that rung is marked unproven. Ported from [pstack's blast-radius](https://github.com/cursor/plugins/tree/main/pstack/skills/blast-radius). |
 | `failure-audit` | Delta failure-mode audit over archived agent-session transcripts: slice new sessions into digests, fan out calibrated auditor waves, then run the standing comparisons (guard treatment check, model drift, new-label emergence). Operator-pulled, never scheduled. |
+| `retro` | Retrospective on one to three sessions: read the real transcript, then propose changes to the agent's environment (checks over prose, steering-file no-ops, tool economy, information access), ranked with receipts, landed only when the operator picks. Ported from [Matt Pocock's retro](https://github.com/mattpocock/skills/tree/main/skills/engineering/retro). Operator-pulled, never scheduled. |
 | `unslop` | Cut AI tells from prose (puffery, filler, hedging, chatbot phrases, metaphor jargon) and put a human voice back in. Ported from [pstack's unslop](https://github.com/cursor/plugins/tree/main/pstack/skills/unslop); rule 26's jargon cut is gated on the project's `UBIQUITOUS_LANGUAGE.md`. |
 
 ### Skill meta-tooling

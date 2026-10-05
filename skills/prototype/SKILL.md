@@ -1,6 +1,6 @@
 ---
 name: prototype
-description: "Build a throwaway prototype to answer a specific design or logic question before committing. Trigger: 'prototype this', 'spike this', 'try a quick implementation', 'build a quick prototype', or when grilling/spec hits a question that can only be answered by running code. Branches into LOGIC (terminal state-machine exploration) or UI (multiple visual variations toggled on one route). Pairs with handoff for the DIY sub-agent pattern."
+description: "Build a throwaway prototype to answer a specific design or logic question before committing. Trigger: 'prototype this', 'spike this', 'try a quick implementation', 'build a quick prototype', or when grilling/spec hits a question that can only be answered by running code. Branches into LOGIC or UI."
 ---
 
 # Prototype — Throwaway Code That Answers a Question
