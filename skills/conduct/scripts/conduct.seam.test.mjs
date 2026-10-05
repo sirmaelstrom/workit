@@ -476,6 +476,8 @@ test('release failures (D20): land gate --wp release code 5, a verify exit 1 and
     ['land gate', { checkRuns: (s) => ok(JSON.stringify(s === RELEASE_HEAD ? red : JSON.parse(text('land', 'check-runs-green.json')))) }, /^land gate: CI failed at head/],
     ['verify', { verifyCode: 1 }, /^verify "node --test" exited 1: not ok 1 - synthetic$/],
     ['after', { afterCode: 1 }, /^after "claude plugin update workit@workit" exited 1: update failed \(synthetic\)$/],
+    // Before the gate: only the release itself can release its lock.
+    ['pr create', { rules: [[/^gh pr create /, () => ({ code: 1, stdout: '', stderr: 'pull request create failed (synthetic)' })]] }, /^pr exited 1: pull request create failed \(synthetic\)$/],
   ];
   for (const [name, patch, reason] of cases) {
     const h = await nonePath(t, { h: patch });
@@ -498,7 +500,9 @@ test('release failures (D20): a bump slot that occurs twice → record exits 2 a
   writeFileSync(join(h.repo, '.claude-plugin', 'marketplace.json'), `${JSON.stringify(twice, null, 2)}\n`);
   const bump = await drive(h, { until: (a) => a.part === 'bump' && a.outPath.endsWith('marketplace.json') });
   const before = readFileSync(join(h.runDir, 'state.json'));
-  author(h, bump);
+  // The agent edits the right occurrence (plugins.0.version): only the
+  // slot's exactly-once rule can refuse this edit.
+  writeFileSync(bump.outPath, `${JSON.stringify({ ...twice, plugins: [{ name: 'scratch', version: '0.1.1' }] }, null, 2)}\n`);
   const result = await h.run(['record', '--run', h.runDir, '--action', bump.id, '--result', '{}']);
   assert.equal(result.code, 2);
   assert.match(out(result).error, /occurs 2 times/);
