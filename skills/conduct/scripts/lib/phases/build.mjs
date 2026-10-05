@@ -209,7 +209,7 @@ const AMEND_TEXT = {
   ruling: (a) => `the conductor ruled (${a.ruled}) on its ## Needs conductor ask. The ruling's evidence, verbatim: ${a.evidence}. Carry on under that ruling.`,
   answer: (a) => `the operator answered ${a.tag}, verbatim: (${a.key})${a.text ? ` ${a.text}` : ''}. Carry on under that answer.`,
   findings: (a) => (a.ids
-    ? `council review round ${a.round} (synthesis in ${a.reviewDir}) has ${a.ids.length} Critical/Major finding(s). Write them into this brief numbered ${a.ids.join(', ')} in synthesis order; the lane's ## Amendment table uses those ids.`
+    ? `council review round ${a.round} (synthesis in ${a.reviewDir}) has ${a.ids.length} Critical/Major/Minor finding(s). Write them into this brief numbered ${a.ids.join(', ')} in synthesis order; the lane's ## Amendment table uses those ids.`
     : `review round ${a.round} posted ${a.findings ?? 'an unknown number of'} finding(s) as PR review comments; the lane adjudicates each in an ## Amendment table keyed by its comment id.`),
 };
 

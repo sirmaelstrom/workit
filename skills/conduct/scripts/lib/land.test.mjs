@@ -804,6 +804,14 @@ test('council review is recorded (D20) after its stages succeed, and the gate ac
   assert.equal(gate(state, { ...wp, ...out.patch }).ok, true);
 });
 
+test('council synthesize counts Minor findings: a Minor-only round is not recorded as zero', () => {
+  const state = makeState({ adapters: { council: { on: true } } });
+  const [, synth] = t2Actions(state, makeWp({ reviews: [], tier: 'T2' }), { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
+  assert.match(synth.instruction, /Critical, Major or Minor/);
+  assert.match(synth.instruction, /Note is not counted/);
+  assert.doesNotMatch(synth.instruction, /Critical \+ Major count/);
+});
+
 test('C1-3/C2-11 a council round is not coverage when a stage failed, a seat failed, or nothing was given to review', () => {
   const state = makeState({ adapters: { council: { on: true } } });
   const wp = makeWp({ reviews: [], tier: 'T2' });

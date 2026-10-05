@@ -202,7 +202,7 @@ export function t2Actions(state, wp, { round = 1, changedPaths = [], report = nu
       artifact_paths: [...(deltaDiff ? [deltaDiff] : []), ...changedPaths], round, profile: 'code' }),
     tool('synthesize', 'council_synthesize', { review_dir: outDir, workshop_path: workshop }, {
       head: wp.pr.head, expects: { type: 'json', fields: ['findings', 'seats'] },
-      instruction: 'Call council_synthesize, then record { findings: <Critical + Major count>, seats: [<usable seats>] } read from the synthesis.',
+      instruction: 'Call council_synthesize, then record { findings: <count>, seats: [<usable seats>] } read from the synthesis. Count each synthesized finding once if any lens rated it Critical, Major or Minor; a finding every lens rated Note is not counted.',
     }),
     tool('challenge', 'council_challenge', { review_dir: outDir, workshop_path: workshop, code_root: wp.lane.worktree }),
   ];
