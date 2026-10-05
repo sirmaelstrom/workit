@@ -7,7 +7,7 @@ The motivating receipt: runs 5/9/10/11 all ended with every PR held for a batche
 ## Eligibility — ALL must hold
 
 1. **Gate-green in full.** Suite green in foreground, CI green on the merge ref, the item's review tier fully run (a fired T2 is never downgraded), zero unresolved findings.
-2. **Easily undone** — the operator's criterion, made concrete. One `git revert` restores the world. That excludes:
+2. **Easily undone** — the operator's criterion, made concrete. One `git revert` restores the world. The PR body's `## Merge danger` section states it as `Door: two-way` (the lane-contract template's § Finish); a `Door: one-way` line, or no `Door:` line at all, fails this criterion before anything is re-derived. That excludes:
    - DB schema migrations or data backfills
    - anything that acts externally (posts, broadcasts, emails, public API shape)
    - secret, config, or infra mutations outside the repo
