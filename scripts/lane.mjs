@@ -185,13 +185,16 @@ class LaneError extends Error {
   }
 }
 
-export function execute(program, args, { cwd, input } = {}) {
+// `timeout` (ms) kills a child that has not exited by then; the kill reads as
+// a failure (code 1), never as a hang. Unset, the child may run indefinitely.
+export function execute(program, args, { cwd, input, timeout } = {}) {
   try {
     return {
       code: 0,
       stdout: execFileSync(program, args, {
         cwd,
         input,
+        ...(timeout ? { timeout } : {}),
         // execFileSync's default copies the child's stderr to ours as well as
         // capturing it: every herdr poll timeout of a long `wait` reached the
         // conductor's task output (~50 KB a wait). Captured is enough; failures

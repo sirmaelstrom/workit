@@ -14,6 +14,8 @@ export const ANSWER_ENV = 'WORKIT_TOUCH_ANSWER_CMD';
 export const AWAIT_INTERVAL_MS = 60000;
 export const AWAIT_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 export const AWAIT_MAX_FAILURES = 3;
+// One lookup's ceiling: a resolver that hangs is killed and counts as a failure.
+export const LOOKUP_TIMEOUT_MS = 30000;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // The tag is `[conduct <slug> touch <n>] (run <hex>/<filing>)`: a slug is
@@ -55,7 +57,7 @@ export function parseAnswerOutput(stdout, tag) {
   if (!text || text === 'null') return null;
   let receipt;
   try {
-    receipt = JSON.parse(text.split(/\r?\n/).filter(Boolean).at(-1));
+    receipt = JSON.parse(text);
   } catch (error) {
     throw new ConductError(1, `${ANSWER_ENV} printed non-JSON: ${error.message}`);
   }
@@ -66,11 +68,12 @@ export function parseAnswerOutput(stdout, tag) {
   return answered ? receipt : null;
 }
 
-// One lookup: { receipt } (null when unanswered). A failing command throws.
-export function lookupAnswer(state, touch, deps) {
+// One lookup: { receipt } (null when unanswered). A failing command throws,
+// and so does one still running after `timeoutMs` (it is killed).
+export function lookupAnswer(state, touch, deps, timeoutMs = LOOKUP_TIMEOUT_MS) {
   const tag = correlation(state, touch);
   const [program, ...args] = answerArgv(deps.env?.[ANSWER_ENV], state.intent.anchor, tag);
-  const result = deps.exec(program, args);
+  const result = deps.exec(program, args, { timeout: Math.max(1000, Math.min(LOOKUP_TIMEOUT_MS, timeoutMs)) });
   if (result.code !== 0) throw new ConductError(1, `${ANSWER_ENV} exited ${result.code}: ${String(result.stderr ?? '').trim().split(/\r?\n/)[0] ?? ''}`);
   return { tag, receipt: parseAnswerOutput(result.stdout, tag) };
 }
@@ -106,7 +109,7 @@ export async function awaitAnswer(flags, deps) {
   let failures = 0;
   for (;;) {
     try {
-      const { tag, receipt } = lookupAnswer(state, touch, deps);
+      const { tag, receipt } = lookupAnswer(state, touch, deps, deadline - deps.now());
       failures = 0;
       if (receipt) return { out: { ok: true, answered: true, receipt, tag, touch: touch.n } };
     } catch (error) {

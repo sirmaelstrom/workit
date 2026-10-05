@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ANSWER_ENV, answerArgv, awaitAnswer, parseAnswerCommand, parseAnswerOutput } from './answer.mjs';
+import { ANSWER_ENV, LOOKUP_TIMEOUT_MS, answerArgv, awaitAnswer, parseAnswerCommand, parseAnswerOutput } from './answer.mjs';
+import { execute } from './exec.mjs';
 import { handBackAction, recordTouch, touchAction } from './touch.mjs';
 import { detectAdapters } from './adapters.mjs';
 
@@ -44,6 +45,7 @@ test('parseAnswerOutput: only an answered receipt to this tag is an answer; noth
   assert.equal(parseAnswerOutput(JSON.stringify(answered({ outcome: 'needs_input' })), TAG), null);
   assert.equal(parseAnswerOutput(JSON.stringify(answered({ question: '[conduct fixture-run touch 1] (run 0a1b2c3d/2) a later filing' })), TAG), null);
   assert.equal(parseAnswerOutput(JSON.stringify(answered({ answer: null })), TAG), null);
+  assert.deepEqual(parseAnswerOutput(JSON.stringify(answered(), null, 2), TAG), answered(), 'a pretty-printed receipt is one object');
   assert.throws(() => parseAnswerOutput('ERROR: relation does not exist', TAG), (error) => error.code === 1);
   assert.throws(() => parseAnswerOutput('[1,2]', TAG), (error) => error.code === 1);
 });
@@ -67,14 +69,16 @@ function runDir(t, state) {
 
 function verbDeps(outputs, { now = 0 } = {}) {
   const calls = [];
+  const timeouts = [];
   let clock = now;
   return {
-    calls,
+    calls, timeouts,
     deps: {
       exists: existsSync, read: (path) => readFileSync(path, 'utf8'),
       env: { [ANSWER_ENV]: JSON.stringify(['resolve', '{quest}', '{tag}']) },
-      exec: (program, args) => {
+      exec: (program, args, options = {}) => {
         calls.push([program, ...args]);
+        timeouts.push(options.timeout);
         const next = outputs.length > 1 ? outputs.shift() : outputs[0];
         return typeof next === 'function' ? next() : next;
       },
@@ -106,6 +110,20 @@ test('await-answer polls until the answer lands (exit 0), stops at the timeout (
   const broken = verbDeps([{ code: 1, stderr: 'down' }]);
   await assert.rejects(awaitAnswer({ run: dir, touch: '1', 'interval-ms': '1000' }, broken.deps), (error) => error.code === 1);
   assert.equal(broken.calls.length, 3);
+});
+
+test('every lookup is bounded: 30 s at most, never past the waiter deadline, and the real executor kills a child that outlives it', { timeout: 20000 }, async (t) => {
+  const dir = runDir(t, makeState());
+  const once = verbDeps([{ code: 0, stdout: 'null' }]);
+  await awaitAnswer({ run: dir, touch: '1', once: true }, once.deps);
+  assert.deepEqual(once.timeouts, [LOOKUP_TIMEOUT_MS]);
+  const near = verbDeps([{ code: 0, stdout: 'null' }]);
+  await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '2000', 'timeout-ms': '5000' }, near.deps);
+  assert.ok(near.timeouts.every((ms) => ms >= 1000 && ms <= 5000), JSON.stringify(near.timeouts));
+  const started = Date.now();
+  const killed = execute(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { timeout: 500 });
+  assert.notEqual(killed.code, 0);
+  assert.ok(Date.now() - started < 10000, `the hung child ran ${Date.now() - started} ms`);
 });
 
 test('await-answer refuses a touch that is not filed and reports one already answered without a lookup', async (t) => {
