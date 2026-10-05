@@ -104,9 +104,25 @@ function filedQuestion(state, touch, filing) {
   return `${correlation(state, touch, filing)} ${refused}${body}`;
 }
 
-function receiptFailure(result) {
-  if (!result || typeof result !== 'object' || Array.isArray(result)) return 'the result is not an object';
-  if (result.error || result.isError) return `the tool reported an error: ${JSON.stringify(result.error ?? result.content ?? result).slice(0, 200)}`;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// A spine acknowledgement must answer what was asked: no error, the same
+// quest, the same outcome/state when it carries one, and a receipt uuid.
+// Every spine_receipt and spine_update the conductor emits is checked here.
+export function spineAckFailure(action, result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result) || result.error != null || result.isError || result.ok === false || result.success === false) {
+    return `failed: ${JSON.stringify(result?.error ?? result).slice(0, 200)}`;
+  }
+  // A carried quest id is a uuid or a hex prefix of 8+, and prefixes the one asked for (either way).
+  const asked = String(action.args.questId).toLowerCase();
+  const carried = String(result.questId ?? '').toLowerCase();
+  if (result.questId !== undefined && (!(UUID.test(carried) || /^[0-9a-f]{8,}$/.test(carried)) || !(carried.startsWith(asked) || asked.startsWith(carried)))) {
+    return `answered for quest ${JSON.stringify(result.questId)}, not ${asked}`;
+  }
+  for (const key of ['outcome', 'workState', 'horizon', 'currentPhase']) {
+    if (action.args[key] !== undefined && result[key] !== undefined && result[key] !== action.args[key]) return `${key} is ${result[key]}, not ${action.args[key]}`;
+  }
+  if (action.tool === 'spine_receipt' && !UUID.test(String(result.id ?? ''))) return `no receipt uuid in the result (id ${JSON.stringify(result.id)})`;
   return null;
 }
 
@@ -137,12 +153,11 @@ export function recordTouch(state, touch, action, result) {
   }
   if (action.kind !== 'agent-tool') return;
   if (action.part === 'receipt') {
-    // A failed filing is refused, so the filing action stays pending and is
-    // retried. The success shape is uncaptured (ASSUMPTION): any other object
-    // counts as filed, its string `id` (if any) kept as receiptId.
-    const failure = receiptFailure(result);
+    // A failed or unbound acknowledgement is refused: the touch stays open and
+    // the filing action stays pending, so it is re-emitted and never filed.
+    const failure = spineAckFailure(action, result);
     if (failure) throw new ConductError(2, `spine_receipt did not file ${touch.tag}: ${failure}`);
-    touch.receiptId = typeof result.id === 'string' ? result.id : null;
+    touch.receiptId = result.id;
     touch.filings += 1;
     touch.status = 'filed';
     touch.refusal = null;

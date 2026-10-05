@@ -520,7 +520,9 @@ function recordCheck(wp, action, result, backend) {
   if (action.part === 'report') {
     const checked = parseStdout(result);
     if (!checked) return block(`lane check printed no JSON: ${said(result)}`);
-    const patch = { runtimeVerdict: checked.verdict ?? null };
+    // Provenance: the analysis reads who recorded the verdict (next or --manual)
+    // from this action's `recorded` event.
+    const patch = { runtimeVerdict: checked.verdict ?? null, runtimeVerdictBy: { actionId: action.id ?? null } };
     // Outcome first (D19.16): nothing after the report check runs unless built.
     if (checked.outcome === 'refuted') return done('refuted', { ...patch, state: 'refuted', queue: backend.stop(wp) });
     if (checked.outcome === 'needs-conductor') return block('needs conductor', { ...patch, asks: checked.asks ?? [] }, 'needs-conductor');
