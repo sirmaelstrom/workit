@@ -1,6 +1,6 @@
 ---
 name: retro
-description: "Retro on one to three sessions: read the real transcript and propose environment changes (checks over prose, steering no-ops, tool economy, information access), never code. Trigger: '/retro', 'retro this session', 'what would have prevented that'. NOT for fleet failure rates (failure-audit) or CLAUDE.md one-liners (/reflect)."
+description: "Retro on one to three sessions: read the real transcript and propose environment changes (checks over prose, steering no-ops, tool economy, information access), never code. User-invoked only: type /retro (the model never starts it from a phrase). NOT for fleet failure rates (failure-audit) or CLAUDE.md one-liners (/reflect)."
 disable-model-invocation: true
 ---
 
