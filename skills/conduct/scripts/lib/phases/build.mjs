@@ -212,7 +212,8 @@ const AMEND_TEXT = {
   ruling: (a) => (a.rulings
     ? `the conductor ruled on each question of its ## Needs conductor: ${a.rulings.map((r) => `${r.question ?? 'the ask'} → (${r.ruled}); evidence, verbatim: ${r.evidence}`).join('. ')}. Carry on under those rulings.`
     : `the conductor ruled (${a.ruled}) on its ## Needs conductor ask. The ruling's evidence, verbatim: ${a.evidence}. Carry on under that ruling.`),
-  answer: (a) => `the operator answered ${a.tag}, verbatim: (${a.key})${a.text ? ` ${a.text}` : ''}. Carry on under that answer.`,
+  answer: (a) => `the operator answered ${a.tag}, verbatim: (${a.key})${a.text ? ` ${a.text}` : ''}. Carry on under that answer.${a.rulings?.length
+    ? ` The conductor also ruled on the report's other questions: ${a.rulings.map((r) => `${r.question ?? 'the ask'} → (${r.ruled}); evidence, verbatim: ${r.evidence}`).join('. ')}.` : ''}`,
   findings: (a) => (a.ids
     ? `council review round ${a.round} (synthesis in ${a.reviewDir}) has ${a.ids.length} Critical/Major/Minor finding(s). Write them into this brief numbered ${a.ids.join(', ')} in synthesis order; the lane's ## Amendment table uses those ids.`
     : `review round ${a.round} posted ${a.findings ?? 'an unknown number of'} finding(s) as PR review comments; the lane adjudicates each in an ## Amendment table keyed by its comment id.`),
@@ -469,7 +470,12 @@ function applyAnswers(state, deps) {
     }
     if (!wp || wp.state !== 'blocked' || (touch.build === 'dialog' && key === 'b')) continue;
     if (touch.build === 'guard') answerGuard(state, wp, touch, deps);
-    else startAmendment(state, wp, deps, { kind: 'answer', reason: `operator answer ${key} to touch ${touch.n}`, tag: touch.tag, key, text, answer: touch.answer });
+    else {
+      // Rulings held for this WP's other questions go to the lane with the answer.
+      const rulings = wp.heldRulings?.length ? { rulings: wp.heldRulings } : {};
+      wp.heldRulings = [];
+      startAmendment(state, wp, deps, { kind: 'answer', reason: `operator answer ${key} to touch ${touch.n}`, tag: touch.tag, key, text, answer: touch.answer, ...rulings });
+    }
   }
 }
 
@@ -1279,8 +1285,8 @@ function route(state, wp, action, out, deps) {
         return;
       }
       if (out.cause === 'needs-conductor') {
-        wp.stage = null;
-        wp.queue.push(rulingAction(state, wp, { asks: wp.asks ?? [] }));
+        // The checked stage rules its asks one question at a time, as for a built report.
+        wp.stage = 'checked';
         return;
       }
       block(state, wp, deps, patch.dispatchHalt ? 'merged tree differs from the checked head' : out.reason);

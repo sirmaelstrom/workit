@@ -846,6 +846,31 @@ function answerCore(h, n, key, text = null) {
   acceptAnswer(touch, { key, text, by: 'operator:tty', answeredAt: h.deps.timestamp(), source: 'tty' });
 }
 
+test('Needs conductor (d9d4d664): a stopped report\'s two questions get one ruling each and one amendment; a ruling held when a later question escalates reaches the lane with the operator\'s answer', async (t) => {
+  const stopped = harness(t, { wps: [TWO[0], TWO[1]] });
+  stopped.reports = { 'WP-02': ['report-stopped-two-asks.md', 'report-built.md'] };
+  stopped.rulings = [{ ruled: 'a', evidence: 'x' }, { ruled: 'b', evidence: 'y' }];
+  const asked = [];
+  stopped.onEmit = (a) => { if (a.step === 'ruling') asked.push(a); };
+  assert.equal(await drive(stopped), null);
+  assert.deepEqual(asked.map((a) => a.ruling.keys), [['a', 'b'], ['a', 'b']]);
+  const briefs = of(stopped, 'WP-02').filter((a) => a.step === 'brief' && a.amendment?.kind === 'ruling');
+  assert.deepEqual(briefs.map((a) => a.amendment.rulings?.map((r) => r.ruled)), [['a', 'b']]);
+
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.reports = { 'WP-02': ['report-built-two-asks.md', 'report-built.md'] };
+  h.rulings = [{ ruled: 'a', evidence: 'the timeout belongs here' }, { escalate: true, why: 'only the operator can drop a guard' }];
+  await drive(h, { until: (a) => a.kind === 'touch' || (a.step === 'touch' && a.part === 'announce') });
+  assert.equal(h.state.touches.length, 1, 'the escalation opened one touch');
+  h.state.pending = null;
+  answerCore(h, 1, 'b');
+  const brief = await step(h);
+  assert.equal(brief.part, 'amendment');
+  assert.match(brief.instruction, /verbatim: \(b\)/);
+  assert.match(brief.instruction, /\(a\) Change the timeout\? → \(a\); evidence, verbatim: the timeout belongs here/);
+  assert.deepEqual(h.wp('WP-02').heldRulings, []);
+});
+
 test('blocked recovery (D19.4): an answer amends the blocked lane verbatim; its deferred dependent returns to pending and runs after it merges; a fresh runConduct agrees', async (t) => {
   const h = harness(t, { wps: withFour });
   h.reports = { 'WP-02': ['report-needs-conductor.md', 'report-built.md'] };
