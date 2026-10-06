@@ -785,10 +785,10 @@ function failed(action, result) {
 }
 
 // An MCP tool result that failed: the call errored (`isError`), or it answered
-// with an `error` or `ok: false`, or nothing came back.
-const toolFailed = (result) => !result || typeof result !== 'object' || result.isError === true || Boolean(result.error) || result.ok === false;
+// with an `error` or `ok: false`, or nothing came back (null, a non-object, `{}`).
+const toolFailed = (result) => !result || typeof result !== 'object' || !Object.keys(result).length || result.isError === true || Boolean(result.error) || result.ok === false;
 const toolError = (result) => {
-  if (!result || typeof result !== 'object') return 'no result';
+  if (!result || typeof result !== 'object' || !Object.keys(result).length) return 'no result';
   const text = Array.isArray(result.content) ? result.content.map((part) => part?.text).filter(Boolean).join(' ') : '';
   return String(result.error ?? (text || (result.isError ? 'isError' : null)) ?? '').slice(0, 200) || null;
 };
@@ -1019,7 +1019,7 @@ function recordOwn(state, wp, action, result, deps) {
     case 'alarm':
       // An alarm that cannot be delivered is recorded, never a reason to stop.
       if (action.kind === 'shell' ? result.code !== 0 : toolFailed(result)) {
-        appendEvent(state, deps, { step: 'alarm', event: 'alarm-failed', data: { wpId: wp.id, part: action.part, code: result.code ?? null, error: toolError(result) } });
+        appendEvent(state, deps, { step: 'alarm', event: 'alarm-failed', data: { wpId: wp.id, part: action.part, code: result?.code ?? null, error: toolError(result) } });
       }
       return ok();
     case 'gate-cmd':

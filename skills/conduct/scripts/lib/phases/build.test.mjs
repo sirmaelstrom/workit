@@ -576,6 +576,16 @@ test('stall alarm: the ledger note needs the ledger adapter: spine alone writes 
   const failed = down.events().filter((e) => e.event === 'alarm-failed');
   assert.deepEqual(failed.map((e) => [e.data.wpId, e.data.part, e.data.error]), [['WP-02', 'ledger', 'ledger unavailable']]);
   assert.equal(down.wp('WP-02').state, 'merged');
+
+  // Nothing came back (null, or an empty object): recorded as not delivered, and the run goes on.
+  for (const nothing of [null, {}]) {
+    const empty = harness(t, { herdr: true, ledger: true, wps: [TWO[0], TWO[1]] });
+    empty.answer = (a) => (a.tool === 'ledger_write' ? nothing : undefined);
+    assert.equal(await staleLockStall(empty), null);
+    const lost = empty.events().filter((e) => e.event === 'alarm-failed');
+    assert.deepEqual(lost.map((e) => [e.data.part, e.data.code, e.data.error]), [['ledger', null, 'no result']], JSON.stringify(nothing));
+    assert.equal(empty.wp('WP-02').state, 'merged');
+  }
 });
 
 test('stall alarm: ledger declared, a WP whose state and stage do not move for 30 minutes gets one ledger note; a lane at work for an hour gets none', async (t) => {
