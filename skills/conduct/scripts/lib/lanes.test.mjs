@@ -130,7 +130,7 @@ test('parseOutcome: built, refuted, needs conductor with asks verbatim, missing'
   const asks = '## Outcome\n\nstopped: needs conductor\n\n## Needs conductor\n\nWhich base should the lane use?\n(a) main: the default\n- (b) release: the branch the WP names\n';
   assert.deepEqual(parseOutcome(asks), {
     outcome: 'needs-conductor',
-    asks: [{ key: 'a', text: '(a) main: the default' }, { key: 'b', text: '- (b) release: the branch the WP names' }],
+    asks: [{ key: 'a', text: '(a) main: the default', question: 'Which base should the lane use?' }, { key: 'b', text: '- (b) release: the branch the WP names', question: 'Which base should the lane use?' }],
   });
   assert.deepEqual(parseOutcome('# Report\n\n## Tests\n\nall green\n'), { outcome: 'missing', asks: [] });
   assert.equal(parseOutcome('## Outcome\n\npartly done\n').outcome, 'missing');
@@ -138,12 +138,17 @@ test('parseOutcome: built, refuted, needs conductor with asks verbatim, missing'
 
 test('parseOutcome (d9d4d664): a lettered question followed by option (a) labels its ask and is not an option; a built report keeps its asks', () => {
   const labeled = '## Outcome\n\nbuilt\n\n## Needs conductor\n\n(a) perf.test.ts is load-sensitive on main too: how should this WP treat it?\n(a) Raise the budget.\n(b) Isolate it in its own job.\n(c) Leave it and file a follow-up.\n';
+  const stem = '(a) perf.test.ts is load-sensitive on main too: how should this WP treat it?';
   assert.deepEqual(parseOutcome(labeled), {
     outcome: 'built',
-    asks: [{ key: 'a', text: '(a) Raise the budget.' }, { key: 'b', text: '(b) Isolate it in its own job.' }, { key: 'c', text: '(c) Leave it and file a follow-up.' }],
+    asks: [{ key: 'a', text: '(a) Raise the budget.', question: stem }, { key: 'b', text: '(b) Isolate it in its own job.', question: stem },
+      { key: 'c', text: '(c) Leave it and file a follow-up.', question: stem }],
   });
   // An option that asks a question is still an option when (a) does not follow it.
-  assert.deepEqual(parseOutcome('## Outcome\n\nbuilt\n\n## Needs conductor\n\nWhich?\n(a) Keep it?\n(b) Drop it?\n').asks.map((ask) => ask.key), ['a', 'b']);
+  assert.deepEqual(parseOutcome('## Outcome\n\nbuilt\n\n## Needs conductor\n\nWhich?\n(a) Keep it?\n(b) Drop it?\n').asks.map((ask) => [ask.key, ask.question]), [['a', 'Which?'], ['b', 'Which?']]);
+  // Two questions with the same letters stay two questions.
+  const two = parseOutcome('## Outcome\n\nbuilt\n\n## Needs conductor\n\n(a) Change the timeout?\n(a) Fix it here.\n(b) Defer it.\n\n(b) Remove the guard?\n(a) Fix it here.\n(b) Defer it.\n').asks;
+  assert.deepEqual(two.map((ask) => [ask.question, ask.key]), [['(a) Change the timeout?', 'a'], ['(a) Change the timeout?', 'b'], ['(b) Remove the guard?', 'a'], ['(b) Remove the guard?', 'b']]);
 });
 
 test('parseOutcome heading form (D20)', () => {

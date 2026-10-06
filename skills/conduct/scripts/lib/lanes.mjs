@@ -299,9 +299,19 @@ export function parseOutcome(reportText) {
   const outcome = /^built\b/.test(value) ? 'built' : /^refuted\b/.test(value) ? 'refuted' : /^stopped:\s*needs conductor\b/.test(value) ? 'needs-conductor' : 'missing';
   const lettered = (reportSection(reportText, 'Needs conductor')?.lines ?? []).map((line) => line.text.trim()).filter(Boolean)
     .map((text) => ({ match: /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\(([a-f])\)/.exec(text), text }));
-  // A lettered question followed by option (a) is the ask's own label, not an option.
+  // A lettered question followed by option (a) is the ask's own label, not an
+  // option. Every option carries the question it answers (the label, or the
+  // last unlettered line asking one), so two questions stay two asks.
   const label = (entry, i) => entry.text.includes('?') && lettered[i + 1]?.match?.[1] === 'a';
-  const asks = lettered.filter((entry, i) => entry.match && !label(entry, i)).map(({ match, text }) => ({ key: match[1], text }));
+  const asks = [];
+  let question = null;
+  lettered.forEach((entry, i) => {
+    if (!entry.match || label(entry, i)) {
+      if (entry.text.includes('?')) question = entry.text;
+      return;
+    }
+    asks.push({ key: entry.match[1], text: entry.text, question });
+  });
   return { outcome, asks };
 }
 

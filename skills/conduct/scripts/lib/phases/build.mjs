@@ -209,7 +209,9 @@ function briefAction(state, wp, deps) {
 const AMEND_TEXT = {
   check: (a) => `its last check failed: ${a.reason}. Fix exactly that, push, and update the report.`,
   gate: (a) => `landing stopped: ${a.reason}. Fix it on the branch at the current head, push, and update the report.`,
-  ruling: (a) => `the conductor ruled (${a.ruled}) on its ## Needs conductor ask. The ruling's evidence, verbatim: ${a.evidence}. Carry on under that ruling.`,
+  ruling: (a) => (a.rulings
+    ? `the conductor ruled on each question of its ## Needs conductor: ${a.rulings.map((r) => `${r.question ?? 'the ask'} → (${r.ruled}); evidence, verbatim: ${r.evidence}`).join('. ')}. Carry on under those rulings.`
+    : `the conductor ruled (${a.ruled}) on its ## Needs conductor ask. The ruling's evidence, verbatim: ${a.evidence}. Carry on under that ruling.`),
   answer: (a) => `the operator answered ${a.tag}, verbatim: (${a.key})${a.text ? ` ${a.text}` : ''}. Carry on under that answer.`,
   findings: (a) => (a.ids
     ? `council review round ${a.round} (synthesis in ${a.reviewDir}) has ${a.ids.length} Critical/Major/Minor finding(s). Write them into this brief numbered ${a.ids.join(', ')} in synthesis order; the lane's ## Amendment table uses those ids.`
@@ -229,6 +231,10 @@ function amendmentBrief(state, wp, amendment) {
   };
 }
 
+// An ask is a question and one of its options: the same option text under a
+// different question is a different ask.
+const askId = (ask) => `${ask.question ?? ''}\n${ask.text}`;
+
 // A ruling on a lane's asks (part ask) or on a guard row (part guard, D20).
 function rulingAction(state, wp, { asks = null, row = null }) {
   wp.rulingSeq = Math.max(wp.rulingSeq ?? 0, (wp.rulings ?? []).length) + 1;
@@ -236,7 +242,9 @@ function rulingAction(state, wp, { asks = null, row = null }) {
   const file = `rulings/${lower(wp)}-${n}.json`;
   const keys = row ? GUARD_VERDICTS : (asks ?? []).map((ask) => ask.key);
   const outPath = join(state.runDir, file);
-  const what = row ? `the guard row for comment ${row.comment} (the lane's evidence: ${row.evidence})` : `${wp.id}'s ## Needs conductor asks: ${(asks ?? []).map((ask) => ask.text).join(' / ')}`;
+  const questions = [...new Set((asks ?? []).map((ask) => ask.question).filter(Boolean))];
+  const what = row ? `the guard row for comment ${row.comment} (the lane's evidence: ${row.evidence})`
+    : `${wp.id}'s ## Needs conductor ${questions.length ? `question ${questions.map((text) => `"${text}"`).join(' and ')}, options` : 'asks'}: ${(asks ?? []).map((ask) => ask.text).join(' / ')}`;
   return {
     kind: 'author', step: 'ruling', part: row ? 'guard' : 'ask', outPath, ruling: { n, file, keys, ...(row ? { comment: row.comment, row } : { asks }) }, expects: { type: 'file' },
     instruction: `Rule on ${what}: write ${outPath} = { "ruled": "<one of ${keys.join(', ')}>", "evidence": "<the measurement or file that settles it>" }, or { "escalate": true, "why": "<why only the operator can settle it>" }.${row ? '' : ` When the ruling needs paths outside ${wp.id}'s Files, add "ratify": ["<path>", …]: they are added to its Files with this ruling (a path another unfinished WP owns is refused).`} Record {}.`,
@@ -601,9 +609,10 @@ function expand(state, wp, deps) {
     case 'wait': return go(backend.wait(wp), 'check');
     case 'check': return go(backend.check(wp), 'checked');
     case 'checked': {
-      // A passing report's `## Needs conductor` asks are ruled before review or adjudication.
-      const open = (wp.asks ?? []).filter((ask) => !(wp.ruledAsks ?? []).includes(ask.text));
-      if (open.length) return go([rulingAction(state, wp, { asks: open })], 'checked');
+      // A passing report's `## Needs conductor` asks are ruled before review or
+      // adjudication, one question per ruling.
+      const open = (wp.asks ?? []).filter((ask) => !(wp.ruledAsks ?? []).includes(askId(ask)));
+      if (open.length) return go([rulingAction(state, wp, { asks: open.filter((ask) => (ask.question ?? null) === (open[0].question ?? null)) })], 'checked');
       const findings = Boolean(wp.reviews?.length && wp.owed?.adjudicate);
       if (findings && !adjudicate(state, wp, deps)) return undefined;
       wp.checkAmends = 0;
@@ -1033,7 +1042,7 @@ function recordRuling(state, wp, action, deps) {
   const value = readJsonFile(deps, action.outPath, 'ruling');
   const { n, file, keys, asks, row } = action.ruling;
   // An ask is ruled once, whatever the lane's next report repeats.
-  const settled = () => { wp.ruledAsks = [...(wp.ruledAsks ?? []), ...(asks ?? []).map((ask) => ask.text)]; };
+  const settled = () => { wp.ruledAsks = [...(wp.ruledAsks ?? []), ...(asks ?? []).map(askId)]; };
   if (value?.escalate === true) {
     if (typeof value.why !== 'string' || !value.why.trim()) throw new ConductError(2, `ruling ${file}: an escalation needs a non-empty why`);
     wp.rulings = [...(wp.rulings ?? []), { n, file, ruled: null, escalate: true }];
@@ -1059,7 +1068,17 @@ function recordRuling(state, wp, action, deps) {
     wp.queue = [...conductorVerdict(state, wp, row, value.ruled, deps), ...wp.queue];
     return undefined;
   }
-  return startAmendment(state, wp, deps, { kind: 'ruling', reason: `ruling ${file}: (${value.ruled})`, ruled: value.ruled, evidence: value.evidence });
+  // Every open question is ruled before the lane hears any of them: its next
+  // report may not repeat a question it is still waiting on.
+  const ruling = { file, ruled: value.ruled, evidence: value.evidence, question: asks?.[0]?.question ?? null };
+  if ((wp.asks ?? []).some((ask) => !(wp.ruledAsks ?? []).includes(askId(ask)))) {
+    wp.heldRulings = [...(wp.heldRulings ?? []), ruling];
+    return undefined;
+  }
+  const all = [...(wp.heldRulings ?? []), ruling];
+  wp.heldRulings = [];
+  if (all.length === 1) return startAmendment(state, wp, deps, { kind: 'ruling', reason: `ruling ${file}: (${value.ruled})`, ruled: value.ruled, evidence: value.evidence });
+  return startAmendment(state, wp, deps, { kind: 'ruling', reason: `rulings ${all.map((r) => `${r.file}: (${r.ruled})`).join(', ')}`, rulings: all });
 }
 
 // Steps the build performs or checks itself; undefined means "not mine".
