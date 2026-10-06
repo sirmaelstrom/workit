@@ -131,6 +131,7 @@ When the target repo is the plugin running this skill, lanes never invoke `/cond
 5. No lane-agent CLI (`claude` or `codex`) is on PATH.
 6. A run already exists for the same slug (use `--resume`).
 7. `--adapter spine` without `--anchor`.
+8. With the Spine adapter, touch 1's question would be over `spine_receipt`'s 2,000-char cap. A goal over 300 chars is already cited by its file (`<run>/goal.md`, written at intake), its length and its opening line, so what remains to shorten is the release recipe or the repo path.
 
 ## What it reuses
 

@@ -3,8 +3,8 @@
 // nothing re-runs, and merged work and the release are never touched again.
 import { join } from 'node:path';
 import { ConductError, STEP_SEAM, TOUCH_SEAM, appendEvent } from '../state.mjs';
-import { judgmentLine, judgmentThreads, mergedPrs } from '../analyze.mjs';
-import { openTouch, recordTouch, touchAction } from '../touch.mjs';
+import { judgmentThreads, mergedPrs } from '../analyze.mjs';
+import { QUESTION_MAX, filedLength, openTouch, recordTouch, touchAction } from '../touch.mjs';
 
 // The seams an answer may name: the STEP_SEAM seams (not TOUCH_SEAM), the
 // runtime-exercise row, and the analysis's three spec rows, which mean `spec`.
@@ -35,16 +35,24 @@ function question(state) {
   const stopped = state.wps.filter((wp) => ['refuted', 'blocked'].includes(wp.state));
   const open = (state.touches ?? []).filter((touch) => touch.kind === 'blocked' && touch.status !== 'answered');
   const r = state.release ?? {};
-  return [
-    `DO: read ${join(state.runDir, 'run-analysis.md')} first, then the merged PRs, then the deliverable (${state.intent.repo.path}, ${state.intent.repo.remote} at origin/${state.intent.repo.defaultBranch ?? 'main'}), and accept, accept with notes, or send back conductor run ${state.slug}. EXPECT: (a) the run closes; (b) the run closes with your notes stored verbatim; (c) the run ends as sent-back: write \`seam: <name>\` (one of ${SEAMS.join(', ')}) in your text; nothing re-runs and merged work and the release are not touched; reopening is a new /conduct run whose goal cites ${state.runDir}.`,
-    `Merged PRs: ${list(mergedPrs(state).map((m) => `${m.id} ${url(m.pr)}`), 'none')}`,
+  const analysis = join(state.runDir, 'run-analysis.md');
+  const judgments = judgmentThreads(state).length;
+  const merged = mergedPrs(state);
+  const lines = (mergedLine) => [
+    `DO: read ${analysis} first, then the merged PRs, then the deliverable (${state.intent.repo.path}, ${state.intent.repo.remote} at origin/${state.intent.repo.defaultBranch ?? 'main'}), and accept, accept with notes, or send back conductor run ${state.slug}. EXPECT: (a) the run closes; (b) the run closes with your notes stored verbatim; (c) the run ends as sent-back: write \`seam: <name>\` (one of ${SEAMS.join(', ')}) in your text; nothing re-runs and merged work and the release are not touched; reopening is a new /conduct run whose goal cites ${state.runDir}.`,
+    mergedLine,
     `Open PRs of held WPs: ${list(held.map((wp) => `${wp.id} ${wp.pr?.number ? url(wp.pr.number) : '(no PR)'} (${wp.reason ?? 'held'})`), 'none')}`,
     `Deferred WPs: ${list(deferred.map((wp) => `${wp.id}: ${wp.reason ?? 'no reason recorded'}`), 'none')}`,
     `Refuted or blocked WPs: ${list(stopped.map((wp) => `${wp.id} ${wp.state}: ${wp.reason ?? 'no reason recorded'}${wp.pr?.number ? ` (${url(wp.pr.number)})` : ''}`), 'none')}`,
-    `Judgment threads the conductor resolved: ${list(judgmentThreads(state).map(judgmentLine), 'none')}`,
+    // Cited by count and file: the list, one line per thread, is what overran spine_receipt's cap.
+    `Judgment threads the conductor resolved: ${judgments ? `${judgments}, each listed under the audit in ${analysis}` : 'none'}`,
     `Blocked touches still open: ${list(open.map((touch) => `touch ${touch.n}${touch.wpId ? ` (${touch.wpId})` : ''}`), 'none')}`,
     `Release: ${r.state}${r.reason ? ` (${r.reason})` : ''}${r.pr?.number ? ` ${url(r.pr.number)}` : ''}`,
   ].join('\n');
+  const full = lines(`Merged PRs: ${list(merged.map((m) => `${m.id} ${url(m.pr)}`), 'none')}`);
+  // Many merged PRs can overrun the cap too: then they are cited the same way.
+  if (filedLength(state, (state.touches ?? []).length + 1, full) <= QUESTION_MAX) return full;
+  return lines(`Merged PRs: ${merged.length}, each listed under the audit in ${analysis}`);
 }
 
 const OPTIONS = [

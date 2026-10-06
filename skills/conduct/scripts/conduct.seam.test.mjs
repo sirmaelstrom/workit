@@ -736,12 +736,14 @@ test('spend on (D19.28, M4): a metered run that stays below budget shows its las
   assert.match(section(halted.analysis(), 'Pre-approval audit'), /^- budget: metered by the spend adapter; spend reading: \$1\.00 \(read \S+\)$/m);
 });
 
-test('judgment threads (D19.9): a judgment row\'s thread is listed under the audit and in the showcase question', async (t) => {
+test('judgment threads (D19.9, 022d6fd9): a judgment row\'s thread is listed under the audit; the showcase question cites them by count and file', async (t) => {
   const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-amendment.md'] }, findings: { 'WP-00': [3] }, amendDiff: 'docs/notes.md\n' } });
   await drive(h, { until: (a) => a.step === 'showcase' });
   const line = 'WP-00 PR #100 comment 4177261828: thread PRRT_kwDOS_8yoc6oxnvx resolved';
   assert.ok(section(h.analysis(), 'Pre-approval audit').includes(`  - ${line}`), section(h.analysis(), 'Pre-approval audit'));
-  assert.ok(h.state().touches.find((touch) => touch.kind === 'showcase').question.includes(line));
+  const question = h.state().touches.find((touch) => touch.kind === 'showcase').question;
+  assert.ok(question.includes(`Judgment threads the conductor resolved: 1, each listed under the audit in ${join(h.state().runDir, 'run-analysis.md')}`), question);
+  assert.ok(!question.includes(line), 'the thread itself lives in the analysis, not the question');
 });
 
 test('adjudication evidence (C1-14, C2-6): a council WP\'s adjudication row reads from its adjudicated events alone', async (t) => {

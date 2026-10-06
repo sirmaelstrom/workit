@@ -227,6 +227,36 @@ test('intake refuses <case>: exit 2 and the runs root stays empty', async (t) =>
   assert.ok(Object.keys(before).includes(join(first.runDir, 'state.json')));
 });
 
+// RC-3's parked first intake: a 3,943-char goal made touch 1's filed question
+// 5,253 chars, and spine_receipt refused it (over 2,000).
+const LONG_GOAL = `Vision: an overhead workshop and logistics sim. ${'One expandable free-build floor where stations, carriers and shelves are placed by the player and every limiter is visible. '.repeat(40)}`.slice(0, 3943);
+
+test('touch 1 (022d6fd9): a 3,943-char goal is cited by its file, length and opening, so the filed question stays under spine_receipt\'s 2,000 chars; goal.md holds it in full', async (t) => {
+  assert.equal(LONG_GOAL.length, 3943);
+  const f = fixture(t);
+  const flow = await toSpineReadBack(f, [], LONG_GOAL);
+  const { question } = flow.receipt.args;
+  assert.ok(question.length < 2000, `the filed question is ${question.length} chars`);
+  assert.match(question, new RegExp(`Goal: 3943 chars, in full at ${join(flow.runDir, 'goal.md').replace(/[\\.]/g, '\\$&')}\\. It opens: "Vision: an overhead workshop`));
+  assert.equal(readFileSync(join(flow.runDir, 'goal.md'), 'utf8'), `${LONG_GOAL}\n`);
+  // A short goal stays inline.
+  const g = fixture(t);
+  const short = await toSpineReadBack(g);
+  assert.match(short.receipt.args.question, /\nGoal: fixture run\n/);
+});
+
+test('refusal 8 (022d6fd9): with the Spine adapter, a touch 1 still over 2,000 chars (here a release recipe) is refused before anything is written', async (t) => {
+  const f = fixture(t);
+  const recipe = { ...RECIPE, verify: Array.from({ length: 60 }, (_, i) => `node scripts/check-${i}.mjs --strict`) };
+  const refused = await intake(f, [...SPINE, '--release', recipeFile(f, recipe)]);
+  assert.equal(refused.code, 2, refused.stdout);
+  assert.match(out(refused).error, /refusal 8: touch 1's question would be \d+ chars, over spine_receipt's 2000-char cap/);
+  assert.deepEqual(readdirSync(f.runs), []);
+  // Without the Spine adapter there is no cap: the core touch is a file.
+  const g = fixture(t);
+  assert.equal((await intake(g, ['--release', recipeFile(g, recipe)])).code, 0);
+});
+
 test('no-adapter names an agent: exit 2, nothing written', async (t) => {
   for (const name of ['claude', 'codex']) {
     const f = fixture(t);

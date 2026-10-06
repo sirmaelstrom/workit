@@ -5,10 +5,15 @@ import { join } from 'node:path';
 import { ConductError, appendEvent } from './state.mjs';
 
 export const READ_BACK_WAIT_MS = 300000;
+// spine_receipt refuses a question longer than this.
+export const QUESTION_MAX = 2000;
 
 export function touchTag(slug, n) {
   return `[conduct ${slug} touch ${n}]`;
 }
+
+// The question a touch's first filing carries: what spine_receipt measures.
+export const filedLength = (state, n, question) => `${touchTag(state.slug, n)} (run ${state.runId}/1) ${question}`.length;
 
 export function touchStep(touch) {
   return touch.kind === 'preapproval' || touch.kind === 'showcase' ? touch.kind : 'touch';

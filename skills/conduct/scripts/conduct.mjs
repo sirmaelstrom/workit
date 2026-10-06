@@ -16,7 +16,7 @@ import {
 } from './lib/state.mjs';
 import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
-import { acceptAnswer, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
+import { QUESTION_MAX, acceptAnswer, filedLength, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -240,10 +240,7 @@ async function intake(tokens, deps) {
   const refuseExisting = () => refuse(6, `a run already exists at ${runDir}; continue it with next --run ${runDir}`);
   if (deps.exists(statePath(runDir))) refuseExisting();
 
-  deps.mkdir(runDir);
-  return withStateLock(runDir, deps, async () => {
-    if (deps.exists(statePath(runDir))) refuseExisting();
-    const state = {
+  const draft = () => ({
       schemaVersion: SCHEMA_VERSION, slug, runId: deps.newRunId(), createdAt: deps.timestamp(), runDir, workshopDir, pluginRoot: deps.pluginRoot,
       intent: {
         goal: options.goal, repo: { path: repoPath, remote, defaultBranch: repoInfo.defaultBranchRef?.name ?? null },
@@ -258,7 +255,24 @@ async function intake(tokens, deps) {
       wps: [],
       release: { state: 'pending', reason: null, base: null, worktree: null, branch: null, pr: null, gate: null, merge: null },
       mergeLock: null, dispatchHalt: null, handover: null, sentBack: null, pending: null, lastRecorded: null, seq: 0, rev: 0, txns: [],
-    };
+  });
+  // Touch 1 is filed through spine_receipt, which refuses a question over its
+  // cap; the run would be stuck at touch 1. Measured before anything is written.
+  if (options.spine) {
+    const preapproval = await loadModule(deps, 'lib/phases/preapproval.mjs', 'module');
+    const projected = draft();
+    const length = filedLength(projected, 1, preapproval.touchOneQuestion(projected));
+    if (length > QUESTION_MAX) {
+      refuse(8, `touch 1's question would be ${length} chars, over spine_receipt's ${QUESTION_MAX}-char cap: shorten the release recipe or the repo path (a long goal is already cited by file)`);
+    }
+  }
+
+  deps.mkdir(runDir);
+  return withStateLock(runDir, deps, async () => {
+    if (deps.exists(statePath(runDir))) refuseExisting();
+    const state = draft();
+    // The goal in full: touch 1 cites it by this file when it is long.
+    deps.write(join(runDir, 'goal.md'), `${options.goal}\n`);
     appendEvent(state, deps, { step: 'intake', event: 'intake', source: 'next', data: { remote, ciWorkflows, ciError } });
     saveState(state, deps);
     return { out: { ok: true, runDir, action: await emit(state, deps) } };
