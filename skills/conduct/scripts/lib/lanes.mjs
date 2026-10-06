@@ -297,9 +297,21 @@ export function parseOutcome(reportText) {
   const raw = section.heading.startsWith('## Outcome:') ? section.heading.slice('## Outcome:'.length) : section.lines.find((line) => line.text.trim())?.text ?? '';
   const value = raw.replace(/[*_`]/g, '').trim().toLowerCase();
   const outcome = /^built\b/.test(value) ? 'built' : /^refuted\b/.test(value) ? 'refuted' : /^stopped:\s*needs conductor\b/.test(value) ? 'needs-conductor' : 'missing';
-  const asks = (reportSection(reportText, 'Needs conductor')?.lines ?? [])
-    .map((line) => ({ match: /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\(([a-f])\)/.exec(line.text.trim()), text: line.text.trim() }))
-    .filter(({ match }) => match).map(({ match, text }) => ({ key: match[1], text }));
+  const lettered = (reportSection(reportText, 'Needs conductor')?.lines ?? []).map((line) => line.text.trim()).filter(Boolean)
+    .map((text) => ({ match: /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\(([a-f])\)/.exec(text), text }));
+  // A lettered question followed by option (a) is the ask's own label, not an
+  // option. Every option carries the question it answers (the label, or the
+  // last unlettered line asking one), so two questions stay two asks.
+  const label = (entry, i) => entry.text.includes('?') && lettered[i + 1]?.match?.[1] === 'a';
+  const asks = [];
+  let question = null;
+  lettered.forEach((entry, i) => {
+    if (!entry.match || label(entry, i)) {
+      if (entry.text.includes('?')) question = entry.text;
+      return;
+    }
+    asks.push({ key: entry.match[1], text: entry.text, question });
+  });
   return { outcome, asks };
 }
 
@@ -522,7 +534,8 @@ function recordCheck(wp, action, result, backend) {
     if (!checked) return block(`lane check printed no JSON: ${said(result)}`);
     // Provenance: the analysis reads who recorded the verdict (next or --manual)
     // from this action's `recorded` event.
-    const patch = { runtimeVerdict: checked.verdict ?? null, runtimeVerdictBy: { actionId: action.id ?? null } };
+    // A built report can still carry `## Needs conductor` asks: the build rules on them before review.
+    const patch = { runtimeVerdict: checked.verdict ?? null, runtimeVerdictBy: { actionId: action.id ?? null }, asks: checked.asks ?? [] };
     // Outcome first (D19.16): nothing after the report check runs unless built.
     if (checked.outcome === 'refuted') return done('refuted', { ...patch, state: 'refuted', queue: backend.stop(wp) });
     if (checked.outcome === 'needs-conductor') return block('needs conductor', { ...patch, asks: checked.asks ?? [] }, 'needs-conductor');

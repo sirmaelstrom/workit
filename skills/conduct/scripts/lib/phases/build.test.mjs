@@ -700,6 +700,55 @@ test('ratify (c58b3a51): coverage follows the merge gate (a directory ends in /)
   assert.throws(() => build.ratify(unknown.state, { wpId: 'WP-03', paths: ['docs/new.md'], why: 'x' }, unknown.deps), { code: 5, message: /WP-02 \(pending\) owns a path.*no declared Files/ });
 });
 
+test('Needs conductor on a passing report (d9d4d664): the build rules before review; the ruling is an event and a rulings[] row, ratifies its path, amends the lane; a repeated ask is not ruled again', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  // The lane's amended report repeats the same ask.
+  h.reports = { 'WP-02': ['report-built-asks.md', 'report-built-asks.md'] };
+  h.rulings = [{ ruled: 'a', evidence: 'the panel is the only place the roving tabindex can live', ratify: ['src/ui/SidePanel.svelte'] }];
+  const rulings = [];
+  h.onEmit = (a) => { if (a.step === 'ruling') rulings.push(a); };
+  assert.equal(await drive(h), null);
+  assert.equal(rulings.length, 1, 'one ruling for the one ask');
+  assert.deepEqual([rulings[0].part, rulings[0].ruling.keys], ['ask', ['a', 'b']]);
+  const firstReview = indexWhere(h, (a) => a.wpId === 'WP-02' && a.step === 'review');
+  assert.ok(h.trace.indexOf(rulings[0]) < firstReview, 'ruled before review');
+  const wp = h.wp('WP-02');
+  assert.deepEqual(wp.rulings.map((r) => [r.ruled, r.ratified]), [['a', ['src/ui/SidePanel.svelte']]]);
+  assert.ok(wp.files.includes('src/ui/SidePanel.svelte'));
+  const ruled = h.events().filter((e) => e.event === 'ruled');
+  assert.deepEqual(ruled.map((e) => [e.data.wpId, e.data.ruled, e.data.ratified]), [['WP-02', 'a', ['src/ui/SidePanel.svelte']]]);
+  assert.equal(h.events().filter((e) => e.event === 'ratified').length, 1);
+  assert.ok(of(h, 'WP-02').some((a) => a.step === 'brief' && a.amendment?.kind === 'ruling'), 'the ruling went to the lane as an amendment');
+  assert.equal(wp.state, 'merged');
+});
+
+test('Needs conductor (d9d4d664): one ruling per question, its stem in the instruction; the same option text under a new question is ruled again', async (t) => {
+  const two = harness(t, { wps: [TWO[0], TWO[1]] });
+  two.reports = { 'WP-02': ['report-built-two-asks.md', 'report-built.md', 'report-built.md'] };
+  two.rulings = [{ ruled: 'a', evidence: 'x' }, { ruled: 'b', evidence: 'y' }];
+  const asked = [];
+  two.onEmit = (a) => { if (a.step === 'ruling') asked.push(a); };
+  assert.equal(await drive(two), null);
+  assert.deepEqual(asked.map((a) => a.ruling.keys), [['a', 'b'], ['a', 'b']]);
+  assert.match(asked[0].instruction, /question "\(a\) Change the timeout\?"/);
+  assert.match(asked[1].instruction, /question "\(b\) Remove the authorization guard\?"/);
+  // Both rulings reach the lane in one amendment, ruled before it.
+  const briefs = of(two, 'WP-02').filter((a) => a.step === 'brief' && a.amendment?.kind === 'ruling');
+  assert.equal(briefs.length, 1);
+  assert.ok(two.trace.indexOf(briefs[0]) > two.trace.indexOf(asked[1]));
+  assert.deepEqual(briefs[0].amendment.rulings.map((r) => [r.question, r.ruled]), [['(a) Change the timeout?', 'a'], ['(b) Remove the authorization guard?', 'b']]);
+  assert.equal(two.wp('WP-02').state, 'merged');
+
+  const reused = harness(t, { wps: [TWO[0], TWO[1]] });
+  reused.reports = { 'WP-02': ['report-built-asks-timeout.md', 'report-built-asks-new-question.md', 'report-built.md'] };
+  reused.rulings = [{ ruled: 'a', evidence: 'x' }, { ruled: 'b', evidence: 'y' }];
+  const again = [];
+  reused.onEmit = (a) => { if (a.step === 'ruling') again.push(a); };
+  assert.equal(await drive(reused), null);
+  assert.equal(again.length, 2, 'the new question is ruled although its options repeat');
+  assert.match(again[1].instruction, /Remove the authorization guard\?/);
+});
+
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
   const h = harness(t);
   h.life = { 'WP-02': 3, 'WP-03': 1 };
@@ -796,6 +845,31 @@ function answerCore(h, n, key, text = null) {
   touch.tty = true;
   acceptAnswer(touch, { key, text, by: 'operator:tty', answeredAt: h.deps.timestamp(), source: 'tty' });
 }
+
+test('Needs conductor (d9d4d664): a stopped report\'s two questions get one ruling each and one amendment; a ruling held when a later question escalates reaches the lane with the operator\'s answer', async (t) => {
+  const stopped = harness(t, { wps: [TWO[0], TWO[1]] });
+  stopped.reports = { 'WP-02': ['report-stopped-two-asks.md', 'report-built.md'] };
+  stopped.rulings = [{ ruled: 'a', evidence: 'x' }, { ruled: 'b', evidence: 'y' }];
+  const asked = [];
+  stopped.onEmit = (a) => { if (a.step === 'ruling') asked.push(a); };
+  assert.equal(await drive(stopped), null);
+  assert.deepEqual(asked.map((a) => a.ruling.keys), [['a', 'b'], ['a', 'b']]);
+  const briefs = of(stopped, 'WP-02').filter((a) => a.step === 'brief' && a.amendment?.kind === 'ruling');
+  assert.deepEqual(briefs.map((a) => a.amendment.rulings?.map((r) => r.ruled)), [['a', 'b']]);
+
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.reports = { 'WP-02': ['report-built-two-asks.md', 'report-built.md'] };
+  h.rulings = [{ ruled: 'a', evidence: 'the timeout belongs here' }, { escalate: true, why: 'only the operator can drop a guard' }];
+  await drive(h, { until: (a) => a.kind === 'touch' || (a.step === 'touch' && a.part === 'announce') });
+  assert.equal(h.state.touches.length, 1, 'the escalation opened one touch');
+  h.state.pending = null;
+  answerCore(h, 1, 'b');
+  const brief = await step(h);
+  assert.equal(brief.part, 'amendment');
+  assert.match(brief.instruction, /verbatim: \(b\)/);
+  assert.match(brief.instruction, /\(a\) Change the timeout\? → \(a\); evidence, verbatim: the timeout belongs here/);
+  assert.deepEqual(h.wp('WP-02').heldRulings, []);
+});
 
 test('blocked recovery (D19.4): an answer amends the blocked lane verbatim; its deferred dependent returns to pending and runs after it merges; a fresh runConduct agrees', async (t) => {
   const h = harness(t, { wps: withFour });

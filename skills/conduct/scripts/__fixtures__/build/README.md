@@ -13,6 +13,9 @@ Inputs for `lib/phases/build.test.mjs`. The `fixture paths` test greps every fil
 ## Authored (not program output)
 
 - `report-built.md`, `report-refuted.md`, `report-needs-conductor.md` (asks `(a)`/`(b)`), `report-no-verdict.md` (a `## Runtime exercise` with no `Verdict:` line): lane reports. `{pr}` and `{head}` are filled by the test with the PR number and head sha.
+- `report-built-asks.md`: a built report whose `## Needs conductor` carries one ask, its question labeled `(a)` like its first option (the shape a live lane wrote).
+- `report-built-two-asks.md`: two labeled questions, each with options `(a)`/`(b)` of the same text; `report-stopped-two-asks.md` is the same with the outcome `stopped: needs conductor`.
+- `report-built-asks-timeout.md`, `report-built-asks-new-question.md`: one question each, with the same option text and different questions.
 - `report-amendment.md`: a built report with an `## Amendment 1` table of three rows (fixed, refuted, judgment); the comment ids are the first comments of `__fixtures__/land/review-threads-145.json`'s threads.
 - `report-council-amendment.md`: the same with council ids `C1-1`, `C1-2`.
 - `report-guard.md`: an `## Amendment 1` table with a `conductor` row (slim-review's test-weakening guard).

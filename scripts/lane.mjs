@@ -1778,6 +1778,13 @@ function askProblems(section, label) {
     const indent = /^\s*/.exec(line.text)[0].replace(/\t/g, '    ').length;
     const letter = letterOf(line);
     if (letter !== null) {
+      // A lettered question followed by option (a) labels its own ask (`(a) Which…? / (a) … / (b) …`): it opens a new ask.
+      const following = section.slice(index + 1).find((candidate) => candidate.text.trim());
+      if (ASK_LETTER.test(letter) && carriesQuestion(line) && letterOf(following) === 'a') {
+        closeRun();
+        itemIndent = null;
+        return;
+      }
       if (ASK_LETTER.test(letter)) {
         itemIndent = indent;
         run ??= { line: line.number, letters: [] };

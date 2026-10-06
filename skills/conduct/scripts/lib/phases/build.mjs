@@ -209,8 +209,11 @@ function briefAction(state, wp, deps) {
 const AMEND_TEXT = {
   check: (a) => `its last check failed: ${a.reason}. Fix exactly that, push, and update the report.`,
   gate: (a) => `landing stopped: ${a.reason}. Fix it on the branch at the current head, push, and update the report.`,
-  ruling: (a) => `the conductor ruled (${a.ruled}) on its ## Needs conductor ask. The ruling's evidence, verbatim: ${a.evidence}. Carry on under that ruling.`,
-  answer: (a) => `the operator answered ${a.tag}, verbatim: (${a.key})${a.text ? ` ${a.text}` : ''}. Carry on under that answer.`,
+  ruling: (a) => (a.rulings
+    ? `the conductor ruled on each question of its ## Needs conductor: ${a.rulings.map((r) => `${r.question ?? 'the ask'} → (${r.ruled}); evidence, verbatim: ${r.evidence}`).join('. ')}. Carry on under those rulings.`
+    : `the conductor ruled (${a.ruled}) on its ## Needs conductor ask. The ruling's evidence, verbatim: ${a.evidence}. Carry on under that ruling.`),
+  answer: (a) => `the operator answered ${a.tag}, verbatim: (${a.key})${a.text ? ` ${a.text}` : ''}. Carry on under that answer.${a.rulings?.length
+    ? ` The conductor also ruled on the report's other questions: ${a.rulings.map((r) => `${r.question ?? 'the ask'} → (${r.ruled}); evidence, verbatim: ${r.evidence}`).join('. ')}.` : ''}`,
   findings: (a) => (a.ids
     ? `council review round ${a.round} (synthesis in ${a.reviewDir}) has ${a.ids.length} Critical/Major/Minor finding(s). Write them into this brief numbered ${a.ids.join(', ')} in synthesis order; the lane's ## Amendment table uses those ids.`
     : `review round ${a.round} posted ${a.findings ?? 'an unknown number of'} finding(s) as PR review comments; the lane adjudicates each in an ## Amendment table keyed by its comment id.`),
@@ -229,6 +232,10 @@ function amendmentBrief(state, wp, amendment) {
   };
 }
 
+// An ask is a question and one of its options: the same option text under a
+// different question is a different ask.
+const askId = (ask) => `${ask.question ?? ''}\n${ask.text}`;
+
 // A ruling on a lane's asks (part ask) or on a guard row (part guard, D20).
 function rulingAction(state, wp, { asks = null, row = null }) {
   wp.rulingSeq = Math.max(wp.rulingSeq ?? 0, (wp.rulings ?? []).length) + 1;
@@ -236,10 +243,12 @@ function rulingAction(state, wp, { asks = null, row = null }) {
   const file = `rulings/${lower(wp)}-${n}.json`;
   const keys = row ? GUARD_VERDICTS : (asks ?? []).map((ask) => ask.key);
   const outPath = join(state.runDir, file);
-  const what = row ? `the guard row for comment ${row.comment} (the lane's evidence: ${row.evidence})` : `${wp.id}'s ## Needs conductor asks: ${(asks ?? []).map((ask) => ask.text).join(' / ')}`;
+  const questions = [...new Set((asks ?? []).map((ask) => ask.question).filter(Boolean))];
+  const what = row ? `the guard row for comment ${row.comment} (the lane's evidence: ${row.evidence})`
+    : `${wp.id}'s ## Needs conductor ${questions.length ? `question ${questions.map((text) => `"${text}"`).join(' and ')}, options` : 'asks'}: ${(asks ?? []).map((ask) => ask.text).join(' / ')}`;
   return {
     kind: 'author', step: 'ruling', part: row ? 'guard' : 'ask', outPath, ruling: { n, file, keys, ...(row ? { comment: row.comment, row } : { asks }) }, expects: { type: 'file' },
-    instruction: `Rule on ${what}: write ${outPath} = { "ruled": "<one of ${keys.join(', ')}>", "evidence": "<the measurement or file that settles it>" }, or { "escalate": true, "why": "<why only the operator can settle it>" }. Record {}.`,
+    instruction: `Rule on ${what}: write ${outPath} = { "ruled": "<one of ${keys.join(', ')}>", "evidence": "<the measurement or file that settles it>" }, or { "escalate": true, "why": "<why only the operator can settle it>" }.${row ? '' : ` When the ruling needs paths outside ${wp.id}'s Files, add "ratify": ["<path>", …]: they are added to its Files with this ruling (a path another unfinished WP owns is refused).`} Record {}.`,
   };
 }
 
@@ -461,7 +470,12 @@ function applyAnswers(state, deps) {
     }
     if (!wp || wp.state !== 'blocked' || (touch.build === 'dialog' && key === 'b')) continue;
     if (touch.build === 'guard') answerGuard(state, wp, touch, deps);
-    else startAmendment(state, wp, deps, { kind: 'answer', reason: `operator answer ${key} to touch ${touch.n}`, tag: touch.tag, key, text, answer: touch.answer });
+    else {
+      // Rulings held for this WP's other questions go to the lane with the answer.
+      const rulings = wp.heldRulings?.length ? { rulings: wp.heldRulings } : {};
+      wp.heldRulings = [];
+      startAmendment(state, wp, deps, { kind: 'answer', reason: `operator answer ${key} to touch ${touch.n}`, tag: touch.tag, key, text, answer: touch.answer, ...rulings });
+    }
   }
 }
 
@@ -601,6 +615,10 @@ function expand(state, wp, deps) {
     case 'wait': return go(backend.wait(wp), 'check');
     case 'check': return go(backend.check(wp), 'checked');
     case 'checked': {
+      // A passing report's `## Needs conductor` asks are ruled before review or
+      // adjudication, one question per ruling.
+      const open = (wp.asks ?? []).filter((ask) => !(wp.ruledAsks ?? []).includes(askId(ask)));
+      if (open.length) return go([rulingAction(state, wp, { asks: open.filter((ask) => (ask.question ?? null) === (open[0].question ?? null)) })], 'checked');
       const findings = Boolean(wp.reviews?.length && wp.owed?.adjudicate);
       if (findings && !adjudicate(state, wp, deps)) return undefined;
       wp.checkAmends = 0;
@@ -1029,9 +1047,13 @@ function recordSpend(state, action, result, deps) {
 function recordRuling(state, wp, action, deps) {
   const value = readJsonFile(deps, action.outPath, 'ruling');
   const { n, file, keys, asks, row } = action.ruling;
+  // An ask is ruled once, whatever the lane's next report repeats.
+  const settled = () => { wp.ruledAsks = [...(wp.ruledAsks ?? []), ...(asks ?? []).map(askId)]; };
   if (value?.escalate === true) {
     if (typeof value.why !== 'string' || !value.why.trim()) throw new ConductError(2, `ruling ${file}: an escalation needs a non-empty why`);
     wp.rulings = [...(wp.rulings ?? []), { n, file, ruled: null, escalate: true }];
+    settled();
+    appendEvent(state, deps, { step: 'ruling', event: 'ruled', data: { wpId: wp.id, n, file, ruled: null, escalate: true } });
     // The rest of the owed adjudication (other replies and rulings) waits for the answer.
     if (row) wp.owed = { ...(wp.owed ?? {}), queue: wp.queue.slice(1) };
     wp.queue = [];
@@ -1039,13 +1061,30 @@ function recordRuling(state, wp, action, deps) {
   }
   if (!keys.includes(value?.ruled)) throw new ConductError(2, `ruling ${file}: ruled must be one of ${keys.join(', ')} (got ${value?.ruled})`);
   if (typeof value.evidence !== 'string' || !value.evidence.trim()) throw new ConductError(2, `ruling ${file}: evidence must name the measurement or file that settles the fork`);
-  wp.rulings = [...(wp.rulings ?? []), { n, file, ruled: value.ruled, escalate: false }];
+  const ratified = value.ratify ?? [];
+  if (!Array.isArray(ratified) || ratified.some((path) => typeof path !== 'string' || !path.trim()) || (row && ratified.length)) {
+    throw new ConductError(2, `ruling ${file}: ratify must be a list of paths${row ? ', and a guard ruling ratifies none' : ''}`);
+  }
+  if (ratified.length) applyRatify(state, wp, ratified, `ruling ${file}: (${value.ruled}) ${value.evidence.trim()}`, deps);
+  wp.rulings = [...(wp.rulings ?? []), { n, file, ruled: value.ruled, escalate: false, ...(ratified.length ? { ratified } : {}) }];
+  settled();
+  appendEvent(state, deps, { step: 'ruling', event: 'ruled', data: { wpId: wp.id, n, file, ruled: value.ruled, ratified } });
   wp.queue.shift();
   if (row) {
     wp.queue = [...conductorVerdict(state, wp, row, value.ruled, deps), ...wp.queue];
     return undefined;
   }
-  return startAmendment(state, wp, deps, { kind: 'ruling', reason: `ruling ${file}: (${value.ruled})`, ruled: value.ruled, evidence: value.evidence });
+  // Every open question is ruled before the lane hears any of them: its next
+  // report may not repeat a question it is still waiting on.
+  const ruling = { file, ruled: value.ruled, evidence: value.evidence, question: asks?.[0]?.question ?? null };
+  if ((wp.asks ?? []).some((ask) => !(wp.ruledAsks ?? []).includes(askId(ask)))) {
+    wp.heldRulings = [...(wp.heldRulings ?? []), ruling];
+    return undefined;
+  }
+  const all = [...(wp.heldRulings ?? []), ruling];
+  wp.heldRulings = [];
+  if (all.length === 1) return startAmendment(state, wp, deps, { kind: 'ruling', reason: `ruling ${file}: (${value.ruled})`, ruled: value.ruled, evidence: value.evidence });
+  return startAmendment(state, wp, deps, { kind: 'ruling', reason: `rulings ${all.map((r) => `${r.file}: (${r.ruled})`).join(', ')}`, rulings: all });
 }
 
 // Steps the build performs or checks itself; undefined means "not mine".
@@ -1246,8 +1285,8 @@ function route(state, wp, action, out, deps) {
         return;
       }
       if (out.cause === 'needs-conductor') {
-        wp.stage = null;
-        wp.queue.push(rulingAction(state, wp, { asks: wp.asks ?? [] }));
+        // The checked stage rules its asks one question at a time, as for a built report.
+        wp.stage = 'checked';
         return;
       }
       block(state, wp, deps, patch.dispatchHalt ? 'merged tree differs from the checked head' : out.reason);
