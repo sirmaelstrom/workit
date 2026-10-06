@@ -83,7 +83,7 @@ function harness(t, opts = {}) {
     intent: { goal: 'demo goal', repo: { path: repo, remote: 'o/r', defaultBranch: 'main' }, anchor: opts.spine ? ANCHOR : null, campaign: null,
       budgetUsd: 100, lanesCap: opts.lanes ?? 2, agent: 'claude', release: null, ciWorkflows: 1 },
     agents: { claude: on(true), codex: on(true) },
-    adapters: { herdr: on(opts.herdr), notify: on(opts.notify), spend: on(opts.spend), spine: on(opts.spine), council: on(opts.council), kb: on(false), verify: on(false) },
+    adapters: { herdr: on(opts.herdr), notify: on(opts.notify), spend: on(opts.spend), spine: on(opts.spine), council: on(opts.council), kb: on(false), verify: on(false), ledger: on(opts.ledger) },
     phase: 'build',
     authority: { merge: opts.merge ?? true, release: false, budgetUsd: opts.budget ?? 25, metered: Boolean(opts.spend), scope: 'demo goal', notes: null, grant: null },
     touches: [], spec: { depth, reviewLevel: null, gate: null, gateCommand: depth === 'deep' ? null : gateCommand },
@@ -551,8 +551,35 @@ test('stall alarm: a lane stop failing three times in a row raises one `stalled`
   assert.equal(h.wp('WP-02').cleanup, null, 'the stop finally confirmed');
 });
 
-test('stall alarm: spine on, a WP whose state and stage do not move for 30 minutes gets one ledger note; a lane at work for an hour gets none', async (t) => {
-  const h = harness(t, { herdr: true, spine: true, env: { WORKIT_LEDGER_USER: 'operator' }, wps: [TWO[0], TWO[1]] });
+// WP-02 reaches its rebase, then waits on a stale merge lock (held by a WP
+// that already merged), a minute per yield, until it has stalled; the lock is
+// then cleared and the run driven to its end.
+async function staleLockStall(h) {
+  await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'rebase' });
+  h.state.mergeLock = { wpId: 'WP-01' };
+  h.onPerform = (a) => { if (a.yield) h.tick(a.waitMs); };
+  await drive(h, { until: () => stalledEvents(h).length > 0 });
+  h.state.mergeLock = null;
+  return drive(h);
+}
+
+test('stall alarm: the ledger note needs the ledger adapter: spine alone writes the event and no ledger_write; a failed ledger_write is an alarm-failed event and the run goes on', async (t) => {
+  const spineOnly = harness(t, { herdr: true, spine: true, wps: [TWO[0], TWO[1]] });
+  assert.equal(await staleLockStall(spineOnly), null);
+  assert.equal(stalledEvents(spineOnly).length, 1);
+  assert.ok(!spineOnly.trace.some((a) => a.tool === 'ledger_write'), 'spine_* tools only: no ledger_write');
+  assert.equal(spineOnly.wp('WP-02').state, 'merged');
+
+  const down = harness(t, { herdr: true, ledger: true, wps: [TWO[0], TWO[1]] });
+  down.answer = (a) => (a.tool === 'ledger_write' ? { isError: true, content: [{ type: 'text', text: 'ledger unavailable' }] } : undefined);
+  assert.equal(await staleLockStall(down), null);
+  const failed = down.events().filter((e) => e.event === 'alarm-failed');
+  assert.deepEqual(failed.map((e) => [e.data.wpId, e.data.part, e.data.error]), [['WP-02', 'ledger', 'ledger unavailable']]);
+  assert.equal(down.wp('WP-02').state, 'merged');
+});
+
+test('stall alarm: ledger declared, a WP whose state and stage do not move for 30 minutes gets one ledger note; a lane at work for an hour gets none', async (t) => {
+  const h = harness(t, { herdr: true, spine: true, ledger: true, env: { WORKIT_LEDGER_USER: 'operator' }, wps: [TWO[0], TWO[1]] });
   h.herdrWait = { 'WP-02': [4, 4, 4, 0] };
   const notes = [];
   h.answer = (a) => {

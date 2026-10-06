@@ -751,8 +751,8 @@ function stampWaits(state, deps) {
 
 // A stall is an alarm, not a touch: nothing waits for an answer and the build
 // goes on. It is an event, a ledger note (the Dogan's ledger stream) when the
-// spine adapter is on, and the notify command when that adapter is on, raised
-// once per stall and re-armed when the WP moves again.
+// ledger adapter is declared, and the notify command when that adapter is on,
+// raised once per stall and re-armed when the WP moves again.
 function alarm(state, wp, deps, why) {
   if (wp.stall) return;
   wp.stall = { at: deps.timestamp(), why };
@@ -763,7 +763,7 @@ function alarm(state, wp, deps, why) {
   if (state.adapters?.notify?.on && notify) {
     out.push(shell('alarm', 'notify', shellArgv(notify, deps.platform), { env: { WORKIT_NOTIFY_KIND: 'stalled', WORKIT_NOTIFY_TEXT: text } }));
   }
-  if (spineOn(state)) {
+  if (state.adapters?.ledger?.on) {
     out.push({ kind: 'agent-tool', step: 'alarm', part: 'ledger', tool: 'ledger_write', expects: { type: 'json' },
       args: { event_type: 'note', source: 'cli', user_id: deps.env?.WORKIT_LEDGER_USER || 'conduct', payload: { content: text } },
       instruction: 'Call ledger_write with these args and record its raw result.' });
@@ -783,6 +783,15 @@ function failed(action, result) {
     return true;
   }
 }
+
+// An MCP tool result that failed: the call errored (`isError`), or it answered
+// with an `error` or `ok: false`, or nothing came back.
+const toolFailed = (result) => !result || typeof result !== 'object' || result.isError === true || Boolean(result.error) || result.ok === false;
+const toolError = (result) => {
+  if (!result || typeof result !== 'object') return 'no result';
+  const text = Array.isArray(result.content) ? result.content.map((part) => part?.text).filter(Boolean).join(' ') : '';
+  return String(result.error ?? (text || (result.isError ? 'isError' : null)) ?? '').slice(0, 200) || null;
+};
 
 // Three failed records in a row of one shell step, with the WP's state
 // unchanged between them.
@@ -1009,7 +1018,9 @@ function recordOwn(state, wp, action, result, deps) {
       return ok();
     case 'alarm':
       // An alarm that cannot be delivered is recorded, never a reason to stop.
-      if (action.kind === 'shell' && result.code !== 0) appendEvent(state, deps, { step: 'alarm', event: 'alarm-failed', data: { wpId: wp.id, part: action.part, code: result.code } });
+      if (action.kind === 'shell' ? result.code !== 0 : toolFailed(result)) {
+        appendEvent(state, deps, { step: 'alarm', event: 'alarm-failed', data: { wpId: wp.id, part: action.part, code: result.code ?? null, error: toolError(result) } });
+      }
       return ok();
     case 'gate-cmd':
       if (result.code === 0) return ok();
