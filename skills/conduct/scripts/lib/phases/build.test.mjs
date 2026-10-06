@@ -771,6 +771,60 @@ test('lanes 3-4 (b443eca6): with --lanes 3 on the exec backend, only the 3rd liv
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged']);
 });
 
+test('budget, live lanes (8f433d11): $70 booked + two live lanes at $30 against a $100 cap halts the third dispatch; the spend command learns its run and repo', async (t) => {
+  const THREE = [TWO[0], TWO[1], TWO[2], { id: 'WP-04', files: ['lib/schedule.mjs'], dependsOn: ['WP-01'] }];
+  const config = JSON.stringify({ ...JSON.parse(fixture('build', 'conduct.json')), laneEstimateUsd: 30 });
+  const h = harness(t, { lanes: 3, wps: THREE, spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100, config });
+  h.life = { 'WP-02': 5, 'WP-03': 5 };
+  const reads = [];
+  h.answer = (a) => {
+    if (a.step !== 'spend') return undefined;
+    reads.push(a);
+    // Nothing booked until two lanes run; then $70 (their earlier sessions, the councils).
+    return ok(['WP-02', 'WP-03'].every((id) => LIVE.includes(h.wp(id).state)) ? '70\n' : '0\n');
+  };
+  await drive(h, { until: (a) => a.part === 'announce' });
+  const [touch] = h.state.touches;
+  assert.ok(touch, `a budget touch opened; WP-04 is ${h.wp('WP-04').state}`);
+  // The first check after both lanes run halts: a paid lane action ($130) or the third dispatch ($160).
+  assert.match(touch.question, /Spend is \$(?:130|160) committed \(\$70 booked \+ \$60 for 2 live lane\(s\)(?: \+ \$30 for the next WP)?; lanes at \$30 each, the repo config laneEstimateUsd\) against the \$100 budget/);
+  assert.equal(h.wp('WP-04').state, 'pending', 'the third lane was never dispatched');
+  assert.ok(!h.trace.some((a) => a.wpId === 'WP-04'));
+  assert.deepEqual(reads[0].env, { WORKIT_SPEND_RUN: 'demo', WORKIT_SPEND_REPO: 'repo' });
+});
+
+test('budget projection (8f433d11): every merge records booked spend and the projected total with the WPs left', async (t) => {
+  const h = harness(t);
+  assert.equal(await drive(h), null);
+  const projections = h.events().filter((e) => e.event === 'spend-projection');
+  assert.equal(projections.length, 2);
+  assert.deepEqual(projections.map((e) => e.data.wpId).sort(), ['WP-02', 'WP-03']);
+  const money = (usd) => Math.round(usd * 100) / 100;
+  for (const p of projections) {
+    assert.equal(p.data.budgetUsd, 25);
+    assert.equal(p.data.projectedUsd, money(p.data.bookedUsd + p.data.wpsLeft * p.data.perWpUsd), JSON.stringify(p.data));
+  }
+  // Exec lanes book their cost when they exit, before the merge: the last merge has both, and nothing left.
+  const last = projections.at(-1).data;
+  assert.deepEqual([last.wpsLeft, money(last.bookedUsd), last.projectedUsd], [0, money(2 * LANE_COST), money(2 * LANE_COST)]);
+  assert.equal(money(last.perWpUsd), money(LANE_COST));
+
+  // A meter reading taken before the merging lane's cost is not what the merge reports: one WP,
+  // read $0 before its start, its lane closed at LANE_COST.
+  const one = harness(t, { wps: [TWO[0], TWO[1]], spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100 });
+  one.spendOut = Array(20).fill('0\n');
+  assert.equal(await drive(one), null);
+  const [merge] = one.events().filter((e) => e.event === 'spend-projection');
+  assert.equal(money(merge.data.bookedUsd), money(LANE_COST), JSON.stringify(merge.data));
+
+  // A reading above the lane sum: $70 read before the lane, which then closes at LANE_COST: booked is both.
+  const above = harness(t, { wps: [TWO[0], TWO[1]], spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100 });
+  above.spendOut = Array(20).fill('70\n');
+  assert.equal(await drive(above), null);
+  const [after] = above.events().filter((e) => e.event === 'spend-projection');
+  assert.equal(money(after.data.bookedUsd), money(70 + LANE_COST), JSON.stringify(after.data));
+});
+
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
   const h = harness(t);
   h.life = { 'WP-02': 3, 'WP-03': 1 };
@@ -1198,7 +1252,8 @@ test('authority only (D19.1): authority.budgetUsd below the lane-only sum halts 
   assert.equal(h.wp('WP-02').state, 'merged');
   assert.equal(h.wp('WP-03').state, 'pending');
   assert.ok(h.state.dispatchHalt);
-  assert.match(h.state.touches[0].question, new RegExp(`\\$${LANE_COST} against the \\$0\\.5 budget \\(unmetered, lane-only lower bound\\)`));
+  const cost = Math.round(LANE_COST * 100) / 100;
+  assert.match(h.state.touches[0].question, new RegExp(`committed \\(\\$${cost} booked \\+ .*\\) against the \\$0\\.5 budget \\(unmetered: booked is the lane-only lower bound\\)`));
 });
 
 test('budget (D16, D19.28): metered spend at the budget → no dispatch and a touch saying metered; the spend argv is shellArgv', async (t) => {
@@ -1208,7 +1263,7 @@ test('budget (D16, D19.28): metered spend at the budget → no dispatch and a to
   const spend = h.trace.find((a) => a.step === 'spend');
   assert.deepEqual(spend.command, shellArgv(`spend-meter --usd ${h.state.createdAt}`, 'linux'));
   assert.ok(!h.trace.some((a) => a.wpId), 'nothing dispatched');
-  assert.match(h.state.touches[0].question, /Spend is \$30 against the \$25 budget \(metered by the spend adapter\)/);
+  assert.match(h.state.touches[0].question, /Spend is \$30(?:\.\d+)? committed \(\$30 booked\b.*\) against the \$25 budget \(metered by the spend adapter\)/);
   assert.deepEqual(h.state.touches[0].options.map((o) => o.key), ['a', 'b']);
 });
 
@@ -1625,7 +1680,7 @@ test('budget before amendment prompts (C1-2, C1-5): an over-budget amendment is 
   const brief = of(h, 'WP-02').find((a) => a.part === 'amendment');
   assert.ok(brief);
   assert.ok(!of(h, 'WP-02').slice(of(h, 'WP-02').indexOf(brief)).some((a) => a.step === 'prompt'), 'not prompted while over budget');
-  assert.match(h.state.touches[0].question, /Spend is \$30 against the \$25 budget \(metered by the spend adapter\)/);
+  assert.match(h.state.touches[0].question, /Spend is \$30(?:\.\d+)? committed \(\$30 booked\b.*\) against the \$25 budget \(metered by the spend adapter\)/);
   assert.equal(h.state.touches[0].allowFreeText, true);
   assert.match(h.state.touches[0].question, /\(b\) no new paid lane work \(no dispatch, lane start, prompt or fallback\); work already at a PR boundary may still be reviewed and landed/);
   const refusals = [[null, /needs the text "budget <USD>"/], ['budget 20', /above the current spend of \$30/], ['budget 1.5k', /needs the text "budget <USD>"/], ['budget 1,50', /needs the text/]];

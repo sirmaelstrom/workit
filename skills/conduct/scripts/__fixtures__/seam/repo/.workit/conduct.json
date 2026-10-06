@@ -9,5 +9,6 @@
     "after": ["claude plugin update workit@workit"],
     "verify": ["node --test"]
   },
-  "laneSuite": "Placeholder suite note for the seam fixture: run node --test before the PR boundary."
+  "laneSuite": "Placeholder suite note for the seam fixture: run node --test before the PR boundary.",
+  "laneEstimateUsd": 0
 }
