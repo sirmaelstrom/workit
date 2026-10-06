@@ -16,9 +16,10 @@ export function touchTag(slug, n) {
 const REFUSED_SHORT = 'Your previous answer could not be used. ';
 
 // The longest question a touch's filing carries, as spine_receipt measures it:
-// a refiling (filing 99) with the short refusal sentence, which always fits
-// once this does (filedQuestion cuts the reason to the room left).
-export const filedLength = (state, n, question) => `${touchTag(state.slug, n)} (run ${state.runId}/99) ${REFUSED_SHORT}${question}`.length;
+// a refiling (filing 9999) with the short refusal sentence, which always fits
+// once this does (filedQuestion cuts the reason to the room left, and drops it
+// when even the short sentence would not fit).
+export const filedLength = (state, n, question) => `${touchTag(state.slug, n)} (run ${state.runId}/9999) ${REFUSED_SHORT}${question}`.length;
 
 export function touchStep(touch) {
   return touch.kind === 'preapproval' || touch.kind === 'showcase' ? touch.kind : 'touch';
@@ -177,7 +178,7 @@ function filedQuestion(state, touch, filing) {
   const room = QUESTION_MAX - head.length - body.length;
   if (full.length <= room) return `${head}${full}${body}`;
   const reasonRoom = room - 'Your previous answer could not be used (…). '.length;
-  const refused = reasonRoom > 0 ? `Your previous answer could not be used (${touch.refusal.slice(0, reasonRoom)}…). ` : REFUSED_SHORT;
+  const refused = reasonRoom > 0 ? `Your previous answer could not be used (${touch.refusal.slice(0, reasonRoom)}…). ` : room >= REFUSED_SHORT.length ? REFUSED_SHORT : '';
   return `${head}${refused}${body}`;
 }
 

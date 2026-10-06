@@ -4,7 +4,7 @@
 import { join } from 'node:path';
 import { ConductError, STEP_SEAM, TOUCH_SEAM, appendEvent } from '../state.mjs';
 import { judgmentThreads, mergedPrs } from '../analyze.mjs';
-import { QUESTION_MAX, conductScript, filedLength, openTouch, recordTouch, touchAction } from '../touch.mjs';
+import { QUESTION_MAX, filedLength, openTouch, recordTouch, touchAction } from '../touch.mjs';
 
 // The seams an answer may name: the STEP_SEAM seams (not TOUCH_SEAM), the
 // runtime-exercise row, and the analysis's three spec rows, which mean `spec`.
@@ -38,13 +38,14 @@ function question(state) {
   const analysis = join(state.runDir, 'run-analysis.md');
   const judgments = judgmentThreads(state).length;
   const merged = mergedPrs(state);
-  const status = `node ${conductScript(state)} status --run ${state.runDir}`;
+  // The analysis's Queue accounting lists every WP with its state, reason and PR.
+  const accounting = `under Queue accounting in ${analysis}`;
   // Each list, in full or (when the question would overrun the cap) by count and where it is listed.
   const lists = [
     { label: 'Merged PRs', items: merged.map((m) => `${m.id} ${url(m.pr)}`), where: `under the audit in ${analysis}` },
-    { label: 'Open PRs of held WPs', items: held.map((wp) => `${wp.id} ${wp.pr?.number ? url(wp.pr.number) : '(no PR)'} (${wp.reason ?? 'held'})`), where: `by ${status}` },
-    { label: 'Deferred WPs', items: deferred.map((wp) => `${wp.id}: ${wp.reason ?? 'no reason recorded'}`), where: `by ${status}` },
-    { label: 'Refuted or blocked WPs', items: stopped.map((wp) => `${wp.id} ${wp.state}: ${wp.reason ?? 'no reason recorded'}${wp.pr?.number ? ` (${url(wp.pr.number)})` : ''}`), where: `by ${status}` },
+    { label: 'Open PRs of held WPs', items: held.map((wp) => `${wp.id} ${wp.pr?.number ? url(wp.pr.number) : '(no PR)'} (${wp.reason ?? 'held'})`), where: accounting },
+    { label: 'Deferred WPs', items: deferred.map((wp) => `${wp.id}: ${wp.reason ?? 'no reason recorded'}`), where: accounting },
+    { label: 'Refuted or blocked WPs', items: stopped.map((wp) => `${wp.id} ${wp.state}: ${wp.reason ?? 'no reason recorded'}${wp.pr?.number ? ` (${url(wp.pr.number)})` : ''}`), where: accounting },
   ];
   const line = (entry, cited) => `${entry.label}: ${!entry.items.length ? 'none' : cited ? `${entry.items.length}, each listed ${entry.where}` : list(entry.items, 'none')}`;
   const lines = (cited) => [
