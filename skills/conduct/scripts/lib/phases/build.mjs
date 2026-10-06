@@ -19,7 +19,7 @@
 // waitDueAt, guard, spendUsd; a queued wait's remainingMs and dueAt; an
 // emitted action's wpId and, on a yielding wait, `yield: true`; a spend
 // action's budgetFor.
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
@@ -527,9 +527,18 @@ function merged(state, wp, deps) {
   if (state.adapters?.notify?.on && notify) {
     after.push(shell('notify', 'notify', shellArgv(notify, deps.platform), { env: { WORKIT_NOTIFY_PR: String(number), WORKIT_NOTIFY_SHA: sha, WORKIT_NOTIFY_REVERT: `git revert ${sha}` } }));
   }
+  // The projected crossing, at every merge: booked spend (the last meter
+  // reading, else the closed lanes) plus every unfinished WP at the projection.
+  const booked = state.build.lastSpend?.usd ?? state.wps.reduce((total, other) => total + (Number(other.lane?.costUsd) || 0), 0);
+  const left = state.wps.filter((other) => !['merged', 'refuted'].includes(other.state)).length;
+  const per = laneProjection(state, deps);
+  const projected = Math.round((booked + left * per.usd) * 100) / 100;
+  const budget = state.authority?.budgetUsd ?? 0;
+  appendEvent(state, deps, { event: 'spend-projection', data: { wpId: wp.id, bookedUsd: booked, wpsLeft: left, perWpUsd: per.usd, projectedUsd: projected, budgetUsd: budget } });
+  const spendLine = ` Spend: $${Math.round(booked * 100) / 100} booked; ~$${projected} projected with ${left} WP(s) left at $${Math.round(per.usd * 100) / 100} each (${per.basis}), against $${budget}${projected >= budget ? ': the projection crosses the budget' : ''}.`;
   if (spineOn(state) && wp.questId) {
     const tool = (part, name, args) => ({ kind: 'agent-tool', step: 'receipt', part, tool: name, args, expects: { type: 'json' }, instruction: `Call ${name} with these args and record its raw result.` });
-    after.push(tool('completed', 'spine_receipt', { questId: wp.questId, outcome: 'completed', did: `${wp.id} (${wp.name}) merged as PR #${number} at ${sha}.`,
+    after.push(tool('completed', 'spine_receipt', { questId: wp.questId, outcome: 'completed', did: `${wp.id} (${wp.name}) merged as PR #${number} at ${sha}.${spendLine}`,
       stoppedAt: `merged by conduct ${state.slug}`, producedArtifacts: [{ type: 'pr', locator: `https://github.com/${state.intent.repo.remote}/pull/${number}`, rel: 'remedy' }] }));
     // The anchor (depth none/lite) stays open until the showcase answer (D18).
     if (wp.questId !== state.intent.anchor) after.push(tool('done', 'spine_update', { questId: wp.questId, workState: 'done', horizon: 'landed' }));
@@ -735,8 +744,37 @@ function deferrals(state, deps) {
 // D19.28). Returns null (go), a spend action, 'halted' or 'ended'.
 const paid = (action) => action.kind === 'shell' && ['start', 'prompt', 'fallback'].includes(action.step);
 const budgetEnded = (state) => (state.build.halts ?? []).some((entry) => entry.kind === 'budget' && entry.ended);
-const spendAction = (state, deps, purpose) => shell('spend', 'spend', shellArgv(`${deps.env.WORKIT_SPEND_CMD} ${state.createdAt}`, deps.platform),
-  { budgetFor: purpose, instruction: 'Run this exact argv; it prints the run\'s spend in USD. Record its { code, stdout, stderr }.' });
+// The command learns which run and repo it meters, so it can attribute spend
+// (lane sessions by worktree, review seats) instead of summing the window.
+const spendAction = (state, deps, purpose) => shell('spend', 'spend', shellArgv(`${deps.env.WORKIT_SPEND_CMD} ${state.createdAt}`, deps.platform), {
+  budgetFor: purpose, env: { WORKIT_SPEND_RUN: state.slug, WORKIT_SPEND_REPO: basename(state.intent.repo.path) },
+  instruction: 'Run this exact argv; it prints the run\'s spend in USD. Record its { code, stdout, stderr }.',
+});
+
+// What spend does not show yet. A lane books its cost when it closes (in the
+// lane log, or in the meter's table at session end), so every live lane is
+// counted at the per-WP projection, and a dispatch adds one more for the WP it
+// starts. The projection is the mean cost of the lanes closed so far, else the
+// repo config's laneEstimateUsd, else DEFAULT_LANE_ESTIMATE_USD. It over- rather
+// than under-counts: a live lane's earlier sessions may already be booked.
+const DEFAULT_LANE_ESTIMATE_USD = 15;
+function laneProjection(state, deps) {
+  const closed = state.wps.map((wp) => Number(wp.lane?.costUsd)).filter((cost) => Number.isFinite(cost) && cost > 0);
+  if (closed.length) return { usd: closed.reduce((a, b) => a + b, 0) / closed.length, basis: `the mean of ${closed.length} closed lane(s)` };
+  const configured = Number(repoConfig(state, deps).laneEstimateUsd);
+  if (Number.isFinite(configured) && configured >= 0) return { usd: configured, basis: 'the repo config laneEstimateUsd' };
+  return { usd: DEFAULT_LANE_ESTIMATE_USD, basis: 'the default estimate' };
+}
+
+function committed(state, deps, purpose, bookedUsd) {
+  const projection = laneProjection(state, deps);
+  const live = state.wps.filter((wp) => LIVE_STATES.includes(wp.state) || laneOccupied(wp)).length;
+  const next = purpose === 'dispatch' ? 1 : 0;
+  const money = (usd) => Math.round(usd * 100) / 100;
+  const usd = money(bookedUsd + (live + next) * projection.usd);
+  const parts = [`$${money(bookedUsd)} booked`, ...(live ? [`$${money(live * projection.usd)} for ${live} live lane(s)`] : []), ...(next ? [`$${money(projection.usd)} for the next WP`] : [])];
+  return { usd, detail: `${parts.join(' + ')}; lanes at $${money(projection.usd)} each, ${projection.basis}` };
+}
 
 function budgetGate(state, deps, purpose) {
   if (budgetEnded(state)) return 'ended';
@@ -754,8 +792,9 @@ function budgetGate(state, deps, purpose) {
     return spendAction(state, deps, purpose);
   }
   const sum = state.wps.reduce((total, wp) => total + (Number(wp.lane?.costUsd) || 0), 0);
-  if (sum < budget) return null;
-  haltTouch(state, deps, `Spend is $${sum} against the $${budget} budget (unmetered, lane-only lower bound)`, 'budget', sum);
+  const spend = committed(state, deps, purpose, sum);
+  if (spend.usd < budget) return null;
+  haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (unmetered: booked is the lane-only lower bound)`, 'budget', spend.usd);
   return 'halted';
 }
 
@@ -1043,7 +1082,9 @@ function recordSpend(state, action, result, deps) {
   state.build.lastSpend = { usd, at: deps.timestamp() };
   state.build.halts = (state.build.halts ?? []).filter((entry) => entry.kind !== 'meter');
   syncHalt(state, deps);
-  if (usd >= budget) return haltTouch(state, deps, `Spend is $${usd} against the $${budget} budget (metered by the spend adapter)`, 'budget', usd);
+  const purpose = action.budgetFor === 'meter' ? 'dispatch' : action.budgetFor ?? 'dispatch';
+  const spend = committed(state, deps, purpose, usd);
+  if (spend.usd >= budget) return haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)`, 'budget', spend.usd);
   state.build.spendOkFor = action.budgetFor === 'meter' ? 'dispatch' : action.budgetFor ?? 'dispatch';
   return undefined;
 }

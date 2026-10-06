@@ -3,5 +3,6 @@
     "scripts/lane.mjs",
     "skills/slim-review/scripts/pr-review.mjs"
   ],
-  "laneSuite": "Zero dependencies and a short suite: run the full node --test before the PR boundary; the conductor runs it once more at the candidate head."
+  "laneSuite": "Zero dependencies and a short suite: run the full node --test before the PR boundary; the conductor runs it once more at the candidate head.",
+  "laneEstimateUsd": 0
 }
