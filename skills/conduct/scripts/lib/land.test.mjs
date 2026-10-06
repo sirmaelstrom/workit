@@ -75,7 +75,7 @@ function makeWp(over = {}) {
 // row; without it, a `renames` pair collapses to its destination (git's default).
 function gateExec(o = {}) {
   const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, threads = 0, inflight = 0,
-    config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], diffQuiet = 0, patchIds = {}, diffs = {}, pr = {} } = o;
+    config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], revLists = {}, diffQuiet = 0, patchIds = {}, diffs = {}, pr = {} } = o;
   const calls = [];
   const exec = (program, args, options = {}) => {
     calls.push({ program, args, input: options.input });
@@ -104,7 +104,8 @@ function gateExec(o = {}) {
     if (program === 'git' && args[2] === 'diff' && has('--quiet')) return { code: diffQuiet, stdout: '', stderr: '' };
     if (program === 'git' && args[2] === 'diff') return ok(diffs[`${args.at(-2)} ${args.at(-1)}`] ?? `diff ${args.at(-2)} ${args.at(-1)}\n`);
     if (program === 'git' && args[2] === 'patch-id') return ok(Object.hasOwn(patchIds, options.input) ? patchIds[options.input] : `p0 ${sha('0')}\n`);
-    if (program === 'git' && args[2] === 'rev-list') return ok(tailCommits.join('\n'));
+    // A range named in `revLists` answers its own commits; any other range answers the tail's.
+    if (program === 'git' && args[2] === 'rev-list') return ok((revLists[args[3]] ?? tailCommits).join('\n'));
     throw new Error(`unexpected exec: ${program} ${args.join(' ')}`);
   };
   exec.calls = calls;
@@ -426,6 +427,55 @@ test('C2-1 review A → equivalent rebase B → amendment C → equivalent rebas
   const needs = gate(makeState(), wp, opts);
   assert.deepEqual([needs.causes, needs.inspect.tail, needs.inspect.head], [['inspect'], `${B}..${C}`, HEAD]);
   assert.deepEqual([gate(makeState(), inspected(wp, opts), opts).ok, gate(makeState(), inspected(wp, opts), opts).unreviewedTail], [true, `${B}..${C} (post-cap)`]);
+});
+
+test('f424b70b gate-fix tail: the round-2 anchor, an equivalent rebase, then a one-line gate amendment classifies as gate-fix and is inspected, not review-uncovered', () => {
+  // RC-3 WP-13: anchor A (round-2 delta), rebased to B, the gate failed at B,
+  // and the lane's one-line fix sits on B as HEAD.
+  const [A, B] = [sha('4'), sha('5')];
+  const anchor = { round: 2, scope: 'delta', since: sha('f'), head: A, reviewId: 'review-2', verdicts: [{ comment: '1', verdict: 'fixed', commit: sha('3') }] };
+  const base = { reviews: [anchor], rebases: [{ from: A, to: B, equivalent: true }] };
+  const opts = { tailFiles: ['lib/x.test.mjs'], tailCommits: [HEAD], ancestry: { [`${A}..${HEAD}`]: 1 } };
+  const uncovered = gate(makeState(), makeWp(base), opts);
+  assert.deepEqual(uncovered.causes, ['review-uncovered'], 'without the recorded gate fix the tail is unreviewed work');
+  const wp = makeWp({ ...base, gateFixes: [{ from: B, reason: 'the gate command exited 1 at the rebased head' }] });
+  const needs = gate(makeState(), wp, opts);
+  assert.deepEqual(needs.causes, ['inspect'], needs.failures.join('; '));
+  assert.deepEqual([needs.inspect.tail, needs.inspect.head], [`${B}..${HEAD}`, HEAD]);
+  const done = gate(makeState(), inspected(wp, opts), opts);
+  assert.deepEqual([done.ok, done.unreviewedTail], [true, `${B}..${HEAD} (gate-fix)`]);
+  // Still bounded: a gate fix outside the WP's Files is held (for a ratify ruling), and one over the cap is out of bounds.
+  assert.deepEqual(gate(makeState(), wp, { ...opts, tailFiles: ['lib/other.mjs'] }).causes, ['tail-outside-files']);
+  assert.deepEqual(gate(makeState(), wp, { ...opts, tailFiles: ['lib/x.mjs'], tailLines: 401 }).causes, ['tail-out-of-bounds']);
+  // A gate fix whose start a later rebase rewrote names nothing.
+  const rewritten = gate(makeState(), wp, { ...opts, ancestry: { [`${A}..${HEAD}`]: 1, [`${B}..${HEAD}`]: 1 } });
+  assert.deepEqual(rewritten.causes, ['review-uncovered']);
+});
+
+test('f424b70b gate-fix inspection: the inspection carries the gate failure it repairs; a closed gate-fix range does not cover a later commit', async () => {
+  const [A, B, C] = [sha('4'), sha('5'), sha('6')];
+  const reason = 'the gate command exited 1 at the rebased head: analysis.test.ts:120 expects a null operating cost';
+  const anchor = { round: 2, scope: 'delta', since: sha('f'), head: A, reviewId: 'review-2', verdicts: [] };
+  const wp = makeWp({ reviews: [anchor], rebases: [{ from: A, to: B, equivalent: true }], gateFixes: [{ from: B, reason }] });
+  const opts = { tailFiles: ['lib/x.test.mjs'], tailCommits: [HEAD], ancestry: { [`${A}..${HEAD}`]: 1 } };
+  const needs = gate(makeState(), wp, opts);
+  assert.deepEqual(needs.inspect.gateFailures, [reason]);
+  const exec = gateExec(opts);
+  const out = await runLandVerb('gate', { runDir: RUN, wpId: 'WP-01', flags: {} }, verbDeps(makeState({ wps: [wp] }), exec));
+  const action = recordLandStep(makeState(), wp, { kind: 'shell', step: 'gate', part: 'gate', command: [] }, { code: out.code, stdout: JSON.stringify(out.out), stderr: '' }, { now: () => NOW }).patch.queue[0];
+  assert.equal(action.part, 'inspect');
+  assert.ok(action.instruction.includes(reason), action.instruction);
+
+  // The amendment ended at C, a delta review then anchored at C, and D is a later commit: only C was the gate fix.
+  const D2 = sha('7');
+  const later = makeWp({ pr: { number: 7, head: D2 }, reviews: [{ ...anchor, head: C }], gateFixes: [{ from: B, to: C, reason }] });
+  const tail = { head: D2, tailFiles: ['lib/x.mjs'], tailCommits: [D2], revLists: { [`${B}..${C}`]: [C] } };
+  assert.deepEqual(gate(makeState(), later, tail).causes, ['review-uncovered'], 'D is neither a fixed row nor the gate fix');
+
+  // A second gate failure R2 fixed by C..HEAD after the review at C: the inspector reads only R2.
+  const second = makeWp({ reviews: [{ ...anchor, head: C }], gateFixes: [{ from: B, to: C, reason }, { from: C, reason: 'R2: the land gate saw red CI at the head' }] });
+  const both = gate(makeState(), second, { tailFiles: ['lib/x.mjs'], tailCommits: [HEAD], revLists: { [`${B}..${C}`]: [C], [`${C}..${HEAD}`]: [HEAD] } });
+  assert.deepEqual(both.inspect.gateFailures, ['R2: the land gate saw red CI at the head']);
 });
 
 test('fresh base: merge-base --is-ancestor exit 1 is "stale base", and land gate is code 5', async () => {
