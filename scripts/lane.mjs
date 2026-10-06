@@ -87,11 +87,12 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            The delegate is HERDR_LANES_SCRIPT, else <workspace-root>/infrastructure/
            herdr-lanes.ps1, else that path from the cwd; if none exists, sweep
            prints the command to run instead of guessing a location.
-  admit    [--min-free-gb <n>] [--drain-free-gb <n>]
+  admit    [--min-free-gb <n>] [--drain-free-gb <n>] [--require-reading]
            Read-only admission check, for a conductor before a start or a council
            dispatch: exit 0 admitted, 7 refused. Prints freeGb, the thresholds,
            and drain: true below --drain-free-gb (or LANE_DRAIN_FREE_GB, default 4).
-           Off Windows freeGb is null and the check admits with a warning.
+           Off Windows freeGb is null and the check admits with a warning, unless
+           --require-reading, which refuses a reading it cannot take.
 
   --log <path>  JSONL instrumentation (default: <workspace>/data/outputs/projects/
                 agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)
@@ -331,7 +332,7 @@ function parseArgs(argv) {
     throw new LaneError(EXIT.USAGE, `expected one verb: ${[...VERBS].join(', ')}`, { usage: USAGE_TEXT });
   }
   const opts = { verb, positional: [], agentArgs: [] };
-  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode', '--amendment', '--no-ruling', '--force-admit']);
+  const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode', '--amendment', '--no-ruling', '--force-admit', '--require-reading']);
   const repeatableFlags = new Set(['--root', '--until']);
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
@@ -1056,7 +1057,9 @@ function admission(opts, deps) {
   const admitThreshold = gbOption(opts.minFreeGb, '--min-free-gb', deps.env.LANE_MIN_FREE_GB, ADMIT_MIN_FREE_GB);
   const drainThreshold = gbOption(opts.drainFreeGb, '--drain-free-gb', deps.env.LANE_DRAIN_FREE_GB, ADMIT_DRAIN_FREE_GB);
   const reading = readFreeGb(deps);
-  const reason = reading.error
+  // A caller that admits only on room (a 3rd or 4th lane) treats an unmeasured reading as none.
+  const unmeasured = opts.requireReading && reading.freeGb === null && !reading.error ? `free commit memory was not measured (${reading.warning}) and --require-reading asks for a reading` : null;
+  const reason = reading.error ?? unmeasured
     ?? (reading.freeGb !== null && reading.freeGb < admitThreshold
       ? `free commit memory ${reading.freeGb} GB is below the admit threshold ${admitThreshold} GB`
       : null);

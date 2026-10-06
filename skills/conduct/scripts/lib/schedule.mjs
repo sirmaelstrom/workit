@@ -12,6 +12,12 @@ export const LIVE_STATES = Object.freeze(['dispatched', 'pr', 'review', 'amendin
 
 export const laneOccupied = (wp) => Boolean(wp.lane?.startedAt) && !wp.lane?.exitedAt;
 
+// `--lanes` runs up to MAX_LANES at once; from this lane on, a lane is admitted
+// only on free commit memory (lane.mjs admit, the 10 GB threshold). Four lanes
+// and two councils exhausted it once.
+export const MAX_LANES = 4;
+export const GATED_FROM_LANE = 3;
+
 const FIELD_LABEL = /^\*\*[^*\n]+:\*\*/;
 const WP_ID = /\bWP-\d+\b/g;
 

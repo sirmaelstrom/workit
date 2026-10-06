@@ -39,6 +39,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { LANE_MODELS, laneModel } from './adapters.mjs';
 import { resolveProgram } from './exec.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, loadState, saveState } from './state.mjs';
+import { GATED_FROM_LANE, LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { EXIT_CODES as LANE_EXIT, reportShapeProblems } from '../../../../scripts/lane.mjs';
 
 const DEADLINE_MS = 120 * 60 * 1000;
@@ -154,11 +155,12 @@ export function laneBackend(state, deps, backend) {
   const confirmAction = (wp) => shellAction('stop', { part: 'confirm', instruction: 'Confirm the lane agent exited.', command: conduct('alive', wp) });
   // Outcome first (D19.16): the report check precedes every other check.
   const reportCheck = (wp, extra) => shellAction('check', { part: 'report', instruction: 'Check the report\'s outcome and runtime exercise.', command: conduct('check', wp, extra) });
+  const laneMjs = (verb, args, log) => ['node', join(pluginRoot, 'scripts', 'lane.mjs'), verb, ...args, '--log', log];
+  const admitAction = (args = []) => shellAction('admit', { instruction: 'Ask lane.mjs whether a lane may start.', command: laneMjs('admit', args, join(state.runDir, 'lane-runner.jsonl')) });
   if (backend === 'herdr') {
-    const laneMjs = (verb, args, log) => ['node', join(pluginRoot, 'scripts', 'lane.mjs'), verb, ...args, '--log', log];
     return {
       name: 'herdr',
-      admit: () => [shellAction('admit', { instruction: 'Ask lane.mjs whether a lane may start.', command: laneMjs('admit', [], join(state.runDir, 'lane-runner.jsonl')) })],
+      admit: () => [admitAction()],
       create: (wp) => {
         const lane = laneLayout(state, wp);
         return [...base(), shellAction('create', {
@@ -208,7 +210,9 @@ export function laneBackend(state, deps, backend) {
   }
   return {
     name: 'exec',
-    admit: () => [],
+    // A 3rd or 4th live lane is admitted on measured free commit memory: room is
+    // the gate's whole point, so a host that cannot measure it does not get one.
+    admit: (wp) => (state.wps.filter((other) => other !== wp && (LIVE_STATES.includes(other.state) || laneOccupied(other))).length >= GATED_FROM_LANE - 1 ? [admitAction(['--require-reading'])] : []),
     create: (wp) => {
       const lane = laneLayout(state, wp);
       return [...base(), shellAction('create', {

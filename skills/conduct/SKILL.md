@@ -13,7 +13,7 @@ You drive a one-shot state machine, `${CLAUDE_SKILL_DIR}/scripts/conduct.mjs`. E
 /conduct "<goal>" --repo <abs path>
          [--anchor <quest id>]        # Spine adapter: the goal's quest
          [--budget <usd>]             # proposed in touch 1; default 25
-         [--lanes <1|2>]              # concurrent lanes per repo; default 2
+         [--lanes <1-4>]              # concurrent lanes per repo; default 2; a 3rd or 4th lane starts only with ≥ 10 GB free commit memory (lane.mjs admit)
          [--agent claude|codex]       # lane agent CLI; default: the first found
          [--adapter <name>]...        # declare spine | council | kb | verify | ledger
          [--no-adapter <name>]...     # force the core path for an adapter
