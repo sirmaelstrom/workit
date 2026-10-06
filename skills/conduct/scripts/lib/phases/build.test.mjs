@@ -491,6 +491,21 @@ test('waits are wall-clock deadlines: WP-03\'s 60 s ci-wait elapses while WP-02 
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
 });
 
+test('waits are wall-clock deadlines: a wait queued while `next` chooses (a rebase waiting on the other WP\'s merge lock) is stamped before the action emitted with it runs', async (t) => {
+  const h = harness(t, { herdr: true });
+  h.herdrWait = { 'WP-02': [4, 4, 0], 'WP-03': [4, 0] };
+  const unstamped = [];
+  h.onEmit = (a) => {
+    for (const wp of h.state.wps) {
+      const head = wp.queue?.[0];
+      if (head?.kind === 'wait' && !head.dueAt) unstamped.push(`${wp.id} ${head.step}/${head.part ?? ''} at ${a.id}`);
+    }
+  };
+  assert.equal(await drive(h), null);
+  assert.ok(h.trace.some((a) => a.step === 'gate'), 'the run reached its gates');
+  assert.deepEqual(unstamped, []);
+});
+
 test('waits are wall-clock deadlines: an unreadable meter is re-read after 5 minutes of WP-02\'s herdr polls, not after WP-02 stops', async (t) => {
   const h = harness(t, { herdr: true, spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
   const polls = 15;

@@ -805,6 +805,14 @@ export function next(state, deps) {
   applyAnswers(state, deps);
   deferrals(state, deps);
   stampWaits(state, deps);
+  const action = chooseAction(state, deps);
+  // A wait queued while choosing (by fill, or under a released head) starts
+  // its deadline now, not after the action emitted with it has run.
+  stampWaits(state, deps);
+  return action;
+}
+
+function chooseAction(state, deps) {
   const first = announce(state);
   if (first) return first;
   for (let pass = 0; pass < 8; pass += 1) {
