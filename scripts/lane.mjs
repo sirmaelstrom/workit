@@ -2220,11 +2220,14 @@ async function stopLane(opts, deps, state) {
       };
     }
     // With no recorded signature, or one that is error output, nothing can
-    // recognise this pane's prompt. The agent is gone, so the pane is judged
-    // idle when no TUI is drawn and its last line held still from the end of
-    // the prompt wait through both late reads.
+    // recognise this pane's prompt by its text. The agent is gone, so the pane
+    // is judged idle at a prompt when no TUI is drawn, its last line held still
+    // from the end of the prompt wait through both late reads, and that line
+    // names the lane's worktree directory, as a shell prompt shows its cwd.
+    // A prompt that does not show the cwd keeps the failure below.
     const untrusted = !lane.promptSignature || paneErrorLine(lane.promptSignature);
-    if (untrusted && gone && !now.liveTui && now.last !== null && now.last === before.last && now.last === error.lastLine) {
+    const showsCwd = (line) => Boolean(lane.path) && line.includes(basename(lane.path));
+    if (untrusted && gone && !now.liveTui && now.last !== null && now.last === before.last && now.last === error.lastLine && showsCwd(now.last)) {
       return {
         exit: EXIT.OK,
         output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'idle', ...latePolls },

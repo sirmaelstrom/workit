@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
 import { fileURLToPath } from 'node:url';
 
@@ -2604,16 +2604,33 @@ test('595672af: a pane read while it ends in the profile error is read again unt
   assert.equal(readState(f).lanes['lane-a'].promptSignature, RC3_PROMPT);
 });
 
-test('595672af: an error-output signature stops on agent-unlisted + idle pane; a listed agent or a moving pane still fails', async (t) => {
+test('595672af: an error-output signature stops on agent-unlisted + an idle pane whose last line shows the worktree; a listed agent, a moving pane or stable non-prompt output still fails', async (t) => {
+  // The lane's worktree is its fixture dir; the prompt shows it as oh-my-posh does.
+  const promptFor = (f) => `~  X: / fixture / projects / ${basename(f.dir)} ~`;
   const idle = fixture(t);
   seedLane(idle, { kind: 'claude', promptSignature: PROFILE_ERROR });
-  const stopped = await stopWith(idle, stopHerdr(`~ sirm  pwsh\n${RC3_PROMPT}`));
+  const stopped = await stopWith(idle, stopHerdr(`~ sirm  pwsh\n${promptFor(idle)}`));
   assert.equal(stopped.exit, EXIT_CODES.ok, JSON.stringify(stopped.output));
   assert.deepEqual([stopped.output.state, stopped.output.promptCheck, stopped.output.panePrompt], ['stopped', 'idle', false]);
 
+  // A null signature is untrusted too: the same evidence stops it.
+  const unsigned = fixture(t);
+  seedLane(unsigned, { kind: 'claude', promptSignature: null });
+  const bare = await stopWith(unsigned, stopHerdr(`~ sirm  pwsh\n${promptFor(unsigned)}`));
+  assert.equal(bare.output.promptCheck, 'idle', JSON.stringify(bare.output));
+
+  // Stable output that is not a prompt (it does not show the worktree) is not idle.
+  for (const signature of [null, PROFILE_ERROR]) {
+    const quiet = fixture(t);
+    seedLane(quiet, { kind: 'claude', promptSignature: signature });
+    const held = await stopWith(quiet, stopHerdr(`${BLOCKED_TAIL}\nsomething printed after the footer`));
+    assert.equal(held.exit, EXIT_CODES.error, `signature ${signature}: ${JSON.stringify(held.output)}`);
+    assert.match(held.output.error, /^stop pane prompt check failed/);
+  }
+
   const listed = fixture(t);
   seedLane(listed, { kind: 'claude', promptSignature: PROFILE_ERROR });
-  const still = await stopWith(listed, stopHerdr(`~ sirm  pwsh\n${RC3_PROMPT}`, () => true));
+  const still = await stopWith(listed, stopHerdr(`~ sirm  pwsh\n${promptFor(listed)}`, () => true));
   assert.equal(still.exit, EXIT_CODES.error);
   assert.match(still.output.error, /still listed/);
 
