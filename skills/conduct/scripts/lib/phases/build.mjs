@@ -22,7 +22,7 @@
 import { join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
-import { LIVE_STATES, dispatchable, laneOccupied } from '../schedule.mjs';
+import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
 import { chooseBackend, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import {
   deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
@@ -241,6 +241,64 @@ function rulingAction(state, wp, { asks = null, row = null }) {
     kind: 'author', step: 'ruling', part: row ? 'guard' : 'ask', outPath, ruling: { n, file, keys, ...(row ? { comment: row.comment, row } : { asks }) }, expects: { type: 'file' },
     instruction: `Rule on ${what}: write ${outPath} = { "ruled": "<one of ${keys.join(', ')}>", "evidence": "<the measurement or file that settles it>" }, or { "escalate": true, "why": "<why only the operator can settle it>" }. Record {}.`,
   };
+}
+
+// ---- ratify ----
+
+// A path is in a WP's Files when it is listed, or sits under a listed
+// directory, which ends in `/`: the merge gate's own rule (land.mjs declaredFile).
+const covered = (files, path) => (files ?? []).some((file) => (String(file).endsWith('/') ? path.startsWith(file) : path === file));
+
+// A WP held only because its post-cap tail touches paths outside its Files is
+// the conductor's ruling, not the end of the build.
+function ratifyAction(state, wp) {
+  const outPath = join(state.runDir, 'rulings', `${lower(wp)}-ratify-${(wp.ratified ?? []).length + 1}.json`);
+  const paths = [...(wp.heldOutside ?? [])];
+  return {
+    kind: 'author', step: 'ratify', part: 'ruling', outPath, paths, expects: { type: 'file' },
+    instruction: `${wp.id} is held: its post-cap tail touches ${paths.join(', ')}, outside its Files. Rule: write ${outPath} = { "ratify": true, "why": "<why these paths belong to ${wp.id}>" } to add them to its Files and send it back to the gate, or { "ratify": false, "why": "<why not>" } to keep it held (create the directory). Record {}.`,
+  };
+}
+
+// Extends a WP's Files with the conductor's ruling. A path another unfinished
+// WP owns is refused (exit 5): lanes run on disjoint Files. A WP held only on
+// its Files whose outside paths are now all covered goes back to its land
+// stage (rebase, gate, inspection), and its deferred dependents follow at the
+// next `next`. Returns whether it was re-admitted.
+function applyRatify(state, wp, paths, why, deps) {
+  const normal = paths.map((path) => {
+    const repoPath = normalizePath(path);
+    if (repoPath === null) throw new ConductError(2, `ratify: \`${path}\` is not a path inside the repository`);
+    return repoPath;
+  });
+  if (!normal.length) throw new ConductError(2, 'ratify: no paths');
+  // No Files means an unknown scope, which conflicts with every WP; a ratified
+  // path would make it look complete. The same holds for the owner check.
+  if (!wp.files?.length) throw new ConductError(5, `ratify: ${wp.id} has no declared Files (an unknown scope); ratifying would define its whole scope`);
+  const owner = state.wps.find((other) => other !== wp && !['merged', 'refuted'].includes(other.state) && !filesDisjoint(normal, other.files ?? []));
+  if (owner) throw new ConductError(5, `ratify: ${owner.id} (${owner.state}) owns a path in ${normal.join(', ')}${owner.files?.length ? '' : ' (it has no declared Files)'}; lanes run on disjoint Files`);
+  wp.files = [...new Set([...(wp.files ?? []), ...normal])];
+  wp.ratified = [...(wp.ratified ?? []), { paths: normal, why, at: deps.timestamp() }];
+  appendEvent(state, deps, { event: 'ratified', data: { wpId: wp.id, paths: normal, why } });
+  if (wp.state !== 'held' || !wp.heldOutside?.length || !wp.heldOutside.every((path) => covered(wp.files, path))) return false;
+  wp.heldOutside = null;
+  wp.queue = (wp.queue ?? []).filter((action) => action.step !== 'ratify');
+  setState(state, wp, 'gate', `ratified: ${why}`, deps);
+  wp.stage = 'land';
+  return true;
+}
+
+// `conduct.mjs ratify --run <dir> --wp <id> --paths <a,b> --why <text>`.
+export function ratify(state, { wpId, paths, why }, deps) {
+  const wp = state.wps.find((candidate) => candidate.id === wpId);
+  if (!wp) throw new ConductError(2, `ratify: no WP ${wpId} in this run`);
+  if (typeof why !== 'string' || !why.trim()) throw new ConductError(2, 'ratify: --why <the ruling> is required');
+  if (['merged', 'refuted'].includes(wp.state)) throw new ConductError(5, `ratify: ${wp.id} is ${wp.state}`);
+  if (state.pending?.wpId === wp.id && state.pending.step === 'ratify') {
+    throw new ConductError(5, `ratify: ${wp.id}'s ruling is the pending action ${state.pending.id}; write its file and record it`);
+  }
+  const readmitted = applyRatify(state, wp, paths, why.trim(), deps);
+  return { wpId: wp.id, files: wp.files, readmitted };
 }
 
 function guardReply(state, wp, row, ruled) {
@@ -1010,6 +1068,18 @@ function recordOwn(state, wp, action, result, deps) {
       }
       return ok();
     case 'ruling': return recordRuling(state, wp, action, deps) ?? true;
+    case 'ratify': {
+      const value = readJsonFile(deps, action.outPath, 'ratify ruling');
+      if (typeof value?.ratify !== 'boolean') throw new ConductError(2, `ratify ruling ${action.outPath}: ratify must be true or false`);
+      if (typeof value.why !== 'string' || !value.why.trim()) throw new ConductError(2, `ratify ruling ${action.outPath}: why must say why`);
+      if (value.ratify) applyRatify(state, wp, action.paths, value.why.trim(), deps);
+      else {
+        wp.heldOutside = null;
+        appendEvent(state, deps, { event: 'ratify-declined', data: { wpId: wp.id, paths: action.paths, why: value.why.trim() } });
+      }
+      wp.queue = (wp.queue ?? []).filter((queued) => queued !== action && queued.step !== 'ratify');
+      return true;
+    }
     case 'council/meta':
       if (readJsonFile(deps, action.outPath, 'council meta')?.title !== action.title) throw new ConductError(2, `${action.outPath} must be { "title": "${action.title}" }`);
       return ok();
@@ -1162,6 +1232,7 @@ function route(state, wp, action, out, deps) {
       setState(state, wp, 'held', out.reason, deps);
       wp.stage = null;
       wp.queue.push(...backendOf(state, wp, deps).stop(wp));
+      if (wp.heldOutside?.length) wp.queue.push(ratifyAction(state, wp));
       return;
     case 'amend':
       return LANE_STEPS.has(action.step) ? checkFailed(state, wp, deps, out.reason) : gateAmend(state, wp, deps, out.reason);

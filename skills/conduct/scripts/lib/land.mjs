@@ -513,7 +513,10 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
   const count = production.reduce((sum, row) => sum + row.lines, 0);
   const outside = rows.map((row) => row.path).filter((path) => !declaredFile(wp, path));
   if (count > TAIL_LINE_CAP || outside.length || rows.some((row) => row.binary)) {
-    return { failure: `post-cap tail ${key} out of bounds: ${count} production lines${outside.length ? `; outside the WP's Files: ${outside.join(', ')}` : ''}`, cause: 'tail-out-of-bounds' };
+    // Only outside the Files, inside the cap: the conductor can ratify the paths.
+    const ratifiable = count <= TAIL_LINE_CAP && !rows.some((row) => row.binary);
+    return { failure: `post-cap tail ${key} out of bounds: ${count} production lines${outside.length ? `; outside the WP's Files: ${outside.join(', ')}` : ''}`,
+      cause: ratifiable ? 'tail-outside-files' : 'tail-out-of-bounds', ...(ratifiable ? { outside } : {}) };
   }
   const binding = { tail: key, head, review: reviewIdentity(anchor), findingsHash: findingsHash(anchor) };
   const inspection = (wp.inspections ?? []).find((entry) => sameBinding(entry, binding));
@@ -607,6 +610,7 @@ export function gateCheck(state, wp, { exec, now }) {
     ok, pending: !ok && failures.length === 0, pendingOn, blocked: ci.blocked === true || flight.blocked === true, head, failures, causes: [...causes],
     unreviewedTail: review.tail ?? null, needsFullReview: review.needsFullReview === true, staleBase: causes.has('stale-base'),
     ...(review.inspect ? { inspect: review.inspect } : {}),
+    ...(review.outside ? { outside: review.outside } : {}),
   };
 }
 
@@ -835,6 +839,8 @@ function classifyGate(state, wp, action, gate, causes, reason, deps) {
   if (gate.blocked || causes.has('pr-state') || causes.has('ci-missing-check')) return result('block', reason);
   if (causes.has('stale-base') && causes.has('head-mismatch')) return result('block', `stale base and head mismatch together: ${reason}`);
   if (causes.has('tail-out-of-bounds')) return result('held', reason);
+  // Held for a ratify ruling: the build asks the conductor before it can end.
+  if (causes.has('tail-outside-files')) return result('held', reason, { heldOutside: gate.outside ?? [] });
   // A lane commit cannot repair coverage: the conductor dispatches a review
   // within the cap or holds the PR.
   if (causes.has('review-uncovered')) return result('block', reason);
