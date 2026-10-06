@@ -14,10 +14,11 @@
 // state.build { contract, halts, spendOkFor }; authority.budgetSource; wps[]
 // stage, amendment, checkAmends, gateAmends, owed, asks, replyIds, rulingSeq,
 // deferredBy, changedPaths, gateCmd, noCi, cleanup, lane.uncertain,
-// lane.livenessHeld; halts[] kinds budget | meter | merged; touches[]
-// build (why the build opened it), applied, announced, waitLeftMs, guard,
-// spendUsd; a queued wait's remainingMs; an emitted action's wpId and, on a
-// yielding wait, `yield: true`; a spend action's budgetFor.
+// lane.livenessHeld; halts[] kinds budget | meter | merged, a meter's dueAt;
+// touches[] build (why the build opened it), applied, announced, waitLeftMs,
+// waitDueAt, guard, spendUsd; a queued wait's remainingMs and dueAt; an
+// emitted action's wpId and, on a yielding wait, `yield: true`; a spend
+// action's budgetFor.
 import { join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
@@ -304,7 +305,7 @@ function meterHalt(state, deps, reason) {
   const halts = (state.build.halts ??= []);
   const meter = halts.find((halt) => halt.kind === 'meter');
   if (meter) {
-    Object.assign(meter, { reason, waitLeftMs: READ_BACK_WAIT_MS });
+    Object.assign(meter, { reason, waitLeftMs: READ_BACK_WAIT_MS, dueAt: null });
     return syncHalt(state, deps);
   }
   halts.push({ kind: 'meter', reason, waitLeftMs: READ_BACK_WAIT_MS });
@@ -328,7 +329,7 @@ function escalate(state, wp, deps, { why, asks = null, row = null }) {
 
 // An unusable answer re-opens the touch with a refusal, so it stays answerable.
 function refuse(state, touch, why, deps) {
-  Object.assign(touch, { status: 'open', answer: null, refusal: why, tty: false, waiting: false, announced: false, applied: false });
+  Object.assign(touch, { status: 'open', answer: null, refusal: why, tty: false, waiting: false, announced: false, applied: false, waitDueAt: null });
   appendEvent(state, deps, { step: 'touch', event: 'answer-refused', data: { n: touch.n, why } });
   if (!spineOn(state)) writeTouchFiles(state, touch, deps);
 }
@@ -712,8 +713,8 @@ function workAction(state, deps) {
   }
   // A meter halt re-reads the spend when its wait is over.
   const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
-  if (meter && meter.waitLeftMs <= 0 && !budgetEnded(state)) {
-    meter.waitLeftMs = READ_BACK_WAIT_MS;
+  if (meter && meterLeft(meter, deps.now()) <= 0 && !budgetEnded(state)) {
+    Object.assign(meter, { waitLeftMs: READ_BACK_WAIT_MS, dueAt: null });
     if (deps.env?.WORKIT_SPEND_CMD) return spendAction(state, deps, 'meter');
   }
   if (state.dispatchHalt || !dispatchable(state, { now: deps.now() }).length) return null;
@@ -723,25 +724,49 @@ function workAction(state, deps) {
   return dispatch(state, dispatchable(state, { now: deps.now() })[0], deps);
 }
 
+// A wait ends at a wall-clock deadline (`dueAt`, stamped when it first heads a
+// queue, is opened or is re-armed) or when the yields recorded against it add
+// up to its length, whichever comes first. Yield credit alone starves: a lane
+// poll's 0 ms re-wait is always due, so the build never yields while a lane
+// runs, and every other wait would sit until that lane stopped.
+const leftMs = (creditMs, dueAt, now) => Math.min(creditMs, dueAt ? Date.parse(dueAt) - now : Infinity);
+const touchWaits = (state, touch) => !spineOn(state) || touch.waiting;
+const meterLeft = (meter, now) => leftMs(meter.waitLeftMs, meter.dueAt, now);
+
+function stampWaits(state, deps) {
+  const now = deps.now();
+  const due = (ms) => new Date(now + ms).toISOString();
+  for (const wp of state.wps) {
+    const head = wp.queue?.[0];
+    if (head?.kind === 'wait' && !head.dueAt) head.dueAt = due(head.remainingMs ?? head.waitMs ?? 0);
+  }
+  for (const touch of openBuildTouches(state)) {
+    if (touchWaits(state, touch) && !touch.waitDueAt) touch.waitDueAt = due(touch.waitLeftMs ?? READ_BACK_WAIT_MS);
+  }
+  const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
+  if (meter && !meter.dueAt) meter.dueAt = due(meter.waitLeftMs);
+}
+
 // Everything that is waiting, with what is left of its wait.
 function yielders(state, deps) {
+  const now = deps.now();
   const out = [];
   for (const wp of state.wps) {
     const head = wp.queue?.[0];
-    if (head?.kind === 'wait') out.push({ ms: head.remainingMs ?? head.waitMs ?? 0, wp, step: head.step, note: `${wp.id}: ${head.instruction}` });
-    const until = wp.state === 'pending' && wp.notBefore ? Date.parse(wp.notBefore) - deps.now() : 0;
+    if (head?.kind === 'wait') out.push({ ms: leftMs(head.remainingMs ?? head.waitMs ?? 0, head.dueAt, now), wp, step: head.step, note: `${wp.id}: ${head.instruction}` });
+    const until = wp.state === 'pending' && wp.notBefore ? Date.parse(wp.notBefore) - now : 0;
     if (until > 0) out.push({ ms: until, step: 'admit', note: `${wp.id} may be dispatched again at ${wp.notBefore}` });
   }
   for (const touch of openBuildTouches(state)) {
-    const core = !spineOn(state);
-    if (core || touch.waiting) {
+    if (touchWaits(state, touch)) {
+      const core = !spineOn(state);
       const refused = touch.refusal ? ` (their last answer could not be used: ${touch.refusal})` : '';
       const note = core ? `${touch.tag} is open: show the operator ${join(state.runDir, touch.file)}; they answer from their own terminal${refused}` : `${touch.tag}: no answer yet`;
-      out.push({ ms: touch.waitLeftMs ?? READ_BACK_WAIT_MS, touch, step: 'touch', note });
+      out.push({ ms: leftMs(touch.waitLeftMs ?? READ_BACK_WAIT_MS, touch.waitDueAt, now), touch, step: 'touch', note });
     }
   }
   const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
-  if (meter && !budgetEnded(state)) out.push({ ms: meter.waitLeftMs, meter, step: 'spend', note: `the spend meter is re-read: ${meter.reason}` });
+  if (meter && !budgetEnded(state)) out.push({ ms: meterLeft(meter, now), meter, step: 'spend', note: `the spend meter is re-read: ${meter.reason}` });
   return out;
 }
 
@@ -749,9 +774,10 @@ function release(y) {
   if (y.wp) y.wp.queue.shift();
   if (y.touch) {
     y.touch.waitLeftMs = null;
+    y.touch.waitDueAt = null;
     y.touch.waiting = false;
   }
-  if (y.meter) y.meter.waitLeftMs = 0;
+  if (y.meter) Object.assign(y.meter, { waitLeftMs: 0, dueAt: null });
 }
 
 // A core touch is announced before any other work, once per opening.
@@ -778,6 +804,7 @@ export function next(state, deps) {
   if (!state.build.contract) return contractAction(state, deps);
   applyAnswers(state, deps);
   deferrals(state, deps);
+  stampWaits(state, deps);
   const first = announce(state);
   if (first) return first;
   for (let pass = 0; pass < 8; pass += 1) {

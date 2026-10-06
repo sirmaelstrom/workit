@@ -146,6 +146,7 @@ export function resumeHandBack(state, deps) {
   const touch = state.touches[action.touch.n - 1];
   touch.waiting = false;
   touch.waitLeftMs = null;
+  touch.waitDueAt = null;
   state.pending = null;
   appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'resumed', phase: action.phase, data: { n: touch.n } });
 }
