@@ -1359,6 +1359,9 @@ test('gate command after a no-op rebase: the amended head gets its delta review 
   assert.equal(h.wp('WP-02').rebases[0].from, h.wp('WP-02').rebases[0].to, 'the first rebase was a no-op');
   const posts = of(h, 'WP-02').filter((a) => a.step === 'post');
   assert.deepEqual(posts.map((a) => [a.land.round, a.land.scope]), [[1, 'full'], [2, 'delta']]);
+  // f424b70b: the gate amendment's range runs from the failed head to the head its lane pushed.
+  const [fix] = h.wp('WP-02').gateFixes;
+  assert.ok(fix.to && fix.to !== fix.from, JSON.stringify(fix));
 });
 
 test('tier from the recipe file (D17, D19.11): contractPaths or an added test raise T1 to T2; neither stays T1; WP-00 at depth none too', async (t) => {

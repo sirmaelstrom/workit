@@ -471,22 +471,29 @@ const fixedCommits = (review) => (review.verdicts ?? [])
   .filter((row) => row.verdict === 'fixed' && /^[0-9a-f]{7,40}$/i.test(row.commit ?? '')).map((row) => row.commit.toLowerCase());
 
 // The commits gate amendments added after the review cap: each gate amendment
-// records the head it started from (build.mjs gateAmend), and its commits are
-// that head..`to`. A start that is no longer an ancestor of `to` (a later
-// rebase rewrote it) names nothing; null is an unreadable range.
+// records the head it started from (build.mjs gateAmend) and, once its lane
+// work is back, the head it ended at; its commits are from..end (end = `to`
+// while it is still open). A range whose ends are no longer on the line to
+// `to` (a later rebase rewrote them) names nothing. Returns the commits and
+// the gate failures they repair; null is an unreadable range.
 function gateFixCommits(wp, to, exec) {
   const wt = wp.lane.worktree;
   const commits = new Set();
+  const reasons = [];
   for (const fix of wp.gateFixes ?? []) {
-    if (!fix?.from || fix.from === to) continue;
-    const onLine = ancestor(wt, fix.from, to, exec);
-    if (onLine === null) return null;
-    if (!onLine) continue;
-    const listed = exec('git', ['-C', wt, 'rev-list', `${fix.from}..${to}`]);
+    const end = fix?.to ?? to;
+    if (!fix?.from || fix.from === end) continue;
+    const fromOnLine = ancestor(wt, fix.from, end, exec);
+    const endOnLine = end === to ? true : ancestor(wt, end, to, exec);
+    if (fromOnLine === null || endOnLine === null) return null;
+    if (!fromOnLine || !endOnLine) continue;
+    const listed = exec('git', ['-C', wt, 'rev-list', `${fix.from}..${end}`]);
     if (listed.code !== 0) return null;
-    for (const sha of lines(listed.stdout)) commits.add(sha.toLowerCase());
+    const shas = lines(listed.stdout).map((sha) => sha.toLowerCase());
+    shas.forEach((sha) => commits.add(sha));
+    if (shas.length && fix.reason) reasons.push(fix.reason);
   }
-  return commits;
+  return { commits, reasons };
 }
 
 // An inspection binds the exact tail and candidate head, the anchoring
@@ -529,7 +536,7 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
   const gateFixed = gateFixCommits(wp, to, exec);
   if (gateFixed === null) return { failure: `tail ${key}: a gate amendment's commits are unreadable`, cause: 'infra' };
   const isFixed = (sha) => fixed.some((commit) => sha.toLowerCase().startsWith(commit));
-  if (!shas.length || !shas.every((sha) => isFixed(sha) || gateFixed.has(sha.toLowerCase()))) {
+  if (!shas.length || !shas.every((sha) => isFixed(sha) || gateFixed.commits.has(sha.toLowerCase()))) {
     return { failure: `review does not cover head: tail ${key} has commits that are not fixed rows of the anchoring review`, cause: 'review-uncovered' };
   }
   // Gate amendments after the cap are their own class: bounded and inspected like the post-cap tail.
@@ -545,7 +552,9 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
   const binding = { tail: key, head, review: reviewIdentity(anchor), findingsHash: findingsHash(anchor) };
   const inspection = (wp.inspections ?? []).find((entry) => sameBinding(entry, binding));
   const files = (nonTrivial.length ? nonTrivial : rows).map((row) => row.path);
-  if (!inspection) return { failure: `post-cap tail ${key} needs an inspection`, cause: 'inspect', inspect: { ...binding, files, anchor: anchor.reviewId ?? anchor.head } };
+  // A gate-fix tail is read against the gate failures it repairs as well as the findings.
+  const repairs = kind === 'gate-fix' ? { gateFailures: gateFixed.reasons } : {};
+  if (!inspection) return { failure: `post-cap tail ${key} needs an inspection`, cause: 'inspect', inspect: { ...binding, files, anchor: anchor.reviewId ?? anchor.head, ...repairs } };
   if (inspection.verdict !== 'addresses-findings') return { failure: `post-cap tail ${key} inspected: ${inspection.verdict}`, cause: 'tail-out-of-bounds' };
   return { tail: `${key} (${kind})` };
 }
@@ -809,7 +818,9 @@ const validInspect = (inspect) => inspect && typeof inspect === 'object' && /^[0
 function inspectAction(state, wp, inspect, gate) {
   const [from, to] = inspect.tail.split('..');
   return { kind: 'inspect', step: 'gate', seam: STEP_SEAM.gate, part: 'inspect',
-    instruction: `Read the post-cap tail's diff (this argv) against the findings of review ${inspect.anchor}; record { verdict: 'addresses-findings' | 'unrelated-change', tail: '${inspect.tail}', head: '${inspect.head}' }.`,
+    instruction: inspect.gateFailures?.length
+      ? `Read the post-cap tail's diff (this argv). It holds gate amendments repairing: ${inspect.gateFailures.join('; ')}. Judge it against those gate failures and the findings of review ${inspect.anchor}: addresses-findings when every change repairs one of them and nothing else changes. Record { verdict: 'addresses-findings' | 'unrelated-change', tail: '${inspect.tail}', head: '${inspect.head}' }.`
+      : `Read the post-cap tail's diff (this argv) against the findings of review ${inspect.anchor}; record { verdict: 'addresses-findings' | 'unrelated-change', tail: '${inspect.tail}', head: '${inspect.head}' }.`,
     command: ['git', '-C', wp.lane.worktree, 'diff', '--no-color', '--no-renames', from, to, '--', ...inspect.files],
     land: { tail: inspect.tail, head: inspect.head, review: inspect.review, findingsHash: inspect.findingsHash, gate: requeue(gate) },
     expects: { type: 'json', fields: ['verdict', 'tail', 'head'] } };

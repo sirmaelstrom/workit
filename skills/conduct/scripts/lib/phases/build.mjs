@@ -641,6 +641,8 @@ function expand(state, wp, deps) {
       return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
     }
     case 'land':
+      // A gate amendment's lane work ends here: its gate-fix range is closed at the head it pushed.
+      for (const fix of wp.gateFixes ?? []) fix.to ??= wp.pr?.head ?? null;
       if (mergeLockFor(state, wp) === 'other') return go([waitSpec('rebase', WAIT_MS, `Wait: ${state.mergeLock.wpId} holds the merge lock.`)], 'land');
       if (wp.state !== 'gate') setState(state, wp, 'gate', null, deps);
       return go(rebaseActions(state, wp), 'gate');
