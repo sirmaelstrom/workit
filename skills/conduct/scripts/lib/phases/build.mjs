@@ -527,12 +527,14 @@ function merged(state, wp, deps) {
   if (state.adapters?.notify?.on && notify) {
     after.push(shell('notify', 'notify', shellArgv(notify, deps.platform), { env: { WORKIT_NOTIFY_PR: String(number), WORKIT_NOTIFY_SHA: sha, WORKIT_NOTIFY_REVERT: `git revert ${sha}` } }));
   }
-  // The projected crossing, at every merge: booked spend (the larger of the
-  // last meter reading and the closed lanes' sum: a reading can predate this
-  // lane's cost) plus every WP whose lane cost is not booked yet (unfinished, or
-  // a lane still open, this one included) at the projection.
-  const closedSum = state.wps.reduce((total, other) => total + (Number(other.lane?.costUsd) || 0), 0);
-  const booked = Math.max(state.build.lastSpend?.usd ?? 0, closedSum);
+  // The projected crossing, at every merge: booked spend (the last meter
+  // reading plus the lanes that closed after it, which it cannot include; with
+  // no reading, the closed lanes' sum) plus every WP whose lane cost is not
+  // booked yet (unfinished, or a lane still open, this one included) at the projection.
+  const read = state.build.lastSpend;
+  // A lane that closed at the reading's instant may or may not be in it: counted (the safe side).
+  const closedAfter = (other) => !read || (other.lane?.exitedAt && Date.parse(other.lane.exitedAt) >= Date.parse(read.at));
+  const booked = (read?.usd ?? 0) + state.wps.filter(closedAfter).reduce((total, other) => total + (Number(other.lane?.costUsd) || 0), 0);
   const unbooked = (other) => !['merged', 'refuted'].includes(other.state) || (Boolean(other.lane?.startedAt) && !Number.isFinite(Number(other.lane?.costUsd ?? NaN)));
   const left = state.wps.filter(unbooked).length;
   const per = laneProjection(state, deps);

@@ -816,6 +816,13 @@ test('budget projection (8f433d11): every merge records booked spend and the pro
   assert.equal(await drive(one), null);
   const [merge] = one.events().filter((e) => e.event === 'spend-projection');
   assert.equal(money(merge.data.bookedUsd), money(LANE_COST), JSON.stringify(merge.data));
+
+  // A reading above the lane sum: $70 read before the lane, which then closes at LANE_COST: booked is both.
+  const above = harness(t, { wps: [TWO[0], TWO[1]], spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100 });
+  above.spendOut = Array(20).fill('70\n');
+  assert.equal(await drive(above), null);
+  const [after] = above.events().filter((e) => e.event === 'spend-projection');
+  assert.equal(money(after.data.bookedUsd), money(70 + LANE_COST), JSON.stringify(after.data));
 });
 
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
