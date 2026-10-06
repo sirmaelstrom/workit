@@ -245,11 +245,9 @@ function rulingAction(state, wp, { asks = null, row = null }) {
 
 // ---- ratify ----
 
-// A path is in a WP's Files when it is listed, or sits under a listed directory.
-const covered = (files, path) => (files ?? []).some((file) => {
-  const bare = String(file).replace(/\/$/, '');
-  return path === bare || path.startsWith(`${bare}/`);
-});
+// A path is in a WP's Files when it is listed, or sits under a listed
+// directory, which ends in `/`: the merge gate's own rule (land.mjs declaredFile).
+const covered = (files, path) => (files ?? []).some((file) => (String(file).endsWith('/') ? path.startsWith(file) : path === file));
 
 // A WP held only because its post-cap tail touches paths outside its Files is
 // the conductor's ruling, not the end of the build.
@@ -274,8 +272,11 @@ function applyRatify(state, wp, paths, why, deps) {
     return repoPath;
   });
   if (!normal.length) throw new ConductError(2, 'ratify: no paths');
-  const owner = state.wps.find((other) => other !== wp && !['merged', 'refuted'].includes(other.state) && other.files?.length && !filesDisjoint(normal, other.files));
-  if (owner) throw new ConductError(5, `ratify: ${owner.id} (${owner.state}) owns a path in ${normal.join(', ')}; lanes run on disjoint Files`);
+  // No Files means an unknown scope, which conflicts with every WP; a ratified
+  // path would make it look complete. The same holds for the owner check.
+  if (!wp.files?.length) throw new ConductError(5, `ratify: ${wp.id} has no declared Files (an unknown scope); ratifying would define its whole scope`);
+  const owner = state.wps.find((other) => other !== wp && !['merged', 'refuted'].includes(other.state) && !filesDisjoint(normal, other.files ?? []));
+  if (owner) throw new ConductError(5, `ratify: ${owner.id} (${owner.state}) owns a path in ${normal.join(', ')}${owner.files?.length ? '' : ' (it has no declared Files)'}; lanes run on disjoint Files`);
   wp.files = [...new Set([...(wp.files ?? []), ...normal])];
   wp.ratified = [...(wp.ratified ?? []), { paths: normal, why, at: deps.timestamp() }];
   appendEvent(state, deps, { event: 'ratified', data: { wpId: wp.id, paths: normal, why } });

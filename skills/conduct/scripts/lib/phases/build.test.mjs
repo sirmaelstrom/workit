@@ -684,6 +684,22 @@ test('ratify verb (c58b3a51): extends a live WP\'s Files with the ruling; refuse
   assert.equal((await run('--wp', 'WP-02', '--paths', '../outside.md', '--why', 'x')).code, 2);
 });
 
+test('ratify (c58b3a51): coverage follows the merge gate (a directory ends in /), and an unknown scope is never ratified or ratified into', (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  const held = h.wp('WP-02');
+  Object.assign(held, { state: 'held', heldOutside: ['src/ui/Panel.svelte'], queue: [] });
+  const bare = build.ratify(h.state, { wpId: 'WP-02', paths: ['src/ui'], why: 'the panel' }, h.deps);
+  assert.equal(bare.readmitted, false, '`src/ui` is a file to the gate, so the tail is still outside');
+  assert.equal(held.state, 'held');
+  const dir = build.ratify(h.state, { wpId: 'WP-02', paths: ['src/ui/'], why: 'the panel directory' }, h.deps);
+  assert.deepEqual([dir.readmitted, held.state, held.stage], [true, 'gate', 'land']);
+
+  const unknown = harness(t, { wps: [TWO[0], { ...TWO[1], files: [] }, TWO[2]] });
+  assert.throws(() => build.ratify(unknown.state, { wpId: 'WP-02', paths: ['docs/new.md'], why: 'x' }, unknown.deps), { code: 5, message: /no declared Files/ });
+  assert.deepEqual(unknown.wp('WP-02').files, []);
+  assert.throws(() => build.ratify(unknown.state, { wpId: 'WP-03', paths: ['docs/new.md'], why: 'x' }, unknown.deps), { code: 5, message: /WP-02 \(pending\) owns a path.*no declared Files/ });
+});
+
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
   const h = harness(t);
   h.life = { 'WP-02': 3, 'WP-03': 1 };
