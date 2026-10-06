@@ -470,6 +470,25 @@ function ancestor(wt, a, b, exec) {
 const fixedCommits = (review) => (review.verdicts ?? [])
   .filter((row) => row.verdict === 'fixed' && /^[0-9a-f]{7,40}$/i.test(row.commit ?? '')).map((row) => row.commit.toLowerCase());
 
+// The commits gate amendments added after the review cap: each gate amendment
+// records the head it started from (build.mjs gateAmend), and its commits are
+// that head..`to`. A start that is no longer an ancestor of `to` (a later
+// rebase rewrote it) names nothing; null is an unreadable range.
+function gateFixCommits(wp, to, exec) {
+  const wt = wp.lane.worktree;
+  const commits = new Set();
+  for (const fix of wp.gateFixes ?? []) {
+    if (!fix?.from || fix.from === to) continue;
+    const onLine = ancestor(wt, fix.from, to, exec);
+    if (onLine === null) return null;
+    if (!onLine) continue;
+    const listed = exec('git', ['-C', wt, 'rev-list', `${fix.from}..${to}`]);
+    if (listed.code !== 0) return null;
+    for (const sha of lines(listed.stdout)) commits.add(sha.toLowerCase());
+  }
+  return commits;
+}
+
 // An inspection binds the exact tail and candidate head, the anchoring
 // review's identity and a hash of its adjudication table.
 const reviewIdentity = (review) => ({ round: review.round ?? null, scope: review.scope ?? null, since: review.since ?? null });
@@ -507,9 +526,14 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
   if (listed.code !== 0) return { failure: `tail ${key} commits unreadable: ${first(listed.stderr)}`, cause: 'infra' };
   const fixed = fixedCommits(anchor);
   const shas = lines(listed.stdout);
-  if (!shas.length || !shas.every((sha) => fixed.some((commit) => sha.toLowerCase().startsWith(commit)))) {
+  const gateFixed = gateFixCommits(wp, to, exec);
+  if (gateFixed === null) return { failure: `tail ${key}: a gate amendment's commits are unreadable`, cause: 'infra' };
+  const isFixed = (sha) => fixed.some((commit) => sha.toLowerCase().startsWith(commit));
+  if (!shas.length || !shas.every((sha) => isFixed(sha) || gateFixed.has(sha.toLowerCase()))) {
     return { failure: `review does not cover head: tail ${key} has commits that are not fixed rows of the anchoring review`, cause: 'review-uncovered' };
   }
+  // Gate amendments after the cap are their own class: bounded and inspected like the post-cap tail.
+  const kind = shas.every(isFixed) ? 'post-cap' : 'gate-fix';
   const count = production.reduce((sum, row) => sum + row.lines, 0);
   const outside = rows.map((row) => row.path).filter((path) => !declaredFile(wp, path));
   if (count > TAIL_LINE_CAP || outside.length || rows.some((row) => row.binary)) {
@@ -523,7 +547,7 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
   const files = (nonTrivial.length ? nonTrivial : rows).map((row) => row.path);
   if (!inspection) return { failure: `post-cap tail ${key} needs an inspection`, cause: 'inspect', inspect: { ...binding, files, anchor: anchor.reviewId ?? anchor.head } };
   if (inspection.verdict !== 'addresses-findings') return { failure: `post-cap tail ${key} inspected: ${inspection.verdict}`, cause: 'tail-out-of-bounds' };
-  return { tail: `${key} (post-cap)` };
+  return { tail: `${key} (${kind})` };
 }
 
 // Condition (3): the latest review covers head, through equivalent rebases in

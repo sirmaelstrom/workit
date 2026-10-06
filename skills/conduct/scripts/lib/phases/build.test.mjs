@@ -1343,6 +1343,10 @@ test('gate command: exit 1 at the rebased head → an amendment and no merge act
   assert.equal(brief.part, 'amendment');
   assert.match(brief.instruction, /the gate command exited 1 at the rebased head/);
   assert.ok(!h.trace.some((a) => a.step === 'merge'));
+  // f424b70b: the amendment's start is recorded for the land gate's gate-fix tail.
+  const wp = h.wp('WP-02');
+  assert.deepEqual(wp.gateFixes.map((fix) => fix.from), [wp.rebases.at(-1).to]);
+  assert.equal(wp.amendment.since, wp.rebases.at(-1).to);
 });
 
 test('gate command after a no-op rebase: the amended head gets its delta review (the fixed land.mjs predicate), never a block', async (t) => {

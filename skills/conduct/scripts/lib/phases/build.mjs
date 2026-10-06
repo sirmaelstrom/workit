@@ -505,6 +505,8 @@ function checkFailed(state, wp, deps, reason) {
 function gateAmend(state, wp, deps, reason) {
   if ((wp.gateAmends ?? 0) >= GATE_AMENDS) return block(state, wp, deps, `${reason} (after ${GATE_AMENDS} gate amendments)`);
   wp.gateAmends = (wp.gateAmends ?? 0) + 1;
+  // The land gate reads this amendment's commits (from..head) as a gate-fix tail, not as unreviewed work.
+  wp.gateFixes = [...(wp.gateFixes ?? []), { from: wp.pr?.head ?? null, reason }];
   return startAmendment(state, wp, deps, { kind: 'gate', reason });
 }
 

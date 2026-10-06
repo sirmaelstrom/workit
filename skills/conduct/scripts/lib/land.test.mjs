@@ -428,6 +428,29 @@ test('C2-1 review A → equivalent rebase B → amendment C → equivalent rebas
   assert.deepEqual([gate(makeState(), inspected(wp, opts), opts).ok, gate(makeState(), inspected(wp, opts), opts).unreviewedTail], [true, `${B}..${C} (post-cap)`]);
 });
 
+test('f424b70b gate-fix tail: the round-2 anchor, an equivalent rebase, then a one-line gate amendment classifies as gate-fix and is inspected, not review-uncovered', () => {
+  // RC-3 WP-13: anchor A (round-2 delta), rebased to B, the gate failed at B,
+  // and the lane's one-line fix sits on B as HEAD.
+  const [A, B] = [sha('4'), sha('5')];
+  const anchor = { round: 2, scope: 'delta', since: sha('f'), head: A, reviewId: 'review-2', verdicts: [{ comment: '1', verdict: 'fixed', commit: sha('3') }] };
+  const base = { reviews: [anchor], rebases: [{ from: A, to: B, equivalent: true }] };
+  const opts = { tailFiles: ['lib/x.test.mjs'], tailCommits: [HEAD], ancestry: { [`${A}..${HEAD}`]: 1 } };
+  const uncovered = gate(makeState(), makeWp(base), opts);
+  assert.deepEqual(uncovered.causes, ['review-uncovered'], 'without the recorded gate fix the tail is unreviewed work');
+  const wp = makeWp({ ...base, gateFixes: [{ from: B, reason: 'the gate command exited 1 at the rebased head' }] });
+  const needs = gate(makeState(), wp, opts);
+  assert.deepEqual(needs.causes, ['inspect'], needs.failures.join('; '));
+  assert.deepEqual([needs.inspect.tail, needs.inspect.head], [`${B}..${HEAD}`, HEAD]);
+  const done = gate(makeState(), inspected(wp, opts), opts);
+  assert.deepEqual([done.ok, done.unreviewedTail], [true, `${B}..${HEAD} (gate-fix)`]);
+  // Still bounded: a gate fix outside the WP's Files is held (for a ratify ruling), and one over the cap is out of bounds.
+  assert.deepEqual(gate(makeState(), wp, { ...opts, tailFiles: ['lib/other.mjs'] }).causes, ['tail-outside-files']);
+  assert.deepEqual(gate(makeState(), wp, { ...opts, tailFiles: ['lib/x.mjs'], tailLines: 401 }).causes, ['tail-out-of-bounds']);
+  // A gate fix whose start a later rebase rewrote names nothing.
+  const rewritten = gate(makeState(), wp, { ...opts, ancestry: { [`${A}..${HEAD}`]: 1, [`${B}..${HEAD}`]: 1 } });
+  assert.deepEqual(rewritten.causes, ['review-uncovered']);
+});
+
 test('fresh base: merge-base --is-ancestor exit 1 is "stale base", and land gate is code 5', async () => {
   const out = gate(makeState(), makeWp(), { ancestor: 1 });
   assert.deepEqual([out.staleBase, out.failures], [true, ['stale base']]);
