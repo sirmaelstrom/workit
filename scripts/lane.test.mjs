@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
 import { fileURLToPath } from 'node:url';
 
 import {
-  DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
+  DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, paneErrorLine, panePromptSignature,
   reportShapeProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -2567,6 +2567,92 @@ test('A3-5b: the capture waits for a freshly created pane to draw its prompt', a
   );
   assert.equal(quiet.exit, 0, 'the capture is best-effort; a quiet pane still starts its lane');
   assert.equal(readState(g).lanes['lane-a'].promptSignature, null);
+});
+
+// A pane whose pwsh profile threw at start: the error line is verbatim from a
+// live run's lane log, the prompt line is that run's shape with the path scrubbed.
+const PROFILE_ERROR = 'InvalidOperation: Index operation failed; the array index evaluated to null.';
+const RC3_PROMPT = '~  X: / fixture / projects / shopfloor-wt-wp-02 ~';
+
+test('595672af: error output is never the signature; the last line above it is', () => {
+  assert.equal(panePromptSignature(`~ sirm  pwsh\n${RC3_PROMPT}\n${PROFILE_ERROR}`), RC3_PROMPT);
+  assert.equal(panePromptSignature(`${PROFILE_ERROR}\n~ sirm  pwsh\n${RC3_PROMPT}`), RC3_PROMPT);
+  const concise = ['InvalidOperation: X:\\fixture\\profile.ps1:12', 'Line |', '  12 |  $x[$null]', '     |  ~~~~~~~~~', '     | Index operation failed; the array index evaluated to null.'].join('\n');
+  assert.equal(panePromptSignature(`~ sirm  pwsh\n${RC3_PROMPT}\n${concise}`), RC3_PROMPT);
+  const classic = ['At line:1 char:1', '+ $x[$null]', '+ ~~~~~~~~~', '    + CategoryInfo          : InvalidOperation: (:) [], RuntimeException'].join('\n');
+  assert.equal(panePromptSignature(`PS C:\\lane>\n${classic}`), 'PS C:\\lane>');
+  assert.equal(panePromptSignature(PROFILE_ERROR), null, 'a pane with only error output has no signature');
+  assert.equal(paneErrorLine(MEASURED_PROMPT), false);
+  assert.equal(paneErrorLine(RC3_PROMPT), false);
+  assert.equal(paneErrorLine(BLOCKED_SIGNATURE), false);
+});
+
+test('595672af: a pane read while it ends in the profile error is read again until the prompt is drawn', async (t) => {
+  const f = fixture(t);
+  f.responses.push(
+    { code: 0, stdout: PROFILE_ERROR, stderr: '' },
+    { code: 0, stdout: `${PROFILE_ERROR}\n~ sirm  pwsh\n${RC3_PROMPT}`, stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, sleep: async () => {} },
+  );
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(readState(f).lanes['lane-a'].promptSignature, RC3_PROMPT);
+});
+
+test('595672af: an error-output signature stops on agent-unlisted + an idle pane whose last line shows the worktree; a listed agent, a moving pane or stable non-prompt output still fails', async (t) => {
+  // The lane's worktree is its fixture dir; the prompt shows it as oh-my-posh does.
+  const promptFor = (f) => `~  X: / fixture / projects / ${basename(f.dir)} ~`;
+  const idle = fixture(t);
+  seedLane(idle, { kind: 'claude', promptSignature: PROFILE_ERROR });
+  const stopped = await stopWith(idle, stopHerdr(`~ sirm  pwsh\n${promptFor(idle)}`));
+  assert.equal(stopped.exit, EXIT_CODES.ok, JSON.stringify(stopped.output));
+  assert.deepEqual([stopped.output.state, stopped.output.promptCheck, stopped.output.panePrompt], ['stopped', 'idle', false]);
+
+  // A null signature is untrusted too: the same evidence stops it.
+  const unsigned = fixture(t);
+  seedLane(unsigned, { kind: 'claude', promptSignature: null });
+  const bare = await stopWith(unsigned, stopHerdr(`~ sirm  pwsh\n${promptFor(unsigned)}`));
+  assert.equal(bare.output.promptCheck, 'idle', JSON.stringify(bare.output));
+
+  // Stable output that is not a prompt is not idle: output without the
+  // worktree, an error naming it, and prose that merely ends with its name.
+  const notPrompts = (f) => [
+    `${BLOCKED_TAIL}\nsomething printed after the footer`,
+    `Error: cannot access X:/fixture/projects/${basename(f.dir)}`,
+    `wrote the report under X:/fixture/projects/${basename(f.dir)}`,
+  ];
+  for (const signature of [null, PROFILE_ERROR]) {
+    for (const k of [0, 1, 2]) {
+      const quiet = fixture(t);
+      seedLane(quiet, { kind: 'claude', promptSignature: signature });
+      const held = await stopWith(quiet, stopHerdr(notPrompts(quiet)[k]));
+      assert.equal(held.exit, EXIT_CODES.error, `signature ${signature}, case ${k}: ${JSON.stringify(held.output)}`);
+      assert.match(held.output.error, /^stop pane prompt check failed/);
+    }
+  }
+  // A bash prompt shows the cwd too; no default shape matches it, so it stops on the idle path.
+  const bash = fixture(t);
+  seedLane(bash, { kind: 'claude', promptSignature: null });
+  const bashStop = await stopWith(bash, stopHerdr(`banner\nuser@host:~/projects/${basename(bash.dir)}$`));
+  assert.deepEqual([bashStop.exit, bashStop.output.promptCheck], [EXIT_CODES.ok, 'idle'], JSON.stringify(bashStop.output));
+
+  const listed = fixture(t);
+  seedLane(listed, { kind: 'claude', promptSignature: PROFILE_ERROR });
+  const still = await stopWith(listed, stopHerdr(`~ sirm  pwsh\n${promptFor(listed)}`, () => true));
+  assert.equal(still.exit, EXIT_CODES.error);
+  assert.match(still.output.error, /still listed/);
+
+  const moving = fixture(t);
+  seedLane(moving, { kind: 'claude', promptSignature: PROFILE_ERROR });
+  let n = 0;
+  const busy = await stopWith(moving, stopHerdr(() => `~ sirm  pwsh\noutput line ${n++}`));
+  assert.equal(busy.exit, EXIT_CODES.error);
+  assert.match(busy.output.error, /^stop pane prompt check failed/);
 });
 
 test('A3-6: fallback waits for the signature the lane recorded', async (t) => {
