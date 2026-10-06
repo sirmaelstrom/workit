@@ -2619,14 +2619,27 @@ test('595672af: an error-output signature stops on agent-unlisted + an idle pane
   const bare = await stopWith(unsigned, stopHerdr(`~ sirm  pwsh\n${promptFor(unsigned)}`));
   assert.equal(bare.output.promptCheck, 'idle', JSON.stringify(bare.output));
 
-  // Stable output that is not a prompt (it does not show the worktree) is not idle.
+  // Stable output that is not a prompt is not idle: output without the
+  // worktree, an error naming it, and prose that merely ends with its name.
+  const notPrompts = (f) => [
+    `${BLOCKED_TAIL}\nsomething printed after the footer`,
+    `Error: cannot access X:/fixture/projects/${basename(f.dir)}`,
+    `wrote the report under X:/fixture/projects/${basename(f.dir)}`,
+  ];
   for (const signature of [null, PROFILE_ERROR]) {
-    const quiet = fixture(t);
-    seedLane(quiet, { kind: 'claude', promptSignature: signature });
-    const held = await stopWith(quiet, stopHerdr(`${BLOCKED_TAIL}\nsomething printed after the footer`));
-    assert.equal(held.exit, EXIT_CODES.error, `signature ${signature}: ${JSON.stringify(held.output)}`);
-    assert.match(held.output.error, /^stop pane prompt check failed/);
+    for (const k of [0, 1, 2]) {
+      const quiet = fixture(t);
+      seedLane(quiet, { kind: 'claude', promptSignature: signature });
+      const held = await stopWith(quiet, stopHerdr(notPrompts(quiet)[k]));
+      assert.equal(held.exit, EXIT_CODES.error, `signature ${signature}, case ${k}: ${JSON.stringify(held.output)}`);
+      assert.match(held.output.error, /^stop pane prompt check failed/);
+    }
   }
+  // A bash prompt shows the cwd too; no default shape matches it, so it stops on the idle path.
+  const bash = fixture(t);
+  seedLane(bash, { kind: 'claude', promptSignature: null });
+  const bashStop = await stopWith(bash, stopHerdr(`banner\nuser@host:~/projects/${basename(bash.dir)}$`));
+  assert.deepEqual([bashStop.exit, bashStop.output.promptCheck], [EXIT_CODES.ok, 'idle'], JSON.stringify(bashStop.output));
 
   const listed = fixture(t);
   seedLane(listed, { kind: 'claude', promptSignature: PROFILE_ERROR });

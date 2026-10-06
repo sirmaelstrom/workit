@@ -2223,10 +2223,13 @@ async function stopLane(opts, deps, state) {
     // recognise this pane's prompt by its text. The agent is gone, so the pane
     // is judged idle at a prompt when no TUI is drawn, its last line held still
     // from the end of the prompt wait through both late reads, and that line
-    // names the lane's worktree directory, as a shell prompt shows its cwd.
-    // A prompt that does not show the cwd keeps the failure below.
+    // is not error output and ENDS with the lane's worktree directory and a
+    // prompt character, as a shell prompt shows its cwd (`… / wp-02 ~`,
+    // `PS …\wp-02>`, `…/wp-02$`). Output that merely mentions the worktree,
+    // or a prompt that does not show the cwd, keeps the failure below.
     const untrusted = !lane.promptSignature || paneErrorLine(lane.promptSignature);
-    const showsCwd = (line) => Boolean(lane.path) && line.includes(basename(lane.path));
+    const cwdPrompt = lane.path ? new RegExp(`${basename(lane.path).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\\\/]?\\s*[~>$#%❯➜λ]\\s*$`, 'u') : null;
+    const showsCwd = (line) => Boolean(cwdPrompt) && !paneErrorLine(line) && cwdPrompt.test(line);
     if (untrusted && gone && !now.liveTui && now.last !== null && now.last === before.last && now.last === error.lastLine && showsCwd(now.last)) {
       return {
         exit: EXIT.OK,
