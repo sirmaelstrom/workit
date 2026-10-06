@@ -684,12 +684,26 @@ function paneRawLines(text) {
   return responseText(text).split(/\r?\n/).filter((line) => line.trim());
 }
 
+// What a shell prints when its profile throws at pane start: PowerShell's
+// concise view (`InvalidOperation: …`, then `Line |` / `12 | …` / `| ~~~`
+// frame lines) and its classic view (`At line:1 char:1`, `+ CategoryInfo …`).
+// None of these is ever a prompt.
+const PANE_ERROR_LINES = Object.freeze([
+  /^[A-Z][A-Za-z]+(?:Exception|Error)?: \S/,
+  /^Line \|$/,
+  /^\d+ \|/,
+  /^\|/,
+  /^At (?:line:\d+|.+:\d+) char:\d+$/,
+  /^\+ /,
+]);
+
+export const paneErrorLine = (line) => PANE_ERROR_LINES.some((pattern) => pattern.test(String(line ?? '').trim()));
+
 // The pane's own prompt is the only prompt that matters. Its last non-empty
-// line is the stable half — the first oh-my-posh line carries a clock and a
-// command duration, which change between reads.
+// line that is not error output is the stable half — the first oh-my-posh
+// line carries a clock and a command duration, which change between reads.
 export function panePromptSignature(text) {
-  const lines = paneLines(text);
-  return lines.length > 0 ? lines.at(-1) : null;
+  return paneLines(text).findLast((line) => !paneErrorLine(line)) ?? null;
 }
 
 export function paneAtPrompt(text, { signature = null, patterns = DEFAULT_PROMPT_PATTERNS } = {}) {
@@ -826,14 +840,17 @@ function readPane(deps, pane) {
 // first live run recorded `promptSignature: null` for both lanes — and a null
 // signature silently drops `fallback` back to the shape guess this exists to
 // replace. Bounded and non-fatal: a lane still starts if the pane stays quiet.
+// A pane that ends in error output has not finished starting (or its profile
+// threw after the prompt): it is read again until the deadline, and then the
+// last line above the error output is taken.
 async function capturePromptSignature(deps, pane, options, timeoutMs = 5_000) {
   const deadline = deps.now() + timeoutMs;
   let signature = null;
   do {
     const snapshot = readPane(deps, pane);
     if (snapshot.code === 0) {
-      signature = panePromptSignature(snapshot.stdout);
-      if (signature) return signature;
+      signature = panePromptSignature(snapshot.stdout) ?? signature;
+      if (signature && !paneErrorLine(paneLines(snapshot.stdout).at(-1))) return signature;
     }
     await deps.sleep(250);
   } while (deps.now() < deadline);
@@ -855,7 +872,7 @@ async function waitForPanePrompt(deps, pane, options = {}, timeoutMs = 30_000) {
   // only the expected prompt invited a match against prompt text higher up.
   const seen = last === null ? 'the last pane read failed' : `its last line was ${JSON.stringify(last.length > 200 ? `${last.slice(0, 200)}…` : last)}`;
   const expected = options.signature ? `, not the recorded prompt ${JSON.stringify(options.signature)}` : '';
-  throw new LaneError(EXIT.ERROR, `pane ${pane} never returned to a shell prompt: ${seen}${expected}`);
+  throw Object.assign(new LaneError(EXIT.ERROR, `pane ${pane} never returned to a shell prompt: ${seen}${expected}`), { lastLine: last });
 }
 
 function laneSlug(value) {
@@ -2157,6 +2174,7 @@ async function stopLane(opts, deps, state) {
         // The footer must be the last two lines, so a live TUI's footer below
         // it keeps it out: neither footer line matches a LIVE_TUI pattern.
         resumeId: lane.kind === 'claude' && read.code === 0 ? claudeExitFooterTail(text) : null,
+        last: lines.at(-1) ?? null,
       };
     };
     const before = look(readPane(deps, lane.pane));
@@ -2199,6 +2217,18 @@ async function stopLane(opts, deps, state) {
         exit: EXIT.OK,
         output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'late', ...latePolls },
         row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'late', ...latePolls },
+      };
+    }
+    // With no recorded signature, or one that is error output, nothing can
+    // recognise this pane's prompt. The agent is gone, so the pane is judged
+    // idle when no TUI is drawn and its last line held still from the end of
+    // the prompt wait through both late reads.
+    const untrusted = !lane.promptSignature || paneErrorLine(lane.promptSignature);
+    if (untrusted && gone && !now.liveTui && now.last !== null && now.last === before.last && now.last === error.lastLine) {
+      return {
+        exit: EXIT.OK,
+        output: { state: 'stopped', panePrompt: false, agentListed: false, promptCheck: 'idle', ...latePolls },
+        row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'idle', ...latePolls },
       };
     }
     if (Array.isArray(lateNames) && lateNames.includes(herdrAgentName(opts.name))) {
