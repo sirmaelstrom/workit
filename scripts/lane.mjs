@@ -241,8 +241,8 @@ export function herdrAgentName(name) {
 
 function herdrArgs(program, args) {
   if (program !== 'herdr' || args[0] !== 'agent' || !HERDR_NAMED_VERBS.has(args[1]) || typeof args[2] !== 'string') return args;
-  // `agent focus` takes a pane id (`w2P:p1`), which the pattern never rewrites: ids contain ':'.
-  if (args[2].includes(':')) return args;
+  // `agent focus` takes a pane id (`w2P:p1`), never an agent name: leave it as it is.
+  if (args[1] === 'focus' && args[2].includes(':')) return args;
   return [args[0], args[1], herdrAgentName(args[2]), ...args.slice(3)];
 }
 
@@ -2167,7 +2167,7 @@ async function stopLane(opts, deps, state) {
     const lateListing = late.listing;
     const lateNames = late.names;
     const latePolls = late.polls > 1 ? { agentListPolls: late.polls } : {};
-    const gone = lateListing.code === 0 && Array.isArray(lateNames) && !lateNames.includes(opts.name);
+    const gone = lateListing.code === 0 && Array.isArray(lateNames) && !lateNames.includes(herdrAgentName(opts.name));
     // The poll can take the whole window, and the shell may come back during
     // it: once the agent is gone, the pane is judged as it is now.
     const now = gone ? look(readPane(deps, lane.pane)) : before;
@@ -2201,7 +2201,7 @@ async function stopLane(opts, deps, state) {
         row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'late', ...latePolls },
       };
     }
-    if (Array.isArray(lateNames) && lateNames.includes(opts.name)) {
+    if (Array.isArray(lateNames) && lateNames.includes(herdrAgentName(opts.name))) {
       throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed after late prompt check`);
     }
     throw new LaneError(EXIT.ERROR, `stop pane prompt check failed: ${error.message}`);

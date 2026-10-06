@@ -228,6 +228,47 @@ test('herdr agent names: a lane name past 32 characters reaches herdr as a stabl
   assert.deepEqual(after[0].args, ['agent', 'focus', 'w1:p1'], 'a pane id is never rewritten');
 });
 
+test('herdr agent names: a long lane still listed under its alias fails the late stop instead of reading as gone', async (t) => {
+  const long = 'shopfloor-v1-an-original-overhead-worksh-wp-01';
+  const alias = herdrAgentName(long);
+  const f = fixture(t);
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    creates: [],
+    lanes: { [long]: { pane: 'w1:p2', kind: 'claude', model: 'opus', reasoning: 'high', branch: 'feat/x', base: 'main', path: f.dir, promptSignature: 'PS X:\\fixture\\lane>' } },
+  }), 'utf8');
+  f.responses.push(
+    { code: 0, stdout: '{}', stderr: '' },
+    // The prompt wait sees no prompt before its 1 ms deadline.
+    { code: 0, stdout: 'still exiting', stderr: '' },
+    // The late read: the pane is at the shell, but herdr lists the alias on every read.
+    { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' },
+  );
+  for (let i = 0; i < 41; i++) f.responses.push({ code: 0, stdout: `{"result":{"agents":[{"name":"${alias}","agent":"claude","agent_status":"working"}]}}`, stderr: '' });
+  // The pane is back at the shell when re-read, so only the listing can keep the stop from succeeding.
+  f.responses.push({ code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' });
+  let clock = 0;
+  const result = await runLane(['stop', long, '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.notEqual(result.exit, 0, `a listed alias must not read as a stopped lane: ${JSON.stringify(result.output)}`);
+});
+
+test('herdr agent names: a lane name with a colon is aliased; only agent focus keeps a pane id', async (t) => {
+  const f = fixture(t);
+  const alias = herdrAgentName('team:lane');
+  assert.match(alias, /^[a-z][a-z0-9_-]{0,31}$/);
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: `{"result":{"agent":{"name":"${alias}","state":"idle"}}}`, stderr: '' },
+    { code: 0, stdout: '{"result":{"focused":true}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"conductor","pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(
+    ['start', 'team:lane', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+  );
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.equal(agentStartCall(f).args[2], alias);
+});
+
 test('WP-1: prompt sends only the absolute prompt-file instruction', async (t) => {
   const f = fixture(t);
   const prompt = join(f.dir, 'task prompt.md');
