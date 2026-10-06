@@ -4428,6 +4428,12 @@ test('93d4855b: admit is a read-only verdict — exit 0 or 7, drain below 4 GB, 
   assert.equal(linux.result.output.freeGb, null);
   assert.match(linux.result.output.warning, /Windows only/);
 
+  // b443eca6: a caller that admits only on room refuses an unmeasured reading.
+  const strict = await admit(null, ['--require-reading'], { platform: 'linux' });
+  assert.equal(strict.result.exit, 7);
+  assert.match(strict.result.output.reason, /not measured .*--require-reading asks for a reading/);
+  assert.equal((await admit(32, ['--require-reading'])).result.exit, 0, 'a measured reading with room is admitted');
+
   const named = fixture(t);
   assert.equal((await runLane(['admit', 'lane-a', '--log', named.log], { exec: named.exec, env: {}, platform: 'win32' })).exit, 2);
 });

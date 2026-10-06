@@ -766,6 +766,7 @@ test('lanes 3-4 (b443eca6): with --lanes 3 on the exec backend, only the 3rd liv
   // Refused once; by its retry the other lanes may have ended, and a lane that is not the 3rd is not gated.
   assert.ok(admits.length >= 1);
   assert.ok(admits[0].command.includes('admit') && admits[0].command[1].endsWith('lane.mjs'));
+  assert.ok(admits[0].command.includes('--require-reading'), 'an unmeasured host gets no 3rd lane');
   assert.ok(held, 'WP-04 was held back while WP-02 and WP-03 ran');
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged']);
 });

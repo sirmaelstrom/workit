@@ -156,7 +156,7 @@ export function laneBackend(state, deps, backend) {
   // Outcome first (D19.16): the report check precedes every other check.
   const reportCheck = (wp, extra) => shellAction('check', { part: 'report', instruction: 'Check the report\'s outcome and runtime exercise.', command: conduct('check', wp, extra) });
   const laneMjs = (verb, args, log) => ['node', join(pluginRoot, 'scripts', 'lane.mjs'), verb, ...args, '--log', log];
-  const admitAction = () => shellAction('admit', { instruction: 'Ask lane.mjs whether a lane may start.', command: laneMjs('admit', [], join(state.runDir, 'lane-runner.jsonl')) });
+  const admitAction = (args = []) => shellAction('admit', { instruction: 'Ask lane.mjs whether a lane may start.', command: laneMjs('admit', args, join(state.runDir, 'lane-runner.jsonl')) });
   if (backend === 'herdr') {
     return {
       name: 'herdr',
@@ -210,8 +210,9 @@ export function laneBackend(state, deps, backend) {
   }
   return {
     name: 'exec',
-    // A 3rd or 4th live lane is admitted on free commit memory, as every herdr lane is.
-    admit: (wp) => (state.wps.filter((other) => other !== wp && (LIVE_STATES.includes(other.state) || laneOccupied(other))).length >= GATED_FROM_LANE - 1 ? [admitAction()] : []),
+    // A 3rd or 4th live lane is admitted on measured free commit memory: room is
+    // the gate's whole point, so a host that cannot measure it does not get one.
+    admit: (wp) => (state.wps.filter((other) => other !== wp && (LIVE_STATES.includes(other.state) || laneOccupied(other))).length >= GATED_FROM_LANE - 1 ? [admitAction(['--require-reading'])] : []),
     create: (wp) => {
       const lane = laneLayout(state, wp);
       return [...base(), shellAction('create', {
