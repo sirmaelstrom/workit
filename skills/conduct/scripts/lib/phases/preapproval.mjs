@@ -38,6 +38,20 @@ function describe(entry) {
   return `${entry.on ? 'on' : 'off'} (${entry.evidence}: ${entry.detail})`;
 }
 
+// A goal longer than this is cited by its file, its length and its opening.
+const GOAL_INLINE = 300;
+export const goalPath = (state) => join(state.runDir, 'goal.md');
+
+function goalLine(state) {
+  const goal = String(state.intent.goal);
+  if (goal.length <= GOAL_INLINE && !goal.includes('\n')) return `Goal: ${goal}`;
+  const opening = goal.split('\n').find((line) => line.trim())?.trim() ?? '';
+  return `Goal: ${goal.length} chars, in full at ${goalPath(state)}. It opens: "${opening.length > 160 ? `${opening.slice(0, 160)}…` : opening}"`;
+}
+
+// Touch 1's question, as intake projects it before it writes anything.
+export const touchOneQuestion = (state) => touchOne(state).question;
+
 function touchOne(state) {
   const { intent } = state;
   const ci = intent.ciWorkflows ?? 0;
@@ -49,7 +63,7 @@ function touchOne(state) {
     : `Budget: $${intent.budgetUsd} unmetered: no spend adapter; exec claude lanes' total_cost_usd is summed as a lane-only lower bound and enforced as one.`;
   const question = [
     `DO: approve, hold, change or decline conductor run ${state.slug} before /spec starts. EXPECT: (a) the run specs the goal, builds it in lanes, reviews each PR and merges it at the gate${release ? ', then runs the release recipe' : ''}; (b) the run builds and reviews, and every PR stays open; (c) your text becomes a grant no wider than (a); (d) the run closes with no writes to the repo.`,
-    `Goal: ${intent.goal}`,
+    goalLine(state),
     `Repo: ${intent.repo.path} (${intent.repo.remote}, default branch ${intent.repo.defaultBranch})`,
     `Adapters: ${ADAPTERS.map((name) => `${name} ${describe(state.adapters[name])}`).join('; ')}`,
     `Agents: ${AGENTS.map((name) => `${name} ${describe(state.agents[name])}`).join('; ')}`,

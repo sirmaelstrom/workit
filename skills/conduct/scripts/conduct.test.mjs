@@ -13,7 +13,7 @@ import { STEPS, STEP_SEAM, ConductError, resolveRunDir, readEvents, saveState, a
 import { detectAdapters, laneModel } from './lib/adapters.mjs';
 import { resolveRecipe, recipeArgv } from './lib/recipe.mjs';
 import { shellArgv, spawnDetached, pidAlive } from './lib/exec.mjs';
-import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, resumeCommand, shellLiteral } from './lib/touch.mjs';
+import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, resumeCommand, shellLiteral, filedLength } from './lib/touch.mjs';
 import { validateGrant } from './lib/phases/preapproval.mjs';
 import { samePath } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
@@ -225,6 +225,69 @@ test('intake refuses <case>: exit 2 and the runs root stays empty', async (t) =>
   assert.match(out(again).error, /refusal 6/);
   assert.deepEqual(snapshot(f.runs), before);
   assert.ok(Object.keys(before).includes(join(first.runDir, 'state.json')));
+});
+
+// RC-3's parked first intake: a 3,943-char goal made touch 1's filed question
+// 5,253 chars, and spine_receipt refused it (over 2,000).
+const LONG_GOAL = `Vision: an overhead workshop and logistics sim. ${'One expandable free-build floor where stations, carriers and shelves are placed by the player and every limiter is visible. '.repeat(40)}`.slice(0, 3943);
+
+test('touch 1 (022d6fd9): a 3,943-char goal is cited by its file, length and opening, so the filed question stays under spine_receipt\'s 2,000 chars; goal.md holds it in full', async (t) => {
+  assert.equal(LONG_GOAL.length, 3943);
+  const f = fixture(t);
+  const flow = await toSpineReadBack(f, [], LONG_GOAL);
+  const { question } = flow.receipt.args;
+  assert.ok(question.length < 2000, `the filed question is ${question.length} chars`);
+  assert.match(question, new RegExp(`Goal: 3943 chars, in full at ${join(flow.runDir, 'goal.md').replace(/[\\.]/g, '\\$&')}\\. It opens: "Vision: an overhead workshop`));
+  assert.equal(readFileSync(join(flow.runDir, 'goal.md'), 'utf8'), `${LONG_GOAL}\n`);
+  // A short goal stays inline.
+  const g = fixture(t);
+  const short = await toSpineReadBack(g);
+  assert.match(short.receipt.args.question, /\nGoal: fixture run\n/);
+});
+
+test('refusal 8 (022d6fd9): with the Spine adapter, a touch 1 still over 2,000 chars (here a release recipe) is refused before anything is written', async (t) => {
+  const f = fixture(t);
+  const recipe = { ...RECIPE, verify: Array.from({ length: 60 }, (_, i) => `node scripts/check-${i}.mjs --strict`) };
+  const refused = await intake(f, [...SPINE, '--release', recipeFile(f, recipe)]);
+  assert.equal(refused.code, 2, refused.stdout);
+  assert.match(out(refused).error, /refusal 8: touch 1's question would be \d+ chars, over spine_receipt's 2000-char cap/);
+  assert.deepEqual(readdirSync(f.runs), []);
+  // Without the Spine adapter there is no cap: the core touch is a file.
+  const g = fixture(t);
+  assert.equal((await intake(g, ['--release', recipeFile(g, recipe)])).code, 0);
+});
+
+test('refiling (022d6fd9): a refused answer\'s reason gives way to spine_receipt\'s cap, never the question', () => {
+  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR } };
+  const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
+  // The longest question intake lets through, measured by intake's own filedLength.
+  const question = 'q'.repeat(2000 - filedLength(state, 1, ''));
+  const touch = openTouch(state, { kind: 'preapproval', question, options: [{ key: 'a', label: 'a', consequence: 'a' }] }, deps);
+  Object.assign(touch, { filings: 1, refusal: `key z is not an option: ${'r'.repeat(600)}` });
+  const filed = touchAction(state, touch).args.question;
+  assert.ok(filed.length <= 2000, `the refiled question is ${filed.length} chars`);
+  assert.ok(filed.endsWith(question), 'the question itself is kept whole');
+  assert.match(filed, /Your previous answer could not be used/);
+  // A refiling past 99 still fits: the reservation is four digits.
+  touch.filings = 150;
+  assert.ok(touchAction(state, touch).args.question.length <= 2000, 'filing 151 fits');
+  // With room, the reason is kept whole.
+  touch.filings = 1;
+  touch.question = `${touch.tag} short question`;
+  assert.match(touchAction(state, touch).args.question, new RegExp(`\\(key z is not an option: r{600}\\)`));
+});
+
+test('showcase (022d6fd9): 30 held WPs are cited by count and where they are listed; the filed question stays under the cap', async () => {
+  const showcase = await import('./lib/phases/showcase.mjs');
+  const wps = Array.from({ length: 30 }, (_, i) => ({ id: `WP-${String(i + 1).padStart(2, '0')}`, state: 'held', pr: { number: 100 + i }, reason: `held at PR: post-cap tail out of bounds, ${'outside the WP\'s Files '.repeat(3)}` }));
+  const state = {
+    slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', pluginRoot: 'X:/fixture/plugin', touches: [], wps, adapters: { spine: { on: true } },
+    intent: { anchor: ANCHOR, repo: { path: 'X:/fixture/repo', remote: 'o/r', defaultBranch: 'main' } }, release: { state: 'not-exercised', reason: 'incomplete build' },
+  };
+  const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
+  const action = showcase.next(state, deps);
+  assert.ok(action.args.question.length <= 2000, `the filed question is ${action.args.question.length} chars`);
+  assert.ok(action.args.question.includes(`Open PRs of held WPs: 30, each listed under Queue accounting in ${join('X:/fixture/run', 'run-analysis.md')}`), action.args.question);
 });
 
 test('no-adapter names an agent: exit 2, nothing written', async (t) => {
