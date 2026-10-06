@@ -700,6 +700,28 @@ test('ratify (c58b3a51): coverage follows the merge gate (a directory ends in /)
   assert.throws(() => build.ratify(unknown.state, { wpId: 'WP-03', paths: ['docs/new.md'], why: 'x' }, unknown.deps), { code: 5, message: /WP-02 \(pending\) owns a path.*no declared Files/ });
 });
 
+test('Needs conductor on a passing report (d9d4d664): the build rules before review; the ruling is an event and a rulings[] row, ratifies its path, amends the lane; a repeated ask is not ruled again', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  // The lane's amended report repeats the same ask.
+  h.reports = { 'WP-02': ['report-built-asks.md', 'report-built-asks.md'] };
+  h.rulings = [{ ruled: 'a', evidence: 'the panel is the only place the roving tabindex can live', ratify: ['src/ui/SidePanel.svelte'] }];
+  const rulings = [];
+  h.onEmit = (a) => { if (a.step === 'ruling') rulings.push(a); };
+  assert.equal(await drive(h), null);
+  assert.equal(rulings.length, 1, 'one ruling for the one ask');
+  assert.deepEqual([rulings[0].part, rulings[0].ruling.keys], ['ask', ['a', 'b']]);
+  const firstReview = indexWhere(h, (a) => a.wpId === 'WP-02' && a.step === 'review');
+  assert.ok(h.trace.indexOf(rulings[0]) < firstReview, 'ruled before review');
+  const wp = h.wp('WP-02');
+  assert.deepEqual(wp.rulings.map((r) => [r.ruled, r.ratified]), [['a', ['src/ui/SidePanel.svelte']]]);
+  assert.ok(wp.files.includes('src/ui/SidePanel.svelte'));
+  const ruled = h.events().filter((e) => e.event === 'ruled');
+  assert.deepEqual(ruled.map((e) => [e.data.wpId, e.data.ruled, e.data.ratified]), [['WP-02', 'a', ['src/ui/SidePanel.svelte']]]);
+  assert.equal(h.events().filter((e) => e.event === 'ratified').length, 1);
+  assert.ok(of(h, 'WP-02').some((a) => a.step === 'brief' && a.amendment?.kind === 'ruling'), 'the ruling went to the lane as an amendment');
+  assert.equal(wp.state, 'merged');
+});
+
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
   const h = harness(t);
   h.life = { 'WP-02': 3, 'WP-03': 1 };

@@ -136,6 +136,16 @@ test('parseOutcome: built, refuted, needs conductor with asks verbatim, missing'
   assert.equal(parseOutcome('## Outcome\n\npartly done\n').outcome, 'missing');
 });
 
+test('parseOutcome (d9d4d664): a lettered question followed by option (a) labels its ask and is not an option; a built report keeps its asks', () => {
+  const labeled = '## Outcome\n\nbuilt\n\n## Needs conductor\n\n(a) perf.test.ts is load-sensitive on main too: how should this WP treat it?\n(a) Raise the budget.\n(b) Isolate it in its own job.\n(c) Leave it and file a follow-up.\n';
+  assert.deepEqual(parseOutcome(labeled), {
+    outcome: 'built',
+    asks: [{ key: 'a', text: '(a) Raise the budget.' }, { key: 'b', text: '(b) Isolate it in its own job.' }, { key: 'c', text: '(c) Leave it and file a follow-up.' }],
+  });
+  // An option that asks a question is still an option when (a) does not follow it.
+  assert.deepEqual(parseOutcome('## Outcome\n\nbuilt\n\n## Needs conductor\n\nWhich?\n(a) Keep it?\n(b) Drop it?\n').asks.map((ask) => ask.key), ['a', 'b']);
+});
+
 test('parseOutcome heading form (D20)', () => {
   assert.equal(parseOutcome('## Outcome: refuted\n\nthe premise fails\n').outcome, 'refuted');
   assert.equal(parseOutcome('## Outcome: built\n').outcome, 'built');

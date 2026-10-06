@@ -239,7 +239,7 @@ function rulingAction(state, wp, { asks = null, row = null }) {
   const what = row ? `the guard row for comment ${row.comment} (the lane's evidence: ${row.evidence})` : `${wp.id}'s ## Needs conductor asks: ${(asks ?? []).map((ask) => ask.text).join(' / ')}`;
   return {
     kind: 'author', step: 'ruling', part: row ? 'guard' : 'ask', outPath, ruling: { n, file, keys, ...(row ? { comment: row.comment, row } : { asks }) }, expects: { type: 'file' },
-    instruction: `Rule on ${what}: write ${outPath} = { "ruled": "<one of ${keys.join(', ')}>", "evidence": "<the measurement or file that settles it>" }, or { "escalate": true, "why": "<why only the operator can settle it>" }. Record {}.`,
+    instruction: `Rule on ${what}: write ${outPath} = { "ruled": "<one of ${keys.join(', ')}>", "evidence": "<the measurement or file that settles it>" }, or { "escalate": true, "why": "<why only the operator can settle it>" }.${row ? '' : ` When the ruling needs paths outside ${wp.id}'s Files, add "ratify": ["<path>", …]: they are added to its Files with this ruling (a path another unfinished WP owns is refused).`} Record {}.`,
   };
 }
 
@@ -601,6 +601,9 @@ function expand(state, wp, deps) {
     case 'wait': return go(backend.wait(wp), 'check');
     case 'check': return go(backend.check(wp), 'checked');
     case 'checked': {
+      // A passing report's `## Needs conductor` asks are ruled before review or adjudication.
+      const open = (wp.asks ?? []).filter((ask) => !(wp.ruledAsks ?? []).includes(ask.text));
+      if (open.length) return go([rulingAction(state, wp, { asks: open })], 'checked');
       const findings = Boolean(wp.reviews?.length && wp.owed?.adjudicate);
       if (findings && !adjudicate(state, wp, deps)) return undefined;
       wp.checkAmends = 0;
@@ -1029,9 +1032,13 @@ function recordSpend(state, action, result, deps) {
 function recordRuling(state, wp, action, deps) {
   const value = readJsonFile(deps, action.outPath, 'ruling');
   const { n, file, keys, asks, row } = action.ruling;
+  // An ask is ruled once, whatever the lane's next report repeats.
+  const settled = () => { wp.ruledAsks = [...(wp.ruledAsks ?? []), ...(asks ?? []).map((ask) => ask.text)]; };
   if (value?.escalate === true) {
     if (typeof value.why !== 'string' || !value.why.trim()) throw new ConductError(2, `ruling ${file}: an escalation needs a non-empty why`);
     wp.rulings = [...(wp.rulings ?? []), { n, file, ruled: null, escalate: true }];
+    settled();
+    appendEvent(state, deps, { step: 'ruling', event: 'ruled', data: { wpId: wp.id, n, file, ruled: null, escalate: true } });
     // The rest of the owed adjudication (other replies and rulings) waits for the answer.
     if (row) wp.owed = { ...(wp.owed ?? {}), queue: wp.queue.slice(1) };
     wp.queue = [];
@@ -1039,7 +1046,14 @@ function recordRuling(state, wp, action, deps) {
   }
   if (!keys.includes(value?.ruled)) throw new ConductError(2, `ruling ${file}: ruled must be one of ${keys.join(', ')} (got ${value?.ruled})`);
   if (typeof value.evidence !== 'string' || !value.evidence.trim()) throw new ConductError(2, `ruling ${file}: evidence must name the measurement or file that settles the fork`);
-  wp.rulings = [...(wp.rulings ?? []), { n, file, ruled: value.ruled, escalate: false }];
+  const ratified = value.ratify ?? [];
+  if (!Array.isArray(ratified) || ratified.some((path) => typeof path !== 'string' || !path.trim()) || (row && ratified.length)) {
+    throw new ConductError(2, `ruling ${file}: ratify must be a list of paths${row ? ', and a guard ruling ratifies none' : ''}`);
+  }
+  if (ratified.length) applyRatify(state, wp, ratified, `ruling ${file}: (${value.ruled}) ${value.evidence.trim()}`, deps);
+  wp.rulings = [...(wp.rulings ?? []), { n, file, ruled: value.ruled, escalate: false, ...(ratified.length ? { ratified } : {}) }];
+  settled();
+  appendEvent(state, deps, { step: 'ruling', event: 'ruled', data: { wpId: wp.id, n, file, ruled: value.ruled, ratified } });
   wp.queue.shift();
   if (row) {
     wp.queue = [...conductorVerdict(state, wp, row, value.ruled, deps), ...wp.queue];

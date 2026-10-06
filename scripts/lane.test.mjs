@@ -3954,6 +3954,15 @@ test('207dbaf1: lettered-ask shapes — list markers, bold, indented continuatio
   assert.equal(needs('Is this right?', '### Needs conductor').length, 1, 'an amendment\'s ### Needs conductor is checked too');
 });
 
+test('d9d4d664: a question labeled (a) before its own option (a) opens the ask; options still may not repeat', () => {
+  const needs = (body) => reportShapeProblems(`## Needs conductor\n\n${body}\n\n${DEBRIEF_NONE.slice(DEBRIEF_NONE.indexOf('## Debrief'))}`);
+  const ask = '(a) perf.test.ts is load-sensitive on main too: how should this WP treat it?\n(a) Raise the budget.\n(b) Isolate it in its own job.\n(c) Leave it and file a follow-up.';
+  assert.deepEqual(needs(ask), []);
+  assert.deepEqual(needs(`${ask}\n\n(b) And the dark-line description, which still names its fix: who owns it?\n(a) This WP.\n(b) WP-07.`), [], 'a second labeled ask');
+  assert.match(needs('(a) Which one?\n(a) This.\n(a) That.').join('\n'), /repeats option \(a\) 2 times/, 'the options of one ask still may not repeat');
+  assert.match(needs('(a) Keep it.\n(a) Or this.').join('\n'), /repeats option \(a\)/, 'a label must ask a question');
+});
+
 test('207dbaf1 / C3: --expect-pr applies the same Debrief check to the PR body through gh', async (t) => {
   const f = fixture(t);
   seedLane(f);
