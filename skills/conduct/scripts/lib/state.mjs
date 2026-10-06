@@ -38,7 +38,7 @@ export const STEP_SEAM = Object.freeze({
   release: 'release',
   analyze: 'run-analysis',
   preapproval: TOUCH_SEAM, grant: TOUCH_SEAM, showcase: TOUCH_SEAM, touch: TOUCH_SEAM,
-  spend: null, notify: null, receipt: null, stop: null,
+  spend: null, notify: null, receipt: null, stop: null, alarm: null,
 });
 export const STEPS = Object.freeze(Object.keys(STEP_SEAM));
 
