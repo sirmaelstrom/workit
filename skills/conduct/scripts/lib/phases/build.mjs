@@ -44,6 +44,8 @@ const CLEANUP_RETRY_MS = 300000;
 const GATE_AMENDS = 2;
 const UNCERTAIN_BLOCK = 3;
 const NO_CI_WINDOW_MS = 30 * 60000;
+const STALL_FAILS = 3;
+const STALL_MS = 30 * 60000;
 const ASK_MARKER = /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\([a-f]\)(?:\*\*|__)?\s*/i;
 const GUARD_VERDICTS = ['confirmed', 'refuted', 'judgment'];
 const FILL = { '{pr.number}': (wp) => wp.pr?.number, '{pr.head}': (wp) => wp.pr?.head, '{merge.sha}': (wp) => wp.merge?.sha };
@@ -747,6 +749,83 @@ function stampWaits(state, deps) {
   if (meter && !meter.dueAt) meter.dueAt = due(meter.waitLeftMs);
 }
 
+// A stall is an alarm, not a touch: nothing waits for an answer and the build
+// goes on. It is an event, a ledger note (the Dogan's ledger stream) when the
+// ledger adapter is declared, and the notify command when that adapter is on,
+// raised once per stall and re-armed when the WP moves again.
+function alarm(state, wp, deps, why) {
+  if (wp.stall) return;
+  wp.stall = { at: deps.timestamp(), why };
+  appendEvent(state, deps, { event: 'stalled', data: { wpId: wp.id, why } });
+  const text = `conduct ${state.slug}: ${wp.id} has stalled: ${why}. Nothing is asked of you; the run continues, and the alarm re-arms when ${wp.id} moves.`;
+  const out = [];
+  const notify = deps.env?.WORKIT_NOTIFY_CMD;
+  if (state.adapters?.notify?.on && notify) {
+    out.push(shell('alarm', 'notify', shellArgv(notify, deps.platform), { env: { WORKIT_NOTIFY_KIND: 'stalled', WORKIT_NOTIFY_TEXT: text } }));
+  }
+  if (state.adapters?.ledger?.on) {
+    out.push({ kind: 'agent-tool', step: 'alarm', part: 'ledger', tool: 'ledger_write', expects: { type: 'json' },
+      args: { event_type: 'note', source: 'cli', user_id: deps.env?.WORKIT_LEDGER_USER || 'conduct', payload: { content: text } },
+      instruction: 'Call ledger_write with these args and record its raw result.' });
+  }
+  wp.queue = [...out, ...(wp.queue ?? [])];
+}
+
+// A non-zero exit is a failure unless it printed a verdict: JSON with no
+// `error` field (a gate that is pending, a check that wants an amendment) is an
+// answer. A lane poll's exit is always its answer.
+function failed(action, result) {
+  if (result.code === 0 || action.step === 'wait') return false;
+  try {
+    const out = JSON.parse(result.stdout);
+    return !out || typeof out !== 'object' || Object.hasOwn(out, 'error');
+  } catch {
+    return true;
+  }
+}
+
+// An MCP tool result that failed: the call errored (`isError`), or it answered
+// with an `error` or `ok: false`, or nothing came back (null, a non-object, `{}`).
+const toolFailed = (result) => !result || typeof result !== 'object' || !Object.keys(result).length || result.isError === true || Boolean(result.error) || result.ok === false;
+const toolError = (result) => {
+  if (!result || typeof result !== 'object' || !Object.keys(result).length) return 'no result';
+  const text = Array.isArray(result.content) ? result.content.map((part) => part?.text).filter(Boolean).join(' ') : '';
+  return String(result.error ?? (text || (result.isError ? 'isError' : null)) ?? '').slice(0, 200) || null;
+};
+
+// Three failed records in a row of one shell step, with the WP's state
+// unchanged between them.
+function failStreak(state, wp, action, result, deps, stateBefore) {
+  if (action.kind !== 'shell' || action.step === 'alarm') return;
+  const key = `${action.step}/${action.part ?? ''}`;
+  if (!failed(action, result) || wp.state !== stateBefore) {
+    wp.failStreak = null;
+    return;
+  }
+  const count = wp.failStreak?.key === key ? wp.failStreak.count + 1 : 1;
+  wp.failStreak = { key, count };
+  if (count >= STALL_FAILS) alarm(state, wp, deps, `${key} failed ${count} times in a row (exit ${result.code}: ${lines(result.stderr || result.stdout)[0] ?? ''})`);
+}
+
+// A WP with work queued, or live, whose state and stage have not moved for
+// STALL_MS. A lane at work (a lane poll queued) is left to the lane deadline.
+function watchStalls(state, deps) {
+  const now = deps.now();
+  for (const wp of state.wps) {
+    const watched = LIVE_STATES.includes(wp.state) || Boolean(wp.queue?.length);
+    const at = `${wp.state}|${wp.stage ?? ''}`;
+    const laneAtWork = Boolean(wp.queue?.some((action) => action.step === 'wait'));
+    if (!watched || wp.progress?.at !== at || laneAtWork) {
+      wp.progress = watched ? { at, since: new Date(now).toISOString() } : null;
+      if (wp.stall && !laneAtWork) wp.stall = null;
+      continue;
+    }
+    if (wp.stall) continue;
+    const still = now - Date.parse(wp.progress.since);
+    if (still >= STALL_MS) alarm(state, wp, deps, `no state or stage change for ${Math.round(still / 60000)} minutes (${wp.state}${wp.stage ? ` at ${wp.stage}` : ''})`);
+  }
+}
+
 // Everything that is waiting, with what is left of its wait.
 function yielders(state, deps) {
   const now = deps.now();
@@ -805,6 +884,7 @@ export function next(state, deps) {
   applyAnswers(state, deps);
   deferrals(state, deps);
   stampWaits(state, deps);
+  watchStalls(state, deps);
   const action = chooseAction(state, deps);
   // A wait queued while choosing (by fill, or under a released head) starts
   // its deadline now, not after the action emitted with it has run.
@@ -935,6 +1015,12 @@ function recordOwn(state, wp, action, result, deps) {
       return ok();
     case 'notify':
       if (result.code !== 0) appendEvent(state, deps, { step: 'notify', event: 'notify-failed', data: { wpId: wp.id, code: result.code } });
+      return ok();
+    case 'alarm':
+      // An alarm that cannot be delivered is recorded, never a reason to stop.
+      if (action.kind === 'shell' ? result.code !== 0 : toolFailed(result)) {
+        appendEvent(state, deps, { step: 'alarm', event: 'alarm-failed', data: { wpId: wp.id, part: action.part, code: result?.code ?? null, error: toolError(result) } });
+      }
       return ok();
     case 'gate-cmd':
       if (result.code === 0) return ok();
@@ -1116,6 +1202,13 @@ export function record(state, action, result = {}, deps) {
   if (action.step === 'spend') return recordSpend(state, action, result, deps);
   const wp = state.wps.find((candidate) => candidate.id === action.wpId);
   if (!wp) throw new ConductError(2, `action ${action.id} names no WP of this run (${action.wpId})`);
+  const before = wp.state;
+  const out = recordStep(state, wp, action, result, deps);
+  failStreak(state, wp, action, result, deps, before);
+  return out;
+}
+
+function recordStep(state, wp, action, result, deps) {
   if (recordOwn(state, wp, action, result, deps) !== undefined) return undefined;
   const recorderDeps = { exec: deps.exec, read: deps.read, now: deps.now, platform: deps.platform, env: deps.env, pluginRoot: deps.pluginRoot };
   if (LANE_STEPS.has(action.step)) {

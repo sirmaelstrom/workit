@@ -1,14 +1,14 @@
 // Agent CLIs and adapters. Agents (claude, codex) are probed into
 // state.agents; adapters replace a core mechanism when present. herdr, notify,
-// spend and answer are probed; spine, council, kb and verify are declared by
-// the agent, because a script cannot see MCP tools.
+// spend and answer are probed; spine, council, kb, verify and ledger are
+// declared by the agent, because a script cannot see MCP tools.
 import { isAbsolute } from 'node:path';
 import { resolveProgram } from './exec.mjs';
 import { ANSWER_ENV, parseAnswerCommand } from './answer.mjs';
 
 export const AGENTS = Object.freeze(['claude', 'codex']);
 export const PROBED_ADAPTERS = Object.freeze(['herdr', 'notify', 'spend', 'answer']);
-export const DECLARED_ADAPTERS = Object.freeze(['spine', 'council', 'kb', 'verify']);
+export const DECLARED_ADAPTERS = Object.freeze(['spine', 'council', 'kb', 'verify', 'ledger']);
 export const ADAPTERS = Object.freeze([...PROBED_ADAPTERS, ...DECLARED_ADAPTERS]);
 
 // The one place model ids live in the skill.

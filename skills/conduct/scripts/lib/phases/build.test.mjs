@@ -83,7 +83,7 @@ function harness(t, opts = {}) {
     intent: { goal: 'demo goal', repo: { path: repo, remote: 'o/r', defaultBranch: 'main' }, anchor: opts.spine ? ANCHOR : null, campaign: null,
       budgetUsd: 100, lanesCap: opts.lanes ?? 2, agent: 'claude', release: null, ciWorkflows: 1 },
     agents: { claude: on(true), codex: on(true) },
-    adapters: { herdr: on(opts.herdr), notify: on(opts.notify), spend: on(opts.spend), spine: on(opts.spine), council: on(opts.council), kb: on(false), verify: on(false) },
+    adapters: { herdr: on(opts.herdr), notify: on(opts.notify), spend: on(opts.spend), spine: on(opts.spine), council: on(opts.council), kb: on(false), verify: on(false), ledger: on(opts.ledger) },
     phase: 'build',
     authority: { merge: opts.merge ?? true, release: false, budgetUsd: opts.budget ?? 25, metered: Boolean(opts.spend), scope: 'demo goal', notes: null, grant: null },
     touches: [], spec: { depth, reviewLevel: null, gate: null, gateCommand: depth === 'deep' ? null : gateCommand },
@@ -523,6 +523,102 @@ test('waits are wall-clock deadlines: an unreadable meter is re-read after 5 min
   const pollsBetween = h.trace.slice(halted).filter((a) => a.wpId === 'WP-02' && a.kind === 'shell' && a.step === 'wait').length;
   assert.ok(pollsBetween >= 5, `about 5 minutes of polls passed before the re-read (${pollsBetween})`);
   assert.ok(of(h, 'WP-02').filter((a) => a.kind === 'shell' && a.step === 'wait').length < polls + 1, 'WP-02 is still polling');
+});
+
+const stalledEvents = (h) => h.events().filter((e) => e.event === 'stalled');
+
+test('stall alarm: a lane stop failing three times in a row raises one `stalled` event and one notify call (kind stalled); the run goes on and merges', async (t) => {
+  const h = harness(t, { herdr: true, notify: true, env: { WORKIT_NOTIFY_CMD: 'notify-me' }, wps: [TWO[0], TWO[1]] });
+  // Three pending gates first: exit 6 with a JSON verdict is an answer, not a failure.
+  let pending = 3;
+  h.inflight = () => pending-- > 0;
+  let fails = 5;
+  h.answer = (a) => {
+    if (a.wpId !== 'WP-02' || a.step !== 'stop' || a.kind !== 'shell' || fails <= 0) return undefined;
+    fails -= 1;
+    return { code: 1, stdout: JSON.stringify({ error: 'stop pane prompt check failed: pane w1:p1 never returned to a shell prompt' }), stderr: '' };
+  };
+  assert.equal(await drive(h), null);
+  const stalled = stalledEvents(h);
+  assert.equal(stalled.length, 1, JSON.stringify(stalled));
+  assert.equal(stalled[0].data.wpId, 'WP-02');
+  assert.match(stalled[0].data.why, /^stop\/stop failed 3 times in a row \(exit 1/);
+  const calls = h.trace.filter((a) => a.step === 'alarm');
+  assert.deepEqual(calls.map((a) => [a.kind, a.part, a.env?.WORKIT_NOTIFY_KIND]), [['shell', 'notify', 'stalled']]);
+  assert.match(calls[0].env.WORKIT_NOTIFY_TEXT, /WP-02 has stalled: stop\/stop failed 3 times/);
+  assert.ok(indexWhere(h, (a) => a.step === 'alarm') > h.trace.findIndex((a) => a.wpId === 'WP-02' && a.step === 'stop'), 'raised after the failures');
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.equal(h.wp('WP-02').cleanup, null, 'the stop finally confirmed');
+});
+
+// WP-02 reaches its rebase, then waits on a stale merge lock (held by a WP
+// that already merged), a minute per yield, until it has stalled; the lock is
+// then cleared and the run driven to its end.
+async function staleLockStall(h) {
+  await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'rebase' });
+  h.state.mergeLock = { wpId: 'WP-01' };
+  h.onPerform = (a) => { if (a.yield) h.tick(a.waitMs); };
+  await drive(h, { until: () => stalledEvents(h).length > 0 });
+  h.state.mergeLock = null;
+  return drive(h);
+}
+
+test('stall alarm: the ledger note needs the ledger adapter: spine alone writes the event and no ledger_write; a failed ledger_write is an alarm-failed event and the run goes on', async (t) => {
+  const spineOnly = harness(t, { herdr: true, spine: true, wps: [TWO[0], TWO[1]] });
+  assert.equal(await staleLockStall(spineOnly), null);
+  assert.equal(stalledEvents(spineOnly).length, 1);
+  assert.ok(!spineOnly.trace.some((a) => a.tool === 'ledger_write'), 'spine_* tools only: no ledger_write');
+  assert.equal(spineOnly.wp('WP-02').state, 'merged');
+
+  const down = harness(t, { herdr: true, ledger: true, wps: [TWO[0], TWO[1]] });
+  down.answer = (a) => (a.tool === 'ledger_write' ? { isError: true, content: [{ type: 'text', text: 'ledger unavailable' }] } : undefined);
+  assert.equal(await staleLockStall(down), null);
+  const failed = down.events().filter((e) => e.event === 'alarm-failed');
+  assert.deepEqual(failed.map((e) => [e.data.wpId, e.data.part, e.data.error]), [['WP-02', 'ledger', 'ledger unavailable']]);
+  assert.equal(down.wp('WP-02').state, 'merged');
+
+  // Nothing came back (null, or an empty object): recorded as not delivered, and the run goes on.
+  for (const nothing of [null, {}]) {
+    const empty = harness(t, { herdr: true, ledger: true, wps: [TWO[0], TWO[1]] });
+    empty.answer = (a) => (a.tool === 'ledger_write' ? nothing : undefined);
+    assert.equal(await staleLockStall(empty), null);
+    const lost = empty.events().filter((e) => e.event === 'alarm-failed');
+    assert.deepEqual(lost.map((e) => [e.data.part, e.data.code, e.data.error]), [['ledger', null, 'no result']], JSON.stringify(nothing));
+    assert.equal(empty.wp('WP-02').state, 'merged');
+  }
+});
+
+test('stall alarm: ledger declared, a WP whose state and stage do not move for 30 minutes gets one ledger note; a lane at work for an hour gets none', async (t) => {
+  const h = harness(t, { herdr: true, spine: true, ledger: true, env: { WORKIT_LEDGER_USER: 'operator' }, wps: [TWO[0], TWO[1]] });
+  h.herdrWait = { 'WP-02': [4, 4, 4, 0] };
+  const notes = [];
+  h.answer = (a) => {
+    if (a.tool !== 'ledger_write') return undefined;
+    notes.push(a.args);
+    return { id: 1 };
+  };
+  // A lane at work for an hour: its poll is queued, so it is left to the lane
+  // deadline. The hour passes on the second poll, once the stage has settled.
+  const polls = () => of(h, 'WP-02').filter((a) => a.kind === 'shell' && a.step === 'wait').length;
+  await drive(h, { until: (a) => a.wpId === 'WP-02' && a.kind === 'shell' && a.step === 'wait' && polls() === 2 });
+  h.tick(61 * 60000);
+  await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'rebase' });
+  assert.deepEqual(stalledEvents(h), [], 'no alarm for the lane at work');
+  // A stale merge lock (held by a WP that already merged): WP-02's rebase
+  // waits on it, a minute per yield, with no state or stage change.
+  h.state.mergeLock = { wpId: 'WP-01' };
+  h.onPerform = (a) => { if (a.yield) h.tick(a.waitMs); };
+  const raised = await drive(h, { until: (a) => a.step === 'alarm' });
+  assert.deepEqual([raised.tool, raised.wpId], ['ledger_write', 'WP-02']);
+  h.state.mergeLock = null;
+  assert.equal(await drive(h), null);
+  const stalled = stalledEvents(h);
+  assert.equal(stalled.length, 1, JSON.stringify(stalled));
+  assert.match(stalled[0].data.why, /^no state or stage change for 3\d minutes \(gate at gate\)$/);
+  assert.equal(notes.length, 1);
+  assert.deepEqual([notes[0].event_type, notes[0].source, notes[0].user_id], ['note', 'cli', 'operator']);
+  assert.match(notes[0].payload.content, /WP-02 has stalled: no state or stage change/);
+  assert.equal(h.wp('WP-02').state, 'merged');
 });
 
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
