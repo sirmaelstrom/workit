@@ -491,7 +491,7 @@ function gateFixCommits(wp, to, exec) {
     if (listed.code !== 0) return null;
     const shas = lines(listed.stdout).map((sha) => sha.toLowerCase());
     shas.forEach((sha) => commits.add(sha));
-    if (shas.length && fix.reason) reasons.push(fix.reason);
+    if (shas.length && fix.reason) reasons.push({ reason: fix.reason, shas });
   }
   return { commits, reasons };
 }
@@ -552,8 +552,11 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
   const binding = { tail: key, head, review: reviewIdentity(anchor), findingsHash: findingsHash(anchor) };
   const inspection = (wp.inspections ?? []).find((entry) => sameBinding(entry, binding));
   const files = (nonTrivial.length ? nonTrivial : rows).map((row) => row.path);
-  // A gate-fix tail is read against the gate failures it repairs as well as the findings.
-  const repairs = kind === 'gate-fix' ? { gateFailures: gateFixed.reasons } : {};
+  // A gate-fix tail is read against the gate failures its own commits repair
+  // (not those of a fix already reviewed) as well as the findings.
+  const inTail = new Set(shas.map((sha) => sha.toLowerCase()));
+  const failures = gateFixed.reasons.filter((fix) => fix.shas.some((sha) => inTail.has(sha))).map((fix) => fix.reason);
+  const repairs = kind === 'gate-fix' ? { gateFailures: failures } : {};
   if (!inspection) return { failure: `post-cap tail ${key} needs an inspection`, cause: 'inspect', inspect: { ...binding, files, anchor: anchor.reviewId ?? anchor.head, ...repairs } };
   if (inspection.verdict !== 'addresses-findings') return { failure: `post-cap tail ${key} inspected: ${inspection.verdict}`, cause: 'tail-out-of-bounds' };
   return { tail: `${key} (${kind})` };

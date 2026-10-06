@@ -471,6 +471,11 @@ test('f424b70b gate-fix inspection: the inspection carries the gate failure it r
   const later = makeWp({ pr: { number: 7, head: D2 }, reviews: [{ ...anchor, head: C }], gateFixes: [{ from: B, to: C, reason }] });
   const tail = { head: D2, tailFiles: ['lib/x.mjs'], tailCommits: [D2], revLists: { [`${B}..${C}`]: [C] } };
   assert.deepEqual(gate(makeState(), later, tail).causes, ['review-uncovered'], 'D is neither a fixed row nor the gate fix');
+
+  // A second gate failure R2 fixed by C..HEAD after the review at C: the inspector reads only R2.
+  const second = makeWp({ reviews: [{ ...anchor, head: C }], gateFixes: [{ from: B, to: C, reason }, { from: C, reason: 'R2: the land gate saw red CI at the head' }] });
+  const both = gate(makeState(), second, { tailFiles: ['lib/x.mjs'], tailCommits: [HEAD], revLists: { [`${B}..${C}`]: [C], [`${C}..${HEAD}`]: [HEAD] } });
+  assert.deepEqual(both.inspect.gateFailures, ['R2: the land gate saw red CI at the head']);
 });
 
 test('fresh base: merge-base --is-ancestor exit 1 is "stale base", and land gate is code 5', async () => {
