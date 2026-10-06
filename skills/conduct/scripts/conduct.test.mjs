@@ -257,6 +257,35 @@ test('refusal 8 (022d6fd9): with the Spine adapter, a touch 1 still over 2,000 c
   assert.equal((await intake(g, ['--release', recipeFile(g, recipe)])).code, 0);
 });
 
+test('refiling (022d6fd9): a refused answer\'s reason gives way to spine_receipt\'s cap, never the question', () => {
+  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR } };
+  const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
+  // The longest question intake lets through: filedLength reserves the refiling's room.
+  const question = 'q'.repeat(2000 - '[conduct fixture-run touch 1] (run abcd1234/99) Your previous answer could not be used. '.length);
+  const touch = openTouch(state, { kind: 'preapproval', question, options: [{ key: 'a', label: 'a', consequence: 'a' }] }, deps);
+  Object.assign(touch, { filings: 1, refusal: `key z is not an option: ${'r'.repeat(600)}` });
+  const filed = touchAction(state, touch).args.question;
+  assert.ok(filed.length <= 2000, `the refiled question is ${filed.length} chars`);
+  assert.ok(filed.endsWith(question), 'the question itself is kept whole');
+  assert.match(filed, /Your previous answer could not be used/);
+  // With room, the reason is kept whole.
+  touch.question = `${touch.tag} short question`;
+  assert.match(touchAction(state, touch).args.question, new RegExp(`\\(key z is not an option: r{600}\\)`));
+});
+
+test('showcase (022d6fd9): 30 held WPs are cited by count and where they are listed; the filed question stays under the cap', async () => {
+  const showcase = await import('./lib/phases/showcase.mjs');
+  const wps = Array.from({ length: 30 }, (_, i) => ({ id: `WP-${String(i + 1).padStart(2, '0')}`, state: 'held', pr: { number: 100 + i }, reason: `held at PR: post-cap tail out of bounds, ${'outside the WP\'s Files '.repeat(3)}` }));
+  const state = {
+    slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', pluginRoot: 'X:/fixture/plugin', touches: [], wps, adapters: { spine: { on: true } },
+    intent: { anchor: ANCHOR, repo: { path: 'X:/fixture/repo', remote: 'o/r', defaultBranch: 'main' } }, release: { state: 'not-exercised', reason: 'incomplete build' },
+  };
+  const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
+  const action = showcase.next(state, deps);
+  assert.ok(action.args.question.length <= 2000, `the filed question is ${action.args.question.length} chars`);
+  assert.match(action.args.question, /Open PRs of held WPs: 30, each listed by node .*status --run X:\/fixture\/run/);
+});
+
 test('no-adapter names an agent: exit 2, nothing written', async (t) => {
   for (const name of ['claude', 'codex']) {
     const f = fixture(t);

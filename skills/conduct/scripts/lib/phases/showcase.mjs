@@ -4,7 +4,7 @@
 import { join } from 'node:path';
 import { ConductError, STEP_SEAM, TOUCH_SEAM, appendEvent } from '../state.mjs';
 import { judgmentThreads, mergedPrs } from '../analyze.mjs';
-import { QUESTION_MAX, filedLength, openTouch, recordTouch, touchAction } from '../touch.mjs';
+import { QUESTION_MAX, conductScript, filedLength, openTouch, recordTouch, touchAction } from '../touch.mjs';
 
 // The seams an answer may name: the STEP_SEAM seams (not TOUCH_SEAM), the
 // runtime-exercise row, and the analysis's three spec rows, which mean `spec`.
@@ -38,21 +38,33 @@ function question(state) {
   const analysis = join(state.runDir, 'run-analysis.md');
   const judgments = judgmentThreads(state).length;
   const merged = mergedPrs(state);
-  const lines = (mergedLine) => [
+  const status = `node ${conductScript(state)} status --run ${state.runDir}`;
+  // Each list, in full or (when the question would overrun the cap) by count and where it is listed.
+  const lists = [
+    { label: 'Merged PRs', items: merged.map((m) => `${m.id} ${url(m.pr)}`), where: `under the audit in ${analysis}` },
+    { label: 'Open PRs of held WPs', items: held.map((wp) => `${wp.id} ${wp.pr?.number ? url(wp.pr.number) : '(no PR)'} (${wp.reason ?? 'held'})`), where: `by ${status}` },
+    { label: 'Deferred WPs', items: deferred.map((wp) => `${wp.id}: ${wp.reason ?? 'no reason recorded'}`), where: `by ${status}` },
+    { label: 'Refuted or blocked WPs', items: stopped.map((wp) => `${wp.id} ${wp.state}: ${wp.reason ?? 'no reason recorded'}${wp.pr?.number ? ` (${url(wp.pr.number)})` : ''}`), where: `by ${status}` },
+  ];
+  const line = (entry, cited) => `${entry.label}: ${!entry.items.length ? 'none' : cited ? `${entry.items.length}, each listed ${entry.where}` : list(entry.items, 'none')}`;
+  const lines = (cited) => [
     `DO: read ${analysis} first, then the merged PRs, then the deliverable (${state.intent.repo.path}, ${state.intent.repo.remote} at origin/${state.intent.repo.defaultBranch ?? 'main'}), and accept, accept with notes, or send back conductor run ${state.slug}. EXPECT: (a) the run closes; (b) the run closes with your notes stored verbatim; (c) the run ends as sent-back: write \`seam: <name>\` (one of ${SEAMS.join(', ')}) in your text; nothing re-runs and merged work and the release are not touched; reopening is a new /conduct run whose goal cites ${state.runDir}.`,
-    mergedLine,
-    `Open PRs of held WPs: ${list(held.map((wp) => `${wp.id} ${wp.pr?.number ? url(wp.pr.number) : '(no PR)'} (${wp.reason ?? 'held'})`), 'none')}`,
-    `Deferred WPs: ${list(deferred.map((wp) => `${wp.id}: ${wp.reason ?? 'no reason recorded'}`), 'none')}`,
-    `Refuted or blocked WPs: ${list(stopped.map((wp) => `${wp.id} ${wp.state}: ${wp.reason ?? 'no reason recorded'}${wp.pr?.number ? ` (${url(wp.pr.number)})` : ''}`), 'none')}`,
+    ...lists.map((entry, i) => line(entry, i < cited)),
     // Cited by count and file: the list, one line per thread, is what overran spine_receipt's cap.
     `Judgment threads the conductor resolved: ${judgments ? `${judgments}, each listed under the audit in ${analysis}` : 'none'}`,
     `Blocked touches still open: ${list(open.map((touch) => `touch ${touch.n}${touch.wpId ? ` (${touch.wpId})` : ''}`), 'none')}`,
     `Release: ${r.state}${r.reason ? ` (${r.reason})` : ''}${r.pr?.number ? ` ${url(r.pr.number)}` : ''}`,
   ].join('\n');
-  const full = lines(`Merged PRs: ${list(merged.map((m) => `${m.id} ${url(m.pr)}`), 'none')}`);
-  // Many merged PRs can overrun the cap too: then they are cited the same way.
-  if (filedLength(state, (state.touches ?? []).length + 1, full) <= QUESTION_MAX) return full;
-  return lines(`Merged PRs: ${merged.length}, each listed under the audit in ${analysis}`);
+  // Lists are cited by count, in order, until the question fits; whatever still
+  // overruns (a very long repo path or reason) is cut at the cap, pointing at the analysis.
+  const n = (state.touches ?? []).length + 1;
+  for (let cited = 0; cited <= lists.length; cited += 1) {
+    const text = lines(cited);
+    if (filedLength(state, n, text) <= QUESTION_MAX) return text;
+  }
+  const cut = `… (cut at spine_receipt's cap; read ${analysis})`;
+  const text = lines(lists.length);
+  return `${text.slice(0, text.length - (filedLength(state, n, text) - QUESTION_MAX) - cut.length)}${cut}`;
 }
 
 const OPTIONS = [

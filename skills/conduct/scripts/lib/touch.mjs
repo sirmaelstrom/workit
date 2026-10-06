@@ -12,8 +12,13 @@ export function touchTag(slug, n) {
   return `[conduct ${slug} touch ${n}]`;
 }
 
-// The question a touch's first filing carries: what spine_receipt measures.
-export const filedLength = (state, n, question) => `${touchTag(state.slug, n)} (run ${state.runId}/1) ${question}`.length;
+// A refiling names its refusal; when room is short the reason is cut, down to this.
+const REFUSED_SHORT = 'Your previous answer could not be used. ';
+
+// The longest question a touch's filing carries, as spine_receipt measures it:
+// a refiling (filing 99) with the short refusal sentence, which always fits
+// once this does (filedQuestion cuts the reason to the room left).
+export const filedLength = (state, n, question) => `${touchTag(state.slug, n)} (run ${state.runId}/99) ${REFUSED_SHORT}${question}`.length;
 
 export function touchStep(touch) {
   return touch.kind === 'preapproval' || touch.kind === 'showcase' ? touch.kind : 'touch';
@@ -165,8 +170,15 @@ export function correlation(state, touch, filing = touch.filings) {
 
 function filedQuestion(state, touch, filing) {
   const body = touch.question.slice(touch.tag.length + 1);
-  const refused = touch.refusal ? `Your previous answer could not be used (${touch.refusal}). ` : '';
-  return `${correlation(state, touch, filing)} ${refused}${body}`;
+  const head = `${correlation(state, touch, filing)} `;
+  if (!touch.refusal) return `${head}${body}`;
+  // The refusal is the one part a refiling adds: it gives way to the cap, never the question.
+  const full = `Your previous answer could not be used (${touch.refusal}). `;
+  const room = QUESTION_MAX - head.length - body.length;
+  if (full.length <= room) return `${head}${full}${body}`;
+  const reasonRoom = room - 'Your previous answer could not be used (…). '.length;
+  const refused = reasonRoom > 0 ? `Your previous answer could not be used (${touch.refusal.slice(0, reasonRoom)}…). ` : REFUSED_SHORT;
+  return `${head}${refused}${body}`;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
