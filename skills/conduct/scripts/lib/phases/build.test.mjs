@@ -749,6 +749,27 @@ test('Needs conductor (d9d4d664): one ruling per question, its stem in the instr
   assert.match(again[1].instruction, /Remove the authorization guard\?/);
 });
 
+test('lanes 3-4 (b443eca6): with --lanes 3 on the exec backend, only the 3rd live lane asks lane.mjs admit; refused (free commit memory 8 GB, exit 7) it is held back, then admitted and merged', async (t) => {
+  const THREE = [TWO[0], TWO[1], TWO[2], { id: 'WP-04', files: ['lib/schedule.mjs'], dependsOn: ['WP-01'] }];
+  const h = harness(t, { lanes: 3, wps: THREE });
+  h.life = { 'WP-02': 4, 'WP-03': 4, 'WP-04': 1 };
+  h.herdrAdmit = { 'WP-04': [7] };
+  h.onPerform = (a) => { if (a.yield) h.tick(a.waitMs); };
+  let held = false;
+  h.onEmit = () => {
+    const four = h.wp('WP-04');
+    if (four.state === 'pending' && four.notBefore && ['WP-02', 'WP-03'].every((id) => LIVE.includes(h.wp(id).state))) held = true;
+  };
+  assert.equal(await drive(h, { max: 1200 }), null);
+  const admits = h.trace.filter((a) => a.step === 'admit' && a.kind === 'shell');
+  assert.deepEqual([...new Set(admits.map((a) => a.wpId))], ['WP-04'], 'the first two lanes are not gated');
+  // Refused once; by its retry the other lanes may have ended, and a lane that is not the 3rd is not gated.
+  assert.ok(admits.length >= 1);
+  assert.ok(admits[0].command.includes('admit') && admits[0].command[1].endsWith('lane.mjs'));
+  assert.ok(held, 'WP-04 was held back while WP-02 and WP-03 ran');
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged']);
+});
+
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
   const h = harness(t);
   h.life = { 'WP-02': 3, 'WP-03': 1 };

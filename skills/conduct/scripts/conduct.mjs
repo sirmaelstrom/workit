@@ -16,6 +16,7 @@ import {
 } from './lib/state.mjs';
 import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
+import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, filedLength, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -24,7 +25,7 @@ const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(SCRIPTS_DIR, '../../..');
 
 const USAGE = `usage: conduct.mjs <verb> [flags]
-  intake --goal <text> --repo <abs> [--anchor <quest id>] [--budget <usd>] [--lanes 1|2] [--agent claude|codex]
+  intake --goal <text> --repo <abs> [--anchor <quest id>] [--budget <usd>] [--lanes 1-4] [--agent claude|codex]
          [--adapter <name>]... [--no-adapter <name>]... [--release <json file>] [--runs-root <dir>]
   next --run <dir>                 (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual]
@@ -183,7 +184,7 @@ function intakeOptions(flags) {
   const budgetUsd = flags.budget === undefined ? 25 : Number(flags.budget);
   if (!Number.isFinite(budgetUsd) || budgetUsd <= 0) throw new ConductError(2, '--budget must be a positive number of USD');
   const lanesCap = flags.lanes === undefined ? 2 : Number(flags.lanes);
-  if (lanesCap !== 1 && lanesCap !== 2) throw new ConductError(2, '--lanes must be 1 or 2');
+  if (!Number.isInteger(lanesCap) || lanesCap < 1 || lanesCap > MAX_LANES) throw new ConductError(2, `--lanes must be 1 to ${MAX_LANES}`);
   if (flags.agent !== undefined && !AGENTS.includes(flags.agent)) throw new ConductError(2, `--agent must be one of ${AGENTS.join(', ')}`);
   const spine = declared.includes('spine') && !forcedOff.includes('spine');
   return { goal, forcedOff, declared, budgetUsd, lanesCap, spine };

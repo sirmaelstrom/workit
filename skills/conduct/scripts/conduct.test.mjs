@@ -290,6 +290,21 @@ test('showcase (022d6fd9): 30 held WPs are cited by count and where they are lis
   assert.ok(action.args.question.includes(`Open PRs of held WPs: 30, each listed under Queue accounting in ${join('X:/fixture/run', 'run-analysis.md')}`), action.args.question);
 });
 
+test('--lanes (b443eca6): 1 to 4 are accepted, 0, 5 and 2.5 are refused (exit 2, nothing written)', async (t) => {
+  for (const lanes of ['3', '4']) {
+    const f = fixture(t);
+    const first = out(await intake(f, ['--lanes', lanes]));
+    assert.equal(readState(first.runDir).intent.lanesCap, Number(lanes));
+  }
+  for (const lanes of ['0', '5', '2.5']) {
+    const f = fixture(t);
+    const refused = await intake(f, ['--lanes', lanes]);
+    assert.equal(refused.code, 2, lanes);
+    assert.match(out(refused).error, /--lanes must be 1 to 4/);
+    assert.deepEqual(readdirSync(f.runs), []);
+  }
+});
+
 test('no-adapter names an agent: exit 2, nothing written', async (t) => {
   for (const name of ['claude', 'codex']) {
     const f = fixture(t);
