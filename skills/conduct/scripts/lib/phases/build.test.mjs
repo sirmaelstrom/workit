@@ -799,8 +799,23 @@ test('budget projection (8f433d11): every merge records booked spend and the pro
   const projections = h.events().filter((e) => e.event === 'spend-projection');
   assert.equal(projections.length, 2);
   assert.deepEqual(projections.map((e) => e.data.wpId).sort(), ['WP-02', 'WP-03']);
-  for (const p of projections) assert.ok(Number.isFinite(p.data.projectedUsd) && p.data.budgetUsd === 25, JSON.stringify(p.data));
-  assert.equal(projections.at(-1).data.wpsLeft, 0, 'the last merge has nothing left to project');
+  const money = (usd) => Math.round(usd * 100) / 100;
+  for (const p of projections) {
+    assert.equal(p.data.budgetUsd, 25);
+    assert.equal(p.data.projectedUsd, money(p.data.bookedUsd + p.data.wpsLeft * p.data.perWpUsd), JSON.stringify(p.data));
+  }
+  // Exec lanes book their cost when they exit, before the merge: the last merge has both, and nothing left.
+  const last = projections.at(-1).data;
+  assert.deepEqual([last.wpsLeft, money(last.bookedUsd), last.projectedUsd], [0, money(2 * LANE_COST), money(2 * LANE_COST)]);
+  assert.equal(money(last.perWpUsd), money(LANE_COST));
+
+  // A meter reading taken before the merging lane's cost is not what the merge reports: one WP,
+  // read $0 before its start, its lane closed at LANE_COST.
+  const one = harness(t, { wps: [TWO[0], TWO[1]], spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100 });
+  one.spendOut = Array(20).fill('0\n');
+  assert.equal(await drive(one), null);
+  const [merge] = one.events().filter((e) => e.event === 'spend-projection');
+  assert.equal(money(merge.data.bookedUsd), money(LANE_COST), JSON.stringify(merge.data));
 });
 
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {

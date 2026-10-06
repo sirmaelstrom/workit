@@ -527,15 +527,19 @@ function merged(state, wp, deps) {
   if (state.adapters?.notify?.on && notify) {
     after.push(shell('notify', 'notify', shellArgv(notify, deps.platform), { env: { WORKIT_NOTIFY_PR: String(number), WORKIT_NOTIFY_SHA: sha, WORKIT_NOTIFY_REVERT: `git revert ${sha}` } }));
   }
-  // The projected crossing, at every merge: booked spend (the last meter
-  // reading, else the closed lanes) plus every unfinished WP at the projection.
-  const booked = state.build.lastSpend?.usd ?? state.wps.reduce((total, other) => total + (Number(other.lane?.costUsd) || 0), 0);
-  const left = state.wps.filter((other) => !['merged', 'refuted'].includes(other.state)).length;
+  // The projected crossing, at every merge: booked spend (the larger of the
+  // last meter reading and the closed lanes' sum: a reading can predate this
+  // lane's cost) plus every WP whose lane cost is not booked yet (unfinished, or
+  // a lane still open, this one included) at the projection.
+  const closedSum = state.wps.reduce((total, other) => total + (Number(other.lane?.costUsd) || 0), 0);
+  const booked = Math.max(state.build.lastSpend?.usd ?? 0, closedSum);
+  const unbooked = (other) => !['merged', 'refuted'].includes(other.state) || (Boolean(other.lane?.startedAt) && !Number.isFinite(Number(other.lane?.costUsd ?? NaN)));
+  const left = state.wps.filter(unbooked).length;
   const per = laneProjection(state, deps);
   const projected = Math.round((booked + left * per.usd) * 100) / 100;
   const budget = state.authority?.budgetUsd ?? 0;
   appendEvent(state, deps, { event: 'spend-projection', data: { wpId: wp.id, bookedUsd: booked, wpsLeft: left, perWpUsd: per.usd, projectedUsd: projected, budgetUsd: budget } });
-  const spendLine = ` Spend: $${Math.round(booked * 100) / 100} booked; ~$${projected} projected with ${left} WP(s) left at $${Math.round(per.usd * 100) / 100} each (${per.basis}), against $${budget}${projected >= budget ? ': the projection crosses the budget' : ''}.`;
+  const spendLine = ` Spend: $${Math.round(booked * 100) / 100} booked; ~$${projected} projected with ${left} WP(s) not yet booked at $${Math.round(per.usd * 100) / 100} each (${per.basis}), against $${budget}${projected >= budget ? ': the projection crosses the budget' : ''}.`;
   if (spineOn(state) && wp.questId) {
     const tool = (part, name, args) => ({ kind: 'agent-tool', step: 'receipt', part, tool: name, args, expects: { type: 'json' }, instruction: `Call ${name} with these args and record its raw result.` });
     after.push(tool('completed', 'spine_receipt', { questId: wp.questId, outcome: 'completed', did: `${wp.id} (${wp.name}) merged as PR #${number} at ${sha}.${spendLine}`,
