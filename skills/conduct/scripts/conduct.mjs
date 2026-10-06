@@ -32,6 +32,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   await-answer --run <dir> --touch <n> [--once] [--interval-ms <ms>] [--timeout-ms <ms>]
   status --run <dir>
   analyze --run <dir>
+  ratify --run <dir> --wp <id> --paths <path,path> --why <text>
   lane <spawn|alive|check> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]`;
 
@@ -40,7 +41,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp']);
+  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -393,6 +394,20 @@ function subVerb(relPath, exportName, subs, writers = []) {
   };
 }
 
+// The conductor extends a WP's Files with a ruling (lib/phases/build.mjs ratify).
+async function ratifyVerb(tokens, deps) {
+  const flags = parseFlags(tokens);
+  const wpId = stringFlag(flags, 'wp');
+  const paths = stringFlag(flags, 'paths').split(',').map((path) => path.trim()).filter(Boolean);
+  const why = stringFlag(flags, 'why');
+  return transact(flags, deps, async (state) => {
+    const module = await loadModule(deps, 'lib/phases/build.mjs', 'module');
+    const out = module.ratify(state, { wpId, paths, why }, deps);
+    saveState(state, deps);
+    return { out: { ok: true, ...out } };
+  });
+}
+
 // The answer adapter's lookup and wait (lib/answer.mjs): read-only, unlocked.
 async function awaitAnswerVerb(tokens, deps) {
   const module = await loadModule(deps, 'lib/answer.mjs', 'module');
@@ -400,7 +415,7 @@ async function awaitAnswerVerb(tokens, deps) {
 }
 
 const VERBS = {
-  intake, next, record, answer, status, analyze, 'await-answer': awaitAnswerVerb,
+  intake, next, record, answer, status, analyze, 'await-answer': awaitAnswerVerb, ratify: ratifyVerb,
   lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
 };

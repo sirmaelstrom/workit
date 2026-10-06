@@ -372,7 +372,12 @@ test('C1-1 post-cap: fixes come only from the anchoring review, which must be a 
 test('C1-1 post-cap bounds: more than 400 production lines, or a file outside the WP\'s Files, is out of bounds', () => {
   const big = gate(makeState(), postCapWp(), { ...TAIL, tailLines: 401 });
   assert.deepEqual([big.ok, big.causes], [false, ['tail-out-of-bounds']]);
-  assert.match(gate(makeState(), postCapWp(), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/other.mjs'] }).failures.join(), /outside the WP's Files: lib\/other\.mjs/);
+  const outside = gate(makeState(), postCapWp(), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/other.mjs'] });
+  assert.match(outside.failures.join(), /outside the WP's Files: lib\/other\.mjs/);
+  // Only outside the Files, inside the cap: ratifiable, and the paths travel with it.
+  assert.deepEqual([outside.causes, outside.outside], [['tail-outside-files'], ['lib/other.mjs']]);
+  const both = gate(makeState(), postCapWp(), { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/other.mjs'], tailLines: 401 });
+  assert.deepEqual([both.causes, both.outside], [['tail-out-of-bounds'], undefined], 'over the cap is never ratifiable');
   assert.equal(gate(makeState(), inspected(postCapWp(), { ...TAIL, tailLines: 400 }), { ...TAIL, tailLines: 400 }).ok, true);
   const mixed = { ...TAIL, tailFiles: ['lib/x.mjs', 'lib/x.test.mjs'], tailLines: { 'lib/x.mjs': 300, 'lib/x.test.mjs': 300 } };
   const withTest = gate(makeState(), inspected(postCapWp(), mixed), mixed);

@@ -66,7 +66,7 @@ export function parseFiles(text, where = 'Files') {
 // (`C:x`, `C:../x`) or leaves the repo. Trailing dots and spaces are dropped
 // from each segment, as Windows does (`a.mjs.` is `a.mjs`). Containment is checked
 // after normalization: `.../x` becomes `/x`, which is absolute, so it is refused too.
-function normalizePath(path) {
+export function normalizePath(path) {
   const slashed = String(path).replace(/\\/g, '/');
   if (/^[A-Za-z]:/.test(slashed) || slashed.startsWith('/')) return null;
   const segments = slashed.split('/').map((segment) => (segment === '.' || segment === '..' ? segment : segment.replace(/[. ]+$/, '')));

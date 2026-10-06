@@ -621,6 +621,69 @@ test('stall alarm: ledger declared, a WP whose state and stage do not move for 3
   assert.equal(h.wp('WP-02').state, 'merged');
 });
 
+// WP-03 depends on WP-02, whose first gate is held: its post-cap tail touches
+// CLAUDE.md, outside its Files, inside the line cap.
+const RATIFY_WPS = [TWO[0], TWO[1], { id: 'WP-03', files: ['lib/land.mjs'], dependsOn: ['WP-02'] }];
+function heldOnFiles(h) {
+  let held = false;
+  h.answer = (a) => {
+    if (held || a.wpId !== 'WP-02' || a.step !== 'gate' || a.part !== 'gate') return undefined;
+    held = true;
+    const failure = 'post-cap tail c1..c2 out of bounds: 12 production lines; outside the WP\'s Files: CLAUDE.md';
+    return { code: 5, stdout: JSON.stringify({ ok: false, pending: false, pendingOn: [], blocked: false, head: h.head('WP-02'), failures: [failure], causes: ['tail-outside-files'],
+      unreviewedTail: null, needsFullReview: false, staleBase: false, outside: ['CLAUDE.md'] }), stderr: '' };
+  };
+}
+
+test('ratify (c58b3a51): a WP held only on its Files does not end the build; ratifying the paths sends it back to the gate, its dependent follows, and every WP merges', async (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  heldOnFiles(h);
+  const ruling = await drive(h, { until: (a) => a.step === 'ratify' });
+  assert.ok(ruling, 'the build asks for a ratify ruling instead of ending');
+  assert.deepEqual([ruling.wpId, ruling.paths], ['WP-02', ['CLAUDE.md']]);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-03').state, h.state.phase], ['held', 'deferred', 'build']);
+  mkdirSync(dirname(ruling.outPath), { recursive: true });
+  writeFileSync(ruling.outPath, JSON.stringify({ ratify: true, why: 'the amendment brief asked for the CLAUDE.md Commands line' }));
+  await recordPending(h, {});
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-02').stage], ['gate', 'land']);
+  assert.ok(h.wp('WP-02').files.includes('CLAUDE.md'));
+  assert.deepEqual(h.events().filter((e) => e.event === 'ratified').map((e) => [e.data.wpId, e.data.paths]), [['WP-02', ['CLAUDE.md']]]);
+  assert.equal(await drive(h), null);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+});
+
+test('ratify (c58b3a51): a declined ruling keeps the WP held, its dependent deferred, and lets the build end', async (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  heldOnFiles(h);
+  const ruling = await drive(h, { until: (a) => a.step === 'ratify' });
+  mkdirSync(dirname(ruling.outPath), { recursive: true });
+  writeFileSync(ruling.outPath, JSON.stringify({ ratify: false, why: 'CLAUDE.md belongs to the docs WP' }));
+  await recordPending(h, {});
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-03').state], ['held', 'deferred']);
+  assert.ok(!h.wp('WP-02').files.includes('CLAUDE.md'));
+  assert.equal(h.events().filter((e) => e.event === 'ratify-declined').length, 1);
+});
+
+test('ratify verb (c58b3a51): extends a live WP\'s Files with the ruling; refuses a path another unfinished WP owns (exit 5), a missing --why (exit 2) and a path outside the repo (exit 2)', async (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'wait' });
+  h.state.pending = null;
+  saveState(h.state, h.deps);
+  const run = (...args) => runConduct(['ratify', '--run', h.runDir, ...args], h.overrides());
+  const ok = await run('--wp', 'WP-02', '--paths', 'src/ui/SidePanel.svelte, docs/x.md', '--why', 'the lane\'s ask (a) needs the panel');
+  assert.equal(ok.code, 0, ok.stdout);
+  assert.deepEqual(JSON.parse(ok.stdout).readmitted, false);
+  const after = loadState(h.runDir, h.deps).wps.find((wp) => wp.id === 'WP-02');
+  assert.deepEqual(after.files, ['lib/lanes.mjs', 'src/ui/SidePanel.svelte', 'docs/x.md']);
+  assert.equal(after.ratified[0].why, 'the lane\'s ask (a) needs the panel');
+  const owned = await run('--wp', 'WP-02', '--paths', 'lib/land.mjs', '--why', 'x');
+  assert.equal(owned.code, 5);
+  assert.match(JSON.parse(owned.stdout).error, /WP-03 \(pending\) owns a path/);
+  assert.equal((await run('--wp', 'WP-02', '--paths', 'a.md')).code, 2);
+  assert.equal((await run('--wp', 'WP-02', '--paths', '../outside.md', '--why', 'x')).code, 2);
+});
+
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
   const h = harness(t);
   h.life = { 'WP-02': 3, 'WP-03': 1 };
