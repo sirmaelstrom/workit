@@ -472,6 +472,59 @@ test('herdr polls and yields (D19.17): wait exit 4 yields to WP-03\'s dispatch; 
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
 });
 
+test('waits are wall-clock deadlines: WP-03\'s 60 s ci-wait elapses while WP-02 polls its herdr lane for minutes, so WP-03\'s gate runs before WP-02\'s poll loop ends', async (t) => {
+  const h = harness(t, { herdr: true });
+  const polls = 30;
+  h.herdrWait = { 'WP-02': [...Array(polls).fill(4), 0], 'WP-03': [0] };
+  // `lane.mjs wait --timeout 60000` blocks for its timeout before exit 4.
+  h.onPerform = (a) => { if (a.wpId === 'WP-02' && a.kind === 'shell' && a.step === 'wait') h.tick(60000); };
+  // A queued wait is never emitted: note where WP-03's ci-wait first heads its queue.
+  let ciWait = -1;
+  h.onEmit = () => { if (ciWait < 0 && h.wp('WP-03').queue?.[0]?.part === 'ci-wait') ciWait = h.trace.length - 1; };
+  assert.equal(await drive(h, { max: 1200 }), null);
+  const gate = indexWhere(h, (a) => a.wpId === 'WP-03' && a.step === 'gate');
+  const lastPoll = h.trace.findLastIndex((a) => a.wpId === 'WP-02' && a.kind === 'shell' && a.step === 'wait');
+  assert.equal(of(h, 'WP-02').filter((a) => a.kind === 'shell' && a.step === 'wait').length, polls + 1);
+  assert.ok(ciWait >= 0 && ciWait < gate, 'WP-03 queued its ci-wait before its gate');
+  assert.ok(gate < lastPoll, `WP-03's gate (trace ${gate}) runs before WP-02's last poll (trace ${lastPoll})`);
+  assert.ok(!h.trace.slice(ciWait, gate).some((a) => a.yield), 'no yield was needed to age the ci-wait');
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+});
+
+test('waits are wall-clock deadlines: a wait queued while `next` chooses (a rebase waiting on the other WP\'s merge lock) is stamped before the action emitted with it runs', async (t) => {
+  const h = harness(t, { herdr: true });
+  h.herdrWait = { 'WP-02': [4, 4, 0], 'WP-03': [4, 0] };
+  const unstamped = [];
+  h.onEmit = (a) => {
+    for (const wp of h.state.wps) {
+      const head = wp.queue?.[0];
+      if (head?.kind === 'wait' && !head.dueAt) unstamped.push(`${wp.id} ${head.step}/${head.part ?? ''} at ${a.id}`);
+    }
+  };
+  assert.equal(await drive(h), null);
+  assert.ok(h.trace.some((a) => a.step === 'gate'), 'the run reached its gates');
+  assert.deepEqual(unstamped, []);
+});
+
+test('waits are wall-clock deadlines: an unreadable meter is re-read after 5 minutes of WP-02\'s herdr polls, not after WP-02 stops', async (t) => {
+  const h = harness(t, { herdr: true, spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
+  const polls = 15;
+  h.herdrWait = { 'WP-02': [...Array(polls).fill(4), 0], 'WP-03': [0] };
+  h.onPerform = (a) => { if (a.wpId === 'WP-02' && a.kind === 'shell' && a.step === 'wait') h.tick(60000); };
+  // WP-03's dispatch read, once WP-02 is live, is unreadable: a meter halt.
+  let halted = -1;
+  h.answer = (a) => {
+    if (a.step !== 'spend' || halted >= 0 || !LIVE.includes(h.wp('WP-02').state) || a.budgetFor !== 'dispatch') return undefined;
+    halted = h.trace.length - 1;
+    return ok('\n');
+  };
+  await drive(h, { until: (a) => a.step === 'spend' && a.budgetFor === 'meter', max: 400 });
+  assert.ok(halted >= 0, 'the meter halted');
+  const pollsBetween = h.trace.slice(halted).filter((a) => a.wpId === 'WP-02' && a.kind === 'shell' && a.step === 'wait').length;
+  assert.ok(pollsBetween >= 5, `about 5 minutes of polls passed before the re-read (${pollsBetween})`);
+  assert.ok(of(h, 'WP-02').filter((a) => a.kind === 'shell' && a.step === 'wait').length < polls + 1, 'WP-02 is still polling');
+});
+
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
   const h = harness(t);
   h.life = { 'WP-02': 3, 'WP-03': 1 };
