@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, panePromptSignature,
-  reportShapeProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState,
+  reportShapeProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -197,6 +197,35 @@ test('WP-1: claude start supplies the mandatory mode and restores conductor focu
   const after = f.calls.slice(f.calls.indexOf(agentStartCall(f)) + 1);
   assert.deepEqual(after[0].args, ['agent', 'focus', 'w1:p1']);
   assert.deepEqual(after[1].args, ['agent', 'list']);
+});
+
+test('herdr agent names: a lane name past 32 characters reaches herdr as a stable, valid alias', async (t) => {
+  const long = 'shopfloor-v1-an-original-overhead-worksh-wp-01';
+  const sibling = 'shopfloor-v1-an-original-overhead-worksh-wp-02';
+  const valid = /^[a-z][a-z0-9_-]{0,31}$/;
+  assert.equal(herdrAgentName('lane-a'), 'lane-a', 'a name that already fits is unchanged');
+  for (const name of [long, sibling, 'WP-01 Upper', '9-starts-with-digit']) {
+    assert.match(herdrAgentName(name), valid, name);
+    assert.equal(herdrAgentName(name), herdrAgentName(name), `stable for ${name}`);
+  }
+  assert.notEqual(herdrAgentName(long), herdrAgentName(sibling), 'names that differ only past the cut stay distinct');
+
+  const alias = herdrAgentName(long);
+  const f = fixture(t);
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: `{"result":{"agent":{"name":"${alias}","state":"idle"}}}`, stderr: '' },
+    { code: 0, stdout: '{"result":{"focused":true}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"conductor","pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(
+    ['start', long, '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+  );
+  assert.equal(result.exit, 0);
+  assert.equal(agentStartCall(f).args[2], alias, 'herdr receives the alias, not the raw lane name');
+  const after = f.calls.slice(f.calls.indexOf(agentStartCall(f)) + 1);
+  assert.deepEqual(after[0].args, ['agent', 'focus', 'w1:p1'], 'a pane id is never rewritten');
 });
 
 test('WP-1: prompt sends only the absolute prompt-file instruction', async (t) => {

@@ -219,8 +219,35 @@ function usage(message) {
   throw new LaneError(EXIT.USAGE, message);
 }
 
+// herdr agent names must start with a lowercase letter and hold only [a-z0-9_-], 1–32 characters.
+// A lane name built from a long goal slug breaks that, so herdr sees a stable alias: the name when it
+// already fits, else a cleaned prefix plus a 6-character hash of the full name. Every herdr verb that
+// takes an agent name, and every agent-list comparison, goes through this one mapping.
+const HERDR_AGENT_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
+const HERDR_NAMED_VERBS = new Set(['start', 'send-keys', 'prompt', 'wait', 'stop', 'read', 'focus']);
+
+export function herdrAgentName(name) {
+  const text = String(name);
+  if (HERDR_AGENT_NAME.test(text)) return text;
+  let hash = 0x811c9dc5;
+  for (const char of text) {
+    hash ^= char.codePointAt(0);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  const tag = hash.toString(36).padStart(6, '0').slice(-6);
+  const clean = text.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/^[^a-z]+/, '') || 'lane';
+  return `${clean.slice(0, 32 - tag.length - 1).replace(/[-_]+$/, '') || 'lane'}-${tag}`;
+}
+
+function herdrArgs(program, args) {
+  if (program !== 'herdr' || args[0] !== 'agent' || !HERDR_NAMED_VERBS.has(args[1]) || typeof args[2] !== 'string') return args;
+  // `agent focus` takes a pane id (`w2P:p1`), which the pattern never rewrites: ids contain ':'.
+  if (args[2].includes(':')) return args;
+  return [args[0], args[1], herdrAgentName(args[2]), ...args.slice(3)];
+}
+
 function call(deps, program, args, options = {}) {
-  const result = deps.exec(program, args, options);
+  const result = deps.exec(program, herdrArgs(program, args), options);
   if (typeof result === 'string') return { code: 0, stdout: result, stderr: '' };
   return {
     code: result?.code ?? result?.exitCode ?? 0,
@@ -2068,7 +2095,7 @@ function agentState(deps, name) {
   if (listing.code !== 0) return null;
   const agents = listedAgents(listing.stdout);
   if (!agents) return null;
-  const agent = agents.find((entry) => (entry?.name ?? entry?.agent) === name);
+  const agent = agents.find((entry) => (entry?.name ?? entry?.agent) === herdrAgentName(name));
   if (!agent) return null;
   return { agent, state: String(agent.state ?? agent.status ?? 'unknown').toLowerCase() };
 }
@@ -2088,7 +2115,7 @@ async function pollUntilUnlisted(deps, name, windowMs) {
     const listing = call(deps, 'herdr', ['agent', 'list']);
     polls++;
     const names = listing.code === 0 ? listedAgentNames(listing.stdout) : null;
-    if (!names || !names.includes(name) || deps.now() >= deadline) return { listing, names, polls };
+    if (!names || !names.includes(herdrAgentName(name)) || deps.now() >= deadline) return { listing, names, polls };
     await deps.sleep(250);
   }
 }
@@ -2185,7 +2212,7 @@ async function stopLane(opts, deps, state) {
   const { listing, names, polls: agentListPolls } = await pollUntilUnlisted(deps, opts.name, STOP_UNLIST_WINDOW_MS);
   if (listing.code !== 0) throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${listing.stderr.trim() || listing.stdout.trim()}`);
   if (!names) throw new LaneError(EXIT.ERROR, 'stop agent list check failed: response did not contain agents');
-  if (names.includes(opts.name)) {
+  if (names.includes(herdrAgentName(opts.name))) {
     throw new LaneError(EXIT.ERROR, `stop agent list check failed: ${opts.name} is still listed ${STOP_UNLIST_WINDOW_MS} ms after the pane prompt returned`);
   }
   const polls = agentListPolls > 1 ? { agentListPolls } : {};
