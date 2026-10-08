@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, paneErrorLine, panePromptSignature,
-  reportShapeProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName,
+  reportShapeProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -27,10 +27,22 @@ function fixture(t) {
   // `memory`, outside the herdr response queue and `calls`: 64 GB free unless a
   // test sets it.
   const memoryReads = [];
+  // The reap's process list and kills (stop, sweep, reap) answer from
+  // `processes` (none unless a test sets it), outside the queue too.
+  const reaps = [];
   const exec = (program, args, options = {}) => {
     if (program === 'pwsh' && args.some((arg) => String(arg).includes('FreeVirtualMemory'))) {
       memoryReads.push([...args]);
       return handle.memory;
+    }
+    if (isProcessList(program, args)) {
+      reaps.push([program, ...args]);
+      return processListResult(handle.processes, handle.platform);
+    }
+    if (program === 'taskkill' || program === 'kill') {
+      reaps.push([program, ...args]);
+      handle.processes = handle.processes.filter((row) => !args.includes(String(row.pid)));
+      return { code: 0, stdout: '', stderr: '' };
     }
     calls.push({ program, args: [...args], options });
     const next = responses.shift();
@@ -46,8 +58,18 @@ function fixture(t) {
     exec,
     memoryReads,
     memory: { code: 0, stdout: `${64 * 1024 * 1024}\r\n`, stderr: '' },
+    reaps,
+    processes: [],
+    platform: process.platform,
   };
   return handle;
+}
+
+const isProcessList = (program, args) => (program === 'pwsh' && args.some((arg) => String(arg).includes('Win32_Process'))) || program === 'ps';
+// The list as each platform prints it: ConvertTo-Json on win32, `ps -eo pid=,ppid=,args=` elsewhere.
+function processListResult(rows, platform) {
+  if (platform === 'win32') return { code: 0, stdout: JSON.stringify(rows.map((row) => ({ ProcessId: row.pid, ParentProcessId: row.ppid ?? 1, CommandLine: row.cmd }))), stderr: '' };
+  return { code: 0, stdout: rows.map((row) => `${row.pid} ${row.ppid ?? 1} ${row.cmd}`).join('\n'), stderr: '' };
 }
 
 function readState(f) {
@@ -4942,4 +4964,116 @@ test('e8a1db7f: a Claude lane never reads a rollout — resume is unchanged', as
   f.responses.push({ code: 0, stdout: '{"result":{"state":"idle"}}', stderr: '' }, paneRead(BG_CONTROL));
   const result = await rolloutResume(f);
   assert.deepEqual([result.exit, result.output.state, result.output.settle, result.row.settleSource], [0, 'idle', undefined, undefined]);
+});
+
+// ---- reap ----
+
+test('reap: a command line names the worktree only at a path boundary, either slash, case folded on win32', () => {
+  const wt = join('X:', 'projects', 'workit-wt-run-wp-02');
+  const vite = `node ${join(wt, 'node_modules', 'vite', 'bin', 'vite.js')} --port 5291`;
+  assert.equal(commandNamesPath(vite, wt, 'win32'), true);
+  assert.equal(commandNamesPath(`"${wt}"`, wt, 'win32'), true, 'a quoted path ends at the quote');
+  assert.equal(commandNamesPath(`cd ${wt}`, wt, 'win32'), true, 'the path at the end of the line');
+  assert.equal(commandNamesPath(vite.replaceAll('\\', '/'), wt.replaceAll('/', '\\'), 'win32'), true, 'the other slash');
+  assert.equal(commandNamesPath(vite.toUpperCase(), wt, 'win32'), true, 'case folded on win32');
+  assert.equal(commandNamesPath(vite.toUpperCase(), wt, 'linux'), false, 'case kept elsewhere');
+  assert.equal(commandNamesPath(vite.replace('wp-02', 'wp-020'), wt, 'win32'), false, 'a sibling worktree whose name extends this one');
+  assert.equal(commandNamesPath(vite.replace('wp-02', 'wp-02-b'), wt, 'win32'), false);
+  assert.equal(commandNamesPath('pwsh.exe -NoExit -Command "if ($null -eq $global:__HerdrOriginalPrompt) { }"', wt, 'win32'), false, 'a herdr pane shell');
+});
+
+// A lane's dev server (cmd.exe /c vite → node …<wt>…vite.js) left behind, a
+// sibling worktree's server, and this reaper, whose own command line names the path.
+function reapScene(f, platform) {
+  const wt = join(f.dir, 'projects', 'repo-wt-run-wp-02');
+  f.platform = platform;
+  f.processes = [
+    { pid: 100, ppid: 1, cmd: 'cmd.exe /c vite --port 5291' },
+    { pid: 101, ppid: 100, cmd: `node ${join(wt, 'node_modules', 'vite', 'bin', 'vite.js')} --port 5291` },
+    { pid: 102, ppid: 1, cmd: `node ${join(`${wt}2`, 'node_modules', 'vite', 'bin', 'vite.js')}` },
+    { pid: 900, ppid: 1, cmd: `node lane.mjs reap --path ${wt}` },
+  ];
+  return wt;
+}
+
+// herdr for stop, the fixture's process list and kills for the reap.
+const withReap = (f, herdr) => (program, args, options) => (isProcessList(program, args) || program === 'taskkill' || program === 'kill'
+  ? f.exec(program, args, options) : herdr.exec(program, args, options));
+
+test('reap: kills the lane worktree\'s leftover process with its tree, spares a sibling worktree and itself, and lists again', async (t) => {
+  const f = fixture(t);
+  const wt = reapScene(f, 'win32');
+  const result = await runLane(['reap', '--path', wt, '--log', f.log], { exec: f.exec, platform: 'win32', pid: 900 });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual([result.output.state, result.output.orphans.map((row) => row.pid)], ['reaped', [101]]);
+  assert.deepEqual(f.reaps.filter(([program]) => program === 'taskkill'), [['taskkill', '/PID', '101', '/T', '/F']]);
+  assert.equal(f.reaps.filter((call) => isProcessList(call[0], call.slice(1))).length, 2, 'listed before and after the kill');
+  assert.deepEqual(f.processes.map((row) => row.pid), [100, 102, 900]);
+  assert.equal(JSON.parse(readFileSync(f.log, 'utf8').trim().split('\n').at(-1)).orphans, 1);
+});
+
+test('reap: --list kills nothing; off win32 it reads ps and sends TERM; a survivor exits 1', async (t) => {
+  const f = fixture(t);
+  const wt = reapScene(f, 'linux');
+  const listed = await runLane(['reap', '--path', wt, '--list', '--log', f.log], { exec: f.exec, platform: 'linux', pid: 900 });
+  assert.deepEqual([listed.exit, listed.output.state, listed.output.orphans.map((row) => row.pid), listed.output.survivors], [0, 'listed', [101], undefined]);
+  assert.equal(f.reaps.some(([program]) => program === 'kill'), false);
+  const reaped = await runLane(['reap', '--path', wt, '--log', f.log], { exec: f.exec, platform: 'linux', pid: 900 });
+  assert.equal(reaped.exit, 0);
+  assert.deepEqual(f.reaps.filter(([program]) => program === 'kill'), [['kill', '-TERM', '101']]);
+  // A process that outlives its kill is reported, never assumed gone.
+  const g = fixture(t);
+  const wt2 = reapScene(g, 'linux');
+  const exec = (program, args, options) => (program === 'kill' ? { code: 0, stdout: '', stderr: '' } : g.exec(program, args, options));
+  const survived = await runLane(['reap', '--path', wt2, '--log', g.log], { exec, platform: 'linux', pid: 900 });
+  assert.deepEqual([survived.exit, survived.output.state, survived.output.survivors.map((row) => row.pid)], [1, 'survivors', [101]]);
+});
+
+test('reap: stop on an exited-shell-blocked lane kills the orphan that held the shell, and a returned prompt makes it stopped (after-reap)', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  f.platform = 'win32';
+  f.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(f.dir, 'node_modules', 'vite', 'bin', 'vite.js')} --port 5297` }];
+  const herdr = stopHerdr(() => (f.processes.length ? BLOCKED_TAIL : `${BLOCKED_TAIL}\n\n${BLOCKED_SIGNATURE}`));
+  let clock = 0;
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: withReap(f, herdr), platform: 'win32', pid: 900, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.equal(result.exit, EXIT_CODES.ok, JSON.stringify(result.output));
+  assert.deepEqual([result.output.state, result.output.promptCheck, result.output.orphans.map((row) => row.pid)], ['stopped', 'after-reap', [101]]);
+  assert.deepEqual(f.reaps.filter(([program]) => program === 'taskkill'), [['taskkill', '/PID', '101', '/T', '/F']]);
+});
+
+test('reap: stop with nothing left behind is unchanged, and a pane that still holds after the reap keeps exited-shell-blocked, naming what was reaped', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: RETURNED_SIGNATURE });
+  const clean = await stopWith(f, stopHerdr(RETURNED_TAIL));
+  assert.deepEqual([clean.exit, clean.output.state, clean.output.orphans], [0, 'stopped', undefined]);
+  const g = fixture(t);
+  seedLane(g, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  g.platform = 'win32';
+  g.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(g.dir, 'server.js')}` }];
+  let clock = 0;
+  const held = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', g.log], { exec: withReap(g, stopHerdr(BLOCKED_TAIL)), platform: 'win32', pid: 900, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.deepEqual([held.exit, held.output.state, held.output.orphans.map((row) => row.pid)], [EXIT_CODES.error, 'exited-shell-blocked', [101]]);
+});
+
+test('reap: sweep --lane reaps the lane before the cleaning delegate runs', async (t) => {
+  const f = fixture(t);
+  const profile = join(f.dir, 'profile');
+  const lane = join(f.dir, 'projects', 'workit-wt-lane');
+  seedCreates(f, [lane]);
+  f.platform = 'win32';
+  f.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(lane, 'node_modules', 'vite', 'bin', 'vite.js')}` }];
+  const order = [];
+  const exec = (program, args, options) => {
+    if (program === 'taskkill') order.push('kill');
+    if (program === 'pwsh' && args.includes('-Clean')) order.push('clean');
+    return f.exec(program, args, options);
+  };
+  f.responses.push(delegateListing(['projects', 'workit-wt-lane']), { code: 0, stdout: 'removing workit-wt-lane ... done', stderr: '' });
+  const result = await runLane(['sweep', '--lane', 'workit-wt-lane', '--log', f.log], {
+    exec, platform: 'win32', pid: 900, exists: fakeExists(), env: { USERPROFILE: profile, WORKIT_WORKSPACE_ROOT: f.dir },
+  });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(order, ['kill', 'clean']);
+  assert.deepEqual(result.output.roots.find((root) => root.lane === 'workit-wt-lane')?.orphans?.map((row) => row.pid), [101]);
 });
