@@ -208,6 +208,13 @@ export function t2Actions(state, wp, { round = 1, changedPaths = [], report = nu
   ];
 }
 
+// A Commit cell: one sha, or several comma-separated when a fix took more than
+// one commit. Returns the shas, or null when any part is not a sha.
+export function rowCommits(cell) {
+  const shas = String(cell ?? '').split(/[\s,]+/).filter(Boolean);
+  return shas.length && shas.every((sha) => /^[0-9a-f]{7,40}$/i.test(sha)) ? shas : null;
+}
+
 function splitRow(line) {
   const cells = line.trim().replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll('\\|', '|'));
   return cells.map((cell) => cell.replace(/^`(.*)`$/, '$1'));
@@ -226,7 +233,7 @@ export function parseAmendmentTable(reportText) {
     if (!line.trim().startsWith('|')) break;
     if (/^\|[\s:|-]+\|$/.test(line.trim())) continue;
     const [comment, verdict, evidence, commit] = splitRow(line);
-    body.push({ comment, verdict: String(verdict ?? '').toLowerCase(), evidence: evidence ?? '', commit: /^[0-9a-f]{7,40}$/i.test(commit ?? '') ? commit : null });
+    body.push({ comment, verdict: String(verdict ?? '').toLowerCase(), evidence: evidence ?? '', commit: rowCommits(commit)?.join(',') ?? null });
   }
   return body;
 }
@@ -244,7 +251,7 @@ export function recordAdjudication(state, wp, verdicts) {
   const rows = verdicts.map((row) => {
     const comment = commentId(row.comment);
     if (!VERDICTS.includes(row.verdict)) throw new ConductError(2, `comment ${comment}: verdict must be one of ${VERDICTS.join(', ')} (got ${row.verdict})`);
-    if (row.verdict === 'fixed' && !/^[0-9a-f]{7,40}$/i.test(row.commit ?? '')) throw new ConductError(2, `comment ${comment}: a fixed row needs its commit sha`);
+    if (row.verdict === 'fixed' && !rowCommits(row.commit)) throw new ConductError(2, `comment ${comment}: a fixed row needs its commit sha (several are comma-separated)`);
     return { comment, verdict: row.verdict, evidence: row.evidence ?? '', commit: row.commit ?? null, ...(row.adjudicator ? { adjudicator: row.adjudicator } : {}) };
   });
   const latest = { ...reviews.at(-1), verdicts: [...(reviews.at(-1).verdicts ?? []), ...rows] };
@@ -468,7 +475,7 @@ function ancestor(wt, a, b, exec) {
 }
 
 const fixedCommits = (review) => (review.verdicts ?? [])
-  .filter((row) => row.verdict === 'fixed' && /^[0-9a-f]{7,40}$/i.test(row.commit ?? '')).map((row) => row.commit.toLowerCase());
+  .filter((row) => row.verdict === 'fixed').flatMap((row) => (rowCommits(row.commit) ?? []).map((commit) => commit.toLowerCase()));
 
 // The commits gate amendments added after the review cap: each gate amendment
 // records the head it started from (build.mjs gateAmend) and, once its lane
@@ -536,8 +543,11 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
   const gateFixed = gateFixCommits(wp, to, exec);
   if (gateFixed === null) return { failure: `tail ${key}: a gate amendment's commits are unreadable`, cause: 'infra' };
   const isFixed = (sha) => fixed.some((commit) => sha.toLowerCase().startsWith(commit));
-  if (!shas.length || !shas.every((sha) => isFixed(sha) || gateFixed.commits.has(sha.toLowerCase()))) {
-    return { failure: `review does not cover head: tail ${key} has commits that are not fixed rows of the anchoring review`, cause: 'review-uncovered' };
+  if (!shas.length) return { failure: `review does not cover head: tail ${key} lists no commits`, cause: 'review-uncovered' };
+  // A commit no fixed row cites goes to the conductor's cite ruling (held), not the end of the build.
+  const uncited = shas.filter((sha) => !isFixed(sha) && !gateFixed.commits.has(sha.toLowerCase()));
+  if (uncited.length) {
+    return { failure: `review does not cover head: tail ${key} has commits that are not fixed rows of the anchoring review: ${uncited.join(', ')}`, cause: 'tail-uncited', uncited };
   }
   // Gate amendments after the cap are their own class: bounded and inspected like the post-cap tail.
   const kind = shas.every(isFixed) ? 'post-cap' : 'gate-fix';
@@ -647,6 +657,7 @@ export function gateCheck(state, wp, { exec, now }) {
     unreviewedTail: review.tail ?? null, needsFullReview: review.needsFullReview === true, staleBase: causes.has('stale-base'),
     ...(review.inspect ? { inspect: review.inspect } : {}),
     ...(review.outside ? { outside: review.outside } : {}),
+    ...(review.uncited ? { uncited: review.uncited } : {}),
   };
 }
 
@@ -879,6 +890,9 @@ function classifyGate(state, wp, action, gate, causes, reason, deps) {
   if (causes.has('tail-out-of-bounds')) return result('held', reason);
   // Held for a ratify ruling: the build asks the conductor before it can end.
   if (causes.has('tail-outside-files')) return result('held', reason, { heldOutside: gate.outside ?? [] });
+  // Held for a cite ruling: the conductor cites each uncited commit on the
+  // fixed row it belongs to, and the inspection reads the tail again.
+  if (causes.has('tail-uncited')) return gate.uncited?.length ? result('held', reason, { heldUncited: gate.uncited }) : result('block', reason);
   // A lane commit cannot repair coverage: the conductor dispatches a review
   // within the cap or holds the PR.
   if (causes.has('review-uncovered')) return result('block', reason);

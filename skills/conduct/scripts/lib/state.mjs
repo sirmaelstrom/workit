@@ -32,7 +32,7 @@ export const STEP_SEAM = Object.freeze({
   fallback: 'lane-dispatch',
   wait: 'lane-wait', check: 'lane-wait', 'pr-lookup': 'lane-wait',
   review: 'review-tier', post: 'review-tier', council: 'review-tier',
-  ruling: 'adjudication', ratify: 'adjudication', adjudicate: 'adjudication', reply: 'adjudication',
+  ruling: 'adjudication', ratify: 'adjudication', cite: 'adjudication', adjudicate: 'adjudication', reply: 'adjudication',
   'thread-ids': 'adjudication', resolve: 'adjudication',
   rebase: 'merge-gate', 'gate-cmd': 'merge-gate', gate: 'merge-gate', merge: 'merge-gate', merged: 'merge-gate',
   release: 'release',
