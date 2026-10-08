@@ -1365,21 +1365,32 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     const before = new Set(String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }))
       .split(/\r?\n/).filter(Boolean));
     const headBefore = headIdentity(run, cwd);
+    // Observe the reviewer immediately, before our own --out and measurement
+    // writes can make a deliberately in-worktree output look like misconduct.
+    // A dirty tree is left as found for the operator; a clean move is undone
+    // before the output is read, so no exit below leaves the checkout moved.
+    const observe = () => {
+      const after = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }));
+      const dirty = after.split(/\r?\n/).filter(Boolean).filter((line) => !before.has(line));
+      return { dirty, head: dirty.length > 0 ? { moved: false, failure: null } : restoreHead(run, cwd, headBefore) };
+    };
     const started = now();
     // Claude's -p mode on this box does not consume stdin (the live probe
     // returned a stale placeholder result), so its prompt is positional.
-    raw = run(program, opts.lens === 'opus' ? [...argv, prompt] : argv, {
-      ...(isCodexLens(opts.lens) ? { input: prompt } : {}),
-      cwd,
-    });
+    try {
+      raw = run(program, opts.lens === 'opus' ? [...argv, prompt] : argv, {
+        ...(isCodexLens(opts.lens) ? { input: prompt } : {}),
+        cwd,
+      });
+    } catch (err) {
+      // A reviewer that moved HEAD and then failed still gets it put back.
+      let unrestored = null;
+      try { unrestored = observe().head.failure; } catch (guardErr) { unrestored = `HEAD not checked: ${guardErr.message}`; }
+      if (unrestored) err.message = `${err.message}; ${unrestored}`;
+      throw err;
+    }
     wallMs = now() - started;
-    // Observe the reviewer immediately, before our own --out and measurement
-    // writes can make a deliberately in-worktree output look like misconduct.
-    const after = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }));
-    const dirty = after.split(/\r?\n/).filter(Boolean).filter((line) => !before.has(line));
-    // A dirty tree is left as found for the operator; a clean move is undone
-    // before the output is read, so no exit below leaves the checkout moved.
-    const head = dirty.length > 0 ? { moved: false, failure: null } : restoreHead(run, cwd, headBefore);
+    const { dirty, head } = observe();
     if (isCodexLens(opts.lens) && !existsSync(tempOut)) {
       throw new LensOutputError(`${opts.lens} lens produced no findings file; API/CLI output: ${String(raw).trim()}`);
     }

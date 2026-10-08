@@ -1199,6 +1199,9 @@ test('rebaseActions on a worktree a review lens left detached at the PR head: th
   commit(seed, 'base.txt');
   git(seed, 'push', '-q', 'origin', 'HEAD:main');
   execFileSync('git', ['clone', '-q', origin, wt], { stdio: 'ignore' });
+  // The rebase writes commits; a CI runner has no identity of its own.
+  git(wt, 'config', 'user.name', 't');
+  git(wt, 'config', 'user.email', 't@t');
   git(wt, 'switch', '-q', '-c', branch);
   commit(wt, 'lane.txt');
   git(wt, 'push', '-q', 'origin', branch);

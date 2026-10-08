@@ -1416,7 +1416,7 @@ test('lens dirty-tree guard detects a new path on an already-dirty tree and reco
 
 // A real checkout: `gh pr checkout --detach` leaves a clean tree, which only
 // git itself can show. The codex call stands in for the reviewer's actions.
-function runLensMovingHead(reviewerDoes) {
+function runLensMovingHead(reviewerDoes, { reviewerFails = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-lens-head-'));
   const repo = join(dir, 'repo');
   const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -1440,6 +1440,7 @@ function runLensMovingHead(reviewerDoes) {
           if (args[0] === 'api') return 'src/a.ts\n';
           if (args[0] === 'exec') {
             reviewerDoes({ git, commit });
+            if (reviewerFails) throw new Error('reviewer exited 1');
             writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(VALID), 'utf8');
             return '';
           }
@@ -1472,6 +1473,19 @@ test('lens head guard: a reviewer that moves the branch itself is not reset; the
   assert.equal(out.deaths[0]?.code, 4);
   assert.match(out.deaths[0]?.message ?? '', /reviewer moved refs\/heads\/lane from/);
   assert.notEqual(out.head, out.before, 'the reviewer\'s commit is left for the operator');
+});
+
+test('lens head guard: a reviewer that detaches and then fails still has HEAD put back; the failure is reported', () => {
+  const out = runLensMovingHead(({ git }) => git('checkout', '-q', '--detach', 'HEAD~1'), { reviewerFails: true });
+  assert.equal(out.deaths[0]?.code, 4);
+  assert.match(out.deaths[0]?.message ?? '', /reviewer exited 1/);
+  assert.deepEqual([out.ref, out.head], ['refs/heads/lane', out.before]);
+});
+
+test('lens head guard: a reviewer that commits and then fails is not reset; the failure names the moved branch', () => {
+  const out = runLensMovingHead(({ commit }) => commit('c.txt'), { reviewerFails: true });
+  assert.match(out.deaths[0]?.message ?? '', /reviewer exited 1; reviewer moved refs\/heads\/lane from/);
+  assert.notEqual(out.head, out.before);
 });
 
 test('lens head guard: an unmoved checkout logs nothing and records no move', () => {
