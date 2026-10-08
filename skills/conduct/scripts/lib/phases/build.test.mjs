@@ -665,6 +665,60 @@ test('ratify (c58b3a51): a declined ruling keeps the WP held, its dependent defe
   assert.equal(h.events().filter((e) => e.event === 'ratify-declined').length, 1);
 });
 
+// WP-03 depends on WP-02, whose first gate is held: its tail has a commit no
+// fixed row of the latest review cites (RC-4 WP-04's 18dd500).
+const UNCITED = 'c'.repeat(40);
+function heldOnUncited(h) {
+  let held = false;
+  h.answer = (a) => {
+    if (held || a.wpId !== 'WP-02' || a.step !== 'gate' || a.part !== 'gate') return undefined;
+    held = true;
+    const review = h.wp('WP-02').reviews.at(-1);
+    review.verdicts = [...(review.verdicts ?? []), { comment: 'C1-1', verdict: 'fixed', evidence: 'red then green', commit: '1111111' }];
+    const failure = `review does not cover head: tail d..e has commits that are not fixed rows of the anchoring review: ${UNCITED}`;
+    return { code: 5, stdout: JSON.stringify({ ok: false, pending: false, pendingOn: [], blocked: false, head: h.head('WP-02'), failures: [failure], causes: ['tail-uncited'],
+      unreviewedTail: null, needsFullReview: false, staleBase: false, uncited: [UNCITED] }), stderr: '' };
+  };
+}
+const writeRuling = (action, value) => {
+  mkdirSync(dirname(action.outPath), { recursive: true });
+  writeFileSync(action.outPath, JSON.stringify(value));
+};
+
+test('cite (61f67554): an uncited tail commit holds the WP for a ruling instead of ending the build; citing it on its fixed row sends the WP back to the gate and every WP merges', async (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  heldOnUncited(h);
+  const ruling = await drive(h, { until: (a) => a.step === 'cite' });
+  assert.ok(ruling, 'the build asks for a cite ruling instead of ending');
+  assert.deepEqual([ruling.wpId, ruling.shas], ['WP-02', [UNCITED]]);
+  assert.match(ruling.instruction, /C1-1 \(1111111\)/);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-03').state, h.state.phase], ['held', 'deferred', 'build']);
+  writeRuling(ruling, { cite: { [UNCITED.slice(0, 7)]: 'C1-1' }, why: 'the second commit is the fix\'s own key-press test' });
+  await recordPending(h, {});
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-02').stage], ['gate', 'land']);
+  assert.equal(h.wp('WP-02').reviews.at(-1).verdicts.find((row) => row.comment === 'C1-1').commit, `1111111,${UNCITED}`);
+  assert.deepEqual(h.events().filter((e) => e.event === 'cited').map((e) => [e.data.wpId, e.data.shas]), [['WP-02', { [UNCITED]: 'C1-1' }]]);
+  assert.equal(await drive(h), null);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+});
+
+test('cite (61f67554): a declined ruling keeps the WP held and lets the build end; a ruling that misses a held commit or names a row that is not fixed is refused (exit 2)', async (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  heldOnUncited(h);
+  const ruling = await drive(h, { until: (a) => a.step === 'cite' });
+  writeRuling(ruling, { cite: { [UNCITED]: 'C9-9' }, why: 'x' });
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /C9-9 is not a fixed row/ });
+  writeRuling(ruling, { cite: { '2222222': 'C1-1' }, why: 'x' });
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /2222222 is not one of the held commits/ });
+  writeRuling(ruling, { cite: {}, why: 'x' });
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /cite must be/ });
+  writeRuling(ruling, { cite: false, why: 'the commit is unrelated work; it belongs in its own PR' });
+  await recordPending(h, {});
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-03').state], ['held', 'deferred']);
+  assert.equal(h.events().filter((e) => e.event === 'cite-declined').length, 1);
+});
+
 test('ratify verb (c58b3a51): extends a live WP\'s Files with the ruling; refuses a path another unfinished WP owns (exit 5), a missing --why (exit 2) and a path outside the repo (exit 2)', async (t) => {
   const h = harness(t, { wps: RATIFY_WPS });
   await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'wait' });

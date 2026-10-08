@@ -859,7 +859,7 @@ const VOCABULARY = [
   'wait', 'check', 'pr-lookup', 'review', 'post', 'council', 'adjudicate', 'reply', 'rebase', 'gate-cmd', 'gate',
   'merge', 'merged', 'notify', 'spend', 'release', 'analyze', 'showcase',
   'flip', 'receipt', 'touch', 'stop', 'fallback',
-  'grant', 'ruling', 'thread-ids', 'resolve', 'alarm', 'ratify',
+  'grant', 'ruling', 'thread-ids', 'resolve', 'alarm', 'ratify', 'cite',
 ];
 
 test('action ids and seams (D18, D19.15)', async (t) => {

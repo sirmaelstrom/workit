@@ -297,6 +297,52 @@ function applyRatify(state, wp, paths, why, deps) {
   return true;
 }
 
+// ---- cite ----
+
+// The fixed rows of the WP's latest review: the rows a tail commit can be cited on.
+const fixedRows = (wp) => ((wp.reviews ?? []).at(-1)?.verdicts ?? []).filter((row) => row.verdict === 'fixed');
+
+// A WP held only because its tail has commits no fixed row cites (a fix that
+// took a second commit) is the conductor's ruling, not the end of the build.
+function citeAction(state, wp) {
+  const outPath = join(state.runDir, 'rulings', `${lower(wp)}-cite-${(wp.cited ?? []).length + 1}.json`);
+  const shas = [...(wp.heldUncited ?? [])];
+  const rows = fixedRows(wp).map((row) => `${row.comment} (${row.commit})`).join(', ') || 'none';
+  return {
+    kind: 'author', step: 'cite', part: 'ruling', outPath, shas, expects: { type: 'file' },
+    instruction: `${wp.id} is held: its tail has commits no fixed row of the latest review cites: ${shas.join(', ')}. Read each (\`git -C ${wp.lane.worktree} show <sha>\`). The fixed rows are ${rows}. Rule: write ${outPath} = { "cite": { "<sha>": "<the fixed row's comment id>", … }, "why": "<why each commit belongs to that fix>" }, citing every sha listed, to add them to those rows and send ${wp.id} back to the gate, where the post-cap inspection reads the tail again; or { "cite": false, "why": "<why not>" } to keep it held (create the directory). Record {}.`,
+  };
+}
+
+// Appends each cited sha to its fixed row's Commit cell. Every held sha must
+// be cited, on a fixed row of the latest review.
+function applyCite(state, wp, action, cite, why, deps) {
+  const shas = action.shas ?? [];
+  const entries = Object.entries(cite);
+  const rows = fixedRows(wp);
+  const cited = new Map();
+  for (const [sha, comment] of entries) {
+    const held = shas.find((full) => /^[0-9a-f]{7,40}$/i.test(sha) && full.toLowerCase().startsWith(sha.toLowerCase()));
+    if (!held) throw new ConductError(2, `cite ruling ${action.outPath}: ${sha} is not one of the held commits ${shas.join(', ')}`);
+    if (!rows.some((row) => row.comment === String(comment))) {
+      throw new ConductError(2, `cite ruling ${action.outPath}: ${comment} is not a fixed row of ${wp.id}'s latest review (${rows.map((row) => row.comment).join(', ') || 'none'})`);
+    }
+    cited.set(held, String(comment));
+  }
+  const missing = shas.filter((sha) => !cited.has(sha));
+  if (missing.length) throw new ConductError(2, `cite ruling ${action.outPath}: every held commit is cited; missing ${missing.join(', ')}`);
+  const latest = wp.reviews.at(-1);
+  latest.verdicts = latest.verdicts.map((row) => {
+    const add = [...cited].filter(([, comment]) => comment === row.comment && row.verdict === 'fixed').map(([sha]) => sha);
+    return add.length ? { ...row, commit: [row.commit, ...add].filter(Boolean).join(',') } : row;
+  });
+  wp.cited = [...(wp.cited ?? []), { shas: Object.fromEntries(cited), why, at: deps.timestamp() }];
+  appendEvent(state, deps, { event: 'cited', data: { wpId: wp.id, shas: Object.fromEntries(cited), why } });
+  wp.heldUncited = null;
+  setState(state, wp, 'gate', `cited: ${why}`, deps);
+  wp.stage = 'land';
+}
+
 // `conduct.mjs ratify --run <dir> --wp <id> --paths <a,b> --why <text>`.
 export function ratify(state, { wpId, paths, why }, deps) {
   const wp = state.wps.find((candidate) => candidate.id === wpId);
@@ -1170,6 +1216,21 @@ function recordOwn(state, wp, action, result, deps) {
       wp.queue = (wp.queue ?? []).filter((queued) => queued !== action && queued.step !== 'ratify');
       return true;
     }
+    case 'cite': {
+      const value = readJsonFile(deps, action.outPath, 'cite ruling');
+      const cite = value?.cite;
+      if (cite !== false && (!cite || typeof cite !== 'object' || Array.isArray(cite) || !Object.keys(cite).length)) {
+        throw new ConductError(2, `cite ruling ${action.outPath}: cite must be { "<sha>": "<comment id>", … } or false`);
+      }
+      if (typeof value.why !== 'string' || !value.why.trim()) throw new ConductError(2, `cite ruling ${action.outPath}: why must say why`);
+      if (cite) applyCite(state, wp, action, cite, value.why.trim(), deps);
+      else {
+        wp.heldUncited = null;
+        appendEvent(state, deps, { event: 'cite-declined', data: { wpId: wp.id, shas: action.shas, why: value.why.trim() } });
+      }
+      wp.queue = (wp.queue ?? []).filter((queued) => queued !== action && queued.step !== 'cite');
+      return true;
+    }
     case 'council/meta':
       if (readJsonFile(deps, action.outPath, 'council meta')?.title !== action.title) throw new ConductError(2, `${action.outPath} must be { "title": "${action.title}" }`);
       return ok();
@@ -1323,6 +1384,7 @@ function route(state, wp, action, out, deps) {
       wp.stage = null;
       wp.queue.push(...backendOf(state, wp, deps).stop(wp));
       if (wp.heldOutside?.length) wp.queue.push(ratifyAction(state, wp));
+      if (wp.heldUncited?.length) wp.queue.push(citeAction(state, wp));
       return;
     case 'amend':
       return LANE_STEPS.has(action.step) ? checkFailed(state, wp, deps, out.reason) : gateAmend(state, wp, deps, out.reason);

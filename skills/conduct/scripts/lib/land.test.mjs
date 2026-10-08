@@ -437,7 +437,7 @@ test('f424b70b gate-fix tail: the round-2 anchor, an equivalent rebase, then a o
   const base = { reviews: [anchor], rebases: [{ from: A, to: B, equivalent: true }] };
   const opts = { tailFiles: ['lib/x.test.mjs'], tailCommits: [HEAD], ancestry: { [`${A}..${HEAD}`]: 1 } };
   const uncovered = gate(makeState(), makeWp(base), opts);
-  assert.deepEqual(uncovered.causes, ['review-uncovered'], 'without the recorded gate fix the tail is unreviewed work');
+  assert.deepEqual([uncovered.causes, uncovered.uncited], [['tail-uncited'], [HEAD]], 'without the recorded gate fix the tail has an uncited commit');
   const wp = makeWp({ ...base, gateFixes: [{ from: B, reason: 'the gate command exited 1 at the rebased head' }] });
   const needs = gate(makeState(), wp, opts);
   assert.deepEqual(needs.causes, ['inspect'], needs.failures.join('; '));
@@ -470,12 +470,50 @@ test('f424b70b gate-fix inspection: the inspection carries the gate failure it r
   const D2 = sha('7');
   const later = makeWp({ pr: { number: 7, head: D2 }, reviews: [{ ...anchor, head: C }], gateFixes: [{ from: B, to: C, reason }] });
   const tail = { head: D2, tailFiles: ['lib/x.mjs'], tailCommits: [D2], revLists: { [`${B}..${C}`]: [C] } };
-  assert.deepEqual(gate(makeState(), later, tail).causes, ['review-uncovered'], 'D is neither a fixed row nor the gate fix');
+  assert.deepEqual(gate(makeState(), later, tail).uncited, [D2], 'D is neither a fixed row nor the gate fix');
 
   // A second gate failure R2 fixed by C..HEAD after the review at C: the inspector reads only R2.
   const second = makeWp({ reviews: [{ ...anchor, head: C }], gateFixes: [{ from: B, to: C, reason }, { from: C, reason: 'R2: the land gate saw red CI at the head' }] });
   const both = gate(makeState(), second, { tailFiles: ['lib/x.mjs'], tailCommits: [HEAD], revLists: { [`${B}..${C}`]: [C], [`${C}..${HEAD}`]: [HEAD] } });
   assert.deepEqual(both.inspect.gateFailures, ['R2: the land gate saw red CI at the head']);
+});
+
+// RC-4 WP-04: every fixed row of the round-2 delta review cites the fix (6a05f06)
+// and the lane's one-line follow-up test commit (18dd500) is cited by none.
+const FIX = sha('6');
+const FOLLOW = sha('8');
+const rc4Wp = (commit = FIX.slice(0, 7)) => makeWp({ reviews: [
+  { round: 1, scope: 'full', head: sha('f'), verdicts: [] },
+  anchorReview([{ comment: 'C2-1', verdict: 'fixed', commit }, { comment: 'C2-2', verdict: 'fixed', commit: FIX.slice(0, 7) }]),
+] });
+const RC4_TAIL = { tailFiles: ['lib/x.test.mjs'], tailCommits: [FOLLOW, FIX] };
+
+test('61f67554 an uncited tail commit is held for a cite ruling and names the commit; it never blocks', () => {
+  const out = gate(makeState(), rc4Wp(), RC4_TAIL);
+  assert.deepEqual([out.ok, out.causes, out.uncited], [false, ['tail-uncited'], [FOLLOW]]);
+  assert.match(out.failures.join(), new RegExp(`not fixed rows of the anchoring review: ${FOLLOW}$`));
+  const recorded = recordLandStep(makeState(), rc4Wp(), GATE_ACTION, { code: 5, stdout: JSON.stringify(out), stderr: '' }, { now: () => NOW });
+  assert.deepEqual([recorded.outcome, recorded.patch.heldUncited, recorded.patch.queue], ['held', [FOLLOW], []]);
+  // A gate output that names no commit has nothing to cite: it blocks as before.
+  const bare = recordLandStep(makeState(), rc4Wp(), GATE_ACTION, { code: 5, stdout: JSON.stringify({ ...out, uncited: undefined }), stderr: '' }, { now: () => NOW });
+  assert.equal(bare.outcome, 'block');
+});
+
+test('61f67554 a fixed row cites several commits, comma-separated: the tail is post-cap and inspected', () => {
+  const both = `${FIX.slice(0, 7)},${FOLLOW.slice(0, 7)}`;
+  const needs = gate(makeState(), rc4Wp(both), RC4_TAIL);
+  assert.deepEqual(needs.causes, ['inspect'], needs.failures.join('; '));
+  const done = gate(makeState(), inspected(rc4Wp(both), RC4_TAIL), RC4_TAIL);
+  assert.deepEqual([done.ok, done.unreviewedTail], [true, `${D}..${HEAD} (post-cap)`]);
+  // The table and the adjudication carry the list; any part that is not a sha voids the cell.
+  const table = (cell) => parseAmendmentTable(`## Amendment 2\n\n| Comment | Verdict | Evidence | Commit |\n|---|---|---|---|\n| C2-1 | fixed | red then green | ${cell} |\n`);
+  assert.equal(table('`6a05f06, 18dd500`')[0].commit, '6a05f06,18dd500');
+  assert.equal(table('6a05f06 18dd500')[0].commit, '6a05f06,18dd500');
+  assert.equal(table('`6a05f06`, `18dd500`')[0].commit, '6a05f06,18dd500', 'each sha in its own code span, as the template shows one');
+  assert.equal(table('6a05f06, and a test')[0].commit, null);
+  const wp = makeWp({ reviews: [anchorReview([])] });
+  assert.equal(recordAdjudication(makeState(), wp, table('6a05f06, 18dd500')).patch.reviews.at(-1).verdicts[0].commit, '6a05f06,18dd500');
+  assert.throws(() => recordAdjudication(makeState(), wp, table('6a05f06, and a test')), { code: 2, message: /a fixed row needs its commit sha/ });
 });
 
 test('fresh base: merge-base --is-ancestor exit 1 is "stale base", and land gate is code 5', async () => {
