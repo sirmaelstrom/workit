@@ -1616,6 +1616,17 @@ test('liveness (C1-1): unparseable or empty `lane alive` output on a wait keeps 
   }
 });
 
+test('liveness (5c93c8cb): a reap that exits 1 while the old agent pid is reused is recorded, never read as liveness', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  const reap = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.part === 'reap' });
+  assert.ok(reap, 'the exec lane exit queues a reap');
+  h.lifeByPid.set(4202, 9);
+  await pendingAfter(h, { code: 1, stdout: JSON.stringify({ ok: false, state: 'survivors', orphans: [{ pid: 9, cmd: 'x' }], survivors: [{ pid: 9, cmd: 'x' }] }), stderr: '' });
+  assert.deepEqual([h.wp('WP-02').lane.reap?.state, h.wp('WP-02').lane.uncertain ?? 0], ['survivors', 0]);
+  const next = await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
+  assert.notEqual(next.part, 'reap', 'the build moves on; the reap is not re-asked as a liveness read');
+});
+
 test('liveness (C1-1): unparseable output on a stop probe and on a stop confirmation keeps the slot and asks again', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   h.life = { 'WP-02': 9 };
