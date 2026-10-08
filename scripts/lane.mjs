@@ -79,8 +79,17 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   stop     <name> [--timeout <ms>]  Stops the lane agent; a late shell/banner
            check is accepted only after the live-TUI veto. A Claude lane gone
            from the listing whose pane still ends in its resume footer exits 1
-           with state "exited-shell-blocked" and its resumeId.
-  sweep    [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
+           with state "exited-shell-blocked" and its resumeId. Then reaps the
+           lane's worktree (see reap); when the reaped process was what held
+           the shell, a returned prompt makes the stop "stopped" (after-reap).
+  reap     <name> | --path <abs> [--list]
+           Kills every process whose command line names the lane's worktree
+           (a dev server that outlived the agent), with its tree, then lists
+           again: exit 1 for a survivor or an unreadable list. --list kills
+           nothing. stop runs it after the agent exits; sweep --lane runs it
+           on a lane the delegate lists SAFE (or HOLD under --force), and
+           leaves a lane with a survivor uncleaned.
+  sweep   [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
            --lane <name> limits the delegate to one lane; --list is a dry run.
            Outside a herdr worktrees root, every call is scoped to a lane this
            helper created (from the sidecar), and --force is refused there.
@@ -170,7 +179,7 @@ const POLL_MS = 1_000;
 const SETTLE_CONFIRM_MS = 3_000;
 const LOG_BASENAME = 'lane-log.jsonl';
 const LOG_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 'lanes'];
-const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'sweep', 'admit']);
+const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'reap', 'sweep', 'admit']);
 // Operator rulings of 2026-10-01 (quest 93d4855b), in GB of free commit memory.
 const ADMIT_MIN_FREE_GB = 10;
 const ADMIT_DRAIN_FREE_GB = 4;
@@ -2147,8 +2156,37 @@ async function pollUntilUnlisted(deps, name, windowMs) {
   }
 }
 
+// Stops the agent, then reaps what the lane left running in its worktree.
 async function stopLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
+  const result = await stopAgent(opts, deps, lane);
+  if (!lane.path) return result;
+  const reaped = reapWorktree(lane.path, deps);
+  if (!reaped.found.length && !reaped.error) return result;
+  const add = (out) => ({
+    ...out,
+    output: { ...out.output, ...reapOutput(reaped) },
+    row: { ...out.row, orphans: reaped.found.length, ...(reaped.error ? { reapError: reaped.error } : {}) },
+  });
+  // Only a verified reap (the second list read, no survivor) can turn a blocked stop into a stop.
+  if (result.output?.state === 'exited-shell-blocked' && reaped.killed.length && !reaped.survivors.length && !reaped.error) {
+    // The live descendant the launch waited on was the orphan: with it gone,
+    // the pane's shell can return.
+    try {
+      await waitForPanePrompt(deps, lane.pane, { signature: lane.promptSignature ?? null, patterns: promptPatterns(opts, deps) }, REAP_PROMPT_MS);
+      return add({
+        exit: EXIT.OK,
+        output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'after-reap' },
+        row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'after-reap' },
+      });
+    } catch {
+      // The pane still holds; the failure stands, with what was reaped.
+    }
+  }
+  return add(result);
+}
+
+async function stopAgent(opts, deps, lane) {
   if (!lane.pane) usage(`lane ${opts.name} has no pane metadata`);
   const timeout = positiveNumber(opts.timeout, '--timeout', 30_000);
   if (lane.kind === 'codex') {
@@ -2269,6 +2307,120 @@ async function stopLane(opts, deps, state) {
   };
 }
 
+// ---- reap ----
+
+const REAP_PROMPT_MS = 10_000;
+const PROCESS_LIST_WIN32 = 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress';
+
+// Every process with its parent and command line, or { error }.
+function processList(deps) {
+  if (deps.platform === 'win32') {
+    const read = call(deps, 'pwsh', ['-NoProfile', '-NonInteractive', '-Command', PROCESS_LIST_WIN32]);
+    if (read.code !== 0) return { error: `process list failed: ${read.stderr.trim() || read.stdout.trim()}` };
+    const parsed = parseJson(read.stdout);
+    if (parsed === null || typeof parsed !== 'object') return { error: 'process list printed no JSON' };
+    // ConvertTo-Json prints a lone object, not an array, for one row.
+    const rows = Array.isArray(parsed) ? parsed : 'ProcessId' in parsed ? [parsed] : [];
+    return { processes: rows.map((row) => ({ pid: Number(row?.ProcessId), ppid: Number(row?.ParentProcessId), cmd: String(row?.CommandLine ?? '') })).filter((row) => Number.isInteger(row.pid)) };
+  }
+  const read = call(deps, 'ps', ['-eo', 'pid=,ppid=,args=']);
+  if (read.code !== 0) return { error: `process list failed: ${read.stderr.trim() || read.stdout.trim()}` };
+  return { processes: read.stdout.split(/\r?\n/).map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).filter(Boolean)
+    .map(([, pid, ppid, cmd]) => ({ pid: Number(pid), ppid: Number(ppid), cmd })) };
+}
+
+// Whether a command line names the worktree: the path (either slash, case
+// folded on win32), followed by a separator, a quote, whitespace or the end,
+// so `<wt>-2` is not `<wt>`.
+export function commandNamesPath(cmd, path, platform) {
+  const fold = (value) => (platform === 'win32' ? value.toLowerCase() : value);
+  const text = fold(String(cmd));
+  const bare = String(path).replace(/[\\/]+$/, '');
+  for (const form of new Set([bare, bare.replaceAll('\\', '/'), bare.replaceAll('/', '\\')].map(fold))) {
+    for (let at = text.indexOf(form); at >= 0; at = text.indexOf(form, at + 1)) {
+      const next = text[at + form.length];
+      if (next === undefined || /[\\/"'\s]/.test(next)) return true;
+    }
+  }
+  return false;
+}
+
+// The processes still running from a lane's worktree after its agent exited
+// (a runtime-exercise dev server). They hold the pane's shell open
+// (exited-shell-blocked) and lock files a sweep must delete. Found by the
+// worktree path in the command line, which herdr's pane shells and the lane
+// agents do not carry (ASSUMPTION beyond the shapes read on 2026-10-08:
+// `pwsh -NoExit -Command <prompt hook>` and `claude.exe --resume <id>`).
+// This process and its ancestors are never matched. Each match is killed with
+// its tree, then the list is read again: a survivor is reported, never
+// assumed gone. ASSUMPTION: a pid is not reused between the list and the kill
+// (one round trip). `list` reports without killing.
+export function reapWorktree(path, deps, { list = false } = {}) {
+  const before = processList(deps);
+  if (before.error) return { path, found: [], killed: [], survivors: [], error: before.error };
+  const self = deps.pid ?? process.pid;
+  const parents = new Map(before.processes.map((row) => [row.pid, row.ppid]));
+  const ancestors = new Set();
+  for (let pid = self; Number.isInteger(pid) && !ancestors.has(pid); pid = parents.get(pid)) ancestors.add(pid);
+  const match = (rows) => rows.filter((row) => !ancestors.has(row.pid) && commandNamesPath(row.cmd, path, deps.platform));
+  const found = match(before.processes);
+  if (list || !found.length) return { path, found, killed: [], survivors: [] };
+  // A match's descendants (a `node server.js` under the matched shell) need not
+  // name the path; the parent links read in the same list find them.
+  const tree = new Map(found.map((row) => [row.pid, row]));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const row of before.processes) {
+      if (!tree.has(row.pid) && tree.has(row.ppid) && !ancestors.has(row.pid)) {
+        tree.set(row.pid, row);
+        grew = true;
+      }
+    }
+  }
+  const killed = [];
+  // taskkill /T walks the tree itself; elsewhere each process gets its own
+  // TERM, deepest first (depth by parent links, not list order).
+  const depth = (row) => {
+    let n = 0;
+    for (let at = row; tree.has(at.ppid) && n < tree.size; at = tree.get(at.ppid)) n += 1;
+    return n;
+  };
+  const targets = deps.platform === 'win32' ? found : [...tree.values()].sort((a, b) => depth(b) - depth(a));
+  for (const row of targets) {
+    const kill = deps.platform === 'win32' ? call(deps, 'taskkill', ['/PID', String(row.pid), '/T', '/F']) : call(deps, 'kill', ['-TERM', String(row.pid)]);
+    if (kill.code === 0) killed.push(row.pid);
+  }
+  const after = processList(deps);
+  if (after.error) return { path, found, killed, survivors: [], error: `after the kill: ${after.error}` };
+  // A survivor is a new path match, or a member of the tree still running the same command (a reused pid is not).
+  const survivors = after.processes.filter((row) => (tree.has(row.pid) && tree.get(row.pid).cmd === row.cmd)
+    || (!ancestors.has(row.pid) && commandNamesPath(row.cmd, path, deps.platform)));
+  return { path, found, killed, survivors };
+}
+
+const shortCmd = (cmd) => (cmd.length > 200 ? `${cmd.slice(0, 197)}...` : cmd);
+function reapOutput(reaped) {
+  return {
+    orphans: reaped.found.map((row) => ({ pid: row.pid, cmd: shortCmd(row.cmd) })),
+    ...(reaped.survivors.length ? { survivors: reaped.survivors.map((row) => ({ pid: row.pid, cmd: shortCmd(row.cmd) })) } : {}),
+    ...(reaped.error ? { reapError: reaped.error } : {}),
+  };
+}
+
+// `lane reap <name> | --path <abs> [--list]`: one lane's leftover processes.
+async function reapLane(opts, deps, state) {
+  const path = opts.path ? resolve(opts.path) : laneRecord(opts, state).path;
+  if (!path) usage('reap needs <name> (a lane with a path) or --path <abs>');
+  const reaped = reapWorktree(path, deps, { list: Boolean(opts.list) });
+  const failed = Boolean(reaped.error) || (!opts.list && reaped.survivors.length > 0);
+  const stateName = reaped.error ? 'reap-failed' : opts.list ? 'listed' : reaped.survivors.length ? 'survivors' : 'reaped';
+  return {
+    exit: failed ? EXIT.ERROR : EXIT.OK,
+    output: { state: stateName, path, ...reapOutput(reaped), ...(reaped.error ? { error: reaped.error } : {}) },
+    row: { lane: opts.name ?? basename(path), state: stateName, orphans: reaped.found.length },
+  };
+}
+
 // A root is a LANE root when everything under it is a lane by construction —
 // herdr's own worktrees directory. A workspace root is not: it holds data/ and
 // projects/, and the delegate deletes with `Remove-Item -Recurse -Force`. A
@@ -2372,18 +2524,24 @@ function delegateRootForLane(lanePath, deps) {
 // Returns those paths, [] for "No lanes under", or null when the output has
 // neither shape (unverifiable, so the caller refuses).
 export function delegateListedPaths(output, worktreeRoot) {
+  return delegateListedRows(output, worktreeRoot)?.map((row) => row.path) ?? null;
+}
+
+// Each listed lane with the delegate's verdict (SAFE, HOLD, PRUNE), its last column.
+export function delegateListedRows(output, worktreeRoot) {
   const lines = String(output).split(/\r?\n/);
   const header = lines.findIndex((line) => /^\s*REPO\s+LANE\s+BRANCH\b/.test(line));
   if (header < 0) return /No lanes under/i.test(String(output)) ? [] : null;
-  const paths = [];
+  const rows = [];
   for (const line of lines.slice(header + 2)) {
     if (line.trim() === '') break;
     if (/^\s/.test(line)) continue;
-    const [repo, lane] = line.trim().split(/\s+/);
+    const cells = line.trim().split(/\s+/);
+    const [repo, lane] = cells;
     if (!repo || !lane) return null;
-    paths.push(join(worktreeRoot, repo, lane));
+    rows.push({ path: join(worktreeRoot, repo, lane), verdict: cells.at(-1) });
   }
-  return paths;
+  return rows;
 }
 
 // d4480b68: `-Lane` scopes the delegate by basename only, two levels below
@@ -2397,14 +2555,15 @@ function verifyDelegateTarget(deps, delegate, entry) {
   const listFlags = entry.flags.filter((flag) => flag !== '-Clean' && flag !== '-Force');
   const listed = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', root, ...listFlags]);
   if (listed.code !== 0) return { refused: `delegate --list failed before -Clean: ${listed.stderr.trim() || listed.stdout.trim() || `exit ${listed.code}`}` };
-  const reported = delegateListedPaths(listed.stdout, root);
-  if (reported === null) return { refused: 'the delegate list could not be read, so the directory -Clean would remove is unverified' };
+  const rows = delegateListedRows(listed.stdout, root);
+  if (rows === null) return { refused: 'the delegate list could not be read, so the directory -Clean would remove is unverified' };
+  const reported = rows.map((row) => row.path);
   const expected = fold(resolve(entry.lanePath));
   const strays = reported.filter((path) => fold(resolve(path)) !== expected);
   if (strays.length > 0) {
     return { refused: `the delegate lists ${strays.join(', ')} for -Lane ${entry.lane}, not the sidecar's ${resolve(entry.lanePath)}; -Clean refused` };
   }
-  return { listed: listed.stdout, nothingListed: reported.length === 0 };
+  return { listed: listed.stdout, nothingListed: reported.length === 0, verdicts: rows.map((row) => row.verdict) };
 }
 
 function sweepDelegate(opts, deps) {
@@ -2520,8 +2679,9 @@ async function sweepLanes(opts, deps, state) {
   // lanes unswept behind a failing legacy root — the alert-fan-out failure
   // where one dead target silences the rest.
   const results = present.map((entry) => {
+    let verified = null;
     if (entry.lanePath && entry.flags.includes('-Clean')) {
-      const verified = verifyDelegateTarget(deps, delegate, entry);
+      verified = verifyDelegateTarget(deps, delegate, entry);
       if (verified.refused) {
         return { root: entry.root, lane: entry.lane, ok: false, exit: null, output: '', refused: true, error: verified.refused };
       }
@@ -2529,10 +2689,22 @@ async function sweepLanes(opts, deps, state) {
         return { root: entry.root, lane: entry.lane, ok: true, exit: 0, output: verified.listed, cleaned: false };
       }
     }
+    // A lane's leftover process locks files the delegate deletes (a dev
+    // server's native module), so the lane is reaped first, but only a lane the
+    // delegate is about to clean: a HOLD lane (a live agent, unfinished work)
+    // keeps its processes unless -Force overrides the HOLD. An unverified reap
+    // leaves the lane uncleaned rather than half-deleted around a locked file.
+    const cleans = (verdict) => verdict === 'SAFE' || verdict === 'PRUNE' || (verdict === 'HOLD' && entry.flags.includes('-Force'));
+    const reaped = verified?.verdicts?.length && verified.verdicts.every(cleans) ? reapWorktree(entry.lanePath, deps) : null;
+    if (reaped && (reaped.error || reaped.survivors.length)) {
+      return { root: entry.root, lane: entry.lane, ...reapOutput(reaped), ok: false, exit: null, output: '',
+        error: `${entry.lanePath} not cleaned: ${reaped.error ?? `${reaped.survivors.length} process(es) still run from it`}` };
+    }
     const swept = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', entry.delegateRoot ?? entry.root, ...entry.flags]);
     return {
       root: entry.root,
       ...(entry.lane ? { lane: entry.lane } : {}),
+      ...(reaped && (reaped.found.length || reaped.error) ? reapOutput(reaped) : {}),
       ok: swept.code === 0,
       exit: swept.code,
       output: swept.stdout,
@@ -2954,6 +3126,7 @@ export async function runLane(argv, overrides = {}) {
       case 'resume': result = await resumeLane(opts, deps, state); break;
       case 'fallback': result = await fallbackLane(opts, deps, state); break;
       case 'stop': result = await stopLane(opts, deps, state); break;
+      case 'reap': result = await reapLane(opts, deps, state); break;
       case 'sweep': result = await sweepLanes(opts, deps, state); break;
       case 'admit': result = await admitLane(opts, deps); break;
       default: throw new LaneError(EXIT.USAGE, `${opts.verb} is not implemented yet`);
