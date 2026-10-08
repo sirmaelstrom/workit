@@ -411,6 +411,9 @@ test('checkCoverage rejects a stale same-count path set', () => {
 // validateFindingsShape
 // ---------------------------------------------------------------------------
 
+// What the standalone lens's head guard reads before and after the reviewer.
+const LENS_HEAD = `${'c'.repeat(40)}\nrefs/heads/lane\n`;
+
 const VALID = {
   summary: 's',
   coverage: 'examined 1 of 1 changed files',
@@ -1176,6 +1179,7 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), codex
           calls.push({ program, args, opts });
           if (args[0] === 'api') return 'src/a.ts\n';
           if (args.includes('status')) return ++statusCalls === 1 ? beforeStatus : afterStatus;
+          if (args.includes('rev-parse')) return LENS_HEAD;
           if (args[0] === 'exec') {
             if (codexOutput !== null) writeFileSync(args[args.indexOf('-o') + 1], codexOutput, 'utf8');
             return 'codex stdout that must not be parsed';
@@ -1359,6 +1363,7 @@ test('lens removes its temp dir before the validation die path throws', () => {
           run: (program, args) => {
             if (args[0] === 'api') return 'src/a.ts\n';
             if (args.includes('status')) return ++statusCalls === 1 ? '' : '';
+            if (args.includes('rev-parse')) return LENS_HEAD;
             if (args[0] === 'exec') {
               tempOut = args[args.indexOf('-o') + 1];
               writeFileSync(tempOut, 'not JSON', 'utf8');
@@ -1407,6 +1412,87 @@ test('lens dirty-tree guard detects a new path on an already-dirty tree and reco
   assert.match(deaths[0]?.message ?? '', /reviewer-created\.ts/);
   assert.equal(outExists, true);
   assert.deepEqual(rows.map((row) => row.dirty), [true]);
+});
+
+// A real checkout: `gh pr checkout --detach` leaves a clean tree, which only
+// git itself can show. The codex call stands in for the reviewer's actions.
+function runLensMovingHead(reviewerDoes, { reviewerFails = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-lens-head-'));
+  const repo = join(dir, 'repo');
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const commit = (file) => {
+    writeFileSync(join(repo, file), file);
+    git('add', file);
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', file);
+  };
+  execFileSync('git', ['init', '-q', '-b', 'lane', repo]);
+  commit('a.txt');
+  commit('b.txt');
+  const before = git('rev-parse', 'HEAD');
+  const deaths = [];
+  const logs = [];
+  const measureLog = join(dir, 'measure.jsonl');
+  try {
+    withNoManagedConfig(() => cmdLens(
+      { pr: '42', repo: 'owner/repo', lens: 'codex', cwd: repo, out: join(dir, 'findings.json'), measureLog },
+      {
+        run: (program, args, opts = {}) => {
+          if (args[0] === 'api') return 'src/a.ts\n';
+          if (args[0] === 'exec') {
+            reviewerDoes({ git, commit });
+            if (reviewerFails) throw new Error('reviewer exited 1');
+            writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(VALID), 'utf8');
+            return '';
+          }
+          if (program === 'git' || program === 'git.exe') return execFileSync(program, args, { ...opts, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+          return JSON.stringify(VALID);
+        },
+        findCodexExe: () => 'codex',
+        die: (code, message) => deaths.push({ code, message }),
+        log: (line) => logs.push(line),
+        now: (() => { let clock = 100; return () => (clock += 25); })(),
+      },
+    ));
+    const rows = existsSync(measureLog) ? readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).filter(Boolean).map(JSON.parse) : [];
+    return { deaths, logs, rows, before, head: git('rev-parse', 'HEAD'), ref: git('rev-parse', '--symbolic-full-name', 'HEAD') };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('lens head guard: a reviewer that detaches the caller\'s checkout has it put back on the branch', () => {
+  const out = runLensMovingHead(({ git }) => git('checkout', '-q', '--detach', 'HEAD~1'));
+  assert.deepEqual(out.deaths, []);
+  assert.deepEqual([out.ref, out.head], ['refs/heads/lane', out.before]);
+  assert.deepEqual(out.rows.map((row) => row.head_moved), [true]);
+  assert.ok(out.logs.some((line) => /restored\s+refs\/heads\/lane/.test(line)), out.logs.join('\n'));
+});
+
+test('lens head guard: a reviewer that moves the branch itself is not reset; the lens exits 4 naming it', () => {
+  const out = runLensMovingHead(({ commit }) => commit('c.txt'));
+  assert.equal(out.deaths[0]?.code, 4);
+  assert.match(out.deaths[0]?.message ?? '', /reviewer moved refs\/heads\/lane from/);
+  assert.notEqual(out.head, out.before, 'the reviewer\'s commit is left for the operator');
+});
+
+test('lens head guard: a reviewer that detaches and then fails still has HEAD put back; the failure is reported', () => {
+  const out = runLensMovingHead(({ git }) => git('checkout', '-q', '--detach', 'HEAD~1'), { reviewerFails: true });
+  assert.equal(out.deaths[0]?.code, 4);
+  assert.match(out.deaths[0]?.message ?? '', /reviewer exited 1/);
+  assert.deepEqual([out.ref, out.head], ['refs/heads/lane', out.before]);
+});
+
+test('lens head guard: a reviewer that commits and then fails is not reset; the failure names the moved branch', () => {
+  const out = runLensMovingHead(({ commit }) => commit('c.txt'), { reviewerFails: true });
+  assert.match(out.deaths[0]?.message ?? '', /reviewer exited 1; reviewer moved refs\/heads\/lane from/);
+  assert.notEqual(out.head, out.before);
+});
+
+test('lens head guard: an unmoved checkout logs nothing and records no move', () => {
+  const out = runLensMovingHead(() => {});
+  assert.deepEqual(out.deaths, []);
+  assert.deepEqual(out.rows.map((row) => row.head_moved), [undefined]);
+  assert.ok(!out.logs.some((line) => /restored/.test(line)));
 });
 
 test('post combines lens findings, tags comment bodies, counts each lens, and guards their path union', () => {
@@ -1987,6 +2073,7 @@ test('characterisation: standalone lens writes the stamped document and one meas
         run: (program, args) => {
           if (args[0] === 'api') return 'src/a.ts\n';
           if (args.includes('status')) { statusCalls += 1; return ''; }
+          if (args.includes('rev-parse')) return LENS_HEAD;
           if (args[0] === 'exec') {
             writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify(VALID), 'utf8');
             return 'codex stdout that must not be parsed';
@@ -5099,6 +5186,7 @@ function runStandaloneLens({ since, contextFile, examined = ['src/c.ts'], amendm
           if (args[0] === 'api' && String(args[1]).includes(`/compare/${DELTA_BASE}...`)) return JSON.stringify(sinceOnBase);
           if (args[0] === 'api' && String(args[1]).includes('/compare/')) return JSON.stringify(amendment);
           if (args.includes('status')) return '';
+          if (args.includes('rev-parse')) return LENS_HEAD;
           if (args[0] === 'exec') {
             writeFileSync(args[args.indexOf('-o') + 1], JSON.stringify({
               summary: 's', coverage: `examined ${examined.length} of ${examined.length} changed files`, examined_paths: examined, findings: [],
@@ -5625,6 +5713,7 @@ test('M2 control: an opus prompt too long for one command-line argument is refus
           run: (program, args) => {
             if (args[0] === 'api') return 'src/a.ts\n';
             if (args.includes('status')) return '';
+            if (args.includes('rev-parse')) return LENS_HEAD;
             spawned.push({ program, args });
             return JSON.stringify({ result: JSON.stringify(VALID) });
           },

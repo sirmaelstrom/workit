@@ -305,17 +305,21 @@ function lockFailure(state, wp) {
 // commit pushed to the branch since then is never overwritten. The PR is
 // readied here, under the lock the fetch takes and before the gate, never back
 // to back with the merge: a ready PR is what a pipeline review picks up, and the
-// gate waits for that review.
+// gate waits for that review. Every step names the branch, never HEAD: a
+// worktree left detached (a review lens's `gh pr checkout --detach`) would
+// otherwise rebase the detached HEAD and push an unmoved branch. `rebase <base>
+// <branch>` checks the branch out first.
 export function rebaseActions(state, wp) {
   if (mergeLockFor(state, wp) === 'other') return [waitAction('rebase', 'yield', `Wait: ${state.mergeLock.wpId} holds the merge lock.`)];
   const git = (part, ...args) => shell('rebase', part, ['git', '-C', wp.lane.worktree, ...args]);
   const base = `origin/${defaultOf(state)}`;
+  const ref = `refs/heads/${wp.lane.branch}`;
   return [
     git('fetch', 'fetch', 'origin'),
     shell('rebase', 'ready', ['gh', 'pr', 'ready', String(wp.pr.number), '--repo', repoOf(state)]),
-    git('pre-head', 'rev-parse', 'HEAD'),
-    git('rebase', 'rebase', base),
-    git('post-heads', 'rev-parse', 'HEAD', base),
+    git('pre-head', 'rev-parse', ref),
+    git('rebase', 'rebase', base, wp.lane.branch),
+    git('post-heads', 'rev-parse', ref, base),
     git('push', 'push', `--force-with-lease=${wp.lane.branch}:${wp.pr.head}`, 'origin', wp.lane.branch),
     waitAction('rebase', 'ci-wait', 'Wait for CI at the pushed head; the land gate action answers it.'),
   ];

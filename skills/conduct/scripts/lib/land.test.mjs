@@ -4,6 +4,7 @@ import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'n
 import { tmpdir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import {
   tierFor, pickReviewers, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions, recordLandStep, runLandVerb,
@@ -1169,13 +1170,60 @@ test('rebaseActions: fetch (takes the lock), ready, pre-head, rebase, post-heads
   const actions = rebaseActions(state, makeWp());
   assert.deepEqual(actions.map((a) => a.part), ['fetch', 'ready', 'pre-head', 'rebase', 'post-heads', 'push', 'ci-wait']);
   assert.deepEqual(actions[1].command, ['gh', 'pr', 'ready', '7', '--repo', 'sirmaelstrom/workit']);
-  assert.deepEqual(actions[4].command, ['git', '-C', WT, 'rev-parse', 'HEAD', 'origin/main']);
+  assert.deepEqual(actions[2].command, ['git', '-C', WT, 'rev-parse', 'refs/heads/conduct/fixture/wp-01']);
+  assert.deepEqual(actions[3].command, ['git', '-C', WT, 'rebase', 'origin/main', 'conduct/fixture/wp-01']);
+  assert.deepEqual(actions[4].command, ['git', '-C', WT, 'rev-parse', 'refs/heads/conduct/fixture/wp-01', 'origin/main']);
   assert.equal(actions.at(-1).kind, 'wait');
   const from = sha('f');
   const wp = makeWp({ rebaseFrom: from });
   const exec = gateExec({ patchIds: { [`diff ${BASE} ${from}\n`]: 'p', [`diff ${sha('9')} ${HEAD}\n`]: 'p' } });
   const out = recordLandStep(state, wp, actions[4], ok(`${HEAD}\n${sha('9')}\n`), { exec });
   assert.deepEqual(out.patch.rebases.map((r) => [r.from, r.to, r.newBase, r.equivalent]), [[from, HEAD, sha('9'), true]]);
+});
+
+test('rebaseActions on a worktree a review lens left detached at the PR head: the pushed branch is the rebased head', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'conduct-rebase-detached-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const origin = join(root, 'origin.git');
+  const seed = join(root, 'seed');
+  const wt = join(root, 'lane');
+  const branch = 'conduct/fixture/wp-01';
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+  execFileSync('git', ['clone', '-q', origin, seed], { stdio: 'ignore' });
+  const commit = (cwd, file) => {
+    writeFileSync(join(cwd, file), file);
+    git(cwd, 'add', file);
+    git(cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', file);
+  };
+  commit(seed, 'base.txt');
+  git(seed, 'push', '-q', 'origin', 'HEAD:main');
+  execFileSync('git', ['clone', '-q', origin, wt], { stdio: 'ignore' });
+  // The rebase writes commits; a CI runner has no identity of its own.
+  git(wt, 'config', 'user.name', 't');
+  git(wt, 'config', 'user.email', 't@t');
+  git(wt, 'switch', '-q', '-c', branch);
+  commit(wt, 'lane.txt');
+  git(wt, 'push', '-q', 'origin', branch);
+  const prHead = git(wt, 'rev-parse', 'HEAD');
+  commit(seed, 'moved.txt');
+  git(seed, 'push', '-q', 'origin', 'HEAD:main');
+  // What `gh pr checkout <n> --detach` leaves behind.
+  git(wt, 'checkout', '-q', '--detach', prHead);
+
+  const state = makeState();
+  const wp = makeWp({ lane: { worktree: wt, branch, base: BASE }, pr: { number: 7, head: prHead } });
+  const outputs = {};
+  for (const action of rebaseActions(state, wp).filter((a) => a.kind === 'shell' && a.part !== 'ready')) {
+    const [program, ...args] = action.command;
+    outputs[action.part] = execFileSync(program, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  }
+  const [to, newBase] = outputs['post-heads'].split(/\r?\n/);
+  assert.equal(outputs['pre-head'], prHead);
+  assert.equal(newBase, git(seed, 'rev-parse', 'HEAD'));
+  assert.notEqual(to, prHead, 'the branch moved onto the new base');
+  assert.equal(git(origin, 'rev-parse', `refs/heads/${branch}`), to, 'the pushed branch is the post-rebase head');
+  assert.equal(git(wt, 'rev-parse', '--symbolic-full-name', 'HEAD'), `refs/heads/${branch}`, 'the worktree is back on the branch');
 });
 
 test('the ready step: an already-ready PR continues; any other failure blocks', () => {
