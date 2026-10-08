@@ -5056,6 +5056,80 @@ test('reap: stop with nothing left behind is unchanged, and a pane that still ho
   assert.deepEqual([held.exit, held.output.state, held.output.orphans.map((row) => row.pid)], [EXIT_CODES.error, 'exited-shell-blocked', [101]]);
 });
 
+test('reap: off win32 the tree is found through parent links and TERMed children first; a child that outlives it is a survivor', async (t) => {
+  const f = fixture(t);
+  const wt = join(f.dir, 'lane');
+  f.platform = 'linux';
+  f.processes = [
+    { pid: 101, ppid: 1, cmd: `sh -c node ${join(wt, 'server.js')}` },
+    { pid: 102, ppid: 101, cmd: 'node worker.js' },
+    { pid: 103, ppid: 1, cmd: 'node unrelated.js' },
+  ];
+  const reaped = await runLane(['reap', '--path', wt, '--log', f.log], { exec: f.exec, platform: 'linux', pid: 900 });
+  assert.equal(reaped.exit, 0, JSON.stringify(reaped.output));
+  assert.deepEqual(f.reaps.filter(([program]) => program === 'kill'), [['kill', '-TERM', '102'], ['kill', '-TERM', '101']]);
+  assert.deepEqual(f.processes.map((row) => row.pid), [103]);
+  const g = fixture(t);
+  g.platform = 'linux';
+  g.processes = [{ pid: 101, ppid: 1, cmd: `sh -c node ${join(wt, 'server.js')}` }, { pid: 102, ppid: 101, cmd: 'node worker.js' }];
+  const exec = (program, args, options) => (program === 'kill' && args.includes('102') ? { code: 0, stdout: '', stderr: '' } : g.exec(program, args, options));
+  const survived = await runLane(['reap', '--path', wt, '--log', g.log], { exec, platform: 'linux', pid: 900 });
+  assert.deepEqual([survived.exit, survived.output.survivors.map((row) => row.pid)], [1, [102]]);
+});
+
+test('reap: a blocked stop whose second process list fails stays exited-shell-blocked, carrying the reap error', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
+  f.platform = 'win32';
+  f.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(f.dir, 'server.js')}` }];
+  let lists = 0;
+  const herdr = stopHerdr(() => (f.processes.length ? BLOCKED_TAIL : `${BLOCKED_TAIL}\n\n${BLOCKED_SIGNATURE}`));
+  const exec = (program, args, options) => {
+    if (isProcessList(program, args) && ++lists === 2) return { code: 1, stdout: '', stderr: 'access denied' };
+    return withReap(f, herdr)(program, args, options);
+  };
+  let clock = 0;
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec, platform: 'win32', pid: 900, now: () => clock, sleep: async (ms) => { clock += ms; } });
+  assert.deepEqual([result.exit, result.output.state], [EXIT_CODES.error, 'exited-shell-blocked']);
+  assert.match(result.output.reapError, /after the kill: process list failed: access denied/);
+});
+
+// One named lane under a herdr worktrees root (where --force is allowed),
+// listed by the delegate with `verdict`.
+function sweepScene(t, verdict) {
+  const f = fixture(t);
+  const root = join(f.dir, '.herdr', 'worktrees');
+  const lane = join(root, 'workit', 'workit-wt-lane');
+  seedCreates(f, [lane]);
+  f.platform = 'win32';
+  f.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(lane, 'node_modules', 'vite', 'bin', 'vite.js')}` }];
+  const listing = delegateListing(['workit', 'workit-wt-lane']);
+  f.responses.push({ ...listing, stdout: listing.stdout.replace('SAFE', verdict) }, { code: 0, stdout: 'workit-wt-lane done', stderr: '' });
+  const run = (...flags) => runLane(['sweep', '--root', root, '--lane', 'workit-wt-lane', ...flags, '--log', f.log], {
+    exec: f.exec, platform: 'win32', pid: 900, exists: fakeExists(), env: {},
+  });
+  return { f, run };
+}
+
+test('reap: sweep leaves a HOLD lane\'s processes alone, reaps it under --force, and leaves a lane with a survivor uncleaned', async (t) => {
+  const held = sweepScene(t, 'HOLD');
+  await held.run();
+  assert.equal(held.f.reaps.some(([program]) => program === 'taskkill'), false, 'a HOLD lane may have a live agent: nothing is killed');
+  assert.equal(cleaningCalls(held.f).length, 1, 'the delegate still runs and holds it');
+  const forced = sweepScene(t, 'HOLD');
+  await forced.run('--force');
+  assert.deepEqual(forced.f.reaps.filter(([program]) => program === 'taskkill').map((call) => call[2]), ['101']);
+  const stuck = sweepScene(t, 'SAFE');
+  const exec = stuck.f.exec;
+  // The kill "succeeds" and the process stays.
+  stuck.f.exec = (program, args, options) => (program === 'taskkill' ? { code: 0, stdout: '', stderr: '' } : exec(program, args, options));
+  const result = await stuck.run();
+  assert.equal(cleaningCalls(stuck.f).length, 0, 'a survivor holds a file the delegate would half-delete around');
+  const root = result.output.roots.find((entry) => entry.lane === 'workit-wt-lane');
+  assert.deepEqual([root.ok, root.survivors.map((row) => row.pid)], [false, [101]]);
+  assert.match(root.error, /not cleaned: 1 process\(es\) still run from it/);
+});
+
 test('reap: sweep --lane reaps the lane before the cleaning delegate runs', async (t) => {
   const f = fixture(t);
   const profile = join(f.dir, 'profile');

@@ -86,7 +86,9 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Kills every process whose command line names the lane's worktree
            (a dev server that outlived the agent), with its tree, then lists
            again: exit 1 for a survivor or an unreadable list. --list kills
-           nothing. stop and sweep --lane run it themselves.
+           nothing. stop runs it after the agent exits; sweep --lane runs it
+           on a lane the delegate lists SAFE (or HOLD under --force), and
+           leaves a lane with a survivor uncleaned.
   sweep   [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
            --lane <name> limits the delegate to one lane; --list is a dry run.
            Outside a herdr worktrees root, every call is scoped to a lane this
@@ -2166,7 +2168,8 @@ async function stopLane(opts, deps, state) {
     output: { ...out.output, ...reapOutput(reaped) },
     row: { ...out.row, orphans: reaped.found.length, ...(reaped.error ? { reapError: reaped.error } : {}) },
   });
-  if (result.output?.state === 'exited-shell-blocked' && reaped.killed.length && !reaped.survivors.length) {
+  // Only a verified reap (the second list read, no survivor) can turn a blocked stop into a stop.
+  if (result.output?.state === 'exited-shell-blocked' && reaped.killed.length && !reaped.survivors.length && !reaped.error) {
     // The live descendant the launch waited on was the orphan: with it gone,
     // the pane's shell can return.
     try {
@@ -2362,14 +2365,31 @@ export function reapWorktree(path, deps, { list = false } = {}) {
   const match = (rows) => rows.filter((row) => !ancestors.has(row.pid) && commandNamesPath(row.cmd, path, deps.platform));
   const found = match(before.processes);
   if (list || !found.length) return { path, found, killed: [], survivors: [] };
+  // A match's descendants (a `node server.js` under the matched shell) need not
+  // name the path; the parent links read in the same list find them.
+  const tree = new Map(found.map((row) => [row.pid, row]));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const row of before.processes) {
+      if (!tree.has(row.pid) && tree.has(row.ppid) && !ancestors.has(row.pid)) {
+        tree.set(row.pid, row);
+        grew = true;
+      }
+    }
+  }
   const killed = [];
-  for (const row of found) {
+  // taskkill /T walks the tree itself; elsewhere each process gets its own TERM, children first.
+  const targets = deps.platform === 'win32' ? found : [...tree.values()].reverse();
+  for (const row of targets) {
     const kill = deps.platform === 'win32' ? call(deps, 'taskkill', ['/PID', String(row.pid), '/T', '/F']) : call(deps, 'kill', ['-TERM', String(row.pid)]);
     if (kill.code === 0) killed.push(row.pid);
   }
   const after = processList(deps);
   if (after.error) return { path, found, killed, survivors: [], error: `after the kill: ${after.error}` };
-  return { path, found, killed, survivors: match(after.processes) };
+  // A survivor is a new path match, or a member of the tree still running the same command (a reused pid is not).
+  const survivors = after.processes.filter((row) => (tree.has(row.pid) && tree.get(row.pid).cmd === row.cmd)
+    || (!ancestors.has(row.pid) && commandNamesPath(row.cmd, path, deps.platform)));
+  return { path, found, killed, survivors };
 }
 
 const shortCmd = (cmd) => (cmd.length > 200 ? `${cmd.slice(0, 197)}...` : cmd);
@@ -2498,18 +2518,24 @@ function delegateRootForLane(lanePath, deps) {
 // Returns those paths, [] for "No lanes under", or null when the output has
 // neither shape (unverifiable, so the caller refuses).
 export function delegateListedPaths(output, worktreeRoot) {
+  return delegateListedRows(output, worktreeRoot)?.map((row) => row.path) ?? null;
+}
+
+// Each listed lane with the delegate's verdict (SAFE, HOLD, PRUNE), its last column.
+export function delegateListedRows(output, worktreeRoot) {
   const lines = String(output).split(/\r?\n/);
   const header = lines.findIndex((line) => /^\s*REPO\s+LANE\s+BRANCH\b/.test(line));
   if (header < 0) return /No lanes under/i.test(String(output)) ? [] : null;
-  const paths = [];
+  const rows = [];
   for (const line of lines.slice(header + 2)) {
     if (line.trim() === '') break;
     if (/^\s/.test(line)) continue;
-    const [repo, lane] = line.trim().split(/\s+/);
+    const cells = line.trim().split(/\s+/);
+    const [repo, lane] = cells;
     if (!repo || !lane) return null;
-    paths.push(join(worktreeRoot, repo, lane));
+    rows.push({ path: join(worktreeRoot, repo, lane), verdict: cells.at(-1) });
   }
-  return paths;
+  return rows;
 }
 
 // d4480b68: `-Lane` scopes the delegate by basename only, two levels below
@@ -2523,14 +2549,15 @@ function verifyDelegateTarget(deps, delegate, entry) {
   const listFlags = entry.flags.filter((flag) => flag !== '-Clean' && flag !== '-Force');
   const listed = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', root, ...listFlags]);
   if (listed.code !== 0) return { refused: `delegate --list failed before -Clean: ${listed.stderr.trim() || listed.stdout.trim() || `exit ${listed.code}`}` };
-  const reported = delegateListedPaths(listed.stdout, root);
-  if (reported === null) return { refused: 'the delegate list could not be read, so the directory -Clean would remove is unverified' };
+  const rows = delegateListedRows(listed.stdout, root);
+  if (rows === null) return { refused: 'the delegate list could not be read, so the directory -Clean would remove is unverified' };
+  const reported = rows.map((row) => row.path);
   const expected = fold(resolve(entry.lanePath));
   const strays = reported.filter((path) => fold(resolve(path)) !== expected);
   if (strays.length > 0) {
     return { refused: `the delegate lists ${strays.join(', ')} for -Lane ${entry.lane}, not the sidecar's ${resolve(entry.lanePath)}; -Clean refused` };
   }
-  return { listed: listed.stdout, nothingListed: reported.length === 0 };
+  return { listed: listed.stdout, nothingListed: reported.length === 0, verdicts: rows.map((row) => row.verdict) };
 }
 
 function sweepDelegate(opts, deps) {
@@ -2646,8 +2673,9 @@ async function sweepLanes(opts, deps, state) {
   // lanes unswept behind a failing legacy root — the alert-fan-out failure
   // where one dead target silences the rest.
   const results = present.map((entry) => {
+    let verified = null;
     if (entry.lanePath && entry.flags.includes('-Clean')) {
-      const verified = verifyDelegateTarget(deps, delegate, entry);
+      verified = verifyDelegateTarget(deps, delegate, entry);
       if (verified.refused) {
         return { root: entry.root, lane: entry.lane, ok: false, exit: null, output: '', refused: true, error: verified.refused };
       }
@@ -2656,8 +2684,16 @@ async function sweepLanes(opts, deps, state) {
       }
     }
     // A lane's leftover process locks files the delegate deletes (a dev
-    // server's native module), so the lane is reaped first.
-    const reaped = entry.lanePath && entry.flags.includes('-Clean') ? reapWorktree(entry.lanePath, deps) : null;
+    // server's native module), so the lane is reaped first, but only a lane the
+    // delegate is about to clean: a HOLD lane (a live agent, unfinished work)
+    // keeps its processes unless -Force overrides the HOLD. An unverified reap
+    // leaves the lane uncleaned rather than half-deleted around a locked file.
+    const cleans = (verdict) => verdict === 'SAFE' || verdict === 'PRUNE' || (verdict === 'HOLD' && entry.flags.includes('-Force'));
+    const reaped = verified?.verdicts?.length && verified.verdicts.every(cleans) ? reapWorktree(entry.lanePath, deps) : null;
+    if (reaped && (reaped.error || reaped.survivors.length)) {
+      return { root: entry.root, lane: entry.lane, ...reapOutput(reaped), ok: false, exit: null, output: '',
+        error: `${entry.lanePath} not cleaned: ${reaped.error ?? `${reaped.survivors.length} process(es) still run from it`}` };
+    }
     const swept = call(deps, 'pwsh', ['-NoProfile', '-File', delegate, '-WorktreeRoot', entry.delegateRoot ?? entry.root, ...entry.flags]);
     return {
       root: entry.root,
