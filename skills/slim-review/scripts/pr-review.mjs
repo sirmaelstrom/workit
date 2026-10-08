@@ -1247,6 +1247,35 @@ function readAuthorContext(path, die) {
   return { ok: true, text };
 }
 
+/** The checkout's HEAD as `{ oid, ref }`; `ref` is `HEAD` when detached. */
+function headIdentity(run, cwd) {
+  const [oid = '', ref = ''] = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'rev-parse', 'HEAD', '--symbolic-full-name', 'HEAD'], { cwd }))
+    .split(/\r?\n/).map((line) => line.trim());
+  return { oid, ref };
+}
+
+/**
+ * A reviewer that moved the caller's HEAD (`gh pr checkout --detach` leaves a
+ * clean tree, so the status diff cannot see it) gets it put back, but only when
+ * the ref it left still points where it did: a moved branch is not ours to
+ * reset. `failure` names why HEAD could not be restored.
+ */
+function restoreHead(run, cwd, before) {
+  const git = process.platform === 'win32' ? 'git.exe' : 'git';
+  const describe = ({ oid, ref }) => `${ref === 'HEAD' ? 'detached' : ref} at ${oid}`;
+  const now = headIdentity(run, cwd);
+  if (now.oid === before.oid && now.ref === before.ref) return { moved: false, failure: null };
+  if (before.ref !== 'HEAD') {
+    const tip = String(run(git, ['-C', cwd, 'rev-parse', before.ref], { cwd })).trim();
+    if (tip !== before.oid) return { moved: true, failure: `reviewer moved ${before.ref} from ${before.oid} to ${tip}` };
+  }
+  run(git, ['-C', cwd, 'switch', '-q', ...(before.ref === 'HEAD' ? ['--detach', before.oid] : [before.ref.replace(/^refs\/heads\//, '')])], { cwd });
+  const restored = headIdentity(run, cwd);
+  return restored.oid === before.oid && restored.ref === before.ref
+    ? { moved: true, failure: null }
+    : { moved: true, failure: `reviewer moved HEAD from ${describe(before)} to ${describe(now)}, and the restore left it ${describe(restored)}` };
+}
+
 /** Run exactly one model lens. The process runner is injected so tests never spawn. */
 function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.log, now = Date.now, findCodexExe = defaultCodexExe, env = process.env, homeDir } = {}) {
   if (managedGate({ command: 'lens', repo: opts.repo, env, homeDir, log, die })) return;
@@ -1335,6 +1364,7 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     const program = isCodexLens(opts.lens) ? findCodexExe() : claudeProgram();
     const before = new Set(String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }))
       .split(/\r?\n/).filter(Boolean));
+    const headBefore = headIdentity(run, cwd);
     const started = now();
     // Claude's -p mode on this box does not consume stdin (the live probe
     // returned a stale placeholder result), so its prompt is positional.
@@ -1346,6 +1376,10 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     // Observe the reviewer immediately, before our own --out and measurement
     // writes can make a deliberately in-worktree output look like misconduct.
     const after = String(run(process.platform === 'win32' ? 'git.exe' : 'git', ['-C', cwd, 'status', '--short', '--porcelain'], { cwd }));
+    const dirty = after.split(/\r?\n/).filter(Boolean).filter((line) => !before.has(line));
+    // A dirty tree is left as found for the operator; a clean move is undone
+    // before the output is read, so no exit below leaves the checkout moved.
+    const head = dirty.length > 0 ? { moved: false, failure: null } : restoreHead(run, cwd, headBefore);
     if (isCodexLens(opts.lens) && !existsSync(tempOut)) {
       throw new LensOutputError(`${opts.lens} lens produced no findings file; API/CLI output: ${String(raw).trim()}`);
     }
@@ -1378,16 +1412,21 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     mkdirSync(dirname(resolve(opts.out)), { recursive: true });
     writeFileSync(opts.out, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
     const counts = countSeverities(doc.findings);
-    const dirty = after.split(/\r?\n/).filter(Boolean).filter((line) => !before.has(line));
     appendMeasurementRow(measureLog, {
       ts: new Date().toISOString(), repo, pr: Number(opts.pr), lens: opts.lens, model, reasoning, wall_ms: wallMs,
       ...counts, examined: doc.examined_paths.length, coverage: doc.coverage, ...(dirty.length > 0 ? { dirty: true } : {}),
+      ...(head.moved ? { head_moved: true } : {}),
       ...(amendment ? { scope: 'delta', since: amendment.since } : {}),
     });
     if (dirty.length > 0) {
       die(4, `reviewer added worktree changes:\n${dirty.join('\n')}`);
       return;
     }
+    if (head.failure) {
+      die(4, head.failure);
+      return;
+    }
+    if (head.moved) log(`restored       ${headBefore.ref === 'HEAD' ? headBefore.oid : headBefore.ref} (the reviewer moved HEAD)`);
     log(`wrote          ${opts.out}`);
   } catch (err) {
     rmSync(tempDir, { recursive: true, force: true });
