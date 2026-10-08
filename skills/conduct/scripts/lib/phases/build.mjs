@@ -595,7 +595,8 @@ function merged(state, wp, deps) {
     // The anchor (depth none/lite) stays open until the showcase answer (D18).
     if (wp.questId !== state.intent.anchor) after.push(tool('done', 'spine_update', { questId: wp.questId, workState: 'done', horizon: 'landed' }));
   }
-  wp.queue = [...(wp.queue ?? []), ...after, ...backendOf(state, wp, deps).stop(wp)];
+  const backend = backendOf(state, wp, deps);
+  wp.queue = [...(wp.queue ?? []), ...after, ...backend.stop(wp), ...(backend.remove ? backend.remove(wp) : [])];
 }
 
 // A library emitter that cannot emit (no lens can run, a delta after a

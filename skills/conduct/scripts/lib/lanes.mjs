@@ -40,7 +40,7 @@ import { LANE_MODELS, laneModel } from './adapters.mjs';
 import { resolveProgram } from './exec.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, LIVE_STATES, laneOccupied } from './schedule.mjs';
-import { EXIT_CODES as LANE_EXIT, reportShapeProblems } from '../../../../scripts/lane.mjs';
+import { EXIT_CODES as LANE_EXIT, reapWorktree, reportShapeProblems } from '../../../../scripts/lane.mjs';
 
 const DEADLINE_MS = 120 * 60 * 1000;
 const POLL_MS = 60000;
@@ -157,6 +157,10 @@ export function laneBackend(state, deps, backend) {
   const reportCheck = (wp, extra) => shellAction('check', { part: 'report', instruction: 'Check the report\'s outcome and runtime exercise.', command: conduct('check', wp, extra) });
   const laneMjs = (verb, args, log) => ['node', join(pluginRoot, 'scripts', 'lane.mjs'), verb, ...args, '--log', log];
   const admitAction = (args = []) => shellAction('admit', { instruction: 'Ask lane.mjs whether a lane may start.', command: laneMjs('admit', args, join(state.runDir, 'lane-runner.jsonl')) });
+  const worktreeOf = (wp) => wp.lane?.worktree ?? laneLayout(state, wp).worktree;
+  // What an exec lane left running in its worktree (a runtime exercise's dev
+  // server) does not end with the agent; herdr's `lane.mjs stop` reaps its own.
+  const execReap = (wp) => [shellAction('stop', { part: 'reap', instruction: 'Kill what the lane left running in its worktree.', command: conduct('reap', wp) })];
   if (backend === 'herdr') {
     return {
       name: 'herdr',
@@ -234,9 +238,16 @@ export function laneBackend(state, deps, backend) {
     // First probe the pid's identity (`alive`); only a match queues the kill
     // (itself guarded by the same identity) and its confirmation. A mismatch,
     // or no identity, kills nothing and records the lane as exited. Only a
-    // confirmation (alive exit 1) releases the slot.
-    stop: (wp) => (wp.lane?.exitedAt || !Number.isInteger(wp.lane?.pid) ? []
+    // confirmation (alive exit 1) releases the slot. A lane already exited
+    // gets the reap alone.
+    stop: (wp) => (!Number.isInteger(wp.lane?.pid) ? [] : wp.lane?.exitedAt ? execReap(wp)
       : [shellAction('stop', { part: 'probe', instruction: 'Check the pid is still the lane agent.', command: conduct('alive', wp) })]),
+    reap: (wp) => execReap(wp),
+    // A merged WP's worktree is removed; git refuses a dirty tree (no --force),
+    // and the refusal is recorded on the lane, never a block.
+    remove: (wp) => [shellAction('stop', {
+      part: 'remove', instruction: 'Remove the merged lane\'s worktree (no --force).', command: ['git', '-C', repo, 'worktree', 'remove', worktreeOf(wp)],
+    })],
     kill: (wp) => [
       shellAction('stop', {
         part: 'kill', instruction: 'Terminate the lane agent if the pid is still its own.', command: guardedKillArgv(wp.lane.pid, wp.lane.identity, deps.platform ?? process.platform),
@@ -493,7 +504,8 @@ function recordExecWait(state, wp, result, deps, backend) {
     return { outcome: 'wait', reason: 'lane running', patch: { queue: [waitAction(POLL_MS), ...backend.wait(wp)] } };
   }
   if (result.code !== 1) return block(said(result));
-  return proceed({ lane: exitedLane(state, wp, deps, parseStdout(result)?.owner === 'gone') });
+  // Each observed exit reaps: a lane's dev server must not outlive its turn.
+  return proceed({ lane: exitedLane(state, wp, deps, parseStdout(result)?.owner === 'gone'), queue: [...backend.reap(wp), ...(wp.queue ?? []).slice(1)] });
 }
 
 // The lane's exit is observed. The exec log holds its session id and, for
@@ -520,16 +532,28 @@ function exitedLane(state, wp, deps, natural) {
 function recordStop(state, wp, action, result, deps) {
   if (action.part === 'kill') return proceed(); // exit 3 (not our pid) or a gone pid: the confirmation decides
   const out = parseStdout(result);
-  if (action.part === 'probe' && result.code === 0) return proceed({ queue: laneBackend(state, deps, 'exec').kill(wp) }, `pid ${wp.lane?.pid} is the lane agent: killing it`);
+  // Cleanup after the agent is gone. A survivor or a worktree git will not
+  // remove is recorded on the lane for the analysis; neither blocks the run.
+  if (action.part === 'reap') {
+    return proceed({ lane: { reap: { state: out?.state ?? 'unreadable', orphans: out?.orphans?.length ?? 0, survivors: out?.survivors?.length ?? 0, ...(result.code === 0 ? {} : { error: said(result) }) } } });
+  }
+  if (action.part === 'remove') return proceed({ lane: { removed: result.code === 0, ...(result.code === 0 ? {} : { removeError: said(result) }) } });
+  // The actions queued after this stop (a reap, a worktree removal, a ratify
+  // or cite ruling) outlive it: every queue below keeps them.
+  const rest = (wp.queue ?? []).slice(1);
+  const backend = laneBackend(state, deps, wp.lane?.backend ?? 'exec');
+  if (action.part === 'probe' && result.code === 0) return proceed({ queue: [...laneBackend(state, deps, 'exec').kill(wp), ...rest] }, `pid ${wp.lane?.pid} is the lane agent: killing it`);
   const gone = action.part === 'stop' ? result.code === 0 || out?.state === 'exited-shell-blocked' : result.code === 1;
-  if (gone) return done(`lane stopped${out?.owner && out.owner !== 'gone' ? ` (pid ${out.owner}: not killed)` : ''}`, { lane: exitedLane(state, wp, deps, false) });
+  if (gone) {
+    return done(`lane stopped${out?.owner && out.owner !== 'gone' ? ` (pid ${out.owner}: not killed)` : ''}`,
+      { lane: exitedLane(state, wp, deps, false), queue: [...(backend.reap ? backend.reap(wp) : []), ...rest] });
+  }
   const confirms = (wp.lane?.stopConfirms ?? 0) + 1;
   const why = action.part !== 'stop' && result.code === 0 ? `lane agent pid ${wp.lane?.pid} still runs after stop` : `stop: ${said(result)}`;
   if (confirms >= STOP_CONFIRMS) {
-    const backend = laneBackend(state, deps, wp.lane?.backend ?? 'exec');
-    return block(`cleanup unresolved after ${confirms} confirmations: ${why}`, { lane: { stopConfirms: confirms }, queue: backend.stop(wp) }, 'cleanup-unresolved');
+    return block(`cleanup unresolved after ${confirms} confirmations: ${why}`, { lane: { stopConfirms: confirms }, queue: [...backend.stop(wp), ...rest] }, 'cleanup-unresolved');
   }
-  return { outcome: 'wait', reason: why, patch: { lane: { stopConfirms: confirms }, queue: [waitAction(STOP_WAIT_MS), action] } };
+  return { outcome: 'wait', reason: why, patch: { lane: { stopConfirms: confirms }, queue: [waitAction(STOP_WAIT_MS), action, ...rest] } };
 }
 
 function recordCheck(wp, action, result, backend) {
@@ -568,7 +592,7 @@ function recordPrLookup(wp, lane, result, deps) {
   return proceed({ pr: found });
 }
 
-const SUB_FLAGS = { spawn: ['amend'], alive: [], check: ['pr', 'runtimeOnly'] };
+const SUB_FLAGS = { spawn: ['amend'], alive: [], check: ['pr', 'runtimeOnly'], reap: [] };
 const kebab = (name) => name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
 const reply = (code, out) => ({ code, out: JSON.stringify(out) });
 
@@ -586,6 +610,13 @@ export async function runLaneVerb(sub, { runDir, wpId, flags = {}, state = null 
     return reply(owner === 'running' ? 0 : 1, { ok: true, alive: owner === 'running', pid: wp.lane.pid, owner });
   }
   if (sub === 'spawn') return spawnLane(current, wp, flags, deps);
+  if (sub === 'reap') {
+    // lane.mjs's reap, in process: the core path runs no lane.mjs argv.
+    const reaped = reapWorktree(wp.lane?.worktree ?? laneLayout(current, wp).worktree, { ...deps, platform: deps.platform ?? process.platform });
+    const rows = (list) => list.map((row) => ({ pid: row.pid, cmd: row.cmd.length > 200 ? `${row.cmd.slice(0, 197)}...` : row.cmd }));
+    const stateName = reaped.error ? 'reap-failed' : reaped.survivors.length ? 'survivors' : 'reaped';
+    return reply(stateName === 'reaped' ? 0 : 1, { ok: stateName === 'reaped', state: stateName, orphans: rows(reaped.found), survivors: rows(reaped.survivors), ...(reaped.error ? { error: reaped.error } : {}) });
+  }
   return checkLane(current, wp, flags, deps);
 }
 
