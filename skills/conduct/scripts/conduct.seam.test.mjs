@@ -248,6 +248,14 @@ function author(h, action) {
   } else if (action.step === 'council') {
     mkdirSync(dirname(action.outPath), { recursive: true });
     writeFileSync(action.outPath, JSON.stringify({ title: action.title }));
+  } else if (action.step === 'showcase-brief') {
+    // A valid briefing: every unfinished WP named in notDone.
+    const unfinished = h.state().wps.filter((wp) => ['refuted', 'blocked', 'held', 'deferred'].includes(wp.state)).map((wp) => wp.id);
+    mkdirSync(dirname(action.outPath), { recursive: true });
+    writeFileSync(action.outPath, JSON.stringify(h.brief ?? {
+      delivered: 'The goal\'s changes, merged.', proof: 'node --test: 12 pass.', notDone: unfinished.length ? `${unfinished.join(', ')} did not finish.` : 'nothing',
+      check: 'The merged PRs.', recommend: unfinished.length ? 'b' : 'a', why: 'Synthetic harness briefing.',
+    }));
   } else if (action.files) {
     mkdirSync(action.outPath, { recursive: true });
     for (const file of action.files) writeFileSync(file.path, `${file.verdict}\n`);
@@ -742,7 +750,9 @@ test('judgment threads (D19.9, 022d6fd9): a judgment row\'s thread is listed und
   const line = 'WP-00 PR #100 comment 4177261828: thread PRRT_kwDOS_8yoc6oxnvx resolved';
   assert.ok(section(h.analysis(), 'Pre-approval audit').includes(`  - ${line}`), section(h.analysis(), 'Pre-approval audit'));
   const question = h.state().touches.find((touch) => touch.kind === 'showcase').question;
-  assert.ok(question.includes(`Judgment threads the conductor resolved: 1, each listed under the audit in ${join(h.state().runDir, 'run-analysis.md')}`), question);
+  // With a briefing, the full path is named once (Full record) and the lists name the file.
+  assert.ok(question.includes('Judgment threads the conductor resolved: 1, each listed under the audit in run-analysis.md'), question);
+  assert.ok(question.includes(`Full record: ${join(h.state().runDir, 'run-analysis.md')}.`), question);
   assert.ok(!question.includes(line), 'the thread itself lives in the analysis, not the question');
 });
 
@@ -842,7 +852,7 @@ test('resume (M5): stopped after the release PR merges, `--resume` from the run 
   h.pending = out(resumed).action;
   assert.equal((await drive(h)).kind, 'done');
   const tail = h.trace.slice(stoppedAt).map(shape);
-  assert.deepEqual(expected.map((a) => `${a.step}/${a.part}`), ['release/after', 'release/verify', 'analyze/null', 'showcase/null']);
+  assert.deepEqual(expected.map((a) => `${a.step}/${a.part}`), ['release/after', 'release/verify', 'analyze/null', 'showcase-brief/null', 'showcase/null']);
   assert.deepEqual(tail, expected);
   assert.equal(h.state().phase, 'closed');
 });
@@ -1136,7 +1146,7 @@ test('failure showcase (U4): a blocked WP and an open run touch are named in the
   assert.ok(question.includes('Refuted or blocked WPs: WP-00 blocked: merged tree differs from the checked head (https://github.com/example/scratch/pull/100)'), question);
   assert.ok(question.includes('Release: not-exercised (incomplete build)'));
   assert.ok(!/conductor names here by hand/.test(question), 'no agent-facing placeholder');
-  assert.match(question, /write `seam: <name>`/);
+  assert.match(question, /send back with `seam: <name>` in your text/);
   // C2-8: merged, then blocked by the post-merge tree check: still merged.
   assert.match(section(h.analysis(), 'Escapes'), /^run PRs: #100 WP-00 merged \(post-merge check failed\)$/m);
 });

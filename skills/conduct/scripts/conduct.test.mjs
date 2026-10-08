@@ -285,9 +285,62 @@ test('showcase (022d6fd9): 30 held WPs are cited by count and where they are lis
     intent: { anchor: ANCHOR, repo: { path: 'X:/fixture/repo', remote: 'o/r', defaultBranch: 'main' } }, release: { state: 'not-exercised', reason: 'incomplete build' },
   };
   const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
-  const action = showcase.next(state, deps);
-  assert.ok(action.args.question.length <= 2000, `the filed question is ${action.args.question.length} chars`);
-  assert.ok(action.args.question.includes(`Open PRs of held WPs: 30, each listed under Queue accounting in ${join('X:/fixture/run', 'run-analysis.md')}`), action.args.question);
+  // A briefing at every field's maximum, on a workspace-length run path: the
+  // briefing, the answer line and every status line still fit, uncut.
+  const full = (lead) => `${lead} ${'x'.repeat(200)}`.slice(0, 200);
+  const briefed = { ...state, touches: [], runDir: 'D:\\Development\\data\\outputs\\workshops\\in-conduct-exec-probe-add-src-slug-mjs-e\\run' };
+  briefed.showcaseBrief = { delivered: full('Built:'), proof: full('Ran:'), notDone: full('All 30 WPs are held at their PRs:'), check: full('Read:'), why: full('Because:'), recommend: 'b' };
+  const briefedQuestion = showcase.next(briefed, deps).args.question;
+  assert.ok(briefedQuestion.length <= 2000, `the filed question is ${briefedQuestion.length} chars`);
+  assert.ok(!briefedQuestion.includes('cut at spine_receipt'), briefedQuestion);
+  for (const line of ['Recommended: (b) Accept with notes.', 'Open PRs of held WPs: 30, each listed under Queue accounting in run-analysis.md', 'Deferred WPs: none', 'Blocked touches still open: none', 'Release: not-exercised (incomplete build)']) {
+    assert.ok(briefedQuestion.includes(line), `missing "${line}":\n${briefedQuestion}`);
+  }
+});
+
+test('showcase briefing: notDone names an unfinished WP as a whole word, and above six says "<n> WPs"', async (t) => {
+  const showcase = await import('./lib/phases/showcase.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'workit-brief-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const deps = { exists: existsSync, read: (path) => readFileSync(path, 'utf8') };
+  const brief = { delivered: 'd', proof: 'p', check: 'c', recommend: 'b', why: 'w' };
+  const read = (wps, notDone) => {
+    writeFileSync(join(dir, 'showcase-brief.json'), JSON.stringify({ ...brief, notDone }));
+    return () => showcase.readBrief({ runDir: dir, wps }, deps);
+  };
+  const one = [{ id: 'WP-01', state: 'blocked' }];
+  assert.throws(read(one, 'WP-010 was dropped.'), { code: 2, message: /does not name WP-01/ });
+  assert.equal(read(one, 'WP-01 blocked at its check.')().notDone, 'WP-01 blocked at its check.');
+  const seven = Array.from({ length: 7 }, (_, i) => ({ id: `WP-0${i + 1}`, state: 'held' }));
+  assert.throws(read(seven, '7 tests passed; nothing remains unfinished.'), { code: 2, message: /"7 WPs"/ });
+  assert.equal(read(seven, 'All 7 WPs are held at their PRs.')().notDone, 'All 7 WPs are held at their PRs.');
+});
+
+test('showcase briefing: the conductor writes it before the touch; the question leads with it and marks the recommended button; a briefing that hides an unfinished WP is refused', async (t) => {
+  const showcase = await import('./lib/phases/showcase.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'workit-brief-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const state = {
+    slug: 'fixture-run', runId: RUN_ID, runDir: dir, pluginRoot: 'X:/fixture/plugin', touches: [], adapters: { spine: { on: true } },
+    wps: [{ id: 'WP-01', state: 'merged', pr: { number: 7 } }, { id: 'WP-02', state: 'blocked', pr: { number: 8 }, reason: 'check failed again after an amendment' }],
+    intent: { anchor: ANCHOR, repo: { path: 'X:/fixture/repo', remote: 'o/r', defaultBranch: 'main' } }, release: { state: 'not-exercised', reason: 'no recipe' },
+  };
+  const deps = { append: () => {}, timestamp: () => '2026-10-08T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: existsSync, read: (path) => readFileSync(path, 'utf8') };
+  const author = showcase.next(state, deps);
+  assert.deepEqual([author.kind, author.step, author.outPath], ['author', 'showcase-brief', join(dir, 'showcase-brief.json')]);
+  assert.match(author.instruction, /name every one of WP-02/);
+  const brief = { delivered: 'slugify() and GET /slug.', proof: 'curl /slug?text=Hello%2C%20World! printed {"slug":"hello-world"}.', notDone: 'nothing', check: 'PR #8.', recommend: 'c', why: 'WP-02 never reached its merge gate.' };
+  writeFileSync(author.outPath, JSON.stringify(brief));
+  assert.throws(() => showcase.record(state, author, {}, deps), { code: 2, message: /notDone does not name WP-02/ });
+  writeFileSync(author.outPath, JSON.stringify({ ...brief, recommend: 'z' }));
+  assert.throws(() => showcase.record(state, author, {}, deps), { code: 2, message: /recommend must be/ });
+  writeFileSync(author.outPath, JSON.stringify({ ...brief, notDone: 'WP-02 blocked before review: its report check failed twice.' }));
+  showcase.record(state, author, {}, deps);
+  const touch = showcase.next(state, deps);
+  const lines = touch.args.question.split('\n');
+  assert.match(lines[0], /^\[conduct fixture-run touch 1\] \(run [^)]+\) Recommended: \(c\) Send back\. WP-02 never reached its merge gate\.$/);
+  assert.deepEqual(lines.slice(1, 5).map((line) => line.split(':')[0]), ['Delivered', 'Proof it works', 'Not done', 'Check yourself']);
+  assert.deepEqual(touch.args.ask.options.map((option) => option.label), ['Accept', 'Accept with notes', 'Send back (recommended)']);
 });
 
 test('--lanes (b443eca6): 1 to 4 are accepted, 0, 5 and 2.5 are refused (exit 2, nothing written)', async (t) => {
@@ -859,7 +912,7 @@ const VOCABULARY = [
   'wait', 'check', 'pr-lookup', 'review', 'post', 'council', 'adjudicate', 'reply', 'rebase', 'gate-cmd', 'gate',
   'merge', 'merged', 'notify', 'spend', 'release', 'analyze', 'showcase',
   'flip', 'receipt', 'touch', 'stop', 'fallback',
-  'grant', 'ruling', 'thread-ids', 'resolve', 'alarm', 'ratify', 'cite',
+  'grant', 'ruling', 'thread-ids', 'resolve', 'alarm', 'ratify', 'cite', 'showcase-brief',
 ];
 
 test('action ids and seams (D18, D19.15)', async (t) => {
