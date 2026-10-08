@@ -114,7 +114,8 @@ const RULES = [
   [/^gh api --paginate repos\/example\/scratch\/actions\/workflows --jq \.workflows\[\]$/, () => ok(`${JSON.stringify({ state: 'active', path: '.github/workflows/ci.yml' })}\n`)],
   [/^claude --version$/, () => ok('2.1.0 (Claude Code)\n')],
   [/^codex --version$/, () => ({ code: 1, stdout: '', stderr: 'codex: not found' })],
-  [/^herdr agent list$/, () => ok('[]')],
+  // The herdr server answers only in a herdr scenario.
+  [/^herdr agent list$/, (h) => (h.deps.env.HERDR_ENV === '1' || h.herdrServer ? ok('[]') : { code: 1, stdout: '', stderr: 'herdr: no server running' })],
   [/^sh -c command -v "\$1" sh (\S+)$/, (h, m) => ok(`/bin/${m[1]}\n`)],
   [/^sh -c id=/, () => ok(`${IDENTITY}\n`)],
   [/^git -C \S+ rev-parse origin\/main$/, () => ok(`${BASE}\n`)],
@@ -855,6 +856,15 @@ test('resume (M5): stopped after the release PR merges, `--resume` from the run 
   assert.deepEqual(expected.map((a) => `${a.step}/${a.part}`), ['release/after', 'release/verify', 'analyze/null', 'showcase-brief/null', 'showcase/null']);
   assert.deepEqual(tail, expected);
   assert.equal(h.state().phase, 'closed');
+});
+
+test('herdr from outside (T3 Code): with no HERDR_ENV the herdr adapter is on whenever the herdr server answers, and off with no server', async (t) => {
+  for (const [server, on] of [[true, true], [false, false]]) {
+    const outside = seam(t, { h: { herdrServer: server } });
+    await start(outside, []);
+    const herdr = outside.state().adapters.herdr;
+    assert.deepEqual([herdr.on, herdr.detail], [on, `herdr agent list exit ${on ? 0 : 1} (conductor outside herdr)`]);
+  }
 });
 
 test('spine + herdr: spine_author once, a receipt per WP stop, touches filed once and read back, lane steps through lane.mjs --log, the runtime-only check; notify env (D20); seams keyed on seam (D19.15)', async (t) => {
