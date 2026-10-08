@@ -241,7 +241,10 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    one unreceipted owed step.
 4. **A ruling that binds a later item is written to that item's quest resume note
    at ruling time** — not carried in a handoff, not held in the session. The
-   binding outlives the session that made it.
+   binding outlives the session that made it. A procedure written there (a
+   rollback, a kill switch, a recovery step) cites its source file and section,
+   or copies the source's commands verbatim; never paraphrase an env var, flag
+   or key, because the paraphrase is a new instruction nobody has run.
 5. **Correct the carrier.** When you measure something that makes a title, note,
    or doc line false, fix *that string* — `spine_update` has `title` for exactly
    this. A correction filed only in a resume note leaves the falsehood on the

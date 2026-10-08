@@ -22,7 +22,7 @@ The limits are constants in the roadmap digest and the spine MCP. Re-measure rat
 
 Three homes, one rule each.
 
-- **The note — live state only.** Where the work is, what is next, what is blocked, and the pointer to the document set. Write it so the **first paragraph survives truncation on its own**: status, then the pointer. Everything a session needs to know it should go read must appear before the arrival cap, because that is the only part guaranteed to arrive.
+- **The note — live state only.** Where the work is, what is next, what is blocked, and the pointer to the document set. Write it so the **first paragraph survives truncation on its own**: status, then the pointer. Everything a session needs to know it should go read must appear before the arrival cap, because that is the only part guaranteed to arrive. A procedure the note must carry (a rollback, a kill switch) points at its source section or copies its commands verbatim: a paraphrased identifier is a new instruction nobody has run.
 - **Attached documents — the durable half.** Method, rulings, gate, standing lessons, glossaries, worked examples. Minted on the quest as artifacts at the moment each is born, so a fresh session walks quest → artifact without keyword search. Documents are unbudgeted and may grow.
 - **Receipts — per-stop detail.** What one stop did and found. This is where audit detail belongs; it is already addressable per stop and never competes with the note for space.
 
