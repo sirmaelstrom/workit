@@ -33,6 +33,7 @@
 import { join, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ConductError, STEP_SEAM, loadState } from './state.mjs';
+import { amendmentSections } from './markdown.mjs';
 
 const WAIT_MS = 60000;
 const PENDING_BLOCK_MS = 30 * 60000;
@@ -227,20 +228,18 @@ const TABLE_HEADER = /^\|\s*Comment\s*\|\s*Verdict\s*\|\s*Evidence\s*\|\s*Commit
 // with it, the table of the latest section numbered `since` or later that has
 // one, so an amendment that only fixed a check (no table) does not hide the
 // findings table before it, and a table from an earlier round never answers.
+// A table quoted inside a code fence is never the table.
 export function parseAmendmentTable(reportText, { since = null } = {}) {
-  const sections = String(reportText).split(/^(?=## )/m)
-    .map((part) => ({ part, n: Number(/^## Amendment (\d+)\b/.exec(part)?.[1] ?? NaN) }))
-    .filter(({ n }) => Number.isInteger(n));
-  const candidates = since === null ? sections.slice(-1)
-    : sections.filter(({ n, part }) => n >= since && part.split(/\r?\n/).some((line) => TABLE_HEADER.test(line.trim())));
-  const section = candidates.at(-1)?.part;
+  const headerAt = (section) => section.lines.findIndex((line) => !line.fenced && TABLE_HEADER.test(line.text.trim()));
+  const sections = amendmentSections(reportText);
+  const candidates = since === null ? sections.slice(-1) : sections.filter((section) => section.n >= since && headerAt(section) >= 0);
+  const section = candidates.at(-1);
   if (!section) return [];
-  const all = section.split(/\r?\n/);
-  const header = all.findIndex((line) => TABLE_HEADER.test(line.trim()));
+  const header = headerAt(section);
   if (header < 0) return [];
   const body = [];
-  for (const line of all.slice(header + 1)) {
-    if (!line.trim().startsWith('|')) break;
+  for (const { text: line, fenced } of section.lines.slice(header + 1)) {
+    if (fenced || !line.trim().startsWith('|')) break;
     if (/^\|[\s:|-]+\|$/.test(line.trim())) continue;
     const [comment, verdict, evidence, commit] = splitRow(line);
     body.push({ comment, verdict: String(verdict ?? '').toLowerCase(), evidence: evidence ?? '', commit: rowCommits(commit)?.join(',') ?? null });

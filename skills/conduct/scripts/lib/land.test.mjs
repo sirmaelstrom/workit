@@ -1021,6 +1021,10 @@ test('parseAmendmentTable since: the latest table at or after the owed amendment
   // Round 2's findings are owed from amendment 3: round 1's table never answers them.
   assert.deepEqual(ids(table(1, '101') + checkFix(2) + checkFix(3), 3), []);
   assert.deepEqual(ids(table(1, '101') + table(3, '301') + checkFix(4), 3), ['301']);
+  // A table quoted in a fence is not a table, and a fenced "## " line is not a heading.
+  const quoted = `## Amendment 2\n\nThe old table, quoted:\n\n\`\`\`\n## Amendment 9\n| Comment | Verdict | Evidence | Commit |\n|---|---|---|---|\n| \`999\` | judgment | STALE_QUOTE | — |\n\`\`\`\n\n`;
+  assert.deepEqual(ids(table(1, '101') + quoted, 1), ['101']);
+  assert.deepEqual(parseAmendmentTable(quoted), []);
 });
 
 test('threads get resolved (D19.9): table → replies → thread ids → resolve every replied thread → a passing gate', () => {
