@@ -5069,6 +5069,18 @@ test('reap: off win32 the tree is found through parent links and TERMed children
   assert.equal(reaped.exit, 0, JSON.stringify(reaped.output));
   assert.deepEqual(f.reaps.filter(([program]) => program === 'kill'), [['kill', '-TERM', '102'], ['kill', '-TERM', '101']]);
   assert.deepEqual(f.processes.map((row) => row.pid), [103]);
+  // Depth, not list order: a path-naming child listed before its parent, and a
+  // non-path supervisor between two path-naming processes.
+  for (const processes of [
+    [{ pid: 102, ppid: 101, cmd: `node ${join(wt, 'child.js')}` }, { pid: 101, ppid: 1, cmd: `node ${join(wt, 'server.js')}` }, { pid: 103, ppid: 102, cmd: 'node leaf.js' }],
+    [{ pid: 101, ppid: 1, cmd: `sh ${join(wt, 'run.sh')}` }, { pid: 103, ppid: 102, cmd: `node ${join(wt, 'worker.js')}` }, { pid: 102, ppid: 101, cmd: 'supervisor' }],
+  ]) {
+    const h = fixture(t);
+    h.platform = 'linux';
+    h.processes = processes;
+    await runLane(['reap', '--path', wt, '--log', h.log], { exec: h.exec, platform: 'linux', pid: 900 });
+    assert.deepEqual(h.reaps.filter(([program]) => program === 'kill').map((call) => call[2]), ['103', '102', '101'], 'deepest first');
+  }
   const g = fixture(t);
   g.platform = 'linux';
   g.processes = [{ pid: 101, ppid: 1, cmd: `sh -c node ${join(wt, 'server.js')}` }, { pid: 102, ppid: 101, cmd: 'node worker.js' }];

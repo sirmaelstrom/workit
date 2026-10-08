@@ -2378,8 +2378,14 @@ export function reapWorktree(path, deps, { list = false } = {}) {
     }
   }
   const killed = [];
-  // taskkill /T walks the tree itself; elsewhere each process gets its own TERM, children first.
-  const targets = deps.platform === 'win32' ? found : [...tree.values()].reverse();
+  // taskkill /T walks the tree itself; elsewhere each process gets its own
+  // TERM, deepest first (depth by parent links, not list order).
+  const depth = (row) => {
+    let n = 0;
+    for (let at = row; tree.has(at.ppid) && n < tree.size; at = tree.get(at.ppid)) n += 1;
+    return n;
+  };
+  const targets = deps.platform === 'win32' ? found : [...tree.values()].sort((a, b) => depth(b) - depth(a));
   for (const row of targets) {
     const kill = deps.platform === 'win32' ? call(deps, 'taskkill', ['/PID', String(row.pid), '/T', '/F']) : call(deps, 'kill', ['-TERM', String(row.pid)]);
     if (kill.code === 0) killed.push(row.pid);
