@@ -87,12 +87,12 @@ export function detectAdapters({ env = {}, exec, exists = () => false, declared 
     if (forcedOff.includes(name)) {
       adapters[name] = { on: false, evidence: 'forced-off', detail: `--no-adapter ${name}` };
     } else if (name === 'herdr') {
-      if (env.HERDR_ENV !== '1') {
-        adapters.herdr = { on: false, evidence: 'probed', detail: 'HERDR_ENV is not 1' };
-      } else {
-        const result = exec('herdr', ['agent', 'list']);
-        adapters.herdr = { on: result.code === 0, evidence: 'probed', detail: `herdr agent list exit ${result.code}` };
-      }
+      // Lanes need a reachable herdr server, not a conductor inside herdr: a
+      // conductor in another client (T3 Code) still opens each lane in a herdr
+      // pane the operator can watch. HERDR_ENV only says where the conductor runs.
+      const result = exec('herdr', ['agent', 'list']);
+      const where = env.HERDR_ENV === '1' ? 'conductor inside herdr' : 'conductor outside herdr';
+      adapters.herdr = { on: result.code === 0, evidence: 'probed', detail: `herdr agent list exit ${result.code} (${where})` };
     } else if (name === 'notify') {
       adapters.notify = probeCommand(env, 'WORKIT_NOTIFY_CMD', { exec, exists, platform });
     } else if (name === 'spend') {
