@@ -37,7 +37,7 @@ function fixture(t) {
     }
     if (isProcessList(program, args)) {
       reaps.push([program, ...args]);
-      return processListResult(handle.processes, handle.platform);
+      return processListResult(handle.processes, program === 'pwsh' ? 'win32' : 'linux');
     }
     if (program === 'taskkill' || program === 'kill') {
       reaps.push([program, ...args]);
@@ -60,7 +60,6 @@ function fixture(t) {
     memory: { code: 0, stdout: `${64 * 1024 * 1024}\r\n`, stderr: '' },
     reaps,
     processes: [],
-    platform: process.platform,
   };
   return handle;
 }
@@ -4984,9 +4983,8 @@ test('reap: a command line names the worktree only at a path boundary, either sl
 
 // A lane's dev server (cmd.exe /c vite → node …<wt>…vite.js) left behind, a
 // sibling worktree's server, and this reaper, whose own command line names the path.
-function reapScene(f, platform) {
+function reapScene(f) {
   const wt = join(f.dir, 'projects', 'repo-wt-run-wp-02');
-  f.platform = platform;
   f.processes = [
     { pid: 100, ppid: 1, cmd: 'cmd.exe /c vite --port 5291' },
     { pid: 101, ppid: 100, cmd: `node ${join(wt, 'node_modules', 'vite', 'bin', 'vite.js')} --port 5291` },
@@ -5002,7 +5000,7 @@ const withReap = (f, herdr) => (program, args, options) => (isProcessList(progra
 
 test('reap: kills the lane worktree\'s leftover process with its tree, spares a sibling worktree and itself, and lists again', async (t) => {
   const f = fixture(t);
-  const wt = reapScene(f, 'win32');
+  const wt = reapScene(f);
   const result = await runLane(['reap', '--path', wt, '--log', f.log], { exec: f.exec, platform: 'win32', pid: 900 });
   assert.equal(result.exit, 0, JSON.stringify(result.output));
   assert.deepEqual([result.output.state, result.output.orphans.map((row) => row.pid)], ['reaped', [101]]);
@@ -5014,7 +5012,7 @@ test('reap: kills the lane worktree\'s leftover process with its tree, spares a 
 
 test('reap: --list kills nothing; off win32 it reads ps and sends TERM; a survivor exits 1', async (t) => {
   const f = fixture(t);
-  const wt = reapScene(f, 'linux');
+  const wt = reapScene(f);
   const listed = await runLane(['reap', '--path', wt, '--list', '--log', f.log], { exec: f.exec, platform: 'linux', pid: 900 });
   assert.deepEqual([listed.exit, listed.output.state, listed.output.orphans.map((row) => row.pid), listed.output.survivors], [0, 'listed', [101], undefined]);
   assert.equal(f.reaps.some(([program]) => program === 'kill'), false);
@@ -5023,7 +5021,7 @@ test('reap: --list kills nothing; off win32 it reads ps and sends TERM; a surviv
   assert.deepEqual(f.reaps.filter(([program]) => program === 'kill'), [['kill', '-TERM', '101']]);
   // A process that outlives its kill is reported, never assumed gone.
   const g = fixture(t);
-  const wt2 = reapScene(g, 'linux');
+  const wt2 = reapScene(g);
   const exec = (program, args, options) => (program === 'kill' ? { code: 0, stdout: '', stderr: '' } : g.exec(program, args, options));
   const survived = await runLane(['reap', '--path', wt2, '--log', g.log], { exec, platform: 'linux', pid: 900 });
   assert.deepEqual([survived.exit, survived.output.state, survived.output.survivors.map((row) => row.pid)], [1, 'survivors', [101]]);
@@ -5032,7 +5030,6 @@ test('reap: --list kills nothing; off win32 it reads ps and sends TERM; a surviv
 test('reap: stop on an exited-shell-blocked lane kills the orphan that held the shell, and a returned prompt makes it stopped (after-reap)', async (t) => {
   const f = fixture(t);
   seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
-  f.platform = 'win32';
   f.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(f.dir, 'node_modules', 'vite', 'bin', 'vite.js')} --port 5297` }];
   const herdr = stopHerdr(() => (f.processes.length ? BLOCKED_TAIL : `${BLOCKED_TAIL}\n\n${BLOCKED_SIGNATURE}`));
   let clock = 0;
@@ -5049,7 +5046,6 @@ test('reap: stop with nothing left behind is unchanged, and a pane that still ho
   assert.deepEqual([clean.exit, clean.output.state, clean.output.orphans], [0, 'stopped', undefined]);
   const g = fixture(t);
   seedLane(g, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
-  g.platform = 'win32';
   g.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(g.dir, 'server.js')}` }];
   let clock = 0;
   const held = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', g.log], { exec: withReap(g, stopHerdr(BLOCKED_TAIL)), platform: 'win32', pid: 900, now: () => clock, sleep: async (ms) => { clock += ms; } });
@@ -5059,7 +5055,6 @@ test('reap: stop with nothing left behind is unchanged, and a pane that still ho
 test('reap: off win32 the tree is found through parent links and TERMed children first; a child that outlives it is a survivor', async (t) => {
   const f = fixture(t);
   const wt = join(f.dir, 'lane');
-  f.platform = 'linux';
   f.processes = [
     { pid: 101, ppid: 1, cmd: `sh -c node ${join(wt, 'server.js')}` },
     { pid: 102, ppid: 101, cmd: 'node worker.js' },
@@ -5076,13 +5071,11 @@ test('reap: off win32 the tree is found through parent links and TERMed children
     [{ pid: 101, ppid: 1, cmd: `sh ${join(wt, 'run.sh')}` }, { pid: 103, ppid: 102, cmd: `node ${join(wt, 'worker.js')}` }, { pid: 102, ppid: 101, cmd: 'supervisor' }],
   ]) {
     const h = fixture(t);
-    h.platform = 'linux';
     h.processes = processes;
     await runLane(['reap', '--path', wt, '--log', h.log], { exec: h.exec, platform: 'linux', pid: 900 });
     assert.deepEqual(h.reaps.filter(([program]) => program === 'kill').map((call) => call[2]), ['103', '102', '101'], 'deepest first');
   }
   const g = fixture(t);
-  g.platform = 'linux';
   g.processes = [{ pid: 101, ppid: 1, cmd: `sh -c node ${join(wt, 'server.js')}` }, { pid: 102, ppid: 101, cmd: 'node worker.js' }];
   const exec = (program, args, options) => (program === 'kill' && args.includes('102') ? { code: 0, stdout: '', stderr: '' } : g.exec(program, args, options));
   const survived = await runLane(['reap', '--path', wt, '--log', g.log], { exec, platform: 'linux', pid: 900 });
@@ -5092,7 +5085,6 @@ test('reap: off win32 the tree is found through parent links and TERMed children
 test('reap: a blocked stop whose second process list fails stays exited-shell-blocked, carrying the reap error', async (t) => {
   const f = fixture(t);
   seedLane(f, { kind: 'claude', promptSignature: BLOCKED_SIGNATURE });
-  f.platform = 'win32';
   f.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(f.dir, 'server.js')}` }];
   let lists = 0;
   const herdr = stopHerdr(() => (f.processes.length ? BLOCKED_TAIL : `${BLOCKED_TAIL}\n\n${BLOCKED_SIGNATURE}`));
@@ -5113,7 +5105,6 @@ function sweepScene(t, verdict) {
   const root = join(f.dir, '.herdr', 'worktrees');
   const lane = join(root, 'workit', 'workit-wt-lane');
   seedCreates(f, [lane]);
-  f.platform = 'win32';
   f.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(lane, 'node_modules', 'vite', 'bin', 'vite.js')}` }];
   const listing = delegateListing(['workit', 'workit-wt-lane']);
   f.responses.push({ ...listing, stdout: listing.stdout.replace('SAFE', verdict) }, { code: 0, stdout: 'workit-wt-lane done', stderr: '' });
@@ -5147,7 +5138,6 @@ test('reap: sweep --lane reaps the lane before the cleaning delegate runs', asyn
   const profile = join(f.dir, 'profile');
   const lane = join(f.dir, 'projects', 'workit-wt-lane');
   seedCreates(f, [lane]);
-  f.platform = 'win32';
   f.processes = [{ pid: 101, ppid: 1, cmd: `node ${join(lane, 'node_modules', 'vite', 'bin', 'vite.js')}` }];
   const order = [];
   const exec = (program, args, options) => {
