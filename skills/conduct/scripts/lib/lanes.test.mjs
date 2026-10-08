@@ -717,6 +717,31 @@ test('PR lookup: after the report check on both backends; stores pr.number and p
   }
 });
 
+test('PR lookup: the top-level ## PR or the latest amendment ### PR may name the head; the check fails only when neither does', (t) => {
+  const f = lanes(t);
+  const lookup = f.backend().check(f.wp).find((act) => act.step === 'pr-lookup');
+  const head = `ed889f8${'0'.repeat(33)}`;
+  const github = ok(JSON.stringify([{ number: 7, headRefOid: head, state: 'OPEN' }]));
+  const amendment = (n, prLine) => `## Amendment ${n}\n\n| Comment | Verdict | Evidence | Commit |\n|---|---|---|---|\n| \`101\` | fixed | red | \`ed889f8\` |\n\n${prLine === null ? '' : `### PR (amendment)\n\n${prLine}\n\n`}### Forks I decided that the brief did not settle\n\nNone\n`;
+  // The top-level ## PR still names the pre-amendment head; the amendment pushed and said so.
+  f.report(`${report({ pr: '#7 · 0105e2c' })}\n${amendment(1, '#7, head `ed889f8`, CI pass.')}`);
+  assert.equal(f.record(lookup, github).outcome, 'continue');
+  // The lane updated the top-level ## PR in place; an earlier amendment's ### PR is history.
+  f.report(`${report({ pr: '#7 · ed889f8' })}\n${amendment(1, '#7, head `0105e2c`.')}\n${amendment(2, null)}`);
+  assert.equal(f.record(lookup, github).outcome, 'continue');
+  // Amendment 1 named the pushed head; amendment 2 pushed nothing and wrote no ### PR.
+  f.report(`${report({ pr: '#7 · 0105e2c' })}\n${amendment(1, '#7, head `ed889f8`.')}\n${amendment(2, null)}`);
+  assert.equal(f.record(lookup, github).outcome, 'continue');
+  // Neither claim names the head: amend, naming both.
+  f.report(`${report({ pr: '#7 · 0105e2c' })}\n${amendment(1, '#7, head `84816ef`.')}\n${amendment(2, null)}`);
+  const stale = f.record(lookup, github);
+  assert.equal(stale.outcome, 'amend');
+  assert.match(stale.reason, /## PR says #7 at 0105e2c; ## Amendment 1's ### PR says #7 at 84816ef; GitHub has #7 at ed889f8/);
+  // A fenced "### PR" line is not a heading.
+  f.report(`${report({ pr: '#7 · 0105e2c' })}\n## Amendment 1\n\n\`\`\`\n### PR\n#7 ed889f8\n\`\`\`\n`);
+  assert.equal(f.record(lookup, github).outcome, 'amend');
+});
+
 // ---------------------------------------------------------------- herdr argv
 
 test('herdr: each action\'s argv, every one with --log (D17, D19.17)', (t) => {

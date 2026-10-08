@@ -81,7 +81,9 @@ List the callers of any function you add a check to, and every construct in your
    |---|---|---|---|
    | `<id>` | fixed / refuted / judgment | the control's red line, the quoted observation, or why nothing can settle it | `<sha>`, several comma-separated, or — |
 
-   Every commit you push after the review is cited on the row of the fix it belongs to, docs-only commits included.
+   Every commit you push after the review is cited on the row of the fix it belongs to, docs-only commits included. After any push, name the new head: update the top-level `## PR`, or give this amendment a `### PR` subsection (number + head SHA). The check passes when either one names the PR's current head.
+
+   An amendment that only fixes a failed check needs no table: the conductor reads the latest table at or after the amendment that carried the findings.
 
    **A guard thread is the conductor's, never yours.** A comment tagged `**lens:** guard` is the writer's test-weakening check: your PR deleted, skipped or loosened a test. Its row's verdict reads `conductor`, never `fixed`. Put in the evidence the reason the removal is legitimate, or the commit that restores the test. The conductor gives the verdict; the writer refuses `--adjudicator lane` on it.
 

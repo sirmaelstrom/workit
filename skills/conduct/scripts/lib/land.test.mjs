@@ -1008,6 +1008,25 @@ test('C1-23 the amendment table ends at its first non-table line', () => {
   assert.deepEqual(parseAmendmentTable(text).map((row) => row.comment), ['101']);
 });
 
+test('parseAmendmentTable since: the latest table at or after the owed amendment; a table-less check fix does not hide it', () => {
+  const table = (n, id) => `## Amendment ${n}\n\n| Comment | Verdict | Evidence | Commit |\n|---|---|---|---|\n| \`${id}\` | judgment | x | — |\n\n`;
+  const checkFix = (n) => `## Amendment ${n}\n\nThe top-level ## PR now names the pushed head.\n\n`;
+  const ids = (text, since) => parseAmendmentTable(text, { since }).map((row) => row.comment);
+  // Findings in 1, a check fix in 2: the table in 1 answers.
+  assert.deepEqual(ids(table(1, '101') + checkFix(2), 1), ['101']);
+  // Without since, only the latest section is read (unchanged).
+  assert.deepEqual(parseAmendmentTable(table(1, '101') + checkFix(2)), []);
+  // A re-carried table in 2 is the newer one.
+  assert.deepEqual(ids(table(1, '101') + table(2, '102'), 1), ['102']);
+  // Round 2's findings are owed from amendment 3: round 1's table never answers them.
+  assert.deepEqual(ids(table(1, '101') + checkFix(2) + checkFix(3), 3), []);
+  assert.deepEqual(ids(table(1, '101') + table(3, '301') + checkFix(4), 3), ['301']);
+  // A table quoted in a fence is not a table, and a fenced "## " line is not a heading.
+  const quoted = `## Amendment 2\n\nThe old table, quoted:\n\n\`\`\`\n## Amendment 9\n| Comment | Verdict | Evidence | Commit |\n|---|---|---|---|\n| \`999\` | judgment | STALE_QUOTE | — |\n\`\`\`\n\n`;
+  assert.deepEqual(ids(table(1, '101') + quoted, 1), ['101']);
+  assert.deepEqual(parseAmendmentTable(quoted), []);
+});
+
 test('threads get resolved (D19.9): table → replies → thread ids → resolve every replied thread → a passing gate', () => {
   const rows = parseAmendmentTable(fixtureText('lane-report-amendment.md'));
   assert.deepEqual(rows, [

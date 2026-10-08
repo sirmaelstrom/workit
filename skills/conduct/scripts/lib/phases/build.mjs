@@ -620,6 +620,8 @@ function findingsAmendment(state, wp, deps) {
   // The adjudication is owed until the table is read, whatever amendments come between.
   wp.owed = { adjudicate: true, round: review.round, findings: review.findings, ids, queue: [] };
   startAmendment(state, wp, deps, { kind: 'findings', reason: `review round ${review.round}: ${review.findings ?? 'unknown'} finding(s)`, round: review.round, findings: review.findings, ids, reviewDir });
+  // The table that answers this review is in this amendment or a later one.
+  wp.owed.since = wp.amendment.n;
 }
 
 // Every finding the review raised has a row: a council id each, or as many
@@ -640,10 +642,11 @@ function unreconciled(owed, rows) {
 // The amended report's table feeds recordAdjudication (step adjudicate): its
 // replies, then a ruling per guard row; thread resolution follows.
 function adjudicate(state, wp, deps) {
-  const rows = parseAmendmentTable(readText(deps, laneLayout(state, wp).reportPath) ?? '');
+  const since = Number.isInteger(wp.owed?.since) ? wp.owed.since : null;
+  const rows = parseAmendmentTable(readText(deps, laneLayout(state, wp).reportPath) ?? '', { since });
   let adjudication;
   try {
-    if (!rows.length) throw new ConductError(2, 'the report has no ## Amendment table (| Comment | Verdict | Evidence | Commit |)');
+    if (!rows.length) throw new ConductError(2, `the report has no ## Amendment table (| Comment | Verdict | Evidence | Commit |)${since === null ? '' : ` in ## Amendment ${since} or later`}`);
     const gap = unreconciled(wp.owed, rows);
     if (gap) throw new ConductError(2, gap);
     adjudication = recordAdjudication(state, wp, rows);

@@ -38,6 +38,7 @@
 import { basename, dirname, join, resolve } from 'node:path';
 import { LANE_MODELS, laneModel } from './adapters.mjs';
 import { resolveProgram } from './exec.mjs';
+import { amendmentSections, markLines } from './markdown.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { EXIT_CODES as LANE_EXIT, reapWorktree, reportShapeProblems } from '../../../../scripts/lane.mjs';
@@ -257,24 +258,6 @@ export function laneBackend(state, deps, backend) {
   };
 }
 
-// Every line, with fenced lines marked. A fence closes only on the character
-// that opened it, at least as long, with nothing after it (CommonMark).
-function markLines(text) {
-  let fence = null;
-  return String(text ?? '').split(/\r?\n/).map((raw) => {
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
-    let fenced = fence !== null;
-    if (marker && fence === null) {
-      fence = marker[1];
-      fenced = true;
-    } else if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && marker[2].trim() === '') {
-      fence = null;
-      fenced = true;
-    }
-    return { text: raw.replace(/\s+$/, ''), fenced };
-  });
-}
-
 // The unfenced lines of the level-2 section `title`, or null.
 function reportSection(text, title) {
   const lines = markLines(text);
@@ -330,10 +313,25 @@ export function parseOutcome(reportText) {
   return { outcome, asks };
 }
 
-// The report's `## PR`: a number and a head sha (7–40 hex), or nulls.
-function reportPr(text) {
-  const body = (reportSection(text, 'PR')?.lines ?? []).map((line) => line.text).join('\n');
-  return { number: Number(/#?(\d+)\b/.exec(body)?.[1] ?? NaN) || null, head: /\b([0-9a-f]{7,40})\b/.exec(body)?.[1] ?? null };
+// The unfenced lines of an amendment's `### PR…` subsection, or null.
+function amendmentPr(section) {
+  const start = section.lines.findIndex((line) => !line.fenced && /^###\s+PR\b/.test(line.text));
+  if (start < 0) return null;
+  const stop = section.lines.findIndex((line, i) => i > start && !line.fenced && /^#{1,3}\s/.test(line.text));
+  return { lines: section.lines.slice(start + 1, stop < 0 ? section.lines.length : stop).filter((line) => !line.fenced) };
+}
+
+// The report's current PR claims, each a number and a head sha (7–40 hex) or
+// nulls: the top-level `## PR`, which a lane may update in place, and the
+// `### PR` subsection of the latest amendment that has one. Either may be the
+// newer; the check passes when one of them names the PR's head.
+function reportPrClaims(text) {
+  const claim = (from, section) => {
+    const body = (section?.lines ?? []).map((line) => line.text).join('\n');
+    return { from, number: Number(/#?(\d+)\b/.exec(body)?.[1] ?? NaN) || null, head: /\b([0-9a-f]{7,40})\b/.exec(body)?.[1] ?? null };
+  };
+  const amended = amendmentSections(text).map((section) => ({ n: section.n, pr: amendmentPr(section) })).filter(({ pr }) => pr).at(-1);
+  return [claim('## PR', reportSection(text, 'PR')), ...(amended ? [claim(`## Amendment ${amended.n}'s ### PR`, amended.pr)] : [])];
 }
 
 // The JSON objects in a lane log (stdout and stderr share the file).
@@ -585,9 +583,10 @@ function recordPrLookup(wp, lane, result, deps) {
   if (prs.length === 0) return amend(`no PR for ${branch}`);
   const pr = prs.find((candidate) => candidate.state === 'OPEN') ?? prs[0];
   const found = { number: pr.number, head: pr.headRefOid };
-  const claimed = reportPr(readLog(deps, lane.reportPath));
-  if (claimed.number !== found.number || !claimed.head || !found.head?.startsWith(claimed.head)) {
-    return amend(`the report's ## PR says #${claimed.number ?? '?'} at ${claimed.head ?? '?'}; GitHub has #${found.number} at ${found.head}`, { pr: found });
+  const claims = reportPrClaims(readLog(deps, lane.reportPath));
+  if (!claims.some((claimed) => claimed.number === found.number && claimed.head && found.head?.startsWith(claimed.head))) {
+    const said = claims.map((claimed) => `${claimed.from} says #${claimed.number ?? '?'} at ${claimed.head ?? '?'}`).join('; ');
+    return amend(`the report's ${said}; GitHub has #${found.number} at ${found.head}`, { pr: found });
   }
   return proceed({ pr: found });
 }
