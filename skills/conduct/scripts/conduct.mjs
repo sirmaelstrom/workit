@@ -34,7 +34,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   status --run <dir>
   analyze --run <dir>
   ratify --run <dir> --wp <id> --paths <path,path> --why <text>
-  lane <spawn|alive|check> --run <dir> --wp <id> [sub-verb flags]
+  lane <spawn|alive|check|reap> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]`;
 
 const BOOLEAN_FLAGS = new Set(['manual', 'once']);
@@ -431,7 +431,7 @@ async function awaitAnswerVerb(tokens, deps) {
 
 const VERBS = {
   intake, next, record, answer, status, analyze, 'await-answer': awaitAnswerVerb, ratify: ratifyVerb,
-  lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check'], ['spawn']),
+  lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
 };
 

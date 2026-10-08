@@ -10,7 +10,7 @@ import {
   mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, appendFileSync, linkSync, truncateSync, copyFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname, basename, sep } from 'node:path';
+import { join, dirname, basename, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as build from './build.mjs';
 import { RUN_SLOTS } from './build.mjs';
@@ -905,6 +905,30 @@ test('step arrays: a herdr check array is emitted one action per next, in order;
   assert.equal(h.wp('WP-02').pr.number, 102);
 });
 
+test('exec cleanup (5c93c8cb): each exec lane exit is reaped, and every merged WP\'s worktree removal follows its merge; herdr lanes queue no removal', async (t) => {
+  const h = harness(t, { wps: TWO });
+  // A reap failure never blocks, so a reap that could not run would pass
+  // silently: the process list answers, and each reap's state is asserted.
+  h.rules.push([/^ps -eo pid=,ppid=,args=$/, () => ok('1 0 init\n')]);
+  assert.equal(await drive(h), null);
+  for (const id of ['WP-02', 'WP-03']) {
+    const mine = of(h, id);
+    const merged = mine.findIndex((a) => a.step === 'merged');
+    const remove = mine.findIndex((a) => a.step === 'stop' && a.part === 'remove');
+    assert.ok(merged >= 0 && remove > merged, `${id}: the worktree removal follows the merge`);
+    assert.deepEqual(mine[remove].command.slice(0, 5), ['git', '-C', resolve(h.repo), 'worktree', 'remove']);
+    assert.ok(mine.some((a, i) => a.part === 'reap' && i < merged && mine[i - 1]?.step === 'wait'), `${id}: the lane's exit was reaped before review`);
+    assert.deepEqual([h.wp(id).state, h.wp(id).lane.removed, h.wp(id).lane.reap.state], ['merged', true, 'reaped']);
+  }
+  // The action's argv runs through the CLI, whose sub-verb list must name reap.
+  const reap = of(h, 'WP-02').find((a) => a.part === 'reap');
+  const cli = await runConduct(reap.command.slice(2), h.overrides());
+  assert.deepEqual([cli.code, JSON.parse(cli.stdout).state], [0, 'reaped'], cli.stderr);
+  const herdr = harness(t, { herdr: true, wps: TWO });
+  assert.equal(await drive(herdr), null);
+  assert.ok(!herdr.trace.some((a) => a.part === 'remove' || a.part === 'reap'), 'herdr lanes are reaped by lane.mjs stop and swept by lane.mjs');
+});
+
 test('backend (D18, D19.18): flipping herdr off after dispatch keeps the WP on herdr; herdr on outside a projects tree → exec with the reason', async (t) => {
   const h = harness(t, { herdr: true, wps: [TWO[0], TWO[1]] });
   await drive(h, { until: (a) => a.step === 'create' });
@@ -1027,7 +1051,8 @@ test('blocked recovery (D19.4): an answer amends the blocked lane verbatim; its 
   const merged2 = indexWhere(h, (a) => a.wpId === 'WP-02' && a.step === 'merged');
   assert.ok(indexWhere(h, (a) => a.wpId === 'WP-04') > merged2, 'WP-04 dispatched after WP-02 merged');
   const afterBrief = of(h, 'WP-02').slice(of(h, 'WP-02').indexOf(brief) + 1).map((a) => a.step);
-  assert.deepEqual(afterBrief.slice(0, 3), ['prompt', 'wait', 'check']);
+  // The exec lane's observed exit reaps its worktree before the check.
+  assert.deepEqual(afterBrief.slice(0, 4), ['prompt', 'wait', 'stop', 'check']);
 });
 
 test('blocked recovery (D19.4), spine, idle build (E6): with no lane work left the build files the touch, reads it back and hands back, never a 300000 ms poll; next resumes at the read-back; the answer merges', async (t) => {
@@ -1589,6 +1614,17 @@ test('liveness (C1-1): unparseable or empty `lane alive` output on a wait keeps 
     const again = await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
     assert.ok(aliveOf(again), `${JSON.stringify(stdout)}: polled again, not checked (${again.step}/${again.part})`);
   }
+});
+
+test('liveness (5c93c8cb): a reap that exits 1 while the old agent pid is reused is recorded, never read as liveness', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  const reap = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.part === 'reap' });
+  assert.ok(reap, 'the exec lane exit queues a reap');
+  h.lifeByPid.set(4202, 9);
+  await pendingAfter(h, { code: 1, stdout: JSON.stringify({ ok: false, state: 'survivors', orphans: [{ pid: 9, cmd: 'x' }], survivors: [{ pid: 9, cmd: 'x' }] }), stderr: '' });
+  assert.deepEqual([h.wp('WP-02').lane.reap?.state, h.wp('WP-02').lane.uncertain ?? 0], ['survivors', 0]);
+  const next = await drive(h, { until: (a) => a.wpId === 'WP-02' && !isWait(a) });
+  assert.notEqual(next.part, 'reap', 'the build moves on; the reap is not re-asked as a liveness read');
 });
 
 test('liveness (C1-1): unparseable output on a stop probe and on a stop confirmation keeps the slot and asks again', async (t) => {

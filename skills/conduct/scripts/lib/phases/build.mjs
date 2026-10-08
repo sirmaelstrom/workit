@@ -595,7 +595,8 @@ function merged(state, wp, deps) {
     // The anchor (depth none/lite) stays open until the showcase answer (D18).
     if (wp.questId !== state.intent.anchor) after.push(tool('done', 'spine_update', { questId: wp.questId, workState: 'done', horizon: 'landed' }));
   }
-  wp.queue = [...(wp.queue ?? []), ...after, ...backendOf(state, wp, deps).stop(wp)];
+  const backend = backendOf(state, wp, deps);
+  wp.queue = [...(wp.queue ?? []), ...after, ...backend.stop(wp), ...(backend.remove ? backend.remove(wp) : [])];
 }
 
 // A library emitter that cannot emit (no lens can run, a delta after a
@@ -1285,7 +1286,9 @@ function recordOwn(state, wp, action, result, deps) {
 // and a touch whose answer is the only release. An error read (any other
 // exit) is the recorder's and never resets the count.
 function liveness(state, wp, action, result, deps) {
-  if (wp.lane?.backend !== 'exec' || !['wait', 'stop'].includes(action.step) || action.part === 'kill') return null;
+  // Only an `alive` reading (the wait, the probe, the confirmation) says anything about liveness;
+  // a kill, a reap or a worktree removal exits 1 for its own reasons.
+  if (wp.lane?.backend !== 'exec' || !['wait', 'stop'].includes(action.step) || ['kill', 'reap', 'remove'].includes(action.part)) return null;
   let owner = null;
   try {
     owner = JSON.parse(result.stdout)?.owner ?? null;

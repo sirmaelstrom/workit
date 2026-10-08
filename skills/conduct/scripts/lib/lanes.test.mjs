@@ -4,7 +4,7 @@ import {
   mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, appendFileSync, linkSync, truncateSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
@@ -332,10 +332,11 @@ test('occupancy until exit (C1-1, C1-2): a deadline block at cap 1 keeps the slo
     assert.ok(platform === 'win32' ? killText.includes('taskkill /PID 4242 /T /F') && killText.includes(`$id -eq '${IDENTITY}'`) : kill.command.at(-1) === IDENTITY && killText.includes('kill -TERM'), killText);
     assert.equal(e.record(kill, exit(128, 'ERROR: not found')).outcome, 'continue');
     const gone = e.record(confirm, exit(1));
-    assert.deepEqual([gone.outcome, gone.patch.queue, gone.patch.lane.exitedAt], ['done', [], new Date(T0 + 121 * 60 * 1000).toISOString()]);
+    assert.deepEqual([gone.outcome, gone.patch.queue.map((a) => [a.step, a.part, a.command.slice(2, 4)]), gone.patch.lane.exitedAt],
+      ['done', [['stop', 'reap', ['lane', 'reap']]], new Date(T0 + 121 * 60 * 1000).toISOString()], 'the confirmed exit reaps the worktree');
     apply(e.wp, gone.patch);
     assert.deepEqual(dispatchable(state).map((wp) => wp.id), ['WP-01']);
-    assert.deepEqual(e.backend().stop(e.wp), [], 'an exited lane has nothing to stop');
+    assert.deepEqual(e.backend().stop(e.wp).map((a) => a.part), ['reap'], 'an exited lane has only its reap left');
   }
 });
 
@@ -346,7 +347,7 @@ test('PID ownership (C2-1): a reused pid is never killed; the lane reads as exit
   assert.deepEqual([alive.code, JSON.parse(alive.out).owner], [1, 'reused']);
   const [probe] = f.backend().stop(f.wp);
   const routed = f.record(probe, { code: alive.code, stdout: alive.out, stderr: '' });
-  assert.deepEqual([routed.outcome, routed.patch.queue, Boolean(routed.patch.lane.exitedAt)], ['done', [], true]);
+  assert.deepEqual([routed.outcome, routed.patch.queue.map((a) => a.part), Boolean(routed.patch.lane.exitedAt)], ['done', ['reap'], true]);
   assert.match(routed.reason, /pid reused: not killed/);
   // No identity to compare: unverified, never killed.
   f.table[identityArgv(4242, 'linux').join(' ')] = ok('\n');
@@ -374,18 +375,22 @@ test('guarded kill (C2-1): the win32 script\'s string literals are closed, an id
 test('cleanup survives an unconfirmed stop (C2-3): alive, alive, gone releases; alive x3 blocks as cleanup-unresolved, stop still queued', (t) => {
   const e = lanes(t, { wpLane: { pid: 4242, identity: IDENTITY, startedAt: new Date(T0).toISOString() } });
   const [, confirm] = e.backend().kill(e.wp);
+  // As the build runs it: the pending action heads the queue, and the wait is consumed before the confirmation re-runs.
+  const later = { step: 'ratify', part: 'ruling' };
+  e.wp.queue = [confirm, later];
   for (let i = 1; i <= 2; i += 1) {
     const again = e.record(confirm, exit(0));
-    assert.deepEqual([again.outcome, again.patch.lane.stopConfirms, again.patch.queue[0].waitMs, again.patch.queue[1]], ['wait', i, 10000, confirm]);
-    apply(e.wp, again.patch);
+    assert.deepEqual([again.outcome, again.patch.lane.stopConfirms, again.patch.queue[0].waitMs, again.patch.queue.slice(1)], ['wait', i, 10000, [confirm, later]], 'what was queued after the stop is kept');
+    apply(e.wp, { ...again.patch, queue: again.patch.queue.slice(1) });
   }
   const released = e.record(confirm, exit(1));
-  assert.deepEqual([released.outcome, released.patch.lane.stopConfirms], ['done', 0]);
+  assert.deepEqual([released.outcome, released.patch.lane.stopConfirms, released.patch.queue.map((a) => a.part)], ['done', 0, ['reap', 'ruling']]);
   const stuck = lanes(t, { wpLane: { pid: 4242, identity: IDENTITY, startedAt: new Date(T0).toISOString() } });
+  stuck.wp.queue = [confirm];
   let routed;
   for (let i = 0; i < 3; i += 1) {
     routed = stuck.record(confirm, exit(0));
-    apply(stuck.wp, routed.patch);
+    apply(stuck.wp, { ...routed.patch, queue: routed.patch.queue.slice(1) });
   }
   assert.deepEqual([routed.outcome, routed.cause], ['block', 'cleanup-unresolved']);
   assert.deepEqual(routed.patch.queue, stuck.backend().stop(stuck.wp));
@@ -969,4 +974,47 @@ test('fixture paths: no private-path shapes under __fixtures__/lanes (Must 8)', 
   for (const insert of [['C:', 'Users', 'someone', 'x'].join('\\'), ['D:', 'Development', 'x'].join('/'), ['', 'Users', 'someone', ''].join('/')]) {
     assert.notDeepEqual(privateHits(`${CODEX_JSONL}${insert}`), [], insert);
   }
+});
+
+test('exec cleanup (5c93c8cb): an observed exit reaps ahead of what follows; a merged lane\'s worktree is removed without --force; neither a survivor nor a refused removal blocks', (t) => {
+  const worktree = join(tmpdir(), 'demo-wt-wp-00');
+  const e = lanes(t, { wpLane: { pid: 4242, identity: IDENTITY, startedAt: new Date(T0).toISOString(), worktree } });
+  const [wait] = e.backend().wait(e.wp);
+  const later = { step: 'check', part: 'report' };
+  e.wp.queue = [wait, later];
+  const exited = e.record(wait, exit(1, '', '{"ok":true,"alive":false,"pid":4242,"owner":"gone"}'));
+  assert.deepEqual([exited.outcome, exited.patch.queue.map((a) => a.part)], ['continue', ['reap', 'report']]);
+  assert.deepEqual(exited.patch.queue[0].command.slice(2, 4), ['lane', 'reap'], 'in process: the core path runs no lane.mjs argv');
+  const [reap] = e.backend().reap(e.wp);
+  const survived = e.record(reap, exit(1, '', JSON.stringify({ ok: false, state: 'survivors', orphans: [{ pid: 9, cmd: 'x' }], survivors: [{ pid: 9, cmd: 'x' }] })));
+  assert.deepEqual([survived.outcome, survived.patch.lane.reap.state, survived.patch.lane.reap.orphans, survived.patch.lane.reap.survivors], ['continue', 'survivors', 1, 1]);
+  const [remove] = e.backend().remove(e.wp);
+  assert.deepEqual(remove.command, ['git', '-C', resolve(e.repo), 'worktree', 'remove', worktree]);
+  const refused = e.record(remove, exit(128, 'fatal: contains modified or untracked files, use --force to delete it'));
+  assert.deepEqual([refused.outcome, refused.patch.lane.removed], ['continue', false]);
+  assert.match(refused.patch.lane.removeError, /modified or untracked/);
+  assert.equal(e.record(remove, exit(0)).patch.lane.removed, true);
+  assert.equal(lanes(t, { backend: 'herdr' }).backend().remove, undefined, 'herdr lanes are swept by lane.mjs, not removed here');
+});
+
+test('lane reap (5c93c8cb): kills what runs from the WP\'s worktree, in process, and exits 1 on a survivor', async (t) => {
+  const worktree = join(tmpdir(), 'demo-wt-wp-00');
+  const e = lanes(t, { wpLane: { worktree } });
+  let rows = [{ pid: 501, cmd: `node ${join(worktree, 'vite.js')}` }, { pid: 502, cmd: `node ${join(`${worktree}2`, 'vite.js')}` }];
+  const killed = [];
+  const exec = (program, args) => {
+    if (program === 'ps') return ok(rows.map((row) => `${row.pid} 1 ${row.cmd}`).join('\n'));
+    if (program === 'kill') {
+      killed.push(args.at(-1));
+      rows = rows.filter((row) => String(row.pid) !== args.at(-1));
+      return ok();
+    }
+    return exit(127, `unexpected: ${program}`);
+  };
+  const reaped = await runLaneVerb('reap', { runDir: e.runDir, wpId: 'WP-00', flags: {} }, { ...e.deps, exec });
+  assert.deepEqual([reaped.code, JSON.parse(reaped.out).state, JSON.parse(reaped.out).orphans.map((row) => row.pid), killed], [0, 'reaped', [501], ['501']]);
+  rows = [{ pid: 503, cmd: `node ${join(worktree, 'vite.js')}` }];
+  const stuck = await runLaneVerb('reap', { runDir: e.runDir, wpId: 'WP-00', flags: {} }, { ...e.deps, exec: (program, args) => (program === 'kill' ? ok() : exec(program, args)) });
+  assert.deepEqual([stuck.code, JSON.parse(stuck.out).state, JSON.parse(stuck.out).survivors.map((row) => row.pid)], [1, 'survivors', [503]]);
+  assert.equal((await runLaneVerb('reap', { runDir: e.runDir, wpId: 'WP-00', flags: { x: true } }, e.deps)).code, 2, 'reap takes no flags');
 });
