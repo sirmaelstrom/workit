@@ -750,7 +750,9 @@ test('judgment threads (D19.9, 022d6fd9): a judgment row\'s thread is listed und
   const line = 'WP-00 PR #100 comment 4177261828: thread PRRT_kwDOS_8yoc6oxnvx resolved';
   assert.ok(section(h.analysis(), 'Pre-approval audit').includes(`  - ${line}`), section(h.analysis(), 'Pre-approval audit'));
   const question = h.state().touches.find((touch) => touch.kind === 'showcase').question;
-  assert.ok(question.includes(`Judgment threads the conductor resolved: 1, each listed under the audit in ${join(h.state().runDir, 'run-analysis.md')}`), question);
+  // With a briefing, the full path is named once (Full record) and the lists name the file.
+  assert.ok(question.includes('Judgment threads the conductor resolved: 1, each listed under the audit in run-analysis.md'), question);
+  assert.ok(question.includes(`Full record: ${join(h.state().runDir, 'run-analysis.md')}.`), question);
   assert.ok(!question.includes(line), 'the thread itself lives in the analysis, not the question');
 });
 

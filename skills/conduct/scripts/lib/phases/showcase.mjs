@@ -69,9 +69,10 @@ export function readBrief(state, deps) {
   const stopped = unfinished(state);
   const notDone = String(brief?.notDone ?? '');
   if (stopped.length > NAMED_MAX) {
-    if (!new RegExp(`\\b${stopped.length}\\b`).test(notDone)) problems.push(`notDone does not state that ${stopped.length} WPs did not finish`);
+    if (!new RegExp(`\\b${stopped.length} WPs\\b`).test(notDone)) problems.push(`notDone does not say "${stopped.length} WPs" did not finish`);
   } else {
-    const missing = stopped.filter((wp) => !notDone.includes(wp.id)).map((wp) => wp.id);
+    // A whole-word id: WP-01 is not named by WP-010.
+    const missing = stopped.filter((wp) => !new RegExp(`(^|[^\\w-])${wp.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(notDone)).map((wp) => wp.id);
     if (missing.length) problems.push(`notDone does not name ${missing.join(', ')}, which did not finish`);
   }
   if (problems.length) throw new ConductError(2, `the showcase briefing ${path}: ${problems.join('; ')}`);
@@ -89,11 +90,14 @@ function question(state) {
   const analysis = join(state.runDir, 'run-analysis.md');
   const judgments = judgmentThreads(state).length;
   const merged = mergedPrs(state);
-  // The analysis's Queue accounting lists every WP with its state, reason and PR.
-  const accounting = `under Queue accounting in ${analysis}`;
+  // The analysis's Queue accounting lists every WP with its state, reason and
+  // PR. With a briefing, its full path is given once (the DO line) and the
+  // lists name the file alone, so the status lines fit under the cap.
+  const file = state.showcaseBrief ? 'run-analysis.md' : analysis;
+  const accounting = `under Queue accounting in ${file}`;
   // Each list, in full or (when the question would overrun the cap) by count and where it is listed.
   const lists = [
-    { label: 'Merged PRs', items: merged.map((m) => `${m.id} ${url(m.pr)}`), where: `under the audit in ${analysis}` },
+    { label: 'Merged PRs', items: merged.map((m) => `${m.id} ${url(m.pr)}`), where: `under the audit in ${file}` },
     { label: 'Open PRs of held WPs', items: held.map((wp) => `${wp.id} ${wp.pr?.number ? url(wp.pr.number) : '(no PR)'} (${wp.reason ?? 'held'})`), where: accounting },
     { label: 'Deferred WPs', items: deferred.map((wp) => `${wp.id}: ${wp.reason ?? 'no reason recorded'}`), where: accounting },
     { label: 'Refuted or blocked WPs', items: stopped.map((wp) => `${wp.id} ${wp.state}: ${wp.reason ?? 'no reason recorded'}${wp.pr?.number ? ` (${url(wp.pr.number)})` : ''}`), where: accounting },
@@ -107,7 +111,7 @@ function question(state) {
     `Proof it works: ${brief.proof}`,
     `Not done: ${brief.notDone}`,
     `Check yourself: ${brief.check}`,
-    `DO: answer (a) accept, (b) accept with notes, or (c) send back with \`seam: <name>\` in your text (one of ${SEAMS.join(', ')}). EXPECT: (a) and (b) close the run, (b) storing your notes verbatim; (c) ends it sent-back, nothing re-runs, and a new /conduct run citing ${state.runDir} reopens the work. Full record: ${analysis}.`,
+    `DO: answer (a) accept, (b) accept with notes, or (c) send back with \`seam: <name>\` in your text (one of ${SEAMS.join(', ')}). EXPECT: (a) and (b) close the run, (b) storing your notes verbatim; (c) ends it sent-back, nothing re-runs, and a new /conduct run citing this run's folder reopens the work. Full record: ${analysis}.`,
   ] : [
     `DO: read ${analysis} first, then the merged PRs, then the deliverable (${state.intent.repo.path}, ${state.intent.repo.remote} at origin/${state.intent.repo.defaultBranch ?? 'main'}), and accept, accept with notes, or send back conductor run ${state.slug}. EXPECT: (a) the run closes; (b) the run closes with your notes stored verbatim; (c) the run ends as sent-back: write \`seam: <name>\` (one of ${SEAMS.join(', ')}) in your text; nothing re-runs and merged work and the release are not touched; reopening is a new /conduct run whose goal cites ${state.runDir}.`,
   ];
@@ -115,7 +119,7 @@ function question(state) {
     ...head,
     ...lists.map((entry, i) => line(entry, i < cited)),
     // Cited by count and file: the list, one line per thread, is what overran spine_receipt's cap.
-    `Judgment threads the conductor resolved: ${judgments ? `${judgments}, each listed under the audit in ${analysis}` : 'none'}`,
+    `Judgment threads the conductor resolved: ${judgments ? `${judgments}, each listed under the audit in ${file}` : 'none'}`,
     `Blocked touches still open: ${list(open.map((touch) => `touch ${touch.n}${touch.wpId ? ` (${touch.wpId})` : ''}`), 'none')}`,
     `Release: ${r.state}${r.reason ? ` (${r.reason})` : ''}${r.pr?.number ? ` ${url(r.pr.number)}` : ''}`,
   ].join('\n');

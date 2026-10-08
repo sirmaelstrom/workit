@@ -285,13 +285,35 @@ test('showcase (022d6fd9): 30 held WPs are cited by count and where they are lis
     intent: { anchor: ANCHOR, repo: { path: 'X:/fixture/repo', remote: 'o/r', defaultBranch: 'main' } }, release: { state: 'not-exercised', reason: 'incomplete build' },
   };
   const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
-  // A briefing at every field's maximum: it and the held count still fit.
+  // A briefing at every field's maximum, on a workspace-length run path: the
+  // briefing, the answer line and every status line still fit, uncut.
   const full = (lead) => `${lead} ${'x'.repeat(200)}`.slice(0, 200);
-  state.showcaseBrief = { delivered: full('Built:'), proof: full('Ran:'), notDone: full('All 30 WPs are held at their PRs:'), check: full('Read:'), why: full('Because:'), recommend: 'b' };
-  const action = showcase.next(state, deps);
-  assert.ok(action.args.question.length <= 2000, `the filed question is ${action.args.question.length} chars`);
-  assert.ok(action.args.question.includes(`Open PRs of held WPs: 30, each listed under Queue accounting in ${join('X:/fixture/run', 'run-analysis.md')}`), action.args.question);
-  assert.ok(action.args.question.includes('Recommended: (b) Accept with notes.'), action.args.question);
+  const briefed = { ...state, touches: [], runDir: 'D:\\Development\\data\\outputs\\workshops\\in-conduct-exec-probe-add-src-slug-mjs-e\\run' };
+  briefed.showcaseBrief = { delivered: full('Built:'), proof: full('Ran:'), notDone: full('All 30 WPs are held at their PRs:'), check: full('Read:'), why: full('Because:'), recommend: 'b' };
+  const briefedQuestion = showcase.next(briefed, deps).args.question;
+  assert.ok(briefedQuestion.length <= 2000, `the filed question is ${briefedQuestion.length} chars`);
+  assert.ok(!briefedQuestion.includes('cut at spine_receipt'), briefedQuestion);
+  for (const line of ['Recommended: (b) Accept with notes.', 'Open PRs of held WPs: 30, each listed under Queue accounting in run-analysis.md', 'Deferred WPs: none', 'Blocked touches still open: none', 'Release: not-exercised (incomplete build)']) {
+    assert.ok(briefedQuestion.includes(line), `missing "${line}":\n${briefedQuestion}`);
+  }
+});
+
+test('showcase briefing: notDone names an unfinished WP as a whole word, and above six says "<n> WPs"', async (t) => {
+  const showcase = await import('./lib/phases/showcase.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'workit-brief-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const deps = { exists: existsSync, read: (path) => readFileSync(path, 'utf8') };
+  const brief = { delivered: 'd', proof: 'p', check: 'c', recommend: 'b', why: 'w' };
+  const read = (wps, notDone) => {
+    writeFileSync(join(dir, 'showcase-brief.json'), JSON.stringify({ ...brief, notDone }));
+    return () => showcase.readBrief({ runDir: dir, wps }, deps);
+  };
+  const one = [{ id: 'WP-01', state: 'blocked' }];
+  assert.throws(read(one, 'WP-010 was dropped.'), { code: 2, message: /does not name WP-01/ });
+  assert.equal(read(one, 'WP-01 blocked at its check.')().notDone, 'WP-01 blocked at its check.');
+  const seven = Array.from({ length: 7 }, (_, i) => ({ id: `WP-0${i + 1}`, state: 'held' }));
+  assert.throws(read(seven, '7 tests passed; nothing remains unfinished.'), { code: 2, message: /"7 WPs"/ });
+  assert.equal(read(seven, 'All 7 WPs are held at their PRs.')().notDone, 'All 7 WPs are held at their PRs.');
 });
 
 test('showcase briefing: the conductor writes it before the touch; the question leads with it and marks the recommended button; a briefing that hides an unfinished WP is refused', async (t) => {
