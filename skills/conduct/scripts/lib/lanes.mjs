@@ -330,10 +330,26 @@ export function parseOutcome(reportText) {
   return { outcome, asks };
 }
 
-// The report's `## PR`: a number and a head sha (7–40 hex), or nulls.
+// The `### PR…` subsection of the report's latest `## Amendment N`, or null.
+function amendmentPrSection(text) {
+  const lines = markLines(text);
+  const starts = lines.flatMap((line, i) => (!line.fenced && /^## Amendment \d+\b/.test(line.text) ? [i] : []));
+  if (!starts.length) return null;
+  const end = lines.findIndex((line, i) => i > starts.at(-1) && !line.fenced && /^#{1,2}\s/.test(line.text));
+  const section = lines.slice(starts.at(-1) + 1, end < 0 ? lines.length : end);
+  const start = section.findIndex((line) => !line.fenced && /^###\s+PR\b/.test(line.text));
+  if (start < 0) return null;
+  const stop = section.findIndex((line, i) => i > start && !line.fenced && /^#{1,3}\s/.test(line.text));
+  return { lines: section.slice(start + 1, stop < 0 ? section.length : stop).filter((line) => !line.fenced) };
+}
+
+// The report's PR claim: a number and a head sha (7–40 hex), or nulls. The
+// latest amendment's `### PR` subsection, when it has one, is the newer claim;
+// otherwise the top-level `## PR`.
 function reportPr(text) {
-  const body = (reportSection(text, 'PR')?.lines ?? []).map((line) => line.text).join('\n');
-  return { number: Number(/#?(\d+)\b/.exec(body)?.[1] ?? NaN) || null, head: /\b([0-9a-f]{7,40})\b/.exec(body)?.[1] ?? null };
+  const amended = amendmentPrSection(text);
+  const body = ((amended ?? reportSection(text, 'PR'))?.lines ?? []).map((line) => line.text).join('\n');
+  return { from: amended ? 'latest amendment\'s ### PR' : '## PR', number: Number(/#?(\d+)\b/.exec(body)?.[1] ?? NaN) || null, head: /\b([0-9a-f]{7,40})\b/.exec(body)?.[1] ?? null };
 }
 
 // The JSON objects in a lane log (stdout and stderr share the file).
@@ -587,7 +603,7 @@ function recordPrLookup(wp, lane, result, deps) {
   const found = { number: pr.number, head: pr.headRefOid };
   const claimed = reportPr(readLog(deps, lane.reportPath));
   if (claimed.number !== found.number || !claimed.head || !found.head?.startsWith(claimed.head)) {
-    return amend(`the report's ## PR says #${claimed.number ?? '?'} at ${claimed.head ?? '?'}; GitHub has #${found.number} at ${found.head}`, { pr: found });
+    return amend(`the report's ${claimed.from} says #${claimed.number ?? '?'} at ${claimed.head ?? '?'}; GitHub has #${found.number} at ${found.head}`, { pr: found });
   }
   return proceed({ pr: found });
 }

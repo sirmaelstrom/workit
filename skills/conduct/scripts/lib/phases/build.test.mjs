@@ -2035,6 +2035,19 @@ test('retry reason and amendment marker (C1-11, C1-13): a missing table re-promp
   assert.equal(h.wp('WP-02').state, 'merged');
 });
 
+test('a check-fix amendment with no table: the findings amendment\'s table is adjudicated, not a second check failure', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3] };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment-stale-pr.md', 'report-amendment-check-fix.md'] };
+  h.unresolved = () => h.resolved < 3;
+  const fix = await drive(h, { until: (a) => a.part === 'amendment' && a.amendment.n === 2 });
+  assert.match(fix.instruction, /its last check failed: the report's ## PR says #\d+ at 0000000/);
+  await recordPending(h, author(h, fix));
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.ok(h.events().some((e) => e.event === 'adjudicated' && e.data.rows.length === 3));
+});
+
 test('comment-id reconciliation (C1-16): a council table missing C1-3 re-prompts naming it', async (t) => {
   const h = harness(t, { council: true, wps: [TWO[0], { ...TWO[1], tier: 'T2' }] });
   h.synth = [{ findings: 3, seats: ['gpt-6.1-sol'] }];

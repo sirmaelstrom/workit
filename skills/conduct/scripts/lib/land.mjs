@@ -220,13 +220,23 @@ function splitRow(line) {
   return cells.map((cell) => cell.replace(/^`(.*)`$/, '$1'));
 }
 
-// The rows of the report's latest `## Amendment N` table, which ends at the
-// first line after its header that is not a table row.
-export function parseAmendmentTable(reportText) {
-  const section = String(reportText).split(/^(?=## )/m).filter((part) => /^## Amendment \d+\b/.test(part)).at(-1);
+const TABLE_HEADER = /^\|\s*Comment\s*\|\s*Verdict\s*\|\s*Evidence\s*\|\s*Commit\s*\|/i;
+
+// The rows of an `## Amendment N` table, which ends at the first line after its
+// header that is not a table row. Without `since`, the latest section's table;
+// with it, the table of the latest section numbered `since` or later that has
+// one, so an amendment that only fixed a check (no table) does not hide the
+// findings table before it, and a table from an earlier round never answers.
+export function parseAmendmentTable(reportText, { since = null } = {}) {
+  const sections = String(reportText).split(/^(?=## )/m)
+    .map((part) => ({ part, n: Number(/^## Amendment (\d+)\b/.exec(part)?.[1] ?? NaN) }))
+    .filter(({ n }) => Number.isInteger(n));
+  const candidates = since === null ? sections.slice(-1)
+    : sections.filter(({ n, part }) => n >= since && part.split(/\r?\n/).some((line) => TABLE_HEADER.test(line.trim())));
+  const section = candidates.at(-1)?.part;
   if (!section) return [];
   const all = section.split(/\r?\n/);
-  const header = all.findIndex((line) => /^\|\s*Comment\s*\|\s*Verdict\s*\|\s*Evidence\s*\|\s*Commit\s*\|/i.test(line.trim()));
+  const header = all.findIndex((line) => TABLE_HEADER.test(line.trim()));
   if (header < 0) return [];
   const body = [];
   for (const line of all.slice(header + 1)) {

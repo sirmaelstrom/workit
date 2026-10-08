@@ -717,6 +717,28 @@ test('PR lookup: after the report check on both backends; stores pr.number and p
   }
 });
 
+test('PR lookup: the latest amendment\'s ### PR is the newer claim; an earlier amendment\'s is history', (t) => {
+  const f = lanes(t);
+  const lookup = f.backend().check(f.wp).find((act) => act.step === 'pr-lookup');
+  const head = `ed889f8${'0'.repeat(33)}`;
+  const github = ok(JSON.stringify([{ number: 7, headRefOid: head, state: 'OPEN' }]));
+  const amendment = (n, prLine) => `## Amendment ${n}\n\n| Comment | Verdict | Evidence | Commit |\n|---|---|---|---|\n| \`101\` | fixed | red | \`ed889f8\` |\n\n${prLine === null ? '' : `### PR (amendment)\n\n${prLine}\n\n`}### Forks I decided that the brief did not settle\n\nNone\n`;
+  // The top-level ## PR still names the pre-amendment head; the amendment pushed and said so.
+  f.report(`${report({ pr: '#7 · 0105e2c' })}\n${amendment(1, '#7, head `ed889f8`, CI pass.')}`);
+  assert.equal(f.record(lookup, github).outcome, 'continue');
+  // A later amendment with no ### PR: the top-level ## PR is read (the lane updated it in place).
+  f.report(`${report({ pr: '#7 · ed889f8' })}\n${amendment(1, '#7, head `0105e2c`.')}\n${amendment(2, null)}`);
+  assert.equal(f.record(lookup, github).outcome, 'continue');
+  // The latest amendment's stale ### PR is the claim, whatever the top-level says.
+  f.report(`${report({ pr: '#7 · ed889f8' })}\n${amendment(1, '#7, head `0105e2c`.')}`);
+  const stale = f.record(lookup, github);
+  assert.equal(stale.outcome, 'amend');
+  assert.match(stale.reason, /latest amendment's ### PR says #7 at 0105e2c; GitHub has #7 at ed889f8/);
+  // A fenced "### PR" line is not a heading.
+  f.report(`${report({ pr: '#7 · ed889f8' })}\n## Amendment 1\n\n\`\`\`\n### PR\n#7 0105e2c\n\`\`\`\n`);
+  assert.equal(f.record(lookup, github).outcome, 'continue');
+});
+
 // ---------------------------------------------------------------- herdr argv
 
 test('herdr: each action\'s argv, every one with --log (D17, D19.17)', (t) => {
