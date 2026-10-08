@@ -509,6 +509,7 @@ test('61f67554 a fixed row cites several commits, comma-separated: the tail is p
   const table = (cell) => parseAmendmentTable(`## Amendment 2\n\n| Comment | Verdict | Evidence | Commit |\n|---|---|---|---|\n| C2-1 | fixed | red then green | ${cell} |\n`);
   assert.equal(table('`6a05f06, 18dd500`')[0].commit, '6a05f06,18dd500');
   assert.equal(table('6a05f06 18dd500')[0].commit, '6a05f06,18dd500');
+  assert.equal(table('`6a05f06`, `18dd500`')[0].commit, '6a05f06,18dd500', 'each sha in its own code span, as the template shows one');
   assert.equal(table('6a05f06, and a test')[0].commit, null);
   const wp = makeWp({ reviews: [anchorReview([])] });
   assert.equal(recordAdjudication(makeState(), wp, table('6a05f06, 18dd500')).patch.reviews.at(-1).verdicts[0].commit, '6a05f06,18dd500');

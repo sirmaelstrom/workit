@@ -211,7 +211,7 @@ export function t2Actions(state, wp, { round = 1, changedPaths = [], report = nu
 // A Commit cell: one sha, or several comma-separated when a fix took more than
 // one commit. Returns the shas, or null when any part is not a sha.
 export function rowCommits(cell) {
-  const shas = String(cell ?? '').split(/[\s,]+/).filter(Boolean);
+  const shas = String(cell ?? '').split(/[\s,]+/).map((part) => part.replace(/^`+|`+$/g, '')).filter(Boolean);
   return shas.length && shas.every((sha) => /^[0-9a-f]{7,40}$/i.test(sha)) ? shas : null;
 }
 

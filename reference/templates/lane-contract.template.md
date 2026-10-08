@@ -81,7 +81,7 @@ List the callers of any function you add a check to, and every construct in your
    |---|---|---|---|
    | `<id>` | fixed / refuted / judgment | the control's red line, the quoted observation, or why nothing can settle it | `<sha>`, several comma-separated, or — |
 
-   Every commit you push after the review is cited on the row of the fix it belongs to. A commit no row cites holds the PR.
+   Every commit you push after the review is cited on the row of the fix it belongs to. An uncited commit that changes more than plain docs holds the PR.
 
    **A guard thread is the conductor's, never yours.** A comment tagged `**lens:** guard` is the writer's test-weakening check: your PR deleted, skipped or loosened a test. Its row's verdict reads `conductor`, never `fixed`. Put in the evidence the reason the removal is legitimate, or the commit that restores the test. The conductor gives the verdict; the writer refuses `--adjudicator lane` on it.
 
