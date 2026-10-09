@@ -879,6 +879,24 @@ test('budget projection (8f433d11): every merge records booked spend and the pro
   assert.equal(money(after.data.bookedUsd), money(70 + LANE_COST), JSON.stringify(after.data));
 });
 
+test('budget projection (93d852e6): a herdr lane logs no cost, so a merged WP whose lane closed before the meter reading is booked by the meter, not counted again', async (t) => {
+  const SERIAL = [TWO[0], TWO[1], { ...TWO[2], dependsOn: ['WP-02'] }];
+  const config = JSON.stringify({ ...JSON.parse(fixture('build', 'conduct.json')), laneEstimateUsd: 15 });
+  const h = harness(t, { herdr: true, spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 250, wps: SERIAL, config });
+  // Each reading is a minute after the step before it, so WP-03's start reads after WP-02's lane closed.
+  h.answer = (a) => (a.step === 'spend' ? (h.tick(60000), ok('40\n')) : undefined);
+  assert.equal(await drive(h), null);
+  const byWp = Object.fromEntries(h.events().filter((e) => e.event === 'spend-projection').map((e) => [e.data.wpId, e.data]));
+  assert.ok(!Number.isFinite(Number(h.wp('WP-02').lane.costUsd ?? NaN)), 'a herdr lane books no cost of its own');
+  assert.ok(Date.parse(h.wp('WP-02').lane.exitedAt) < Date.parse(h.state.build.lastSpend.at), 'WP-02 closed before a later reading');
+  // At WP-02's merge its own lane (a herdr lane's exit is observed at its stop, after the merge) and the
+  // undispatched WP-03 are left; at WP-03's, only its own lane: the shopfloor v1.2 run counted every merged
+  // WP here ("8 WP(s) not yet booked", $310.55 projected against $190.55 booked).
+  assert.equal(byWp['WP-02'].wpsLeft, 2, JSON.stringify(byWp['WP-02']));
+  assert.ok(!h.wp('WP-03').lane.exitedAt || Date.parse(h.wp('WP-03').lane.exitedAt) >= Date.parse(h.state.build.lastSpend.at), 'WP-03\'s lane closed after the last reading');
+  assert.deepEqual([byWp['WP-03'].wpsLeft, byWp['WP-03'].bookedUsd, byWp['WP-03'].projectedUsd], [1, 40, 55], JSON.stringify(byWp['WP-03']));
+});
+
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
   const h = harness(t);
   h.life = { 'WP-02': 3, 'WP-03': 1 };
@@ -1132,6 +1150,10 @@ test('threads in the loop (D19.9): findings → amendment → its table → adju
   const gate = of(h, 'WP-02').findIndex((a) => a.step === 'gate');
   assert.ok(gate > of(h, 'WP-02').findIndex((a) => a.step === 'resolve'));
   assert.ok(of(h, 'WP-02').some((a) => a.step === 'merged'));
+  // 93d852e6: a brief that ruled "decline" got a `declined` row the check refused; the instruction names the verdicts.
+  const brief = of(h, 'WP-02').find((a) => a.part === 'amendment');
+  assert.match(brief.instruction, /`fixed`, `refuted` or `judgment`/);
+  assert.match(brief.instruction, /"no change" ruling is `refuted` .* otherwise `judgment`/);
 });
 
 test('council meta and args (D20): meta precedes council_review; its args; a missing or wrong meta exits 2; C-ids reach the brief; no reply, thread-ids or resolve', async (t) => {

@@ -618,6 +618,10 @@ test('herdr wait exits map to outcomes (D17, D19.17)', (t) => {
   assert.equal(planLow.outcome, 'continue');
   assert.equal(planLow.patch.queue[0].step, 'fallback');
   assert.deepEqual(planLow.patch.queue[0].command, ['node', LANE(f), 'fallback', 'demo-wp-00', '--to', 'claude', '--model', 'claude-opus-5-5', '--reasoning', 'high', '--log', LOG(f)]);
+  // 93d852e6: a claude lane's usage limit (read from its transcript) blocks with the reset time; no fallback.
+  const limited = f.record(wait, exit(6, '', JSON.stringify({ state: 'plan-refused', refusalShape: 'transcript', rateLimitType: 'seven_day', resetsAt: '2026-10-09T00:00:00.000Z', refusal: "You've hit your weekly limit · resets 7pm (America/Chicago)" })));
+  assert.deepEqual([limited.outcome, limited.cause, limited.patch.queue], ['block', 'error', []]);
+  assert.match(limited.reason, /^usage limit: .*\(seven_day\); it resets at 2026-10-09T00:00:00\.000Z\. You've hit your weekly limit/);
   const capacity = f.record(wait, exit(8));
   assert.equal(capacity.outcome, 'continue');
   assert.deepEqual(capacity.patch.queue[0].command, ['node', LANE(f), 'prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--amendment', '--no-ruling', '--log', LOG(f)]);

@@ -806,6 +806,56 @@ test('quest 8b7c477c amend 1: a claude lane whose pane quotes the capacity banne
   assert.equal(result.output.state, 'done');
 });
 
+// The synthetic entry a Claude lane's transcript ends on when the plan refuses
+// it, trimmed from the shopfloor v1.2 run's WP-06 lane (2026-10-08T23:48:02Z).
+const claudeLimitEntry = (timestamp) => JSON.stringify({
+  type: 'assistant', timestamp, apiError: 'usage_limit_reached',
+  apiErrorParams: { rate_limit_info: { status: 'rejected', resetsAt: 1791504000, rateLimitType: 'seven_day' } },
+  message: { model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: "You've hit your weekly limit · resets 7pm (America/Chicago)" }] },
+});
+const claudeTurnEntry = (timestamp) => JSON.stringify({ type: 'assistant', timestamp, message: { role: 'assistant', content: [{ type: 'text', text: 'Report written.' }] } });
+function writeClaudeTranscript(f, lines, name = 'session.jsonl') {
+  const dir = join(f.dir, 'claude-home', 'projects', resolve(f.dir).replace(/[^a-zA-Z0-9]/g, '-'));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, name), `${lines.join('\n')}\n`, 'utf8');
+}
+const claudeWait = (f) => {
+  let clock = Date.parse('2026-10-08T23:50:00Z');
+  return runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], {
+    exec: f.exec, env: { CLAUDE_CONFIG_DIR: join(f.dir, 'claude-home') }, now: () => (clock += 1000), sleep: async () => {},
+  });
+};
+
+test('93d852e6: a claude lane whose transcript ends on the plan\'s usage limit is plan-refused with its reset time, not done', async (t) => {
+  const done = { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' };
+  const pane = { code: 0, stdout: CLAUDE_TAIL.join('\n'), stderr: '' };
+  const f = fixture(t);
+  seedLane(f, { kind: 'claude', promptedAt: '2026-10-08T23:40:00.000Z' });
+  writeClaudeTranscript(f, [claudeTurnEntry('2026-10-08T23:45:00.000Z'), claudeLimitEntry('2026-10-08T23:48:02.602Z')]);
+  f.responses.push(done, pane);
+  const limited = await claudeWait(f);
+  assert.equal(limited.exit, 6, JSON.stringify(limited.output));
+  assert.deepEqual(
+    [limited.output.state, limited.output.refusalShape, limited.output.rateLimitType, limited.output.resetsAt, limited.output.refusal],
+    ['plan-refused', 'transcript', 'seven_day', '2026-10-09T00:00:00.000Z', "You've hit your weekly limit · resets 7pm (America/Chicago)"],
+  );
+  assert.equal(lastRow(f).state, 'plan-refused');
+
+  // Controls: a turn that ended normally, and a limit hit before the lane's last prompt, are done.
+  for (const [label, lines, promptedAt] of [
+    ['normal end', [claudeLimitEntry('2026-10-08T23:30:00.000Z'), claudeTurnEntry('2026-10-08T23:48:02.602Z')], '2026-10-08T23:40:00.000Z'],
+    ['limit before the prompt', [claudeLimitEntry('2026-10-08T23:30:00.000Z')], '2026-10-08T23:40:00.000Z'],
+    ['no transcript', null, '2026-10-08T23:40:00.000Z'],
+  ]) {
+    const g = fixture(t);
+    seedLane(g, { kind: 'claude', promptedAt });
+    if (lines) writeClaudeTranscript(g, lines);
+    g.responses.push(done, pane);
+    const result = await claudeWait(g);
+    assert.deepEqual([result.exit, result.output.state], [0, 'done'], `${label}: ${JSON.stringify(result.output)}`);
+  }
+});
+
 test('quest 8b7c477c K1: a lane with no recorded kind is never scraped, and still warns that capacity is unknown', async (t) => {
   // A no-kind record is a lane whose start failed after herdr registered the
   // agent (lane zd, a claude lane). Each pane would trip one codex scrape.
