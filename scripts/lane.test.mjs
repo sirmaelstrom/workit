@@ -3984,8 +3984,28 @@ test('207dbaf1 / C3: --expect-report exits 5 naming a missing Debrief heading; N
   assert.equal(green.exit, 0, JSON.stringify(green.output));
   assert.deepEqual(green.output.evidence.problems, []);
   // The only call is the lane's diff from its base, for the evidence checks (e4ad108b).
-  assert.deepEqual(f.calls.map((call) => [call.program, ...call.args]), Array(2).fill(['git', '-C', f.dir, 'diff', '--no-color', '--no-ext-diff', '--no-renames', 'main..feat/lane-a']));
+  // Three dots: a base ref that moved on after the lane started adds nothing (council round 1).
+  assert.deepEqual(f.calls.map((call) => [call.program, ...call.args]), Array(2).fill(['git', '-C', f.dir, 'diff', '--no-color', '--no-ext-diff', '--no-renames', 'main...feat/lane-a']));
   assert.equal(green.output.evidence.diffChecks, 'ran');
+
+  // The diff checks' other branches (council round 1): no base on the record skips them and says so;
+  // a swept worktree or a failed git diff is exit 1, never a pass.
+  const legacy = fixture(t);
+  seedLane(legacy, { base: undefined });
+  const skipped = await runLane(['check', 'lane-a', '--expect-report', reportFile(legacy, DEBRIEF_NONE), '--log', legacy.log], { exec: legacy.exec });
+  assert.deepEqual([skipped.exit, skipped.output.evidence.diffChecks, legacy.calls.length], [0, 'did not run: the lane record has no worktree or base', 0]);
+  const swept = fixture(t);
+  seedLane(swept, { path: join(swept.dir, 'gone') });
+  const sweptReport = reportFile(swept, DEBRIEF_NONE);
+  const gone = await runLane(['check', 'lane-a', '--expect-report', sweptReport, '--log', swept.log], { exec: swept.exec });
+  assert.equal(gone.exit, 1);
+  assert.match(gone.output.error, /worktree path does not exist/);
+  const broken = fixture(t);
+  seedLane(broken);
+  broken.responses.push({ code: 128, stdout: '', stderr: 'fatal: bad revision main...feat/lane-a' });
+  const failed = await runLane(['check', 'lane-a', '--expect-report', reportFile(broken, DEBRIEF_NONE), '--log', broken.log], { exec: broken.exec });
+  assert.equal(failed.exit, 1);
+  assert.match(failed.output.error, /git diff for the report's evidence checks failed: fatal: bad revision/);
 });
 
 // --- quest e4ad108b: the report's evidence rules (6, 7, 14), checked.
@@ -4050,10 +4070,11 @@ test('e4ad108b rule 14: a cited screenshot is a lane-<id>-<claim> file beside th
 test('e4ad108b rule 7: a new test is named in a control run or under Claims; without a diff the check does not run', () => {
   const diff = diffOf('src/a.test.ts', ["test('refuses a rank at or above nextId', () => {", "  it(\"keeps the order\", () => {});", 'test(`case ${n}`, () => {});']);
   const claims = (body) => evidenceReport('## Debrief', '### Claims no control measures', body);
-  const both = evidenceReport('## Negative controls', '**C1: x**', failingRun, claims('- `keeps the order` runs green; no control crossed it.'));
+  const both = evidenceReport('## Negative controls', '**C1: x**', failingRun, claims('- `keeps the order` and the `case ${n}` tests run green; no control crossed them.'));
   assert.deepEqual(reportEvidenceProblems(both, { diff }), []);
   const missing = evidenceReport('## Negative controls', '**C1: x**', failingRun, claims('None.'));
-  assert.deepEqual(reportEvidenceProblems(missing, { diff }), ['1 new test(s) named in no Negative controls run and not under Claims no control measures (rule 7): src/a.test.ts:2 "keeps the order"']);
+  // A template name is matched by its text before `${` (council round 1, the challenge's new concern 3).
+  assert.deepEqual(reportEvidenceProblems(missing, { diff }), ['2 new test(s) named in no Negative controls run and not under Claims no control measures (rule 7): src/a.test.ts:2 "keeps the order"; src/a.test.ts:3 "case ${n}"']);
   // A name only in prose outside a control's run does not count.
   assert.equal(reportEvidenceProblems(evidenceReport('## Tests', 'keeps the order passes', missing), { diff }).length, 1);
   assert.deepEqual(reportEvidenceProblems(missing), [], 'no diff: the diff checks are skipped');
@@ -4073,6 +4094,78 @@ test('e4ad108b rule 7: a boundary word in a new code comment is quoted under Ass
   // A quote under Claims no control measures counts the same.
   const claimed = evidenceReport('## Debrief', '### Claims no control measures', '- "Never throws: a bad entry is refused" and "the only writer of nextId" are unmeasured.');
   assert.deepEqual(reportEvidenceProblems(claimed, { diff }), []);
+});
+
+test('e4ad108b council round 1: a numbered control list, a green labelled run, an error-themed pass and a keyword disclosure are each caught', () => {
+  const green = [FENCE, '$ npx vitest run', ' ✓ handles TypeError', 'ok 1 - passes', 'Error: boom', '# fail 0', '      Tests  5 passed (5)', FENCE].join('\n');
+  // Consensus 1 (council Major): a numbered list of bold leads, with green runs, was read as zero controls.
+  const numbered = evidenceReport('## Negative controls', '1. **C1: removed guard**', '', green.split('\n').map((line) => `   ${line}`).join('\n'));
+  assert.match(reportEvidenceProblems(numbered).join('\n'), /control at line 3 has no fenced block with its failing run/);
+  const plainNumbered = evidenceReport('## Negative controls', '1. C1: removed guard', green);
+  assert.equal(reportEvidenceProblems(plainNumbered).length, 1);
+  // A fenced run with no control named at all is not evidence either.
+  assert.match(reportEvidenceProblems(evidenceReport('## Negative controls', green)).join('\n'), /has fenced runs but names no control/);
+  // A fixed row citing a label whose fenced run is green: the control itself fails rule 6.
+  const cited = evidenceReport('## Amendment 1', '| Comment | Verdict | Evidence | Commit |', '|---|---|---|---|', '| C1-1 | fixed | Control C9 | `abc1234` |', '### Negative controls', [FENCE, 'C9 the guard removed', 'ok 1 - passes', FENCE].join('\n'));
+  assert.match(reportEvidenceProblems(cited).join('\n'), /control C9 at line \d+ has no fenced block with its failing run/);
+  // Majority 1 and the challenge's new concern 1: an error word in a green run is not a failure.
+  assert.equal(reportEvidenceProblems(evidenceReport('## Negative controls', '**C1: x**', green)).length, 1);
+  // Real failures from other runners count: tsc, dotnet, vitest ×, Playwright x, and an Error with no passing summary.
+  for (const run of ['src/a.ts(3,1): error TS2322: Type string is not assignable', 'Failed!  - Failed: 1, Passed: 4', '     × refuses a rank 9ms', '  x  1 [chromium] › e2e/a.spec.ts:3:1 › opens', 'Error: a CREAM pixel on the link line']) {
+    assert.deepEqual(reportEvidenceProblems(evidenceReport('## Negative controls', '**C1: x**', [FENCE, run, FENCE].join('\n'))), [], run);
+  }
+  // Unique 6: a disclosure word inside a hyphenated name is not a disclosure; Majority 5: "no control" needs its reason.
+  assert.equal(reportEvidenceProblems(evidenceReport('## Negative controls', '**C1: removed the vacuous-check guard**', green)).length, 1);
+  const waived = (cell) => reportEvidenceProblems(evidenceReport('## Amendment 1', '| Comment | Verdict | Evidence | Commit |', '|---|---|---|---|', `| C1-1 | fixed | ${cell} | \`abc1234\` |`));
+  assert.equal(waived('there is no control-flow change').length, 1);
+  assert.equal(waived('no control:').length, 1);
+  assert.deepEqual(waived('no control: a docs correction'), []);
+  // Unique 4: a sub-label inside a control does not split it.
+  assert.deepEqual(reportEvidenceProblems(evidenceReport('## Negative controls', '**C1: the guard removed**', '**Before (guard removed):**', failingRun, '**After (restored):**', passingRun)), []);
+  // Unique 8: a `#` on a fixed row's id is the PR-comment form.
+  const hashed = evidenceReport('## Amendment 1', '| Comment | Verdict | Evidence | Commit |', '|---|---|---|---|', '| #123 | fixed | the fix reverted | `abc1234` |', '### Negative controls', '- **123** (the fix reverted):', '', failingRun);
+  assert.deepEqual(reportEvidenceProblems(hashed), []);
+});
+
+test('e4ad108b council round 1: test declarations, comment syntax, diff headers and screenshots', (t) => {
+  const claims = (body) => evidenceReport('## Debrief', '### Claims no control measures', body);
+  const run = (text) => evidenceReport('## Negative controls', '**C1: x**', [FENCE, text, FENCE].join('\n'));
+  // Majority 2: a name on the line after `test(`; Majority 3: a regex `.test(` is not a declaration; Unique 2: escapes decode.
+  const tests = diffOf('src/a.test.ts', ['test(', "  'a name on the next line',", '  () => {});', "const ok = /x/.test('some string value');", "it('keeps the user\\'s order', () => {});"]);
+  assert.deepEqual(reportEvidenceProblems(claims('None.'), { diff: tests }), [
+    '2 new test(s) named in no Negative controls run and not under Claims no control measures (rule 7): src/a.test.ts:1 "a name on the next line"; src/a.test.ts:5 "keeps the user\'s order"',
+  ]);
+  assert.deepEqual(reportEvidenceProblems(run("✖ a name on the next line\nnot ok 2 - keeps the user's order"), { diff: tests }), []);
+  // The challenge's new concern 2: a short name inside another word is not a match.
+  assert.equal(reportEvidenceProblems(run('not ok 1 - other'), { diff: diffOf('src/b.test.ts', ["test('ther', () => {});"]) }).length, 1);
+  // Majority 4: comments by file type. SQL `--` and Python trailing `#` are comments; JS `#only`, CSS `#never`, C# `#region` are not.
+  const comments = [
+    diffOf('db/q.sql', ['-- always run after the backfill']),
+    diffOf('tool.py', ['x = 1  # only on Windows']),
+    diffOf('src/a.js', ['class A { #only = 1; }']),
+    diffOf('src/a.css', ['#never { color: red; }']),
+    diffOf('src/A.cs', ['#region every helper']),
+    // Unique 8: every boundary word in a comment, not the first one only.
+    diffOf('src/b.ts', ['// only the writer, and it never retries']),
+    // Unique 8: an added `++` line inside a hunk is not a file header.
+    diffOf('src/c.ts', ['++ x; // always one', '// never two']),
+  ].join('\n');
+  const listedFiles = reportEvidenceProblems(evidenceReport('## Assertions', '- "the writer, and it never" — ASSUMPTION.'), { diff: comments })[0];
+  for (const kept of ['db/q.sql:1', 'tool.py:1', 'src/b.ts:1', 'src/c.ts:1', 'src/c.ts:2']) assert.ok(listedFiles.includes(kept), `${kept} in ${listedFiles}`);
+  for (const not of ['src/a.js', 'src/a.css', 'src/A.cs']) assert.ok(!listedFiles.includes(not), `${not} in ${listedFiles}`);
+  assert.match(listedFiles, /^5 new comment\(s\)/);
+
+  // Majority 6 and Unique 7: the lane's own name, a claim after it, and no URL or fenced output.
+  const f = fixture(t);
+  const runDir = join(f.dir, 'workshop', 'run');
+  mkdirSync(runDir, { recursive: true });
+  const reportPath = join(runDir, 'lane-wp-02-report.md');
+  for (const name of ['lane-wp-02-links.png', 'lane-wp-03-links.png', 'lane-wp-02-.png']) writeFileSync(join(runDir, name), 'png');
+  const shot = (body) => reportEvidenceProblems(evidenceReport('## Runtime exercise', body), { reportPath, exists: existsSync });
+  assert.deepEqual(shot('`lane-wp-02-links.png`, https://example.com/ref.png'), []);
+  assert.equal(shot('`lane-wp-03-links.png`').length, 1, "another lane's file");
+  assert.equal(shot('`lane-wp-02-.png`').length, 1, 'no claim');
+  assert.deepEqual(shot([FENCE, 'saved e2e/artifacts/run.png', FENCE].join('\n')), [], 'runner output is not a citation');
 });
 
 test('207dbaf1: --expect-report refuses a missing Debrief, an empty body, and a missing file', async (t) => {

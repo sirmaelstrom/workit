@@ -3,7 +3,8 @@
 export function markLines(text) {
   let fence = null;
   return String(text ?? '').split(/\r?\n/).map((raw) => {
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
+    // Any indent, as in lane.mjs: a report nests its fenced runs inside list items.
+    const marker = /^\s*(`{3,}|~{3,})(.*)$/.exec(raw);
     let fenced = fence !== null;
     if (marker && fence === null) {
       fence = marker[1];

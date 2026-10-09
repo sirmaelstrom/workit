@@ -700,7 +700,7 @@ function checkLane(state, wp, flags, deps) {
     const ahead = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'rev-list', '--count', `${wp.lane?.base}..HEAD`]);
     if (ahead.code !== 0 || !(Number(ahead.stdout.trim()) >= 1)) failures.push(`the branch has no commit past base ${wp.lane?.base} (${ahead.code === 0 ? `${ahead.stdout.trim()} commits` : said(ahead)})`);
     // The lane contract's evidence rules, against the report and the lane's diff.
-    const diff = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'diff', '--no-color', '--no-ext-diff', '--no-renames', `${wp.lane?.base}..HEAD`]);
+    const diff = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'diff', '--no-color', '--no-ext-diff', '--no-renames', `${wp.lane?.base}...HEAD`]);
     if (diff.code !== 0) failures.push(`the evidence checks did not run: git diff from base ${wp.lane?.base}: ${said(diff)}`);
     failures.push(...reportEvidenceProblems(text, { diff: diff.code === 0 ? diff.stdout : null, reportPath: lane.reportPath, exists: deps.exists }));
     if (flags.pr !== undefined) {

@@ -887,7 +887,7 @@ test('LANE_MODELS: a claude opus lane carries claude-opus-5-5; no production mod
 test('exec: lane check passes a good report and fails a missing Debrief heading or runtime exercise', async (t) => {
   const f = lanes(t, { wpLane: { worktree: '/wt', branch: 'conduct/demo/wp-00' } });
   f.table[`git -C /wt rev-list --count ${SHA40}..HEAD`] = ok('1\n');
-  const DIFF = `git -C /wt diff --no-color --no-ext-diff --no-renames ${SHA40}..HEAD`;
+  const DIFF = `git -C /wt diff --no-color --no-ext-diff --no-renames ${SHA40}...HEAD`;
   f.table[DIFF] = ok('');
   const check = (flags = {}) => runLaneVerb('check', { runDir: f.runDir, wpId: 'WP-00', flags }, f.deps).then((result) => ({ ...result, out: JSON.parse(result.out) }));
   f.report(report());
