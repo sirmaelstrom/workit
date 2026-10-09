@@ -124,10 +124,16 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    **The conductor's full suite runs once, at the candidate merge head**, when
    the repo's CI does not run its database-backed tests per PR. It gets its
    own test database, never the lane's (name it after the lane's with a
-   `_cond` suffix), so it never blocks the lane: start it in parallel with
+   `_cond` suffix), and its own detached checkout of that head, never the
+   lane's worktree (`git worktree add --detach <repo>-wt-<lane>-cond <head>`,
+   then the repo's install and build there; remove it after the merge): a
+   build in the lane's tree cleans what the lane is running, and a lane turn
+   would stop the suite. So it never blocks the lane: start it in parallel with
    the lane's amendment or with the challenge on the amended tree, and record
-   its start and end in the row. Run no suite before the amendment; a green
-   suite on a head that is about to change gates nothing.
+   its start and end in the row. It is the whole suite: the database-backed
+   files alone take most of its time, so running only those saves little. Run
+   no suite before the amendment; a green suite on a head that is about to
+   change gates nothing.
 
    Two rules with receipts: **never downgrade a fired T2 trigger** (the one
    measured downgrade would have cost 10 confirmed defects — run-4 ruling 8,
