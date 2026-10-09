@@ -2973,29 +2973,37 @@ function claudeProjectDir(deps, path) {
 // A Claude lane the plan refuses ends its turn on a synthetic assistant entry
 // carrying apiError "usage_limit_reached", and herdr reads it as done. Its
 // pane is not scraped (a lane's own output can quote any banner), so the
-// evidence is the newest session's last assistant entry, after the last
-// prompt: { text, rateLimitType, resetsAt } when it is that entry, else null.
+// evidence is the lane's own session: the newest one in its worktree's
+// project directory that holds the lane's last prompt as sent (another
+// session there, such as a review lens's `claude -p`, is not the lane's).
+// { text, rateLimitType, resetsAt } when its last assistant entry after that
+// prompt is the refusal, else null.
 export function claudeUsageLimit(deps, lane) {
-  if (!lane.path) return null;
+  if (!lane.path || !lane.promptFile) return null;
   const dir = claudeProjectDir(deps, lane.path);
-  let newest = null;
+  const wire = JSON.stringify(`Read ${lane.promptFile} and execute it exactly.`).slice(1, -1);
+  let sessions;
   try {
-    for (const name of deps.list(dir)) {
-      if (!name.endsWith('.jsonl')) continue;
+    sessions = deps.list(dir).filter((name) => name.endsWith('.jsonl')).map((name) => {
       const path = join(dir, name);
-      const mtime = Number(deps.stat(path).mtimeMs);
-      if (!newest || mtime > newest.mtime) newest = { path, mtime };
+      return { path, mtime: Number(deps.stat(path).mtimeMs) };
+    }).sort((a, b) => b.mtime - a.mtime);
+  } catch {
+    return null;
+  }
+  let read = null;
+  for (const session of sessions) {
+    try {
+      const text = deps.read(session.path);
+      if (text.includes(wire)) {
+        read = { text, start: 0 };
+        break;
+      }
+    } catch {
+      // unreadable: not evidence either way
     }
-  } catch {
-    return null;
   }
-  if (!newest) return null;
-  let read;
-  try {
-    read = deps.readBytes(newest.path, { bytes: ROLLOUT_TAIL_BYTES, fromEnd: true });
-  } catch {
-    return null;
-  }
+  if (!read) return null;
   const lines = read.text.split('\n');
   if (read.start > 0) lines.shift();
   for (let index = lines.length - 1; index >= 0; index--) {

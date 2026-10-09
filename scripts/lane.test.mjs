@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
@@ -814,11 +814,15 @@ const claudeLimitEntry = (timestamp) => JSON.stringify({
   message: { model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: "You've hit your weekly limit · resets 7pm (America/Chicago)" }] },
 });
 const claudeTurnEntry = (timestamp) => JSON.stringify({ type: 'assistant', timestamp, message: { role: 'assistant', content: [{ type: 'text', text: 'Report written.' }] } });
-function writeClaudeTranscript(f, lines, name = 'session.jsonl') {
+// The lane's own prompt, as `lane prompt` sends it.
+const claudePromptEntry = (f, timestamp) => JSON.stringify({ type: 'user', timestamp, message: { role: 'user', content: `Read ${join(f.dir, 'brief.md')} and execute it exactly.` } });
+function writeClaudeTranscript(f, lines, name = 'session.jsonl', mtime = null) {
   const dir = join(f.dir, 'claude-home', 'projects', resolve(f.dir).replace(/[^a-zA-Z0-9]/g, '-'));
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, name), `${lines.join('\n')}\n`, 'utf8');
+  if (mtime) utimesSync(join(dir, name), new Date(mtime), new Date(mtime));
 }
+const claudeLane = (f, promptedAt = '2026-10-08T23:40:00.000Z') => seedLane(f, { kind: 'claude', promptedAt, promptFile: join(f.dir, 'brief.md') });
 const claudeWait = (f) => {
   let clock = Date.parse('2026-10-08T23:50:00Z');
   return runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], {
@@ -830,8 +834,10 @@ test('93d852e6: a claude lane whose transcript ends on the plan\'s usage limit i
   const done = { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' };
   const pane = { code: 0, stdout: CLAUDE_TAIL.join('\n'), stderr: '' };
   const f = fixture(t);
-  seedLane(f, { kind: 'claude', promptedAt: '2026-10-08T23:40:00.000Z' });
-  writeClaudeTranscript(f, [claudeTurnEntry('2026-10-08T23:45:00.000Z'), claudeLimitEntry('2026-10-08T23:48:02.602Z')]);
+  claudeLane(f);
+  writeClaudeTranscript(f, [claudePromptEntry(f, '2026-10-08T23:40:00.100Z'), claudeTurnEntry('2026-10-08T23:45:00.000Z'), claudeLimitEntry('2026-10-08T23:48:02.602Z')], 'lane.jsonl', '2026-10-08T23:48:03Z');
+  // A newer session in the same worktree (a review lens's `claude -p`) that ended normally does not hide it.
+  writeClaudeTranscript(f, [claudeTurnEntry('2026-10-08T23:49:00.000Z')], 'review.jsonl', '2026-10-08T23:49:01Z');
   f.responses.push(done, pane);
   const limited = await claudeWait(f);
   assert.equal(limited.exit, 6, JSON.stringify(limited.output));
@@ -841,15 +847,21 @@ test('93d852e6: a claude lane whose transcript ends on the plan\'s usage limit i
   );
   assert.equal(lastRow(f).state, 'plan-refused');
 
-  // Controls: a turn that ended normally, and a limit hit before the lane's last prompt, are done.
-  for (const [label, lines, promptedAt] of [
-    ['normal end', [claudeLimitEntry('2026-10-08T23:30:00.000Z'), claudeTurnEntry('2026-10-08T23:48:02.602Z')], '2026-10-08T23:40:00.000Z'],
-    ['limit before the prompt', [claudeLimitEntry('2026-10-08T23:30:00.000Z')], '2026-10-08T23:40:00.000Z'],
-    ['no transcript', null, '2026-10-08T23:40:00.000Z'],
+  // Controls, each done: a turn that ended normally, a limit hit before the lane's last prompt, no
+  // transcript, and (codex lens, workit#199) a newer session that is not the lane's ending on a limit.
+  const own = (g, ...rest) => [claudePromptEntry(g, '2026-10-08T23:40:00.100Z'), ...rest];
+  for (const [label, write] of [
+    ['normal end', (g) => writeClaudeTranscript(g, own(g, claudeLimitEntry('2026-10-08T23:30:00.000Z'), claudeTurnEntry('2026-10-08T23:48:02.602Z')))],
+    ['limit before the prompt', (g) => writeClaudeTranscript(g, [claudeLimitEntry('2026-10-08T23:30:00.000Z'), claudePromptEntry(g, '2026-10-08T23:40:00.100Z')])],
+    ['no transcript', () => {}],
+    ['another session\'s limit', (g) => {
+      writeClaudeTranscript(g, own(g, claudeTurnEntry('2026-10-08T23:45:00.000Z')), 'lane.jsonl', '2026-10-08T23:45:01Z');
+      writeClaudeTranscript(g, [claudeLimitEntry('2026-10-08T23:48:02.602Z')], 'review.jsonl', '2026-10-08T23:48:03Z');
+    }],
   ]) {
     const g = fixture(t);
-    seedLane(g, { kind: 'claude', promptedAt });
-    if (lines) writeClaudeTranscript(g, lines);
+    claudeLane(g);
+    write(g);
     g.responses.push(done, pane);
     const result = await claudeWait(g);
     assert.deepEqual([result.exit, result.output.state], [0, 'done'], `${label}: ${JSON.stringify(result.output)}`);
