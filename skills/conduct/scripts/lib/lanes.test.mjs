@@ -887,10 +887,18 @@ test('LANE_MODELS: a claude opus lane carries claude-opus-5-5; no production mod
 test('exec: lane check passes a good report and fails a missing Debrief heading or runtime exercise', async (t) => {
   const f = lanes(t, { wpLane: { worktree: '/wt', branch: 'conduct/demo/wp-00' } });
   f.table[`git -C /wt rev-list --count ${SHA40}..HEAD`] = ok('1\n');
+  const DIFF = `git -C /wt diff --no-color --no-ext-diff --no-renames ${SHA40}..HEAD`;
+  f.table[DIFF] = ok('');
   const check = (flags = {}) => runLaneVerb('check', { runDir: f.runDir, wpId: 'WP-00', flags }, f.deps).then((result) => ({ ...result, out: JSON.parse(result.out) }));
   f.report(report());
   const good = await check();
   assert.deepEqual([good.code, good.out.ok, good.out.outcome, good.out.verdict, good.out.failures], [0, true, 'built', 'exercised', []]);
+  // e4ad108b: the evidence checks read the lane's diff; one that cannot be read is "did not run", never a pass.
+  f.table[DIFF] = ok(['diff --git a/src/a.test.mjs b/src/a.test.mjs', '--- a/src/a.test.mjs', '+++ b/src/a.test.mjs', '@@ -0,0 +1 @@', "+test('an unnamed new test', () => {});"].join('\n'));
+  assert.match((await check()).out.failures.join('; '), /1 new test\(s\) named in no Negative controls run .*src\/a\.test\.mjs:1 "an unnamed new test"/);
+  f.table[DIFF] = { code: 128, stdout: '', stderr: 'fatal: bad revision' };
+  assert.match((await check()).out.failures.join('; '), /the evidence checks did not run: git diff from base/);
+  f.table[DIFF] = ok('');
   f.report(report({ claims: null }));
   const noClaims = await check();
   assert.equal(noClaims.code, 5);

@@ -1742,7 +1742,8 @@ function markdownHeading(line) {
 function markdownLines(text) {
   let fence = null;
   return String(text).split(/\r?\n/).map((raw, index) => {
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
+    // Any indent: a report nests its fenced runs inside list items.
+    const marker = /^\s*(`{3,}|~{3,})(.*)$/.exec(raw);
     let fenced = fence !== null;
     if (marker && fence === null) {
       fence = marker[1];
@@ -1868,6 +1869,182 @@ export function reportShapeProblems(text) {
   return problems;
 }
 
+// What a failing run prints: a runner's failure line, an error, a failed count
+// above zero, or a non-zero exit. "0 failed" is a pass and does not count.
+const FAIL_MARKER = /\bFAIL(?:ED)?\b|✖|✗|\bnot ok\b|\b\w*Error\b|\b[1-9]\d* (?:failed|failing)\b|\b[Ee]xit(?:ed)?(?: with)?(?: code)?[ =:]*[1-9]\d*\b/;
+const TEST_FILE = /(^|\/)(__tests__|tests?|e2e)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
+const TEST_NAME = /\b(?:it|test)(?:\.(?:only|skip|todo|each\([^)]*\)))?\s*\(\s*(['"`])((?:\\.|(?!\1).)+)\1/g;
+const CODE_FILE = /\.(?:[cm]?[jt]sx?|svelte|vue|cs|py|ps1|psm1|sh|go|rs|sql|css|scss)$/;
+// Rule 7's boundary words, as they appear in a code comment.
+const ASSERTION_WORD = /(?<![\w-])(?:every|always|never|only|cannot|can't)(?![\w-])/i;
+// A control's name as a report writes it: A1b, C1-5a, NC4.
+const CONTROL_LABEL = /(?<![\w-])(?=[A-Z0-9-]*\d)[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*[a-z]?(?![\w-])/g;
+const IMAGE_PATH = /(?:[A-Za-z]:[\\/])?[^\s`'"()[\]<>|*]+\.(?:png|jpe?g|webp)\b/gi;
+
+// The headed sections (levels 2–4) whose title matches, each as its heading
+// line and body, with fenced lines marked.
+function sectionsTitled(lines, pattern) {
+  const found = [];
+  lines.forEach((line, index) => {
+    const heading = markdownHeading(line);
+    if (!heading || heading.level < 2 || heading.level > 4 || !pattern.test(heading.title)) return;
+    found.push({ heading, line: line.number, body: lines.slice(index + 1, sectionEnd(lines, index, heading.level)) });
+  });
+  return found;
+}
+
+// A control entry starts at a bold lead (`**C1: …**`, `- **C1-5a** …`) or a
+// deeper heading; it runs to the next one. Text before the first is preamble.
+function controlEntries(body) {
+  const entries = [];
+  for (const line of body) {
+    const starts = !line.fenced && (/^\s{0,3}(?:[-*+]\s+)?\*\*\S/.test(line.text) || /^#{3,6}\s/.test(line.text));
+    if (starts) entries.push({ line: line.number, label: line.text.trim(), lines: [] });
+    else if (entries.length) entries.at(-1).lines.push(line);
+  }
+  return entries;
+}
+
+// Words of a comment or a section, lowercased, with markdown and quote
+// punctuation stripped from each word's ends, so a quote and its source match.
+function words(text) {
+  return String(text).toLowerCase().split(/\s+/).map((word) => word.replace(/^[`'"“”‘’*_([{]+|[`'"“”‘’*_)\]}.,;:!?]+$/g, '')).filter(Boolean);
+}
+
+// The added lines of a unified diff, by file, with their new line numbers.
+function addedLines(diff) {
+  const added = [];
+  let file = null;
+  let next = 0;
+  for (const raw of String(diff ?? '').split(/\r?\n/)) {
+    const header = /^\+\+\+ (?:b\/)?(.*)$/.exec(raw);
+    if (header) {
+      file = header[1] === '/dev/null' ? null : header[1].trim();
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+    if (hunk) {
+      next = Number(hunk[1]);
+      continue;
+    }
+    if (!file || raw.startsWith('---')) continue;
+    if (raw.startsWith('+')) added.push({ file, line: next++, text: raw.slice(1) });
+    else if (!raw.startsWith('-') && !raw.startsWith('\\')) next++;
+  }
+  return added;
+}
+
+// The comment text a code line carries: a whole-line comment, or one after code.
+function commentOf(text) {
+  const whole = /^\s*(?:\/\/+|\/\*+|\*+(?!\/)|#(?![!{[])|<!--)\s?(.*?)(?:\*\/|-->)?\s*$/.exec(text);
+  if (whole) return whole[1];
+  const trailing = /\s\/\/\s(.*)$/.exec(text);
+  return trailing ? trailing[1] : null;
+}
+
+// Every item, never a sample: the lane's amendment is written from this list.
+const listed = (items) => items.join('; ');
+
+// The lane contract's evidence rules (6, 7, 14), checked against the report and
+// the lane's diff (base..head, unified). Empty means they hold. `exists` and
+// `reportPath` resolve the screenshots; without a diff the two diff checks are
+// skipped, and the caller says so.
+export function reportEvidenceProblems(text, { diff = null, reportPath = null, exists = () => false } = {}) {
+  const lines = markdownLines(text);
+  const problems = [];
+  const controlSections = sectionsTitled(lines, /^Negative controls\b/i);
+
+  // Rule 6: each control quotes its failing run in a fenced block. A control
+  // reported as vacuous, still green or not run is a finding, not a gap.
+  for (const section of controlSections) {
+    for (const entry of controlEntries(section.body)) {
+      const said = [entry.label, ...entry.lines.filter((line) => !line.fenced).map((line) => line.text)].join(' ');
+      if (/\b(?:vacuous|no control|did not go red|stayed green|did not run)\b/i.test(said)) continue;
+      if (!entry.lines.some((line) => line.fenced && FAIL_MARKER.test(line.text))) {
+        problems.push(`control at line ${entry.line} has no fenced block with its failing run (rule 6): ${entry.label.slice(0, 120)}`);
+      }
+    }
+  }
+
+  // An amendment's `fixed` row has a control in that amendment's Negative
+  // controls: an entry whose lead names the row's id or a control its Evidence
+  // cell names, or a fenced line that starts with one, unless the cell says
+  // `no control: <why>`. A control quoted only in the table cell is a fragment.
+  sectionsTitled(lines, /^Amendment \d+\b/).filter((section) => section.heading.level === 2).forEach((amendment) => {
+    const controls = sectionsTitled(amendment.body, /^Negative controls\b/i);
+    const leads = controls.flatMap((section) => controlEntries(section.body).map((entry) => entry.label));
+    const fencedStarts = controls.flatMap((section) => section.body.filter((line) => line.fenced).map((line) => line.text.trim()));
+    for (const line of amendment.body) {
+      const row = /^\s*\|\s*`?([^|`]+?)`?\s*\|\s*fixed\s*\|((?:\\\||[^|])*)\|/i.exec(line.fenced ? '' : line.text);
+      if (!row || /\bno control\b/i.test(row[2])) continue;
+      const names = [row[1], ...(row[2].match(CONTROL_LABEL) ?? [])];
+      const named = names.some((name) => {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const within = new RegExp(`(?<![\\w-])${escaped}(?![\\d-])`);
+        const at = new RegExp(`^${escaped}(?![\\d-])`);
+        return leads.some((lead) => within.test(lead)) || fencedStarts.some((start) => at.test(start));
+      });
+      if (!named) problems.push(`${amendment.heading.title}: fixed row ${row[1]} has no control under its Negative controls, and its Evidence does not say "no control: <why>" (rule 6)`);
+    }
+  });
+
+  // Rule 14: a screenshot is a file beside the report, named lane-<id>-<claim>.
+  if (reportPath) {
+    const dir = dirname(resolve(reportPath));
+    const fold = (path) => resolve(path).toLowerCase();
+    for (const section of sectionsTitled(lines, /^Runtime exercise\b/i)) {
+      for (const line of section.body) {
+        for (const [match] of line.text.matchAll(IMAGE_PATH)) {
+          // A relative path may be written from the report's directory or from the workshop above it (run/lane-…).
+          const candidates = isAbsolute(match) ? [resolve(match)] : [resolve(dir, match), resolve(dirname(dir), match)];
+          const path = candidates.find((candidate) => fold(dirname(candidate)) === fold(dir)) ?? candidates[0];
+          if (fold(dirname(path)) !== fold(dir) || !/^lane-/i.test(basename(path))) {
+            problems.push(`screenshot ${match} (line ${line.number}) is not beside the report as lane-<id>-<claim>.png (rule 14): the worktree is deleted after the merge`);
+          } else if (!exists(path)) {
+            problems.push(`screenshot ${match} (line ${line.number}) does not exist (rule 14)`);
+          }
+        }
+      }
+    }
+  }
+  if (diff === null) return problems;
+
+  const added = addedLines(diff);
+  const fencedIn = (sections) => sections.flatMap((section) => section.body.filter((line) => line.fenced).map((line) => line.text)).join('\n');
+  const claims = sectionsTitled(lines, /^Claims no control measures\b/i);
+  const claimText = claims.flatMap((section) => section.body.map((line) => line.text)).join('\n');
+
+  // Rule 7, instruments: a new test is named in a control's run or in Claims.
+  const controlRuns = fencedIn(controlSections);
+  const unnamed = [];
+  for (const row of added.filter((entry) => TEST_FILE.test(entry.file))) {
+    for (const match of row.text.matchAll(TEST_NAME)) {
+      const name = match[2];
+      if (name.includes('${') || controlRuns.includes(name) || claimText.includes(name)) continue;
+      unnamed.push(`${row.file}:${row.line} "${name.slice(0, 80)}"`);
+    }
+  }
+  if (unnamed.length) problems.push(`${unnamed.length} new test(s) named in no Negative controls run and not under Claims no control measures (rule 7): ${listed(unnamed)}`);
+
+  // Rule 7, assertions: a boundary word in a new comment is quoted under
+  // Assertions or Claims. A quote of four words around the word matches; a
+  // shorter comment must be quoted whole.
+  const quoted = ` ${words([...sectionsTitled(lines, /^Assertions\b/i), ...claims].flatMap((section) => section.body.map((line) => line.text)).join('\n')).join(' ')} `;
+  const unquoted = [];
+  for (const row of added.filter((entry) => CODE_FILE.test(entry.file) && !TEST_FILE.test(entry.file))) {
+    const comment = commentOf(row.text);
+    if (!comment || !ASSERTION_WORD.test(comment)) continue;
+    const said = words(comment);
+    const at = said.findIndex((word) => ASSERTION_WORD.test(word));
+    const span = Math.min(4, said.length);
+    const windows = [];
+    for (let start = Math.max(0, at - span + 1); start <= Math.min(at, said.length - span); start++) windows.push(said.slice(start, start + span).join(' '));
+    if (!windows.some((window) => quoted.includes(` ${window} `))) unquoted.push(`${row.file}:${row.line} "${comment.trim().slice(0, 100)}"`);
+  }
+  if (unquoted.length) problems.push(`${unquoted.length} new comment(s) with every/always/never/only/cannot quoted under neither ## Assertions nor Claims no control measures (rule 7): ${listed(unquoted)}`);
+  return problems;
+}
+
 // spawnSync reports a missing cwd as ENOENT on the PROGRAM ("spawnSync gh
 // ENOENT"), and git -C a swept path reads as a git failure; both send the
 // operator to PATH. Name the directory before either runs.
@@ -1875,6 +2052,16 @@ function requireLaneDir(opts, lane, deps) {
   if (!deps.exists(lane.path)) {
     throw new LaneError(EXIT.ERROR, `lane ${opts.name} worktree path does not exist: ${lane.path} (a swept worktree, or a stale lane record)`);
   }
+}
+
+// The lane's diff from its base, for the report's evidence checks. A lane
+// record without a worktree or base (an older sidecar) skips the two diff
+// checks and says so; a git that cannot answer is infrastructure (exit 1).
+function laneDiff(deps, lane) {
+  if (!lane.path || !lane.base || !deps.exists(lane.path)) return { diff: null, diffChecks: 'did not run: the lane record has no worktree or base' };
+  const diff = call(deps, 'git', ['-C', lane.path, 'diff', '--no-color', '--no-ext-diff', '--no-renames', `${lane.base}..${lane.branch ?? 'HEAD'}`]);
+  if (diff.code !== 0) throw new LaneError(EXIT.ERROR, `git diff for the report's evidence checks failed: ${diff.stderr.trim()}`);
+  return { diff: diff.stdout, diffChecks: 'ran' };
 }
 
 async function checkLane(opts, deps, state) {
@@ -1911,8 +2098,10 @@ async function checkLane(opts, deps, state) {
     if (!deps.exists(path)) {
       failedExpectation = `--expect-report: report does not exist: ${path}`;
     } else {
-      const problems = reportShapeProblems(deps.read(path));
-      evidence = { path, problems };
+      const text = deps.read(path);
+      const { diff, diffChecks } = laneDiff(deps, lane);
+      const problems = [...reportShapeProblems(text), ...reportEvidenceProblems(text, { diff, reportPath: path, exists: deps.exists })];
+      evidence = { path, problems, diffChecks };
       if (problems.length > 0) failedExpectation = `--expect-report ${path}: ${problems.join('; ')}`;
     }
   } else {

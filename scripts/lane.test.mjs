@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, paneErrorLine, panePromptSignature,
-  reportShapeProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
+  reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -3983,7 +3983,96 @@ test('207dbaf1 / C3: --expect-report exits 5 naming a missing Debrief heading; N
   const green = await runLane(['check', 'lane-a', '--expect-report', clean, '--log', f.log], { exec: f.exec });
   assert.equal(green.exit, 0, JSON.stringify(green.output));
   assert.deepEqual(green.output.evidence.problems, []);
-  assert.equal(f.calls.length, 0, 'a report check calls nothing');
+  // The only call is the lane's diff from its base, for the evidence checks (e4ad108b).
+  assert.deepEqual(f.calls.map((call) => [call.program, ...call.args]), Array(2).fill(['git', '-C', f.dir, 'diff', '--no-color', '--no-ext-diff', '--no-renames', 'main..feat/lane-a']));
+  assert.equal(green.output.evidence.diffChecks, 'ran');
+});
+
+// --- quest e4ad108b: the report's evidence rules (6, 7, 14), checked.
+const FENCE = '```';
+const evidenceReport = (...sections) => sections.join('\n\n');
+const failingRun = [FENCE, '$ npx vitest run src/a.test.ts', ' FAIL  src/a.test.ts > refuses a rank at or above nextId', 'AssertionError: expected true to be false', '      Tests  1 failed | 4 passed (5)', FENCE].join('\n');
+const passingRun = [FENCE, '$ npx vitest run src/a.test.ts', '      Tests  5 passed (5)', FENCE].join('\n');
+const diffOf = (file, added) => [`diff --git a/${file} b/${file}`, `--- a/${file}`, `+++ b/${file}`, `@@ -1,0 +1,${added.length} @@`, ...added.map((line) => `+${line}`)].join('\n');
+
+test('e4ad108b rule 6: a control quotes its failing run in a fenced block; an inline fragment or a green run is not one', () => {
+  const ok = evidenceReport('## Negative controls', '**C1: the bound check removed**', failingRun);
+  assert.deepEqual(reportEvidenceProblems(ok), []);
+  // A fence nested in a list item, indented four spaces, is still a fence.
+  const nested = evidenceReport('## Negative controls', '- **B. C1-1 removed.**', '  - Unit tests:', '', failingRun.split('\n').map((line) => `    ${line}`).join('\n'));
+  assert.deepEqual(reportEvidenceProblems(nested), []);
+  const fragment = evidenceReport('## Negative controls', "- **C1-3a** (links get round caps): `expected [ 'round' ] to deeply equal [ 'butt' ]`, `1 failed | 19 passed (20)`.");
+  assert.match(reportEvidenceProblems(fragment).join('\n'), /control at line 3 has no fenced block with its failing run \(rule 6\): - \*\*C1-3a\*\*/);
+  const green = evidenceReport('## Negative controls', '**C2: the guard removed**', passingRun);
+  assert.equal(reportEvidenceProblems(green).length, 1, 'a passing run is not a failing one');
+  // A control the lane reports as green or vacuous is a finding it disclosed.
+  const disclosed = evidenceReport('## Negative controls', '**F: suppression removed. Did not go red: the instrument was vacuous.**', passingRun);
+  assert.deepEqual(reportEvidenceProblems(disclosed), []);
+  // Preamble before the first control is not a control.
+  assert.deepEqual(reportEvidenceProblems(evidenceReport('## Negative controls', 'Each ran after its commit.', '**C1: x**', failingRun)), []);
+});
+
+test('e4ad108b rule 6: an amendment\'s fixed row has a control of its own, or says no control', () => {
+  const table = (rows) => ['| Comment | Verdict | Evidence | Commit |', '|---|---|---|---|', ...rows].join('\n');
+  const amendment = (rows, controls) => evidenceReport('## Amendment 1', table(rows), '### Negative controls', ...controls);
+  const named = amendment(['| C1-5 | fixed | the 0.3 switch back | `51b79fb` |'], ['- **C1-5a** (the 0.3 switch back):', '', failingRun]);
+  assert.deepEqual(reportEvidenceProblems(named), []);
+  // The Evidence cell names the control, which leads a line of the fenced run (WP-01's layout).
+  const cited = amendment(['| C1-2 | fixed | Control A1b (no-op that bumps the revision) | `e776df7` |'], ['Each ran after commit `e776df7`.', [FENCE, 'A1b commands.ts: the no-op kept but bumping layoutRevision first', '    AssertionError: expected [ 2 ] to deeply equal [ 1 ]', FENCE].join('\n')]);
+  assert.deepEqual(reportEvidenceProblems(cited), []);
+  const inCell = amendment(['| C1-1 | fixed | Control: dropping `tick > 0` fails with `element(s) not found` | `abc1234` |'], ['**C9: something else**', failingRun]);
+  assert.match(reportEvidenceProblems(inCell).join('\n'), /Amendment 1: fixed row C1-1 has no control/);
+  const docs = amendment(['| C1-1 | fixed | no control: a docs correction, read against `overlays.ts:150` | `db04108` |'], []);
+  assert.deepEqual(reportEvidenceProblems(docs), []);
+  // C1-12's control does not stand for C1-1.
+  const prefix = amendment(['| C1-1 | fixed | the clamp | `abc1234` |'], ['- **C1-12** (other):', '', failingRun]);
+  assert.equal(reportEvidenceProblems(prefix).length, 1);
+  // Refuted and judgment rows need no control.
+  assert.deepEqual(reportEvidenceProblems(amendment(['| C1-3 | refuted | `grep` prints 0 | — |', '| C1-4 | judgment | style | — |'], [])), []);
+});
+
+test('e4ad108b rule 14: a cited screenshot is a lane-<id>-<claim> file beside the report', (t) => {
+  const f = fixture(t);
+  const run = join(f.dir, 'workshop', 'run');
+  mkdirSync(run, { recursive: true });
+  const reportPath = join(run, 'lane-wp-02-report.md');
+  writeFileSync(join(run, 'lane-wp-02-links.png'), 'png');
+  const check = (line) => reportEvidenceProblems(evidenceReport('## Runtime exercise', line), { reportPath, exists: existsSync });
+  assert.deepEqual(check('Screenshot: `lane-wp-02-links.png`.'), []);
+  assert.deepEqual(check('Screenshot: `run/lane-wp-02-links.png` (from the workshop).'), []);
+  assert.deepEqual(check(`Screenshot: ${join(run, 'lane-wp-02-links.png')}`), []);
+  assert.match(check('Screenshot: `e2e/artifacts/new-game.png`.').join('\n'), /screenshot e2e\/artifacts\/new-game\.png .* is not beside the report/);
+  assert.match(check('Screenshot: `lane-wp-02-missing.png`.').join('\n'), /lane-wp-02-missing\.png .* does not exist/);
+  // Outside Runtime exercise an image path is not a runtime claim.
+  assert.deepEqual(reportEvidenceProblems(evidenceReport('## What changed', '`docs/shot.png` added'), { reportPath, exists: existsSync }), []);
+});
+
+test('e4ad108b rule 7: a new test is named in a control run or under Claims; without a diff the check does not run', () => {
+  const diff = diffOf('src/a.test.ts', ["test('refuses a rank at or above nextId', () => {", "  it(\"keeps the order\", () => {});", 'test(`case ${n}`, () => {});']);
+  const claims = (body) => evidenceReport('## Debrief', '### Claims no control measures', body);
+  const both = evidenceReport('## Negative controls', '**C1: x**', failingRun, claims('- `keeps the order` runs green; no control crossed it.'));
+  assert.deepEqual(reportEvidenceProblems(both, { diff }), []);
+  const missing = evidenceReport('## Negative controls', '**C1: x**', failingRun, claims('None.'));
+  assert.deepEqual(reportEvidenceProblems(missing, { diff }), ['1 new test(s) named in no Negative controls run and not under Claims no control measures (rule 7): src/a.test.ts:2 "keeps the order"']);
+  // A name only in prose outside a control's run does not count.
+  assert.equal(reportEvidenceProblems(evidenceReport('## Tests', 'keeps the order passes', missing), { diff }).length, 1);
+  assert.deepEqual(reportEvidenceProblems(missing), [], 'no diff: the diff checks are skipped');
+});
+
+test('e4ad108b rule 7: a boundary word in a new code comment is quoted under Assertions or Claims', () => {
+  const diff = [
+    diffOf('src/save.ts', ['// Never throws: a bad entry is refused, not raised.', 'const x = 1; // the only writer of nextId', '// ---- undo-only: restore and rehire ----']),
+    diffOf('src/save.test.ts', ['// every case below starts from a fresh world']),
+    diffOf('docs/how-to-play.md', ['Links always show their glyph.']),
+  ].join('\n');
+  const assertions = (...lines) => evidenceReport('## Assertions', ...lines);
+  const quoted = assertions('- **"Never throws: a bad entry"** (`save.ts`): ASSUMPTION.', '- **"the only writer of nextId"**: `grep -rn "nextId =" src` prints one line.');
+  assert.deepEqual(reportEvidenceProblems(quoted, { diff }), []);
+  const one = reportEvidenceProblems(assertions('- **"Never throws"**: ASSUMPTION.'), { diff });
+  assert.deepEqual(one, ['2 new comment(s) with every/always/never/only/cannot quoted under neither ## Assertions nor Claims no control measures (rule 7): src/save.ts:1 "Never throws: a bad entry is refused, not raised."; src/save.ts:2 "the only writer of nextId"']);
+  // A quote under Claims no control measures counts the same.
+  const claimed = evidenceReport('## Debrief', '### Claims no control measures', '- "Never throws: a bad entry is refused" and "the only writer of nextId" are unmeasured.');
+  assert.deepEqual(reportEvidenceProblems(claimed, { diff }), []);
 });
 
 test('207dbaf1: --expect-report refuses a missing Debrief, an empty body, and a missing file', async (t) => {

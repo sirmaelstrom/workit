@@ -33,6 +33,14 @@ None.
 | `4177234275` | refuted | the caller at `lib/land.mjs:12` already checks it | — |
 | `4177261828` | judgment | nothing runnable settles the naming | — |
 
+### Negative controls
+
+- **4177234272** (the fix reverted):
+
+  ```
+  not ok 3 - gate collects every failure
+  ```
+
 ### Forks I decided that the brief did not settle
 
 None.

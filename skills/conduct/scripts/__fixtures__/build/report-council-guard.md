@@ -32,6 +32,14 @@ None.
 | `C1-1` | fixed | the control's red line: `not ok 4 - merge lock` | `2222222` |
 | `C1-2` | conductor | the finding asks to delete a test the lane believes is a duplicate | — |
 
+### Negative controls
+
+- **C1-1** (the fix reverted):
+
+  ```
+  not ok 4 - merge lock
+  ```
+
 ### Forks I decided that the brief did not settle
 
 None.
