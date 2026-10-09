@@ -277,6 +277,39 @@ test('refiling (022d6fd9): a refused answer\'s reason gives way to spine_receipt
   assert.match(touchAction(state, touch).args.question, new RegExp(`\\(key z is not an option: r{600}\\)`));
 });
 
+test('touch 1 (44b4fb49): the filed question\'s first 300 chars name the repo, the authority asked and the budget, with no probe detail before them', async () => {
+  const { touchOneQuestion } = await import('./lib/phases/preapproval.mjs');
+  const { ADAPTERS, AGENTS } = await import('./lib/adapters.mjs');
+  const { touchTag } = await import('./lib/touch.mjs');
+  // Probe details about as long as a real intake's (the run that prompted this quest: 12 to 102 chars,
+  // 32 on average), so a dump placed first would fill the window.
+  const probed = (names) => Object.fromEntries(names.map((name) => [name, { on: true, evidence: 'probed', detail: `${name} resolves to C:\\AppData\\${name}.exe` }]));
+  const state = (over) => ({
+    slug: 'in-conduct-exec-probe-two-independent-ch', runId: RUN_ID, runDir: 'D:\\Development\\data\\outputs\\workshops\\in-conduct-exec-probe-two-independent-ch\\run',
+    adapters: probed(ADAPTERS), agents: probed(AGENTS),
+    intent: { goal: `In conduct-exec-probe, add two independent changes. ${'Each one comes with tests and a runtime check. '.repeat(5)}`, agent: 'claude', budgetUsd: 25, ciWorkflows: 2,
+      release: { bump: ['package.json'] }, repo: { path: 'D:\\Development\\projects\\conduct-exec-probe', remote: 'sirmaelstrom/conduct-exec-probe', defaultBranch: 'main' } },
+    ...over,
+  });
+  const filed = (s) => `${touchTag(s.slug, 1)} (run ${RUN_ID}/1) ${touchOneQuestion(s)}`;
+  const head = filed(state()).slice(0, 300);
+  for (const said of ['sirmaelstrom/conduct-exec-probe', 'merge it at the gate and run the release recipe', 'Budget $25', 'herdr panes you can watch']) {
+    assert.ok(head.includes(said), `"${said}" is not in the first 300 chars:\n${head}`);
+  }
+  for (const probe of ['Adapters:', 'Agents:', 'probed', 'AppData', 'Lane agent:']) assert.ok(!head.includes(probe), `"${probe}" comes before the briefing:\n${head}`);
+  // Every probe detail is still there, after the briefing and the answer line.
+  const question = touchOneQuestion(state());
+  assert.ok(question.indexOf('Details:') > question.indexOf('DO: approve'), question);
+  for (const kept of ['Adapters: ', 'Agents: ', 'Lane agent: claude', 'Release recipe: ', 'CI workflows that can gate a PR: 2', 'Budget: $25, metered by the spend adapter.']) assert.ok(question.includes(kept), kept);
+  // No CI: the lead says nothing merges; headless lanes say there is nothing to watch.
+  const noCi = state({ adapters: { ...probed(ADAPTERS), herdr: { on: false, evidence: 'probed', detail: 'no server' } } });
+  noCi.intent = { ...noCi.intent, ciWorkflows: 0 };
+  const lead = filed(noCi).slice(0, 300);
+  assert.match(lead, /hold every PR open \(no CI on sirmaelstrom\/conduct-exec-probe can gate a PR, so nothing merges\)/);
+  assert.match(touchOneQuestion(noCi), /Lanes: headless \(exec\), with nothing to watch while they work/);
+  assert.ok(filedLength(state(), 1, question) <= 2000, `touch 1 is ${filedLength(state(), 1, question)} chars filed`);
+});
+
 test('showcase (022d6fd9): 30 held WPs are cited by count and where they are listed; the filed question stays under the cap', async () => {
   const showcase = await import('./lib/phases/showcase.mjs');
   const wps = Array.from({ length: 30 }, (_, i) => ({ id: `WP-${String(i + 1).padStart(2, '0')}`, state: 'held', pr: { number: 100 + i }, reason: `held at PR: post-cap tail out of bounds, ${'outside the WP\'s Files '.repeat(3)}` }));
@@ -1087,7 +1120,8 @@ test('C1: a failed receipt filing is refused and the filing stays retryable', as
 test('C3: a same-tag answer from another run of the goal is not this run\'s answer', async (t) => {
   const f = fixture(t);
   const { runDir, receipt, readBack } = await toSpineReadBack(f);
-  assert.ok(receipt.args.question.startsWith(`[conduct fixture-run touch 1] (run ${RUN_ID}/1) DO:`), receipt.args.question);
+  // Touch 1 leads with its briefing (44b4fb49); the DO line follows it.
+  assert.ok(receipt.args.question.startsWith(`[conduct fixture-run touch 1] (run ${RUN_ID}/1) Proposed:`), receipt.args.question);
   const back = out(await record(f, runDir, readBack.id, fixtureJson('spine-quest-answered-stale.json'))).action;
   assert.equal(back.handBack, true);
   const state = readState(runDir);

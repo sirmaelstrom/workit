@@ -61,9 +61,18 @@ function touchOne(state) {
   const budget = metered
     ? `Budget: $${intent.budgetUsd}, metered by the spend adapter.`
     : `Budget: $${intent.budgetUsd} unmetered: no spend adapter; exec claude lanes' total_cost_usd is summed as a lane-only lower bound and enforced as one.`;
+  const herdr = state.adapters.herdr?.on === true;
+  // The briefing comes first, as touch 2's does: what the run will do, with
+  // what authority, at what cost, and where its lanes can be watched. The
+  // probe details the answer rests on follow, under Details.
   const question = [
-    `DO: approve, hold, change or decline conductor run ${state.slug} before /spec starts. EXPECT: (a) the run specs the goal, builds it in lanes, reviews each PR and merges it at the gate${release ? ', then runs the release recipe' : ''}; (b) the run builds and reviews, and every PR stays open; (c) your text becomes a grant no wider than (a); (d) the run closes with no writes to the repo.`,
+    `Proposed: on ${intent.repo.remote}, spec the goal, build it in lanes, review each PR, then ${noCi
+      ? `hold every PR open (no CI on ${intent.repo.remote} can gate a PR, so nothing merges)`
+      : `merge it at the gate${release ? ' and run the release recipe' : ''}`}. Budget $${intent.budgetUsd}, ${metered ? 'metered' : 'unmetered'}.`,
+    `Lanes: ${herdr ? 'herdr panes you can watch' : 'headless (exec), with nothing to watch while they work'}; agent ${intent.agent}.`,
     goalLine(state),
+    `DO: approve, hold, change or decline this run before /spec starts. EXPECT: (a) the run goes as proposed; (b) it builds and reviews, and every PR stays open; (c) your text becomes a grant no wider than (a); (d) it closes with no writes to the repo.`,
+    'Details:',
     `Repo: ${intent.repo.path} (${intent.repo.remote}, default branch ${intent.repo.defaultBranch})`,
     `Adapters: ${ADAPTERS.map((name) => `${name} ${describe(state.adapters[name])}`).join('; ')}`,
     `Agents: ${AGENTS.map((name) => `${name} ${describe(state.agents[name])}`).join('; ')}`,
