@@ -814,8 +814,10 @@ const claudeLimitEntry = (timestamp) => JSON.stringify({
   message: { model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: "You've hit your weekly limit · resets 7pm (America/Chicago)" }] },
 });
 const claudeTurnEntry = (timestamp) => JSON.stringify({ type: 'assistant', timestamp, message: { role: 'assistant', content: [{ type: 'text', text: 'Report written.' }] } });
-// The lane's own prompt, as `lane prompt` sends it.
+// The lane's own prompt, as `lane prompt` sends it, and the same words quoted in
+// another session's tool result (a review lens reading the lane's report).
 const claudePromptEntry = (f, timestamp) => JSON.stringify({ type: 'user', timestamp, message: { role: 'user', content: `Read ${join(f.dir, 'brief.md')} and execute it exactly.` } });
+const claudeQuotedPromptEntry = (f, timestamp) => JSON.stringify({ type: 'user', timestamp, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: `report: sent "Read ${join(f.dir, 'brief.md')} and execute it exactly."` }] } });
 function writeClaudeTranscript(f, lines, name = 'session.jsonl', mtime = null) {
   const dir = join(f.dir, 'claude-home', 'projects', resolve(f.dir).replace(/[^a-zA-Z0-9]/g, '-'));
   mkdirSync(dir, { recursive: true });
@@ -836,8 +838,9 @@ test('93d852e6: a claude lane whose transcript ends on the plan\'s usage limit i
   const f = fixture(t);
   claudeLane(f);
   writeClaudeTranscript(f, [claudePromptEntry(f, '2026-10-08T23:40:00.100Z'), claudeTurnEntry('2026-10-08T23:45:00.000Z'), claudeLimitEntry('2026-10-08T23:48:02.602Z')], 'lane.jsonl', '2026-10-08T23:48:03Z');
-  // A newer session in the same worktree (a review lens's `claude -p`) that ended normally does not hide it.
-  writeClaudeTranscript(f, [claudeTurnEntry('2026-10-08T23:49:00.000Z')], 'review.jsonl', '2026-10-08T23:49:01Z');
+  // A newer session in the same worktree (a review lens's `claude -p`) that ended normally does not
+  // hide it, even when it quotes the lane's prompt in a tool result (both delta lenses, workit#199).
+  writeClaudeTranscript(f, [claudeQuotedPromptEntry(f, '2026-10-08T23:48:30.000Z'), claudeTurnEntry('2026-10-08T23:49:00.000Z')], 'review.jsonl', '2026-10-08T23:49:01Z');
   f.responses.push(done, pane);
   const limited = await claudeWait(f);
   assert.equal(limited.exit, 6, JSON.stringify(limited.output));
@@ -856,7 +859,7 @@ test('93d852e6: a claude lane whose transcript ends on the plan\'s usage limit i
     ['no transcript', () => {}],
     ['another session\'s limit', (g) => {
       writeClaudeTranscript(g, own(g, claudeTurnEntry('2026-10-08T23:45:00.000Z')), 'lane.jsonl', '2026-10-08T23:45:01Z');
-      writeClaudeTranscript(g, [claudeLimitEntry('2026-10-08T23:48:02.602Z')], 'review.jsonl', '2026-10-08T23:48:03Z');
+      writeClaudeTranscript(g, [claudeQuotedPromptEntry(g, '2026-10-08T23:47:00.000Z'), claudeLimitEntry('2026-10-08T23:48:02.602Z')], 'review.jsonl', '2026-10-08T23:48:03Z');
     }],
   ]) {
     const g = fixture(t);

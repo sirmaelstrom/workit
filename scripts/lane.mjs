@@ -2981,7 +2981,23 @@ function claudeProjectDir(deps, path) {
 export function claudeUsageLimit(deps, lane) {
   if (!lane.path || !lane.promptFile) return null;
   const dir = claudeProjectDir(deps, lane.path);
-  const wire = JSON.stringify(`Read ${lane.promptFile} and execute it exactly.`).slice(1, -1);
+  const sent = `Read ${lane.promptFile} and execute it exactly.`;
+  const wire = JSON.stringify(sent).slice(1, -1);
+  // The prompt as delivered: a user entry whose content is that text (a string,
+  // or a text part), never a tool result or another session quoting it.
+  const delivered = (line) => {
+    if (!line.includes(wire) || !line.includes('"type":"user"')) return false;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    const content = entry.type === 'user' ? entry.message?.content : null;
+    const texts = typeof content === 'string' ? [content]
+      : Array.isArray(content) ? content.filter((part) => part?.type === 'text').map((part) => part.text) : [];
+    return texts.some((text) => String(text).trim() === sent);
+  };
   let sessions;
   try {
     sessions = deps.list(dir).filter((name) => name.endsWith('.jsonl')).map((name) => {
@@ -2995,7 +3011,7 @@ export function claudeUsageLimit(deps, lane) {
   for (const session of sessions) {
     try {
       const text = deps.read(session.path);
-      if (text.includes(wire)) {
+      if (text.includes(wire) && text.split('\n').some(delivered)) {
         read = { text, start: 0 };
         break;
       }
