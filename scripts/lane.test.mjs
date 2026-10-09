@@ -4122,6 +4122,13 @@ test('e4ad108b council round 1: a numbered control list, a green labelled run, a
   assert.deepEqual(waived('no control: a docs correction'), []);
   // Unique 4: a sub-label inside a control does not split it.
   assert.deepEqual(reportEvidenceProblems(evidenceReport('## Negative controls', '**C1: the guard removed**', '**Before (guard removed):**', failingRun, '**After (restored):**', passingRun)), []);
+  // Astra delta, workit#200: a labelled line's own failure text counts, so one shared block of
+  // `label: FAIL …` lines passes; and an unnamed fenced run fails even beside a named control.
+  assert.deepEqual(reportEvidenceProblems(evidenceReport('## Negative controls', [FENCE, 'A1b commands.ts: FAIL guard removed', 'A2b other.ts: FAIL bound removed', FENCE].join('\n'))), []);
+  const unnamed = evidenceReport('## Negative controls', [FENCE, 'Error: unlabelled green run', '0 failed', FENCE].join('\n'), '**C1: removed guard**', [FENCE, 'FAIL real control', FENCE].join('\n'));
+  assert.match(reportEvidenceProblems(unnamed).join('\n'), /has fenced runs but names no control/);
+  // A command line before the first label of a labelled block is that block's header, not an unnamed run.
+  assert.deepEqual(reportEvidenceProblems(evidenceReport('## Negative controls', [FENCE, '$ npx vitest run', 'A1 x.ts: line removed', '  × fails', FENCE].join('\n'))), []);
   // Unique 8: a `#` on a fixed row's id is the PR-comment form.
   const hashed = evidenceReport('## Amendment 1', '| Comment | Verdict | Evidence | Commit |', '|---|---|---|---|', '| #123 | fixed | the fix reverted | `abc1234` |', '### Negative controls', '- **123** (the fix reverted):', '', failingRun);
   assert.deepEqual(reportEvidenceProblems(hashed), []);
