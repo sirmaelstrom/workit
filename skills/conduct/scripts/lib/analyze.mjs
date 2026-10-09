@@ -30,15 +30,20 @@ export function mergedPrs(state) {
   return [...wps, ...release];
 }
 
-// Every `judgment` adjudication row, with its thread when it has one (D19.9).
+// Every `judgment` adjudication row, with its thread when it has one (D19.9),
+// the lane's Evidence cell as its text, and the PR it lives on (da57e5ba).
 export function judgmentThreads(state) {
   return state.wps.flatMap((wp) => (wp.reviews ?? []).flatMap((review) => (review.verdicts ?? []).filter((row) => row.verdict === 'judgment').map((row) => {
     const thread = wp.threadIds?.[row.comment] ?? null;
-    return { wpId: wp.id, pr: wp.pr?.number ?? null, comment: row.comment, thread, resolved: Boolean(thread && (review.resolved ?? []).includes(thread)) };
+    const url = wp.pr?.number && state.intent?.repo?.remote ? `https://github.com/${state.intent.repo.remote}/pull/${wp.pr.number}` : null;
+    return { wpId: wp.id, pr: wp.pr?.number ?? null, url, comment: row.comment, text: String(row.evidence ?? '').trim(), thread,
+      resolved: Boolean(thread && (review.resolved ?? []).includes(thread)), record: review.record?.url ?? null };
   })));
 }
 
-export const judgmentLine = (j) => `${j.wpId} PR #${j.pr} comment ${j.comment}: ${j.thread ? `thread ${j.thread} ${j.resolved ? 'resolved' : 'not resolved'}` : 'no PR thread (council finding)'}`;
+const where = (j) => (j.thread ? `thread ${j.thread} ${j.resolved ? 'resolved' : 'not resolved'}`
+  : j.record ? `in the PR's council review record ${j.record}` : 'no PR thread (council finding)');
+export const judgmentLine = (j) => `${j.wpId} PR #${j.pr} ${j.comment}: ${j.text || '(the lane gave no evidence text)'} (${where(j)}${j.url && !j.record ? `; ${j.url}` : ''})`;
 
 function queueAccounting(state) {
   const rows = state.wps.map((wp) => {
@@ -184,6 +189,13 @@ function preapproval(state) {
   }
   const judgments = judgmentThreads(state);
   out.push(`- judgment threads: ${judgments.length}`, ...judgments.map((j) => `  - ${judgmentLine(j)}`));
+  // A council round's adjudication, posted to its PR as a review (da57e5ba).
+  const records = state.wps.flatMap((wp) => (wp.reviews ?? []).filter((review) => review.record).map((review) => ({ wp, review })));
+  const posted = records.filter(({ review }) => !review.record.failed);
+  const failed = records.filter(({ review }) => review.record.failed);
+  if (records.length) {
+    out.push(`- council review records: ${posted.length} posted${posted.length ? ` (${posted.map(({ wp, review }) => `${wp.id} round ${review.round}: ${review.record.url ?? 'no url returned'}`).join('; ')})` : ''}${failed.length ? `, ${failed.length} not posted (${failed.map(({ wp, review }) => `${wp.id} round ${review.round}: ${review.record.failed}`).join('; ')})` : ''}`);
+  }
   if (a.metered) {
     // The build's last successful reading, else the latest budget touch's snapshot.
     const last = state.build?.lastSpend;

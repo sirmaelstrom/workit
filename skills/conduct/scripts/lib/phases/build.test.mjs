@@ -1188,7 +1188,16 @@ test('council meta and args (D20): meta precedes council_review; its args; a mis
   assert.deepEqual(between.map((a) => a.tool), ['council_challenge']);
   assert.equal(await drive(h), null);
   const all = of(h, 'WP-02');
-  assert.ok(!all.some((a) => ['reply', 'thread-ids', 'resolve'].includes(a.step)));
+  // No thread replies: a council round's only PR write is its review record (da57e5ba).
+  assert.deepEqual(all.filter((a) => ['reply', 'thread-ids', 'resolve'].includes(a.step)).map((a) => `${a.step}/${a.part}`), ['reply/record']);
+  const record = all.find((a) => a.part === 'record');
+  const recordFile = join(h.runDir, 'council', 'wp-02', 'review-1', 'pr-record.md');
+  assert.deepEqual(record.command, ['gh', 'api', '--method', 'POST', `repos/o/r/pulls/${prNumber('WP-02')}/reviews`, '-f', 'event=COMMENT', '-F', `body=@${recordFile}`]);
+  const body = readFileSync(recordFile, 'utf8');
+  assert.match(body, /\*\*Council review record\*\*: `\/conduct` run `demo`, WP-02, round 1/);
+  assert.match(body, /\| C1-1 \| fixed \| `2222222` \| the control's red line: `not ok 4 - merge lock` \|/);
+  assert.match(body, /\| C1-2 \| refuted \| — \| `grep -n mergeLock lib\/land\.mjs` shows the release at :876 \|/);
+  assert.ok(all.indexOf(record) < all.findIndex((a) => a.step === 'rebase'), 'the record is posted at adjudication, before landing');
   const second = all.findIndex((a) => a.tool === 'council_review' && a.args.round === 2);
   assert.ok(second > all.indexOf(brief), 'the delta council round');
   assert.ok(all.findIndex((a) => a.step === 'rebase') > second);
@@ -2184,7 +2193,8 @@ test('council guard rows (C2-6): an answered escalation on C1-2 is recorded as a
   await recordPending(h, {});
   answerCore(h, 1, 'b');
   assert.equal(await drive(h), null);
-  assert.ok(!h.trace.some((a) => a.step === 'reply' || a.step === 'thread-ids' || a.step === 'resolve'));
+  // The council round's review record is its only PR write; no comment id is replied to (da57e5ba).
+  assert.deepEqual(h.trace.filter((a) => ['reply', 'thread-ids', 'resolve'].includes(a.step)).map((a) => `${a.step}/${a.part}`), ['reply/record']);
   const verdicts = h.events().filter((e) => e.event === 'adjudicated').flatMap((e) => e.data.rows);
   assert.deepEqual(verdicts.at(-1), { comment: 'C1-2', verdict: 'refuted', adjudicator: 'conductor' });
   assert.equal(h.wp('WP-02').state, 'merged');

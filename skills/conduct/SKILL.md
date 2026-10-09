@@ -58,7 +58,7 @@ The **core** runs with `git`, `gh` and one lane-agent CLI. An adapter replaces a
 
 - **Declared by you.** A script can't see your MCP tools, so declare an adapter only when **every** tool it needs is callable in your own tool list; a partial set means the adapter isn't declared. Intake records each declaration with its evidence (`declared`).
   - `spine`: `spine_quest`, `spine_update`, `spine_receipt`, `spine_author`.
-  - `council`: `council_review`, `council_synthesize`, `council_challenge`.
+  - `council`: `council_review`, `council_synthesize`, `council_challenge`. A council round leaves no thread on the PR, so at adjudication the build posts one COMMENT review to the PR: every finding's id, the lane's verdict, commit and Evidence cell (`<review dir>/pr-record.md`). A post that fails is named under the analysis audit and never blocks the WP. The audit's judgment lines quote each item's Evidence and link its PR.
   - `kb`: `kb_search`, `kb_save`.
   - `verify`: the workit `verify` skill, when it covers the repo's surface.
   - `ledger`: `ledger_write` (the context ledger; a stall alarm's note).

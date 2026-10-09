@@ -19,13 +19,13 @@
 // waitDueAt, guard, spendUsd; a queued wait's remainingMs and dueAt; an
 // emitted action's wpId and, on a yielding wait, `yield: true`; a spend
 // action's budgetFor.
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
 import { chooseBackend, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import {
-  deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
+  councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
   recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
 } from '../land.mjs';
 import { READ_BACK_WAIT_MS, answerCommand, conductScript, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles } from '../touch.mjs';
@@ -666,7 +666,13 @@ function adjudicate(state, wp, deps) {
   wp.reviews = adjudication.patch.reviews;
   wp.replyIds = adjudication.actions.filter((a) => a.part === 'reply').map((a) => a.command[a.command.indexOf('--comment-id') + 1]);
   appendEvent(state, deps, { step: 'adjudicate', event: 'adjudicated', data: { wpId: wp.id, rows: rows.map((row) => ({ comment: row.comment, verdict: row.verdict })) } });
-  wp.queue = [...adjudication.actions, ...adjudication.conductorRows.map((row) => rulingAction(state, wp, { row }))];
+  // A council round leaves its adjudication on the PR as one review.
+  const record = councilRecord(state, wp, rows);
+  if (record) {
+    deps.mkdir(dirname(record.path));
+    deps.write(record.path, record.body);
+  }
+  wp.queue = [...(record ? [record.action] : []), ...adjudication.actions, ...adjudication.conductorRows.map((row) => rulingAction(state, wp, { row }))];
   wp.stage = 'resolve';
   return true;
 }
