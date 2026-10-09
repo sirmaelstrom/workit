@@ -262,7 +262,7 @@ async function intake(tokens, deps) {
   if (options.spine) {
     const preapproval = await loadModule(deps, 'lib/phases/preapproval.mjs', 'module');
     const projected = draft();
-    const length = filedLength(projected, 1, preapproval.touchOneQuestion(projected));
+    const length = filedLength(projected, 1, preapproval.touchOneQuestion(projected, deps));
     if (length > QUESTION_MAX) {
       refuse(8, `touch 1's question would be ${length} chars, over spine_receipt's ${QUESTION_MAX}-char cap: shorten the release recipe or the repo path (a long goal is already cited by file)`);
     }

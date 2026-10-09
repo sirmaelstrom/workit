@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { ConductError } from '../state.mjs';
 import { ADAPTERS, AGENTS, laneModel } from '../adapters.mjs';
 import { openTouch, touchAction, recordTouch } from '../touch.mjs';
+import { chooseBackend } from '../lanes.mjs';
 
 const GRANT_KEYS = ['merge', 'release', 'budgetUsd', 'scope'];
 
@@ -50,9 +51,9 @@ function goalLine(state) {
 }
 
 // Touch 1's question, as intake projects it before it writes anything.
-export const touchOneQuestion = (state) => touchOne(state).question;
+export const touchOneQuestion = (state, deps = {}) => touchOne(state, deps).question;
 
-function touchOne(state) {
+function touchOne(state, deps = {}) {
   const { intent } = state;
   const ci = intent.ciWorkflows ?? 0;
   const noCi = ci === 0;
@@ -61,7 +62,9 @@ function touchOne(state) {
   const budget = metered
     ? `Budget: $${intent.budgetUsd}, metered by the spend adapter.`
     : `Budget: $${intent.budgetUsd} unmetered: no spend adapter; exec claude lanes' total_cost_usd is summed as a lane-only lower bound and enforced as one.`;
-  const herdr = state.adapters.herdr?.on === true;
+  // The backend dispatch will pick: a herdr server that answers runs headless lanes for a repo outside a projects tree.
+  const lanes = chooseBackend(state, deps);
+  const herdr = lanes.backend === 'herdr';
   // The briefing comes first, as touch 2's does: what the run will do, with
   // what authority, at what cost, and where its lanes can be watched. The
   // probe details the answer rests on follow, under Details.
@@ -69,7 +72,7 @@ function touchOne(state) {
     `Proposed: on ${intent.repo.remote}, spec the goal, build it in lanes, review each PR, then ${noCi
       ? `hold every PR open (no CI on ${intent.repo.remote} can gate a PR, so nothing merges)`
       : `merge it at the gate${release ? ' and run the release recipe' : ''}`}. Budget $${intent.budgetUsd}, ${metered ? 'metered' : 'unmetered'}.`,
-    `Lanes: ${herdr ? 'herdr panes you can watch' : 'headless (exec), with nothing to watch while they work'}; agent ${intent.agent}.`,
+    `Lanes: ${herdr ? 'herdr panes you can watch' : `headless (exec${state.adapters.herdr?.on ? `: ${lanes.detail}` : ''}), with nothing to watch while they work`}; agent ${intent.agent}.`,
     goalLine(state),
     `DO: approve, hold, change or decline this run before /spec starts. EXPECT: (a) the run goes as proposed; (b) it builds and reviews, and every PR stays open; (c) your text becomes a grant no wider than (a); (d) it closes with no writes to the repo.`,
     'Details:',
@@ -97,7 +100,7 @@ function grantPath(state, touch) {
 }
 
 export function next(state, deps) {
-  const touch = state.touches.at(-1) ?? openTouch(state, touchOne(state), deps);
+  const touch = state.touches.at(-1) ?? openTouch(state, touchOne(state, deps), deps);
   if (touch.status === 'answered' && touch.answer.key === 'c') {
     const outPath = grantPath(state, touch);
     return {

@@ -288,7 +288,7 @@ test('touch 1 (44b4fb49): the filed question\'s first 300 chars name the repo, t
     slug: 'in-conduct-exec-probe-two-independent-ch', runId: RUN_ID, runDir: 'D:\\Development\\data\\outputs\\workshops\\in-conduct-exec-probe-two-independent-ch\\run',
     adapters: probed(ADAPTERS), agents: probed(AGENTS),
     intent: { goal: `In conduct-exec-probe, add two independent changes. ${'Each one comes with tests and a runtime check. '.repeat(5)}`, agent: 'claude', budgetUsd: 25, ciWorkflows: 2,
-      release: { bump: ['package.json'] }, repo: { path: 'D:\\Development\\projects\\conduct-exec-probe', remote: 'sirmaelstrom/conduct-exec-probe', defaultBranch: 'main' } },
+      release: { bump: ['package.json'] }, repo: { path: join(tmpdir(), 'projects', 'conduct-exec-probe'), remote: 'sirmaelstrom/conduct-exec-probe', defaultBranch: 'main' } },
     ...over,
   });
   const filed = (s) => `${touchTag(s.slug, 1)} (run ${RUN_ID}/1) ${touchOneQuestion(s)}`;
@@ -307,6 +307,14 @@ test('touch 1 (44b4fb49): the filed question\'s first 300 chars name the repo, t
   const lead = filed(noCi).slice(0, 300);
   assert.match(lead, /hold every PR open \(no CI on sirmaelstrom\/conduct-exec-probe can gate a PR, so nothing merges\)/);
   assert.match(touchOneQuestion(noCi), /Lanes: headless \(exec\), with nothing to watch while they work/);
+  // A herdr server that answers is not enough: dispatch runs a repo outside a projects tree headless,
+  // so the briefing reads the same resolver (both lenses, workit#202).
+  const outside = state();
+  outside.intent = { ...outside.intent, repo: { ...outside.intent.repo, path: join(tmpdir(), 'standalone', 'conduct-exec-probe') } };
+  assert.ok(touchOneQuestion(outside, { env: {} }).includes(`Lanes: headless (exec: lane.mjs create would refuse: ${join(tmpdir(), 'standalone')} is not a projects tree)`));
+  const rooted = touchOneQuestion(state(), { env: { WORKIT_WORKSPACE_ROOT: join(tmpdir(), 'elsewhere') } });
+  assert.ok(rooted.includes(`Lanes: headless (exec: lane.mjs create would refuse: the lane must live under ${join(tmpdir(), 'elsewhere', 'projects')}`), rooted);
+  assert.match(touchOneQuestion(state(), { env: {} }), /Lanes: herdr panes you can watch/);
   assert.ok(filedLength(state(), 1, question) <= 2000, `touch 1 is ${filedLength(state(), 1, question)} chars filed`);
 });
 
