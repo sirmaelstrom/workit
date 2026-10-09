@@ -32,6 +32,14 @@ None.
 | `4177234272` | fixed | the control's red line: `not ok 3 - gate collects every failure` | `1111111` |
 | `4177234275` | conductor | the deleted assertion duplicated `test 7`; the guard lens flagged the removal | — |
 
+### Negative controls
+
+- **4177234272** (the fix reverted):
+
+  ```
+  not ok 3 - gate collects every failure
+  ```
+
 ### Forks I decided that the brief did not settle
 
 None.

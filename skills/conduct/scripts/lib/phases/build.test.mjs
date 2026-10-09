@@ -124,6 +124,8 @@ const idOfWorktree = (path) => /-(wp-\d+)$/.exec(path)?.[1].toUpperCase();
 const BASE_RULES = [
   [/Get-CimInstance|ps -o lstart/, (h) => ok(h.identity ? `${IDENTITY}\n` : '')],
   [/^git -C \S+ rev-list --count \S+\.\.HEAD$/, () => ok('1\n')],
+  // The lane's diff for the report's evidence checks (e4ad108b): empty unless a test sets one.
+  [/^git -C \S+ diff --no-color --no-ext-diff --no-renames \S+\.\.HEAD$/, (h) => ok(h.laneDiff ?? '')],
   [/^gh pr view (\d+) --repo o\/r --json headRefName,state,body$/, (h, m) => {
     const id = `WP-${String(Number(m[1]) - 100).padStart(2, '0')}`;
     return ok(JSON.stringify({ headRefName: `conduct/demo/${id.toLowerCase()}`, state: 'OPEN', body: readFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), 'utf8') }));

@@ -125,6 +125,8 @@ const RULES = [
     return ok();
   }],
   [/^git -C \S+ rev-list --count \S+\.\.HEAD$/, () => ok('1\n')],
+  // The lane's diff for the report's evidence checks (e4ad108b): empty unless a test sets one.
+  [/^git -C \S+ diff --no-color --no-ext-diff --no-renames \S+\.\.HEAD$/, (h) => ok(h.laneDiff ?? '')],
   [/^gh pr list --repo example\/scratch --head conduct\/\S+\/(wp-\d+) --state all --json number,headRefOid,state$/, (h, m) => {
     const id = m[1].toUpperCase();
     return ok(JSON.stringify([{ number: prOf(id), headRefOid: h.head(id), state: 'OPEN' }]));

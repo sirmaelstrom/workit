@@ -41,7 +41,7 @@ import { resolveProgram } from './exec.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, LIVE_STATES, laneOccupied } from './schedule.mjs';
-import { EXIT_CODES as LANE_EXIT, reapWorktree, reportShapeProblems } from '../../../../scripts/lane.mjs';
+import { EXIT_CODES as LANE_EXIT, reapWorktree, reportEvidenceProblems, reportShapeProblems } from '../../../../scripts/lane.mjs';
 
 const DEADLINE_MS = 120 * 60 * 1000;
 const POLL_MS = 60000;
@@ -699,6 +699,10 @@ function checkLane(state, wp, flags, deps) {
     failures.push(...reportShapeProblems(text));
     const ahead = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'rev-list', '--count', `${wp.lane?.base}..HEAD`]);
     if (ahead.code !== 0 || !(Number(ahead.stdout.trim()) >= 1)) failures.push(`the branch has no commit past base ${wp.lane?.base} (${ahead.code === 0 ? `${ahead.stdout.trim()} commits` : said(ahead)})`);
+    // The lane contract's evidence rules, against the report and the lane's diff.
+    const diff = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'diff', '--no-color', '--no-ext-diff', '--no-renames', `${wp.lane?.base}...HEAD`]);
+    if (diff.code !== 0) failures.push(`the evidence checks did not run: git diff from base ${wp.lane?.base}: ${said(diff)}`);
+    failures.push(...reportEvidenceProblems(text, { diff: diff.code === 0 ? diff.stdout : null, reportPath: lane.reportPath, exists: deps.exists }));
     if (flags.pr !== undefined) {
       if (!/^\d+$/.test(String(flags.pr))) return reply(2, { ok: false, error: `--pr needs a PR number, got ${flags.pr}` });
       const view = deps.exec('gh', ['pr', 'view', String(flags.pr), '--repo', state.intent.repo.remote, '--json', 'headRefName,state,body']);
