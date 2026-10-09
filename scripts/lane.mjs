@@ -74,6 +74,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            --expect-report and --expect-pr (on the PR body) require ## Debrief with
            both headings, and every question under ## Needs conductor in a lettered
            ask (a)…(f): at most six options per ask, no letter twice.
+           --expect-report also checks the contract's evidence rules against the
+           report and the lane's diff from its base: fenced failing runs for
+           controls, a control per amendment fixed row, new tests named in a
+           control or Claims, boundary-word comments quoted under Assertions or
+           Claims, cited screenshots beside the report (lane-*.png).
   resume   <name> [--timeout <ms>] [--plan-floor <pct>]
            Waits --until idle --until done, never bare; honours --plan-floor.
            One read, no poll loop: a codex lane whose rollout shows its turn
