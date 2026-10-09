@@ -3,7 +3,7 @@
 import { join } from 'node:path';
 import { ConductError } from '../state.mjs';
 import { ADAPTERS, AGENTS, laneModel } from '../adapters.mjs';
-import { openTouch, touchAction, recordTouch } from '../touch.mjs';
+import { QUESTION_MAX, filedLength, openTouch, touchAction, recordTouch } from '../touch.mjs';
 import { chooseBackend } from '../lanes.mjs';
 
 const GRANT_KEYS = ['merge', 'release', 'budgetUsd', 'scope'];
@@ -50,10 +50,11 @@ function goalLine(state) {
   return `Goal: ${goal.length} chars, in full at ${goalPath(state)}. It opens: "${opening.length > 160 ? `${opening.slice(0, 160)}…` : opening}"`;
 }
 
-// Touch 1's question, as intake projects it before it writes anything.
-export const touchOneQuestion = (state, deps = {}) => touchOne(state, deps).question;
+// Touch 1's question, as intake projects it before it writes anything. Intake
+// checks the cap against `bound`: the longest lane wording, with no detail.
+export const touchOneQuestion = (state, deps = {}, { bound = false } = {}) => touchOne(state, deps, { bound }).question;
 
-function touchOne(state, deps = {}) {
+function touchOne(state, deps = {}, { bound = false } = {}) {
   const { intent } = state;
   const ci = intent.ciWorkflows ?? 0;
   const noCi = ci === 0;
@@ -64,15 +65,21 @@ function touchOne(state, deps = {}) {
     : `Budget: $${intent.budgetUsd} unmetered: no spend adapter; exec claude lanes' total_cost_usd is summed as a lane-only lower bound and enforced as one.`;
   // The backend dispatch will pick: a herdr server that answers runs headless lanes for a repo outside a projects tree.
   const lanes = chooseBackend(state, deps);
-  const herdr = lanes.backend === 'herdr';
+  const herdr = lanes.backend === 'herdr' && !bound;
+  const headless = 'headless (exec), with nothing to watch while they work';
+  // Why a herdr server that answers still runs headless lanes. It reads the
+  // environment at `next`, after intake checked the cap, so it is dropped
+  // when it would overrun the cap.
+  const why = !bound && !herdr && state.adapters.herdr?.on ? lanes.detail : null;
+  const lanesLine = (detail) => `Lanes: ${herdr ? 'herdr panes you can watch' : detail ? `headless (exec: ${detail}), with nothing to watch while they work` : headless}; agent ${intent.agent}.`;
   // The briefing comes first, as touch 2's does: what the run will do, with
   // what authority, at what cost, and where its lanes can be watched. The
   // probe details the answer rests on follow, under Details.
-  const question = [
+  const render = (detail) => [
     `Proposed: on ${intent.repo.remote}, spec the goal, build it in lanes, review each PR, then ${noCi
       ? `hold every PR open (no CI on ${intent.repo.remote} can gate a PR, so nothing merges)`
       : `merge it at the gate${release ? ' and run the release recipe' : ''}`}. Budget $${intent.budgetUsd}, ${metered ? 'metered' : 'unmetered'}.`,
-    `Lanes: ${herdr ? 'herdr panes you can watch' : `headless (exec${state.adapters.herdr?.on ? `: ${lanes.detail}` : ''}), with nothing to watch while they work`}; agent ${intent.agent}.`,
+    lanesLine(detail),
     goalLine(state),
     `DO: approve, hold, change or decline this run before /spec starts. EXPECT: (a) the run goes as proposed; (b) it builds and reviews, and every PR stays open; (c) your text becomes a grant no wider than (a); (d) it closes with no writes to the repo.`,
     'Details:',
@@ -86,6 +93,8 @@ function touchOne(state, deps = {}) {
       : `CI workflows that can gate a PR: ${ci}`,
     budget,
   ].join('\n');
+  const detailed = why ? render(why) : null;
+  const question = detailed && filedLength(state, 1, detailed) <= QUESTION_MAX ? detailed : render(null);
   const options = [
     { key: 'a', label: 'Approve as proposed', consequence: `Merge each PR at the gate, ${release ? 'run the release recipe' : 'no release (no recipe)'}, budget $${intent.budgetUsd}.` },
     { key: 'b', label: 'Approve, but hold at PR boundaries', consequence: 'The run builds and reviews; every PR stays open for the showcase, and nothing merges or releases.' },

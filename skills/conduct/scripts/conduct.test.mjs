@@ -310,11 +310,26 @@ test('touch 1 (44b4fb49): the filed question\'s first 300 chars name the repo, t
   // A herdr server that answers is not enough: dispatch runs a repo outside a projects tree headless,
   // so the briefing reads the same resolver (both lenses, workit#202).
   const outside = state();
-  outside.intent = { ...outside.intent, repo: { ...outside.intent.repo, path: join(tmpdir(), 'standalone', 'conduct-exec-probe') } };
-  assert.ok(touchOneQuestion(outside, { env: {} }).includes(`Lanes: headless (exec: lane.mjs create would refuse: ${join(tmpdir(), 'standalone')} is not a projects tree)`));
-  const rooted = touchOneQuestion(state(), { env: { WORKIT_WORKSPACE_ROOT: join(tmpdir(), 'elsewhere') } });
+  // A short goal leaves room for the detail under the cap.
+  outside.intent = { ...outside.intent, goal: 'Add two independent changes.', repo: { ...outside.intent.repo, path: join(tmpdir(), 'standalone', 'conduct-exec-probe') } };
+  const outsideQuestion = touchOneQuestion(outside, { env: {} });
+  assert.ok(outsideQuestion.includes(`Lanes: headless (exec: lane.mjs create would refuse: ${join(tmpdir(), 'standalone')} is not a projects tree)`), `${filedLength(outside, 1, outsideQuestion)} chars: ${outsideQuestion.split('\n')[1]}`);
+  const short = state();
+  short.intent = { ...short.intent, goal: 'Add two independent changes.' };
+  const rooted = touchOneQuestion(short, { env: { WORKIT_WORKSPACE_ROOT: join(tmpdir(), 'elsewhere') } });
   assert.ok(rooted.includes(`Lanes: headless (exec: lane.mjs create would refuse: the lane must live under ${join(tmpdir(), 'elsewhere', 'projects')}`), rooted);
   assert.match(touchOneQuestion(state(), { env: {} }), /Lanes: herdr panes you can watch/);
+  // The lane detail depends on the environment at `next`, after intake checked the cap (codex delta, workit#202):
+  // intake checks the bound (the longest wording, with no detail); a detail that would overrun the cap is dropped.
+  // This fixture sits near the cap; a long workspace root makes the detailed line overrun it.
+  const crowded = state();
+  const longRoot = { env: { WORKIT_WORKSPACE_ROOT: join(tmpdir(), 'r'.repeat(200)) } };
+  assert.ok(filedLength(crowded, 1, touchOneQuestion(crowded, longRoot).replace('headless (exec)', `headless (exec: ${'r'.repeat(200)})`)) > 2000, 'the detail would overrun');
+  const bound = touchOneQuestion(crowded, { env: {} }, { bound: true });
+  assert.ok(filedLength(crowded, 1, bound) <= 2000, `the intake bound is ${filedLength(crowded, 1, bound)} chars`);
+  const atNext = touchOneQuestion(crowded, longRoot);
+  assert.ok(filedLength(crowded, 1, atNext) <= filedLength(crowded, 1, bound), `next is ${filedLength(crowded, 1, atNext)}, the bound ${filedLength(crowded, 1, bound)}`);
+  assert.match(atNext, /Lanes: headless \(exec\), with nothing to watch while they work/);
   assert.ok(filedLength(state(), 1, question) <= 2000, `touch 1 is ${filedLength(state(), 1, question)} chars filed`);
 });
 
