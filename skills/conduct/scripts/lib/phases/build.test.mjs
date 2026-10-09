@@ -2195,6 +2195,12 @@ test('council guard rows (C2-6): an answered escalation on C1-2 is recorded as a
   assert.equal(await drive(h), null);
   // The council round's review record is its only PR write; no comment id is replied to (da57e5ba).
   assert.deepEqual(h.trace.filter((a) => ['reply', 'thread-ids', 'resolve'].includes(a.step)).map((a) => `${a.step}/${a.part}`), ['reply/record']);
+  // It is written after the guard row's ruling, so it carries the operator's final verdict, never `conductor` (codex lens, workit#201).
+  const body = readFileSync(join(h.runDir, 'council', 'wp-02', 'review-1', 'pr-record.md'), 'utf8');
+  assert.match(body, /\| C1-2 \| refuted \(conductor\) \| — \|/);
+  assert.ok(!/\| conductor \|/.test(body), body);
+  const answered = h.trace.findIndex((a) => a.part === 'record');
+  assert.ok(answered > h.trace.findIndex((a) => a.part === 'announce'), 'the record follows the escalation and its answer');
   const verdicts = h.events().filter((e) => e.event === 'adjudicated').flatMap((e) => e.data.rows);
   assert.deepEqual(verdicts.at(-1), { comment: 'C1-2', verdict: 'refuted', adjudicator: 'conductor' });
   assert.equal(h.wp('WP-02').state, 'merged');

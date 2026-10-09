@@ -491,6 +491,8 @@ function answerGuard(state, wp, touch, deps) {
 function conductorVerdict(state, wp, row, verdict, deps) {
   if (/^C\d+-\d+$/.test(row.comment)) {
     appendEvent(state, deps, { step: 'adjudicate', event: 'adjudicated', data: { wpId: wp.id, rows: [{ comment: row.comment, verdict, adjudicator: 'conductor' }] } });
+    // The round's PR record, still to be posted, shows the ruling rather than `conductor`.
+    if (wp.pendingRecord) wp.pendingRecord.rows = wp.pendingRecord.rows.map((pending) => (pending.comment === row.comment ? { ...pending, verdict: `${verdict} (conductor)` } : pending));
     return [];
   }
   wp.replyIds = [...(wp.replyIds ?? []), row.comment];
@@ -667,12 +669,9 @@ function adjudicate(state, wp, deps) {
   wp.replyIds = adjudication.actions.filter((a) => a.part === 'reply').map((a) => a.command[a.command.indexOf('--comment-id') + 1]);
   appendEvent(state, deps, { step: 'adjudicate', event: 'adjudicated', data: { wpId: wp.id, rows: rows.map((row) => ({ comment: row.comment, verdict: row.verdict })) } });
   // A council round leaves its adjudication on the PR as one review.
-  const record = councilRecord(state, wp, rows);
-  if (record) {
-    deps.mkdir(dirname(record.path));
-    deps.write(record.path, record.body);
-  }
-  wp.queue = [...(record ? [record.action] : []), ...adjudication.actions, ...adjudication.conductorRows.map((row) => rulingAction(state, wp, { row }))];
+  // A council round's record is posted at `resolve`, after its guard rows are ruled, so it carries their final verdicts.
+  wp.pendingRecord = councilRecord(state, wp, rows) ? { rows: rows.map(({ comment, verdict, evidence, commit }) => ({ comment, verdict, evidence, commit })) } : null;
+  wp.queue = [...adjudication.actions, ...adjudication.conductorRows.map((row) => rulingAction(state, wp, { row }))];
   wp.stage = 'resolve';
   return true;
 }
@@ -712,7 +711,15 @@ function expand(state, wp, deps) {
       if ((wp.reviews ?? []).at(-1)?.findings === 0) return go([], 'land');
       return findingsAmendment(state, wp, deps);
     }
-    case 'resolve': return go(wp.replyIds?.length ? resolveThreadActions(state, wp, wp.replyIds) : [], 'delta');
+    case 'resolve': {
+      const record = wp.pendingRecord ? councilRecord(state, wp, wp.pendingRecord.rows) : null;
+      wp.pendingRecord = null;
+      if (record) {
+        deps.mkdir(dirname(record.path));
+        deps.write(record.path, record.body);
+      }
+      return go([...(record ? [record.action] : []), ...(wp.replyIds?.length ? resolveThreadActions(state, wp, wp.replyIds) : [])], 'delta');
+    }
     case 'delta': {
       // One delta pass per full review; a later tail is the gate's post-cap inspection.
       const since = wp.amendment?.since;
