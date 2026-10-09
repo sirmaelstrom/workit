@@ -214,10 +214,14 @@ const AMEND_TEXT = {
     : `the conductor ruled (${a.ruled}) on its ## Needs conductor ask. The ruling's evidence, verbatim: ${a.evidence}. Carry on under that ruling.`),
   answer: (a) => `the operator answered ${a.tag}, verbatim: (${a.key})${a.text ? ` ${a.text}` : ''}. Carry on under that answer.${a.rulings?.length
     ? ` The conductor also ruled on the report's other questions: ${a.rulings.map((r) => `${r.question ?? 'the ask'} → (${r.ruled}); evidence, verbatim: ${r.evidence}`).join('. ')}.` : ''}`,
-  findings: (a) => (a.ids
+  findings: (a) => `${a.ids
     ? `council review round ${a.round} (synthesis in ${a.reviewDir}) has ${a.ids.length} Critical/Major/Minor finding(s). Write them into this brief numbered ${a.ids.join(', ')} in synthesis order; the lane's ## Amendment table uses those ids.`
-    : `review round ${a.round} posted ${a.findings ?? 'an unknown number of'} finding(s) as PR review comments; the lane adjudicates each in an ## Amendment table keyed by its comment id.`),
+    : `review round ${a.round} posted ${a.findings ?? 'an unknown number of'} finding(s) as PR review comments; the lane adjudicates each in an ## Amendment table keyed by its comment id.`} ${VERDICT_TEXT}`,
 };
+
+// The lane contract's verdicts (§ Finish step 4), which the check parses; any
+// other word in a table row, `declined` included, fails it.
+const VERDICT_TEXT = 'Each row\'s Verdict is `fixed`, `refuted` or `judgment` (`conductor` only on a guard thread). When the brief rules on a finding itself, write the ruling in those words: a "no change" ruling is `refuted` when its evidence shows the finding is wrong, otherwise `judgment`, with the ruling quoted as the row\'s Evidence.';
 
 // A retry renders the failed expectation whatever the amendment's kind; the
 // marker line is what `record` looks for, so an unchanged brief is refused.
@@ -581,7 +585,11 @@ function merged(state, wp, deps) {
   // A lane that closed at the reading's instant may or may not be in it: counted (the safe side).
   const closedAfter = (other) => !read || (other.lane?.exitedAt && Date.parse(other.lane.exitedAt) >= Date.parse(read.at));
   const booked = (read?.usd ?? 0) + state.wps.filter(closedAfter).reduce((total, other) => total + (Number(other.lane?.costUsd) || 0), 0);
-  const unbooked = (other) => !['merged', 'refuted'].includes(other.state) || (Boolean(other.lane?.startedAt) && !Number.isFinite(Number(other.lane?.costUsd ?? NaN)));
+  // A finished lane is booked by its own logged cost or, when it closed before
+  // the reading, by the meter: a herdr lane logs no cost, so the meter is its
+  // only booking.
+  const laneBooked = (other) => Number.isFinite(Number(other.lane?.costUsd ?? NaN)) || Boolean(other.lane?.exitedAt && !closedAfter(other));
+  const unbooked = (other) => !['merged', 'refuted'].includes(other.state) || (Boolean(other.lane?.startedAt) && !laneBooked(other));
   const left = state.wps.filter(unbooked).length;
   const per = laneProjection(state, deps);
   const projected = Math.round((booked + left * per.usd) * 100) / 100;

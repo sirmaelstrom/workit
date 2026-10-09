@@ -62,7 +62,10 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Naming any state adds blocked; a bare wait forwards none (herdr's
            default already matches idle|done|blocked). A codex lane's idle/done
            must hold on a second poll 3 s later. A turn that ended on codex's
-           "Selected model is at capacity" banner exits 8 (retryable). A Claude
+           "Selected model is at capacity" banner exits 8 (retryable). A settled
+           Claude lane whose transcript's last entry since its prompt is the
+           plan's usage limit exits 6 as plan-refused (refusalShape transcript,
+           rateLimitType, resetsAt). A Claude
            lane whose status bar still shows background work ("· 1 shell ·") is
            not settled: at the deadline it exits 4 as settled-background-live.
            stdout is the verdict alone; the row counts pollCount and pollTimeouts.
@@ -1639,6 +1642,15 @@ async function waitLane(opts, deps, state) {
     // back either, whatever herdr reads. No rollout found keeps the two-poll
     // settle alone, and the verdict says which evidence it rests on.
     const herdrSettled = waited.code === 0 && ['idle', 'done'].includes(stateAfter);
+    const limit = herdrSettled && lane.kind === 'claude' ? claudeUsageLimit(deps, lane) : null;
+    if (limit) {
+      const { text, ...when } = limit;
+      return settle({
+        exit: EXIT.PLAN_LOW,
+        output: { state: 'plan-refused', refusal: text, refusalShape: 'transcript', ...when, ...warning },
+        row: { ...laneInstrumentation(opts.name, lane, 'plan-refused'), refusalShape: 'transcript', ...when, ...warning },
+      });
+    }
     let hold = herdrSettled ? settleHold(plan, lane.kind) : null;
     if (herdrSettled && !hold && lane.kind === 'codex') {
       rolloutPath ??= findCodexRollout(deps, lane);
@@ -2949,6 +2961,89 @@ export function findCodexRollout(deps, lane) {
     }
   }
   return best?.path ?? null;
+}
+
+// Claude Code files a session under <config dir>/projects/<the cwd with every
+// non-alphanumeric character as '-'>; CLAUDE_CONFIG_DIR moves the config dir.
+function claudeProjectDir(deps, path) {
+  const root = deps.env.CLAUDE_CONFIG_DIR || join(deps.home(), '.claude');
+  return join(root, 'projects', resolve(path).replace(/[^a-zA-Z0-9]/g, '-'));
+}
+
+// A Claude lane the plan refuses ends its turn on a synthetic assistant entry
+// carrying apiError "usage_limit_reached", and herdr reads it as done. Its
+// pane is not scraped (a lane's own output can quote any banner), so the
+// evidence is the lane's own session: the newest one in its worktree's
+// project directory that holds the lane's last prompt as sent (another
+// session there, such as a review lens's `claude -p`, is not the lane's).
+// { text, rateLimitType, resetsAt } when its last assistant entry after that
+// prompt is the refusal, else null.
+export function claudeUsageLimit(deps, lane) {
+  if (!lane.path || !lane.promptFile) return null;
+  const dir = claudeProjectDir(deps, lane.path);
+  const sent = `Read ${lane.promptFile} and execute it exactly.`;
+  const wire = JSON.stringify(sent).slice(1, -1);
+  // The prompt as delivered: a user entry whose content is that text (a string,
+  // or a text part), never a tool result or another session quoting it.
+  const delivered = (line) => {
+    if (!line.includes(wire) || !line.includes('"type":"user"')) return false;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    const content = entry.type === 'user' ? entry.message?.content : null;
+    const texts = typeof content === 'string' ? [content]
+      : Array.isArray(content) ? content.filter((part) => part?.type === 'text').map((part) => part.text) : [];
+    return texts.some((text) => String(text).trim() === sent);
+  };
+  let sessions;
+  try {
+    sessions = deps.list(dir).filter((name) => name.endsWith('.jsonl')).map((name) => {
+      const path = join(dir, name);
+      return { path, mtime: Number(deps.stat(path).mtimeMs) };
+    }).sort((a, b) => b.mtime - a.mtime);
+  } catch {
+    return null;
+  }
+  let read = null;
+  for (const session of sessions) {
+    try {
+      const text = deps.read(session.path);
+      if (text.includes(wire) && text.split('\n').some(delivered)) {
+        read = { text, start: 0 };
+        break;
+      }
+    } catch {
+      // unreadable: not evidence either way
+    }
+  }
+  if (!read) return null;
+  const lines = read.text.split('\n');
+  if (read.start > 0) lines.shift();
+  for (let index = lines.length - 1; index >= 0; index--) {
+    if (!lines[index].includes('"type":"assistant"')) continue;
+    let entry;
+    try {
+      entry = JSON.parse(lines[index]);
+    } catch {
+      continue;
+    }
+    if (entry.type !== 'assistant') continue;
+    if (entry.apiError !== 'usage_limit_reached') return null;
+    const promptMs = lane.promptedAt ? Date.parse(lane.promptedAt) : NaN;
+    if (Number.isFinite(promptMs) && !(Date.parse(entry.timestamp) >= promptMs)) return null;
+    const info = entry.apiErrorParams?.rate_limit_info ?? entry.quotaLimits ?? {};
+    const resets = Number(info.resetsAt);
+    const content = Array.isArray(entry.message?.content) ? entry.message.content : [];
+    return {
+      text: content.map((part) => part?.text).find(Boolean) ?? null,
+      rateLimitType: info.rateLimitType ?? null,
+      resetsAt: Number.isFinite(resets) && resets > 0 ? new Date(resets * 1000).toISOString() : null,
+    };
+  }
+  return null;
 }
 
 // { ended, event, at } from the rollout's last turn event, or null when the

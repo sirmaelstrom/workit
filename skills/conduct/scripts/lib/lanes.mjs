@@ -481,6 +481,11 @@ function recordHerdrWait(state, wp, result, deps, backend) {
     case LANE_EXIT.blocked:
       return dialogRoute(wp, result, backend.wait(wp));
     case LANE_EXIT.planLow: {
+      // A claude lane the plan refused can't fall back to claude: its WP waits for the reset.
+      const refused = parseStdout(result);
+      if (refused?.refusalShape === 'transcript') {
+        return block(`usage limit: the plan refused the lane (${refused.rateLimitType ?? 'unknown window'}); it resets at ${refused.resetsAt ?? 'an unknown time'}. ${refused.refusal ?? ''}`.trim());
+      }
       const fallback = shellAction('fallback', {
         instruction: 'Hand the lane to claude.',
         command: ['node', join(deps.pluginRoot ?? state.pluginRoot, 'scripts', 'lane.mjs'), 'fallback', laneLayout(state, wp).name, '--to', 'claude',

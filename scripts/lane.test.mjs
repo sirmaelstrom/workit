@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 
@@ -804,6 +804,71 @@ test('quest 8b7c477c amend 1: a claude lane whose pane quotes the capacity banne
   const result = await timedOutWait(f);
   assert.equal(result.exit, 0);
   assert.equal(result.output.state, 'done');
+});
+
+// The synthetic entry a Claude lane's transcript ends on when the plan refuses
+// it, trimmed from the shopfloor v1.2 run's WP-06 lane (2026-10-08T23:48:02Z).
+const claudeLimitEntry = (timestamp) => JSON.stringify({
+  type: 'assistant', timestamp, apiError: 'usage_limit_reached',
+  apiErrorParams: { rate_limit_info: { status: 'rejected', resetsAt: 1791504000, rateLimitType: 'seven_day' } },
+  message: { model: '<synthetic>', role: 'assistant', content: [{ type: 'text', text: "You've hit your weekly limit · resets 7pm (America/Chicago)" }] },
+});
+const claudeTurnEntry = (timestamp) => JSON.stringify({ type: 'assistant', timestamp, message: { role: 'assistant', content: [{ type: 'text', text: 'Report written.' }] } });
+// The lane's own prompt, as `lane prompt` sends it, and the same words quoted in
+// another session's tool result (a review lens reading the lane's report).
+const claudePromptEntry = (f, timestamp) => JSON.stringify({ type: 'user', timestamp, message: { role: 'user', content: `Read ${join(f.dir, 'brief.md')} and execute it exactly.` } });
+const claudeQuotedPromptEntry = (f, timestamp) => JSON.stringify({ type: 'user', timestamp, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_x', content: `report: sent "Read ${join(f.dir, 'brief.md')} and execute it exactly."` }] } });
+function writeClaudeTranscript(f, lines, name = 'session.jsonl', mtime = null) {
+  const dir = join(f.dir, 'claude-home', 'projects', resolve(f.dir).replace(/[^a-zA-Z0-9]/g, '-'));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, name), `${lines.join('\n')}\n`, 'utf8');
+  if (mtime) utimesSync(join(dir, name), new Date(mtime), new Date(mtime));
+}
+const claudeLane = (f, promptedAt = '2026-10-08T23:40:00.000Z') => seedLane(f, { kind: 'claude', promptedAt, promptFile: join(f.dir, 'brief.md') });
+const claudeWait = (f) => {
+  let clock = Date.parse('2026-10-08T23:50:00Z');
+  return runLane(['wait', 'lane-a', '--timeout', '1000', '--log', f.log], {
+    exec: f.exec, env: { CLAUDE_CONFIG_DIR: join(f.dir, 'claude-home') }, now: () => (clock += 1000), sleep: async () => {},
+  });
+};
+
+test('93d852e6: a claude lane whose transcript ends on the plan\'s usage limit is plan-refused with its reset time, not done', async (t) => {
+  const done = { code: 0, stdout: '{"result":{"state":"done"}}', stderr: '' };
+  const pane = { code: 0, stdout: CLAUDE_TAIL.join('\n'), stderr: '' };
+  const f = fixture(t);
+  claudeLane(f);
+  writeClaudeTranscript(f, [claudePromptEntry(f, '2026-10-08T23:40:00.100Z'), claudeTurnEntry('2026-10-08T23:45:00.000Z'), claudeLimitEntry('2026-10-08T23:48:02.602Z')], 'lane.jsonl', '2026-10-08T23:48:03Z');
+  // A newer session in the same worktree (a review lens's `claude -p`) that ended normally does not
+  // hide it, even when it quotes the lane's prompt in a tool result (both delta lenses, workit#199).
+  writeClaudeTranscript(f, [claudeQuotedPromptEntry(f, '2026-10-08T23:48:30.000Z'), claudeTurnEntry('2026-10-08T23:49:00.000Z')], 'review.jsonl', '2026-10-08T23:49:01Z');
+  f.responses.push(done, pane);
+  const limited = await claudeWait(f);
+  assert.equal(limited.exit, 6, JSON.stringify(limited.output));
+  assert.deepEqual(
+    [limited.output.state, limited.output.refusalShape, limited.output.rateLimitType, limited.output.resetsAt, limited.output.refusal],
+    ['plan-refused', 'transcript', 'seven_day', '2026-10-09T00:00:00.000Z', "You've hit your weekly limit · resets 7pm (America/Chicago)"],
+  );
+  assert.equal(lastRow(f).state, 'plan-refused');
+
+  // Controls, each done: a turn that ended normally, a limit hit before the lane's last prompt, no
+  // transcript, and (codex lens, workit#199) a newer session that is not the lane's ending on a limit.
+  const own = (g, ...rest) => [claudePromptEntry(g, '2026-10-08T23:40:00.100Z'), ...rest];
+  for (const [label, write] of [
+    ['normal end', (g) => writeClaudeTranscript(g, own(g, claudeLimitEntry('2026-10-08T23:30:00.000Z'), claudeTurnEntry('2026-10-08T23:48:02.602Z')))],
+    ['limit before the prompt', (g) => writeClaudeTranscript(g, [claudeLimitEntry('2026-10-08T23:30:00.000Z'), claudePromptEntry(g, '2026-10-08T23:40:00.100Z')])],
+    ['no transcript', () => {}],
+    ['another session\'s limit', (g) => {
+      writeClaudeTranscript(g, own(g, claudeTurnEntry('2026-10-08T23:45:00.000Z')), 'lane.jsonl', '2026-10-08T23:45:01Z');
+      writeClaudeTranscript(g, [claudeQuotedPromptEntry(g, '2026-10-08T23:47:00.000Z'), claudeLimitEntry('2026-10-08T23:48:02.602Z')], 'review.jsonl', '2026-10-08T23:48:03Z');
+    }],
+  ]) {
+    const g = fixture(t);
+    claudeLane(g);
+    write(g);
+    g.responses.push(done, pane);
+    const result = await claudeWait(g);
+    assert.deepEqual([result.exit, result.output.state], [0, 'done'], `${label}: ${JSON.stringify(result.output)}`);
+  }
 });
 
 test('quest 8b7c477c K1: a lane with no recorded kind is never scraped, and still warns that capacity is unknown', async (t) => {
