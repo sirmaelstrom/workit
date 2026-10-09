@@ -1879,8 +1879,10 @@ export function reportShapeProblems(text) {
 // error, a failed count above zero or a non-zero exit fails a block outright.
 // An `…Error` at the start of a line fails it only when the block shows no
 // passing summary: green suites that test error paths print them too.
-const FAIL_RECORD = /^\s*(?:✖|✗|×|x\s+\d+\s|not ok\b)|\bFAIL(?:ED)?\b|\bAssertionError\b|\berror TS\d+\b|\b[1-9]\d* (?:failed|failing)\b|\bFailed:\s*[1-9]|\b[Ee]xit(?:ed)?(?: with)?(?: code)?[ =:]*[1-9]\d*\b/m;
-const ERROR_LINE = /^\s*\w*Error\b/m;
+const FAIL_RECORD = /^\s*(?:FAIL(?:ED)?\b|✖|✗|×|x\s+\d+\s|not ok\b)|\berror TS\d+\b|\b[1-9]\d* (?:failed|failing)\b|\bFailed:\s*[1-9]|\b[Ee]xit(?:ed)?(?: with)?(?: code)?[ =:]*[1-9]\d*\b/m;
+// Words a passing run can print too (a test titled "rejects AssertionError"):
+// they fail a block only when it shows no passing summary.
+const ERROR_LINE = /^\s*\w*Error\b|\bAssertionError\b|\bFAIL(?:ED)?\b/m;
 const GREEN_SUMMARY = /#\s*fail\s+0\b|\b0 (?:failed|failing)\b|^\s*(?:Tests\s+)?\d+ passed\b(?!.*\bfailed\b)/m;
 const blockFails = (text) => FAIL_RECORD.test(text) || (ERROR_LINE.test(text) && !GREEN_SUMMARY.test(text));
 // A control that is reported as a finding rather than as evidence.
@@ -1967,7 +1969,7 @@ function controlRecords(body) {
     for (const line of block) {
       const label = FENCED_LABEL.exec(line.text)?.[1];
       // The label's own line is part of its run (`A1b x.ts: FAIL …`).
-      if (label) records.push((current = { line: line.number, label, fenced: true, lines: [line], fails: false, disclosed: false }));
+      if (label) records.push((current = { line: line.number, label, fenced: true, lines: [{ ...line, text: line.text.replace(/^\s*\S+\s+/, '') }], fails: false, disclosed: false }));
       else if (current) current.lines.push(line);
       else if (line.text.trim() && !/^\s*(`{3,}|~{3,})/.test(line.text)) content = true;
     }

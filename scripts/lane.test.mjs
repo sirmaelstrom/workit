@@ -4127,6 +4127,9 @@ test('e4ad108b council round 1: a numbered control list, a green labelled run, a
   assert.deepEqual(reportEvidenceProblems(evidenceReport('## Negative controls', [FENCE, 'A1b commands.ts: FAIL guard removed', 'A2b other.ts: FAIL bound removed', FENCE].join('\n'))), []);
   const unnamed = evidenceReport('## Negative controls', [FENCE, 'Error: unlabelled green run', '0 failed', FENCE].join('\n'), '**C1: removed guard**', [FENCE, 'FAIL real control', FENCE].join('\n'));
   assert.match(reportEvidenceProblems(unnamed).join('\n'), /has fenced runs but names no control/);
+  // Codex delta, workit#200: a labelled line's own `not ok` counts; an AssertionError in a passing title does not.
+  assert.deepEqual(reportEvidenceProblems(evidenceReport('## Negative controls', [FENCE, 'C1 not ok 1 - rejects invalid rank', FENCE].join('\n'))), []);
+  assert.equal(reportEvidenceProblems(evidenceReport('## Negative controls', '**C1: x**', [FENCE, 'ok 1 - rejects AssertionError', 'ok 2 - handles a FAIL state', '# fail 0', FENCE].join('\n'))).length, 1);
   // A command line before the first label of a labelled block is that block's header, not an unnamed run.
   assert.deepEqual(reportEvidenceProblems(evidenceReport('## Negative controls', [FENCE, '$ npx vitest run', 'A1 x.ts: line removed', '  × fails', FENCE].join('\n'))), []);
   // Unique 8: a `#` on a fixed row's id is the PR-comment form.
