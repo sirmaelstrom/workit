@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import {
   tierFor, pickReviewers, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions, recordLandStep, runLandVerb,
-  parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH,
+  parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord,
 } from './land.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
 import { runConduct } from '../conduct.mjs';
@@ -970,6 +970,31 @@ test('C2-13 a rounds recovery with empty stdout reaches the recorder through the
     { importModule: (relPath) => (relPath === 'lib/phases/build.mjs' ? build : import(pathToFileURL(join(HERE, '..', relPath)).href)) });
   assert.equal(out.code, 0, out.stdout + out.stderr);
   assert.deepEqual([outcome.outcome, outcome.patch.queue], ['held', []]);
+});
+
+test('council record (da57e5ba): one COMMENT review per council round with every finding\'s verdict and Evidence; a failed post is kept on the review, not a block', () => {
+  const reviewDir = join(RUN, 'council', 'wp-01', 'review-1');
+  const wp = makeWp({ tier: 'T2', reviews: [{ round: 1, scope: 'full', tier: 'T2', head: HEAD, lenses: ['gpt-6.1-sol', 'opus'], reviewId: reviewDir, findings: 2, verdicts: [], resolved: [] }] });
+  const rows = [
+    { comment: 'C1-1', verdict: 'fixed', evidence: 'control red: `not ok 4 - merge lock`', commit: '89abcde' },
+    { comment: 'C1-2', verdict: 'judgment', evidence: 'Apply fix scoped to a stale nextId | a split pipe', commit: null },
+  ];
+  const record = councilRecord(makeState({ slug: 'demo' }), wp, rows);
+  assert.equal(record.path, join(reviewDir, 'pr-record.md'));
+  assert.deepEqual(record.action.command, ['gh', 'api', '--method', 'POST', 'repos/sirmaelstrom/workit/pulls/7/reviews', '-f', 'event=COMMENT', '-F', `body=@${record.path}`]);
+  assert.deepEqual([record.action.step, record.action.part], ['reply', 'record']);
+  assert.match(record.body, /^\*\*Council review record\*\*: `\/conduct` run `demo`, WP-01, round 1, seats gpt-6\.1-sol, opus\./);
+  assert.ok(record.body.includes('| C1-1 | fixed | `89abcde` | control red: `not ok 4 - merge lock` |'), record.body);
+  // A pipe inside the Evidence cell is escaped, so the row keeps its four cells.
+  assert.ok(record.body.includes('| C1-2 | judgment | — | Apply fix scoped to a stale nextId \\| a split pipe |'), record.body);
+  // A round with only PR-comment rows (T1) has its threads already: no record.
+  assert.equal(councilRecord(makeState(), wp, [{ comment: '101', verdict: 'fixed', evidence: 'x', commit: '1234567' }]), null);
+
+  const posted = recordLandStep(makeState(), wp, record.action, { code: 0, stdout: JSON.stringify({ html_url: 'https://github.com/sirmaelstrom/workit/pull/7#pullrequestreview-9' }), stderr: '' });
+  assert.deepEqual([posted.outcome, posted.patch.reviews.at(-1).record], ['continue', { url: 'https://github.com/sirmaelstrom/workit/pull/7#pullrequestreview-9' }]);
+  const failed = recordLandStep(makeState(), wp, record.action, { code: 1, stdout: '', stderr: 'HTTP 422: Unprocessable Entity' });
+  assert.deepEqual([failed.outcome, failed.patch.reviews.at(-1).record], ['continue', { failed: 'HTTP 422: Unprocessable Entity' }]);
+  assert.match(failed.reason, /council review record not posted \(exit 1\): HTTP 422/);
 });
 
 test('reply bodies and council ids (D20); replies carry the run\'s measure log (C1-17)', () => {

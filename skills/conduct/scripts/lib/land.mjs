@@ -278,6 +278,30 @@ export function recordAdjudication(state, wp, verdicts) {
   return { patch: { reviews: [...reviews.slice(0, -1), latest] }, actions, conductorRows: rows.filter((row) => row.verdict === 'conductor') };
 }
 
+// A council round leaves no thread on the PR, so its adjudication is posted as
+// one COMMENT review: every finding's id, the lane's verdict, commit and
+// Evidence cell, verbatim. Null for a round with no council rows. The body is
+// a file beside the round's synthesis, read by `gh api -F body=@<file>`.
+export function councilRecord(state, wp, rows) {
+  const review = (wp.reviews ?? []).at(-1);
+  const council = rows.filter((row) => /^C\d+-\d+$/i.test(String(row.comment).trim()));
+  if (!council.length || !review?.reviewId || !wp.pr?.number) return null;
+  const cell = (text) => String(text ?? '').replace(/\r?\n/g, ' ').replace(/(?<!\\)\|/g, '\\|').trim();
+  const body = [
+    `**Council review record**: \`/conduct\` run \`${state.slug}\`, ${wp.id}, round ${review.round}${review.scope === 'delta' ? ' (delta)' : ''}${review.lenses?.length ? `, seats ${review.lenses.join(', ')}` : ''}.`,
+    `${council.length} finding(s), with the lane's verdicts from its report's \`## Amendment\` table. \`judgment\` rows are left for the operator.`,
+    '',
+    '| Finding | Verdict | Commit | Evidence |',
+    '|---|---|---|---|',
+    ...council.map((row) => `| ${cell(row.comment)} | ${cell(row.verdict)} | ${row.commit ? `\`${cell(row.commit)}\`` : '—'} | ${cell(row.evidence) || '—'} |`),
+    '',
+  ].join('\n');
+  const path = join(review.reviewId, 'pr-record.md');
+  const action = shell('reply', 'record', ['gh', 'api', '--method', 'POST', `repos/${repoOf(state)}/pulls/${wp.pr.number}/reviews`, '-f', 'event=COMMENT', '-F', `body=@${path}`],
+    { instruction: 'Post the council round\'s adjudication as a PR review (the run\'s review record). Record { code, stdout, stderr }.' });
+  return { path, body, action };
+}
+
 // One lookup maps comment ids to thread node ids; its record queues the resolves.
 export function resolveThreadActions(state, wp, commentIds) {
   const [owner, name] = repoOf(state).split('/');
@@ -933,6 +957,13 @@ function landOutcome(state, wp, action, r, deps) {
       return result('continue', null, { reviews: [...(wp.reviews ?? []), reviewEntry(wp, action.land, { findings: findingsCount(r) })] });
     case 'council': return recordCouncil(state, wp, action, r);
     case 'reply':
+      // The council record is evidence, not a gate: a failed post is kept on the review for the analysis, and the WP goes on.
+      if (action.part === 'record') {
+        const url = parseJson(r.stdout)?.html_url ?? null;
+        return r.code === 0
+          ? result('continue', null, { reviews: withLatest(wp, (review) => ({ ...review, record: { url } })) })
+          : result('continue', `council review record not posted (exit ${r.code}): ${first(r.stderr)}`, { reviews: withLatest(wp, (review) => ({ ...review, record: { failed: first(r.stderr) || `exit ${r.code}` } })) });
+      }
       return action.kind === 'author' || r.code === 0 ? result('continue') : result('block', `reply failed (exit ${r.code}): ${first(r.stderr)}`);
     case 'thread-ids': return recordThreadIds(state, wp, action, r);
     case 'resolve':

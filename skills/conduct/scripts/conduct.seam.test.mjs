@@ -148,6 +148,7 @@ const RULES = [
   [/^node \S+pr-review\.mjs threads /, () => ok()],
   [/^node \S+pr-review\.mjs inflight /, () => ok()],
   [/^node \S+pr-review\.mjs (uncertainty|lens|reply) /, () => ok()],
+  [/^gh api --method POST repos\/example\/scratch\/pulls\/(\d+)\/reviews -f event=COMMENT -F body=@(\S+)$/, (h, m) => ok(JSON.stringify({ id: 1, html_url: `https://github.com/example/scratch/pull/${m[1]}#pullrequestreview-1` }))],
   [/^gh api graphql -f query=query/, () => ok(text('land', 'review-threads-145.json'))],
   [/^gh api graphql -f query=mutation/, () => ok('{}')],
   [/^git -C (\S+) rev-parse (?:HEAD|refs\/heads\/\S+)$/, (h, m) => ok(`${headOf(h, idOfWorktree(m[1]))}\n`)],
@@ -750,7 +751,8 @@ test('spend on (D19.28, M4): a metered run that stays below budget shows its las
 test('judgment threads (D19.9, 022d6fd9): a judgment row\'s thread is listed under the audit; the showcase question cites them by count and file', async (t) => {
   const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-amendment.md'] }, findings: { 'WP-00': [3] }, amendDiff: 'docs/notes.md\n' } });
   await drive(h, { until: (a) => a.step === 'showcase' });
-  const line = 'WP-00 PR #100 comment 4177261828: thread PRRT_kwDOS_8yoc6oxnvx resolved';
+  // The lane's Evidence cell is the item's text, with its PR's link (da57e5ba): readable without the run dir.
+  const line = 'WP-00 PR #100 4177261828: nothing runnable settles the naming (thread PRRT_kwDOS_8yoc6oxnvx resolved; https://github.com/example/scratch/pull/100)';
   assert.ok(section(h.analysis(), 'Pre-approval audit').includes(`  - ${line}`), section(h.analysis(), 'Pre-approval audit'));
   const question = h.state().touches.find((touch) => touch.kind === 'showcase').question;
   // With a briefing, the full path is named once (Full record) and the lists name the file.
@@ -764,10 +766,12 @@ test('adjudication evidence (C1-14, C2-6): a council WP\'s adjudication row read
   const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } },
     [...flags, '--adapter', 'council']);
   await drive(h, { until: (a) => a.step === 'showcase' });
-  assert.ok(!h.trace.some((a) => ['reply', 'thread-ids', 'resolve'].includes(a.step)), 'a council WP emits no reply, thread-ids or resolve');
+  // A council WP replies to no comment id; its one PR write is the round's review record (da57e5ba).
+  assert.deepEqual(h.trace.filter((a) => ['reply', 'thread-ids', 'resolve'].includes(a.step)).map((a) => `${a.step}/${a.part}`), ['reply/record']);
   const adjudicated = h.events().filter((e) => e.event === 'adjudicated');
   assert.equal(adjudicated.length, 1);
-  assert.equal(row(h.analysis(), 'adjudication'), '- adjudication: owned (adjudicated)');
+  assert.match(row(h.analysis(), 'adjudication'), /^- adjudication: owned \(adjudicated, \d+-reply\)$/, 'the record is the adjudication seam\'s own step');
+  assert.match(h.analysis(), /- council review records: 1 posted \(WP-00 round 1: https:\/\/github\.com\/example\/scratch\/pull\/\d+#pullrequestreview-1\)/);
 });
 
 test('send-back is terminal (D19.5): (c) naming merge-gate → sent-back with the seam and text; next is done; no later merge, release or lane event; replay 0, other id 5', async (t) => {
