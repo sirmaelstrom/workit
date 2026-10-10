@@ -146,6 +146,8 @@ const BASE_RULES = [
   [/^git -C \S+ patch-id --verbatim$/, (h, m, input) => ok(`${h.patchId ? h.patchId(input) : 'f'.repeat(40)} x\n`)],
   [/^git -C \S+ diff --quiet (?:--no-renames )?(\w+) (\w+)$/, (h, m) => ({ code: h.treeMismatch && m[2] === mergeSha(h.treeMismatch) ? 1 : 0, stdout: '', stderr: '' })],
   [/^git -C \S+ diff --name-only --no-renames origin\/main\.\.\.HEAD$/, () => ok('src/a.mjs\n')],
+  // The merged-lane cleanup's check for another checkout of the branch (db7fde36).
+  [/^git -C (\S+) worktree list --porcelain$/, (h, m) => (h.worktreeList ? h.worktreeList() : ok(`worktree ${m[1]}\nHEAD ${BASE}\nbranch refs/heads/main\n`))],
 ];
 
 function fakeExec(h, program, args, { input } = {}) {
@@ -990,6 +992,32 @@ test('merged cleanup (db7fde36): a worktree that stays keeps both branches; a br
   const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
   assert.match(analysis, /^- WP-02 \(name WP-02\): merged, PR #102; cleanup kept the worktree and branches: .*still exists after the removal/m);
   assert.match(analysis, /^- WP-03 \(name WP-03\): merged, PR #103; cleanup kept the local branch \(error: cannot lock ref .*\)$/m);
+
+  // An exec lane's branch deletes exit 1 for their own reasons: with the old
+  // pid reused, each is recorded (a moved branch kept, a gone one absent),
+  // never polled as a liveness read.
+  const exec = harness(t, { wps: [TWO[0], TWO[1]] });
+  exec.rules.push([/^ps -eo pid=,ppid=,args=$/, () => ok('1 0 init\n')]);
+  exec.answer = (a) => {
+    if (a.wpId !== 'WP-02' || !['branch', 'branch-remote'].includes(a.part)) return undefined;
+    exec.lifeByPid.set(4202, 9);
+    return { code: 1, stdout: '', stderr: a.part === 'branch' ? "error: cannot lock ref 'refs/heads/conduct/demo/wp-02': is at 1111 but expected 2222" : "error: unable to delete 'conduct/demo/wp-02': remote ref does not exist" };
+  };
+  assert.equal(await drive(exec), null);
+  assert.deepEqual([exec.wp('WP-02').lane.branchDeleted.local, exec.wp('WP-02').lane.branchDeleted.remote], ['kept', 'absent']);
+  assert.ok(!exec.events().some((e) => e.event === 'liveness-uncertain'), 'a branch delete is not a liveness read');
+
+  // Another worktree has WP-03's branch checked out (an operator's `gh pr
+  // checkout`): both branches stay, and the analysis says where.
+  const other = harness(t, { wps: TWO });
+  other.rules.push([/^ps -eo pid=,ppid=,args=$/, () => ok('1 0 init\n')]);
+  other.worktreeList = () => ok(`worktree ${other.repo}\nHEAD ${BASE}\nbranch refs/heads/main\n\nworktree ${other.dir}/review\nHEAD ${'a'.repeat(40)}\nbranch refs/heads/conduct/demo/wp-03\n`);
+  assert.equal(await drive(other), null);
+  assert.ok(!of(other, 'WP-03').some((a) => a.part === 'branch' || a.part === 'branch-remote'), 'a branch checked out elsewhere is not deleted');
+  assert.deepEqual([other.wp('WP-03').lane.removed, other.wp('WP-03').lane.branchDeleted.local, other.wp('WP-03').lane.branchDeleted.remote], [true, 'kept', 'kept']);
+  assert.deepEqual(other.wp('WP-02').lane.branchDeleted, { local: 'deleted', remote: 'deleted' });
+  await analyzeRun(other.runDir, other.deps);
+  assert.match(readFileSync(join(other.runDir, 'run-analysis.md'), 'utf8'), /^- WP-03 \(name WP-03\): merged, PR #103; cleanup kept the local branch \(checked out at \S+review\) and the remote branch/m);
 
   const hold = harness(t, { herdr: true, merge: false, wps: [TWO[0], TWO[1]] });
   assert.equal(await drive(hold), null);

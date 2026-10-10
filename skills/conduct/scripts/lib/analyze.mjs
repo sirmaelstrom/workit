@@ -45,14 +45,20 @@ const where = (j) => (j.thread ? `thread ${j.thread} ${j.resolved ? 'resolved' :
   : j.record ? `in the PR's council review record ${j.record}` : 'no PR thread (council finding)');
 export const judgmentLine = (j) => `${j.wpId} PR #${j.pr} ${j.comment}: ${j.text || '(the lane gave no evidence text)'} (${where(j)}${j.url && !j.record ? `; ${j.url}` : ''})`;
 
+// A recorded failure can carry a whole sweep JSON: one line, bounded.
+const brief = (text) => {
+  const line = String(text).replace(/\s+/g, ' ').trim();
+  return line.length > 240 ? `${line.slice(0, 239)}…` : line;
+};
+
 // What a merged WP's cleanup kept: a worktree it could not remove keeps both
-// branches; a removed one names each branch not deleted (or already absent).
+// branches; a removed one names each branch neither deleted nor already gone.
 function cleanupKept(wp) {
   const lane = wp.lane;
   if (wp.state !== 'merged' || lane?.removed === undefined) return '';
-  if (!lane.removed) return `; cleanup kept the worktree and branches: ${lane.removeError ?? 'not removed'}`;
+  if (!lane.removed) return `; cleanup kept the worktree and branches: ${brief(lane.removeError ?? 'not removed')}`;
   const kept = ['local', 'remote'].filter((where) => !['deleted', 'absent'].includes(lane.branchDeleted?.[where]))
-    .map((where) => `${where} branch (${lane.branchDeleted?.[`${where}Error`] ?? 'not attempted'})`);
+    .map((where) => `${where} branch (${brief(lane.branchDeleted?.[`${where}Error`] ?? 'not attempted')})`);
   return kept.length ? `; cleanup kept the ${kept.join(' and the ')}` : '';
 }
 
