@@ -280,14 +280,18 @@ function checkedOutAt(porcelain, branch) {
 }
 
 // A merged WP's branch, local then on origin, queued only once its worktree
-// is gone and no other worktree has the branch checked out: update-ref
-// deletes a checked-out branch, and the sweep HOLDs a lane whose upstream is
-// gone. Both compare and delete, so a branch that moved past the merged head
-// stays.
+// is gone, behind a read of every worktree's checkout run right before them:
+// update-ref deletes a checked-out branch, and the sweep HOLDs a lane whose
+// upstream is gone. Both compare and delete, so a branch that moved past the
+// merged head stays.
 function branchDeletes(state, wp, head) {
   const repo = resolve(state.intent.repo.path);
   const branch = laneBranch(state, wp);
   return [
+    shellAction('stop', {
+      part: 'branch-holder', instruction: 'List every worktree, to keep a branch another worktree has checked out.',
+      command: ['git', '-C', repo, 'worktree', 'list', '--porcelain'],
+    }),
     shellAction('stop', {
       part: 'branch', instruction: 'Delete the merged lane\'s local branch if it still names the merged head.',
       command: ['git', '-C', repo, 'update-ref', '-d', `refs/heads/${branch}`, head],
@@ -595,15 +599,16 @@ function recordStop(state, wp, action, result, deps) {
     const removeError = removed ? null : result.code === 0 ? `${worktree} still exists after the removal: ${said(result)}` : said(result);
     const head = wp.gate?.head;
     const lane = { removed, ...(removeError ? { removeError } : {}) };
-    if (!removed || !head) return proceed({ lane });
-    // Another worktree (an operator's `gh pr checkout`) keeps both branches.
-    const listed = deps.exec('git', ['-C', resolve(state.intent.repo.path), 'worktree', 'list', '--porcelain']);
-    const holder = listed.code === 0 ? checkedOutAt(listed.stdout, laneBranch(state, wp)) : `unknown: git worktree list failed: ${said(listed)}`;
-    if (holder) {
-      const why = `checked out at ${holder}`;
-      return proceed({ lane: { ...lane, branchDeleted: { local: 'kept', remote: 'kept', localError: why, remoteError: why } } });
-    }
-    return proceed({ lane, queue: [...branchDeletes(state, wp, head), ...rest] });
+    return proceed({ lane, ...(removed && head ? { queue: [...branchDeletes(state, wp, head), ...rest] } : {}) });
+  }
+  // Another worktree (an operator's `gh pr checkout`), or a listing that
+  // failed, keeps both branches: the two deletes queued behind it are dropped.
+  if (action.part === 'branch-holder') {
+    const holder = result.code === 0 ? checkedOutAt(result.stdout, laneBranch(state, wp)) : `unknown: git worktree list failed: ${said(result)}`;
+    if (!holder) return proceed();
+    const why = `checked out at ${holder}`;
+    return proceed({ lane: { branchDeleted: { local: 'kept', remote: 'kept', localError: why, remoteError: why } },
+      queue: rest.filter((queued) => !['branch', 'branch-remote'].includes(queued.part)) });
   }
   if (action.part === 'branch' || action.part === 'branch-remote') {
     const where = action.part === 'branch' ? 'local' : 'remote';

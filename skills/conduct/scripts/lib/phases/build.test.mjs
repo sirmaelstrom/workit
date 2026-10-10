@@ -146,8 +146,6 @@ const BASE_RULES = [
   [/^git -C \S+ patch-id --verbatim$/, (h, m, input) => ok(`${h.patchId ? h.patchId(input) : 'f'.repeat(40)} x\n`)],
   [/^git -C \S+ diff --quiet (?:--no-renames )?(\w+) (\w+)$/, (h, m) => ({ code: h.treeMismatch && m[2] === mergeSha(h.treeMismatch) ? 1 : 0, stdout: '', stderr: '' })],
   [/^git -C \S+ diff --name-only --no-renames origin\/main\.\.\.HEAD$/, () => ok('src/a.mjs\n')],
-  // The merged-lane cleanup's check for another checkout of the branch (db7fde36).
-  [/^git -C (\S+) worktree list --porcelain$/, (h, m) => (h.worktreeList ? h.worktreeList() : ok(`worktree ${m[1]}\nHEAD ${BASE}\nbranch refs/heads/main\n`))],
 ];
 
 function fakeExec(h, program, args, { input } = {}) {
@@ -946,7 +944,8 @@ test('exec cleanup (5c93c8cb, db7fde36): each exec lane exit is reaped, and ever
     const head = h.wp(id).gate.head;
     const local = mine.findIndex((a) => a.part === 'branch');
     const remote = mine.findIndex((a) => a.part === 'branch-remote');
-    assert.ok(local > remove && remote > local, `${id}: the branch deletes follow the worktree removal`);
+    // The checkout read runs right before the deletes, not when the removal is recorded.
+    assert.deepEqual([mine[local - 1].part, local > remove, remote], ['branch-holder', true, local + 1], `${id}: removal, checkout read, local delete, remote delete`);
     assert.deepEqual(mine[local].command, ['git', '-C', resolve(h.repo), 'update-ref', '-d', `refs/heads/${branch}`, head]);
     assert.deepEqual(mine[remote].command, ['git', '-C', resolve(h.repo), 'push', 'origin', `--force-with-lease=refs/heads/${branch}:${head}`, '--delete', branch]);
     assert.deepEqual(h.wp(id).lane.branchDeleted, { local: 'deleted', remote: 'deleted' });
@@ -1011,8 +1010,12 @@ test('merged cleanup (db7fde36): a worktree that stays keeps both branches; a br
   // checkout`): both branches stay, and the analysis says where.
   const other = harness(t, { wps: TWO });
   other.rules.push([/^ps -eo pid=,ppid=,args=$/, () => ok('1 0 init\n')]);
-  other.worktreeList = () => ok(`worktree ${other.repo}\nHEAD ${BASE}\nbranch refs/heads/main\n\nworktree ${other.dir}/review\nHEAD ${'a'.repeat(40)}\nbranch refs/heads/conduct/demo/wp-03\n`);
+  other.answer = (a) => (a.part === 'branch-holder' && a.wpId === 'WP-03'
+    ? ok(`worktree ${other.repo}\nHEAD ${BASE}\nbranch refs/heads/main\n\nworktree ${other.dir}/review\nHEAD ${'a'.repeat(40)}\nbranch refs/heads/conduct/demo/wp-03\n`)
+    : undefined);
   assert.equal(await drive(other), null);
+  const holder = of(other, 'WP-03').find((a) => a.part === 'branch-holder');
+  assert.deepEqual(holder.command, ['git', '-C', resolve(other.repo), 'worktree', 'list', '--porcelain']);
   assert.ok(!of(other, 'WP-03').some((a) => a.part === 'branch' || a.part === 'branch-remote'), 'a branch checked out elsewhere is not deleted');
   assert.deepEqual([other.wp('WP-03').lane.removed, other.wp('WP-03').lane.branchDeleted.local, other.wp('WP-03').lane.branchDeleted.remote], [true, 'kept', 'kept']);
   assert.deepEqual(other.wp('WP-02').lane.branchDeleted, { local: 'deleted', remote: 'deleted' });
@@ -1031,7 +1034,7 @@ test('backend (D18, D19.18): flipping herdr off after dispatch keeps the WP on h
   h.state.adapters.herdr.on = false;
   await drive(h);
   assert.equal(h.wp('WP-02').lane.backend, 'herdr');
-  for (const a of of(h, 'WP-02').filter((x) => ['start', 'wait', 'stop'].includes(x.step) && !['branch', 'branch-remote'].includes(x.part))) assert.ok(a.command[1].endsWith('lane.mjs'), a.id);
+  for (const a of of(h, 'WP-02').filter((x) => ['start', 'wait', 'stop'].includes(x.step) && !['branch-holder', 'branch', 'branch-remote'].includes(x.part))) assert.ok(a.command[1].endsWith('lane.mjs'), a.id);
   const outside = harness(t, { herdr: true, inProjects: false, wps: [TWO[0], TWO[1]] });
   await drive(outside, { until: (a) => a.wpId === 'WP-02' });
   assert.equal(outside.wp('WP-02').lane.backend, 'exec');
