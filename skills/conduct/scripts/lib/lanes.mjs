@@ -142,7 +142,7 @@ export function guardedKillArgv(pid, identity, platform) {
 export function laneBackend(state, deps, backend) {
   const repo = resolve(state.intent.repo.path);
   const fallbackBranch = state.intent.repo.defaultBranch ?? 'main';
-  // A recorder's deps are { exec, read, now }; it re-arms steps from the run's root.
+  // A recorder's deps are { exec, read, exists, now, … }; it re-arms steps from the run's root.
   const pluginRoot = deps.pluginRoot ?? state.pluginRoot;
   const conduct = (sub, wp, extra = []) => ['node', join(pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'lane', sub, '--run', state.runDir, '--wp', wp.id, ...extra];
   const prLookup = (wp) => shellAction('pr-lookup', {
@@ -211,6 +211,14 @@ export function laneBackend(state, deps, backend) {
       stop: (wp) => (wp.lane?.exitedAt ? [] : [shellAction('stop', {
         part: 'stop', instruction: 'Stop the lane agent.', command: laneMjs('stop', [laneLayout(state, wp).name], laneLayout(state, wp).runnerLog),
       })]),
+      // A merged WP's lane is swept: the delegate closes its pane first (a
+      // shell holding the folder fails the removal) and removes only a lane
+      // it reads SAFE. The workspace root is the lane's grandparent, the root
+      // lane.mjs sweep walks for <workspace>/projects/<repo>-wt-<slug>.
+      remove: (wp) => [shellAction('stop', {
+        part: 'remove', instruction: 'Close the merged lane\'s pane and remove its worktree.',
+        command: laneMjs('sweep', ['--lane', laneLayout(state, wp).name, '--workspace-root', dirname(dirname(repo))], laneLayout(state, wp).runnerLog),
+      })],
     };
   }
   return {
@@ -257,6 +265,28 @@ export function laneBackend(state, deps, backend) {
     ],
   };
 }
+
+// A merged WP's branch, local then on origin, queued only once its worktree
+// is gone: update-ref deletes a branch a worktree still has checked out, and
+// the sweep HOLDs a lane whose upstream is gone. Both compare and delete, so a
+// branch that moved past the merged head stays.
+function branchDeletes(state, wp, head) {
+  const repo = resolve(state.intent.repo.path);
+  const branch = wp.lane?.branch ?? laneLayout(state, wp).branch;
+  return [
+    shellAction('stop', {
+      part: 'branch', instruction: 'Delete the merged lane\'s local branch if it still names the merged head.',
+      command: ['git', '-C', repo, 'update-ref', '-d', `refs/heads/${branch}`, head],
+    }),
+    shellAction('stop', {
+      part: 'branch-remote', instruction: 'Delete the merged lane\'s branch on origin if it still names the merged head.',
+      command: ['git', '-C', repo, 'push', 'origin', `--force-with-lease=refs/heads/${branch}:${head}`, '--delete', branch],
+    }),
+  ];
+}
+
+// A branch already gone is the goal reached, not a failure.
+const BRANCH_ABSENT = /unable to resolve reference|remote ref does not exist/;
 
 // The unfenced lines of the level-2 section `title`, or null.
 function reportSection(text, title) {
@@ -540,10 +570,23 @@ function recordStop(state, wp, action, result, deps) {
   if (action.part === 'reap') {
     return proceed({ lane: { reap: { state: out?.state ?? 'unreadable', orphans: out?.orphans?.length ?? 0, survivors: out?.survivors?.length ?? 0, ...(result.code === 0 ? {} : { error: said(result) }) } } });
   }
-  if (action.part === 'remove') return proceed({ lane: { removed: result.code === 0, ...(result.code === 0 ? {} : { removeError: said(result) }) } });
   // The actions queued after this stop (a reap, a worktree removal, a ratify
   // or cite ruling) outlive it: every queue below keeps them.
   const rest = (wp.queue ?? []).slice(1);
+  // Removed means the directory is gone: a sweep exits 0 on a lane it HOLDs.
+  // Only then are the branches deleted, against the head the merge checked.
+  if (action.part === 'remove') {
+    const worktree = wp.lane?.worktree ?? laneLayout(state, wp).worktree;
+    const removed = result.code === 0 && !deps.exists(worktree);
+    const removeError = removed ? null : result.code === 0 ? `${worktree} still exists after the removal: ${said(result)}` : said(result);
+    const head = wp.gate?.head;
+    return proceed({ lane: { removed, ...(removeError ? { removeError } : {}) }, ...(removed && head ? { queue: [...branchDeletes(state, wp, head), ...rest] } : {}) });
+  }
+  if (action.part === 'branch' || action.part === 'branch-remote') {
+    const where = action.part === 'branch' ? 'local' : 'remote';
+    const outcome = result.code === 0 ? 'deleted' : BRANCH_ABSENT.test(String(result.stderr ?? '')) ? 'absent' : 'kept';
+    return proceed({ lane: { branchDeleted: { ...(wp.lane?.branchDeleted ?? {}), [where]: outcome, ...(outcome === 'kept' ? { [`${where}Error`]: said(result) } : {}) } } });
+  }
   const backend = laneBackend(state, deps, wp.lane?.backend ?? 'exec');
   if (action.part === 'probe' && result.code === 0) return proceed({ queue: [...laneBackend(state, deps, 'exec').kill(wp), ...rest] }, `pid ${wp.lane?.pid} is the lane agent: killing it`);
   const gone = action.part === 'stop' ? result.code === 0 || out?.state === 'exited-shell-blocked' : result.code === 1;

@@ -893,7 +893,8 @@ test('spine + herdr: spine_author once, a receipt per WP stop, touches filed onc
     const next = h.trace[h.trace.indexOf(filings[0]) + 1];
     assert.deepEqual([next.tool, next.args.ids], ['spine_quest', [ANCHOR]]);
   }
-  const herdr = h.trace.filter((a) => a.wpId && ['admit', 'start', 'prompt', 'wait', 'stop'].includes(a.step) && a.kind === 'shell');
+  // A merged lane's branch deletes are git cleanup, not lane steps.
+  const herdr = h.trace.filter((a) => a.wpId && ['admit', 'start', 'prompt', 'wait', 'stop'].includes(a.step) && a.kind === 'shell' && !['branch', 'branch-remote'].includes(a.part));
   assert.ok(herdr.length > 0 && herdr.every((a) => a.command[1].endsWith('lane.mjs') && a.command.includes('--log')));
   for (const wp of state.wps) {
     const checks = of(h, wp.id).filter((a) => a.step === 'check');

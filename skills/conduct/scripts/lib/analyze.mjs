@@ -45,11 +45,22 @@ const where = (j) => (j.thread ? `thread ${j.thread} ${j.resolved ? 'resolved' :
   : j.record ? `in the PR's council review record ${j.record}` : 'no PR thread (council finding)');
 export const judgmentLine = (j) => `${j.wpId} PR #${j.pr} ${j.comment}: ${j.text || '(the lane gave no evidence text)'} (${where(j)}${j.url && !j.record ? `; ${j.url}` : ''})`;
 
+// What a merged WP's cleanup kept: a worktree it could not remove keeps both
+// branches; a removed one names each branch not deleted (or already absent).
+function cleanupKept(wp) {
+  const lane = wp.lane;
+  if (wp.state !== 'merged' || lane?.removed === undefined) return '';
+  if (!lane.removed) return `; cleanup kept the worktree and branches: ${lane.removeError ?? 'not removed'}`;
+  const kept = ['local', 'remote'].filter((where) => !['deleted', 'absent'].includes(lane.branchDeleted?.[where]))
+    .map((where) => `${where} branch (${lane.branchDeleted?.[`${where}Error`] ?? 'not attempted'})`);
+  return kept.length ? `; cleanup kept the ${kept.join(' and the ')}` : '';
+}
+
 function queueAccounting(state) {
   const rows = state.wps.map((wp) => {
     const why = wp.reason ? `: ${wp.reason}` : '';
     const pr = wp.pr?.number ? `, PR #${wp.pr.number}${wp.state === 'held' ? ' open' : ''}` : '';
-    return `- ${wp.id} (${wp.name || 'unnamed'}): ${wp.state}${why}${pr}`;
+    return `- ${wp.id} (${wp.name || 'unnamed'}): ${wp.state}${why}${pr}${cleanupKept(wp)}`;
   });
   const r = state.release ?? {};
   const version = r.version ? `, ${r.version.from} → ${r.version.to}` : '';

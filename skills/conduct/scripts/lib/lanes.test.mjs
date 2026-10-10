@@ -1031,7 +1031,9 @@ test('exec cleanup (5c93c8cb): an observed exit reaps ahead of what follows; a m
   assert.deepEqual([refused.outcome, refused.patch.lane.removed], ['continue', false]);
   assert.match(refused.patch.lane.removeError, /modified or untracked/);
   assert.equal(e.record(remove, exit(0)).patch.lane.removed, true);
-  assert.equal(lanes(t, { backend: 'herdr' }).backend().remove, undefined, 'herdr lanes are swept by lane.mjs, not removed here');
+  const herdr = lanes(t, { backend: 'herdr' });
+  const [sweep] = herdr.backend().remove(herdr.wp);
+  assert.deepEqual([sweep.part, sweep.command[1].endsWith('lane.mjs'), sweep.command[2]], ['remove', true, 'sweep'], 'herdr lanes are swept by lane.mjs');
 });
 
 test('lane reap (5c93c8cb): kills what runs from the WP\'s worktree, in process, and exits 1 on a survivor', async (t) => {
