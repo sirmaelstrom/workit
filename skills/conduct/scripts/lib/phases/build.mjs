@@ -606,7 +606,8 @@ function merged(state, wp, deps) {
     if (wp.questId !== state.intent.anchor) after.push(tool('done', 'spine_update', { questId: wp.questId, workState: 'done', horizon: 'landed' }));
   }
   const backend = backendOf(state, wp, deps);
-  wp.queue = [...(wp.queue ?? []), ...after, ...backend.stop(wp), ...(backend.remove ? backend.remove(wp) : [])];
+  // The lane's removal queues its branch deletes once the worktree is gone.
+  wp.queue = [...(wp.queue ?? []), ...after, ...backend.stop(wp), ...backend.remove(wp)];
 }
 
 // A library emitter that cannot emit (no lens can run, a delta after a
@@ -1310,9 +1311,11 @@ function recordOwn(state, wp, action, result, deps) {
 // and a touch whose answer is the only release. An error read (any other
 // exit) is the recorder's and never resets the count.
 function liveness(state, wp, action, result, deps) {
-  // Only an `alive` reading (the wait, the probe, the confirmation) says anything about liveness;
-  // a kill, a reap or a worktree removal exits 1 for its own reasons.
-  if (wp.lane?.backend !== 'exec' || !['wait', 'stop'].includes(action.step) || ['kill', 'reap', 'remove'].includes(action.part)) return null;
+  // Only an `alive` reading (the wait, the probe, the confirmation) says anything about liveness.
+  // Every other stop (a kill, a reap, a worktree removal, a branch delete) exits 1 for its own
+  // reasons, so the reads are named here rather than the rest excluded.
+  const aliveRead = action.step === 'wait' || (action.step === 'stop' && ['probe', 'confirm'].includes(action.part));
+  if (wp.lane?.backend !== 'exec' || !aliveRead) return null;
   let owner = null;
   try {
     owner = JSON.parse(result.stdout)?.owner ?? null;
@@ -1460,7 +1463,7 @@ export function record(state, action, result = {}, deps) {
 
 function recordStep(state, wp, action, result, deps) {
   if (recordOwn(state, wp, action, result, deps) !== undefined) return undefined;
-  const recorderDeps = { exec: deps.exec, read: deps.read, now: deps.now, platform: deps.platform, env: deps.env, pluginRoot: deps.pluginRoot };
+  const recorderDeps = { exec: deps.exec, read: deps.read, exists: deps.exists, now: deps.now, platform: deps.platform, env: deps.env, pluginRoot: deps.pluginRoot };
   if (LANE_STEPS.has(action.step)) {
     if (liveness(state, wp, action, result, deps) === 'polling') return undefined;
     return route(state, wp, action, recordLaneStep(state, wp, action, result, recorderDeps), deps);

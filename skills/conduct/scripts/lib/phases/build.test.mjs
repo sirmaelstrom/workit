@@ -925,7 +925,7 @@ test('step arrays: a herdr check array is emitted one action per next, in order;
   assert.equal(h.wp('WP-02').pr.number, 102);
 });
 
-test('exec cleanup (5c93c8cb): each exec lane exit is reaped, and every merged WP\'s worktree removal follows its merge; herdr lanes queue no removal', async (t) => {
+test('exec cleanup (5c93c8cb, db7fde36): each exec lane exit is reaped, and every merged WP\'s worktree removal, then its branch deletes, follow its merge; herdr lanes are swept', async (t) => {
   const h = harness(t, { wps: TWO });
   // A reap failure never blocks, so a reap that could not run would pass
   // silently: the process list answers, and each reap's state is asserted.
@@ -939,6 +939,16 @@ test('exec cleanup (5c93c8cb): each exec lane exit is reaped, and every merged W
     assert.deepEqual(mine[remove].command.slice(0, 5), ['git', '-C', resolve(h.repo), 'worktree', 'remove']);
     assert.ok(mine.some((a, i) => a.part === 'reap' && i < merged && mine[i - 1]?.step === 'wait'), `${id}: the lane's exit was reaped before review`);
     assert.deepEqual([h.wp(id).state, h.wp(id).lane.removed, h.wp(id).lane.reap.state], ['merged', true, 'reaped']);
+    // Both deletes compare against the head the merge checked.
+    const branch = `conduct/demo/${id.toLowerCase()}`;
+    const head = h.wp(id).gate.head;
+    const local = mine.findIndex((a) => a.part === 'branch');
+    const remote = mine.findIndex((a) => a.part === 'branch-remote');
+    // The checkout read runs right before the deletes, not when the removal is recorded.
+    assert.deepEqual([mine[local - 1].part, local > remove, remote], ['branch-holder', true, local + 1], `${id}: removal, checkout read, local delete, remote delete`);
+    assert.deepEqual(mine[local].command, ['git', '-C', resolve(h.repo), 'update-ref', '-d', `refs/heads/${branch}`, head]);
+    assert.deepEqual(mine[remote].command, ['git', '-C', resolve(h.repo), 'push', 'origin', `--force-with-lease=refs/heads/${branch}:${head}`, '--delete', branch]);
+    assert.deepEqual(h.wp(id).lane.branchDeleted, { local: 'deleted', remote: 'deleted' });
   }
   // The action's argv runs through the CLI, whose sub-verb list must name reap.
   const reap = of(h, 'WP-02').find((a) => a.part === 'reap');
@@ -946,7 +956,76 @@ test('exec cleanup (5c93c8cb): each exec lane exit is reaped, and every merged W
   assert.deepEqual([cli.code, JSON.parse(cli.stdout).state], [0, 'reaped'], cli.stderr);
   const herdr = harness(t, { herdr: true, wps: TWO });
   assert.equal(await drive(herdr), null);
-  assert.ok(!herdr.trace.some((a) => a.part === 'remove' || a.part === 'reap'), 'herdr lanes are reaped by lane.mjs stop and swept by lane.mjs');
+  assert.ok(!herdr.trace.some((a) => a.part === 'reap'), 'herdr lanes are reaped by lane.mjs stop');
+  for (const id of ['WP-02', 'WP-03']) {
+    const mine = of(herdr, id);
+    const remove = mine.findIndex((a) => a.part === 'remove');
+    assert.ok(remove > mine.findIndex((a) => a.step === 'merged'), `${id}: the sweep follows the merge`);
+    assert.ok(mine[remove].command[1].endsWith('lane.mjs'));
+    assert.deepEqual(mine[remove].command.slice(2, 7), ['sweep', '--lane', `demo-${id.toLowerCase()}`, '--workspace-root', dirname(dirname(resolve(herdr.repo)))]);
+    assert.deepEqual([herdr.wp(id).lane.removed, herdr.wp(id).lane.branchDeleted], [true, { local: 'deleted', remote: 'deleted' }]);
+  }
+});
+
+test('merged cleanup (db7fde36): a worktree that stays keeps both branches; a branch that moved stays, one already gone reads absent; an unmerged WP queues none', async (t) => {
+  const h = harness(t, { herdr: true, wps: TWO });
+  const kept = `${h.repo}-wt-demo-wp-02`;
+  h.answer = (a) => {
+    // The sweep HOLDs WP-02's lane: exit 0, and the directory is still there.
+    if (a.wpId === 'WP-02' && a.part === 'remove') {
+      mkdirSync(kept, { recursive: true });
+      return ok(JSON.stringify({ delegated: true, holds: [{ pane: 'pane-WP-02', message: 'HOLD on pane-WP-02 by claude' }] }));
+    }
+    if (a.wpId === 'WP-03' && a.part === 'branch') return { code: 1, stdout: '', stderr: "error: cannot lock ref 'refs/heads/conduct/demo/wp-03': is at 1111 but expected 2222" };
+    if (a.wpId === 'WP-03' && a.part === 'branch-remote') return { code: 1, stdout: '', stderr: "error: unable to delete 'conduct/demo/wp-03': remote ref does not exist" };
+    return undefined;
+  };
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-02').lane.removed], ['merged', false]);
+  assert.match(h.wp('WP-02').lane.removeError, /still exists after the removal: .*HOLD on pane-WP-02/);
+  assert.ok(!of(h, 'WP-02').some((a) => a.part === 'branch' || a.part === 'branch-remote'), 'no branch is deleted while its worktree stays');
+  const wp03 = h.wp('WP-03').lane.branchDeleted;
+  assert.deepEqual([wp03.local, wp03.remote], ['kept', 'absent']);
+  assert.match(wp03.localError, /cannot lock ref/);
+  await analyzeRun(h.runDir, h.deps);
+  const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
+  assert.match(analysis, /^- WP-02 \(name WP-02\): merged, PR #102; cleanup kept the worktree and branches: .*still exists after the removal/m);
+  assert.match(analysis, /^- WP-03 \(name WP-03\): merged, PR #103; cleanup kept the local branch \(error: cannot lock ref .*\)$/m);
+
+  // An exec lane's branch deletes exit 1 for their own reasons: with the old
+  // pid reused, each is recorded (a moved branch kept, a gone one absent),
+  // never polled as a liveness read.
+  const exec = harness(t, { wps: [TWO[0], TWO[1]] });
+  exec.rules.push([/^ps -eo pid=,ppid=,args=$/, () => ok('1 0 init\n')]);
+  exec.answer = (a) => {
+    if (a.wpId !== 'WP-02' || !['branch', 'branch-remote'].includes(a.part)) return undefined;
+    exec.lifeByPid.set(4202, 9);
+    return { code: 1, stdout: '', stderr: a.part === 'branch' ? "error: cannot lock ref 'refs/heads/conduct/demo/wp-02': is at 1111 but expected 2222" : "error: unable to delete 'conduct/demo/wp-02': remote ref does not exist" };
+  };
+  assert.equal(await drive(exec), null);
+  assert.deepEqual([exec.wp('WP-02').lane.branchDeleted.local, exec.wp('WP-02').lane.branchDeleted.remote], ['kept', 'absent']);
+  assert.ok(!exec.events().some((e) => e.event === 'liveness-uncertain'), 'a branch delete is not a liveness read');
+
+  // Another worktree has WP-03's branch checked out (an operator's `gh pr
+  // checkout`): both branches stay, and the analysis says where.
+  const other = harness(t, { wps: TWO });
+  other.rules.push([/^ps -eo pid=,ppid=,args=$/, () => ok('1 0 init\n')]);
+  other.answer = (a) => (a.part === 'branch-holder' && a.wpId === 'WP-03'
+    ? ok(`worktree ${other.repo}\nHEAD ${BASE}\nbranch refs/heads/main\n\nworktree ${other.dir}/review\nHEAD ${'a'.repeat(40)}\nbranch refs/heads/conduct/demo/wp-03\n`)
+    : undefined);
+  assert.equal(await drive(other), null);
+  const holder = of(other, 'WP-03').find((a) => a.part === 'branch-holder');
+  assert.deepEqual(holder.command, ['git', '-C', resolve(other.repo), 'worktree', 'list', '--porcelain']);
+  assert.ok(!of(other, 'WP-03').some((a) => a.part === 'branch' || a.part === 'branch-remote'), 'a branch checked out elsewhere is not deleted');
+  assert.deepEqual([other.wp('WP-03').lane.removed, other.wp('WP-03').lane.branchDeleted.local, other.wp('WP-03').lane.branchDeleted.remote], [true, 'kept', 'kept']);
+  assert.deepEqual(other.wp('WP-02').lane.branchDeleted, { local: 'deleted', remote: 'deleted' });
+  await analyzeRun(other.runDir, other.deps);
+  assert.match(readFileSync(join(other.runDir, 'run-analysis.md'), 'utf8'), /^- WP-03 \(name WP-03\): merged, PR #103; cleanup kept the local branch \(checked out at \S+review\) and the remote branch/m);
+
+  const hold = harness(t, { herdr: true, merge: false, wps: [TWO[0], TWO[1]] });
+  assert.equal(await drive(hold), null);
+  assert.equal(hold.wp('WP-02').state, 'held');
+  assert.ok(!of(hold, 'WP-02').some((a) => ['remove', 'branch', 'branch-remote'].includes(a.part)), 'a held WP keeps its worktree and branches');
 });
 
 test('backend (D18, D19.18): flipping herdr off after dispatch keeps the WP on herdr; herdr on outside a projects tree → exec with the reason', async (t) => {
@@ -955,7 +1034,7 @@ test('backend (D18, D19.18): flipping herdr off after dispatch keeps the WP on h
   h.state.adapters.herdr.on = false;
   await drive(h);
   assert.equal(h.wp('WP-02').lane.backend, 'herdr');
-  for (const a of of(h, 'WP-02').filter((x) => ['start', 'wait', 'stop'].includes(x.step))) assert.ok(a.command[1].endsWith('lane.mjs'), a.id);
+  for (const a of of(h, 'WP-02').filter((x) => ['start', 'wait', 'stop'].includes(x.step) && !['branch-holder', 'branch', 'branch-remote'].includes(x.part))) assert.ok(a.command[1].endsWith('lane.mjs'), a.id);
   const outside = harness(t, { herdr: true, inProjects: false, wps: [TWO[0], TWO[1]] });
   await drive(outside, { until: (a) => a.wpId === 'WP-02' });
   assert.equal(outside.wp('WP-02').lane.backend, 'exec');
@@ -2006,7 +2085,7 @@ test('recovery paths (C1-9): an inspect action the gate asks for is emitted and 
   answerCore(twice, 1, 'a');
   assert.equal(await drive(twice), null);
   const lane = twice.trace.filter((a) => a.command?.[1]?.endsWith('lane.mjs')).map((a) => a.command[2]);
-  assert.ok(lane.every((verb) => ['admit', 'create', 'start', 'prompt', 'wait', 'check', 'stop'].includes(verb)), lane.join(','));
+  assert.ok(lane.every((verb) => ['admit', 'create', 'start', 'prompt', 'wait', 'check', 'stop', 'sweep'].includes(verb)), lane.join(','));
   assert.equal(twice.wp('WP-02').state, 'merged');
 });
 
