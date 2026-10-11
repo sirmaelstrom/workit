@@ -270,7 +270,7 @@ const laneBranch = (state, wp) => wp.lane?.branch ?? laneLayout(state, wp).branc
 
 // The worktree that has `branch` checked out, from `git worktree list
 // --porcelain`; null when none does.
-function checkedOutAt(porcelain, branch) {
+export function checkedOutAt(porcelain, branch) {
   let path = null;
   for (const line of String(porcelain).split(/\r?\n/)) {
     if (line.startsWith('worktree ')) path = line.slice('worktree '.length);
@@ -284,27 +284,31 @@ function checkedOutAt(porcelain, branch) {
 // update-ref deletes a checked-out branch, and the sweep HOLDs a lane whose
 // upstream is gone. Both compare and delete, so a branch that moved past the
 // merged head stays.
-function branchDeletes(state, wp, head) {
-  const repo = resolve(state.intent.repo.path);
-  const branch = laneBranch(state, wp);
+// The release phase queues the same three steps for its own branch.
+export function branchDeleteSteps(repo, branch, head, what = 'merged lane') {
   return [
-    shellAction('stop', {
-      part: 'branch-holder', instruction: 'List every worktree, to keep a branch another worktree has checked out.',
-      command: ['git', '-C', repo, 'worktree', 'list', '--porcelain'],
-    }),
-    shellAction('stop', {
-      part: 'branch', instruction: 'Delete the merged lane\'s local branch if it still names the merged head.',
-      command: ['git', '-C', repo, 'update-ref', '-d', `refs/heads/${branch}`, head],
-    }),
-    shellAction('stop', {
-      part: 'branch-remote', instruction: 'Delete the merged lane\'s branch on origin if it still names the merged head.',
-      command: ['git', '-C', repo, 'push', 'origin', `--force-with-lease=refs/heads/${branch}:${head}`, '--delete', branch],
-    }),
+    { part: 'branch-holder', instruction: 'List every worktree, to keep a branch another worktree has checked out.',
+      command: ['git', '-C', repo, 'worktree', 'list', '--porcelain'] },
+    { part: 'branch', instruction: `Delete the ${what}'s local branch if it still names the merged head.`,
+      command: ['git', '-C', repo, 'update-ref', '-d', `refs/heads/${branch}`, head] },
+    { part: 'branch-remote', instruction: `Delete the ${what}'s branch on origin if it still names the merged head.`,
+      command: ['git', '-C', repo, 'push', 'origin', `--force-with-lease=refs/heads/${branch}:${head}`, '--delete', branch] },
   ];
 }
 
+function branchDeletes(state, wp, head) {
+  return branchDeleteSteps(resolve(state.intent.repo.path), laneBranch(state, wp), head).map((fields) => shellAction('stop', fields));
+}
+
+// Removed means the directory is gone, and git either removed it or no longer
+// knows it: a replayed removal (resumed before its result was recorded)
+// exits 128 "is not a working tree" on a worktree it already removed.
+export const worktreeGone = (result, worktree, exists) => !exists(worktree)
+  && (result.code === 0 || /is not a working tree/.test(String(result.stderr ?? '')));
+
 // A branch already gone is the goal reached, not a failure.
 const BRANCH_ABSENT = /unable to resolve reference|remote ref does not exist/;
+export const branchOutcome = (result) => (result.code === 0 ? 'deleted' : BRANCH_ABSENT.test(String(result.stderr ?? '')) ? 'absent' : 'kept');
 
 // The unfenced lines of the level-2 section `title`, or null.
 function reportSection(text, title) {
@@ -595,7 +599,7 @@ function recordStop(state, wp, action, result, deps) {
   // Only then are the branches deleted, against the head the merge checked.
   if (action.part === 'remove') {
     const worktree = wp.lane?.worktree ?? laneLayout(state, wp).worktree;
-    const removed = result.code === 0 && !deps.exists(worktree);
+    const removed = worktreeGone(result, worktree, deps.exists);
     const removeError = removed ? null : result.code === 0 ? `${worktree} still exists after the removal: ${said(result)}` : said(result);
     const head = wp.gate?.head;
     const lane = { removed, ...(removeError ? { removeError } : {}) };
@@ -612,7 +616,7 @@ function recordStop(state, wp, action, result, deps) {
   }
   if (action.part === 'branch' || action.part === 'branch-remote') {
     const where = action.part === 'branch' ? 'local' : 'remote';
-    const outcome = result.code === 0 ? 'deleted' : BRANCH_ABSENT.test(String(result.stderr ?? '')) ? 'absent' : 'kept';
+    const outcome = branchOutcome(result);
     return proceed({ lane: { branchDeleted: { ...(wp.lane?.branchDeleted ?? {}), [where]: outcome, ...(outcome === 'kept' ? { [`${where}Error`]: said(result) } : {}) } } });
   }
   const backend = laneBackend(state, deps, wp.lane?.backend ?? 'exec');

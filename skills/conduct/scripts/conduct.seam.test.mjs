@@ -441,7 +441,7 @@ test('release PR (D16, D17, D19): base rev-parse, slot-form bumps, no review, la
   assert.deepEqual(release.filter((a) => a.kind !== 'wait').map(key), [
     'release/fetch', 'release/base', 'release/worktree', 'release/bump', 'release/bump',
     'release/add', 'release/commit', 'release/head', 'release/push', 'release/pr', 'release/ready', 'gate/gate',
-    'merge/squash', 'merge/merge-commit', 'merged/merged', 'release/after', 'release/verify',
+    'merge/squash', 'merge/merge-commit', 'merged/merged', 'release/after', 'release/verify', 'release/remove',
   ]);
   assert.ok(release.every((a) => a.seam === 'release'));
   assert.deepEqual(release.find((a) => a.part === 'base').command.slice(-2), ['rev-parse', 'origin/main']);
@@ -527,6 +527,62 @@ test('release failures (D20): land gate --wp release code 5, a verify exit 1 and
     assert.ok(h.state().touches.find((touch) => touch.kind === 'showcase').question.includes(`Release: failed (${state.release.reason})${link}`), name);
     if (name === 'land gate') assert.ok(link);
   }
+});
+
+test('release cleanup (44e46c79): after verify, the merged release\'s worktree is removed, then its branch is compared and deleted against the gate head, locally and on origin; what is kept is named and never fails the release', async (t) => {
+  const removeOk = [/^git -C \S+ worktree remove (\S+)$/, (h, m) => {
+    rmSync(m[1], { recursive: true, force: true });
+    return ok();
+  }];
+  const list = (holder) => [/^git -C \S+ worktree list --porcelain$/, (h) => ok(`worktree ${h.repo}\nHEAD ${BASE}\nbranch refs/heads/main\n\n${holder ? `worktree /elsewhere/review\nHEAD ${RELEASE_HEAD}\nbranch refs/heads/${h.state().release.branch}\n` : ''}`)];
+  const local = (code) => [/^git -C \S+ update-ref -d /, () => (code ? { code, stdout: '', stderr: 'error: cannot lock ref (synthetic)' } : ok())];
+  const remote = (stderr) => [/^git -C \S+ push origin --force-with-lease=\S+ --delete /, () => (stderr ? { code: 1, stdout: '', stderr } : ok())];
+  const cases = [
+    ['clean', [removeOk, list(false), local(0), remote(null)], ['remove', 'branch-holder', 'branch', 'branch-remote'], { local: 'deleted', remote: 'deleted' }, null],
+    ['dirty', [[/^git -C \S+ worktree remove /, () => ({ code: 128, stdout: '', stderr: "fatal: '/wt' contains modified or untracked files, use --force to delete it" })]],
+      ['remove'], undefined, /cleanup kept the worktree and branches: fatal: '\/wt' contains modified/],
+    // A resume replays a removal that already happened: git no longer knows the path.
+    ['replayed removal', [[/^git -C \S+ worktree remove (\S+)$/, (h, m) => {
+      rmSync(m[1], { recursive: true, force: true });
+      return { code: 128, stdout: '', stderr: `fatal: '${m[1]}' is not a working tree` };
+    }], list(false), local(0), remote(null)], ['remove', 'branch-holder', 'branch', 'branch-remote'], { local: 'deleted', remote: 'deleted' }, null],
+    ['exit 0, still there', [[/^git -C \S+ worktree remove /, () => ok()]], ['remove'], undefined, /cleanup kept the worktree and branches: \S+-release still exists after the removal/],
+    ['held elsewhere', [removeOk, list(true), local(0), remote(null)], ['remove', 'branch-holder'], { local: 'kept', remote: 'kept' }, /cleanup kept the local branch \(checked out at \/elsewhere\/review\)/],
+    ['origin moved', [removeOk, list(false), local(0), remote(' ! [rejected] conduct/seam-run/release (stale info)')], ['remove', 'branch-holder', 'branch', 'branch-remote'], { local: 'deleted', remote: 'kept' }, /cleanup kept the remote branch \(! \[rejected\]/],
+    ['already gone', [removeOk, list(false), [/^git -C \S+ update-ref -d /, () => ({ code: 1, stdout: '', stderr: "error: unable to resolve reference 'refs/heads/x'" })], remote("error: unable to delete 'x': remote ref does not exist")],
+      ['remove', 'branch-holder', 'branch', 'branch-remote'], { local: 'absent', remote: 'absent' }, null],
+  ];
+  for (const [name, rules, parts, deleted, kept] of cases) {
+    const h = await nonePath(t, { h: { rules } });
+    await drive(h, { until: (a) => a.step === 'showcase' });
+    const state = h.state();
+    assert.equal(state.release.state, 'done', name);
+    const verify = h.trace.findIndex((a) => a.phase === 'release' && a.part === 'verify');
+    const after = h.trace.slice(verify + 1).filter((a) => a.phase === 'release').map((a) => a.part);
+    assert.deepEqual(after, parts, name);
+    const keptTree = ['dirty', 'exit 0, still there'].includes(name);
+    assert.equal(state.release.cleanup.removed, !keptTree, name);
+    assert.equal(existsSync(state.release.worktree), keptTree, name);
+    const pick = (b) => b && { local: b.local, remote: b.remote };
+    assert.deepEqual(pick(state.release.cleanup.branchDeleted), deleted, name);
+    if (parts.includes('branch')) {
+      const [l, r] = ['branch', 'branch-remote'].map((part) => h.trace.find((a) => a.phase === 'release' && a.part === part).command);
+      const { branch } = state.release;
+      assert.deepEqual(l.slice(-4), ['update-ref', '-d', `refs/heads/${branch}`, RELEASE_HEAD], name);
+      assert.deepEqual(r.slice(-4), ['origin', `--force-with-lease=refs/heads/${branch}:${RELEASE_HEAD}`, '--delete', branch], name);
+    }
+    const line = section(h.analysis(), 'Queue accounting').split('\n').find((l) => l.startsWith('- release:'));
+    if (kept) assert.match(line, kept, name);
+    else assert.ok(!line.includes('cleanup kept'), `${name}: ${line}`);
+  }
+});
+
+test('release cleanup (44e46c79): a release that fails at verify keeps its worktree for diagnosis; no cleanup step runs', async (t) => {
+  const h = await nonePath(t, { h: { verifyCode: 1 } });
+  await drive(h, { until: (a) => a.step === 'analyze' });
+  assert.equal(h.state().release.state, 'failed');
+  assert.ok(!h.trace.some((a) => a.phase === 'release' && ['remove', 'branch-holder', 'branch', 'branch-remote'].includes(a.part)));
+  assert.ok(existsSync(h.state().release.worktree));
 });
 
 test('release bumps (M2): checked before emission — no slot, a duplicate slot, a file edited twice → failed and unlocked; a reformatted edit → record exits 2, state.json byte-identical', async (t) => {
@@ -859,7 +915,7 @@ test('resume (M5): stopped after the release PR merges, `--resume` from the run 
   h.pending = out(resumed).action;
   assert.equal((await drive(h)).kind, 'done');
   const tail = h.trace.slice(stoppedAt).map(shape);
-  assert.deepEqual(expected.map((a) => `${a.step}/${a.part}`), ['release/after', 'release/verify', 'analyze/null', 'showcase-brief/null', 'showcase/null']);
+  assert.deepEqual(expected.map((a) => `${a.step}/${a.part}`), ['release/after', 'release/verify', 'release/remove', 'analyze/null', 'showcase-brief/null', 'showcase/null']);
   assert.deepEqual(tail, expected);
   assert.equal(h.state().phase, 'closed');
 });

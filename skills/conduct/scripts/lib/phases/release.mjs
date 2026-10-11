@@ -1,11 +1,13 @@
 // Phase release: the repo's recipe as its own PR, after a complete build. A
 // release worktree beside the repo, the version bump in slot form, a draft PR
 // with no review (T0), the merge gate and merge through WP-03's land.mjs, the
-// recipe's `after` and `verify` commands, and the plugin-root handover when
+// recipe's `after` and `verify` commands, the worktree and branch cleanup,
+// and the plugin-root handover when
 // the run built the plugin that runs it. Every action carries seam `release`.
 //
 // Fields this phase adds to state.release (optional; readers tolerate their
-// absence): stage, queue, head, commit, retries, rebaseFrom, rebases, anomaly.
+// absence): stage, queue, head, commit, retries, rebaseFrom, rebases, anomaly,
+// cleanup ({ removed, removeError?, branchDeleted? }, as a merged lane's).
 // The release holds the merge lock as { wpId: 'release', since } from its
 // fetch to its merged, or to a failure (D20).
 import { basename, dirname, join, resolve } from 'node:path';
@@ -15,6 +17,7 @@ import { bumpPlan, releaseEligible, resolvePluginRoot, selfHosted } from '../rel
 import { mergeActions, mergeLockFor, recordLandStep } from '../land.mjs';
 import { conductScript, openTouch, recordTouch, touchAction } from '../touch.mjs';
 import { firstLine } from '../adapters.mjs';
+import { branchDeleteSteps, branchOutcome, checkedOutAt, worktreeGone } from '../lanes.mjs';
 import { samePath } from './spec.mjs';
 
 const SEAM = 'release';
@@ -22,6 +25,7 @@ const WAIT_MS = 60000;
 // No CI at the release head waits as long as a WP's does (WP-04's window).
 const NO_CI_WINDOW_MS = 30 * 60000;
 const LAND_STEPS = new Set(['rebase', 'gate', 'merge', 'merged']);
+const CLEANUP_PARTS = new Set(['remove', 'branch-holder', 'branch', 'branch-remote']);
 const FILL = { '{pr.number}': (r) => r.pr?.number, '{pr.head}': (r) => r.pr?.head, '{merge.sha}': (r) => r.merge?.sha };
 
 const shell = (part, command, extra = {}) => ({ kind: 'shell', step: 'release', seam: SEAM, part, command, expects: { type: 'none' },
@@ -153,8 +157,12 @@ function expand(state, deps) {
     case 'after':
     case 'verify': {
       const commands = recipe[r.stage] ?? [];
-      return go(commands.map((command) => shell(r.stage, recipeArgv(command), { cwd: r.worktree, recipeCommand: command })), r.stage === 'after' ? 'verify' : 'handover');
+      return go(commands.map((command) => shell(r.stage, recipeArgv(command), { cwd: r.worktree, recipeCommand: command })), r.stage === 'after' ? 'verify' : 'cleanup');
     }
+    // After verify, which runs in the worktree. The remove recorder queues the
+    // branch deletes only once the directory is gone (#206's order).
+    case 'cleanup':
+      return go([shell('remove', ['git', '-C', repo, 'worktree', 'remove', r.worktree], { instruction: 'Remove the merged release\'s worktree (no --force).' })], 'handover');
     case 'handover':
       return handover(state, deps);
     default:
@@ -308,10 +316,43 @@ function recordBump(action, deps) {
   if (!editsOnly(original, text, jsonPath, to)) throw new ConductError(2, `bump ${file}: the edit must parse and change only ${jsonPath}, to ${to}`);
 }
 
+// The merged release's worktree and branch, cleaned up as a merged WP's are
+// (lanes.mjs recordStop). What is kept lands on r.cleanup for the analysis and
+// never fails the release: it has already merged.
+function recordCleanup(state, action, result, deps) {
+  const r = state.release;
+  if (r.queue[0]?.step === action.step && r.queue[0]?.part === action.part) r.queue.shift();
+  // Every stderr line: a rejected push names its origin first, its reason after.
+  const why = () => String(result.stderr ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(' ') || firstLine(result.stdout) || `exit ${result.code}`;
+  if (action.part === 'remove') {
+    const removed = worktreeGone(result, r.worktree, deps.exists);
+    r.cleanup = { removed, ...(removed ? {} : { removeError: result.code === 0 ? `${r.worktree} still exists after the removal` : why() }) };
+    const head = r.gate?.head;
+    if (removed && head) {
+      const steps = branchDeleteSteps(resolve(state.intent.repo.path), r.branch, head, 'merged release');
+      r.queue.unshift(...steps.map(({ part, command, instruction }) => shell(part, command, { instruction })));
+    }
+    return undefined;
+  }
+  if (action.part === 'branch-holder') {
+    const holder = result.code === 0 ? checkedOutAt(result.stdout, r.branch) : `unknown: git worktree list failed: ${why()}`;
+    if (!holder) return undefined;
+    const kept = `checked out at ${holder}`;
+    r.cleanup.branchDeleted = { local: 'kept', remote: 'kept', localError: kept, remoteError: kept };
+    r.queue = r.queue.filter((queued) => !['branch', 'branch-remote'].includes(queued.part));
+    return undefined;
+  }
+  const where = action.part === 'branch' ? 'local' : 'remote';
+  const outcome = branchOutcome(result);
+  r.cleanup.branchDeleted = { ...(r.cleanup.branchDeleted ?? {}), [where]: outcome, ...(outcome === 'kept' ? { [`${where}Error`]: why() } : {}) };
+  return undefined;
+}
+
 export function record(state, action, result = {}, deps) {
   const r = state.release;
   if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result);
   if (LAND_STEPS.has(action.step) && action.kind !== 'wait') return recordLand(state, action, result, deps);
+  if (action.kind === 'shell' && CLEANUP_PARTS.has(action.part)) return recordCleanup(state, action, result, deps);
   if (action.part === 'bump') recordBump(action, deps);
   const head = r.queue[0];
   const sameHead = head && head.step === action.step && head.part === action.part;
