@@ -53,9 +53,9 @@ const brief = (text) => {
 
 // What a merged WP's cleanup kept: a worktree it could not remove keeps both
 // branches; a removed one names each branch neither deleted nor already gone.
-function cleanupKept(wp) {
-  const lane = wp.lane;
-  if (wp.state !== 'merged' || lane?.removed === undefined) return '';
+// The release's cleanup record has the lane's shape.
+function cleanupKept(merged, lane) {
+  if (!merged || lane?.removed === undefined) return '';
   if (!lane.removed) return `; cleanup kept the worktree and branches: ${brief(lane.removeError ?? 'not removed')}`;
   const kept = ['local', 'remote'].filter((where) => !['deleted', 'absent'].includes(lane.branchDeleted?.[where]))
     .map((where) => `${where} branch (${brief(lane.branchDeleted?.[`${where}Error`] ?? 'not attempted')})`);
@@ -66,11 +66,11 @@ function queueAccounting(state) {
   const rows = state.wps.map((wp) => {
     const why = wp.reason ? `: ${wp.reason}` : '';
     const pr = wp.pr?.number ? `, PR #${wp.pr.number}${wp.state === 'held' ? ' open' : ''}` : '';
-    return `- ${wp.id} (${wp.name || 'unnamed'}): ${wp.state}${why}${pr}${cleanupKept(wp)}`;
+    return `- ${wp.id} (${wp.name || 'unnamed'}): ${wp.state}${why}${pr}${cleanupKept(wp.state === 'merged', wp.lane)}`;
   });
   const r = state.release ?? {};
   const version = r.version ? `, ${r.version.from} → ${r.version.to}` : '';
-  return [...rows, `- release: ${r.state}${r.reason ? `: ${r.reason}` : ''}${version}${r.pr?.number ? `, PR #${r.pr.number}` : ''}`];
+  return [...rows, `- release: ${r.state}${r.reason ? `: ${r.reason}` : ''}${version}${r.pr?.number ? `, PR #${r.pr.number}` : ''}${cleanupKept(Boolean(r.merge?.sha), r.cleanup)}`];
 }
 
 // Counted from the touch-opened events (both modes); the showcase opens after this file.
