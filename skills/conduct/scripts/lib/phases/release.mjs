@@ -17,7 +17,7 @@ import { bumpPlan, releaseEligible, resolvePluginRoot, selfHosted } from '../rel
 import { mergeActions, mergeLockFor, recordLandStep } from '../land.mjs';
 import { conductScript, openTouch, recordTouch, touchAction } from '../touch.mjs';
 import { firstLine } from '../adapters.mjs';
-import { branchDeleteSteps, branchOutcome, checkedOutAt } from '../lanes.mjs';
+import { branchDeleteSteps, branchOutcome, checkedOutAt, worktreeGone } from '../lanes.mjs';
 import { samePath } from './spec.mjs';
 
 const SEAM = 'release';
@@ -325,7 +325,7 @@ function recordCleanup(state, action, result, deps) {
   // Every stderr line: a rejected push names its origin first, its reason after.
   const why = () => String(result.stderr ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean).join(' ') || firstLine(result.stdout) || `exit ${result.code}`;
   if (action.part === 'remove') {
-    const removed = result.code === 0 && !deps.exists(r.worktree);
+    const removed = worktreeGone(result, r.worktree, deps.exists);
     r.cleanup = { removed, ...(removed ? {} : { removeError: result.code === 0 ? `${r.worktree} still exists after the removal` : why() }) };
     const head = r.gate?.head;
     if (removed && head) {

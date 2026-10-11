@@ -541,6 +541,11 @@ test('release cleanup (44e46c79): after verify, the merged release\'s worktree i
     ['clean', [removeOk, list(false), local(0), remote(null)], ['remove', 'branch-holder', 'branch', 'branch-remote'], { local: 'deleted', remote: 'deleted' }, null],
     ['dirty', [[/^git -C \S+ worktree remove /, () => ({ code: 128, stdout: '', stderr: "fatal: '/wt' contains modified or untracked files, use --force to delete it" })]],
       ['remove'], undefined, /cleanup kept the worktree and branches: fatal: '\/wt' contains modified/],
+    // A resume replays a removal that already happened: git no longer knows the path.
+    ['replayed removal', [[/^git -C \S+ worktree remove (\S+)$/, (h, m) => {
+      rmSync(m[1], { recursive: true, force: true });
+      return { code: 128, stdout: '', stderr: `fatal: '${m[1]}' is not a working tree` };
+    }], list(false), local(0), remote(null)], ['remove', 'branch-holder', 'branch', 'branch-remote'], { local: 'deleted', remote: 'deleted' }, null],
     ['exit 0, still there', [[/^git -C \S+ worktree remove /, () => ok()]], ['remove'], undefined, /cleanup kept the worktree and branches: \S+-release still exists after the removal/],
     ['held elsewhere', [removeOk, list(true), local(0), remote(null)], ['remove', 'branch-holder'], { local: 'kept', remote: 'kept' }, /cleanup kept the local branch \(checked out at \/elsewhere\/review\)/],
     ['origin moved', [removeOk, list(false), local(0), remote(' ! [rejected] conduct/seam-run/release (stale info)')], ['remove', 'branch-holder', 'branch', 'branch-remote'], { local: 'deleted', remote: 'kept' }, /cleanup kept the remote branch \(! \[rejected\]/],

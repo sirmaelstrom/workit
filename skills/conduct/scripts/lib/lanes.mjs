@@ -300,6 +300,12 @@ function branchDeletes(state, wp, head) {
   return branchDeleteSteps(resolve(state.intent.repo.path), laneBranch(state, wp), head).map((fields) => shellAction('stop', fields));
 }
 
+// Removed means the directory is gone, and git either removed it or no longer
+// knows it: a replayed removal (resumed before its result was recorded)
+// exits 128 "is not a working tree" on a worktree it already removed.
+export const worktreeGone = (result, worktree, exists) => !exists(worktree)
+  && (result.code === 0 || /is not a working tree/.test(String(result.stderr ?? '')));
+
 // A branch already gone is the goal reached, not a failure.
 const BRANCH_ABSENT = /unable to resolve reference|remote ref does not exist/;
 export const branchOutcome = (result) => (result.code === 0 ? 'deleted' : BRANCH_ABSENT.test(String(result.stderr ?? '')) ? 'absent' : 'kept');
@@ -593,7 +599,7 @@ function recordStop(state, wp, action, result, deps) {
   // Only then are the branches deleted, against the head the merge checked.
   if (action.part === 'remove') {
     const worktree = wp.lane?.worktree ?? laneLayout(state, wp).worktree;
-    const removed = result.code === 0 && !deps.exists(worktree);
+    const removed = worktreeGone(result, worktree, deps.exists);
     const removeError = removed ? null : result.code === 0 ? `${worktree} still exists after the removal: ${said(result)}` : said(result);
     const head = wp.gate?.head;
     const lane = { removed, ...(removeError ? { removeError } : {}) };
