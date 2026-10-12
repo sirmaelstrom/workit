@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
  * Claude-session lifecycle carrier.  Each invocation emits JSON and appends one
- * receipt row, except a chain whose caller /exit is refused: it appends its
- * `chained` row and then a `retire-failed` row. herdr is reached only through
- * the injectable executor.
+ * receipt row, except a self-retirement (a chain that retires its caller, or
+ * `retire self`): it appends its intent row (`chained` / `retiring`) before the
+ * /exit send and its outcome row (`exit-sent`, or `retire-failed` on a refusal)
+ * after it. herdr is reached only through the injectable executor.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -665,16 +666,32 @@ export async function runSession(argv, overrides = {}) {
       if (retired.self) {
         const session = Object.values(state.sessions).find((item) => item.pane === opts.currentPane);
         let finalMessagePath = null;
+        let captureId = null;
         if (opts.captureFinal) {
           const current = call(deps, ['agent', 'get', opts.currentPane]);
-          const id = (current.code === 0 ? sessionId(current.stdout) : null) ?? session?.sessionId ?? null;
-          finalMessagePath = prepareFinalCapture(deps, id);
+          captureId = (current.code === 0 ? sessionId(current.stdout) : null) ?? session?.sessionId ?? null;
+          finalMessagePath = prepareFinalCapture(deps, captureId);
         }
         const output = { target: opts.currentPane, mode: 'exit', resumeId: null, closed: false, finalMessagePath, notice: 'this must be your last tool call' };
+        // `retiring` is the intent, written before the send; the row after the
+        // send records what happened to it. A run that dies between the two
+        // leaves only the intent, never a success it did not reach.
         const row = { ...base, ...output, state: 'retiring' };
         appendRow(deps, opts.log, row);
         const sent = call(deps, ['agent', 'prompt', opts.currentPane, '/exit']);
-        return { exit: sent.code === 0 ? EXIT.ok : EXIT.error, output: sent.code === 0 ? output : { error: `herdr agent prompt failed: ${(sent.stderr || sent.stdout).trim()}` }, row, log: opts.log, logSource: opts.logSource };
+        if (sent.code === 0) {
+          // A delivered /exit, not proof of exit.
+          const delivered = { ...row, ts: deps.timestamp(), state: 'exit-sent', waitMs: deps.now() - started };
+          appendRow(deps, opts.log, delivered);
+          return { exit: EXIT.ok, output, row: delivered, log: opts.log, logSource: opts.logSource };
+        }
+        // A refused /exit leaves a live session: disarm its final capture (the
+        // Stop hook would otherwise take whichever turn ends next) and say so.
+        const error = `herdr agent prompt ${opts.currentPane} /exit failed: ${(sent.stderr || sent.stdout).trim()}`;
+        if (captureId) deps.remove(join(finalStateRoot(deps), 'final-pending', captureId));
+        const refused = { ...row, ts: deps.timestamp(), state: 'retire-failed', exit: EXIT.error, error, finalMessagePath: null, waitMs: deps.now() - started };
+        appendRow(deps, opts.log, refused);
+        return { exit: EXIT.error, output: { ...output, finalMessagePath: null, error }, row: refused, log: opts.log, logSource: opts.logSource };
       }
       result = { output: retired, row: retired };
     } else if (opts.verb === 'chain') {
@@ -689,8 +706,15 @@ export async function runSession(argv, overrides = {}) {
         appendRow(deps, opts.log, committed);
         const sent = call(deps, ['agent', 'prompt', chained.target.target, '/exit']);
         // An accepted /exit is a delivered prompt, not proof the caller exited; the
-        // successor's `retire <caller pane> --mode close` is what confirms it.
-        if (sent.code === 0) return { exit: EXIT.ok, output: chained.output, row: committed, log: opts.log, logSource: opts.logSource };
+        // successor's `retire <caller pane> --mode close` is what confirms it. The
+        // `chained` row above is written before the send, so it records the intent;
+        // this one records the delivery. A run that dies between them leaves only
+        // the intent as the chain's last row.
+        if (sent.code === 0) {
+          const delivered = { ...committed, ts: deps.timestamp(), state: 'exit-sent', waitMs: deps.now() - started };
+          appendRow(deps, opts.log, delivered);
+          return { exit: EXIT.ok, output: chained.output, row: delivered, log: opts.log, logSource: opts.logSource };
+        }
         // The chained row was written before the send; a refused /exit gets its own
         // row so `status --last` shows a caller that is still live. The caller is not
         // retiring, so its final capture is disarmed (the Stop hook would otherwise

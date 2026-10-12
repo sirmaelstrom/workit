@@ -248,7 +248,55 @@ test('317f6cef: a chain that started on a retry reaches the same retirement path
   assert.deepEqual(f.calls.filter((call) => call.args.includes('/exit')).map((call) => call.args), [['agent', 'prompt', 'pane:caller', '/exit']]);
   const status = await runSession(['status', '--last', '--log', f.log], { exec: f.exec, env: env() });
   const [last] = status.output.rows;
-  assert.deepEqual([last.state, last.callerRetirement, last.callerPane, last.successorStartAttempts], ['chained', 'retiring', 'pane:caller', 4]);
+  // d4b3a8ea: the last row is the delivery (`exit-sent`), written after the
+  // send; the `chained` row before it is the intent.
+  assert.deepEqual([last.state, last.callerRetirement, last.callerPane, last.successorStartAttempts], ['exit-sent', 'retiring', 'pane:caller', 4]);
+  const all = await runSession(['status', '--chain', last.chainId, '--log', f.log], { exec: f.exec, env: env() });
+  assert.deepEqual(all.output.rows.map((r) => r.state), ['chained', 'exit-sent']);
+});
+
+// d4b3a8ea: retirement receipts record delivery, not intent.
+const selfRetire = (t, promptResult) => {
+  const f = fixture(t); const root = join(f.dir, 'self-capture'); const id = '88888888-8888-4888-8888-888888888888';
+  f.handler = (_program, args) => {
+    if (`${args[0]} ${args[1]}` === 'agent get') return { code: 0, stdout: herdrShapes.agentGet({ pane: 'pane:caller', session: id }), stderr: '' };
+    if (`${args[0]} ${args[1]}` === 'agent prompt') return promptResult;
+    return { code: 0, stdout: herdrShapes.empty('fixture'), stderr: '' };
+  };
+  return { f, root, id };
+};
+const logRows = (f) => readFileSync(f.log, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+
+test('d4b3a8ea: retire self on a refused /exit appends retire-failed, disarms the final capture, exits 1', async (t) => {
+  const { f, root, id } = selfRetire(t, { code: 1, stdout: '', stderr: 'agent_not_found' });
+  const result = await runSession(['retire', 'self', '--mode', 'exit', '--capture-final', '--log', f.log], { exec: f.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: root }) });
+  assert.equal(result.exit, 1);
+  assert.match(result.output.error, /\/exit failed: agent_not_found/);
+  assert.equal(result.output.finalMessagePath, null);
+  assert.deepEqual(logRows(f).map((r) => r.state), ['retiring', 'retire-failed']);
+  assert.equal(existsSync(join(root, 'final-pending', id)), false, 'a live session must not leave its capture armed');
+});
+
+test('d4b3a8ea: retire self on an accepted /exit appends exit-sent after the retiring intent', async (t) => {
+  const { f, root, id } = selfRetire(t, { code: 0, stdout: herdrShapes.prompt(), stderr: '' });
+  const result = await runSession(['retire', 'self', '--mode', 'exit', '--capture-final', '--log', f.log], { exec: f.exec, env: env({ WORKIT_SESSION_CHAIN_DIR: root }) });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(logRows(f).map((r) => r.state), ['retiring', 'exit-sent']);
+  assert.equal(existsSync(join(root, 'final-pending', id)), true);
+});
+
+test('d4b3a8ea: a chain that dies between its chained row and the /exit send leaves the intent as the last row, not a delivery', async (t) => {
+  const f = fixture(t); const c = clock(); f.handler = busyHerdr(0);
+  const crash = (program, args, options) => {
+    if (args.includes('/exit')) throw new Error('killed before the send');
+    return f.exec(program, args, options);
+  };
+  // A thrown send stands in for a kill: whatever the run writes after it, no
+  // row may claim the /exit was delivered.
+  await runSession(chainArgv(f), { exec: crash, env: env(), ...c.deps });
+  const states = logRows(f).filter((r) => r.verb === 'chain').map((r) => r.state);
+  assert.ok(states.includes('chained'), states.join(','));
+  assert.equal(states.includes('exit-sent'), false, states.join(','));
 });
 
 test('317f6cef custody: a pane busy for the whole successor timeout leaves the caller live, closes the empty split, and reports agent_pane_busy', async (t) => {
