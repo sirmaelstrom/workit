@@ -101,6 +101,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Waits --until idle --until done, never bare; honours --plan-floor.
            One read, no poll loop: a codex lane whose rollout shows its turn
            still running exits 4 as settled-turn-live.
+  status   <name>  Read-only, no wait: liveness live|settled|unknown and its
+           source. A codex lane's comes from its rollout turn events only
+           (source rollout, or unknown with source none); herdr's reading is
+           printed as herdr and never decides it. A claude lane's is herdr's.
+           Judge codex liveness here, never from herdr agent get.
   fallback <name> --to claude --model <slug> --reasoning <lvl>
   stop     <name> [--timeout <ms>]  Stops the lane agent; a late shell/banner
            check is accepted only after the live-TUI veto. A Claude lane gone
@@ -205,7 +210,7 @@ const POLL_MS = 1_000;
 const SETTLE_CONFIRM_MS = 3_000;
 const LOG_BASENAME = 'lane-log.jsonl';
 const LOG_SUBPATH = ['data', 'outputs', 'projects', 'agentic-practice-transfer', 'lanes'];
-const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'reap', 'sweep', 'admit']);
+const VERBS = new Set(['create', 'start', 'prompt', 'wait', 'check', 'resume', 'status', 'fallback', 'stop', 'reap', 'sweep', 'admit']);
 // Operator rulings of 2026-10-01 (quest 93d4855b), in GB of free commit memory.
 const ADMIT_MIN_FREE_GB = 10;
 const ADMIT_DRAIN_FREE_GB = 4;
@@ -260,7 +265,7 @@ function usage(message) {
 // already fits, else a cleaned prefix plus a 6-character hash of the full name. Every herdr verb that
 // takes an agent name, and every agent-list comparison, goes through this one mapping.
 const HERDR_AGENT_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
-const HERDR_NAMED_VERBS = new Set(['start', 'send-keys', 'prompt', 'wait', 'stop', 'read', 'focus']);
+const HERDR_NAMED_VERBS = new Set(['start', 'send-keys', 'prompt', 'wait', 'stop', 'read', 'focus', 'get']);
 
 export function herdrAgentName(name) {
   const text = String(name);
@@ -2457,6 +2462,32 @@ async function checkLane(opts, deps, state) {
   };
 }
 
+// Read-only liveness. herdr's agent_status reads idle while a codex lane sleeps
+// inside a tool call, so a codex lane's liveness comes from its rollout alone:
+// herdr's reading is printed beside it and never decides. No rollout found is
+// `unknown`, not idle. A claude lane has no rollout; its liveness is herdr's.
+async function statusLane(opts, deps, state) {
+  const lane = laneRecord(opts, state);
+  const got = call(deps, 'herdr', ['agent', 'get', opts.name]);
+  const herdr = got.code === 0 ? responseState(got.stdout, 'unknown') : 'unreadable';
+  let result;
+  if (lane.kind === 'codex') {
+    const rolloutPath = findCodexRollout(deps, lane);
+    const turn = rolloutPath ? codexTurnState(deps, rolloutPath, lane.promptedAt ?? null) : null;
+    result = turn
+      ? { liveness: turn.ended ? 'settled' : 'live', source: 'rollout', turnEvent: turn.event, turnEventAt: turn.at, rollout: rolloutPath }
+      : { liveness: 'unknown', source: 'none', rollout: rolloutPath };
+  } else {
+    const liveness = ['working', 'blocked'].includes(herdr) ? 'live' : ['idle', 'done'].includes(herdr) ? 'settled' : 'unknown';
+    result = { liveness, source: 'herdr' };
+  }
+  return {
+    exit: EXIT.OK,
+    output: { ...result, herdr, notice: 'status is not evidence of finished work — run lane check' },
+    row: { ...laneInstrumentation(opts.name, lane, result.liveness), herdr, settleSource: result.source },
+  };
+}
+
 async function resumeLane(opts, deps, state) {
   const lane = laneRecord(opts, state);
   const timeout = positiveNumber(opts.timeout, '--timeout', 120_000);
@@ -3704,6 +3735,7 @@ export async function runLane(argv, overrides = {}) {
       case 'wait': result = await waitLane(opts, deps, state); break;
       case 'check': result = await checkLane(opts, deps, state); break;
       case 'resume': result = await resumeLane(opts, deps, state); break;
+      case 'status': result = await statusLane(opts, deps, state); break;
       case 'fallback': result = await fallbackLane(opts, deps, state); break;
       case 'stop': result = await stopLane(opts, deps, state); break;
       case 'reap': result = await reapLane(opts, deps, state); break;
