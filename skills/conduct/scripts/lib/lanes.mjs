@@ -139,6 +139,24 @@ export function guardedKillArgv(pid, identity, platform) {
   return ['sh', '-c', `${SH_IDENTITY}; if [ -n "$id" ] && [ "$id" = "$2" ]; then kill -TERM -- "-$1"; else echo "${refuse}"; exit 3; fi`, 'sh', String(pid), identity];
 }
 
+// The paths a herdr lane's brief may name while they are absent from its
+// worktree (lane.mjs prompt refuses any other absent path). Its own `- Create`
+// paths, and a `- Modify` path an earlier WP of the run creates: the worktree
+// is cut from origin/<default>, which lacks that file until the earlier WP
+// merges. Any other Modify path the brief names must exist, or the brief's
+// premise is stale (the check reads the brief, not the WP spec it points at). A
+// directory entry (`dir/`) covers the paths under it. Herdr backend only: the
+// exec backend's brief rides `conduct spawn`, which runs no path check.
+export function allowedMissing(state, wp) {
+  const own = wp.creates ?? [];
+  // Only a WP that runs first can supply the file: an earlier wave, or one this WP depends on.
+  const first = (other) => other.id !== wp.id && ((other.wave ?? 0) < (wp.wave ?? 0) || (wp.dependsOn ?? []).includes(other.id));
+  const others = (state.wps ?? []).filter(first).flatMap((other) => other.creates ?? []);
+  const under = (path, created) => path === created || (created.endsWith('/') && path.startsWith(created));
+  const createdElsewhere = (wp.files ?? []).filter((path) => !own.includes(path) && others.some((created) => under(path, created)));
+  return [...new Set([...own, ...createdElsewhere])];
+}
+
 export function laneBackend(state, deps, backend) {
   const repo = resolve(state.intent.repo.path);
   const fallbackBranch = state.intent.repo.defaultBranch ?? 'main';
@@ -187,9 +205,7 @@ export function laneBackend(state, deps, backend) {
       // automatic capacity re-send, which renews nothing.
       prompt: (wp, { amendment = false, answer = null, resend = false } = {}) => {
         const lane = laneLayout(state, wp);
-        // The WP's Files are the paths the lane may create, so the brief's
-        // path check (lane.mjs prompt) allows them to be absent.
-        const args = [lane.name, '--file', wp.lane.briefPath, ...(wp.files ?? []).flatMap((path) => ['--allow-missing', path])];
+        const args = [lane.name, '--file', wp.lane.briefPath, ...allowedMissing(state, wp).flatMap((path) => ['--allow-missing', path])];
         const byReceipt = Boolean(answer?.receiptId && deps.env?.WORKIT_RECEIPT_RESOLVER);
         if (amendment) args.push('--amendment', ...(byReceipt ? ['--ruling-receipt', answer.receiptId, '--quest', state.intent.anchor] : ['--no-ruling']));
         return [shellAction('prompt', {

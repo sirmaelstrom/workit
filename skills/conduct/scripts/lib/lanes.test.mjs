@@ -7,11 +7,11 @@ import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
+  allowedMissing, chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
 } from './lanes.mjs';
 import { dispatchable } from './schedule.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
-import { reportShapeProblems } from '../../../../scripts/lane.mjs';
+import { reportShapeProblems, runLane } from '../../../../scripts/lane.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS = join(HERE, '..');
@@ -37,7 +37,7 @@ function lanes(t, { agent = 'claude', herdr = false, backend = 'exec', model = '
   const repo = join(dir, 'repo');
   const pluginRoot = join(dir, 'plugin');
   const wp = {
-    id: 'WP-00', name: 'demo', files: ['a.mjs'], dependsOn: [], tier: 'T1', model, runtimeExercise: 'CLI: cat hello.txt prints hi', state: 'dispatched',
+    id: 'WP-00', name: 'demo', files: ['a.mjs'], creates: ['a.mjs'], dependsOn: [], tier: 'T1', model, runtimeExercise: 'CLI: cat hello.txt prints hi', state: 'dispatched',
     queue: [], lane: { backend, base: SHA40, ...wpLane },
   };
   const state = {
@@ -755,11 +755,11 @@ test('herdr: each action\'s argv, every one with --log (D17, D19.17)', (t) => {
   assert.deepEqual(b.admit(f.wp).map((act) => act.command), [lane('admit')]);
   assert.deepEqual(b.create(f.wp)[2].command, lane('create', '--repo', f.repo, '--branch', 'conduct/demo/wp-00', '--base', 'origin/main', '--label', 'demo-wp-00', '--slug', 'demo-wp-00'));
   assert.deepEqual(b.start(f.wp)[0].command, lane('start', 'demo-wp-00', '--pane', 'w1:p1', '--kind', 'claude', '--model', 'claude-opus-5-5', '--reasoning', 'high'));
-  // The WP's Files ride as --allow-missing: lane.mjs prompt refuses a brief
-  // naming an absent path, and these are the paths the lane creates (ec7b1192).
+  // The WP's Create paths ride as --allow-missing: lane.mjs prompt refuses a
+  // brief naming an absent path, and these are the paths the lane creates (ec7b1192).
   assert.deepEqual(b.prompt(f.wp)[0].command, lane('prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--allow-missing', 'a.mjs'));
-  assert.deepEqual(b.prompt({ ...f.wp, files: ['src/x.ts', 'src/x.test.ts'] })[0].command,
-    lane('prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--allow-missing', 'src/x.ts', '--allow-missing', 'src/x.test.ts'));
+  assert.deepEqual(b.prompt({ ...f.wp, files: ['src/x.ts', 'src/x.test.ts'], creates: ['src/x.test.ts'] })[0].command,
+    lane('prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--allow-missing', 'src/x.test.ts'));
   assert.deepEqual(b.check(f.wp).map((act) => act.command), [
     ['node', CONDUCT(f), 'lane', 'check', '--run', f.runDir, '--wp', 'WP-00', '--runtime-only'],
     lane('check', 'demo-wp-00', '--expect-report', join(f.runDir, 'lane-wp-00-report.md')),
@@ -779,6 +779,56 @@ test('herdr codex start sandbox (D20)', (t) => {
   assert.deepEqual(command.slice(command.indexOf('--sandbox'), command.indexOf('--sandbox') + 2), ['--sandbox', 'danger-full-access']);
   const claude = lanes(t, { backend: 'herdr', wpLane: { paneId: 'w1:p1' } });
   assert.equal(claude.backend().start(claude.wp)[0].command.includes('--sandbox'), false);
+});
+
+// ec7b1192 post-merge council (Major): exempting every Files entry let a moved
+// or renamed Modify target through, the stale premise the check exists for.
+test('allowedMissing: Create paths, and a Modify path only when another WP of the run creates it', () => {
+  const wp = { id: 'WP-02', wave: 2, files: ['src/new.ts', 'src/old.ts', 'src/made-by-01.ts', 'gen/out.ts'], creates: ['src/new.ts'] };
+  const state = { wps: [
+    { id: 'WP-01', wave: 1, files: ['src/made-by-01.ts'], creates: ['src/made-by-01.ts', 'gen/'] },
+    wp,
+  ] };
+  const allowed = allowedMissing(state, wp);
+  assert.ok(allowed.includes('src/new.ts'), '(c) a Create path is exempt');
+  assert.ok(allowed.includes('src/made-by-01.ts'), '(b) a Modify path an earlier WP creates is exempt');
+  assert.ok(allowed.includes('gen/out.ts'), 'a Modify path under a directory another WP creates is exempt');
+  assert.equal(allowed.includes('src/old.ts'), false, '(a) a Modify path no WP creates is not exempt');
+  assert.deepEqual(allowedMissing({ wps: [wp] }, { ...wp, creates: undefined }), [], 'a record without creates exempts nothing');
+});
+
+// Review of #220 (codex): only a WP that runs first can supply the file.
+test('allowedMissing: a Modify path a LATER WP creates is not exempt; an earlier wave or a named dependency is', () => {
+  const wp = { id: 'WP-02', wave: 2, dependsOn: [], files: ['src/later.ts', 'src/earlier.ts', 'src/dep.ts'], creates: [] };
+  const state = { wps: [
+    { id: 'WP-01', wave: 1, creates: ['src/earlier.ts'] },
+    wp,
+    { id: 'WP-03', wave: 3, creates: ['src/later.ts'] },
+    { id: 'WP-04', wave: 2, creates: ['src/dep.ts'] },
+  ] };
+  assert.deepEqual(allowedMissing(state, wp), ['src/earlier.ts']);
+  assert.deepEqual(allowedMissing(state, { ...wp, dependsOn: ['WP-04'] }), ['src/earlier.ts', 'src/dep.ts']);
+});
+
+test('allowedMissing → lane.mjs prompt: a missing Modify path no WP creates is refused; one an earlier WP creates is sent', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'workit-allow-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const worktree = join(dir, 'projects', 'repo-wt-x');
+  mkdirSync(worktree, { recursive: true });
+  const brief = join(dir, 'brief.md');
+  writeFileSync(brief, 'Edit `src/old.ts` and `src/made-by-01.ts`; add `src/new.ts`.', 'utf8');
+  const log = join(dir, 'lane-runner.jsonl');
+  writeFileSync(`${log}.state.json`, JSON.stringify({ creates: [], lanes: { 'lane-x': { pane: 'w1:p2', kind: 'claude', path: worktree, branch: 'b', base: 'main' } } }), 'utf8');
+  const wp = { id: 'WP-02', wave: 2, files: ['src/new.ts', 'src/old.ts', 'src/made-by-01.ts'], creates: ['src/new.ts'] };
+  const state = { wps: [{ id: 'WP-01', wave: 1, creates: ['src/made-by-01.ts'] }, wp] };
+  const exec = () => ({ code: 0, stdout: '{"result":{"agents":[{"name":"lane-x","state":"done"}],"state":"working","accepted":true}}', stderr: '' });
+  const send = (extra) => runLane(['prompt', 'lane-x', '--file', brief, ...allowedMissing(state, extra).flatMap((p) => ['--allow-missing', p]), '--log', log], { exec });
+  const refused = await send(wp);
+  assert.equal(refused.exit, 2, JSON.stringify(refused.output));
+  assert.match(refused.output.error, /src\/old\.ts/);
+  assert.doesNotMatch(refused.output.error, /src\/made-by-01\.ts|src\/new\.ts/);
+  const sent = await send({ ...wp, files: ['src/new.ts', 'src/made-by-01.ts'], creates: ['src/new.ts', 'src/old.ts'] });
+  assert.equal(sent.exit, 0, JSON.stringify(sent.output));
 });
 
 test('herdr amendments: a receipt only when a resolver can resolve it (D16)', (t) => {

@@ -54,14 +54,17 @@ function fieldText(lines, field) {
 // `- Modify `, first backticked token each; the list ends at the next line
 // that begins with a field label. Each path is repository-relative, posix,
 // with `.` and `..` resolved; one that leaves the repository is refused.
-export function parseFiles(text, where = 'Files') {
+// `verbs` narrows the bullets read: `['Create']` gives the paths the WP says
+// do not exist yet, the set lane.mjs prompt may allow to be absent.
+export function parseFiles(text, where = 'Files', { verbs = ['Create', 'Modify'] } = {}) {
   const lines = text.split(/\r?\n/);
   const start = lines.findIndex((line) => line.startsWith('**Files:**'));
   if (start < 0) return [];
   const files = [];
   for (const line of lines.slice(start + 1)) {
     if (FIELD_LABEL.test(line)) break;
-    if (!/^- (Create|Modify) /.test(line)) continue;
+    const verb = /^- (Create|Modify) /.exec(line)?.[1];
+    if (!verb || !verbs.includes(verb)) continue;
     const token = /`([^`]+)`/.exec(line);
     if (token) files.push(...expandBraces(token[1].trim()).map((path) => repoPath(path, where)));
   }
@@ -187,7 +190,7 @@ export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(p
     if (!waveOf.has(id)) throw new ConductError(2, `${id} is not in the orchestrator's ## Wave Plan`);
     const tier = reviewTier(text, id);
     return {
-      id, name: rows.get(id)?.name || heading[2].trim(), specPath, wave: waveOf.get(id), files: parseFiles(text, id),
+      id, name: rows.get(id)?.name || heading[2].trim(), specPath, wave: waveOf.get(id), files: parseFiles(text, id), creates: parseFiles(text, id, { verbs: ['Create'] }),
       precondition: fieldText(lines, 'Precondition') ?? '', verification: fieldText(lines, 'Verification'), tier,
       model: rows.get(id)?.model ?? 'opus', runtimeExercise: fieldText(lines, 'Runtime exercise') ?? '',
     };
