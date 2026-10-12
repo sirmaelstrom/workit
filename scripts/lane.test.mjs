@@ -3589,6 +3589,10 @@ test('4aa9b174: a dialog still drawn after the answer is exit 3 with the pane ta
   assert.equal(result.exit, 3);
   assert.match(result.output.error, /folder-trust dialog in pane w1:p2 was answered with Down\+Enter but no Claude mode line was drawn last within 15000 ms/);
   assert.match(result.output.dialog, /Enter to confirm/);
+  // ec77fec7 review (codex, astra): the agent is registered, so its record is kept.
+  const lane = readState(f).lanes['lane-a'];
+  assert.deepEqual([lane?.kind, lane?.pane], ['claude', 'w1:p2']);
+  assert.match(lane.startFailed?.reason ?? '', /folder-trust dialog/);
 });
 
 test('4aa9b174 amend 2: an empty frame after the answer is not readiness; it times out to exit 3', async (t) => {

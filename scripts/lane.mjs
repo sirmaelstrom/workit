@@ -1275,10 +1275,20 @@ async function startLane(opts, deps, state) {
       }
       // herdr registers the agent before it reports agent_not_ready, so once
       // the dialog is answered the agent is live in this pane.
-      if (opts.kind === 'claude' && startupBlocked(started) && await answerFolderTrust(deps, pane)) {
-        folderTrusted = true;
-        raw = '';
-        break;
+      if (opts.kind === 'claude' && startupBlocked(started)) {
+        let answered = false;
+        try {
+          answered = await answerFolderTrust(deps, pane);
+        } catch (error) {
+          // The agent is registered whether or not the answer took: keep its record.
+          await recordLane({ startFailed: { at: deps.timestamp(), reason: String(error.message).slice(0, 300) } });
+          throw error;
+        }
+        if (answered) {
+          folderTrusted = true;
+          raw = '';
+          break;
+        }
       }
       const recoverable = startCollision(started) || (isTimeoutFailure(started) && bareShellWithoutAgent(deps, pane, { signature: promptSignature, patterns }));
       if (!recoverable || attempt > 0) {
