@@ -326,6 +326,10 @@ test('briefPaths: backticked repo-relative paths outside fences, line locators s
     '```',
     'node `skills/in-fence/x.mjs`',
     '```',
+    '````markdown',
+    '```',
+    'still fenced: `src/in-quote.ts`',
+    '````',
     '- Create `src/made.ts` (a WP Files bullet names a file that does not exist yet)',
     '- Modify `src/kept.ts`',
   ].join('\n');

@@ -1438,16 +1438,11 @@ const BRIEF_PATH = /^(?:\.\/)?[\w@.+-]+(?:\/[\w@.+-]+)*\/[\w@+-][\w@.+-]*\.[A-Za
 
 export function briefPaths(text) {
   const found = new Set();
-  let fence = null;
-  for (const line of String(text).split(/\r?\n/)) {
-    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
-    if (marker) {
-      if (fence === null) fence = marker[1][0];
-      else if (marker[1][0] === fence) fence = null;
-      continue;
-    }
+  // markdownLines marks fenced lines the way the report checks read them: a
+  // fence closes only on its own character, at least its own length.
+  for (const { text: line, fenced } of markdownLines(text)) {
     // A work package's `- Create <path>` bullet names a file that does not exist yet.
-    if (fence !== null || /^\s*[-*]\s+Create\s/.test(line)) continue;
+    if (fenced || /^\s*[-*]\s+Create\s/.test(line)) continue;
     for (const match of line.matchAll(/`([^`]+)`/g)) {
       for (const word of match[1].split(/\s+/)) {
         const token = word.replace(/:\d+(?:-\d+)?$/, '');
