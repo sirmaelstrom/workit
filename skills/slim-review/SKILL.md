@@ -387,8 +387,13 @@ lane refutations and conductor overturns separately.
 **A guard thread (`**lens:** guard`) is judged by the conductor or the
 operator, never the lane.** It flags the author's own change, so the author
 cannot clear it. `reply --verdict` on a guard comment exits 2, posting and
-logging nothing, unless `--adjudicator` is `conductor` or `operator`. The
-verdicts are the same three:
+logging nothing, unless `--adjudicator` is `conductor` or `operator`. Those two
+are refused in turn (exit 2, before anything is read) while `WORKIT_LANE` is
+set, which `lane.mjs start` does in every lane's tool environment. This
+catches a lane's mistake; it is not proof of identity. A lane spawned any other
+way (an Agent-tool subagent) carries no marker, and a lane that unsets it is
+past the check, so for both the rule is honour-bound. The verdicts are the
+same three:
 - `refuted`: the removal is legitimate, with a quoted reason (the function it
   tested was deleted, the case moved to another file);
 - `judgment`;

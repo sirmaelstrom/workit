@@ -87,7 +87,7 @@ List the callers of any function you add a check to, and every construct in your
 
    An amendment that only fixes a failed check needs no table: the conductor reads the latest table at or after the amendment that carried the findings.
 
-   **A guard thread is the conductor's, never yours.** A comment tagged `**lens:** guard` is the writer's test-weakening check: your PR deleted, skipped or loosened a test. Its row's verdict reads `conductor`, never `fixed`. Put in the evidence the reason the removal is legitimate, or the commit that restores the test. The conductor gives the verdict; the writer refuses `--adjudicator lane` on it.
+   **A guard thread is the conductor's, never yours.** A comment tagged `**lens:** guard` is the writer's test-weakening check: your PR deleted, skipped or loosened a test. Its row's verdict reads `conductor`, never `fixed`. Put in the evidence the reason the removal is legitimate, or the commit that restores the test. The conductor gives the verdict; the writer refuses `--adjudicator lane` on it. Never sign as anyone else: you never pass `--adjudicator conductor` or `--adjudicator operator`, on any thread. A lane started by `lane.mjs` carries `WORKIT_LANE`, and `pr-review.mjs reply` refuses both while it is set. Never unset it. A lane started any other way is bound by this sentence alone.
 
    After the table, the amendment's own Debrief uses **headings**, not bold paragraphs: `### Forks I decided that the brief did not settle` and `### Claims no control measures` (or `####` under the `## Amendment N` heading). The reviewers' uncertainty extractor matches headings only, so a bold-paragraph Debrief never reaches them.
 

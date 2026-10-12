@@ -430,6 +430,12 @@ export function anchorEntry(entry, index) {
 export const GUARD_LENS = 'guard';
 /** Who may give a guard thread its verdict. The author may not clear it. */
 export const GUARD_ADJUDICATORS = Object.freeze(['conductor', 'operator']);
+/**
+ * Set by lane.mjs in every lane agent's tool environment (scripts/lane.mjs
+ * LANE_MARKER_ENV). While it is set, `reply` refuses an adjudicator from
+ * GUARD_ADJUDICATORS: a lane cannot sign as the conductor or the operator.
+ */
+export const LANE_MARKER_ENV = 'WORKIT_LANE';
 
 const MAX_LISTED = 20;
 

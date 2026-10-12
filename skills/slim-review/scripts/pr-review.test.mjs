@@ -87,6 +87,8 @@ import {
   deliveryKind,
   postedReviewScope,
 } from './pr-review-recognise.mjs';
+import { GUARD_ADJUDICATORS, LANE_MARKER_ENV } from './pr-review-guard.mjs';
+import { LANE_MARKER_ENV as LANE_MJS_MARKER } from '../../../scripts/lane.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
 const SCHEMA = join(dirname(fileURLToPath(import.meta.url)), '..', 'reference', 'findings.schema.json');
@@ -5942,7 +5944,7 @@ test('guard, coordinated delta post: only the amendment\'s removal is reported, 
   });
 });
 
-function replyToGuard({ adjudicator, body = '**lens:** guard\n\n**Test-weakening check: `src/a.test.mjs`**\n\n- ...' }) {
+function replyToGuard({ adjudicator, env = {}, body = '**lens:** guard\n\n**Test-weakening check: `src/a.test.mjs`**\n\n- ...' }) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-guard-reply-'));
   const calls = [];
   try {
@@ -5960,13 +5962,14 @@ function replyToGuard({ adjudicator, body = '**lens:** guard\n\n**Test-weakening
           },
           die: (code, message) => { throw Object.assign(new Error(message), { code }); },
           log: () => {},
+          env,
         },
       );
     } catch (err) {
       error = err;
     }
     const rows = existsSync(measureLog) ? readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).map(JSON.parse) : [];
-    return { error, rows, posts: calls.filter((args) => args.includes('POST')) };
+    return { error, rows, calls, posts: calls.filter((args) => args.includes('POST')) };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -5991,4 +5994,30 @@ test('guard adjudicator: the conductor can, and the row says lens guard; a lens 
   assert.equal(lensComment.error, undefined);
   assert.equal(lensComment.rows[0].lens, 'codex');
   assert.equal(lensComment.rows[0].adjudicator, 'lane');
+});
+
+test('lane marker: with WORKIT_LANE set, conductor and operator are refused on guard and lens comments before any gh call', () => {
+  const env = { [LANE_MARKER_ENV]: 'al-l4' };
+  for (const adjudicator of GUARD_ADJUDICATORS) {
+    for (const body of [undefined, '**lens:** codex\n\n**[P2] t**\n\nb']) {
+      const { error, rows, calls } = replyToGuard({ adjudicator, env, ...(body ? { body } : {}) });
+      assert.equal(error?.code, 2, `adjudicator ${adjudicator}`);
+      assert.match(error.message, /WORKIT_LANE=al-l4 is set, so this is a lane/);
+      assert.deepEqual(calls, [], 'no gh call at all: the comment is not even read');
+      assert.deepEqual(rows, [], 'no verdict row');
+    }
+  }
+});
+
+test('lane marker: the writer reads the same name lane.mjs sets', () => {
+  assert.equal(LANE_MARKER_ENV, LANE_MJS_MARKER);
+});
+
+test('lane marker: a marked lane still records its own verdict on a lens comment; an empty marker is no marker', () => {
+  const lane = replyToGuard({ adjudicator: 'lane', env: { [LANE_MARKER_ENV]: 'al-l4' }, body: '**lens:** codex\n\n**[P2] t**\n\nb' });
+  assert.equal(lane.error, undefined);
+  assert.equal(lane.rows[0].adjudicator, 'lane');
+  const empty = replyToGuard({ adjudicator: 'conductor', env: { [LANE_MARKER_ENV]: '' } });
+  assert.equal(empty.error, undefined);
+  assert.equal(empty.rows[0].adjudicator, 'conductor');
 });
