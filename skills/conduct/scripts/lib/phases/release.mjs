@@ -36,7 +36,7 @@ const wait = (step, waitMs, instruction) => ({ kind: 'wait', step, seam: SEAM, w
 function view(state) {
   const r = state.release;
   return { id: 'release', tier: 'T0', commit: r.commit ?? null, queue: r.queue ?? [], retries: r.retries ?? 0, rebaseFrom: r.rebaseFrom ?? null,
-    lane: { worktree: r.worktree, branch: r.branch, base: r.base }, pr: r.pr, gate: r.gate, merge: r.merge, reviews: [], rebases: r.rebases ?? [] };
+    lane: { worktree: r.worktree, branch: r.branch, base: r.base }, pr: r.pr, gate: r.gate, merge: r.merge, squashExit: r.squashExit, reviews: [], rebases: r.rebases ?? [] };
 }
 
 // Terminal for the release: the lock is released and the phase moves on.
@@ -293,8 +293,9 @@ function recordLand(state, action, result, deps) {
     else r[key] = value;
   }
   if (!Object.hasOwn(patch, 'queue')) r.queue.shift();
-  // The squash landed even if the merge-commit lookup after it fails.
-  if (action.part === 'squash' && out.outcome === 'continue') r.squashed = true;
+  // The squash landed even if the merge-commit lookup after it fails; a squash
+  // that exited non-zero is confirmed only by that lookup (land.mjs).
+  if (action.part === 'squash' && out.outcome === 'continue' && !patch.squashExit) r.squashed = true;
   if (out.outcome === 'continue' || out.outcome === 'done') return;
   if (out.outcome === 'wait') {
     if (r.queue[0]?.kind !== 'wait') r.queue.unshift(wait(action.step, out.waitMs ?? WAIT_MS, out.reason ?? ''));

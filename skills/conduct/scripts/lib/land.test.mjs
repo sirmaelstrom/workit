@@ -1160,6 +1160,27 @@ test('recordLandStep outcomes (D19.15)', () => {
   assert.deepEqual(recordLandStep(state, wp, mergeCommit, ok(fixtureText('pr-view-150-merge-commit.json')), {}).patch, { merge: { sha: '37e79605735904eac875b000ad1b2ca55885db89' } });
 });
 
+// 722108d6: `gh pr merge` can exit non-zero after the merge landed (a
+// post-merge local step failing, obs#701). Its exit is advisory; the
+// merge-commit read decides.
+test('merge: a squash that exits non-zero goes on to the merge-commit read, which confirms or blocks', () => {
+  const state = makeState();
+  const wp = makeWp({ gate: { ok: true, head: HEAD, door: 'two-way' } });
+  const [squash, mergeCommit] = mergeActions(state, wp, HEAD);
+  const failed = recordLandStep(state, wp, squash, { code: 1, stdout: '', stderr: 'failed to run git: fatal: \'main\' is already checked out' }, {});
+  assert.equal(failed.outcome, 'continue');
+  assert.deepEqual(failed.patch.squashExit, { code: 1, stderr: 'failed to run git: fatal: \'main\' is already checked out' });
+  assert.equal(Object.hasOwn(failed.patch, 'squashed'), false, 'a failed squash is not recorded as landed until the merge commit says so');
+  const after = { ...wp, ...failed.patch };
+  const landed = recordLandStep(state, after, mergeCommit, ok(fixtureText('pr-view-150-merge-commit.json')), {});
+  assert.deepEqual([landed.outcome, landed.patch.merge, landed.patch.squashed], ['continue', { sha: '37e79605735904eac875b000ad1b2ca55885db89' }, true]);
+  const notMerged = recordLandStep(state, after, mergeCommit, ok(JSON.stringify({ mergeCommit: null })), {});
+  assert.equal(notMerged.outcome, 'block');
+  assert.match(notMerged.reason, /squash failed \(exit 1\): failed to run git.*no merge commit/);
+  // A squash that exits 0 is unchanged.
+  assert.deepEqual(recordLandStep(state, wp, squash, ok(), {}).patch, { squashed: true });
+});
+
 test('C1-8/C1-18 failures are classified: lock re-acquires, infrastructure retries 3 times then blocks, a held gate releases the lock', () => {
   const state = makeState();
   const deps = { now: () => NOW };
