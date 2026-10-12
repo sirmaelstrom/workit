@@ -53,13 +53,15 @@ Read `work-packages/_orchestrator.md` in full. Extract:
 
 Read the WP file itself. It's self-contained by design — you should be able to execute from the orchestrator + this file alone.
 
-Parse the 6 required fields:
+Parse the required fields: the 6 core ones, plus Review tier and Runtime exercise (the field set and each field's form: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/work-package.md`):
 - **Precondition** — Is this met? If it references prior packages, check the progress log for confirmation. If the precondition isn't met, STOP and tell the user.
 - **Goal** — The single outcome this package produces.
-- **Files** — Exact paths to create, modify, or delete. Touch nothing else.
+- **Files** — Exact paths to create or modify (a deletion is written ``- Modify `path` (delete)``). Touch nothing else.
 - **Verification** — The concrete check proving it works.
 - **Failure Criteria** — Diagnostic footholds if things go wrong.
 - **Boundary** — What's explicitly out of scope. Respect this.
+- **Review tier** — `T0`, `T1` or `T2`: the review the change gets at its PR. This skill does not run that review; whoever opens the PR reads the tier, and may raise it but never lower it.
+- **Runtime exercise** — The surface and the check that exercises the change at runtime, or `none: <why>`. Step 6 runs it.
 
 Also read any Implementation section for detailed guidance (code snippets, API shapes, component structure).
 
@@ -96,6 +98,8 @@ Do the work specified in the package. Key principles:
 ### Step 6: Run Final Verification
 
 Run the verification command(s) specified in the work package. Then run any orchestrator-level verification commands. Both must pass.
+
+Then run the WP's **Runtime exercise** check, unless it reads `none: <why>`, and put the command and what it showed in the progress entry's **What changed**. A check that could not have failed is reported as vacuous, not as passed.
 
 If verification fails:
 1. Check the failure criteria for diagnostic guidance
