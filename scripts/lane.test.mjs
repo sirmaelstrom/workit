@@ -3541,6 +3541,36 @@ test('4aa9b174: agent_not_ready without the dialog sends nothing and the start f
   assert.equal(result.row.folderTrusted, undefined);
 });
 
+// ec77fec7: herdr registers the agent before it reports agent_not_ready, so the
+// failed start leaves a live agent in the pane. Its record carries the kind and
+// pane (lane zd, 2026-09-26, kept kind null for every later row).
+test('ec77fec7: a start that fails with agent_not_ready records kind, pane and the failure; a later start clears it', async (t) => {
+  const f = fixture(t);
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, { code: 0, stdout: 'Some other dialog\n❯ 1. Continue\n  2. Quit', stderr: '' });
+  const failed = await startClaude(f);
+  assert.equal(failed.exit, 1);
+  const lane = readState(f).lanes['lane-a'];
+  assert.deepEqual([lane?.kind, lane?.pane, lane?.model, lane?.reasoning], ['claude', 'w1:p2', 'opus', 'high']);
+  assert.match(lane.startFailed?.reason ?? '', /agent_not_ready|blocked during startup/);
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a","state":"idle"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"focused":true}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"conductor","pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const started = await startClaude(f);
+  assert.equal(started.exit, 0, JSON.stringify(started.output));
+  assert.equal(Object.hasOwn(readState(f).lanes['lane-a'], 'startFailed'), false);
+});
+
+test('ec77fec7: a start refused before herdr registers anything (pane busy, split failed) records no lane', async (t) => {
+  const f = fixture(t);
+  f.responses.push(SHELL_READ, { code: 1, stdout: '', stderr: 'some other herdr failure' });
+  const failed = await startClaude(f);
+  assert.equal(failed.exit, 1);
+  assert.ok(!existsSync(`${f.log}.state.json`) || readState(f).lanes['lane-a'] === undefined);
+});
+
 test('4aa9b174: the dialog with the cursor already moved is not answered blind', async (t) => {
   const f = fixture(t);
   const moved = { ...FOLDER_TRUST_READ, stdout: FOLDER_TRUST_READ.stdout.replace(' ❯ No, exit', '   No, exit').replace('   Yes, I trust', ' ❯ Yes, I trust') };
@@ -3559,6 +3589,10 @@ test('4aa9b174: a dialog still drawn after the answer is exit 3 with the pane ta
   assert.equal(result.exit, 3);
   assert.match(result.output.error, /folder-trust dialog in pane w1:p2 was answered with Down\+Enter but no Claude mode line was drawn last within 15000 ms/);
   assert.match(result.output.dialog, /Enter to confirm/);
+  // ec77fec7 review (codex, astra): the agent is registered, so its record is kept.
+  const lane = readState(f).lanes['lane-a'];
+  assert.deepEqual([lane?.kind, lane?.pane], ['claude', 'w1:p2']);
+  assert.match(lane.startFailed?.reason ?? '', /folder-trust dialog/);
 });
 
 test('4aa9b174 amend 2: an empty frame after the answer is not readiness; it times out to exit 3', async (t) => {
