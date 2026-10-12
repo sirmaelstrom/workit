@@ -35,6 +35,11 @@ import { pathToFileURL } from 'node:url';
 const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, BLOCKED: 3, TIMEOUT: 4, CHECK_FAILED: 5, PLAN_LOW: 6, ADMIT_REFUSED: 7, CAPACITY: 8 });
 export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, blocked: 3, timeout: 4, artifactCheckFailed: 5, planLow: 6, admitRefused: 7, capacity: 8 });
 
+// The lane marker: set in every started agent's tool-command environment, so a
+// writer can tell a lane from the conductor without taking the caller's word.
+// pr-review.mjs reply reads it (pr-review-guard.mjs LANE_MARKER_ENV).
+export const LANE_MARKER_ENV = 'WORKIT_LANE';
+
 export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per invocation, JSON on stdout.
 
   create   --repo <abs> --branch <b> --base <ref> --label <text>
@@ -51,6 +56,10 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            dontAsk is always refused; default mode needs --allow-default-mode.
            Codex has no default MCP startup timeout. Opt in with the timeout/server
            pair; a caller-supplied mcp_servers.<server>.startup_timeout_sec wins.
+           Every started agent's tool commands see WORKIT_LANE=<name> (claude:
+           --settings env, so a caller --settings is refused; codex: -c
+           shell_environment_policy.set). pr-review.mjs reply refuses
+           --adjudicator conductor|operator while it is set.
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
            [--amendment (--ruling-receipt <uuid> --quest <id> | --no-ruling)]
            Any prompt after the lane's first is an amendment, --amendment or not,
@@ -1163,7 +1172,16 @@ async function startLane(opts, deps, state) {
     // is the documented extension point: a forwarded --model would sit AFTER
     // the enforced one, and last-flag-wins would silently pick it.
     native = withoutOption(withoutOption(withoutOption(native, '--permission-mode'), '--effort'), '--model');
-    native = ['--model', opts.model, '--permission-mode', mode, '--effort', opts.reasoning, ...native];
+    // The marker rides --settings env, which reaches every Bash/PowerShell tool
+    // call. A second --settings would make which one wins a guess, so a caller's
+    // own is refused rather than merged.
+    if (native.includes('--settings')) {
+      usage(`claude lanes carry ${LANE_MARKER_ENV} through --settings; a caller-supplied --settings is refused`);
+    }
+    native = [
+      '--model', opts.model, '--permission-mode', mode, '--effort', opts.reasoning,
+      '--settings', JSON.stringify({ env: { [LANE_MARKER_ENV]: opts.name } }), ...native,
+    ];
   } else {
     // C12 makes codex lanes Windows-only here: the launch depends on the real
     // codex.exe under a win32 vendor path. Refuse elsewhere rather than hunt
@@ -1177,10 +1195,14 @@ async function startLane(opts, deps, state) {
     if (sandbox === 'workspace-write') {
       usage('codex workspace-write sandbox is refused on Windows: unified exec can time out connecting its runner pipe; use danger-full-access instead');
     }
-    native = withoutConfig(withoutOption(withoutOption(withoutOption(native, '--sandbox'), '--ask-for-approval'), '--model'), 'model_reasoning_effort');
+    const markerKey = `shell_environment_policy.set.${LANE_MARKER_ENV}`;
+    native = withoutConfig(withoutConfig(withoutOption(withoutOption(withoutOption(native, '--sandbox'), '--ask-for-approval'), '--model'), 'model_reasoning_effort'), markerKey);
+    // A dotted -c key adds one entry to the config's set table; the rest of it
+    // survives. JSON string escapes are valid TOML basic-string escapes.
     native = [
       '--model', opts.model, '--ask-for-approval', 'never', '--sandbox', sandbox,
-      '-c', `model_reasoning_effort=${opts.reasoning}`, ...native,
+      '-c', `model_reasoning_effort=${opts.reasoning}`,
+      ...native, '-c', `${markerKey}=${JSON.stringify(opts.name)}`,
     ];
     if (mcpStartup !== null) {
       native.push('-c', `mcp_servers.${mcpStartup.server}.startup_timeout_sec=${mcpStartup.seconds}`);

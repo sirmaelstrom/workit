@@ -217,7 +217,7 @@ test('WP-1: claude start supplies the mandatory mode and restores conductor focu
     { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
   );
   assert.equal(result.exit, 0);
-  assert.deepEqual(agentStartCall(f).args, ['agent', 'start', 'lane-a', '--kind', 'claude', '--pane', 'w1:p2', '--', '--model', 'opus', '--permission-mode', 'bypassPermissions', '--effort', 'high']);
+  assert.deepEqual(agentStartCall(f).args, ['agent', 'start', 'lane-a', '--kind', 'claude', '--pane', 'w1:p2', '--', '--model', 'opus', '--permission-mode', 'bypassPermissions', '--effort', 'high', '--settings', '{"env":{"WORKIT_LANE":"lane-a"}}']);
   const after = f.calls.slice(f.calls.indexOf(agentStartCall(f)) + 1);
   assert.deepEqual(after[0].args, ['agent', 'focus', 'w1:p1']);
   assert.deepEqual(after[1].args, ['agent', 'list']);
@@ -503,8 +503,36 @@ test('WP-1: codex start waits for codex.exe and a returned prompt before agent s
   const runIndex = f.calls.findIndex((call) => call.args[0] === 'pane' && call.args[1] === 'run');
   const readsAfterRun = f.calls.slice(runIndex, startIndex).filter((call) => call.args[0] === 'pane' && call.args[1] === 'read');
   assert.equal(readsAfterRun.length, 2, 'the readiness poll ran twice before the agent was started');
-  assert.deepEqual(f.calls[startIndex].args.slice(-8), ['--model', 'gpt-5.6-terra', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', '-c', 'model_reasoning_effort=medium']);
+  assert.deepEqual(f.calls[startIndex].args.slice(-10), ['--model', 'gpt-5.6-terra', '--ask-for-approval', 'never', '--sandbox', 'danger-full-access', '-c', 'model_reasoning_effort=medium', '-c', 'shell_environment_policy.set.WORKIT_LANE="lane-c"']);
   assert.equal(f.calls[startIndex].args.some((arg) => String(arg).includes('startup_timeout_sec')), false);
+});
+
+test('lane marker: a caller cannot drop or replace it — claude refuses a caller --settings, codex keeps only its own marker key', async (t) => {
+  const refused = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', fixture(t).log, '--', '--settings', '{"env":{}}'],
+    { exec: () => { throw new Error('no herdr call may happen before the refusal'); }, env: {} },
+  );
+  assert.equal(refused.exit, 2);
+  assert.match(refused.output.error, /a caller-supplied --settings is refused/);
+
+  const f = fixture(t);
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: 'X:\\fixture\\vendor\\bin\\codex.exe\nPS X:\\fixture\\lane>', stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-c"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const result = await runLane(
+    ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'm', '--reasoning', 'low', '--sandbox', 'danger-full-access', '--log', f.log,
+      '--', '-c', 'shell_environment_policy.set.WORKIT_LANE="conductor"'],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {} },
+  );
+  assert.equal(result.exit, 0);
+  const args = agentStartCall(f).args;
+  assert.deepEqual(args.filter((arg) => String(arg).startsWith('shell_environment_policy.set.WORKIT_LANE=')), ['shell_environment_policy.set.WORKIT_LANE="lane-c"']);
 });
 
 test('WP-1: every attempted verb appends the complete JSONL instrumentation shape', async (t) => {

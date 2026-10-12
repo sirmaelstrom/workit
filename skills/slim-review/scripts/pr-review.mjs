@@ -66,7 +66,7 @@ import {
 import { emitOutcome, WITHDRAW_REASONS } from './pr-review-outcomes.mjs';
 import { buildMarker, recognise, postedReviewScope } from './pr-review-recognise.mjs';
 import { amendmentProblem, COMPARE_FILE_CAP, readTail, roundsAnswer } from './pr-review-rounds.mjs';
-import { filesFromDiff, guardReview, GUARD_ADJUDICATORS, GUARD_LENS } from './pr-review-guard.mjs';
+import { filesFromDiff, guardReview, GUARD_ADJUDICATORS, GUARD_LENS, LANE_MARKER_ENV } from './pr-review-guard.mjs';
 
 // ---------------------------------------------------------------------------
 // gh plumbing
@@ -896,7 +896,15 @@ export function cmdThreads(opts, {
   }
 }
 
-export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log } = {}) {
+export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log, env = process.env } = {}) {
+  // The adjudicator is the caller's own word; the lane marker is not. A lane
+  // started by lane.mjs carries it, and may not sign as conductor or operator on
+  // any comment. Refused before the repo is resolved or anything is read.
+  const lane = env[LANE_MARKER_ENV];
+  if (lane && GUARD_ADJUDICATORS.includes(opts.adjudicator)) {
+    die(2, `${LANE_MARKER_ENV}=${lane} is set, so this is a lane: --adjudicator ${opts.adjudicator} is refused. Report the verdict to the conductor, which records it. Nothing was posted or logged.`);
+    return;
+  }
   const repo = resolveRepo(opts.repo, opts.cwd);
   if (!existsSync(opts.bodyFile)) {
     die(2, `body file not found: ${opts.bodyFile}`);
@@ -3411,6 +3419,7 @@ const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
            [--dup-of <comment id>] [--measure-log <path>]
            judgment = cannot be settled by running anything; left as a PR note
            a guard comment (**lens:** guard) needs --adjudicator conductor|operator: exit 2 otherwise
+           with WORKIT_LANE set (lane.mjs sets it in every lane), --adjudicator conductor|operator: exit 2
   managed  --repo owner/name
            read-only: prints how this installation resolves that repository —
            standalone, managed, or managed-config-missing — with the directory
