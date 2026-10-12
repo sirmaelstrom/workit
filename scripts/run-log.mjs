@@ -36,7 +36,8 @@ export const USAGE_TEXT = `run-log <verb> [options] — one run-doc operation pe
          WORKIT_RECEIPT_RESOLVER at write time and prefixes the pointers cell
          with what it returned: "asks: <uuid> <outcome>[, superseded by
          <latest>]". No resolver, an unknown receipt, or one on another quest is
-         refused (2); a resolver failure is 1. Nothing is written either way.
+         refused (2); a resolver failure or an unusable reply is 1. A field
+         that itself types "asks: <uuid>" is refused (2). Nothing is written.
   lint   --doc <abs>
          Exit 5 naming each row whose stamp is later than now, earlier than the
          row above it, unparseable, or (git-tracked, committed rows) later than
@@ -48,6 +49,8 @@ const FIELDS = ['item', 'event', 'pointers', 'teach'];
 const OPTIONAL_APPEND = ['asks', 'quest'];
 const RECEIPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const QUEST_REF = /^[0-9a-f-]{6,}$/i;
+// The helper's own asks prefix, as a caller could type it.
+const TYPED_ASKS = /\basks:\s*[0-9a-f]{8}-/i;
 const HEADER = Object.freeze(['date', 'item', 'event', 'pointers', 'teach →']);
 const LOCK_STALE_MS = 30_000;
 
@@ -217,7 +220,9 @@ function takeLock(deps, doc) {
 // The asks field is measured the way the stamp is: the helper reads the receipt
 // itself, at write time, through the same resolver contract `lane prompt
 // --ruling-receipt` uses (lane.mjs resolverArgv). The cell says what the read
-// returned, so a row cannot claim an ask read that did not happen.
+// returned. `append` refuses a caller-typed `asks: <uuid>` in any field, so a
+// row the helper writes carries an asks claim only from a read; a row added by
+// Edit is outside that, and lint cannot tell the two apart.
 function readAsks(opts, deps) {
   if (!RECEIPT_ID.test(opts.asks)) usage(`--asks must be a full receipt uuid, got ${JSON.stringify(opts.asks)}`);
   if (!QUEST_REF.test(opts.quest)) usage(`--quest must be a quest uuid or a prefix of at least 6 characters, got ${JSON.stringify(opts.quest)}`);
@@ -248,10 +253,16 @@ function readAsks(opts, deps) {
   }
   const id = String(receipt.id ?? '').toLowerCase();
   const questId = String(receipt.questId ?? receipt.quest_id ?? '').toLowerCase();
-  const outcome = String(receipt.outcome ?? '') || 'unknown';
+  const outcome = receipt.outcome;
+  if (typeof outcome !== 'string' || !/^[a-z_]+$/.test(outcome)) {
+    throw new RunLogError(EXIT.ERROR, `the resolver's receipt has no usable outcome (${JSON.stringify(outcome)}); nothing was written`);
+  }
   if (id !== opts.asks.toLowerCase()) usage(`the resolver returned receipt ${id || '<no id>'}, not ${opts.asks}`);
   if (!questId.startsWith(opts.quest.toLowerCase())) usage(`receipt ${opts.asks} belongs to quest ${questId || '<none>'}, not ${opts.quest}`);
   const latest = receipt.latestReceiptId ?? receipt.latest_receipt_id ?? null;
+  if (latest !== null && !RECEIPT_ID.test(String(latest))) {
+    throw new RunLogError(EXIT.ERROR, `the resolver's latest receipt id is not a uuid (${JSON.stringify(latest)}); nothing was written`);
+  }
   const superseded = latest !== null && String(latest).toLowerCase() !== id ? `, superseded by ${String(latest).toLowerCase()}` : '';
   return `asks: ${id} ${outcome}${superseded}`;
 }
@@ -259,6 +270,9 @@ function readAsks(opts, deps) {
 function appendRow(opts, deps) {
   if (!EVENTS.includes(opts.event)) usage(`--event ${JSON.stringify(opts.event)} is outside the vocabulary: ${EVENTS.join(' / ')}`);
   const cells = FIELDS.map((name) => cell(name, opts[name]));
+  for (const name of FIELDS) {
+    if (TYPED_ASKS.test(opts[name])) usage(`--${name} carries an asks claim (${TYPED_ASKS.exec(opts[name])[0]}…); only --asks <receipt> --quest <id> writes one, from a read`);
+  }
   if (!deps.exists(opts.doc)) usage(`doc does not exist: ${opts.doc}`);
   if (opts.asks !== undefined) {
     const pointers = FIELDS.indexOf('pointers');

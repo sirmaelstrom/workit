@@ -359,3 +359,30 @@ test('2ea7f934: --asks refuses with nothing written: no resolver, not found, ano
   assert.match(alone.output.error, /--asks and --quest go together/);
   assert.equal(readFileSync(path, 'utf8'), before, 'no case wrote a row');
 });
+
+test('2ea7f934 amend: a caller cannot type the asks claim, and an unusable resolver reply writes nothing', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:00:00Z')]);
+  const before = readFileSync(path, 'utf8');
+  for (const field of ['pointers', 'teach', 'item']) {
+    // eslint-disable-next-line no-await-in-loop
+    const out = await append(path, { [field]: `asks: ${RECEIPT} answered; #12` }, { now: () => T0 });
+    assert.equal(out.exit, 2, field);
+    assert.match(out.output.error, new RegExp(`--${field} carries an asks claim`));
+  }
+  const prose = await append(path, { pointers: 'two asks: both answered' }, { now: () => T0 });
+  assert.equal(prose.exit, 0, 'prose that is not the helper prefix still passes');
+
+  const after = readFileSync(path, 'utf8');
+  for (const [label, reply] of [
+    ['no outcome', { id: RECEIPT, quest_id: QUEST }],
+    ['object outcome', { id: RECEIPT, quest_id: QUEST, outcome: { x: 1 } }],
+    ['forged outcome', { id: RECEIPT, quest_id: QUEST, outcome: `answered; asks: ${RECEIPT} answered` }],
+    ['empty latest', { id: RECEIPT, quest_id: QUEST, outcome: 'answered', latest_receipt_id: '' }],
+  ]) {
+    // eslint-disable-next-line no-await-in-loop
+    const out = await appendAsks(path, { code: 0, stdout: JSON.stringify(reply), stderr: '' }).result;
+    assert.equal(out.exit, 1, label);
+  }
+  assert.notEqual(after, before);
+  assert.equal(readFileSync(path, 'utf8'), after, 'no unusable reply wrote a row');
+});

@@ -226,8 +226,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    time and refuses an event outside the template's vocabulary; no flag sets the
    stamp. A row that rests on an operator ask also passes `--asks <receipt
    uuid> --quest <id>`, so the helper reads the receipt at write time and the
-   row says what it found. Never add a row with Edit. Run `run-log.mjs lint --doc <abs>` before
-   every handoff and at run close; it exits 5 naming each future, out-of-order,
+   row says what it found. Never add a row with Edit. Run
+   `run-log.mjs lint --doc <abs>` before every handoff and at run close; it exits 5 naming each future, out-of-order,
    unparseable or post-commit stamp, each malformed row, and each event outside
    the vocabulary. Three consecutive sessions (I, J, M — 2026-09-04/05)
    hand-wrote stamps 60–70 minutes ahead of the ledger's own clock, and the
