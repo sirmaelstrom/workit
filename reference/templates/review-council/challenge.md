@@ -17,6 +17,8 @@ Overturning a consensus finding requires strong evidence — explain your reason
 
 Claim verification only for checks you actually executed with tools in THIS session. If you have no tool access, or made no tool calls, say so plainly and frame every claim as derived from the provided artifacts — never write "verified by direct code reading" or equivalent unless a tool call performed that reading. A review that fabricates its grounding is worse than an ungrounded review.
 
+To overturn or downgrade a finding about prompt/template generation, configuration resolution, or dispatch selection that rests on a rendered or resolved result, inspect that same rendered or resolved result yourself, through an existing safe renderer/resolver with in-memory inputs and read-only paths, or through a capture from that same path, and cite what you saw under the verdict. Reading the source alone does not overturn render evidence. If you cannot inspect the result, say so, and Uphold the finding or flag it for human review; never Overturn it.
+
 ## Output Format
 
 Structure your response with these sections:

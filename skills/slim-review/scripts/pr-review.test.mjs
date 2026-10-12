@@ -529,6 +529,29 @@ test('council templates put the consumer-visible evidence clause in Grounding In
   }
 });
 
+// cdf67da7: the challenge seat overturns findings, so it carries the
+// adjudication side of the evidence rule. Its template has no Artifacts
+// section: the clause must sit in Grounding Integrity, before the synthesis
+// it challenges is inlined.
+const CHALLENGE_TEMPLATE = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'reference', 'templates', 'review-council', 'challenge.md');
+const CHALLENGE_RENDER_CLAUSE = 'To overturn or downgrade a finding about prompt/template generation, configuration resolution, or dispatch selection that rests on a rendered or resolved result, inspect that same rendered or resolved result yourself, through an existing safe renderer/resolver with in-memory inputs and read-only paths, or through a capture from that same path, and cite what you saw under the verdict. Reading the source alone does not overturn render evidence. If you cannot inspect the result, say so, and Uphold the finding or flag it for human review; never Overturn it.';
+
+function challengeGrounding(template) {
+  const before = template.split(/^## Synthesis to Challenge\s*$/m);
+  assert.equal(before.length, 2, 'challenge template has one Synthesis to Challenge section');
+  const match = /^## Grounding Integrity\r?\n([\s\S]*?)(?=^## )/m.exec(before[0]);
+  assert.ok(match, 'challenge template has a Grounding Integrity section before the synthesis');
+  return match[1];
+}
+
+test('challenge template carries the render-evidence rule for overturning, in Grounding Integrity', () => {
+  const template = readFileSync(CHALLENGE_TEMPLATE, 'utf8');
+  assert.ok(challengeGrounding(template).replace(/\s+/g, ' ').includes(CHALLENGE_RENDER_CLAUSE));
+  // Negative control: the same template with the clause moved into the inlined synthesis fails.
+  const moved = template.replace(CHALLENGE_RENDER_CLAUSE, '').replace('{{prior_findings}}', `> ${CHALLENGE_RENDER_CLAUSE}\n\n{{prior_findings}}`);
+  assert.equal(challengeGrounding(moved).replace(/\s+/g, ' ').includes(CHALLENGE_RENDER_CLAUSE), false);
+});
+
 test('council template contract rejects a clause quoted only in artifacts', () => {
   const positive = `## Grounding Integrity\n\n${COUNCIL_EVIDENCE_CLAUSE}\n\n## Output Format\n\n${COUNCIL_GROUNDING_OUTPUT_BULLET}\n\n## Artifacts\n\nartifact text`;
   const badFixture = `## Grounding Integrity\n\nClaim verification only for executed checks.\n\n## Output Format\n\n${COUNCIL_GROUNDING_OUTPUT_BULLET}\n\n## Artifacts\n\n> ${COUNCIL_EVIDENCE_CLAUSE}`;
