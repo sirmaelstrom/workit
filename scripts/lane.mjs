@@ -61,7 +61,7 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            the file (outside fenced blocks and - Create bullets) must exist in
            the lane's worktree or the workspace root, or the prompt is refused
            (exit 2). --allow-missing names one absent on purpose.
-  wait    <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
+  wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
            Naming any state adds blocked; a bare wait forwards none (herdr's
            default already matches idle|done|blocked). A codex lane's idle/done
@@ -103,7 +103,7 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            nothing. stop runs it after the agent exits; sweep --lane runs it
            on a lane the delegate lists SAFE (or HOLD under --force), and
            leaves a lane with a survivor uncleaned.
-  sweep   [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
+  sweep    [--root <path>]... [--workspace-root <abs>] [--lane <name>] [--list] [--force]
            --lane <name> limits the delegate to one lane; --list is a dry run.
            Outside a herdr worktrees root, every call is scoped to a lane this
            helper created (from the sidecar), and --force is refused there.
@@ -1453,8 +1453,12 @@ function rulingGate(opts, deps, lane) {
 // such as `npx vitest run a/b.test.ts`), outside fenced blocks and outside
 // `- Create` bullets. Repo-relative: at least one `/`, a file extension on the
 // last segment, no scheme, drive, placeholder, glob or `..`. A trailing
-// `:<line>` or `:<line>-<line>` is a locator, not part of the path.
+// `:<line>`, `:<line>-<line>` or `:<line>:<col>` is a locator, not part of the path.
 const BRIEF_PATH = /^(?:\.\/)?[\w@.+-]+(?:\/[\w@.+-]+)*\/[\w@+-][\w@.+-]*\.[A-Za-z0-9]{1,10}$/u;
+const LOCATOR = /:\d+(?::\d+)?(?:-\d+)?$/;
+// A Create bullet in any of its dresses: `- Create `, `- **Create** `,
+// `1. Create `, `- Create: `.
+const CREATE_BULLET = /^\s*(?:[-*+]|\d+[.)])\s+(?:\*\*|__)?Create(?:\*\*|__)?:?\s/;
 
 export function briefPaths(text) {
   const found = new Set();
@@ -1462,10 +1466,10 @@ export function briefPaths(text) {
   // fence closes only on its own character, at least its own length.
   for (const { text: line, fenced } of markdownLines(text)) {
     // A work package's `- Create <path>` bullet names a file that does not exist yet.
-    if (fenced || /^\s*[-*]\s+Create\s/.test(line)) continue;
+    if (fenced || CREATE_BULLET.test(line)) continue;
     for (const match of line.matchAll(/`([^`]+)`/g)) {
       for (const word of match[1].split(/\s+/)) {
-        const token = word.replace(/:\d+(?:-\d+)?$/, '');
+        const token = word.replace(LOCATOR, '');
         if (BRIEF_PATH.test(token) && !token.split('/').includes('..')) found.add(token.replace(/^\.\//, ''));
       }
     }

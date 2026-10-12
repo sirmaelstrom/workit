@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, paneErrorLine, panePromptSignature,
-  briefPaths, mergeDanger, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
+  USAGE_TEXT, briefPaths, mergeDanger, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -337,6 +337,23 @@ test('briefPaths: backticked repo-relative paths outside fences, line locators s
     '- Modify `src/kept.ts`',
   ].join('\n');
   assert.deepEqual(briefPaths(text), ['src/briefings/deploy-state.ts', 'scripts/lane.mjs', 'README.md', 'scripts/deploy-state.test.ts', 'src/a.test.ts', 'src/kept.ts']);
+});
+
+// Post-merge council minors on #213: a `file:line:col` citation is a path, and
+// a Create bullet in other dress still names a file that does not exist yet.
+test('briefPaths: file:line:col citations are read; Create bullets in other forms are skipped', () => {
+  assert.deepEqual(briefPaths('See `scripts/lane.mjs:12:5` and `src/a.ts:3:1-9`.'), ['scripts/lane.mjs', 'src/a.ts']);
+  const creates = ['- **Create** `src/one.ts`', '1. Create `src/two.ts`', '- Create: `src/three.ts`', '* __Create__ `src/four.ts`', '2) Create `src/five.ts`'];
+  assert.deepEqual(briefPaths(creates.join('\n')), []);
+  assert.deepEqual(briefPaths('- Created `src/made.ts` yesterday\n- Modify `src/kept.ts`'), ['src/made.ts', 'src/kept.ts'], 'only the Create verb itself is skipped');
+});
+
+test('usage: the verb column stays aligned', () => {
+  const verbs = ['create', 'start', 'prompt', 'wait', 'check', 'resume', 'fallback', 'stop', 'reap', 'sweep', 'admit'];
+  // A verb's own line: the verb, then its first argument (`<`, `[` or `--`); prose that starts with a verb word is not one.
+  const verbLines = USAGE_TEXT.split('\n').filter((line) => verbs.some((verb) => new RegExp(`^  ${verb} +(?:<|\\[|--)`).test(line)));
+  assert.equal(verbLines.length, verbs.length);
+  for (const line of verbLines) assert.equal(/^  [a-z]+ +/.exec(line)[0].length, 11, line);
 });
 
 test('ec7b1192: prompt refuses a brief naming a path missing from the worktree, before herdr is invoked', async (t) => {

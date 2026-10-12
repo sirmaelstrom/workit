@@ -40,7 +40,7 @@ export function next(state) {
 export function wpRecord(fields) {
   return {
     id: fields.id, name: fields.name ?? '', specPath: fields.specPath ?? null, wave: fields.wave ?? 1,
-    files: fields.files ?? [], dependsOn: fields.dependsOn ?? [], tier: fields.tier ?? 'T1', model: fields.model ?? 'opus',
+    files: fields.files ?? [], creates: fields.creates ?? [], dependsOn: fields.dependsOn ?? [], tier: fields.tier ?? 'T1', model: fields.model ?? 'opus',
     runtimeExercise: fields.runtimeExercise ?? '', precondition: fields.precondition ?? null, verification: fields.verification ?? null,
     questId: null, state: 'pending', reason: null, dispatchedAt: null, queue: [],
     lane: null, runtimeVerdict: null, rulings: [], pr: null, reviews: [], rebases: [], gate: null, merge: null,

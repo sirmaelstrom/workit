@@ -78,6 +78,8 @@ test('paths (C1-12): case and dot-segment aliases conflict; a path leaving the r
   assert.deepEqual(ids(dispatchable(run(shared))), ['WP-01']);
   const dir = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: '**Files:**\n- Create `src/../lib/./a.mjs`\n- Modify `docs\\b.md`\n' } });
   assert.deepEqual(parseWorkPackages(dir)[0].files, ['lib/a.mjs', 'docs/b.md']);
+  // ec7b1192: the Create paths alone, which lane.mjs prompt may allow to be absent.
+  assert.deepEqual(parseWorkPackages(dir)[0].creates, ['lib/a.mjs']);
   for (const bad of ['../x.mjs', '/etc/passwd', 'C:/x.mjs', 'a/../../x.mjs']) {
     const escaping = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: `**Files:**\n- Create \`${bad}\`\n` } });
     assert.throws(() => parseWorkPackages(escaping), (error) => error.code === 2 && error.message.includes('WP-01') && error.message.includes(bad), bad);
