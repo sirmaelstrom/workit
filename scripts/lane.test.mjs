@@ -584,13 +584,16 @@ test('launch guards: the --flag=value and --config spellings meet the same guard
     { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
   );
   const codex = await runLane(
-    codexStart(g.log, ['--config', 'model_reasoning_effort=xhigh', '--config=shell_environment_policy.set.WORKIT_LANE="conductor"', '--model=cheap']),
+    codexStart(g.log, [
+      '--config', 'model_reasoning_effort=xhigh', '--config=shell_environment_policy.set.WORKIT_LANE="conductor"', '--model=cheap',
+      '-cmodel_reasoning_effort=xhigh', '-c=model_reasoning_effort=xhigh', '-c', 'model_reasoning_effort =xhigh', '-c', ' model_reasoning_effort=xhigh',
+    ]),
     codexDeps(g),
   );
   assert.equal(codex.exit, 0);
   const codexArgs = agentStartCall(g).args;
   assert.equal(codexArgs.some((arg) => arg === '--config' || /^--(config|model)=/.test(arg)), false, 'no long or equals spelling survives');
-  assert.deepEqual(codexArgs.filter((arg) => /^model_reasoning_effort=/.test(arg)), ['model_reasoning_effort=low']);
+  assert.deepEqual(codexArgs.filter((arg) => /model_reasoning_effort\s*=/.test(arg)), ['model_reasoning_effort=low']);
   assert.deepEqual(codexArgs.filter((arg) => /^shell_environment_policy\.set\.WORKIT_LANE=/.test(arg)), ['shell_environment_policy.set.WORKIT_LANE="lane-c"']);
   assert.equal(codexArgs.filter((arg) => arg === '--model').length, 1);
 });
@@ -599,6 +602,8 @@ test('normalizeAgentArgs: a codex -c value is never split; claude -c takes no va
   assert.deepEqual(normalizeAgentArgs(['-c', '--odd=1', '--x=y'], 'codex'), ['-c', '--odd=1', '--x', 'y']);
   assert.deepEqual(normalizeAgentArgs(['-c', '--model=x'], 'claude'), ['-c', '--model', 'x']);
   assert.deepEqual(normalizeAgentArgs(['--config=a=b'], 'codex'), ['-c', 'a=b']);
+  assert.deepEqual(normalizeAgentArgs(['-ca=b', '-c=a=b'], 'codex'), ['-c', 'a=b', '-c', 'a=b']);
+  assert.deepEqual(normalizeAgentArgs(['-cx'], 'claude'), ['-cx']);
   assert.deepEqual(normalizeAgentArgs(['--config', 'a=b'], 'claude'), ['--config', 'a=b']);
 });
 

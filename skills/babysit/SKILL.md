@@ -130,7 +130,9 @@ is replied.
 deleted, skipped or loosened a test. Its verdict needs `--adjudicator
 conductor` or `operator`. `adjudicate --adjudicator lane`, or no
 `--adjudicator`, fails: the writer's `reply` exits 2, nothing is replied, and
-the thread stays open, so the PR cannot converge past it.
+the thread stays open, so the PR cannot converge past it. Inside a lane that
+`lane.mjs` started (`WORKIT_LANE` set), `conductor` and `operator` fail the
+same way, so babysit run by a lane leaves guard threads to the conductor.
 
 A confirmed finding is fixed on the branch
 and pushed. The loop sees the new head as the next iteration and claims the

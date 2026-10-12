@@ -60,8 +60,9 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            --settings env, so a caller --settings is refused; codex: -c
            shell_environment_policy.set). pr-review.mjs reply refuses
            --adjudicator conductor|operator while it is set.
-           Native args are read in one spelling first: --flag=value is split
-           and codex --config is -c, so every guard above sees both forms.
+           Native args are read in one spelling first: --flag=value is split;
+           codex --config, -cK=V and -c=K=V become -c K=V, keys trimmed.
+           Short aliases (codex -m/-s/-a) are not mapped.
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
            [--amendment (--ruling-receipt <uuid> --quest <id> | --no-ruling)]
            Any prompt after the lane's first is an amendment, --amendment or not,
@@ -572,6 +573,12 @@ export function normalizeAgentArgs(args, kind) {
       configValueNext = false;
       continue;
     }
+    // codex also takes `-cKEY=V` and `-c=KEY=V` as one token.
+    const attached = kind === 'codex' ? /^-c=?([\s\S]+)$/.exec(token) : null;
+    if (attached) {
+      out.push('-c', attached[1]);
+      continue;
+    }
     const eq = /^(--[A-Za-z][\w-]*)=([\s\S]*)$/.exec(token);
     const flag = eq ? eq[1] : token;
     const spelled = kind === 'codex' && flag === '--config' ? '-c' : flag;
@@ -589,10 +596,17 @@ function agentOption(args, flag) {
 
 // Strips `-c <key>=…` pairs for one key only: a codex lane may legitimately
 // carry other -c overrides, but not one that reopens the enforced effort level.
+// codex trims the key, so ` key =v` sets `key`; compare it the same way.
+function configKey(value) {
+  const text = String(value ?? '');
+  const eq = text.indexOf('=');
+  return eq < 0 ? null : text.slice(0, eq).trim();
+}
+
 function withoutConfig(args, key) {
   const copy = [];
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '-c' && String(args[i + 1] ?? '').startsWith(`${key}=`)) {
+    if (args[i] === '-c' && configKey(args[i + 1]) === key) {
       i++;
       continue;
     }
@@ -604,7 +618,7 @@ function withoutConfig(args, key) {
 function hasMcpStartupTimeoutConfig(args) {
   for (let i = 0; i < args.length; i++) {
     if (args[i] !== '-c') continue;
-    if (/^mcp_servers\..+\.startup_timeout_sec=/.test(String(args[i + 1] ?? ''))) return true;
+    if (/^mcp_servers\..+\.startup_timeout_sec$/.test(configKey(args[i + 1]) ?? '')) return true;
   }
   return false;
 }
