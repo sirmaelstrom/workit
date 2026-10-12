@@ -624,7 +624,7 @@ test('herdr wait exits map to outcomes (D17, D19.17)', (t) => {
   assert.match(limited.reason, /^usage limit: .*\(seven_day\); it resets at 2026-10-09T00:00:00\.000Z\. You've hit your weekly limit/);
   const capacity = f.record(wait, exit(8));
   assert.equal(capacity.outcome, 'continue');
-  assert.deepEqual(capacity.patch.queue[0].command, ['node', LANE(f), 'prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--amendment', '--no-ruling', '--log', LOG(f)]);
+  assert.deepEqual(capacity.patch.queue[0].command, ['node', LANE(f), 'prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--allow-missing', 'a.mjs', '--amendment', '--no-ruling', '--log', LOG(f)]);
 });
 
 test('wait exit 3 (C1-4, C1-10): a structured dialog cause, one re-poll after 60 s, the second consecutive dialog blocks', (t) => {
@@ -755,7 +755,11 @@ test('herdr: each action\'s argv, every one with --log (D17, D19.17)', (t) => {
   assert.deepEqual(b.admit(f.wp).map((act) => act.command), [lane('admit')]);
   assert.deepEqual(b.create(f.wp)[2].command, lane('create', '--repo', f.repo, '--branch', 'conduct/demo/wp-00', '--base', 'origin/main', '--label', 'demo-wp-00', '--slug', 'demo-wp-00'));
   assert.deepEqual(b.start(f.wp)[0].command, lane('start', 'demo-wp-00', '--pane', 'w1:p1', '--kind', 'claude', '--model', 'claude-opus-5-5', '--reasoning', 'high'));
-  assert.deepEqual(b.prompt(f.wp)[0].command, lane('prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md'));
+  // The WP's Files ride as --allow-missing: lane.mjs prompt refuses a brief
+  // naming an absent path, and these are the paths the lane creates (ec7b1192).
+  assert.deepEqual(b.prompt(f.wp)[0].command, lane('prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--allow-missing', 'a.mjs'));
+  assert.deepEqual(b.prompt({ ...f.wp, files: ['src/x.ts', 'src/x.test.ts'] })[0].command,
+    lane('prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--allow-missing', 'src/x.ts', '--allow-missing', 'src/x.test.ts'));
   assert.deepEqual(b.check(f.wp).map((act) => act.command), [
     ['node', CONDUCT(f), 'lane', 'check', '--run', f.runDir, '--wp', 'WP-00', '--runtime-only'],
     lane('check', 'demo-wp-00', '--expect-report', join(f.runDir, 'lane-wp-00-report.md')),
@@ -781,13 +785,14 @@ test('herdr amendments: a receipt only when a resolver can resolve it (D16)', (t
   const answer = { key: 'a', receiptId: '91cc7678-0000-4000-8000-000000000000' };
   const withResolver = lanes(t, { backend: 'herdr', env: { WORKIT_RECEIPT_RESOLVER: 'node resolve.mjs' }, wpLane: { briefPath: '/b.md' } });
   const named = withResolver.backend().prompt(withResolver.wp, { amendment: true, answer })[0];
-  assert.deepEqual(named.command.slice(6, -2), ['--amendment', '--ruling-receipt', answer.receiptId, '--quest', 'anchor-uuid']);
+  // [node, lane.mjs, prompt, <lane>, --file, <brief>, --allow-missing, a.mjs, …]
+  assert.deepEqual(named.command.slice(8, -2), ['--amendment', '--ruling-receipt', answer.receiptId, '--quest', 'anchor-uuid']);
   assert.equal(named.data, undefined);
   const unset = lanes(t, { backend: 'herdr', wpLane: { briefPath: '/b.md' } });
   const brief = unset.backend().prompt(unset.wp, { amendment: true, answer })[0];
-  assert.deepEqual([brief.command.slice(6, -2), brief.data], [['--amendment', '--no-ruling'], { rulingCarried: 'brief' }]);
+  assert.deepEqual([brief.command.slice(8, -2), brief.data], [['--amendment', '--no-ruling'], { rulingCarried: 'brief' }]);
   const core = unset.backend().prompt(unset.wp, { amendment: true, answer: { key: 'b', receiptId: null } })[0];
-  assert.deepEqual(core.command.slice(6, -2), ['--amendment', '--no-ruling']);
+  assert.deepEqual(core.command.slice(8, -2), ['--amendment', '--no-ruling']);
 });
 
 test('herdr: lane check --runtime-only fails a shape-valid report with no runtime exercise (exit 5, missing)', async (t) => {

@@ -57,7 +57,11 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            and states whether it acts on an operator ruling. A named receipt must
            resolve through WORKIT_RECEIPT_RESOLVER to an answered receipt on that
            quest; with no resolver configured it is refused.
-  wait     <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
+           [--allow-missing <rel>]... Every backticked repo-relative path in
+           the file (outside fenced blocks and - Create bullets) must exist in
+           the lane's worktree or the workspace root, or the prompt is refused
+           (exit 2). --allow-missing names one absent on purpose.
+  wait    <name> [--until blocked|idle|done]... --timeout <ms> [--plan-floor <pct>]
            --until repeats: a blocked-only wait cannot see a lane that finished.
            Naming any state adds blocked; a bare wait forwards none (herdr's
            default already matches idle|done|blocked). A codex lane's idle/done
@@ -350,7 +354,7 @@ function parseArgs(argv) {
   }
   const opts = { verb, positional: [], agentArgs: [] };
   const booleanFlags = new Set(['--expect-commit', '--live', '--force', '--list', '--allow-default-mode', '--amendment', '--no-ruling', '--force-admit', '--require-reading']);
-  const repeatableFlags = new Set(['--root', '--until']);
+  const repeatableFlags = new Set(['--root', '--until', '--allow-missing']);
   const valueFlags = new Set([
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
     '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--expect-report', '--to', '--log',
@@ -390,6 +394,7 @@ function parseArgs(argv) {
   if (verb !== 'prompt' && (opts.amendment || opts.noRuling || opts.rulingReceipt !== undefined || opts.quest !== undefined)) {
     usage(`--amendment, --ruling-receipt, --quest and --no-ruling belong to the prompt verb, not ${verb}`);
   }
+  if (verb !== 'prompt' && opts.allowMissing !== undefined) usage(`--allow-missing belongs to the prompt verb, not ${verb}`);
   // Refused here, for every verb: a prompt pattern that cannot compile is a
   // typo the operator wants told about, not a setting to fall back from.
   if (opts.promptRegex !== undefined) {
@@ -1424,6 +1429,54 @@ function rulingGate(opts, deps, lane) {
   return { ruling: 'receipt', receipt: id, quest: questId };
 }
 
+// A path a brief names inside backticks (alone, or as one word of a command
+// such as `npx vitest run a/b.test.ts`), outside fenced blocks and outside
+// `- Create` bullets. Repo-relative: at least one `/`, a file extension on the
+// last segment, no scheme, drive, placeholder, glob or `..`. A trailing
+// `:<line>` or `:<line>-<line>` is a locator, not part of the path.
+const BRIEF_PATH = /^(?:\.\/)?[\w@.+-]+(?:\/[\w@.+-]+)*\/[\w@+-][\w@.+-]*\.[A-Za-z0-9]{1,10}$/u;
+
+export function briefPaths(text) {
+  const found = new Set();
+  // markdownLines marks fenced lines the way the report checks read them: a
+  // fence closes only on its own character, at least its own length.
+  for (const { text: line, fenced } of markdownLines(text)) {
+    // A work package's `- Create <path>` bullet names a file that does not exist yet.
+    if (fenced || /^\s*[-*]\s+Create\s/.test(line)) continue;
+    for (const match of line.matchAll(/`([^`]+)`/g)) {
+      for (const word of match[1].split(/\s+/)) {
+        const token = word.replace(/:\d+(?:-\d+)?$/, '');
+        if (BRIEF_PATH.test(token) && !token.split('/').includes('..')) found.add(token.replace(/^\.\//, ''));
+      }
+    }
+  }
+  return [...found];
+}
+
+// A brief is a premise about the tree it will run in. Every repo-relative path
+// it names must exist in the lane's worktree, or under the workspace root (the
+// directory holding the `projects` tree the worktree sits in), unless the
+// caller names it with --allow-missing (a file the lane creates, a runtime
+// artifact). A miss refuses the send before the first herdr call. With no
+// worktree on the lane record there is nothing to resolve against, and the
+// output says the check did not run.
+function briefPathGate(opts, deps, lane, file) {
+  if (opts.verb !== 'prompt') return null;
+  if (!lane.path) return { checked: 0, ran: false, reason: 'the lane record has no worktree path' };
+  const paths = briefPaths(deps.read(file));
+  const allowed = new Set((opts.allowMissing ?? []).map((p) => p.replace(/\\/g, '/').replace(/^\.\//, '')));
+  const roots = [resolve(lane.path)];
+  if (basename(dirname(roots[0])) === 'projects') roots.push(dirname(dirname(roots[0])));
+  const absent = paths.filter((p) => !roots.some((root) => deps.exists(join(root, p))));
+  // A WP's Files may name a directory (`src/generated/`): it allows every path under it.
+  const dirs = [...allowed].filter((p) => p.endsWith('/'));
+  const missing = absent.filter((p) => !allowed.has(p) && !dirs.some((dir) => p.startsWith(dir)));
+  if (missing.length > 0) {
+    usage(`prompt file names ${missing.length === 1 ? 'a path' : 'paths'} not found in ${roots.join(' or ')}: ${missing.join(', ')}. Fix the brief, or pass --allow-missing <path> for each one that is absent on purpose (a file the lane creates, a runtime artifact)`);
+  }
+  return { checked: paths.length, ran: true, allowedMissing: absent };
+}
+
 async function promptLane(opts, deps, state) {
   required(opts, 'file');
   if (!opts.name) usage('prompt needs <name>');
@@ -1431,6 +1484,7 @@ async function promptLane(opts, deps, state) {
   if (!deps.exists(file)) usage(`prompt file does not exist: ${file}`);
   const lane = state.lanes[opts.name] ?? {};
   const ruling = rulingGate(opts, deps, lane);
+  const briefCheck = briefPathGate(opts, deps, lane, file);
   const wire = `Read ${file} and execute it exactly.`;
   const initial = agentState(deps, opts.name);
   if (!initial) throw new LaneError(EXIT.ERROR, `prompt agent state check failed: ${opts.name} is not listed`);
@@ -1514,9 +1568,10 @@ async function promptLane(opts, deps, state) {
     draft.lanes[opts.name] = { ...(draft.lanes[opts.name] ?? lane), promptFile: file, promptedAt };
   });
   const rulingRecord = ruling ? { amendment: true, ruling: ruling.ruling === 'none' ? 'none' : ruling.receipt } : {};
+  const briefRecord = briefCheck ? { briefPaths: briefCheck } : {};
   return {
-    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, composerCleared, stateAfter, delivery, resent, ...rulingRecord },
-    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries, composerCleared, delivery, resent, ...rulingRecord },
+    output: { accepted: deepFind(unwrapResult(sent.stdout), ['accepted']) ?? true, queued, enterRetries, composerCleared, stateAfter, delivery, resent, ...rulingRecord, ...briefRecord },
+    row: { lane: opts.name, kind: lane.kind ?? null, model: lane.model ?? null, reasoning: lane.reasoning ?? null, state: stateAfter, queued, enterRetries, composerCleared, delivery, resent, ...rulingRecord, ...briefRecord },
   };
 }
 

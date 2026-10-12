@@ -187,7 +187,9 @@ export function laneBackend(state, deps, backend) {
       // automatic capacity re-send, which renews nothing.
       prompt: (wp, { amendment = false, answer = null, resend = false } = {}) => {
         const lane = laneLayout(state, wp);
-        const args = [lane.name, '--file', wp.lane.briefPath];
+        // The WP's Files are the paths the lane may create, so the brief's
+        // path check (lane.mjs prompt) allows them to be absent.
+        const args = [lane.name, '--file', wp.lane.briefPath, ...(wp.files ?? []).flatMap((path) => ['--allow-missing', path])];
         const byReceipt = Boolean(answer?.receiptId && deps.env?.WORKIT_RECEIPT_RESOLVER);
         if (amendment) args.push('--amendment', ...(byReceipt ? ['--ruling-receipt', answer.receiptId, '--quest', state.intent.anchor] : ['--no-ruling']));
         return [shellAction('prompt', {
