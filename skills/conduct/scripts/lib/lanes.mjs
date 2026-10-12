@@ -41,7 +41,7 @@ import { resolveProgram } from './exec.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, LIVE_STATES, laneOccupied } from './schedule.mjs';
-import { EXIT_CODES as LANE_EXIT, reapWorktree, reportEvidenceProblems, reportShapeProblems } from '../../../../scripts/lane.mjs';
+import { EXIT_CODES as LANE_EXIT, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems } from '../../../../scripts/lane.mjs';
 
 const DEADLINE_MS = 120 * 60 * 1000;
 const POLL_MS = 60000;
@@ -788,7 +788,7 @@ function checkLane(state, wp, flags, deps) {
       else {
         if (pr.headRefName !== (wp.lane?.branch ?? lane.branch)) failures.push(`PR #${flags.pr} head is ${pr.headRefName}, not ${wp.lane?.branch ?? lane.branch}`);
         if (pr.state !== 'OPEN' && pr.state !== 'MERGED') failures.push(`PR #${flags.pr} is ${pr.state}`);
-        failures.push(...reportShapeProblems(pr.body ?? '').map((p) => `PR body: ${p}`));
+        failures.push(...[...reportShapeProblems(pr.body ?? ''), ...mergeDanger(pr.body ?? '').problems].map((p) => `PR body: ${p}`));
       }
     }
   }

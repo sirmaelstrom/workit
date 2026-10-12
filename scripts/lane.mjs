@@ -1929,6 +1929,40 @@ export function reportShapeProblems(text) {
   return problems;
 }
 
+// A PR body's `## Merge danger` section (lane contract § Finish): one `Door:`
+// marker line and one `Blast radius:` line, each at the start of a line,
+// outside any fence, with no bullet or bold. The door is `two-way` or
+// `one-way`, lowercase; an explanation may follow after `: `, ` — ` or in
+// parentheses. `door` is the declared value, or null when the section does
+// not declare one cleanly; `problems` lists what is missing or malformed.
+const DOOR_LINE = /^Door: (two-way|one-way)(?:(?::| —| -) \S.*| \(.+)?$/;
+const BLAST_LINE = /^Blast radius: \S.*$/;
+const looseMarker = (text, label) => new RegExp(`^[\\s>*+-]*(?:\\*\\*|__)?\\s*${label}\\s*(?:\\*\\*|__)?\\s*:`, 'i').test(text);
+
+export function mergeDanger(text) {
+  const lines = markdownLines(text);
+  const at = lines.findIndex((line) => {
+    const heading = markdownHeading(line);
+    return heading?.level === 2 && heading.title === 'Merge danger';
+  });
+  if (at < 0) return { door: null, problems: ['## Merge danger is missing (Door: and Blast radius: lines)'] };
+  const section = lines.slice(at + 1, sectionEnd(lines, at, 2)).filter((line) => !line.fenced);
+  const problems = [];
+  const read = (label, strict, hint) => {
+    const candidates = section.filter((line) => looseMarker(line.text, label));
+    const exact = candidates.filter((line) => strict.test(line.text.trimEnd()));
+    for (const line of candidates) {
+      if (!strict.test(line.text.trimEnd())) problems.push(`## Merge danger line ${line.number} is not a ${label}: marker line (${hint}): ${line.text.trim()}`);
+    }
+    if (candidates.length === 0) problems.push(`## Merge danger has no ${label}: line (${hint})`);
+    else if (candidates.length > 1) problems.push(`## Merge danger has ${candidates.length} ${label}: lines; it carries exactly one`);
+    return candidates.length === 1 && exact.length === 1 ? exact[0] : null;
+  };
+  const door = read('Door', DOOR_LINE, '`Door: two-way` or `Door: one-way`, at the start of the line, no bullet or bold');
+  read('Blast radius', BLAST_LINE, '`Blast radius: <one phrase>`, at the start of the line, no bullet or bold');
+  return { door: door ? DOOR_LINE.exec(door.text.trimEnd())[1] : null, problems };
+}
+
 // What a failing run prints, read per fenced block. A runner's failure record
 // (FAIL, ✖, ×, a Playwright `x  1`, TAP `not ok`), an AssertionError, a tsc
 // error, a failed count above zero or a non-zero exit fails a block outright.
@@ -2296,7 +2330,9 @@ async function checkLane(opts, deps, state) {
       }
     } else {
       const doc = parseJson(viewed.stdout);
-      const bodyProblems = reportShapeProblems(typeof doc?.body === 'string' ? doc.body : '');
+      // The PR body also carries `## Merge danger`; the report does not need it.
+      const body = typeof doc?.body === 'string' ? doc.body : '';
+      const bodyProblems = [...reportShapeProblems(body), ...mergeDanger(body).problems];
       evidence = { headRefName: doc?.headRefName ?? null, state: doc?.state ?? null, bodyProblems };
       const prStatus = String(doc?.state ?? '').toUpperCase();
       if (doc?.headRefName !== lane.branch) {

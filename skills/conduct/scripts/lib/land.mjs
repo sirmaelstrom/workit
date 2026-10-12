@@ -34,6 +34,7 @@ import { join, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ConductError, STEP_SEAM, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
+import { mergeDanger } from '../../../../scripts/lane.mjs';
 
 const WAIT_MS = 60000;
 const PENDING_BLOCK_MS = 30 * 60000;
@@ -657,8 +658,12 @@ export function gateCheck(state, wp, { exec, now }) {
   const rev = exec('git', ['-C', wt, 'rev-parse', 'HEAD']);
   const head = rev.code === 0 ? rev.stdout.trim() : null;
   if (!head) fail(`worktree head unreadable: ${first(rev.stderr)}`, 'infra');
-  const view = exec('gh', ['pr', 'view', String(wp.pr.number), '--repo', repoOf(state), '--json', 'headRefOid,baseRefName,state']);
+  // A WP's PR body declares its door (`## Merge danger`); the release PR is the
+  // run's own and carries none.
+  const release = wp.id === 'release';
+  const view = exec('gh', ['pr', 'view', String(wp.pr.number), '--repo', repoOf(state), '--json', release ? 'headRefOid,baseRefName,state' : 'headRefOid,baseRefName,state,body']);
   const pr = view.code === 0 ? parseJson(view.stdout) : null;
+  const danger = release || !pr?.headRefOid ? null : mergeDanger(typeof pr.body === 'string' ? pr.body : '');
   if (!pr?.headRefOid) fail(`PR head unreadable: ${first(view.stderr)}`, 'infra');
   else {
     if (head && pr.headRefOid !== head) fail('head mismatch', 'head-mismatch');
@@ -692,6 +697,7 @@ export function gateCheck(state, wp, { exec, now }) {
   return {
     ok, pending: !ok && failures.length === 0, pendingOn, blocked: ci.blocked === true || flight.blocked === true, head, failures, causes: [...causes],
     unreviewedTail: review.tail ?? null, needsFullReview: review.needsFullReview === true, staleBase: causes.has('stale-base'),
+    ...(danger ? { door: danger.door, doorProblems: danger.problems } : {}),
     ...(review.inspect ? { inspect: review.inspect } : {}),
     ...(review.outside ? { outside: review.outside } : {}),
     ...(review.uncited ? { uncited: review.uncited } : {}),
@@ -905,6 +911,12 @@ function recordGate(state, wp, action, r, deps) {
   if (![0, 5, 6].includes(r.code) || !validGate(gate)) return result('block', `land gate output unreadable (exit ${r.code}): ${first(r.stderr) || first(r.stdout)}`);
   const recorded = { gate: gateRecord(wp, gate, deps) };
   if (r.code === 0) {
+    // Merge authority covers a two-way door only: a one-way or undeclared door
+    // is held for the operator, whatever else the gate passed.
+    if (gate.door !== undefined && gate.door !== 'two-way') {
+      const why = gate.door === 'one-way' ? 'Door: one-way' : `no valid Door: line (${(gate.doorProblems ?? []).join('; ') || 'unreadable'})`;
+      return result('held', `gate passed; ${why}: a merge that one revert cannot undo is the operator's`, { ...recorded, retries: 0 });
+    }
     return state.authority?.merge === true ? result('continue', null, { ...recorded, retries: 0 }) : result('held', 'gate passed; no merge authority', { ...recorded, retries: 0 });
   }
   if (r.code === 6) {

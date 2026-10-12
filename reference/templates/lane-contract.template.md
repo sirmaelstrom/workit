@@ -49,7 +49,7 @@ List the callers of any function you add a check to, and every construct in your
      The door decides how the PR is read, not whether it is merged: a two-way door with a small radius is skimmed, a one-way door is read slowly and never takes the ping-not-hold merge lane.
    - **A fix PR** — one that repairs a defect an earlier PR shipped — carries one line in its body: `Escape: introduced by <repo>#<n>; review saw it | missed it | unreviewed`. Pick one of the three. Write it at fix time, from what you know of that PR's review threads; never reconstruct it later from blame.
    - End the body with the session attribution line your environment gives you, if any.
-   - The conductor runs `lane check <lane> --expect-pr <n>` on it: the check fails unless the PR's head is your branch, the PR is open or merged, and the body passes the same shape check as the report (step 2).
+   - The conductor runs `lane check <lane> --expect-pr <n>` on it: the check fails unless the PR's head is your branch, the PR is open or merged, and the body passes the same shape check as the report (step 2) plus the `## Merge danger` marker lines above.
 2. Write your report to `<reports directory>/lane-<id>-report.md`, with these sections. The conductor runs `lane check <lane> --expect-report <path>` on it, which fails on a missing `## Debrief` heading, a missing or empty `###` sub-heading under it, any question under `## Needs conductor` that is not a lettered ask `(a)`…`(f)`, and any ask with more than six options or a letter used twice. It also checks the evidence rules marked **(checked)** below against the report and your branch's diff from its base:
    - `## Outcome` (built | refuted | stopped: needs conductor)
    - `## Premise check` (rule 15)

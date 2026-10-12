@@ -917,10 +917,17 @@ test('exec: lane check passes a good report and fails a missing Debrief heading 
   assert.match((await check()).out.failures.join('; '), /no commit past base/);
   // The PR form: head branch, state and body.
   f.table[`git -C /wt rev-list --count ${SHA40}..HEAD`] = ok('1\n');
-  f.table['gh pr view 7 --repo o/r --json headRefName,state,body'] = ok(JSON.stringify({ headRefName: 'conduct/demo/wp-00', state: 'OPEN', body: report() }));
+  const danger = '\n## Merge danger\n\nDoor: two-way\nBlast radius: the demo WP\n';
+  f.table['gh pr view 7 --repo o/r --json headRefName,state,body'] = ok(JSON.stringify({ headRefName: 'conduct/demo/wp-00', state: 'OPEN', body: report() + danger }));
   assert.equal((await check({ pr: '7' })).code, 0);
+  // fca05d92: the PR body needs its `## Merge danger` marker lines.
+  f.table['gh pr view 7 --repo o/r --json headRefName,state,body'] = ok(JSON.stringify({ headRefName: 'conduct/demo/wp-00', state: 'OPEN', body: report() }));
+  assert.match((await check({ pr: '7' })).out.failures.join('; '), /PR body: ## Merge danger is missing/);
+  f.table['gh pr view 7 --repo o/r --json headRefName,state,body'] = ok(JSON.stringify({ headRefName: 'conduct/demo/wp-00', state: 'OPEN', body: report() + danger.replace('Door: two-way', '- Door: two-way') }));
+  assert.match((await check({ pr: '7' })).out.failures.join('; '), /PR body: ## Merge danger line \d+ is not a Door: marker line/);
   f.table['gh pr view 7 --repo o/r --json headRefName,state,body'] = ok(JSON.stringify({ headRefName: 'other', state: 'CLOSED', body: 'no debrief' }));
-  assert.equal((await check({ pr: '7' })).out.failures.length, 3);
+  // Head, state, the Debrief, and (fca05d92) the missing ## Merge danger.
+  assert.equal((await check({ pr: '7' })).out.failures.length, 4);
   const pr = f.backend().check(f.wp).at(-1);
   assert.deepEqual(pr.command.slice(-2), ['--pr', '{pr.number}']);
 });

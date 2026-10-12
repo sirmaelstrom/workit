@@ -16,6 +16,9 @@ import * as build from './build.mjs';
 import { RUN_SLOTS } from './build.mjs';
 import { wpRecord } from './spec.mjs';
 import { STEPS, STEP_SEAM, saveState, readEvents, loadState } from '../state.mjs';
+
+// The section a lane PR body carries (lane contract § Finish; fca05d92).
+const MERGE_DANGER = '## Merge danger\n\nDoor: two-way\nBlast radius: the demo WP\n';
 import { runLaneVerb } from '../lanes.mjs';
 import { runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
@@ -128,11 +131,14 @@ const BASE_RULES = [
   [/^git -C \S+ diff --no-color --no-ext-diff --no-renames \S+\.\.HEAD$/, (h) => ok(h.laneDiff ?? '')],
   [/^gh pr view (\d+) --repo o\/r --json headRefName,state,body$/, (h, m) => {
     const id = `WP-${String(Number(m[1]) - 100).padStart(2, '0')}`;
-    return ok(JSON.stringify({ headRefName: `conduct/demo/${id.toLowerCase()}`, state: 'OPEN', body: readFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), 'utf8') }));
+    // The lane's PR body: its report plus the `## Merge danger` section (fca05d92).
+    const body = `${readFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), 'utf8')}\n${h.mergeDanger ?? MERGE_DANGER}`;
+    return ok(JSON.stringify({ headRefName: `conduct/demo/${id.toLowerCase()}`, state: 'OPEN', body }));
   }],
   [/^git -C (\S+) rev-parse HEAD$/, (h, m) => ok(`${h.head(idOfWorktree(m[1]))}\n`)],
-  [/^gh pr view (\d+) --repo o\/r --json headRefOid,baseRefName,state$/, (h, m) => ok(JSON.stringify({
-    headRefOid: h.head(`WP-${String(Number(m[1]) - 100).padStart(2, '0')}`), baseRefName: 'main', state: 'OPEN' }))],
+  // The gate reads a WP PR's body for its door (fca05d92); the release PR's view has no body.
+  [/^gh pr view (\d+) --repo o\/r --json headRefOid,baseRefName,state(,body)?$/, (h, m) => ok(JSON.stringify({
+    headRefOid: h.head(`WP-${String(Number(m[1]) - 100).padStart(2, '0')}`), baseRefName: 'main', state: 'OPEN', ...(m[2] ? { body: h.mergeDanger ?? MERGE_DANGER } : {}) }))],
   [/^git -C \S+ fetch origin$/, () => ok()],
   [/^git -C \S+ merge-base --is-ancestor origin\/main HEAD$/, (h) => (h.stale > 0 ? (h.stale -= 1, { code: 1, stdout: '', stderr: '' }) : ok())],
   [/^git -C \S+ merge-base --is-ancestor \w+ \w+$/, () => ok()],

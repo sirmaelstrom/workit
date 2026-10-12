@@ -72,6 +72,7 @@ function makeWp(over = {}) {
 }
 
 // A fake executor for the gate's programs. Every call is logged with its input.
+const TWO_WAY = '## Merge danger\n\nDoor: two-way\nBlast radius: the fixture WP\n';
 // `tailFiles` answers the tail diffs: with --no-renames each entry is its own
 // row; without it, a `renames` pair collapses to its destination (git's default).
 function gateExec(o = {}) {
@@ -82,7 +83,11 @@ function gateExec(o = {}) {
     calls.push({ program, args, input: options.input });
     const has = (flag) => args.includes(flag);
     if (program === 'git' && args[2] === 'rev-parse') return ok(`${args[3] === 'HEAD' ? head : BASE_TIP}\n`);
-    if (program === 'gh' && args[1] === 'view') return ok(JSON.stringify({ headRefOid: head, baseRefName: 'main', state: 'OPEN', ...pr }));
+    if (program === 'gh' && args[1] === 'view') {
+      // A WP's view asks for the body (its `## Merge danger`, fca05d92); the release's does not.
+      const body = args.at(-1).endsWith(',body') ? { body: TWO_WAY } : {};
+      return ok(JSON.stringify({ headRefOid: head, baseRefName: 'main', state: 'OPEN', ...body, ...pr }));
+    }
     if (program === 'git' && args[2] === 'fetch') return { code: fetch, stdout: '', stderr: fetch ? 'fatal: unable to access' : '' };
     if (program === 'git' && args[2] === 'merge-base') {
       if (args[4] === 'origin/main') return { code: ancestor, stdout: '', stderr: '' };
@@ -121,7 +126,34 @@ const GATE_PENDING = { code: 6, stdout: gateJson({ pending: true }), stderr: '' 
 
 test('gateCheck: ok for green CI, threads exit 0, a review at head, a fresh base and the lock held', () => {
   const out = gate(makeState(), makeWp());
-  assert.deepEqual(out, { ok: true, pending: false, pendingOn: [], blocked: false, head: HEAD, failures: [], causes: [], unreviewedTail: null, needsFullReview: false, staleBase: false });
+  assert.deepEqual(out, { ok: true, pending: false, pendingOn: [], blocked: false, head: HEAD, failures: [], causes: [], unreviewedTail: null, needsFullReview: false, staleBase: false, door: 'two-way', doorProblems: [] });
+});
+
+// fca05d92: the gate reads the WP PR body's door; merge authority covers a two-way door only.
+test('gateCheck: a WP PR reports its declared door; the release PR is not asked for a body', () => {
+  const oneWay = gate(makeState(), makeWp(), { pr: { body: TWO_WAY.replace('two-way', 'one-way') } });
+  assert.deepEqual([oneWay.ok, oneWay.door, oneWay.doorProblems], [true, 'one-way', []]);
+  const missing = gate(makeState(), makeWp(), { pr: { body: 'no section' } });
+  assert.equal(missing.door, null);
+  assert.match(missing.doorProblems.join('\n'), /## Merge danger is missing/);
+  const exec = gateExec();
+  const release = gateCheck(makeState(), makeWp({ id: 'release' }), { exec, now: () => NOW });
+  assert.equal(Object.hasOwn(release, 'door'), false);
+  assert.equal(exec.calls.find((c) => c.program === 'gh' && c.args[1] === 'view').args.at(-1), 'headRefOid,baseRefName,state');
+});
+
+test('recordLandStep: a passed gate with a one-way or undeclared door is held even with merge authority', () => {
+  const state = makeState();
+  const passed = (extra) => ok(gateJson({ ok: true, ...extra }));
+  assert.equal(recordLandStep(state, makeWp(), GATE_ACTION, passed({ door: 'two-way', doorProblems: [] }), { now: () => NOW }).outcome, 'continue');
+  const oneWay = recordLandStep(state, makeWp(), GATE_ACTION, passed({ door: 'one-way', doorProblems: [] }), { now: () => NOW });
+  assert.deepEqual([oneWay.outcome, oneWay.patch.queue], ['held', []]);
+  assert.match(oneWay.reason, /Door: one-way/);
+  const none = recordLandStep(state, makeWp(), GATE_ACTION, passed({ door: null, doorProblems: ['## Merge danger is missing'] }), { now: () => NOW });
+  assert.equal(none.outcome, 'held');
+  assert.match(none.reason, /no valid Door: line \(## Merge danger is missing\)/);
+  // A gate record without a door (the release PR) keeps the authority rule.
+  assert.equal(recordLandStep(state, makeWp(), GATE_ACTION, passed({}), { now: () => NOW }).outcome, 'continue');
 });
 
 test('gateCheck: a pipeline review of the head still in flight is pending, then blocks at the CI deadline', () => {
