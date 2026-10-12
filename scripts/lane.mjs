@@ -101,11 +101,13 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            Waits --until idle --until done, never bare; honours --plan-floor.
            One read, no poll loop: a codex lane whose rollout shows its turn
            still running exits 4 as settled-turn-live.
-  status   <name>  Read-only, no wait: liveness live|settled|unknown and its
-           source. A codex lane's comes from its rollout turn events only
-           (source rollout, or unknown with source none); herdr's reading is
-           printed as herdr and never decides it. A claude lane's is herdr's.
-           Judge codex liveness here, never from herdr agent get.
+  status   <name>  No wait, no keys, exit 0: liveness live|settled|unknown and
+           its source. A codex lane's comes from its rollout turn events only
+           (source rollout, or unknown with source none): live until a turn
+           end stamped at or after the last prompt. herdr's reading is printed
+           as herdr (unreadable when get fails) and never decides it. A
+           claude lane's is herdr's. Judge codex liveness here, never from
+           herdr agent get (lane-supervision constraint 27).
   fallback <name> --to claude --model <slug> --reasoning <lvl>
   stop     <name> [--timeout <ms>]  Stops the lane agent; a late shell/banner
            check is accepted only after the live-TUI veto. A Claude lane gone

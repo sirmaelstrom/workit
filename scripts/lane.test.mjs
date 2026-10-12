@@ -5478,6 +5478,32 @@ test('d72185dc: a turn end after the last prompt is settled; no rollout is unkno
   assert.deepEqual([claude.output.liveness, claude.output.source], ['settled', 'herdr']);
 });
 
+test('d72185dc: a turn end before the last prompt is live; a failed get is unreadable, exit 0; a long name is mapped for get', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { ...AE_LANE, promptedAt: '2026-10-04T02:40:00.000Z' });
+  writeRollout(f, f.dir, [...AE_TURN, AE_COMPLETE]);
+  f.responses.push(IDLE_GET);
+  const stale = await laneStatus(f, '2026-10-04T02:40:01Z');
+  assert.deepEqual([stale.output.liveness, stale.output.turnEvent], ['live', 'task_complete'], 'the 02:40 prompt has not started its turn');
+
+  const g = fixture(t);
+  seedLane(g, AE_LANE);
+  writeRollout(g, g.dir, AE_TURN);
+  g.responses.push({ code: 1, stdout: '', stderr: 'agent not found' });
+  const failed = await laneStatus(g);
+  assert.equal(failed.exit, 0);
+  assert.deepEqual([failed.output.herdr, failed.output.liveness, failed.output.source], ['unreadable', 'live', 'rollout']);
+
+  const h = fixture(t);
+  const longName = 'a-very-long-lane-name-that-herdr-cannot-take';
+  writeFileSync(`${h.log}.state.json`, JSON.stringify({ creates: [], lanes: { [longName]: { pane: 'w1:p2', kind: 'claude', path: h.dir } } }), 'utf8');
+  h.responses.push(IDLE_GET);
+  const mapped = await runLane(['status', longName, '--log', h.log], { exec: h.exec });
+  assert.equal(mapped.exit, 0, JSON.stringify(mapped.output));
+  assert.deepEqual(h.calls[0].args, ['agent', 'get', herdrAgentName(longName)]);
+  assert.notEqual(herdrAgentName(longName), longName);
+});
+
 // --- quest e8a1db7f: `lane resume` reads the same rollout `wait` does, once.
 const rolloutResume = (f, now = '2026-10-04T02:20:28Z') => runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], {
   exec: f.exec, now: () => Date.parse(now), env: { CODEX_HOME: join(f.dir, 'codex-home') },
