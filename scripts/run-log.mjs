@@ -11,7 +11,7 @@ import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:
 import { basename, dirname, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { execute } from './lane.mjs';
+import { execute, resolverArgv } from './lane.mjs';
 
 // The exit contract, aligned with lane.mjs where the meaning is shared:
 //   0 ok · 1 infrastructure (read/write/git could not answer)
@@ -32,6 +32,12 @@ export const USAGE_TEXT = `run-log <verb> [options] — one run-doc operation pe
          date cell is the process clock at write time (UTC, ISO 8601, seconds);
          no argument sets it. Events: ${EVENTS.join(' / ')}.
          Refuses (5) a malformed table or a last row stamped later than now.
+         [--asks <receipt uuid> --quest <id>] reads the receipt through
+         WORKIT_RECEIPT_RESOLVER at write time and prefixes the pointers cell
+         with what it returned: "asks: <uuid> <outcome>[, superseded by
+         <latest>]". No resolver, an unknown receipt, or one on another quest is
+         refused (2); a resolver failure or an unusable reply is 1. A field
+         that itself types "asks: <uuid>" is refused (2). Nothing is written.
   lint   --doc <abs>
          Exit 5 naming each row whose stamp is later than now, earlier than the
          row above it, unparseable, or (git-tracked, committed rows) later than
@@ -40,6 +46,16 @@ export const USAGE_TEXT = `run-log <verb> [options] — one run-doc operation pe
 
 const STAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/;
 const FIELDS = ['item', 'event', 'pointers', 'teach'];
+const OPTIONAL_APPEND = ['asks', 'quest'];
+const RECEIPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const QUEST_REF = /^[0-9a-f-]{6,}$/i;
+// An asks claim as a caller could type it: `asks:` then a receipt id or prefix,
+// bare or in markdown. Checked after NFKC (a fullwidth colon is a colon) with
+// format characters (a zero-width space) removed.
+const TYPED_ASKS = /\basks\s*:\s*[`*_~]*[0-9a-f]{7,}/i;
+function typedAsks(value) {
+  return TYPED_ASKS.exec(String(value).normalize('NFKC').replace(/\p{Cf}/gu, ''));
+}
 const HEADER = Object.freeze(['date', 'item', 'event', 'pointers', 'teach →']);
 const LOCK_STALE_MS = 30_000;
 
@@ -57,7 +73,7 @@ function usage(message) {
 function parseArgs(argv) {
   const [verb, ...tokens] = argv;
   if (!['append', 'lint'].includes(verb)) usage('expected one verb: append, lint');
-  const allowed = verb === 'append' ? ['doc', ...FIELDS] : ['doc'];
+  const allowed = verb === 'append' ? ['doc', ...FIELDS, ...OPTIONAL_APPEND] : ['doc'];
   const opts = { verb };
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -68,7 +84,8 @@ function parseArgs(argv) {
     if (value === undefined) usage(`${token} needs a value`);
     opts[name] = value;
   }
-  for (const name of allowed) if (opts[name] === undefined) usage(`${verb} needs --${name}`);
+  for (const name of allowed) if (opts[name] === undefined && !OPTIONAL_APPEND.includes(name)) usage(`${verb} needs --${name}`);
+  if ((opts.asks === undefined) !== (opts.quest === undefined)) usage('--asks and --quest go together: the receipt and the quest it must belong to');
   if (!isAbsolute(opts.doc)) usage(`--doc must be absolute: ${opts.doc}`);
   return opts;
 }
@@ -205,10 +222,69 @@ function takeLock(deps, doc) {
   throw new RunLogError(EXIT.ERROR, `could not take the append lock: ${lock}`);
 }
 
+// The asks field is measured the way the stamp is: the helper reads the receipt
+// itself, at write time, through the same resolver contract `lane prompt
+// --ruling-receipt` uses (lane.mjs resolverArgv). The cell says what the read
+// returned. `append` refuses a caller-typed `asks: <id or prefix>` in any field
+// (typedAsks: the common spellings, not every homoglyph), so the claim a row
+// gets from the helper comes from a read. A row added by Edit is outside this,
+// and lint cannot tell the two apart.
+function readAsks(opts, deps) {
+  if (!RECEIPT_ID.test(opts.asks)) usage(`--asks must be a full receipt uuid, got ${JSON.stringify(opts.asks)}`);
+  if (!QUEST_REF.test(opts.quest)) usage(`--quest must be a quest uuid or a prefix of at least 6 characters, got ${JSON.stringify(opts.quest)}`);
+  const spec = deps.env.WORKIT_RECEIPT_RESOLVER;
+  if (!spec || !String(spec).trim()) usage('--asks needs WORKIT_RECEIPT_RESOLVER to read the receipt; none is configured, so nothing was written');
+  let argv;
+  try {
+    argv = resolverArgv(spec, opts.asks.toLowerCase());
+  } catch (error) {
+    usage(error.message);
+  }
+  const [program, ...args] = argv;
+  const resolved = deps.exec(program, args);
+  if (resolved.code !== 0) {
+    const detail = String(resolved.stderr || resolved.stdout || '').trim();
+    throw new RunLogError(EXIT.ERROR, `receipt resolver failed (exit ${resolved.code})${detail ? `: ${detail.slice(0, 200)}` : ''}; nothing was written`);
+  }
+  const text = String(resolved.stdout ?? '').trim();
+  if (!text || text === 'null') usage(`receipt ${opts.asks} was not found by the resolver; nothing was written`);
+  let receipt;
+  try {
+    receipt = JSON.parse(text);
+  } catch {
+    receipt = null;
+  }
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
+    throw new RunLogError(EXIT.ERROR, `receipt resolver printed something that is not one receipt JSON object: ${text.slice(0, 200)}`);
+  }
+  const id = String(receipt.id ?? '').toLowerCase();
+  const questId = String(receipt.questId ?? receipt.quest_id ?? '').toLowerCase();
+  const outcome = receipt.outcome;
+  if (typeof outcome !== 'string' || !/^[a-z_]+$/.test(outcome)) {
+    throw new RunLogError(EXIT.ERROR, `the resolver's receipt has no usable outcome (${JSON.stringify(outcome)}); nothing was written`);
+  }
+  if (id !== opts.asks.toLowerCase()) usage(`the resolver returned receipt ${id || '<no id>'}, not ${opts.asks}`);
+  if (!questId.startsWith(opts.quest.toLowerCase())) usage(`receipt ${opts.asks} belongs to quest ${questId || '<none>'}, not ${opts.quest}`);
+  const latest = receipt.latestReceiptId ?? receipt.latest_receipt_id ?? null;
+  if (latest !== null && !RECEIPT_ID.test(String(latest))) {
+    throw new RunLogError(EXIT.ERROR, `the resolver's latest receipt id is not a uuid (${JSON.stringify(latest)}); nothing was written`);
+  }
+  const superseded = latest !== null && String(latest).toLowerCase() !== id ? `, superseded by ${String(latest).toLowerCase()}` : '';
+  return `asks: ${id} ${outcome}${superseded}`;
+}
+
 function appendRow(opts, deps) {
   if (!EVENTS.includes(opts.event)) usage(`--event ${JSON.stringify(opts.event)} is outside the vocabulary: ${EVENTS.join(' / ')}`);
   const cells = FIELDS.map((name) => cell(name, opts[name]));
+  for (const name of FIELDS) {
+    const typed = typedAsks(opts[name]);
+    if (typed) usage(`--${name} carries an asks claim (${typed[0]}…); only --asks <receipt> --quest <id> writes one, from a read`);
+  }
   if (!deps.exists(opts.doc)) usage(`doc does not exist: ${opts.doc}`);
+  if (opts.asks !== undefined) {
+    const pointers = FIELDS.indexOf('pointers');
+    cells[pointers] = `${cell('asks', readAsks(opts, deps))}; ${cells[pointers]}`;
+  }
   const release = takeLock(deps, opts.doc);
   try {
     return appendLocked(opts, deps, cells);
@@ -352,6 +428,7 @@ export async function runRunLog(argv, overrides = {}) {
     remove: (path) => rmSync(path, { force: true }),
     stat: (path) => statSync(path),
     pid: process.pid,
+    env: process.env,
     now: () => Date.now(),
     ...overrides,
   };

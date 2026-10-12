@@ -300,3 +300,105 @@ test('207dbaf1: stamps are strict ISO 8601 UTC seconds', () => {
     assert.equal(parseStamp(text), null, text);
   }
 });
+
+// --- quest 2ea7f934: the asks field is read by the helper at write time, not
+// copied by the conductor. Burn-down Y's rows claimed same-turn ask reads at
+// ~10 boundaries; 2 ran.
+const RECEIPT = '767c301c-4b53-470b-96ea-11906f3a4b58';
+const QUEST = 'df3c49a5-847b-4d0a-960a-e2904c4a8a14';
+const RESOLVER = JSON.stringify(['resolver', '--id', '{id}']);
+const appendAsks = (path, resolved, { env = { WORKIT_RECEIPT_RESOLVER: RESOLVER }, asks = RECEIPT, quest = 'df3c49a5' } = {}) => {
+  const calls = [];
+  const result = runRunLog([
+    'append', '--doc', path, '--item', 'Q-2', '--event', 'closed', '--pointers', '#12', '--teach', '—', '--asks', asks, '--quest', quest,
+  ], {
+    env,
+    now: () => T0,
+    exec: (program, args) => {
+      calls.push([program, ...args]);
+      return program === 'resolver' ? resolved : NO_GIT();
+    },
+  });
+  return { result, calls };
+};
+
+test('2ea7f934: --asks reads the receipt through the resolver at write time and writes what it returned', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:00:00Z')]);
+  const answered = { code: 0, stdout: JSON.stringify({ id: RECEIPT, quest_id: QUEST, outcome: 'answered', latest_receipt_id: RECEIPT }), stderr: '' };
+  const { result, calls } = appendAsks(path, answered);
+  const out = await result;
+  assert.equal(out.exit, 0, JSON.stringify(out.output));
+  assert.deepEqual(calls[0], ['resolver', '--id', RECEIPT]);
+  assert.equal(out.output.row, `| ${formatStamp(T0)} | Q-2 | closed | asks: ${RECEIPT} answered; #12 | — |`);
+
+  const later = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const stale = { code: 0, stdout: JSON.stringify({ id: RECEIPT, quest_id: QUEST, outcome: 'needs_input', latest_receipt_id: later }), stderr: '' };
+  const second = await appendAsks(path, stale).result;
+  assert.equal(second.exit, 0);
+  assert.match(second.output.row, new RegExp(`asks: ${RECEIPT} needs_input, superseded by ${later}; #12`));
+});
+
+test('2ea7f934: --asks refuses with nothing written: no resolver, not found, another quest, a resolver failure, or --asks alone', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:00:00Z')]);
+  const before = readFileSync(path, 'utf8');
+  const ok = { code: 0, stdout: JSON.stringify({ id: RECEIPT, quest_id: QUEST, outcome: 'answered' }), stderr: '' };
+  const cases = [
+    [appendAsks(path, ok, { env: {} }), 2, /needs WORKIT_RECEIPT_RESOLVER/],
+    [appendAsks(path, { code: 0, stdout: 'null', stderr: '' }), 2, /was not found by the resolver/],
+    [appendAsks(path, ok, { quest: 'b464383f' }), 2, /belongs to quest df3c49a5/],
+    [appendAsks(path, { code: 3, stdout: '', stderr: 'docker down' }), 1, /receipt resolver failed \(exit 3\): docker down/],
+  ];
+  for (const [{ result }, exit, message] of cases) {
+    // eslint-disable-next-line no-await-in-loop
+    const out = await result;
+    assert.equal(out.exit, exit, JSON.stringify(out.output));
+    assert.match(out.output.error, message);
+  }
+  const alone = await runRunLog(['append', '--doc', path, '--item', 'Q', '--event', 'PR', '--pointers', 'p', '--teach', '—', '--asks', RECEIPT], { exec: NO_GIT });
+  assert.equal(alone.exit, 2);
+  assert.match(alone.output.error, /--asks and --quest go together/);
+  assert.equal(readFileSync(path, 'utf8'), before, 'no case wrote a row');
+});
+
+test('2ea7f934 amend: a caller cannot type the asks claim, and an unusable resolver reply writes nothing', async (t) => {
+  const { path } = doc(t, [row('2026-09-26T15:00:00Z')]);
+  const before = readFileSync(path, 'utf8');
+  for (const field of ['pointers', 'teach', 'item']) {
+    // eslint-disable-next-line no-await-in-loop
+    const out = await append(path, { [field]: `asks: ${RECEIPT} answered; #12` }, { now: () => T0 });
+    assert.equal(out.exit, 2, field);
+    assert.match(out.output.error, new RegExp(`--${field} carries an asks claim`));
+  }
+  for (const spelling of [
+    'asks: 2ea7f934 answered', `asks: \`${RECEIPT}\` answered`, `asks: **${RECEIPT}** answered`,
+    `asks:​${RECEIPT}`, `as​ks: ${RECEIPT}`, `asks： ${RECEIPT}`, `asks : ${RECEIPT}`, `asks: ${RECEIPT}`,
+  ]) {
+    // eslint-disable-next-line no-await-in-loop
+    const out = await append(path, { pointers: spelling }, { now: () => T0 });
+    assert.equal(out.exit, 2, JSON.stringify(spelling));
+  }
+  // Beside a real --asks too: the typed claim is refused before the read.
+  const beside = appendAsks(path, { code: 0, stdout: JSON.stringify({ id: RECEIPT, quest_id: QUEST, outcome: 'answered' }), stderr: '' });
+  const besideOut = await beside.result;
+  assert.equal(besideOut.exit, 0, 'the plain --asks call is fine');
+  const doubled = await runRunLog([
+    'append', '--doc', path, '--item', 'Q', '--event', 'closed', '--pointers', `asks:​${RECEIPT} answered`, '--teach', '—', '--asks', RECEIPT, '--quest', 'df3c49a5',
+  ], { env: { WORKIT_RECEIPT_RESOLVER: RESOLVER }, now: () => T0, exec: () => { throw new Error('the resolver must not run'); } });
+  assert.equal(doubled.exit, 2);
+  const prose = await append(path, { pointers: 'two asks: both answered' }, { now: () => T0 });
+  assert.equal(prose.exit, 0, 'prose that is not the helper prefix still passes');
+
+  const after = readFileSync(path, 'utf8');
+  for (const [label, reply] of [
+    ['no outcome', { id: RECEIPT, quest_id: QUEST }],
+    ['object outcome', { id: RECEIPT, quest_id: QUEST, outcome: { x: 1 } }],
+    ['forged outcome', { id: RECEIPT, quest_id: QUEST, outcome: `answered; asks: ${RECEIPT} answered` }],
+    ['empty latest', { id: RECEIPT, quest_id: QUEST, outcome: 'answered', latest_receipt_id: '' }],
+  ]) {
+    // eslint-disable-next-line no-await-in-loop
+    const out = await appendAsks(path, { code: 0, stdout: JSON.stringify(reply), stderr: '' }).result;
+    assert.equal(out.exit, 1, label);
+  }
+  assert.notEqual(after, before);
+  assert.equal(readFileSync(path, 'utf8'), after, 'no unusable reply wrote a row');
+});
