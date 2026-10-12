@@ -78,6 +78,8 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            --expect-report and --expect-pr (on the PR body) require ## Debrief with
            both headings, and every question under ## Needs conductor in a lettered
            ask (a)…(f): at most six options per ask, no letter twice.
+           --expect-pr also requires one ## Merge danger section with one
+           "Door: two-way|one-way" line and one "Blast radius: …" line.
            --expect-report also checks the contract's evidence rules against the
            report and the lane's diff from its base: fenced failing runs for
            controls, a control per amendment fixed row, new tests named in a
@@ -1932,20 +1934,25 @@ export function reportShapeProblems(text) {
 // A PR body's `## Merge danger` section (lane contract § Finish): one `Door:`
 // marker line and one `Blast radius:` line, each at the start of a line,
 // outside any fence, with no bullet or bold. The door is `two-way` or
-// `one-way`, lowercase; an explanation may follow after `: `, ` — ` or in
-// parentheses. `door` is the declared value, or null when the section does
+// `one-way`, lowercase; an explanation may follow on the same line after
+// `: `, after ` — `, or in parentheses. `door` is the declared value, or null when the section does
 // not declare one cleanly; `problems` lists what is missing or malformed.
-const DOOR_LINE = /^Door: (two-way|one-way)(?:(?::| —| -) \S.*| \(.+)?$/;
+const DOOR_LINE = /^Door: (two-way|one-way)(?:(?::| —) \S.*| \(.+)?$/;
 const BLAST_LINE = /^Blast radius: \S.*$/;
-const looseMarker = (text, label) => new RegExp(`^[\\s>*+-]*(?:\\*\\*|__)?\\s*${label}\\s*(?:\\*\\*|__)?\\s*:`, 'i').test(text);
+// Any line that labels itself as the marker, in any dress: quoted, bulleted,
+// numbered (`1.`, `1)`), bold, any case. Only DOOR_LINE/BLAST_LINE forms pass.
+const looseMarker = (text, label) => new RegExp(`^[\\s>*+-]*(?:\\d+[.)]\\s*)?(?:\\*\\*|__)?\\s*${label}\\s*(?:\\*\\*|__)?\\s*:`, 'i').test(text);
 
 export function mergeDanger(text) {
   const lines = markdownLines(text);
-  const at = lines.findIndex((line) => {
+  const sections = lines.flatMap((line, index) => {
     const heading = markdownHeading(line);
-    return heading?.level === 2 && heading.title === 'Merge danger';
+    return heading?.level === 2 && heading.title === 'Merge danger' ? [index] : [];
   });
-  if (at < 0) return { door: null, problems: ['## Merge danger is missing (Door: and Blast radius: lines)'] };
+  if (sections.length === 0) return { door: null, problems: ['## Merge danger is missing (Door: and Blast radius: lines)'] };
+  // Two sections are two declarations, and the gate cannot tell which one is current.
+  if (sections.length > 1) return { door: null, problems: [`the body has ${sections.length} ## Merge danger sections; it carries exactly one`] };
+  const at = sections[0];
   const section = lines.slice(at + 1, sectionEnd(lines, at, 2)).filter((line) => !line.fenced);
   const problems = [];
   const read = (label, strict, hint) => {

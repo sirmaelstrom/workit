@@ -16,15 +16,15 @@ import * as build from './build.mjs';
 import { RUN_SLOTS } from './build.mjs';
 import { wpRecord } from './spec.mjs';
 import { STEPS, STEP_SEAM, saveState, readEvents, loadState } from '../state.mjs';
-
-// The section a lane PR body carries (lane contract § Finish; fca05d92).
-const MERGE_DANGER = '## Merge danger\n\nDoor: two-way\nBlast radius: the demo WP\n';
 import { runLaneVerb } from '../lanes.mjs';
 import { runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
 import { acceptAnswer, correlation } from '../touch.mjs';
 import { runConduct } from '../../conduct.mjs';
+
+// The section a lane PR body carries (lane contract § Finish; fca05d92).
+const MERGE_DANGER = '## Merge danger\n\nDoor: two-way\nBlast radius: the demo WP\n';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS = join(HERE, '..', '..');
@@ -658,6 +658,16 @@ test('ratify (c58b3a51): a WP held only on its Files does not end the build; rat
   assert.deepEqual(h.events().filter((e) => e.event === 'ratified').map((e) => [e.data.wpId, e.data.paths]), [['WP-02', ['CLAUDE.md']]]);
   assert.equal(await drive(h), null);
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+});
+
+test('door (fca05d92): with merge authority, a PR body declaring Door: one-way passes its gate and is held, its dependent deferred, no merge issued', async (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  h.mergeDanger = '## Merge danger\n\nDoor: one-way\nBlast radius: every consumer of the demo\n';
+  assert.equal(await drive(h), null);
+  assert.equal(h.state.authority.merge, true);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-03').state], ['held', 'deferred']);
+  assert.equal(h.wp('WP-02').gate.door, 'one-way');
+  assert.equal(h.trace.some((a) => a.wpId === 'WP-02' && a.step === 'merge'), false);
 });
 
 test('ratify (c58b3a51): a declined ruling keeps the WP held, its dependent deferred, and lets the build end', async (t) => {

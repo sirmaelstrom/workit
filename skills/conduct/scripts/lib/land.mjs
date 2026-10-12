@@ -706,6 +706,9 @@ export function gateCheck(state, wp, { exec, now }) {
 
 export function mergeActions(state, wp, head) {
   if (state.authority?.merge !== true || mergeLockFor(state, wp) !== 'mine') return [];
+  // The door again, at the merge itself: a gate record from before the door
+  // check (a run resumed across an upgrade) carries none.
+  if (wp.id !== 'release' && wp.gate?.door !== 'two-way') return [];
   const pr = String(wp.pr.number);
   const repo = repoOf(state);
   return [
@@ -912,10 +915,13 @@ function recordGate(state, wp, action, r, deps) {
   const recorded = { gate: gateRecord(wp, gate, deps) };
   if (r.code === 0) {
     // Merge authority covers a two-way door only: a one-way or undeclared door
-    // is held for the operator, whatever else the gate passed.
-    if (gate.door !== undefined && gate.door !== 'two-way') {
-      const why = gate.door === 'one-way' ? 'Door: one-way' : `no valid Door: line (${(gate.doorProblems ?? []).join('; ') || 'unreadable'})`;
-      return result('held', `gate passed; ${why}: a merge that one revert cannot undo is the operator's`, { ...recorded, retries: 0 });
+    // is held for the operator, whatever else the gate passed. The release PR
+    // is the run's own and declares none.
+    if (wp.id !== 'release' && gate.door !== 'two-way') {
+      const why = gate.door === 'one-way'
+        ? 'Door: one-way, a merge one revert cannot undo'
+        : `the PR body declares no valid door (${(gate.doorProblems ?? []).join('; ') || 'the gate reported none'}), so whether one revert undoes it is unknown`;
+      return result('held', `gate passed; ${why}: the merge is the operator's`, { ...recorded, retries: 0 });
     }
     return state.authority?.merge === true ? result('continue', null, { ...recorded, retries: 0 }) : result('held', 'gate passed; no merge authority', { ...recorded, retries: 0 });
   }

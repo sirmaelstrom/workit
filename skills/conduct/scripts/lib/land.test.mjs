@@ -120,7 +120,7 @@ function gateExec(o = {}) {
 
 const gate = (state, wp, options = {}, now = NOW) => gateCheck(state, wp, { exec: gateExec(options), now: () => now });
 const olderReview = (over = {}) => makeWp({ reviews: [{ round: 1, scope: 'full', head: sha('e'), verdicts: [] }], ...over });
-const gateJson = (out) => JSON.stringify({ ok: false, pending: false, blocked: false, head: HEAD, failures: [], causes: [], ...out });
+const gateJson = (out) => JSON.stringify({ ok: false, pending: false, blocked: false, head: HEAD, failures: [], causes: [], door: 'two-way', doorProblems: [], ...out });
 const GATE_OK = ok(gateJson({ ok: true }));
 const GATE_PENDING = { code: 6, stdout: gateJson({ pending: true }), stderr: '' };
 
@@ -151,9 +151,22 @@ test('recordLandStep: a passed gate with a one-way or undeclared door is held ev
   assert.match(oneWay.reason, /Door: one-way/);
   const none = recordLandStep(state, makeWp(), GATE_ACTION, passed({ door: null, doorProblems: ['## Merge danger is missing'] }), { now: () => NOW });
   assert.equal(none.outcome, 'held');
-  assert.match(none.reason, /no valid Door: line \(## Merge danger is missing\)/);
-  // A gate record without a door (the release PR) keeps the authority rule.
-  assert.equal(recordLandStep(state, makeWp(), GATE_ACTION, passed({}), { now: () => NOW }).outcome, 'continue');
+  assert.match(none.reason, /declares no valid door \(## Merge danger is missing\)/);
+  assert.doesNotMatch(none.reason, /cannot undo/, 'an undeclared door is unknown, not one-way');
+  // The exemption is the release's identity, never a missing field: a WP gate
+  // record with no door is held; the release's (which has none) keeps the authority rule.
+  const noField = JSON.stringify({ ok: true, pending: false, blocked: false, head: HEAD, failures: [], causes: [] });
+  assert.equal(recordLandStep(state, makeWp(), GATE_ACTION, ok(noField), { now: () => NOW }).outcome, 'held');
+  assert.equal(recordLandStep(state, makeWp({ id: 'release' }), GATE_ACTION, ok(noField), { now: () => NOW }).outcome, 'continue');
+});
+
+test('mergeActions: a WP whose gate record has no two-way door gets no merge (re-gated); the release does', () => {
+  const state = makeState({ mergeLock: { wpId: 'WP-01' } });
+  assert.equal(mergeActions(state, makeWp({ gate: { ok: true, head: HEAD, door: 'two-way' } }), HEAD).length, 3);
+  assert.deepEqual(mergeActions(state, makeWp({ gate: { ok: true, head: HEAD } }), HEAD), []);
+  assert.deepEqual(mergeActions(state, makeWp({ gate: { ok: true, head: HEAD, door: 'one-way' } }), HEAD), []);
+  const release = makeState({ mergeLock: { wpId: 'release' } });
+  assert.equal(mergeActions(release, makeWp({ id: 'release', gate: { ok: true, head: HEAD } }), HEAD).length, 3);
 });
 
 test('gateCheck: a pipeline review of the head still in flight is pending, then blocks at the CI deadline', () => {
@@ -675,7 +688,8 @@ test('fixture paths: no private-path shapes under __fixtures__/land; no loopback
 });
 
 test('mergeActions: squash at --match-head-commit, the merge commit, then land merged with a literal {merge.sha}; never a ready', () => {
-  const actions = mergeActions(makeState(), makeWp(), HEAD);
+  const passed = { gate: { ok: true, head: HEAD, door: 'two-way' } };
+  const actions = mergeActions(makeState(), makeWp(passed), HEAD);
   assert.deepEqual(actions.map((a) => a.command), [
     ['gh', 'pr', 'merge', '7', '--repo', 'sirmaelstrom/workit', '--squash', '--match-head-commit', HEAD],
     ['gh', 'pr', 'view', '7', '--repo', 'sirmaelstrom/workit', '--json', 'mergeCommit'],
@@ -683,12 +697,12 @@ test('mergeActions: squash at --match-head-commit, the merge commit, then land m
   ]);
   assert.deepEqual(actions.map((a) => a.step), ['merge', 'merge', 'merged']);
   assert.deepEqual(mergeActions(makeState({ authority: { merge: false } }), makeWp(), HEAD), []);
-  assert.equal(mergeActions(makeState({ intent: { ...makeState().intent, merge: false, hold: true } }), makeWp(), HEAD).length, 3);
-  assert.deepEqual(mergeActions(makeState({ mergeLock: { wpId: 'WP-02' } }), makeWp(), HEAD), []);
+  assert.equal(mergeActions(makeState({ intent: { ...makeState().intent, merge: false, hold: true } }), makeWp(passed), HEAD).length, 3);
+  assert.deepEqual(mergeActions(makeState({ mergeLock: { wpId: 'WP-02' } }), makeWp(passed), HEAD), []);
 });
 
 test('C1-12 the squash subject is the WP\'s Commit line when the record carries it', () => {
-  const [squash] = mergeActions(makeState(), makeWp({ commit: 'feat(conduct): landing (2ff76fa2 WP-03)' }), HEAD);
+  const [squash] = mergeActions(makeState(), makeWp({ commit: 'feat(conduct): landing (2ff76fa2 WP-03)', gate: { ok: true, head: HEAD, door: 'two-way' } }), HEAD);
   assert.deepEqual(squash.command.slice(-2), ['--subject', 'feat(conduct): landing (2ff76fa2 WP-03) (#7)']);
 });
 
@@ -1142,7 +1156,7 @@ test('recordLandStep outcomes (D19.15)', () => {
   assert.deepEqual([yielded.outcome, yielded.patch.queue, Object.hasOwn(yielded.patch, 'mergeLock')], ['wait', [fetch], false]);
   const taken = recordLandStep(makeState({ mergeLock: null }), wp, fetch, ok(), { now: () => NOW });
   assert.deepEqual(taken.patch.mergeLock, { wpId: 'WP-01', since: new Date(NOW).toISOString() });
-  const mergeCommit = mergeActions(state, wp, HEAD)[1];
+  const mergeCommit = mergeActions(state, { ...wp, gate: { ok: true, head: HEAD, door: 'two-way' } }, HEAD)[1];
   assert.deepEqual(recordLandStep(state, wp, mergeCommit, ok(fixtureText('pr-view-150-merge-commit.json')), {}).patch, { merge: { sha: '37e79605735904eac875b000ad1b2ca55885db89' } });
 });
 
