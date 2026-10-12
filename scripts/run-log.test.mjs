@@ -369,6 +369,22 @@ test('2ea7f934 amend: a caller cannot type the asks claim, and an unusable resol
     assert.equal(out.exit, 2, field);
     assert.match(out.output.error, new RegExp(`--${field} carries an asks claim`));
   }
+  for (const spelling of [
+    'asks: 2ea7f934 answered', `asks: \`${RECEIPT}\` answered`, `asks: **${RECEIPT}** answered`,
+    `asks:​${RECEIPT}`, `as​ks: ${RECEIPT}`, `asks： ${RECEIPT}`, `asks : ${RECEIPT}`, `asks: ${RECEIPT}`,
+  ]) {
+    // eslint-disable-next-line no-await-in-loop
+    const out = await append(path, { pointers: spelling }, { now: () => T0 });
+    assert.equal(out.exit, 2, JSON.stringify(spelling));
+  }
+  // Beside a real --asks too: the typed claim is refused before the read.
+  const beside = appendAsks(path, { code: 0, stdout: JSON.stringify({ id: RECEIPT, quest_id: QUEST, outcome: 'answered' }), stderr: '' });
+  const besideOut = await beside.result;
+  assert.equal(besideOut.exit, 0, 'the plain --asks call is fine');
+  const doubled = await runRunLog([
+    'append', '--doc', path, '--item', 'Q', '--event', 'closed', '--pointers', `asks:​${RECEIPT} answered`, '--teach', '—', '--asks', RECEIPT, '--quest', 'df3c49a5',
+  ], { env: { WORKIT_RECEIPT_RESOLVER: RESOLVER }, now: () => T0, exec: () => { throw new Error('the resolver must not run'); } });
+  assert.equal(doubled.exit, 2);
   const prose = await append(path, { pointers: 'two asks: both answered' }, { now: () => T0 });
   assert.equal(prose.exit, 0, 'prose that is not the helper prefix still passes');
 

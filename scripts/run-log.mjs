@@ -49,8 +49,13 @@ const FIELDS = ['item', 'event', 'pointers', 'teach'];
 const OPTIONAL_APPEND = ['asks', 'quest'];
 const RECEIPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const QUEST_REF = /^[0-9a-f-]{6,}$/i;
-// The helper's own asks prefix, as a caller could type it.
-const TYPED_ASKS = /\basks:\s*[0-9a-f]{8}-/i;
+// An asks claim as a caller could type it: `asks:` then a receipt id or prefix,
+// bare or in markdown. Checked after NFKC (a fullwidth colon is a colon) with
+// format characters (a zero-width space) removed.
+const TYPED_ASKS = /\basks\s*:\s*[`*_~]*[0-9a-f]{7,}/i;
+function typedAsks(value) {
+  return TYPED_ASKS.exec(String(value).normalize('NFKC').replace(/\p{Cf}/gu, ''));
+}
 const HEADER = Object.freeze(['date', 'item', 'event', 'pointers', 'teach →']);
 const LOCK_STALE_MS = 30_000;
 
@@ -220,9 +225,10 @@ function takeLock(deps, doc) {
 // The asks field is measured the way the stamp is: the helper reads the receipt
 // itself, at write time, through the same resolver contract `lane prompt
 // --ruling-receipt` uses (lane.mjs resolverArgv). The cell says what the read
-// returned. `append` refuses a caller-typed `asks: <uuid>` in any field, so a
-// row the helper writes carries an asks claim only from a read; a row added by
-// Edit is outside that, and lint cannot tell the two apart.
+// returned. `append` refuses a caller-typed `asks: <id or prefix>` in any field
+// (typedAsks: the common spellings, not every homoglyph), so the claim a row
+// gets from the helper comes from a read. A row added by Edit is outside this,
+// and lint cannot tell the two apart.
 function readAsks(opts, deps) {
   if (!RECEIPT_ID.test(opts.asks)) usage(`--asks must be a full receipt uuid, got ${JSON.stringify(opts.asks)}`);
   if (!QUEST_REF.test(opts.quest)) usage(`--quest must be a quest uuid or a prefix of at least 6 characters, got ${JSON.stringify(opts.quest)}`);
@@ -271,7 +277,8 @@ function appendRow(opts, deps) {
   if (!EVENTS.includes(opts.event)) usage(`--event ${JSON.stringify(opts.event)} is outside the vocabulary: ${EVENTS.join(' / ')}`);
   const cells = FIELDS.map((name) => cell(name, opts[name]));
   for (const name of FIELDS) {
-    if (TYPED_ASKS.test(opts[name])) usage(`--${name} carries an asks claim (${TYPED_ASKS.exec(opts[name])[0]}…); only --asks <receipt> --quest <id> writes one, from a read`);
+    const typed = typedAsks(opts[name]);
+    if (typed) usage(`--${name} carries an asks claim (${typed[0]}…); only --asks <receipt> --quest <id> writes one, from a read`);
   }
   if (!deps.exists(opts.doc)) usage(`doc does not exist: ${opts.doc}`);
   if (opts.asks !== undefined) {
