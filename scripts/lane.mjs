@@ -1446,7 +1446,7 @@ const QUEST_REF = /^[0-9a-f-]{6,}$/i;
 // `{id}` substituted in any element (appended as the last argument if none has
 // it), or a bare program path that gets the id as its one argument. No shell
 // parses it, and the id is a validated uuid before it reaches the argv.
-function resolverArgv(spec, id) {
+export function resolverArgv(spec, id) {
   const trimmed = String(spec).trim();
   if (!trimmed.startsWith('[')) return [trimmed, id];
   const argv = parseJson(trimmed);
