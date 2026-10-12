@@ -689,9 +689,11 @@ export async function runSession(argv, overrides = {}) {
         // Stop hook would otherwise take whichever turn ends next) and say so.
         const error = `herdr agent prompt ${opts.currentPane} /exit failed: ${(sent.stderr || sent.stdout).trim()}`;
         if (captureId) deps.remove(join(finalStateRoot(deps), 'final-pending', captureId));
-        const refused = { ...row, ts: deps.timestamp(), state: 'retire-failed', exit: EXIT.error, error, finalMessagePath: null, waitMs: deps.now() - started };
+        const refused = { ...row, ts: deps.timestamp(), state: 'retire-failed', exit: EXIT.error, error, finalMessagePath: null, notice: null, waitMs: deps.now() - started };
         appendRow(deps, opts.log, refused);
-        return { exit: EXIT.error, output: { ...output, finalMessagePath: null, error }, row: refused, log: opts.log, logSource: opts.logSource };
+        // The session is live, so the last-call notice no longer applies.
+        const { notice: _lastCall, ...live } = output;
+        return { exit: EXIT.error, output: { ...live, finalMessagePath: null, error }, row: refused, log: opts.log, logSource: opts.logSource };
       }
       result = { output: retired, row: retired };
     } else if (opts.verb === 'chain') {

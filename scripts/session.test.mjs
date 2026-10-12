@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -273,6 +273,7 @@ test('d4b3a8ea: retire self on a refused /exit appends retire-failed, disarms th
   assert.equal(result.exit, 1);
   assert.match(result.output.error, /\/exit failed: agent_not_found/);
   assert.equal(result.output.finalMessagePath, null);
+  assert.equal(Object.hasOwn(result.output, 'notice'), false, 'a live session is not told to stop');
   assert.deepEqual(logRows(f).map((r) => r.state), ['retiring', 'retire-failed']);
   assert.equal(existsSync(join(root, 'final-pending', id)), false, 'a live session must not leave its capture armed');
 });
@@ -287,16 +288,21 @@ test('d4b3a8ea: retire self on an accepted /exit appends exit-sent after the ret
 
 test('d4b3a8ea: a chain that dies between its chained row and the /exit send leaves the intent as the last row, not a delivery', async (t) => {
   const f = fixture(t); const c = clock(); f.handler = busyHerdr(0);
+  // A kill at the send: the /exit call never returns, and the dead process
+  // writes nothing after it (every later append throws, so runSession's own
+  // catch cannot write a row either).
+  let killed = false;
   const crash = (program, args, options) => {
-    if (args.includes('/exit')) throw new Error('killed before the send');
+    if (args.includes('/exit')) { killed = true; throw new Error('killed at the send'); }
     return f.exec(program, args, options);
   };
-  // A thrown send stands in for a kill: whatever the run writes after it, no
-  // row may claim the /exit was delivered.
-  await runSession(chainArgv(f), { exec: crash, env: env(), ...c.deps });
-  const states = logRows(f).filter((r) => r.verb === 'chain').map((r) => r.state);
-  assert.ok(states.includes('chained'), states.join(','));
-  assert.equal(states.includes('exit-sent'), false, states.join(','));
+  const append = (path, value) => {
+    if (killed) throw new Error('the process is gone');
+    appendFileSync(path, value, 'utf8');
+  };
+  await assert.rejects(runSession(chainArgv(f), { exec: crash, append, env: env(), ...c.deps }), /the process is gone/);
+  const status = await runSession(['status', '--last', '--log', f.log], { exec: f.exec, env: env() });
+  assert.equal(status.output.rows[0].state, 'chained', 'the intent is the last row the successor reads');
 });
 
 test('317f6cef custody: a pane busy for the whole successor timeout leaves the caller live, closes the empty split, and reports agent_pane_busy', async (t) => {
