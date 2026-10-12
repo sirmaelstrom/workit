@@ -4381,9 +4381,14 @@ test('fca05d92: mergeDanger reads one Door line and one Blast radius line', () =
   red(body('Door: two-waybroken\nBlast radius: x'), /not a Door: marker line/, 'a value run into its explanation');
   red(body('Door: two-way - a hyphen is not a separator\nBlast radius: x'), /not a Door: marker line/, 'a hyphen separator');
   // Council review of #214: a later declaration must not hide behind an earlier one.
-  red(`${PR_BODY}\n## Merge danger\n\nDoor: one-way\nBlast radius: x\n`, /2 ## Merge danger sections/, 'a second section');
+  red(`${PR_BODY}\n## Merge danger\n\nDoor: one-way\nBlast radius: x\n`, /2 Merge danger sections/, 'a second section');
   red(body('Door: two-way\n1. Door: one-way\nBlast radius: x'), /2 Door: lines/, 'a numbered Door beside a valid one');
   red(body('Door: two-way\n2) Door: one-way\nBlast radius: x'), /2 Door: lines/, 'a 1)-numbered Door');
+  // Challenge on the amended tree: lookalike headings and other dress.
+  red(`${PR_BODY}\n## Merge Danger\n\nDoor: one-way\n`, /2 Merge danger sections/, 'a capitalized second heading');
+  red(`${PR_BODY}\n### merge danger\n\nDoor: one-way\n`, /2 Merge danger sections/, 'a level-3 lowercase heading');
+  red(body('Door: two-way\n### Door: one-way\nBlast radius: x'), /2 Door: lines/, 'a heading-dressed Door');
+  red(body('Door: two-way\n| Door: one-way |\nBlast radius: x'), /2 Door: lines/, 'a table-cell Door');
   red(`${DEBRIEF_NONE}\nDoor: two-way\nBlast radius: x\n## Merge danger\n\nNone.\n`, /has no Door: line/, 'Door outside the section');
   assert.match(mergeDanger(body('Door: two-way')).problems.join('\n'), /has no Blast radius: line/, 'no Blast radius');
   assert.match(mergeDanger(body('Door: two-way\nBlast radius:')).problems.join('\n'), /not a Blast radius: marker line/, 'an empty Blast radius');

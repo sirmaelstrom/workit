@@ -1940,8 +1940,11 @@ export function reportShapeProblems(text) {
 const DOOR_LINE = /^Door: (two-way|one-way)(?:(?::| —) \S.*| \(.+)?$/;
 const BLAST_LINE = /^Blast radius: \S.*$/;
 // Any line that labels itself as the marker, in any dress: quoted, bulleted,
-// numbered (`1.`, `1)`), bold, any case. Only DOOR_LINE/BLAST_LINE forms pass.
-const looseMarker = (text, label) => new RegExp(`^[\\s>*+-]*(?:\\d+[.)]\\s*)?(?:\\*\\*|__)?\\s*${label}\\s*(?:\\*\\*|__)?\\s*:`, 'i').test(text);
+// numbered (`1.`, `1)`), a heading, a table cell, bold, any case. Only
+// DOOR_LINE/BLAST_LINE forms pass.
+const looseMarker = (text, label) => new RegExp(`^[\\s>*+|#-]*(?:\\d+[.)]\\s*)?(?:\\*\\*|__)?\\s*${label}\\s*(?:\\*\\*|__)?\\s*:`, 'i').test(text);
+// A heading that reads as Merge danger in any case or dress, at levels 1-3.
+const dangerLookalike = (heading) => heading && heading.level <= 3 && heading.title.replace(/[*_`:.]/g, '').trim().toLowerCase() === 'merge danger';
 
 export function mergeDanger(text) {
   const lines = markdownLines(text);
@@ -1950,8 +1953,10 @@ export function mergeDanger(text) {
     return heading?.level === 2 && heading.title === 'Merge danger' ? [index] : [];
   });
   if (sections.length === 0) return { door: null, problems: ['## Merge danger is missing (Door: and Blast radius: lines)'] };
-  // Two sections are two declarations, and the gate cannot tell which one is current.
-  if (sections.length > 1) return { door: null, problems: [`the body has ${sections.length} ## Merge danger sections; it carries exactly one`] };
+  // Two sections are two declarations, and the gate cannot tell which one is
+  // current. A lookalike heading (`## Merge Danger`) counts as a second one.
+  const lookalikes = lines.filter((line) => dangerLookalike(markdownHeading(line))).length;
+  if (lookalikes > 1) return { door: null, problems: [`the body has ${lookalikes} Merge danger sections (headings in any case count); it carries exactly one ## Merge danger`] };
   const at = sections[0];
   const section = lines.slice(at + 1, sectionEnd(lines, at, 2)).filter((line) => !line.fenced);
   const problems = [];
