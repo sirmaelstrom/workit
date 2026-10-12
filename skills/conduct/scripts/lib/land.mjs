@@ -990,11 +990,21 @@ function landOutcome(state, wp, action, r, deps) {
     case 'rebase': return recordRebaseStep(state, wp, action, r, deps);
     case 'gate': return recordGate(state, wp, action, r, deps);
     case 'merge': {
+      // gh's exit on the squash is advisory: `gh pr merge` can exit non-zero
+      // after the merge landed (a post-merge local step failing). The
+      // merge-commit read that follows is the oracle, so a failed squash goes
+      // on to it carrying its exit, and only a missing merge commit blocks.
+      if (action.part === 'squash' && r.code !== 0) {
+        return result('continue', `squash exited ${r.code}; the merge commit decides`, { squashExit: { code: r.code, stderr: first(r.stderr) } });
+      }
       if (r.code !== 0 && !(action.part === 'ready' && /already/i.test(r.stderr))) return result('block', `${action.part} failed (exit ${r.code}): ${first(r.stderr)}`);
       // The squash landed even if the merge-commit lookup after it fails.
       if (action.part !== 'merge-commit') return result('continue', null, action.part === 'squash' ? { squashed: true } : {});
       const sha = parseJson(r.stdout)?.mergeCommit?.oid;
-      return sha ? result('continue', null, { merge: { sha } }) : result('block', 'gh pr view printed no mergeCommit.oid');
+      if (sha) return result('continue', null, { merge: { sha }, ...(wp.squashExit ? { squashed: true } : {}) });
+      return result('block', wp.squashExit
+        ? `squash failed (exit ${wp.squashExit.code}): ${wp.squashExit.stderr}; gh pr view shows no merge commit`
+        : 'gh pr view printed no mergeCommit.oid');
     }
     case 'merged': {
       if (r.code === 0) {

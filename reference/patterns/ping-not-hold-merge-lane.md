@@ -20,7 +20,7 @@ Any doubt at classification time → held lane. The classification and its ratio
 ## Behavior at an eligible boundary
 
 1. **Preflight the ping path before merging.** From a CLI session the Discord ping is the Observatory broadcast helper (`projects/heathdev-observatory/scripts/merge-ping.ps1`); run its `-Check` mode first. A broken ping path discovered before the merge is a held-lane classification, not an incident.
-2. Merge.
+2. Merge: `gh pr merge <n> --squash --match-head-commit <head>`, **without** `--delete-branch`. Then read the outcome from `gh pr view <n> --json mergeCommit`, not from gh's exit: `gh pr merge` can exit non-zero after the merge has landed (with `--delete-branch` from a lane worktree, its post-merge checkout of the default branch fails when that branch is checked out in the canonical checkout, and the remote branch is kept). Remove the lane's worktree, then delete the branch in a second call (`git push origin --delete <branch>`, or `/conduct`'s compare-and-delete against the merged head).
 3. **Ping, immediately:**
    - **Discord** — the authorizing channel: what merged, which criteria it passed, the exact one-command revert. The helper is fail-closed: a non-zero exit means the ping did not happen.
    - **Push notification** — additive attention layer (adopted 2026-08-22, deliberately exploratory): the merged item + short-form revert via the session's PushNotification tool. Best-effort; a skipped or failed push never blocks and never substitutes for the Discord ping.
