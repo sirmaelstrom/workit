@@ -1225,6 +1225,43 @@ async function startLane(opts, deps, state) {
     let promptSignature = null;
     let raw = null;
     let folderTrusted = false;
+    // The lane record for the agent on `pane`. A started lane writes it once the
+    // agent is live; a start herdr refused after registering the agent (the
+    // agent_not_ready shape) writes it too, with `startFailed`, so later verbs
+    // read the lane's kind and pane instead of a kindless record. A successful
+    // start drops any earlier `startFailed`.
+    const recordLane = (extra = {}) => mergeState(deps, opts.log, state, (draft) => {
+      const { startFailed: _earlier, ...existing } = draft.lanes[opts.name] ?? {};
+      // creates[] is append-only (createLane's push is its one writer), so a higher
+      // index is a newer create. A re-start of the same live lane (fallback, or a
+      // split onto a fresh pane id) keeps its create by path (amendment 17). A lane
+      // NAME reused from an earlier run carries that run's path, and herdr reissues
+      // pane ids across workspaces; either way the newest create on the started pane
+      // is newer than the record's own create, and it wins.
+      const byPathIndex = existing.path
+        ? draft.creates.findLastIndex((created) => created.path && resolve(created.path) === resolve(existing.path))
+        : -1;
+      const byPaneIndex = draft.creates.findLastIndex((created) => created.paneId === opts.pane || created.paneId === pane);
+      const priorIndex = byPaneIndex > byPathIndex ? byPaneIndex : byPathIndex;
+      const prior = priorIndex >= 0 ? draft.creates[priorIndex] : {};
+      draft.lanes[opts.name] = {
+        ...existing,
+        pane,
+        kind: opts.kind,
+        model: opts.model,
+        reasoning: opts.reasoning ?? null,
+        // A fallback re-starts an existing lane, and its `creates` lookup misses:
+        // without the existing fallbacks this nulls the lane's identity and
+        // `lane check` — the completion verdict (C2) — is forfeited for good.
+        branch: prior.branch ?? existing.branch ?? null,
+        base: prior.base ?? existing.base ?? null,
+        path: prior.path ?? existing.path ?? null,
+        promptSignature: promptSignature ?? existing.promptSignature ?? null,
+        startRequestedAt,
+        ...(paneSplitFrom ? { paneSplitFrom } : {}),
+        ...extra,
+      };
+    });
     for (let attempt = 0; attempt < 2; attempt++) {
       refreshLock(deps, `${opts.log}.start.lock`, startLockContent);
       promptSignature = await capturePromptSignature(deps, pane, { patterns });
@@ -1247,6 +1284,7 @@ async function startLane(opts, deps, state) {
       if (!recoverable || attempt > 0) {
         const detail = started.stderr.trim() || started.stdout.trim();
         const holder = startLock.holder ? ` while ${startLock.holder} was starting` : '';
+        if (startupBlocked(started)) await recordLane({ startFailed: { at: deps.timestamp(), reason: detail.slice(0, 300) } });
         throw new LaneError(EXIT.ERROR, `herdr agent start failed${holder}${detail ? `: ${detail}` : ''}`);
       }
       const split = call(deps, 'herdr', ['pane', 'split', pane, '--direction', 'right']);
@@ -1269,37 +1307,7 @@ async function startLane(opts, deps, state) {
   // the world: a focus check that threw here once left a running agent with no
   // state row, and `lane wait` then answered "unknown lane" — the exact blind
   // lane this helper exists to prevent.
-    await mergeState(deps, opts.log, state, (draft) => {
-    const existing = draft.lanes[opts.name] ?? {};
-    // creates[] is append-only (createLane's push is its one writer), so a higher
-    // index is a newer create. A re-start of the same live lane (fallback, or a
-    // split onto a fresh pane id) keeps its create by path (amendment 17). A lane
-    // NAME reused from an earlier run carries that run's path, and herdr reissues
-    // pane ids across workspaces; either way the newest create on the started pane
-    // is newer than the record's own create, and it wins.
-    const byPathIndex = existing.path
-      ? draft.creates.findLastIndex((created) => created.path && resolve(created.path) === resolve(existing.path))
-      : -1;
-    const byPaneIndex = draft.creates.findLastIndex((created) => created.paneId === opts.pane || created.paneId === pane);
-    const priorIndex = byPaneIndex > byPathIndex ? byPaneIndex : byPathIndex;
-    const prior = priorIndex >= 0 ? draft.creates[priorIndex] : {};
-    draft.lanes[opts.name] = {
-      ...existing,
-      pane,
-      kind: opts.kind,
-      model: opts.model,
-      reasoning: opts.reasoning ?? null,
-      // A fallback re-starts an existing lane, and its `creates` lookup misses:
-      // without the existing fallbacks this nulls the lane's identity and
-      // `lane check` — the completion verdict (C2) — is forfeited for good.
-      branch: prior.branch ?? existing.branch ?? null,
-      base: prior.base ?? existing.base ?? null,
-      path: prior.path ?? existing.path ?? null,
-      promptSignature: promptSignature ?? existing.promptSignature ?? null,
-      startRequestedAt,
-      ...(paneSplitFrom ? { paneSplitFrom } : {}),
-    };
-  });
+    await recordLane();
 
     let hooksTrusted = false;
     if (opts.kind === 'codex') {

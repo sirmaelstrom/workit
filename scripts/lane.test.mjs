@@ -3541,6 +3541,36 @@ test('4aa9b174: agent_not_ready without the dialog sends nothing and the start f
   assert.equal(result.row.folderTrusted, undefined);
 });
 
+// ec77fec7: herdr registers the agent before it reports agent_not_ready, so the
+// failed start leaves a live agent in the pane. Its record carries the kind and
+// pane (lane zd, 2026-09-26, kept kind null for every later row).
+test('ec77fec7: a start that fails with agent_not_ready records kind, pane and the failure; a later start clears it', async (t) => {
+  const f = fixture(t);
+  f.responses.push(SHELL_READ, AGENT_NOT_READY, { code: 0, stdout: 'Some other dialog\n❯ 1. Continue\n  2. Quit', stderr: '' });
+  const failed = await startClaude(f);
+  assert.equal(failed.exit, 1);
+  const lane = readState(f).lanes['lane-a'];
+  assert.deepEqual([lane?.kind, lane?.pane, lane?.model, lane?.reasoning], ['claude', 'w1:p2', 'opus', 'high']);
+  assert.match(lane.startFailed?.reason ?? '', /agent_not_ready|blocked during startup/);
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a","state":"idle"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"focused":true}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"conductor","pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const started = await startClaude(f);
+  assert.equal(started.exit, 0, JSON.stringify(started.output));
+  assert.equal(Object.hasOwn(readState(f).lanes['lane-a'], 'startFailed'), false);
+});
+
+test('ec77fec7: a start refused before herdr registers anything (pane busy, split failed) records no lane', async (t) => {
+  const f = fixture(t);
+  f.responses.push(SHELL_READ, { code: 1, stdout: '', stderr: 'some other herdr failure' });
+  const failed = await startClaude(f);
+  assert.equal(failed.exit, 1);
+  assert.ok(!existsSync(`${f.log}.state.json`) || readState(f).lanes['lane-a'] === undefined);
+});
+
 test('4aa9b174: the dialog with the cursor already moved is not answered blind', async (t) => {
   const f = fixture(t);
   const moved = { ...FOLDER_TRUST_READ, stdout: FOLDER_TRUST_READ.stdout.replace(' ❯ No, exit', '   No, exit').replace('   Yes, I trust', ' ❯ Yes, I trust') };
