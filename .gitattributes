@@ -1,0 +1,5 @@
+# Fixtures are compared byte for byte (hashes, parity with vendored copies), so
+# they check out exactly as committed on every platform, whatever core.autocrlf
+# says. scripts/fixtures-eol.test.mjs fails when a fixture checks out with CR.
+**/__fixtures__/** text eol=lf
+**/fixtures/** text eol=lf
