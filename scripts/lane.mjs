@@ -78,6 +78,8 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            --expect-report and --expect-pr (on the PR body) require ## Debrief with
            both headings, and every question under ## Needs conductor in a lettered
            ask (a)…(f): at most six options per ask, no letter twice.
+           --expect-pr also requires one ## Merge danger section with one
+           "Door: two-way|one-way" line and one "Blast radius: …" line.
            --expect-report also checks the contract's evidence rules against the
            report and the lane's diff from its base: fenced failing runs for
            controls, a control per amendment fixed row, new tests named in a
@@ -1929,6 +1931,50 @@ export function reportShapeProblems(text) {
   return problems;
 }
 
+// A PR body's `## Merge danger` section (lane contract § Finish): one `Door:`
+// marker line and one `Blast radius:` line, each at the start of a line,
+// outside any fence, with no bullet or bold. The door is `two-way` or
+// `one-way`, lowercase; an explanation may follow on the same line after
+// `: `, after ` — `, or in parentheses. `door` is the declared value, or null when the section does
+// not declare one cleanly; `problems` lists what is missing or malformed.
+const DOOR_LINE = /^Door: (two-way|one-way)(?:(?::| —) \S.*| \(.+)?$/;
+const BLAST_LINE = /^Blast radius: \S.*$/;
+// Any line that labels itself as the marker, in any dress: quoted, bulleted,
+// numbered (`1.`, `1)`), a heading, a table cell, bold, any case. Only
+// DOOR_LINE/BLAST_LINE forms pass.
+const looseMarker = (text, label) => new RegExp(`^[\\s>*+|#-]*(?:\\d+[.)]\\s*)?(?:\\*\\*|__)?\\s*${label}\\s*(?:\\*\\*|__)?\\s*:`, 'i').test(text);
+// A heading that reads as Merge danger in any case or dress, at levels 1-3.
+const dangerLookalike = (heading) => heading && heading.level <= 3 && heading.title.replace(/[*_`:.]/g, '').trim().toLowerCase() === 'merge danger';
+
+export function mergeDanger(text) {
+  const lines = markdownLines(text);
+  const sections = lines.flatMap((line, index) => {
+    const heading = markdownHeading(line);
+    return heading?.level === 2 && heading.title === 'Merge danger' ? [index] : [];
+  });
+  if (sections.length === 0) return { door: null, problems: ['## Merge danger is missing (Door: and Blast radius: lines)'] };
+  // Two sections are two declarations, and the gate cannot tell which one is
+  // current. A lookalike heading (`## Merge Danger`) counts as a second one.
+  const lookalikes = lines.filter((line) => dangerLookalike(markdownHeading(line))).length;
+  if (lookalikes > 1) return { door: null, problems: [`the body has ${lookalikes} Merge danger sections (headings in any case count); it carries exactly one ## Merge danger`] };
+  const at = sections[0];
+  const section = lines.slice(at + 1, sectionEnd(lines, at, 2)).filter((line) => !line.fenced);
+  const problems = [];
+  const read = (label, strict, hint) => {
+    const candidates = section.filter((line) => looseMarker(line.text, label));
+    const exact = candidates.filter((line) => strict.test(line.text.trimEnd()));
+    for (const line of candidates) {
+      if (!strict.test(line.text.trimEnd())) problems.push(`## Merge danger line ${line.number} is not a ${label}: marker line (${hint}): ${line.text.trim()}`);
+    }
+    if (candidates.length === 0) problems.push(`## Merge danger has no ${label}: line (${hint})`);
+    else if (candidates.length > 1) problems.push(`## Merge danger has ${candidates.length} ${label}: lines; it carries exactly one`);
+    return candidates.length === 1 && exact.length === 1 ? exact[0] : null;
+  };
+  const door = read('Door', DOOR_LINE, '`Door: two-way` or `Door: one-way`, at the start of the line, no bullet or bold');
+  read('Blast radius', BLAST_LINE, '`Blast radius: <one phrase>`, at the start of the line, no bullet or bold');
+  return { door: door ? DOOR_LINE.exec(door.text.trimEnd())[1] : null, problems };
+}
+
 // What a failing run prints, read per fenced block. A runner's failure record
 // (FAIL, ✖, ×, a Playwright `x  1`, TAP `not ok`), an AssertionError, a tsc
 // error, a failed count above zero or a non-zero exit fails a block outright.
@@ -2296,7 +2342,9 @@ async function checkLane(opts, deps, state) {
       }
     } else {
       const doc = parseJson(viewed.stdout);
-      const bodyProblems = reportShapeProblems(typeof doc?.body === 'string' ? doc.body : '');
+      // The PR body also carries `## Merge danger`; the report does not need it.
+      const body = typeof doc?.body === 'string' ? doc.body : '';
+      const bodyProblems = [...reportShapeProblems(body), ...mergeDanger(body).problems];
       evidence = { headRefName: doc?.headRefName ?? null, state: doc?.state ?? null, bodyProblems };
       const prStatus = String(doc?.state ?? '').toUpperCase();
       if (doc?.headRefName !== lane.branch) {

@@ -23,6 +23,9 @@ import { shellArgv } from '../exec.mjs';
 import { acceptAnswer, correlation } from '../touch.mjs';
 import { runConduct } from '../../conduct.mjs';
 
+// The section a lane PR body carries (lane contract § Finish; fca05d92).
+const MERGE_DANGER = '## Merge danger\n\nDoor: two-way\nBlast radius: the demo WP\n';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPTS = join(HERE, '..', '..');
 const FIXTURES = join(SCRIPTS, '__fixtures__');
@@ -128,11 +131,14 @@ const BASE_RULES = [
   [/^git -C \S+ diff --no-color --no-ext-diff --no-renames \S+\.\.HEAD$/, (h) => ok(h.laneDiff ?? '')],
   [/^gh pr view (\d+) --repo o\/r --json headRefName,state,body$/, (h, m) => {
     const id = `WP-${String(Number(m[1]) - 100).padStart(2, '0')}`;
-    return ok(JSON.stringify({ headRefName: `conduct/demo/${id.toLowerCase()}`, state: 'OPEN', body: readFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), 'utf8') }));
+    // The lane's PR body: its report plus the `## Merge danger` section (fca05d92).
+    const body = `${readFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), 'utf8')}\n${h.mergeDanger ?? MERGE_DANGER}`;
+    return ok(JSON.stringify({ headRefName: `conduct/demo/${id.toLowerCase()}`, state: 'OPEN', body }));
   }],
   [/^git -C (\S+) rev-parse HEAD$/, (h, m) => ok(`${h.head(idOfWorktree(m[1]))}\n`)],
-  [/^gh pr view (\d+) --repo o\/r --json headRefOid,baseRefName,state$/, (h, m) => ok(JSON.stringify({
-    headRefOid: h.head(`WP-${String(Number(m[1]) - 100).padStart(2, '0')}`), baseRefName: 'main', state: 'OPEN' }))],
+  // The gate reads a WP PR's body for its door (fca05d92); the release PR's view has no body.
+  [/^gh pr view (\d+) --repo o\/r --json headRefOid,baseRefName,state(,body)?$/, (h, m) => ok(JSON.stringify({
+    headRefOid: h.head(`WP-${String(Number(m[1]) - 100).padStart(2, '0')}`), baseRefName: 'main', state: 'OPEN', ...(m[2] ? { body: h.mergeDanger ?? MERGE_DANGER } : {}) }))],
   [/^git -C \S+ fetch origin$/, () => ok()],
   [/^git -C \S+ merge-base --is-ancestor origin\/main HEAD$/, (h) => (h.stale > 0 ? (h.stale -= 1, { code: 1, stdout: '', stderr: '' }) : ok())],
   [/^git -C \S+ merge-base --is-ancestor \w+ \w+$/, () => ok()],
@@ -652,6 +658,16 @@ test('ratify (c58b3a51): a WP held only on its Files does not end the build; rat
   assert.deepEqual(h.events().filter((e) => e.event === 'ratified').map((e) => [e.data.wpId, e.data.paths]), [['WP-02', ['CLAUDE.md']]]);
   assert.equal(await drive(h), null);
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+});
+
+test('door (fca05d92): with merge authority, a PR body declaring Door: one-way passes its gate and is held, its dependent deferred, no merge issued', async (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  h.mergeDanger = '## Merge danger\n\nDoor: one-way\nBlast radius: every consumer of the demo\n';
+  assert.equal(await drive(h), null);
+  assert.equal(h.state.authority.merge, true);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-03').state], ['held', 'deferred']);
+  assert.equal(h.wp('WP-02').gate.door, 'one-way');
+  assert.equal(h.trace.some((a) => a.wpId === 'WP-02' && a.step === 'merge'), false);
 });
 
 test('ratify (c58b3a51): a declined ruling keeps the WP held, its dependent deferred, and lets the build end', async (t) => {

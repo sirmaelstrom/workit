@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, paneErrorLine, panePromptSignature,
-  briefPaths, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
+  briefPaths, mergeDanger, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -163,6 +163,9 @@ const DEBRIEF_NONE = [
   '### Forks I decided that the brief did not settle', '', 'None.', '',
   '### Claims no control measures', '', 'None.', '',
 ].join('\n');
+// A PR body also carries `## Merge danger` (lane contract § Finish; fca05d92).
+const MERGE_DANGER = ['## Merge danger', '', 'Door: two-way', 'Blast radius: the lane fixture', ''].join('\n');
+const PR_BODY = `${DEBRIEF_NONE}\n${MERGE_DANGER}`;
 
 test('WP-1: dontAsk is refused before herdr is invoked', async (t) => {
   const f = fixture(t);
@@ -1885,7 +1888,7 @@ test('AM14: a closed PR is not a completion verdict', async (t) => {
   assert.equal(closed.exit, 5);
   assert.match(closed.output.failedExpectation, /closed/i);
 
-  f.responses.push({ code: 0, stdout: JSON.stringify({ headRefName: 'feat/lane-a', state: 'MERGED', body: DEBRIEF_NONE }), stderr: '' });
+  f.responses.push({ code: 0, stdout: JSON.stringify({ headRefName: 'feat/lane-a', state: 'MERGED', body: PR_BODY }), stderr: '' });
   const merged = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
   assert.equal(merged.exit, 0, 'a merged PR is the work landing, not a failure');
 });
@@ -4350,9 +4353,59 @@ test('207dbaf1 / C3: --expect-pr applies the same Debrief check to the PR body t
   assert.equal(ask.exit, 5);
   assert.match(ask.output.failedExpectation, /PR body: .*Merge now\?/);
 
-  f.responses.push(pr(DEBRIEF_NONE));
+  f.responses.push(pr(PR_BODY));
   const green = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
   assert.equal(green.exit, 0, JSON.stringify(green.output));
+});
+
+// fca05d92: the PR body's `## Merge danger` is checked the way rule 14's
+// Verdict line is: marker lines at the start of a line, outside fences.
+test('fca05d92: mergeDanger reads one Door line and one Blast radius line', () => {
+  const body = (section) => `${DEBRIEF_NONE}\n## Merge danger\n\n${section}\n`;
+  assert.deepEqual(mergeDanger(PR_BODY), { door: 'two-way', problems: [] });
+  assert.deepEqual(mergeDanger(body('Door: one-way\nBlast radius: every consumer')), { door: 'one-way', problems: [] });
+  assert.deepEqual(mergeDanger(body('Door: two-way: revert the squash commit\nBlast radius: one route')), { door: 'two-way', problems: [] });
+  assert.deepEqual(mergeDanger(body('Door: one-way (posts a review a revert does not take back)\nBlast radius: one route')), { door: 'one-way', problems: [] });
+  const red = (text, pattern, label) => {
+    const read = mergeDanger(text);
+    assert.equal(read.door, null, label);
+    assert.match(read.problems.join('\n'), pattern, label);
+  };
+  red(DEBRIEF_NONE, /## Merge danger is missing/, 'no section');
+  red(body('Door: two-way\nDoor: one-way\nBlast radius: x'), /has 2 Door: lines/, 'two Door lines');
+  red(body('```\nDoor: two-way\n```\nBlast radius: x'), /has no Door: line/, 'a Door inside a fence');
+  red(body('Door: One-Way\nBlast radius: x'), /not a Door: marker line/, 'capitalized value');
+  red(body('- Door: two-way\nBlast radius: x'), /not a Door: marker line/, 'a bulleted Door');
+  red(body('**Door:** two-way\nBlast radius: x'), /not a Door: marker line/, 'a bold Door');
+  red(body('Door: maybe\nBlast radius: x'), /not a Door: marker line/, 'an unknown value');
+  red(body('Door: two-waybroken\nBlast radius: x'), /not a Door: marker line/, 'a value run into its explanation');
+  red(body('Door: two-way - a hyphen is not a separator\nBlast radius: x'), /not a Door: marker line/, 'a hyphen separator');
+  // Council review of #214: a later declaration must not hide behind an earlier one.
+  red(`${PR_BODY}\n## Merge danger\n\nDoor: one-way\nBlast radius: x\n`, /2 Merge danger sections/, 'a second section');
+  red(body('Door: two-way\n1. Door: one-way\nBlast radius: x'), /2 Door: lines/, 'a numbered Door beside a valid one');
+  red(body('Door: two-way\n2) Door: one-way\nBlast radius: x'), /2 Door: lines/, 'a 1)-numbered Door');
+  // Challenge on the amended tree: lookalike headings and other dress.
+  red(`${PR_BODY}\n## Merge Danger\n\nDoor: one-way\n`, /2 Merge danger sections/, 'a capitalized second heading');
+  red(`${PR_BODY}\n### merge danger\n\nDoor: one-way\n`, /2 Merge danger sections/, 'a level-3 lowercase heading');
+  red(body('Door: two-way\n### Door: one-way\nBlast radius: x'), /2 Door: lines/, 'a heading-dressed Door');
+  red(body('Door: two-way\n| Door: one-way |\nBlast radius: x'), /2 Door: lines/, 'a table-cell Door');
+  red(`${DEBRIEF_NONE}\nDoor: two-way\nBlast radius: x\n## Merge danger\n\nNone.\n`, /has no Door: line/, 'Door outside the section');
+  assert.match(mergeDanger(body('Door: two-way')).problems.join('\n'), /has no Blast radius: line/, 'no Blast radius');
+  assert.match(mergeDanger(body('Door: two-way\nBlast radius:')).problems.join('\n'), /not a Blast radius: marker line/, 'an empty Blast radius');
+});
+
+test('fca05d92: --expect-pr fails a PR body without a valid ## Merge danger', async (t) => {
+  const f = fixture(t);
+  seedLane(f);
+  const pr = (body) => ({ code: 0, stdout: JSON.stringify({ headRefName: 'feat/lane-a', state: 'OPEN', body }), stderr: '' });
+  f.responses.push(pr(DEBRIEF_NONE));
+  const missing = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  assert.equal(missing.exit, 5);
+  assert.match(missing.output.failedExpectation, /^--expect-pr 42: PR body: ## Merge danger is missing/);
+  f.responses.push(pr(PR_BODY.replace('Door: two-way', 'Door: One-Way')));
+  const invalid = await runLane(['check', 'lane-a', '--expect-pr', '42', '--log', f.log], { exec: f.exec });
+  assert.equal(invalid.exit, 5);
+  assert.match(invalid.output.failedExpectation, /not a Door: marker line/);
 });
 
 const RECEIPT = '0b1c2d3e-4f50-4617-8293-a4b5c6d7e8f9';

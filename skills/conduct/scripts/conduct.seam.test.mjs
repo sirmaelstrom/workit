@@ -133,9 +133,12 @@ const RULES = [
   }],
   [/^gh pr view (\d+) --repo example\/scratch --json headRefName,state,body$/, (h, m) => {
     const id = idOfPr(m[1]);
-    return ok(JSON.stringify({ headRefName: `conduct/seam-run/${id.toLowerCase()}`, state: 'OPEN', body: readFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), 'utf8') }));
+    // The lane's PR body: its report plus `## Merge danger` (fca05d92).
+    const body = `${readFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), 'utf8')}\n## Merge danger\n\nDoor: two-way\nBlast radius: the seam WP\n`;
+    return ok(JSON.stringify({ headRefName: `conduct/seam-run/${id.toLowerCase()}`, state: 'OPEN', body }));
   }],
-  [/^gh pr view (\d+) --repo example\/scratch --json headRefOid,baseRefName,state$/, (h, m) => ok(JSON.stringify({ headRefOid: headOf(h, idOfPr(m[1])), baseRefName: 'main', state: 'OPEN' }))],
+  // The gate reads a WP PR's body for its door (fca05d92); the release PR's view has no body.
+  [/^gh pr view (\d+) --repo example\/scratch --json headRefOid,baseRefName,state(,body)?$/, (h, m) => ok(JSON.stringify({ headRefOid: headOf(h, idOfPr(m[1])), baseRefName: 'main', state: 'OPEN', ...(m[2] ? { body: '## Merge danger\n\nDoor: two-way\nBlast radius: the seam WP\n' } : {}) }))],
   [/^gh pr view (\d+) --repo example\/scratch --json mergeCommit$/, (h, m) => ok(JSON.stringify({ mergeCommit: { oid: mergeSha(idOfPr(m[1])) } }))],
   [/^gh pr diff (\d+) --repo example\/scratch --name-only$/, (h, m) => ok(h.diff?.[idOfPr(m[1])] ?? 'src/x.mjs\n')],
   [/^gh pr (ready|merge) /, () => ok()],
