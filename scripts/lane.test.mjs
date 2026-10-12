@@ -372,6 +372,23 @@ test('ec7b1192: prompt sends when every named path exists in the worktree or the
   assert.deepEqual(result.output.briefPaths, { checked: 3, ran: true, allowedMissing: ['src/new.test.ts'] });
 });
 
+test('ec7b1192: an --allow-missing directory (trailing /) allows every path under it', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'brief.md');
+  writeFileSync(prompt, 'Write `src/generated/item.ts` and `src/generatedX.ts`.', 'utf8');
+  seedLane(f, { kind: 'claude' });
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
+  );
+  const sibling = await runLane(['prompt', 'lane-a', '--file', prompt, '--allow-missing', 'src/generated/', '--log', f.log], { exec: f.exec });
+  assert.equal(sibling.exit, 2, 'a sibling that only shares the prefix is not under the directory');
+  assert.match(sibling.output.error, /src\/generatedX\.ts/);
+  assert.doesNotMatch(sibling.output.error, /src\/generated\/item\.ts/);
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--allow-missing', 'src/generated/', '--allow-missing', 'src/generatedX.ts', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+});
+
 test('ec7b1192: a lane with no worktree path says the brief check did not run', async (t) => {
   const f = fixture(t);
   const prompt = join(f.dir, 'brief.md');

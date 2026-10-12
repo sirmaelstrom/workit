@@ -1468,7 +1468,9 @@ function briefPathGate(opts, deps, lane, file) {
   const roots = [resolve(lane.path)];
   if (basename(dirname(roots[0])) === 'projects') roots.push(dirname(dirname(roots[0])));
   const absent = paths.filter((p) => !roots.some((root) => deps.exists(join(root, p))));
-  const missing = absent.filter((p) => !allowed.has(p));
+  // A WP's Files may name a directory (`src/generated/`): it allows every path under it.
+  const dirs = [...allowed].filter((p) => p.endsWith('/'));
+  const missing = absent.filter((p) => !allowed.has(p) && !dirs.some((dir) => p.startsWith(dir)));
   if (missing.length > 0) {
     usage(`prompt file names ${missing.length === 1 ? 'a path' : 'paths'} not found in ${roots.join(' or ')}: ${missing.join(', ')}. Fix the brief, or pass --allow-missing <path> for each one that is absent on purpose (a file the lane creates, a runtime artifact)`);
   }
