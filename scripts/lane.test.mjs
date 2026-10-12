@@ -5433,6 +5433,77 @@ test('4f55ea42: findCodexRollout takes the earliest TUI rollout for this worktre
   assert.equal(codexTurnState(deps, join(f.dir, 'missing.jsonl')), null);
 });
 
+// --- quest d72185dc: `lane status` is the conductor's liveness read. AF's
+// conductor read `herdr agent get` as idle while the codex lane slept inside a
+// tool call (its turn ran 13:07:49Z-13:21:25Z) and re-sent an amendment.
+const IDLE_GET = { code: 0, stdout: '{"result":{"agent":{"name":"lane-a","agent_status":"idle"}}}', stderr: '' };
+const laneStatus = (f, now = '2026-10-04T02:20:28Z') => runLane(['status', 'lane-a', '--log', f.log], {
+  exec: f.exec, now: () => Date.parse(now), env: { CODEX_HOME: join(f.dir, 'codex-home') },
+});
+
+test('d72185dc: herdr reading idle while the rollout\'s last turn event is task_started reports the codex turn live', async (t) => {
+  const f = fixture(t);
+  seedLane(f, AE_LANE);
+  writeRollout(f, f.dir, AE_TURN);
+  f.responses.push(IDLE_GET);
+  const result = await laneStatus(f);
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(
+    [result.output.liveness, result.output.source, result.output.herdr, result.output.turnEvent],
+    ['live', 'rollout', 'idle', 'task_started'],
+  );
+  assert.deepEqual(f.calls.map((call) => call.args.slice(0, 3)), [['agent', 'get', 'lane-a']], 'one herdr read, no wait, no keys');
+  assert.equal(lastRow(f).state, 'live');
+});
+
+test('d72185dc: a turn end after the last prompt is settled; no rollout is unknown, never herdr\'s idle; a claude lane reads herdr', async (t) => {
+  const f = fixture(t);
+  seedLane(f, AE_LANE);
+  writeRollout(f, f.dir, [...AE_TURN, AE_COMPLETE]);
+  f.responses.push({ code: 0, stdout: '{"result":{"agent":{"agent_status":"working"}}}', stderr: '' });
+  const ended = await laneStatus(f, '2026-10-04T02:35:00Z');
+  assert.deepEqual([ended.output.liveness, ended.output.source, ended.output.herdr], ['settled', 'rollout', 'working']);
+
+  const g = fixture(t);
+  seedLane(g, AE_LANE);
+  writeRollout(g, join(g.dir, 'some-other-worktree'), AE_TURN);
+  g.responses.push(IDLE_GET);
+  const none = await laneStatus(g);
+  assert.deepEqual([none.output.liveness, none.output.source, none.output.herdr], ['unknown', 'none', 'idle']);
+
+  const h = fixture(t);
+  seedLane(h, { kind: 'claude' });
+  h.responses.push(IDLE_GET);
+  const claude = await laneStatus(h);
+  assert.deepEqual([claude.output.liveness, claude.output.source], ['settled', 'herdr']);
+});
+
+test('d72185dc: a turn end before the last prompt is live; a failed get is unreadable, exit 0; a long name is mapped for get', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { ...AE_LANE, promptedAt: '2026-10-04T02:40:00.000Z' });
+  writeRollout(f, f.dir, [...AE_TURN, AE_COMPLETE]);
+  f.responses.push(IDLE_GET);
+  const stale = await laneStatus(f, '2026-10-04T02:40:01Z');
+  assert.deepEqual([stale.output.liveness, stale.output.turnEvent], ['live', 'task_complete'], 'the 02:40 prompt has not started its turn');
+
+  const g = fixture(t);
+  seedLane(g, AE_LANE);
+  writeRollout(g, g.dir, AE_TURN);
+  g.responses.push({ code: 1, stdout: '', stderr: 'agent not found' });
+  const failed = await laneStatus(g);
+  assert.equal(failed.exit, 0);
+  assert.deepEqual([failed.output.herdr, failed.output.liveness, failed.output.source], ['unreadable', 'live', 'rollout']);
+
+  const h = fixture(t);
+  const longName = 'a-very-long-lane-name-that-herdr-cannot-take';
+  writeFileSync(`${h.log}.state.json`, JSON.stringify({ creates: [], lanes: { [longName]: { pane: 'w1:p2', kind: 'claude', path: h.dir } } }), 'utf8');
+  h.responses.push(IDLE_GET);
+  const mapped = await runLane(['status', longName, '--log', h.log], { exec: h.exec });
+  assert.equal(mapped.exit, 0, JSON.stringify(mapped.output));
+  assert.deepEqual(h.calls[0].args, ['agent', 'get', herdrAgentName(longName)]);
+  assert.notEqual(herdrAgentName(longName), longName);
+});
+
 // --- quest e8a1db7f: `lane resume` reads the same rollout `wait` does, once.
 const rolloutResume = (f, now = '2026-10-04T02:20:28Z') => runLane(['resume', 'lane-a', '--timeout', '1000', '--log', f.log], {
   exec: f.exec, now: () => Date.parse(now), env: { CODEX_HOME: join(f.dir, 'codex-home') },
