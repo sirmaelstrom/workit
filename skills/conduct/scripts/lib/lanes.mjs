@@ -141,14 +141,17 @@ export function guardedKillArgv(pid, identity, platform) {
 
 // The paths a herdr lane's brief may name while they are absent from its
 // worktree (lane.mjs prompt refuses any other absent path). Its own `- Create`
-// paths, and a `- Modify` path another WP of the run creates: the worktree is
-// cut from origin/<default>, which lacks that file until the other WP merges.
-// Any other Modify path must exist, or the brief's premise is stale. A
+// paths, and a `- Modify` path an earlier WP of the run creates: the worktree
+// is cut from origin/<default>, which lacks that file until the earlier WP
+// merges. Any other Modify path the brief names must exist, or the brief's
+// premise is stale (the check reads the brief, not the WP spec it points at). A
 // directory entry (`dir/`) covers the paths under it. Herdr backend only: the
 // exec backend's brief rides `conduct spawn`, which runs no path check.
 export function allowedMissing(state, wp) {
   const own = wp.creates ?? [];
-  const others = (state.wps ?? []).filter((other) => other.id !== wp.id).flatMap((other) => other.creates ?? []);
+  // Only a WP that runs first can supply the file: an earlier wave, or one this WP depends on.
+  const first = (other) => other.id !== wp.id && ((other.wave ?? 0) < (wp.wave ?? 0) || (wp.dependsOn ?? []).includes(other.id));
+  const others = (state.wps ?? []).filter(first).flatMap((other) => other.creates ?? []);
   const under = (path, created) => path === created || (created.endsWith('/') && path.startsWith(created));
   const createdElsewhere = (wp.files ?? []).filter((path) => !own.includes(path) && others.some((created) => under(path, created)));
   return [...new Set([...own, ...createdElsewhere])];

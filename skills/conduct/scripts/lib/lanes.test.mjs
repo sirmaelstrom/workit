@@ -784,9 +784,9 @@ test('herdr codex start sandbox (D20)', (t) => {
 // ec7b1192 post-merge council (Major): exempting every Files entry let a moved
 // or renamed Modify target through, the stale premise the check exists for.
 test('allowedMissing: Create paths, and a Modify path only when another WP of the run creates it', () => {
-  const wp = { id: 'WP-02', files: ['src/new.ts', 'src/old.ts', 'src/made-by-01.ts', 'gen/out.ts'], creates: ['src/new.ts'] };
+  const wp = { id: 'WP-02', wave: 2, files: ['src/new.ts', 'src/old.ts', 'src/made-by-01.ts', 'gen/out.ts'], creates: ['src/new.ts'] };
   const state = { wps: [
-    { id: 'WP-01', files: ['src/made-by-01.ts'], creates: ['src/made-by-01.ts', 'gen/'] },
+    { id: 'WP-01', wave: 1, files: ['src/made-by-01.ts'], creates: ['src/made-by-01.ts', 'gen/'] },
     wp,
   ] };
   const allowed = allowedMissing(state, wp);
@@ -795,6 +795,19 @@ test('allowedMissing: Create paths, and a Modify path only when another WP of th
   assert.ok(allowed.includes('gen/out.ts'), 'a Modify path under a directory another WP creates is exempt');
   assert.equal(allowed.includes('src/old.ts'), false, '(a) a Modify path no WP creates is not exempt');
   assert.deepEqual(allowedMissing({ wps: [wp] }, { ...wp, creates: undefined }), [], 'a record without creates exempts nothing');
+});
+
+// Review of #220 (codex): only a WP that runs first can supply the file.
+test('allowedMissing: a Modify path a LATER WP creates is not exempt; an earlier wave or a named dependency is', () => {
+  const wp = { id: 'WP-02', wave: 2, dependsOn: [], files: ['src/later.ts', 'src/earlier.ts', 'src/dep.ts'], creates: [] };
+  const state = { wps: [
+    { id: 'WP-01', wave: 1, creates: ['src/earlier.ts'] },
+    wp,
+    { id: 'WP-03', wave: 3, creates: ['src/later.ts'] },
+    { id: 'WP-04', wave: 2, creates: ['src/dep.ts'] },
+  ] };
+  assert.deepEqual(allowedMissing(state, wp), ['src/earlier.ts']);
+  assert.deepEqual(allowedMissing(state, { ...wp, dependsOn: ['WP-04'] }), ['src/earlier.ts', 'src/dep.ts']);
 });
 
 test('allowedMissing → lane.mjs prompt: a missing Modify path no WP creates is refused; one an earlier WP creates is sent', async (t) => {
@@ -806,8 +819,8 @@ test('allowedMissing → lane.mjs prompt: a missing Modify path no WP creates is
   writeFileSync(brief, 'Edit `src/old.ts` and `src/made-by-01.ts`; add `src/new.ts`.', 'utf8');
   const log = join(dir, 'lane-runner.jsonl');
   writeFileSync(`${log}.state.json`, JSON.stringify({ creates: [], lanes: { 'lane-x': { pane: 'w1:p2', kind: 'claude', path: worktree, branch: 'b', base: 'main' } } }), 'utf8');
-  const wp = { id: 'WP-02', files: ['src/new.ts', 'src/old.ts', 'src/made-by-01.ts'], creates: ['src/new.ts'] };
-  const state = { wps: [{ id: 'WP-01', creates: ['src/made-by-01.ts'] }, wp] };
+  const wp = { id: 'WP-02', wave: 2, files: ['src/new.ts', 'src/old.ts', 'src/made-by-01.ts'], creates: ['src/new.ts'] };
+  const state = { wps: [{ id: 'WP-01', wave: 1, creates: ['src/made-by-01.ts'] }, wp] };
   const exec = () => ({ code: 0, stdout: '{"result":{"agents":[{"name":"lane-x","state":"done"}],"state":"working","accepted":true}}', stderr: '' });
   const send = (extra) => runLane(['prompt', 'lane-x', '--file', brief, ...allowedMissing(state, extra).flatMap((p) => ['--allow-missing', p]), '--log', log], { exec });
   const refused = await send(wp);
