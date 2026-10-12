@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, paneErrorLine, panePromptSignature,
-  USAGE_TEXT, briefPaths, mergeDanger, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
+  USAGE_TEXT, briefPaths, mergeDanger, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath, normalizeAgentArgs,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -533,6 +533,73 @@ test('lane marker: a caller cannot drop or replace it — claude refuses a calle
   assert.equal(result.exit, 0);
   const args = agentStartCall(f).args;
   assert.deepEqual(args.filter((arg) => String(arg).startsWith('shell_environment_policy.set.WORKIT_LANE=')), ['shell_environment_policy.set.WORKIT_LANE="lane-c"']);
+});
+
+test('launch guards: the --flag=value and --config spellings meet the same guard as the two-token form', async (t) => {
+  const refusedOnly = { exec: () => { throw new Error('no herdr call may happen before the refusal'); }, env: {} };
+  const claudeStart = (native) => ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', fixture(t).log, '--', ...native];
+  const codexStart = (log, native) => ['start', 'lane-c', '--pane', 'w1:p2', '--kind', 'codex', '--model', 'm', '--reasoning', 'low', '--sandbox', 'danger-full-access', '--log', log, '--', ...native];
+  const codexDeps = (f) => ({ exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' }, platform: 'win32', findCodexBin: () => 'X:\\fixture\\vendor\\bin', sleep: async () => {} });
+
+  for (const native of [['--permission-mode', 'dontAsk'], ['--permission-mode=dontAsk']]) {
+    const out = await runLane(claudeStart(native), refusedOnly);
+    assert.equal(out.exit, 2, native.join(' '));
+    assert.match(out.output.error, /dontAsk is refused/);
+  }
+  for (const native of [['--settings', '{}'], ['--settings={}']]) {
+    const out = await runLane(claudeStart(native), refusedOnly);
+    assert.equal(out.exit, 2, native.join(' '));
+    assert.match(out.output.error, /caller-supplied --settings is refused/);
+  }
+
+  const f = fixture(t);
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a","state":"idle"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"focused":true}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"conductor","pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const claude = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--log', f.log, '--', '--model=cheap', '--effort=xhigh'],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+  );
+  assert.equal(claude.exit, 0);
+  const claudeArgs = agentStartCall(f).args;
+  assert.equal(claudeArgs.some((arg) => /^--(model|effort)=/.test(arg)), false, 'no equals-form survives');
+  assert.deepEqual([claudeArgs[claudeArgs.indexOf('--model') + 1], claudeArgs[claudeArgs.indexOf('--effort') + 1]], ['opus', 'high']);
+  assert.equal(claudeArgs.filter((arg) => arg === '--model' || arg === '--effort').length, 2);
+
+  const sandbox = await runLane(codexStart(fixture(t).log, []).filter((arg) => arg !== '--sandbox' && arg !== 'danger-full-access').concat('--sandbox=read-only'), { ...refusedOnly, platform: 'win32' });
+  assert.equal(sandbox.exit, 2);
+  assert.match(sandbox.output.error, /read-only sandbox is refused/);
+
+  const g = fixture(t);
+  g.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: 'X:\\fixture\\npm', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: 'X:\\fixture\\vendor\\bin\\codex.exe\nPS X:\\fixture\\lane>', stderr: '' },
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-c"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const codex = await runLane(
+    codexStart(g.log, ['--config', 'model_reasoning_effort=xhigh', '--config=shell_environment_policy.set.WORKIT_LANE="conductor"', '--model=cheap']),
+    codexDeps(g),
+  );
+  assert.equal(codex.exit, 0);
+  const codexArgs = agentStartCall(g).args;
+  assert.equal(codexArgs.some((arg) => arg === '--config' || /^--(config|model)=/.test(arg)), false, 'no long or equals spelling survives');
+  assert.deepEqual(codexArgs.filter((arg) => /^model_reasoning_effort=/.test(arg)), ['model_reasoning_effort=low']);
+  assert.deepEqual(codexArgs.filter((arg) => /^shell_environment_policy\.set\.WORKIT_LANE=/.test(arg)), ['shell_environment_policy.set.WORKIT_LANE="lane-c"']);
+  assert.equal(codexArgs.filter((arg) => arg === '--model').length, 1);
+});
+
+test('normalizeAgentArgs: a codex -c value is never split; claude -c takes no value', () => {
+  assert.deepEqual(normalizeAgentArgs(['-c', '--odd=1', '--x=y'], 'codex'), ['-c', '--odd=1', '--x', 'y']);
+  assert.deepEqual(normalizeAgentArgs(['-c', '--model=x'], 'claude'), ['-c', '--model', 'x']);
+  assert.deepEqual(normalizeAgentArgs(['--config=a=b'], 'codex'), ['-c', 'a=b']);
+  assert.deepEqual(normalizeAgentArgs(['--config', 'a=b'], 'claude'), ['--config', 'a=b']);
 });
 
 test('WP-1: every attempted verb appends the complete JSONL instrumentation shape', async (t) => {

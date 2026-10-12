@@ -60,6 +60,8 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            --settings env, so a caller --settings is refused; codex: -c
            shell_environment_policy.set). pr-review.mjs reply refuses
            --adjudicator conductor|operator while it is set.
+           Native args are read in one spelling first: --flag=value is split
+           and codex --config is -c, so every guard above sees both forms.
   prompt   <name> --file <abs>          Sends only "Read <file> and execute it exactly."
            [--amendment (--ruling-receipt <uuid> --quest <id> | --no-ruling)]
            Any prompt after the lane's first is an amendment, --amendment or not,
@@ -553,6 +555,31 @@ function lockAge(deps, lock) {
 
 function required(opts, ...names) {
   for (const name of names) if (!opts[name]) usage(`${opts.verb} needs --${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`);
+}
+
+// Every launch guard below compares whole tokens, so the native args get one
+// spelling first: `--flag=value` becomes `--flag value`, and codex's `--config`
+// becomes `-c`. Without it `--permission-mode=dontAsk`, `--model=x` and
+// `--settings=…` walked past their guards. On codex, the token after `-c` is
+// its value and is left alone; claude's `-c` (--continue) takes none.
+export function normalizeAgentArgs(args, kind) {
+  const out = [];
+  let configValueNext = false;
+  for (const raw of args) {
+    const token = String(raw);
+    if (configValueNext) {
+      out.push(token);
+      configValueNext = false;
+      continue;
+    }
+    const eq = /^(--[A-Za-z][\w-]*)=([\s\S]*)$/.exec(token);
+    const flag = eq ? eq[1] : token;
+    const spelled = kind === 'codex' && flag === '--config' ? '-c' : flag;
+    out.push(spelled);
+    if (eq) out.push(eq[2]);
+    else if (kind === 'codex' && spelled === '-c') configValueNext = true;
+  }
+  return out;
 }
 
 function agentOption(args, flag) {
@@ -1134,11 +1161,11 @@ async function startLane(opts, deps, state) {
   // the TUI loads, and `wait` finds it as the newest rollout since this stamp.
   const startRequestedAt = deps.timestamp();
 
-  let native = [...opts.agentArgs];
+  let native = normalizeAgentArgs(opts.agentArgs, opts.kind);
   let warning = null;
   const hasMcpStartupTimeout = opts.mcpStartupTimeout !== undefined;
   const hasMcpStartupServer = opts.mcpStartupServer !== undefined;
-  const callerMcpStartupTimeout = hasMcpStartupTimeoutConfig(opts.agentArgs);
+  const callerMcpStartupTimeout = hasMcpStartupTimeoutConfig(native);
   if (opts.kind !== 'codex' && (hasMcpStartupTimeout || hasMcpStartupServer)) {
     usage('--mcp-startup-timeout/--mcp-startup-server apply to codex lanes only');
   }
