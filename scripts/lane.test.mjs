@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, paneErrorLine, panePromptSignature,
-  reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
+  briefPaths, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -314,6 +314,79 @@ test('WP-1: prompt refuses a missing file before herdr is invoked', async (t) =>
   assert.equal(result.exit, 2);
   assert.match(result.output.error, /does not exist/);
   assert.equal(f.calls.length, 0);
+});
+
+// ec7b1192: a brief naming a path that is not in the lane's tree is a premise
+// nobody checked. The send is refused before herdr is invoked.
+test('briefPaths: backticked repo-relative paths outside fences, line locators stripped', () => {
+  const text = [
+    'Fix `src/briefings/deploy-state.ts:119` and `scripts/lane.mjs:10-20`; see `./README.md`.',
+    'Run `npx vitest run scripts/deploy-state.test.ts src/a.test.ts` with your DB.',
+    'Not paths: `origin/main`, `owner/repo`, `/abs/x.ts`, `C:/x/y.ts`, `https://h/x.md`, `src/{a,b}.ts`, `<repo>/x.md`, `../up/x.md`, `--flag`, `x.md`.',
+    '```',
+    'node `skills/in-fence/x.mjs`',
+    '```',
+    '- Create `src/made.ts` (a WP Files bullet names a file that does not exist yet)',
+    '- Modify `src/kept.ts`',
+  ].join('\n');
+  assert.deepEqual(briefPaths(text), ['src/briefings/deploy-state.ts', 'scripts/lane.mjs', 'README.md', 'scripts/deploy-state.test.ts', 'src/a.test.ts', 'src/kept.ts']);
+});
+
+test('ec7b1192: prompt refuses a brief naming a path missing from the worktree, before herdr is invoked', async (t) => {
+  const f = fixture(t);
+  mkdirSync(join(f.dir, 'src'), { recursive: true });
+  writeFileSync(join(f.dir, 'src', 'real.ts'), '', 'utf8');
+  const prompt = join(f.dir, 'brief.md');
+  writeFileSync(prompt, 'Edit `src/real.ts` and run `npx vitest run scripts/deploy-state.test.ts`.', 'utf8');
+  seedLane(f);
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 2, JSON.stringify(result.output));
+  assert.match(result.output.error, /scripts\/deploy-state\.test\.ts/);
+  assert.doesNotMatch(result.output.error, /src\/real\.ts/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('ec7b1192: prompt sends when every named path exists in the worktree or the workspace root, or is named --allow-missing', async (t) => {
+  const f = fixture(t);
+  const worktree = join(f.dir, 'projects', 'workit-wt-x');
+  mkdirSync(join(worktree, 'src'), { recursive: true });
+  writeFileSync(join(worktree, 'src', 'real.ts'), '', 'utf8');
+  mkdirSync(join(f.dir, 'data', 'outputs'), { recursive: true });
+  writeFileSync(join(f.dir, 'data', 'outputs', 'spec.md'), '', 'utf8');
+  const prompt = join(f.dir, 'brief.md');
+  writeFileSync(prompt, 'Edit `src/real.ts:3`, read `data/outputs/spec.md`, create `src/new.test.ts`.', 'utf8');
+  seedLane(f, { kind: 'claude', path: worktree });
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
+  );
+  const refused = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec });
+  assert.equal(refused.exit, 2);
+  assert.match(refused.output.error, /src\/new\.test\.ts/);
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--allow-missing', 'src/new.test.ts', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(result.output.briefPaths, { checked: 3, ran: true, allowedMissing: ['src/new.test.ts'] });
+});
+
+test('ec7b1192: a lane with no worktree path says the brief check did not run', async (t) => {
+  const f = fixture(t);
+  const prompt = join(f.dir, 'brief.md');
+  writeFileSync(prompt, 'Edit `src/nowhere.ts`.', 'utf8');
+  seedLane(f, { kind: 'claude', path: undefined });
+  f.responses.push(
+    { code: 0, stdout: '{"result":{"agents":[{"name":"lane-a","state":"done"}]}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"state":"working","accepted":true}}', stderr: '' },
+  );
+  const result = await runLane(['prompt', 'lane-a', '--file', prompt, '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  assert.deepEqual(result.output.briefPaths, { checked: 0, ran: false, reason: 'the lane record has no worktree path' });
+});
+
+test('ec7b1192: --allow-missing belongs to prompt only', async (t) => {
+  const f = fixture(t);
+  const result = await runLane(['wait', 'lane-a', '--allow-missing', 'x/y.ts', '--timeout', '1', '--log', f.log], { exec: f.exec });
+  assert.equal(result.exit, 2);
+  assert.match(result.output.error, /--allow-missing belongs to the prompt verb/);
 });
 
 test('WP-1: create refuses an existing branch before herdr is invoked', async (t) => {
