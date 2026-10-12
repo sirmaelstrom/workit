@@ -196,12 +196,16 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    that head, and the conductor's own read of the tail diff, and the row
    records `unreviewed tail <reviewed>..<merged> (post-cap|trivial)`. Any other
    gap, such as an executable amendment after the full round with no delta
-   pass, gets the delta pass before the merge. T2 adds two checks. When the
+   pass, gets the delta pass before the merge. T2 adds three checks. When the
    base branch moved during review, test the tree that will land (rebase and
    re-run, or run the suite on the merge result) rather than the reviewed
-   branch alone. And the row names how each challenge escalation ("Human
+   branch alone. The row names how each challenge escalation ("Human
    review required") was disposed of, including any confirmation of an
-   operator ruling that the challenge asks for.
+   operator ruling that the challenge asks for. And an amendment made after
+   the challenge on the amended tree is post-cap at T2: it merges on its
+   controls seen red then green, CI and the suite at that head, and the
+   conductor's read of the tail's diff body (not its `--stat`), and the row
+   records `unreviewed tail <challenged>..<merged> (post-cap)`.
 
    **A red gate names an oracle; re-derive WHICH one per red step before
    monitoring anything.** A CI red is reached through several steps that may
