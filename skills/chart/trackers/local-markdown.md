@@ -123,11 +123,11 @@ Blocking is expressed only through the ticket's `Blocked by:` field. There is no
 **Re-block mutation** (rewrite the field of an existing ticket):
 
 1. Applies to a ticket whose `Status:` is `open`, read from the file immediately before the write. A `claimed` ticket is refused, because a session may be live in it. A `resolved` ticket is refused, because its edges are history.
-2. Replace the whole `Blocked by:` value with the new integer list, written in the form of rule 1. An empty list ends the line immediately after the colon.
+2. Replace the whole `Blocked by:` value with the new integer list, written in the form of rule 1: an argument given as `03` is written `3`. An empty list ends the line immediately after the colon.
 3. The new list goes through the same checks as a creation, on the graph as it will be after the write. A self-block or a cycle is refused, naming the cycle. Any number in the new list that names no existing ticket is refused too, whether it is new or carried over: re-block repairs dangling references and must never write one.
 4. No other byte of the ticket changes. `map.md` is not touched, `Last advanced:` included, because a re-block resolves nothing.
 
-Without re-block, an `open` ticket reported under `defects` could leave that state only through a hand edit of the file or by creating a ticket under the number it names. That number may be a typo for a ticket that already exists.
+Without re-block, an `open` ticket reported under `defects` could leave that state only through a hand edit of the file, a `record` that resolves it with the edge unchanged, or the next created ticket happening to take the number it names. Numbers are assigned as `max + 1`, so that ticket is whatever comes next, which for a typo is an unrelated question.
 
 ### 4. Frontier — select the next actionable ticket
 
@@ -138,7 +138,7 @@ The frontier predicate:
 1. Order candidates numerically ascending by `NN`. **First match wins.**
 2. `claimed` tickets are not frontier candidates. Neither are `resolved` ones.
 3. **Fail closed.** A dangling `Blocked by:` reference leaves the ticket **blocked** — it never becomes a frontier candidate — and is reported as a defect. A malformed tracker state never resolves in favor of doing work.
-4. When no ticket satisfies the predicate, say so plainly and report any defects found while scanning. An empty frontier with unresolved tickets means everything is blocked or claimed, which is information, not an error.
+4. When no ticket satisfies the predicate, say so plainly and report any defects found while scanning, counted as List rule 5 counts them. An empty frontier with unresolved tickets means everything is blocked or claimed, which is information, not an error.
 
 ### 5. Claim — take a ticket, or give it back
 

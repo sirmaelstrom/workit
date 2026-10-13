@@ -145,9 +145,9 @@ whose intended target looks obvious.
 
 This mode exists for the same reason `release` does. A dangling `Blocked by:`
 reference keeps an `open` ticket off the frontier, and `release` only covers
-`claimed → open`. Without `reblock`, the only ways out are a hand edit, creating
-a ticket under the number the reference names (wrong when the reference is a
-typo), or `record`. `record` resolves the ticket without its blocker and leaves
+`claimed → open`. Without `reblock`, the only ways out are a hand edit, the next
+ticket created happening to take the number the reference names (an unrelated
+ticket when the reference is a typo), or `record`. `record` resolves the ticket without its blocker and leaves
 the edge as it was. `reblock` changes a field, not `Status:`, so the three legal
 transitions above stay the only ones.
 
@@ -224,8 +224,9 @@ yourself past it. An escalation implemented as advisory prose is not implemented
 A dangling `Blocked by:` reference leaves the ticket **blocked** and reports it as
 a defect in the listing. A typo must never silently promote a ticket onto the
 frontier. On an `open` ticket the repair is `/chart reblock`, run by the
-operator, or creating the ticket the reference names when that is the ticket it
-meant.
+operator. Creating a ticket also ends a dangling reference, but only to the next
+number (`max + 1`), and that ticket may not be the one the reference meant. Do
+not offer creation as the repair.
 
 ---
 
