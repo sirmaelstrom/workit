@@ -117,7 +117,17 @@ Blocking is expressed only through the ticket's `Blocked by:` field. There is no
 1. Write the blocking ticket numbers as a comma-separated integer list: `Blocked by: 1, 4`.
 2. **Self-block is refused at creation.** A ticket may not list its own number.
 3. **Cycles are refused at creation, naming the cycle** — for example, `refused: 02 → 05 → 02`. Do not write the file and then report; refuse before writing.
-4. A reference to a ticket that does not exist is a **dangling reference**. It is not repaired, not dropped, and not silently ignored: the ticket stays blocked and is reported as a defect (see Frontier and List).
+4. **The cycle check runs on the graph as it will be after the write.** Creating ticket `NN` turns every existing dangling reference to `NN` into a live edge, so those edges are part of the check. `01` carrying `Blocked by: 2` with no `02`, then creating `02` with `Blocked by: 1`, is refused as `refused: 01 → 02 → 01`. Checking only the edges among tickets that already exist would write that cycle.
+5. A reference to a ticket that does not exist is a **dangling reference**. Nothing repairs, drops, or ignores it automatically: the ticket stays blocked and is reported as a defect (see Frontier and List) until the re-block mutation below rewrites the field.
+
+**Re-block mutation** (rewrite the field of an existing ticket):
+
+1. Applies to a ticket whose `Status:` is `open`. A `claimed` ticket is refused, because a session may be live in it. A `resolved` ticket is refused, because its edges are history.
+2. Replace the whole `Blocked by:` value with the new integer list, written in the same form as at creation. An empty list ends the line immediately after the colon.
+3. The new list goes through the same checks as a creation, on the graph as it will be after the write. A self-block or a cycle is refused, naming the cycle. A reference to a ticket that does not exist is also refused: re-block repairs dangling references and must not create one.
+4. No other byte of the ticket changes. `map.md` is not touched, `Last advanced:` included, because a re-block resolves nothing.
+
+Re-block is how a dangling reference gets repaired. Without it, a ticket reported under `defects` could leave that state only through a hand edit of the file.
 
 ### 4. Frontier — select the next actionable ticket
 

@@ -55,7 +55,7 @@ literally.** Never construct, glob, or name a path yourself.
 |---|---|
 | **Map** | Create an effort's map. |
 | **Child ticket** | Create one question under an effort. |
-| **Blocking** | Declare and read dependencies between tickets. |
+| **Blocking** | Declare, read, and re-declare dependencies between tickets. |
 | **Frontier** | Select the next actionable ticket. |
 | **Claim** | Take a ticket, or release it back. |
 | **Resolve** | Record an answer and advance the map. |
@@ -72,6 +72,7 @@ The listing is the **List** verb. It is not a glob and not a path this file know
 | `/chart advance [<effort>]` | Claim the frontier ticket and resolve it. |
 | `/chart record <effort> <NN>` | Write back an answer produced outside the session. |
 | `/chart release <effort> <NN>` | Return a stale claim to `open`. |
+| `/chart reblock <effort> <NN> [<NN>, …]` | Rewrite an `open` ticket's `Blocked by:` list; an empty list clears it. |
 
 1. Bare `/chart <text>` with a non-keyword argument is read as `new`, and **state
    that interpretation** rather than acting on it silently.
@@ -126,6 +127,26 @@ property outright.
 Legal transitions are exactly **`open → claimed`**, **`claimed → resolved`**, and
 **`claimed → open`**. Everything else is forbidden.
 
+## Session sequence — `reblock`
+
+Apply the adapter's **re-block mutation** to an `open` ticket. Operator-invoked
+only: `/chart` never rewrites a blocking edge on its own, not even a dangling one
+whose intended target looks obvious.
+
+1. **Show the ticket's current `Blocked by:`** and name every dangling reference
+   in it before writing anything.
+2. **Refuse** a `claimed` or `resolved` ticket, and any new list that self-blocks,
+   closes a cycle (name it), or names a ticket that does not exist. A refusal
+   writes nothing.
+3. **Report the frontier effect** after the write: whether the ticket is now a
+   frontier candidate, and if it is not, which blocker holds it.
+
+This mode exists for the same reason `release` does. A dangling `Blocked by:`
+reference keeps an `open` ticket off the frontier, and `release` only covers
+`claimed → open`. Without `reblock`, a ticket reported under `defects` has no
+operation that can act on it. `reblock` changes a field, not `Status:`, so the
+three legal transitions above stay the only ones.
+
 ## Delegation
 
 This is the core behavior: `/chart` schedules, other skills answer.
@@ -173,8 +194,10 @@ yourself past it. An escalation implemented as advisory prose is not implemented
    **Do not widen `NN` to three digits.** This is a backstop; rule 4 fires long
    before it.
 6. **Bad blocking edge.** A `Blocked by:` edge that creates a cycle or a self-block
-   is refused **at creation**, naming the cycle. Do not write the ticket and leave
-   the graph to be repaired later.
+   is refused **at creation** and at `reblock`, naming the cycle. Do not write the
+   ticket and leave the graph to be repaired later. Check the graph as it will be
+   after the write: a new ticket turns every existing dangling reference to its
+   number into a live edge.
 
 ## Never
 
@@ -196,7 +219,7 @@ yourself past it. An escalation implemented as advisory prose is not implemented
 
 A dangling `Blocked by:` reference leaves the ticket **blocked** and reports it as
 a defect in the listing. A typo must never silently promote a ticket onto the
-frontier.
+frontier. The repair is `/chart reblock`, run by the operator.
 
 ---
 
