@@ -114,20 +114,20 @@ Blocked by:
 
 Blocking is expressed only through the ticket's `Blocked by:` field. There is no separate index file.
 
-1. Write the blocking ticket numbers as a comma-separated integer list: `Blocked by: 1, 4`.
+1. Write the blocking ticket numbers as a comma-separated integer list: `Blocked by: 1, 4`. Numbers are unpadded, ascending, each listed once, separated by `, `.
 2. **Self-block is refused at creation.** A ticket may not list its own number.
-3. **Cycles are refused at creation, naming the cycle** — for example, `refused: 02 → 05 → 02`. Do not write the file and then report; refuse before writing.
-4. **The cycle check runs on the graph as it will be after the write.** Creating ticket `NN` turns every existing dangling reference to `NN` into a live edge, so those edges are part of the check. `01` carrying `Blocked by: 2` with no `02`, then creating `02` with `Blocked by: 1`, is refused as `refused: 01 → 02 → 01`. Checking only the edges among tickets that already exist would write that cycle.
-5. A reference to a ticket that does not exist is a **dangling reference**. Nothing repairs, drops, or ignores it automatically: the ticket stays blocked and is reported as a defect (see Frontier and List) until the re-block mutation below rewrites the field.
+3. **Cycles are refused at creation, naming the cycle** — for example, `refused: 02 → 05 → 02`. An arrow `A → B` reads "A is blocked by B". Do not write the file and then report; refuse before writing.
+4. **The cycle check runs on the graph as it will be after the write.** Creating ticket `NN` turns every existing dangling reference to `NN` into a live edge, so those edges are part of the check. `01` carrying `Blocked by: 2` with no `02`, then creating `02` with `Blocked by: 1`, is refused as `refused: 01 → 02 → 01`. Checking only the edges among tickets that already exist would write that cycle. Edges out of a `resolved` ticket are history and are left out of the check: a resolved ticket cannot wait on anything, so no cycle through it can block work.
+5. A reference to a ticket that does not exist is a **dangling reference**. Nothing repairs, drops, or ignores it automatically: the ticket stays blocked and is reported as a defect (see Frontier and List). It stops being dangling when the referenced ticket is created (rule 4), or when the re-block mutation below rewrites the field.
 
 **Re-block mutation** (rewrite the field of an existing ticket):
 
-1. Applies to a ticket whose `Status:` is `open`. A `claimed` ticket is refused, because a session may be live in it. A `resolved` ticket is refused, because its edges are history.
-2. Replace the whole `Blocked by:` value with the new integer list, written in the same form as at creation. An empty list ends the line immediately after the colon.
-3. The new list goes through the same checks as a creation, on the graph as it will be after the write. A self-block or a cycle is refused, naming the cycle. A reference to a ticket that does not exist is also refused: re-block repairs dangling references and must not create one.
+1. Applies to a ticket whose `Status:` is `open`, read from the file immediately before the write. A `claimed` ticket is refused, because a session may be live in it. A `resolved` ticket is refused, because its edges are history.
+2. Replace the whole `Blocked by:` value with the new integer list, written in the form of rule 1. An empty list ends the line immediately after the colon.
+3. The new list goes through the same checks as a creation, on the graph as it will be after the write. A self-block or a cycle is refused, naming the cycle. Any number in the new list that names no existing ticket is refused too, whether it is new or carried over: re-block repairs dangling references and must never write one.
 4. No other byte of the ticket changes. `map.md` is not touched, `Last advanced:` included, because a re-block resolves nothing.
 
-Re-block is how a dangling reference gets repaired. Without it, a ticket reported under `defects` could leave that state only through a hand edit of the file.
+Without re-block, an `open` ticket reported under `defects` could leave that state only through a hand edit of the file or by creating a ticket under the number it names. That number may be a typo for a ticket that already exists.
 
 ### 4. Frontier — select the next actionable ticket
 
@@ -202,7 +202,7 @@ Enumerate every `<root>/*/map.md`. Per map emit one row:
 2. `<total>` is every file in `issues/`. `<open>` is every ticket whose `Status:` is **not** `resolved` — that is, `open` plus `claimed` — because the listing answers "how much is left," and `reclaimable` already surfaces the claimed subset separately. An effort with one claimed ticket reads `1/1 open`, not `0/1 open`.
 3. `STALE` is present when `Last advanced:` is more than **14 days** old.
 4. `reclaimable` counts tickets that are `claimed` with a `Claimed:` timestamp more than **24 hours** old.
-5. `defects` counts tickets carrying **at least one** dangling `Blocked by:` reference — one count per ticket, not per reference. This is where the blocking rules' promise that dangling references are "reported in the listing" is kept, so an effort nobody advances still surfaces its rot.
+5. `defects` counts tickets that are not `resolved` and carry **at least one** dangling `Blocked by:` reference — one count per ticket, not per reference. A resolved ticket's edges are history and no operation rewrites them, so counting it would leave a flag nobody can clear. This is where the blocking rules' promise that dangling references are "reported in the listing" is kept, so an effort nobody advances still surfaces its rot.
 6. Each bracketed flag is **omitted entirely** when it does not apply — no `[0 defects]`, no empty brackets. Present flags keep the order shown: `STALE`, then `reclaimable`, then `defects`.
 7. Counts come from scanning `issues/` at list time. Never read a count from a map header; no such field exists.
 

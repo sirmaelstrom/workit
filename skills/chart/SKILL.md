@@ -72,7 +72,8 @@ The listing is the **List** verb. It is not a glob and not a path this file know
 | `/chart advance [<effort>]` | Claim the frontier ticket and resolve it. |
 | `/chart record <effort> <NN>` | Write back an answer produced outside the session. |
 | `/chart release <effort> <NN>` | Return a stale claim to `open`. |
-| `/chart reblock <effort> <NN> [<NN>, …]` | Rewrite an `open` ticket's `Blocked by:` list; an empty list clears it. |
+| `/chart reblock <effort> <NN> <NN>[, <NN>…]` | Rewrite an `open` ticket's `Blocked by:` list. |
+| `/chart reblock <effort> <NN> none` | Clear it. A missing list is refused, never read as `none`. |
 
 1. Bare `/chart <text>` with a non-keyword argument is read as `new`, and **state
    that interpretation** rather than acting on it silently.
@@ -135,7 +136,8 @@ whose intended target looks obvious.
 
 1. **Show the ticket's current `Blocked by:`** and name every dangling reference
    in it before writing anything.
-2. **Refuse** a `claimed` or `resolved` ticket, and any new list that self-blocks,
+2. **Refuse** a `claimed` or `resolved` ticket, an invocation with no list (only
+   the literal `none` clears the field), and any new list that self-blocks,
    closes a cycle (name it), or names a ticket that does not exist. A refusal
    writes nothing.
 3. **Report the frontier effect** after the write: whether the ticket is now a
@@ -143,9 +145,11 @@ whose intended target looks obvious.
 
 This mode exists for the same reason `release` does. A dangling `Blocked by:`
 reference keeps an `open` ticket off the frontier, and `release` only covers
-`claimed → open`. Without `reblock`, a ticket reported under `defects` has no
-operation that can act on it. `reblock` changes a field, not `Status:`, so the
-three legal transitions above stay the only ones.
+`claimed → open`. Without `reblock`, the only ways out are a hand edit, creating
+a ticket under the number the reference names (wrong when the reference is a
+typo), or `record`. `record` resolves the ticket without its blocker and leaves
+the edge as it was. `reblock` changes a field, not `Status:`, so the three legal
+transitions above stay the only ones.
 
 ## Delegation
 
@@ -219,7 +223,9 @@ yourself past it. An escalation implemented as advisory prose is not implemented
 
 A dangling `Blocked by:` reference leaves the ticket **blocked** and reports it as
 a defect in the listing. A typo must never silently promote a ticket onto the
-frontier. The repair is `/chart reblock`, run by the operator.
+frontier. On an `open` ticket the repair is `/chart reblock`, run by the
+operator, or creating the ticket the reference names when that is the ticket it
+meant.
 
 ---
 
