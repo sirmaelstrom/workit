@@ -379,20 +379,22 @@ const keepStops = (state, wp) => (wp.queue ?? []).filter((action) => action.step
 const firstProblem = (...checks) => checks.reduce((found, check) => found ?? check(), null);
 
 export const RESET_TARGETS = Object.freeze({
-  check: { from: ['blocked'], state: laneWork, stage: 'check', agent: false, needs: (state, wp) => hasLane(wp), queue: keepStops },
+  check: { from: ['blocked'], state: laneWork, stage: 'check', needs: (state, wp) => hasLane(wp), queue: keepStops },
   checked: {
-    from: ['blocked'], state: laneWork, stage: 'checked', agent: false, queue: keepStops,
+    from: ['blocked'], state: laneWork, stage: 'checked', queue: keepStops,
     // The review the checked stage starts reads the PR, which only the check's pr-lookup records.
     needs: (state, wp, deps) => firstProblem(() => hasLane(wp), () => (wp.pr?.number ? null : `${wp.id} has no PR recorded; reset it --to check`),
       () => (deps.exists(laneLayout(state, wp).reportPath) ? null : `${wp.id} has no report at ${laneLayout(state, wp).reportPath}`)),
   },
   prompt: {
-    from: ['blocked'], state: laneWork, stage: 'wait', agent: true,
+    from: ['blocked'], state: laneWork, stage: 'wait',
     needs: (state, wp, deps) => firstProblem(() => hasLane(wp),
       () => (wp.lane.briefPath && deps.exists(wp.lane.briefPath) ? null : `${wp.id} has no brief at ${wp.lane.briefPath ?? laneLayout(state, wp).briefPath}`),
       () => (wp.lane.backend === 'herdr' && !wp.lane.paneId ? `${wp.id}'s herdr lane has no pane` : null),
       () => (wp.lane.backend !== 'herdr' && !laneExited(wp) ? `${wp.id}'s exec lane agent (pid ${wp.lane.pid}) has not been observed to exit; an exec lane is re-prompted by a new spawn, which a running agent refuses` : null),
-      () => (wp.lane.backend !== 'herdr' && wp.amendment && !wp.lane.sessionId ? `${wp.id}'s exec lane has no session id to resume` : null)),
+      // `lane spawn --amend` reads the session id from the lane, else from its log.
+      () => (wp.lane.backend !== 'herdr' && wp.amendment && !wp.lane.sessionId && !deps.exists(wp.lane.logPath ?? laneLayout(state, wp).logPath)
+        ? `${wp.id}'s exec lane has no session id to resume (none recorded, no lane log)` : null)),
     queue: (state, wp, deps) => {
       const backend = backendOf(state, wp, deps);
       if (backend.name === 'exec') return wp.amendment ? backend.prompt(wp, { amendment: true }) : backend.start(wp);
@@ -402,28 +404,32 @@ export const RESET_TARGETS = Object.freeze({
     },
   },
   wait: {
-    from: ['blocked'], state: laneWork, stage: 'wait', agent: true,
+    from: ['blocked'], state: laneWork, stage: 'wait',
     // An exec lane is polled by its recorded pid, which a restart outside `lane spawn` does not update.
     needs: (state, wp) => firstProblem(() => hasLane(wp), () => (wp.lane.backend !== 'herdr' ? `${wp.id} is an exec lane; restart it with --to prompt` : null),
       () => (wp.lane.paneId ? null : `${wp.id}'s herdr lane has no pane`)),
     lane: (deps) => freshStart(deps),
   },
   land: {
-    from: ['blocked', 'held'], state: () => 'gate', stage: 'land', agent: false, queue: keepStops,
+    from: ['blocked', 'held'], state: () => 'gate', stage: 'land', queue: keepStops,
     needs: (state, wp) => firstProblem(() => hasLane(wp), () => (wp.pr?.number ? null : `${wp.id} has no PR to land`),
       () => (wp.merge?.sha ? `${wp.id}'s PR is already merged (${wp.merge.sha}); a merged WP is never landed again` : null)),
   },
 });
 
-// A WP back in a live state takes a lane under the scheduler's rules: Files
-// disjoint from every live or lane-holding WP, and (for a target that runs the
-// agent) a slot under the run's lane cap.
-function admissionRefusal(state, wp, target) {
+// Every target puts the WP in a live state, so it takes a lane under the
+// scheduler's rules (schedule.mjs dispatchable): Files disjoint from every
+// live or lane-holding WP, and a slot under the run's lane cap. A WP whose own
+// lane still holds its slot already has one. A merged-tree halt is the
+// operator's to clear first.
+function admissionRefusal(state, wp) {
+  const halt = (state.build?.halts ?? []).find((entry) => entry.kind === 'merged');
+  if (halt) return `dispatch is halted (${halt.reason}); answer touch ${halt.touch} first`;
   const running = state.wps.filter((other) => other !== wp && (LIVE_STATES.includes(other.state) || laneOccupied(other)));
   const overlap = running.find((other) => !filesDisjoint(wp.files ?? [], other.files ?? []));
   if (overlap) return `${overlap.id} (${overlap.state}) holds a path in ${wp.id}'s Files; lanes run on disjoint Files, so reset ${wp.id} after it finishes`;
   const cap = state.intent?.lanesCap ?? 1;
-  if (target.agent && !(laneOccupied(wp)) && running.length >= cap) return `${running.length} lane(s) are live (${running.map((other) => other.id).join(', ')}) against the run's cap of ${cap}; reset ${wp.id} when one finishes`;
+  if (!laneOccupied(wp) && running.length >= cap) return `${running.length} lane(s) are live (${running.map((other) => other.id).join(', ')}) against the run's cap of ${cap}; reset ${wp.id} when one finishes`;
   return null;
 }
 
@@ -478,7 +484,7 @@ export function resetWp(state, { wpId, to, why }, deps, { beforeChange = () => n
   const touch = (state.touches ?? []).find((candidate) => candidate.wpId === wp.id && candidate.status !== 'answered');
   if (touch) refuse(`${wp.id} has touch ${touch.n} open; its answer resumes the WP`);
   if (state.pending?.wpId === wp.id) refuse(`${wp.id}'s action ${state.pending.id} is pending; perform and record it first`);
-  const blocker = rewindRefusal(state) ?? admissionRefusal(state, wp, target);
+  const blocker = rewindRefusal(state) ?? admissionRefusal(state, wp);
   if (blocker) refuse(blocker);
   // Built before the snapshot: an emitter that throws leaves nothing behind.
   const nextQueue = target.queue ? target.queue(state, wp, deps) : [];
