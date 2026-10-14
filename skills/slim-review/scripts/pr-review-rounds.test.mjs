@@ -265,6 +265,42 @@ test('a conflict resolution that changes only indentation is a new patch (patch 
   assert.notEqual(a, b, 'indentation is part of the patch id');
 });
 
+test('a rebase that rewrites a reviewed patch only in indentation gets a delta over it, never reviewed', () => {
+  const dir = repo();
+  writeFileSync(join(dir, 'p.py'), 'if ok:\n    run()\n');
+  commit(dir, 'base: p.py');
+  git(dir, ['checkout', '-q', '-b', 'pr']);
+  edit(dir, 'a.txt', 'a.txt line 2', 'a.txt line 2 (pr)');
+  commit(dir, 'pr: a');
+  writeFileSync(join(dir, 'p.py'), 'if ok:\n    run()\naudit()\n');
+  const reviewed = commit(dir, 'pr: audit');
+  advanceMain(dir, 'c.txt', 'c.txt line 1', 'c.txt line 1 (main)');
+  git(dir, ['rebase', '-q', 'main']);
+  writeFileSync(join(dir, 'p.py'), 'if ok:\n    run()\n    audit()\n');
+  git(dir, ['add', 'p.py']);
+  git(dir, ['commit', '-q', '--amend', '--no-edit']);
+  const r = round(dir, [full(reviewed)], head(dir));
+  assert.deepEqual([r.answer.round, r.answer.since, r.answer.rebase.kind, r.answer.rebase.commits], ['delta', git(dir, ['rev-parse', 'HEAD~1']).trim(), 'delta', 1]);
+});
+
+test('a rebase that drops a reviewed merge carrying its own edit refuses', () => {
+  const { dir } = prOnMain();
+  git(dir, ['reset', '-q', '--hard', 'HEAD~1']); // the PR is `pr: a` alone
+  const c1 = head(dir);
+  advanceMain(dir, 'c.txt', 'c.txt line 1', 'c.txt line 1 (main)');
+  git(dir, ['merge', '-q', '--no-commit', 'main']);
+  writeFileSync(join(dir, 'b.txt'), git(dir, ['show', ':b.txt']).replace('b.txt line 3', 'b.txt line 3 GUARD()'));
+  git(dir, ['add', 'b.txt']);
+  const reviewed = commit(dir, 'merge main, with a guard');
+  // rebuilt on main with only `pr: a`: the guard that rode in with the merge is gone
+  git(dir, ['checkout', '-q', '-B', 'pr', 'main']);
+  git(dir, ['cherry-pick', c1]);
+  const r = round(dir, [full(reviewed)], head(dir));
+  assert.equal(r.answer.rebase.kind, 'refused');
+  assert.match(r.answer.rebase.reason, /reviewed merge .* carried its own edits/);
+  assert.notEqual(r.answer.round, 'reviewed');
+});
+
 test('the mapping refuses a truncated or over-cap commit list before reading any diff', () => {
   const sha = (c) => c.repeat(40);
   const commits = (n, tip) => Array.from({ length: n }, (_, i) => ({ sha: i === n - 1 ? tip : sha(String(i % 10)), parents: [{ sha: 'p'.repeat(40) }] }));

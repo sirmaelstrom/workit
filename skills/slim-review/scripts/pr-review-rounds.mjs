@@ -264,22 +264,32 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
     const reviewedShas = new Set(reviewed.line.map((c) => c.sha));
     const headShas = new Set(headSide.line.map((c) => c.sha));
     const isMerge = (c) => (c.parents?.length ?? 0) > 1;
-    // A reviewed merge contributes no patch: its content cannot be matched, so
-    // a head commit carrying it reads new (reviewed again), never the reverse.
+    // Clean: the merge adds onto its second parent exactly what its first
+    // parent added past their merge base — the branch's own changes and
+    // nothing else, so no conflict resolution or edit rode in with it.
+    const cleanMerge = (c) => {
+      if (c.parents.length !== 2) return false;
+      const [p1, p2] = c.parents.map((p) => p.sha);
+      const onto = patchIdOf(diff(`repos/${repo}/compare/${p2}...${c.sha}`));
+      const own = patchIdOf(diff(`repos/${repo}/compare/${p2}...${p1}`));
+      return onto !== null && onto === own;
+    };
+    // A reviewed merge the head no longer carries must have been clean: an
+    // edit that rode in with it was reviewed, and nothing here can match it
+    // to a head commit, so its loss would read as no change at all.
+    const lostMerge = reviewed.line.find((c) => isMerge(c) && !headShas.has(c.sha) && !cleanMerge(c));
+    if (lostMerge) {
+      return { kind: 'refused', reason: `the reviewed merge ${lostMerge.sha.slice(0, 7)} carried its own edits and the head no longer carries it` };
+    }
+    // A reviewed clean merge contributes no patch; a head commit carrying a
+    // reviewed merge's content reads new (reviewed again), never the reverse.
     const reviewedPatches = reviewed.line
       .filter((c) => !isMerge(c) && !headShas.has(c.sha))
       .map((c) => ({ sha: c.sha, patchId: patchIdOf(diff(`repos/${repo}/commits/${c.sha}`)), message: c.commit?.message }));
     const chain = headSide.line.map((c) => {
       if (reviewedShas.has(c.sha)) return { sha: c.sha, reviewedSha: true, merge: isMerge(c), patchId: null };
       if (!isMerge(c)) return { sha: c.sha, merge: false, patchId: patchIdOf(diff(`repos/${repo}/commits/${c.sha}`)), message: c.commit?.message };
-      if (c.parents.length !== 2) return { sha: c.sha, merge: true, clean: false, patchId: null };
-      // Clean: the merge adds onto its second parent exactly what its first
-      // parent added past their merge base — the branch's own changes and
-      // nothing else, so no conflict resolution or edit rode in with it.
-      const [p1, p2] = c.parents.map((p) => p.sha);
-      const onto = patchIdOf(diff(`repos/${repo}/compare/${p2}...${c.sha}`));
-      const own = patchIdOf(diff(`repos/${repo}/compare/${p2}...${p1}`));
-      return { sha: c.sha, merge: true, clean: onto !== null && onto === own, patchId: null };
+      return { sha: c.sha, merge: true, clean: cleanMerge(c), patchId: null };
     });
     const mapped = mapRebase({ chain, reviewed: reviewedPatches });
     if (mapped.kind === 'refused') return mapped;

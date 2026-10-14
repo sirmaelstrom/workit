@@ -665,7 +665,7 @@ A non-null `problem` is the conductor's call.
 
 **A rebase is mapped, not refused.** When the tail from the last reviewed head
 diverged, or is ahead with a merge in it, `rounds` matches the head's commits
-past the base branch to the reviewed head's by `git patch-id --stable`, and
+past the base branch to the reviewed head's by `git patch-id --verbatim`, and
 reports the mapping as `rebase: {kind, from, …}`:
 - every patch already reviewed, and every reviewed patch still on the head (a
   merge whose own diff is only base-branch content counts as none):
@@ -674,9 +674,12 @@ reports the mapping as `rebase: {kind, from, …}`:
   before the first new patch, so the delta pass reviews the changed commits and
   everything after them. A reviewed patch the rebase rewrote (a conflict
   resolution) must be replaced by a new commit with the same message, which
-  the delta reviews as it now stands;
+  the delta reviews as it now stands. The delta diff does not show what the
+  replaced commit looked like, so a delta reviewer reads a rewritten commit as
+  new code, not as an interdiff;
 - no reviewed patch on the head (a force-push of unrelated content), a reviewed
-  patch the head dropped with no replacement, a first commit whose patch changed (the delta would
+  patch the head dropped with no replacement, a reviewed merge carrying its
+  own edits that the head dropped, a first commit whose patch changed (the delta would
   be the whole PR), a history that is not one first-parent line, or a read
   that failed: `kind` is `refused` or `unavailable` with a `reason`, and
   `problem` stands as above.
