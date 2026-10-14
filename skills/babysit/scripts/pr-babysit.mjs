@@ -203,7 +203,7 @@ export function normaliseThreads(nodes) {
  * One observation of the PR: head (read twice, before and after), checks on
  * that head, review threads, the coordinator's attempts, the beat's gate.
  */
-export async function observe({ repo, pr, cwd }, deps) {
+export async function observe({ repo, pr, cwd, rebaseCache }, deps) {
   const readHead = () => deps.runGh(['pr', 'view', String(pr), '--repo', repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd }).trim();
   const headBefore = readHead();
   const [owner, name] = repo.split('/');
@@ -257,7 +257,7 @@ export async function observe({ repo, pr, cwd }, deps) {
       .map((r) => postedReviewScope(r, { serviceLogin: identity.login, replacedReviewIds }))
       .filter(Boolean);
     const last = reviews[reviews.length - 1];
-    if (last && last.head !== headBefore) tail = readRoundTail({ repo, pr, cwd, runGh: deps.runGh, from: last.head, to: headBefore });
+    if (last && last.head !== headBefore) tail = readRoundTail({ repo, pr, cwd, runGh: deps.runGh, from: last.head, to: headBefore, cache: rebaseCache });
   }
 
   const headAfter = readHead();
@@ -509,9 +509,12 @@ export async function runLoop(opts, deps) {
     return finish({ outcome: 'blocked', reason: 'not-managed', owed: owedFor('not-managed', { repo: opts.repo, bounds }) }, ctx, deps, null);
   }
 
+  // A settled patch-id mapping per tail, so a poll over an unchanged rebased
+  // head re-reads no diffs (readRoundTail's `cache`).
+  const rebaseCache = new Map();
   let first = true;
   for (;;) {
-    const obs = await observe({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd }, deps);
+    const obs = await observe({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, rebaseCache }, deps);
     if (ctx.iterationHead === null) { ctx.iterationHead = obs.head; ctx.iterations = 1; persist(); }
     if (first && opts.skipDelta) {
       // The session that pushed the amendment judged it trivial; the judgment

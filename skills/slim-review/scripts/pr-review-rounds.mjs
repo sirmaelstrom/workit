@@ -15,11 +15,12 @@
  *
  * A rebase is mapped, not refused: when the tail from the last reviewed head
  * diverged, the head's commits past the base branch are matched to the
- * reviewed head's by `git patch-id --stable`. Every patch already reviewed →
- * the head reads `reviewed`. Some new → the delta runs from the last commit
- * before the first new patch. A merge whose own diff carries only base-branch
- * content is no new patch. No reviewed patch on the head at all, or any read
- * that cannot be completed → the refusal stands as before.
+ * reviewed head's by `git patch-id --verbatim`, one for one. Every patch
+ * reviewed and every reviewed patch still there → the head reads `reviewed`.
+ * Some new → the delta runs from the last commit before the first new patch.
+ * A merge whose own diff carries only base-branch content is no new patch. No
+ * reviewed patch on the head, a reviewed patch dropped, or any read that
+ * cannot be completed → the refusal stands as before.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -142,14 +143,15 @@ export function deltaTailProblem(tail, since, head) {
 // ---------------------------------------------------------------------------
 
 /**
- * `git patch-id --stable` of one diff text: the id, or null for an empty diff.
- * Reads stdin only, so it needs no repository. `--stable` sums per-file
- * hashes, so file order does not change the id; like every patch id it
- * ignores whitespace and line numbers.
+ * `git patch-id --verbatim` of one diff text: the id, or null for an empty
+ * diff. Reads stdin only, so it needs no repository. `--verbatim` keeps
+ * whitespace (indentation is code in Python, YAML or a Makefile) and, like
+ * `--stable`, sums per-file hashes so file order does not change the id; line
+ * numbers are ignored, which is what lets a rebased patch match.
  */
 export function gitPatchId(diff) {
   if (!diff || !diff.trim()) return null;
-  const r = spawnSync('git', ['patch-id', '--stable'], { input: diff, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
+  const r = spawnSync('git', ['patch-id', '--verbatim'], { input: diff, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024 });
   if (r.error) throw r.error;
   if (r.status !== 0) throw new Error(`git patch-id exited ${r.status}: ${String(r.stderr ?? '').trim()}`);
   const id = String(r.stdout ?? '').trim().split(/\s+/)[0];
@@ -159,38 +161,70 @@ export function gitPatchId(diff) {
 /**
  * Map the head's commits onto the reviewed patches. Pure.
  *
- *   chain        the head's commits past the base branch, oldest first, each
- *                { sha, reviewedSha, merge, patchId, clean }: `reviewedSha`
- *                when the same commit is in the reviewed head; `patchId` for a
- *                non-merge (null for an empty commit); `clean` for a merge
- *                whose own diff carries only base-branch content
- *   reviewedIds  the patch ids of the reviewed head's commits past the base
+ *   chain     the head's commits past the base branch, oldest first, each
+ *             { sha, reviewedSha, merge, patchId, clean }: `reviewedSha` when
+ *             the same commit is in the reviewed head; `patchId` for a
+ *             non-merge (null for an empty commit); `clean` for a merge whose
+ *             own diff carries only base-branch content
+ *   reviewed  the reviewed head's non-merge commits past the base that are
+ *             NOT on the head by sha, each { sha, patchId, message }
  *
  * → { kind: 'identical', commits }
  *   { kind: 'delta', since, commits, fresh }   since = the last commit before
- *                the first new patch; every commit after it is reviewed again
+ *             the first new patch; every commit after it is reviewed again
  *   { kind: 'refused', reason }
  *
- * A commit is new when it is a merge that is not clean, or a non-empty
- * non-merge whose patch id no reviewed commit carries. The head must carry at
- * least one reviewed patch: a force-push of unrelated content is refused, as
- * is a head whose first commit is new (the delta would be the whole PR).
+ * Patches are matched one for one (a multiset): a reviewed patch accounts for
+ * at most one head commit. A commit is new when it is a merge that is not
+ * clean, or a non-empty non-merge no unmatched reviewed patch accounts for.
+ * A reviewed patch the head no longer carries must have been REPLACED: a new
+ * non-merge commit with the same commit message (a rebase keeps messages, and
+ * a conflict resolution rewrites the patch under it) takes its place, one for
+ * one, and is reviewed again in the delta as it now stands. Refused: a
+ * reviewed patch with no replacement (a dropped commit changes the code as
+ * much as an added one, and nothing here proves it landed upstream), a head
+ * carrying no reviewed patch (a force-push of unrelated content), and a head
+ * whose first commit is new (the delta would be the whole PR).
  */
-export function mapRebase({ chain, reviewedIds }) {
+export function mapRebase({ chain, reviewed }) {
   if (!Array.isArray(chain) || chain.length === 0) return { kind: 'refused', reason: 'the head has no commits past the base branch' };
-  const seen = new Set((reviewedIds ?? []).filter(Boolean));
-  const reviewedPatch = (c) => c.reviewedSha === true || (!c.merge && c.patchId !== null && seen.has(c.patchId));
-  const isNew = (c) => {
-    if (c.reviewedSha === true) return false;
+  const unmatched = new Map();
+  const messageOf = new Map();
+  for (const r of reviewed ?? []) {
+    if (r.patchId === null || r.patchId === undefined) continue; // an empty reviewed commit carried nothing
+    if (!unmatched.has(r.patchId)) unmatched.set(r.patchId, []);
+    unmatched.get(r.patchId).push(r.sha);
+    messageOf.set(r.sha, r.message);
+  }
+  let carried = 0;
+  const fresh = chain.map((c) => {
+    if (c.reviewedSha === true) { carried += 1; return false; }
     if (c.merge) return c.clean !== true;
     if (c.patchId === null) return false;
-    return !seen.has(c.patchId);
-  };
-  if (!chain.some(reviewedPatch)) return { kind: 'refused', reason: 'no commit on the head carries a reviewed patch, so this is not a rebase of the reviewed head' };
-  const first = chain.findIndex(isNew);
+    const shas = unmatched.get(c.patchId);
+    if (!shas || shas.length === 0) return true;
+    shas.shift();
+    carried += 1;
+    return false;
+  });
+  if (carried === 0) return { kind: 'refused', reason: 'no commit on the head carries a reviewed patch, so this is not a rebase of the reviewed head' };
+  const replacements = chain
+    .filter((c, i) => fresh[i] && !c.merge && typeof c.message === 'string' && c.message.trim() !== '')
+    .map((c) => c.message);
+  const dropped = [...unmatched.values()].flat().filter((sha) => {
+    const message = messageOf.get(sha);
+    const at = typeof message === 'string' && message.trim() !== '' ? replacements.indexOf(message) : -1;
+    if (at === -1) return true;
+    replacements.splice(at, 1);
+    return false;
+  });
+  if (dropped.length > 0) {
+    return { kind: 'refused', reason: `the head no longer carries the reviewed patch of ${dropped.map((sha) => String(sha).slice(0, 7)).join(', ')}, and a dropped commit is a change no review saw` };
+  }
+  const first = fresh.indexOf(true);
   if (first === -1) return { kind: 'identical', commits: chain.length };
   if (first === 0) return { kind: 'refused', reason: `the head's first commit ${String(chain[0].sha).slice(0, 7)} carries a patch no review saw, so the delta would be the whole PR` };
-  return { kind: 'delta', since: chain[first - 1].sha, commits: chain.length - first, fresh: chain.slice(first).filter(isNew).length };
+  return { kind: 'delta', since: chain[first - 1].sha, commits: chain.length - first, fresh: fresh.filter(Boolean).length };
 }
 
 /** A compare `<base>...<sha>`'s commits as a first-parent line, oldest first, or a reason it is not one. */
@@ -230,14 +264,14 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
     const reviewedShas = new Set(reviewed.line.map((c) => c.sha));
     const headShas = new Set(headSide.line.map((c) => c.sha));
     const isMerge = (c) => (c.parents?.length ?? 0) > 1;
-    // A reviewed merge contributes no id: its content cannot be matched, so a
-    // head commit carrying it reads new (reviewed again), never the reverse.
-    const reviewedIds = reviewed.line
+    // A reviewed merge contributes no patch: its content cannot be matched, so
+    // a head commit carrying it reads new (reviewed again), never the reverse.
+    const reviewedPatches = reviewed.line
       .filter((c) => !isMerge(c) && !headShas.has(c.sha))
-      .map((c) => patchIdOf(diff(`repos/${repo}/commits/${c.sha}`)));
+      .map((c) => ({ sha: c.sha, patchId: patchIdOf(diff(`repos/${repo}/commits/${c.sha}`)), message: c.commit?.message }));
     const chain = headSide.line.map((c) => {
       if (reviewedShas.has(c.sha)) return { sha: c.sha, reviewedSha: true, merge: isMerge(c), patchId: null };
-      if (!isMerge(c)) return { sha: c.sha, merge: false, patchId: patchIdOf(diff(`repos/${repo}/commits/${c.sha}`)) };
+      if (!isMerge(c)) return { sha: c.sha, merge: false, patchId: patchIdOf(diff(`repos/${repo}/commits/${c.sha}`)), message: c.commit?.message };
       if (c.parents.length !== 2) return { sha: c.sha, merge: true, clean: false, patchId: null };
       // Clean: the merge adds onto its second parent exactly what its first
       // parent added past their merge base — the branch's own changes and
@@ -247,7 +281,7 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
       const own = patchIdOf(diff(`repos/${repo}/compare/${p2}...${p1}`));
       return { sha: c.sha, merge: true, clean: onto !== null && onto === own, patchId: null };
     });
-    const mapped = mapRebase({ chain, reviewedIds });
+    const mapped = mapRebase({ chain, reviewed: reviewedPatches });
     if (mapped.kind === 'refused') return mapped;
     if (mapped.kind === 'delta') return { ...mapped, tail: readTail({ repo, cwd, runGh, from: mapped.since, to }) };
     return mapped;
@@ -262,12 +296,24 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
  * or a force-push) or is ahead with a merge in it (the base branch merged in).
  * A plain ahead tail is not mapped: it is already an amendment diff. The
  * compare itself failing still throws, as `readTail` does.
+ *
+ * `cache` (a Map, optional) keeps a settled mapping per `from...to` for a
+ * caller that polls the same head, since a mapping costs a diff read per
+ * commit. Both ends are commit shas, so only a moved base tip could change
+ * the answer, and one polling run (bounded by its wall budget) takes the tip
+ * it first read. An `unavailable` answer is never kept, so a failed read is
+ * tried again.
  */
-export function readRoundTail({ repo, pr, cwd, runGh, from, to, patchIdOf }) {
+export function readRoundTail({ repo, pr, cwd, runGh, from, to, patchIdOf, cache }) {
   const tail = readTail({ repo, cwd, runGh, from, to });
   const mergedIn = tail.status === 'ahead' && tail.merge === true;
   if (tail.status !== 'diverged' && !mergedIn) return tail;
-  return { ...tail, rebase: readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf }) };
+  const key = `${repo}#${pr}:${from}...${to}`;
+  const kept = cache?.get(key);
+  if (kept) return { ...tail, rebase: kept };
+  const rebase = readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf });
+  if (cache && rebase.kind !== 'unavailable') cache.set(key, rebase);
+  return { ...tail, rebase };
 }
 
 /** The wire summary of a mapping: kind, and its since / commit counts or reason. */

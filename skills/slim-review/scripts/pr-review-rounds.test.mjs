@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitPatchId, mapRebase, readRoundTail, resolveRound, roundsAnswer, REBASE_COMMIT_CAP } from './pr-review-rounds.mjs';
+import { gitPatchId, mapRebase, readRebase, readRoundTail, resolveRound, roundsAnswer, REBASE_COMMIT_CAP } from './pr-review-rounds.mjs';
 import { git, gitBackedGh } from './__fixtures__/git-gh.mjs';
 
 const LINES = (tag) => Array.from({ length: 12 }, (_, i) => `${tag} line ${i + 1}`).join('\n') + '\n';
@@ -203,19 +203,110 @@ test('a mapping read that fails leaves the refusal exactly as before', () => {
 
 test('mapRebase: the pure rules', () => {
   const nm = (sha, patchId) => ({ sha, merge: false, patchId });
-  assert.deepEqual(mapRebase({ chain: [nm('a', 'p1'), nm('b', 'p2')], reviewedIds: ['p2', 'p1'] }), { kind: 'identical', commits: 2 });
-  // reordered and one dropped (landed upstream): still identical
-  assert.equal(mapRebase({ chain: [nm('b', 'p2')], reviewedIds: ['p1', 'p2'] }).kind, 'identical');
-  // an empty commit is no patch
-  assert.equal(mapRebase({ chain: [nm('a', 'p1'), nm('e', null)], reviewedIds: ['p1'] }).kind, 'identical');
+  const rv = (...ids) => ids.map((patchId, i) => ({ sha: `r${i}`, patchId }));
+  assert.deepEqual(mapRebase({ chain: [nm('a', 'p1'), nm('b', 'p2')], reviewed: rv('p2', 'p1') }), { kind: 'identical', commits: 2 });
+  // a reviewed patch the head dropped is refused: nothing proves it landed upstream
+  const dropped = mapRebase({ chain: [nm('b', 'p2')], reviewed: rv('p1', 'p2') });
+  assert.equal(dropped.kind, 'refused');
+  assert.match(dropped.reason, /no longer carries the reviewed patch of r0/);
+  // an empty commit is no patch, on either side
+  assert.equal(mapRebase({ chain: [nm('a', 'p1'), nm('e', null)], reviewed: rv('p1', null) }).kind, 'identical');
+  // a rewritten patch under the same message replaces the reviewed one and is reviewed again
+  const msg = (sha, patchId, message) => ({ sha, merge: false, patchId, message });
+  assert.deepEqual(
+    mapRebase({ chain: [msg('a', 'p1', 'one'), msg('b', 'p2x', 'two')], reviewed: [{ sha: 'r0', patchId: 'p1', message: 'one' }, { sha: 'r1', patchId: 'p2', message: 'two' }] }),
+    { kind: 'delta', since: 'a', commits: 1, fresh: 1 },
+  );
+  // a new commit under another message is no replacement: the reviewed one was dropped
+  assert.equal(mapRebase({ chain: [msg('a', 'p1', 'one'), msg('b', 'p3', 'three')], reviewed: [{ sha: 'r0', patchId: 'p1', message: 'one' }, { sha: 'r1', patchId: 'p2', message: 'two' }] }).kind, 'refused');
+  // one replacement per dropped commit
+  assert.equal(mapRebase({ chain: [msg('a', 'p1', 'one'), msg('b', 'p9', 'two')], reviewed: [{ sha: 'r0', patchId: 'p1', message: 'one' }, { sha: 'r1', patchId: 'p2', message: 'two' }, { sha: 'r2', patchId: 'p3', message: 'two' }] }).kind, 'refused');
+  // one for one: a reviewed patch accounts for one head commit, a second copy is new
+  assert.deepEqual(mapRebase({ chain: [nm('a', 'p1'), nm('b', 'p1')], reviewed: rv('p1') }), { kind: 'delta', since: 'a', commits: 1, fresh: 1 });
   // interleaved: everything after the first new patch is reviewed again
-  assert.deepEqual(mapRebase({ chain: [nm('a', 'p1'), nm('b', 'NEW'), nm('c', 'p2')], reviewedIds: ['p1', 'p2'] }), { kind: 'delta', since: 'a', commits: 2, fresh: 1 });
-  // a merge that is not clean is new
-  assert.equal(mapRebase({ chain: [nm('a', 'p1'), { sha: 'm', merge: true, clean: false, patchId: null }], reviewedIds: ['p1'] }).kind, 'delta');
-  assert.equal(mapRebase({ chain: [], reviewedIds: ['p1'] }).kind, 'refused');
-  assert.equal(mapRebase({ chain: [nm('a', 'x')], reviewedIds: ['p1'] }).kind, 'refused');
+  assert.deepEqual(mapRebase({ chain: [nm('a', 'p1'), nm('b', 'NEW'), nm('c', 'p2')], reviewed: rv('p1', 'p2') }), { kind: 'delta', since: 'a', commits: 2, fresh: 1 });
+  // a merge that is not clean is new (an octopus merge is never clean)
+  assert.equal(mapRebase({ chain: [nm('a', 'p1'), { sha: 'm', merge: true, clean: false, patchId: null }], reviewed: rv('p1') }).kind, 'delta');
+  // the same commit on both sides needs no patch id
+  assert.equal(mapRebase({ chain: [{ sha: 'a', reviewedSha: true, merge: false, patchId: null }, { sha: 'm', merge: true, clean: true, patchId: null }], reviewed: [] }).kind, 'identical');
+  assert.equal(mapRebase({ chain: [], reviewed: rv('p1') }).kind, 'refused');
+  assert.equal(mapRebase({ chain: [nm('a', 'x')], reviewed: rv('p1') }).kind, 'refused');
   // only empty commits and clean merges: no reviewed patch on the head
-  assert.equal(mapRebase({ chain: [nm('e', null)], reviewedIds: ['p1'] }).kind, 'refused');
+  assert.equal(mapRebase({ chain: [nm('e', null)], reviewed: rv('p1') }).kind, 'refused');
+});
+
+test('a rebase that dropped a reviewed commit refuses', () => {
+  const { dir, c1, c2: reviewed } = prOnMain();
+  advanceMain(dir, 'c.txt', 'c.txt line 1', 'c.txt line 1 (main)');
+  // keep only the second commit: the reviewed change to a.txt is gone
+  git(dir, ['rebase', '-q', '--onto', 'main', c1, 'pr']);
+  const r = round(dir, [full(reviewed)], head(dir));
+  assert.equal(r.answer.round, 'delta');
+  assert.equal(r.answer.rebase.kind, 'refused');
+  assert.match(r.answer.rebase.reason, new RegExp(`no longer carries the reviewed patch of ${c1.slice(0, 7)}`));
+  assert.match(r.answer.problem, /not an ancestor/);
+});
+
+test('a conflict resolution that changes only indentation is a new patch (patch ids keep whitespace)', () => {
+  const dir = repo();
+  writeFileSync(join(dir, 'p.py'), 'if ok:\n    run()\n');
+  commit(dir, 'base: p.py');
+  git(dir, ['checkout', '-q', '-b', 'pr']);
+  writeFileSync(join(dir, 'p.py'), 'if ok:\n    run()\naudit()\n');
+  const reviewed = commit(dir, 'pr: audit');
+  // the same addition, now inside the if: one indentation apart
+  git(dir, ['checkout', '-q', '-B', 'pr2', 'main']);
+  edit(dir, 'c.txt', 'c.txt line 1', 'c.txt line 1 (main)');
+  commit(dir, 'main-ish: c');
+  writeFileSync(join(dir, 'p.py'), 'if ok:\n    run()\n    audit()\n');
+  const indented = commit(dir, 'pr: audit (indented)');
+  const a = gitPatchId(git(dir, ['diff', `${reviewed}^`, reviewed]));
+  const b = gitPatchId(git(dir, ['diff', `${indented}^`, indented]));
+  assert.notEqual(a, b, 'indentation is part of the patch id');
+});
+
+test('the mapping refuses a truncated or over-cap commit list before reading any diff', () => {
+  const sha = (c) => c.repeat(40);
+  const commits = (n, tip) => Array.from({ length: n }, (_, i) => ({ sha: i === n - 1 ? tip : sha(String(i % 10)), parents: [{ sha: 'p'.repeat(40) }] }));
+  const runFor = (payloadFor) => {
+    const calls = [];
+    const runGh = (args) => {
+      calls.push(args);
+      if (args[1] === 'repos/o/r/pulls/1') return JSON.stringify({ base: { ref: 'main' } });
+      if (args[1]?.startsWith('repos/o/r/compare/main...')) return JSON.stringify(payloadFor(args[1].split('...')[1]));
+      throw new Error(`unexpected ${args.join(' ')}`);
+    };
+    return { runGh, calls };
+  };
+  const over = runFor((tip) => ({ commits: commits(REBASE_COMMIT_CAP + 1, tip), total_commits: REBASE_COMMIT_CAP + 1 }));
+  const a = readRebase({ repo: 'o/r', pr: 1, runGh: over.runGh, from: sha('a'), to: sha('b') });
+  assert.deepEqual([a.kind, /over the mapping cap/.test(a.reason)], ['unavailable', true]);
+  const short = runFor((tip) => ({ commits: commits(2, tip), total_commits: 300 }));
+  const b = readRebase({ repo: 'o/r', pr: 1, runGh: short.runGh, from: sha('a'), to: sha('b') });
+  assert.deepEqual([b.kind, /listed 2 of 300 commits/.test(b.reason)], ['unavailable', true]);
+  for (const { calls } of [over, short]) assert.ok(calls.every((args) => !args.includes('Accept: application/vnd.github.diff')), 'no diff was read');
+});
+
+test('readRoundTail keeps a settled mapping per tail; an unavailable one is read again', () => {
+  const { dir, c2: reviewed } = prOnMain();
+  advanceMain(dir, 'c.txt', 'c.txt line 1', 'c.txt line 1 (main)');
+  git(dir, ['rebase', '-q', 'main']);
+  const rebased = head(dir);
+  const cache = new Map();
+  const { runGh, calls } = gitBackedGh(dir);
+  const read = () => readRoundTail({ repo: 'o/r', pr: 1, cwd: dir, runGh, from: reviewed, to: rebased, cache });
+  assert.equal(read().rebase.kind, 'identical');
+  const after = calls.length;
+  assert.equal(read().rebase.kind, 'identical');
+  assert.equal(calls.length - after, 1, 'the second read is the tail compare alone');
+
+  let fail = true;
+  const flaky = (args) => { if (fail && args.includes('Accept: application/vnd.github.diff')) throw new Error('HTTP 502'); return runGh(args); };
+  const cache2 = new Map();
+  const again = () => readRoundTail({ repo: 'o/r', pr: 1, cwd: dir, runGh: flaky, from: reviewed, to: rebased, cache: cache2 });
+  assert.equal(again().rebase.kind, 'unavailable');
+  fail = false;
+  assert.equal(again().rebase.kind, 'identical');
 });
 
 test('a history past the base that is not one first-parent line, or over the cap, is not mapped', () => {

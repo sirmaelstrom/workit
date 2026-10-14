@@ -667,18 +667,24 @@ A non-null `problem` is the conductor's call.
 diverged, or is ahead with a merge in it, `rounds` matches the head's commits
 past the base branch to the reviewed head's by `git patch-id --stable`, and
 reports the mapping as `rebase: {kind, from, …}`:
-- every patch already reviewed (a merge whose own diff is only base-branch
-  content counts as none): `reviewed`, with `rebased_from`;
+- every patch already reviewed, and every reviewed patch still on the head (a
+  merge whose own diff is only base-branch content counts as none):
+  `reviewed`, with `rebased_from`;
 - some patches new: `kind: "delta"`, and the tail starts at the last commit
   before the first new patch, so the delta pass reviews the changed commits and
-  everything after them;
-- no reviewed patch on the head (a force-push of unrelated content), a first
-  commit whose patch changed (the delta would be the whole PR), a history that
-  is not one first-parent line, or a read that failed: `kind` is `refused` or
-  `unavailable` with a `reason`, and `problem` stands as above.
+  everything after them. A reviewed patch the rebase rewrote (a conflict
+  resolution) must be replaced by a new commit with the same message, which
+  the delta reviews as it now stands;
+- no reviewed patch on the head (a force-push of unrelated content), a reviewed
+  patch the head dropped with no replacement, a first commit whose patch changed (the delta would
+  be the whole PR), a history that is not one first-parent line, or a read
+  that failed: `kind` is `refused` or `unavailable` with a `reason`, and
+  `problem` stands as above.
 
-Patch ids ignore whitespace and line numbers, so a whitespace-only edit made
-during a rebase reads as reviewed. A refusal is
+Patch ids are `--verbatim`: line numbers are ignored, whitespace is not. In the
+capped round a mapped rebase converges on its tail like any post-cap amendment,
+so a conflict resolution after the delta pass is checked by its control, not
+by a third review. A refusal is
 `{"outcome":"refused","reason":…}` with the reasons `recognise` gives, plus
 `identity-unset` for a pinned identity with no login and `gh-failure` for a
 listing or compare it couldn't read. It never answers `full` from a read that

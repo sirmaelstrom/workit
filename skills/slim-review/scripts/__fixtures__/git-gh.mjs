@@ -34,6 +34,7 @@ function comparePayload(dir, a, b) {
   const commits = shas.map((sha) => ({
     sha,
     parents: git(dir, ['rev-list', '--parents', '-n', '1', sha]).trim().split(' ').slice(1).map((p) => ({ sha: p })),
+    commit: { message: git(dir, ['log', '-1', '--format=%B', sha]).trim() },
   }));
   const files = git(dir, ['diff', '--name-only', mb, to]).split('\n').filter(Boolean).map((filename) => ({ filename }));
   return { status, ahead_by: shas.length, behind_by: Number(behind), total_commits: shas.length, commits, files, merge_base_commit: { sha: mb } };

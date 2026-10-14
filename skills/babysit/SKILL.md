@@ -63,7 +63,8 @@ and the coordinator admits only one attempt per head.
 For the PR's **current head** `H`, either:
 
 - **a reviewed head.** The coordinator holds a **posted** paired attempt on `H`
-  (lenses codex + astra), **or**
+  (lenses codex + astra), or `H` is a patch-identical rebase of the last
+  reviewed head (no attempt on `H`; the receipt carries `rebased_from`), **or**
 - **the tail after the cap.** `H` is past round two (or its delta was skipped,
   below), and the last posted review's head is an ancestor of `H` (or, after
   a rebase, the mapped commit is: see above). The tail
