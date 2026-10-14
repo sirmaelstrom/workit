@@ -463,7 +463,7 @@ const iso = (ms) => new Date(ms).toISOString();
 
 // A successful start or conductor amendment: a fresh deadline, the exit
 // marker cleared, every retry counter reset.
-function freshStart(deps, startedAt = null) {
+export function freshStart(deps, startedAt = null) {
   const at = startedAt ? Date.parse(startedAt) : deps.now();
   return { startedAt: iso(at), deadline: iso(at + DEADLINE_MS), exitedAt: null, dialogPolls: 0, capacityResent: false, startRearms: 0, stopConfirms: 0 };
 }

@@ -36,6 +36,8 @@ export const STEP_SEAM = Object.freeze({
   'thread-ids': 'adjudication', resolve: 'adjudication',
   rebase: 'merge-gate', 'gate-cmd': 'merge-gate', gate: 'merge-gate', merge: 'merge-gate', merged: 'merge-gate',
   release: 'release',
+  // The conductor's reset-wp verb: a recovery crossed by hand, counted in the run analysis.
+  reset: 'recovery',
   analyze: 'run-analysis',
   preapproval: TOUCH_SEAM, grant: TOUCH_SEAM, showcase: TOUCH_SEAM, 'showcase-brief': TOUCH_SEAM, touch: TOUCH_SEAM,
   spend: null, notify: null, receipt: null, stop: null, alarm: null,
