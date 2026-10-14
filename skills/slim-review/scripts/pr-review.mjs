@@ -65,7 +65,7 @@ import {
 } from './pr-review-managed.mjs';
 import { emitOutcome, WITHDRAW_REASONS } from './pr-review-outcomes.mjs';
 import { buildMarker, recognise, postedReviewScope } from './pr-review-recognise.mjs';
-import { amendmentProblem, COMPARE_FILE_CAP, readTail, roundsAnswer } from './pr-review-rounds.mjs';
+import { amendmentProblem, COMPARE_FILE_CAP, readRoundTail, roundsAnswer } from './pr-review-rounds.mjs';
 import { filesFromDiff, guardReview, GUARD_ADJUDICATORS, GUARD_LENS, LANE_MARKER_ENV } from './pr-review-guard.mjs';
 
 // ---------------------------------------------------------------------------
@@ -2274,7 +2274,7 @@ export async function cmdRounds(opts, {
       .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
       .filter(Boolean);
     const last = reviews[reviews.length - 1];
-    if (last && last.head !== head) tail = readTail({ repo: opts.repo, cwd: opts.cwd, runGh, from: last.head, to: head });
+    if (last && last.head !== head) tail = readRoundTail({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh, from: last.head, to: head });
   } catch (err) {
     refuse('gh-failure', {}, `could not read the review listing or the tail compare for ${opts.repo}#${opts.pr}: ${err.message}`, 4);
     return undefined;

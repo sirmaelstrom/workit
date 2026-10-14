@@ -38,8 +38,14 @@ delta, a marker without it is a full review, and a marker-less review with a
 body is a legacy full review. A full review the conductor runs later (say,
 after a rebase) starts a new pair.
 
-**A refused delta blocks.** After a rebase, a merge from the base branch, or a
-compare that can't be read whole, there is no amendment diff. The loop stops
+**A rebase is mapped by patch id** (slim-review's `rounds`, same function). A
+patch-identical rebase of the last reviewed head converges on controls with no
+claim, and the receipt carries `rebased_from`. A rebase that changed some
+patches claims a delta from the last commit before the first changed one.
+
+**A refused delta blocks.** After a force-push the patch ids don't map, a merge
+from the base branch that carries its own edit, or a compare that can't be
+read whole, there is no amendment diff. The loop stops
 with `amendment-not-descendant`, and the conductor decides how the head is
 reviewed. The loop checks this with the writer's own rule before it claims. If
 the writer refuses `--since` after the claim, the attempt stays live, and `owed`
@@ -59,7 +65,8 @@ For the PR's **current head** `H`, either:
 - **a reviewed head.** The coordinator holds a **posted** paired attempt on `H`
   (lenses codex + astra), **or**
 - **the tail after the cap.** `H` is past round two (or its delta was skipped,
-  below), and the last posted review's head is an ancestor of `H`. The tail
+  below), and the last posted review's head is an ancestor of `H` (or, after
+  a rebase, the mapped commit is: see above). The tail
   has no merge commit, and its commit list is complete. Either problem is
   `amendment-not-descendant`, and the conductor decides. A tail that changes
   no file, such as an empty commit to re-run CI, still converges, but only

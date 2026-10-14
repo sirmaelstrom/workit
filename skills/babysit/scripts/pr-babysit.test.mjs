@@ -529,6 +529,30 @@ test('a refused delta blocks: the writer answers input-mismatch on the delta len
   assert.ok(lensCalls(w).every((c) => sinceOf(c) === H1), 'no lens ran without --since');
 });
 
+test('a rebase mapped by patch id (quest d5390fa3): identical converges on controls with no claim; a delta claims since the mapped commit; an unmapped one still blocks', () => {
+  const reviews = [{ review_id: 7001, head: H1, scope: 'full', since: null }];
+  const diverged = { from: H1, to: H2, status: 'diverged', aheadBy: 2, files: 1, merge: false, commitsComplete: true, problem: `${H1.slice(0, 7)} is not an ancestor of the head` };
+  const at = (tail, over = {}) => obs({ head: H2, headBefore: H2, headAfter: H2, reviews, tail, ...over });
+  const c = ctx({ iterationHead: H2 });
+
+  const identical = decide(at({ ...diverged, rebase: { kind: 'identical', commits: 2 } }), c);
+  assert.deepEqual([identical.action, identical.reviewId, identical.attempt, identical.rebasedFrom], ['converged', 7001, null, H1]);
+  const open = decide(at({ ...diverged, rebase: { kind: 'identical', commits: 2 } }, { threads: [thread(9, false)] }), c);
+  assert.deepEqual([open.action, open.reviewId], ['adjudicate', 7001]);
+
+  const deltaTail = { from: H3, to: H2, status: 'ahead', aheadBy: 1, files: 1, merge: false, commitsComplete: true, problem: null };
+  const mapped = decide(at({ ...diverged, rebase: { kind: 'delta', since: H3, commits: 1, fresh: 1, tail: deltaTail } }), c);
+  assert.deepEqual([mapped.action, mapped.since], ['claim', H3]);
+
+  const refused = decide(at({ ...diverged, rebase: { kind: 'refused', reason: 'no commit on the head carries a reviewed patch' } }), c);
+  assert.deepEqual([refused.action, refused.reason], ['blocked', 'amendment-not-descendant']);
+  assert.match(refused.owed, /not an ancestor/);
+
+  // a skipped delta over a mapped rebase converges on the tail from the mapped commit
+  const skipped = decide(at({ ...diverged, rebase: { kind: 'delta', since: H3, commits: 1, fresh: 1, tail: deltaTail } }), ctx({ iterationHead: H2, deltaSkipped: { head: H2, reason: 'trivial' } }));
+  assert.deepEqual([skipped.action, skipped.unreviewedTail, skipped.rebasedFrom], ['converged', `${H3.slice(0, 7)}...${H2.slice(0, 7)}`, H1]);
+});
+
 test('a rebased head is refused before any claim: the delta pre-check runs the writer\'s own amendment rule over the compare', async () => {
   const { w, deps } = fullReviewedOnH1({ history: [H2] });
   const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
