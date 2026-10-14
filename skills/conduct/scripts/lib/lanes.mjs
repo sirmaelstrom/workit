@@ -463,7 +463,7 @@ const iso = (ms) => new Date(ms).toISOString();
 
 // A successful start or conductor amendment: a fresh deadline, the exit
 // marker cleared, every retry counter reset.
-function freshStart(deps, startedAt = null) {
+export function freshStart(deps, startedAt = null) {
   const at = startedAt ? Date.parse(startedAt) : deps.now();
   return { startedAt: iso(at), deadline: iso(at + DEADLINE_MS), exitedAt: null, dialogPolls: 0, capacityResent: false, startRearms: 0, stopConfirms: 0 };
 }
@@ -515,7 +515,8 @@ export function recordLaneStep(state, wp, action, result, deps) {
       if (result.code === LANE_EXIT.admitRefused) {
         const rearms = (wp.lane?.startRearms ?? 0) + 1;
         if (rearms > START_REARMS) return block(`start refused ${rearms} times: ${said(result)}`, { lane: { startRearms: rearms } }, 'admission');
-        return { outcome: 'wait', reason: `start refused: ${said(result)}`, patch: { lane: { startRearms: rearms }, queue: [waitAction(POLL_MS), ...backend.start(wp)] } };
+        // What was queued after the start (a reset's prompt) still follows it.
+        return { outcome: 'wait', reason: `start refused: ${said(result)}`, patch: { lane: { startRearms: rearms }, queue: [waitAction(POLL_MS), ...backend.start(wp), ...(wp.queue ?? []).slice(1)] } };
       }
       if (result.code === LANE_EXIT.blocked) return dialogRoute(wp, result, backend.wait(wp));
       return ok ? proceed({ lane: freshStart(deps, parseStdout(result)?.startedAt) }) : block(said(result));

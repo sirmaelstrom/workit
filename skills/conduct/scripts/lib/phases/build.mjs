@@ -23,7 +23,7 @@ import { basename, dirname, join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
-import { chooseBackend, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
+import { chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import {
   councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
   recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
@@ -358,6 +358,177 @@ export function ratify(state, { wpId, paths, why }, deps) {
   }
   const readmitted = applyRatify(state, wp, paths, why.trim(), deps);
   return { wpId: wp.id, files: wp.files, readmitted };
+}
+
+// ---- reset-wp ----
+
+// Where the conductor may put a stopped WP back: each target is a stage the
+// build itself runs, with the WP state the build holds there. Only a blocked or
+// held WP is reset; every other state belongs to the scheduler.
+// - check: re-run the lane's checks (report, shape, PR) against what is there now.
+// - checked: rule and adjudicate the report already written, as after a passing check.
+// - prompt: re-send the lane its current brief; a lane whose agent has exited is started first.
+// - wait: poll a herdr lane the conductor restarted outside the verbs; its deadline is renewed.
+// - land: rebase, gate and merge the PR again.
+// check, checked and land keep a queued stop (an agent still running is
+// stopped before anything else runs); prompt and wait want the agent.
+const laneWork = (wp) => (wp.amendment ? 'amending' : 'dispatched');
+const hasLane = (wp) => (wp.lane?.backend && wp.lane?.worktree ? null : `${wp.id} has no lane worktree (it was never dispatched)`);
+const laneExited = (wp) => !wp.lane?.startedAt || Boolean(wp.lane?.exitedAt);
+const keepStops = (state, wp) => (wp.queue ?? []).filter((action) => action.step === 'stop');
+const firstProblem = (...checks) => checks.reduce((found, check) => found ?? check(), null);
+
+export const RESET_TARGETS = Object.freeze({
+  check: { from: ['blocked'], state: laneWork, stage: 'check', needs: (state, wp) => hasLane(wp), queue: keepStops },
+  checked: {
+    from: ['blocked'], state: laneWork, stage: 'checked', queue: keepStops,
+    // The review the checked stage starts reads the PR, which only the check's pr-lookup records.
+    needs: (state, wp, deps) => firstProblem(() => hasLane(wp), () => (wp.pr?.number ? null : `${wp.id} has no PR recorded; reset it --to check`),
+      () => (deps.exists(laneLayout(state, wp).reportPath) ? null : `${wp.id} has no report at ${laneLayout(state, wp).reportPath}`)),
+  },
+  prompt: {
+    from: ['blocked'], state: laneWork, stage: 'wait',
+    needs: (state, wp, deps) => firstProblem(() => hasLane(wp),
+      () => (wp.lane.briefPath && deps.exists(wp.lane.briefPath) ? null : `${wp.id} has no brief at ${wp.lane.briefPath ?? laneLayout(state, wp).briefPath}`),
+      () => (wp.lane.backend === 'herdr' && !wp.lane.paneId ? `${wp.id}'s herdr lane has no pane` : null),
+      () => (wp.lane.backend !== 'herdr' && !laneExited(wp) ? `${wp.id}'s exec lane agent (pid ${wp.lane.pid}) has not been observed to exit; an exec lane is re-prompted by a new spawn, which a running agent refuses` : null),
+      // `lane spawn --amend` reads the session id from the lane, else from its log.
+      () => (wp.lane.backend !== 'herdr' && (wp.amendment || wp.lane.startedAt) && !wp.lane.sessionId && !deps.exists(wp.lane.logPath ?? laneLayout(state, wp).logPath)
+        ? `${wp.id}'s exec lane has no session id to resume (none recorded, no lane log)` : null)),
+    queue: (state, wp, deps) => {
+      const backend = backendOf(state, wp, deps);
+      // A lane that ever ran is re-prompted as an amendment: herdr's lane.mjs
+      // treats any later prompt as one (--no-ruling), and an exec lane resumes
+      // its session (spawn --amend) rather than starting a fresh one.
+      const again = Boolean(wp.amendment || wp.lane.startedAt);
+      if (backend.name === 'exec') return again ? backend.prompt(wp, { amendment: true }) : backend.start(wp);
+      return [...(laneExited(wp) ? backend.start(wp) : []), ...backend.prompt(wp, { amendment: again })];
+    },
+  },
+  wait: {
+    from: ['blocked'], state: laneWork, stage: 'wait',
+    // An exec lane is polled by its recorded pid, which a restart outside `lane spawn` does not update.
+    needs: (state, wp) => firstProblem(() => hasLane(wp), () => (wp.lane.backend !== 'herdr' ? `${wp.id} is an exec lane; restart it with --to prompt` : null),
+      () => (wp.lane.paneId ? null : `${wp.id}'s herdr lane has no pane`)),
+    lane: (deps) => freshStart(deps),
+  },
+  land: {
+    from: ['blocked', 'held'], state: () => 'gate', stage: 'land', queue: keepStops,
+    needs: (state, wp) => firstProblem(() => hasLane(wp), () => (wp.pr?.number ? null : `${wp.id} has no PR to land`),
+      () => (wp.merge?.sha ? `${wp.id}'s PR is already merged (${wp.merge.sha}); a merged WP is never landed again` : null),
+      // The gate does not read the owed adjudication; only the checked stage settles it.
+      () => (wp.owed?.adjudicate ? `${wp.id}'s review round ${wp.owed.round ?? '?'} findings are not adjudicated; reset it --to checked` : null)),
+  },
+});
+
+// Every target puts the WP in a live state, so it takes a lane under the
+// scheduler's rules (schedule.mjs dispatchable): Files disjoint from every
+// live or lane-holding WP, and a slot under the run's lane cap. A WP whose own
+// lane still holds its slot already has one. A merged-tree halt is the
+// operator's to clear first.
+function admissionRefusal(state, wp) {
+  const halt = (state.build?.halts ?? []).find((entry) => entry.kind === 'merged');
+  if (halt) return `dispatch is halted (${halt.reason}); answer touch ${halt.touch} first`;
+  const running = state.wps.filter((other) => other !== wp && (LIVE_STATES.includes(other.state) || laneOccupied(other)));
+  const overlap = running.find((other) => !filesDisjoint(wp.files ?? [], other.files ?? []));
+  if (overlap) return `${overlap.id} (${overlap.state}) holds a path in ${wp.id}'s Files; lanes run on disjoint Files, so reset ${wp.id} after it finishes`;
+  const cap = state.intent?.lanesCap ?? 1;
+  if (!laneOccupied(wp) && running.length >= cap) return `${running.length} lane(s) are live (${running.map((other) => other.id).join(', ')}) against the run's cap of ${cap}; reset ${wp.id} when one finishes`;
+  return null;
+}
+
+// The phases a reset can move back to build: the build ended (a WP stopped and
+// its dependents deferred), and nothing after it has acted yet. A release that
+// ran, or a showcase touch already filed, is never undone.
+const REWINDABLE = ['release', 'analyze', 'showcase'];
+function rewindRefusal(state) {
+  if (state.phase === 'build') return null;
+  if (!REWINDABLE.includes(state.phase)) return `the run is in phase ${state.phase}; a reset moves only a build, or a run whose build ended (release, analyze, showcase), back to build`;
+  const r = state.release ?? {};
+  const untouched = r.state === 'not-exercised' || (r.state === 'pending' && !r.stage && !r.anomaly);
+  if (!untouched || state.mergeLock?.wpId === 'release') return `the release is ${r.state}${r.stage ? ` at ${r.stage}` : ''}; a run whose release has acted is not moved back to build`;
+  const showcase = (state.touches ?? []).find((touch) => touch.kind === 'showcase');
+  if (showcase) return `the showcase touch ${showcase.n} is already ${showcase.status}; answer it, or start a new run`;
+  return null;
+}
+
+function rewindPhase(state, deps) {
+  if (state.phase === 'build') return null;
+  const from = state.phase;
+  // The pending action belongs to the phase being left; it is dropped, never recorded.
+  const dropped = state.pending && state.pending.phase !== 'build' ? state.pending.id : null;
+  if (dropped) state.pending = null;
+  // The release is decided again when the build ends again: a reason like
+  // `incomplete build` may no longer hold.
+  if (state.release?.state === 'not-exercised') Object.assign(state.release, { state: 'pending', reason: null, stage: null, queue: [] });
+  if (state.showcaseBrief) state.showcaseBrief = null;
+  state.phase = 'build';
+  // A phase event carries the phase it leaves, as emit's hand-overs do.
+  appendEvent(state, deps, { step: 'reset', event: 'phase', phase: from, data: { from, to: 'build' } });
+  return { from, to: 'build', droppedPending: dropped };
+}
+
+// `conduct.mjs reset-wp --run <dir> --wp <id> --to <target> --why <text>`.
+// Refusals: an unknown WP, target or empty why (exit 2); a transition the
+// table does not allow, a target whose needs fail, a WP whose action is the
+// pending one, an open touch or an unverified lane on the WP, or a phase that
+// cannot go back to build (exit 5). `beforeChange` runs after every check and
+// before the first change (the verb writes its snapshot there).
+export function resetWp(state, { wpId, to, why }, deps, { beforeChange = () => null } = {}) {
+  const wp = (state.wps ?? []).find((candidate) => candidate.id === wpId);
+  if (!wp) throw new ConductError(2, `reset-wp: no WP ${wpId} in this run`);
+  const target = Object.hasOwn(RESET_TARGETS, to ?? '') ? RESET_TARGETS[to] : null;
+  if (!target) throw new ConductError(2, `reset-wp: --to must be one of ${Object.keys(RESET_TARGETS).join(', ')} (got ${to ?? 'none'})`);
+  if (typeof why !== 'string' || !why.trim()) throw new ConductError(2, 'reset-wp: --why <the ruling> is required');
+  const refuse = (reason) => { throw new ConductError(5, `reset-wp: ${reason}`); };
+  if (!target.from.includes(wp.state)) refuse(`${wp.id} is ${wp.state}; --to ${to} resets a WP that is ${target.from.join(' or ')}`);
+  const need = target.needs(state, wp, deps);
+  if (need) refuse(need);
+  if (wp.lane?.livenessHeld) refuse(`${wp.id}'s lane liveness is unverified; answer its liveness touch first`);
+  const touch = (state.touches ?? []).find((candidate) => candidate.wpId === wp.id && candidate.status !== 'answered');
+  if (touch) refuse(`${wp.id} has touch ${touch.n} open; its answer resumes the WP`);
+  if (state.pending?.wpId === wp.id) refuse(`${wp.id}'s action ${state.pending.id} is pending; perform and record it first`);
+  const blocker = rewindRefusal(state) ?? admissionRefusal(state, wp);
+  if (blocker) refuse(blocker);
+  // Built before the snapshot: an emitter that throws leaves nothing behind.
+  const nextQueue = target.queue ? target.queue(state, wp, deps) : [];
+
+  const snapshot = beforeChange();
+  const from = { state: wp.state, stage: wp.stage ?? null };
+  const label = (action) => `${action.step}${action.part ? `/${action.part}` : ''}`;
+  const dropped = (wp.queue ?? []).filter((action) => !nextQueue.includes(action)).map(label);
+  const phase = rewindPhase(state, deps);
+  const reason = `reset-wp --to ${to}: ${why.trim()}`;
+  if (target.lane) wp.lane = { ...wp.lane, ...target.lane(deps) };
+  setState(state, wp, target.state(wp), reason, deps);
+  wp.stage = target.stage;
+  wp.queue = nextQueue;
+  wp.failStreak = null;
+  wp.stall = null;
+  // A held WP's markers belong to the hold it leaves; the gate sets them again if they still hold.
+  if (from.state === 'held') Object.assign(wp, { heldOutside: null, heldUncited: null });
+  // Every WP deferred because of this one, directly or through another
+  // deferral, goes back to pending; the next `next` defers again any that
+  // still waits on a stopped WP.
+  const undeferred = [];
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const other of state.wps) {
+      if (other.state !== 'deferred' || !(other.deferredBy === wp.id || undeferred.includes(other.deferredBy))) continue;
+      setState(state, other, 'pending', null, deps);
+      other.deferredBy = null;
+      undeferred.push(other.id);
+      changed = true;
+    }
+  }
+  const queue = wp.queue.map(label);
+  // The seam row the run analysis counts: one per reset, by hand.
+  state.seq += 1;
+  appendEvent(state, deps, {
+    actionId: `${state.seq}-reset`, step: 'reset', kind: 'reset', event: 'wp-reset', source: 'manual',
+    data: { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, why: why.trim(), snapshot },
+  });
+  return { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, snapshot };
 }
 
 function guardReply(state, wp, row, ruled) {

@@ -46,7 +46,7 @@ You drive a one-shot state machine, `${CLAUDE_SKILL_DIR}/scripts/conduct.mjs`. E
 3. **Record it.** `conduct.mjs record --run <dir> --action <id> --result '<json>'` (or `--result-file <path>`). It prints `{ ok, phase, action }`, the next action: loop to step 2. Re-recording the last recorded id is a no-op; any other id that isn't the pending one is exit 5. `--manual` marks a step you did by hand, so the analysis counts it as crossed by hand rather than owned by the skill. Exit 2 is an invalid result; fix it and record again. Exit 3 is a refused answer, and the next action re-files the touch. **A failure whose JSON output carries a `recorded` field** (the action id; exit 1, or the failing step's own code) means the record landed durably and a later step failed: don't record again with a different result. Run `next` (or re-send the same record, a no-op replay) to get the next action.
 4. **Resume.** `conduct.mjs next --run <dir>` (or `next --resume <dir>`) returns the pending action again, with one exception: a pending hand-back is consumed and the read-back is emitted in its place. `conduct.mjs status --run <dir>` prints a summary.
 
-**Exit 4** means this installed version lacks a phase handler or module the run needs (the verb names the path, e.g. `lib/analyze.mjs`): the later phases ship in a later version. Stop and report the path; don't write state by hand to get past it.
+**Exit 4** means this installed version lacks a phase handler or module the run needs (the verb names the path, e.g. `lib/analyze.mjs`): the later phases ship in a later version. Stop and report the path; don't write state by hand to get past it. A stopped WP is put back with `reset-wp` (§ Recovering a stopped WP), never by editing `state.json`.
 
 **A new plugin root.** After a self-hosted release (§ Self-hosted runs) a verb can exit 2 naming a new plugin root. Re-run it with that root's `skills/conduct/scripts/conduct.mjs`, and re-read that root's SKILL.md before the analyze and showcase steps: the text you loaded is the old version.
 
@@ -106,6 +106,26 @@ Try these first. A blocked touch is for what they can't settle.
 - **A harness dialog** (a `block` with cause `dialog`): the verb re-polls once after about a minute, then blocks. **Never answer a harness dialog yourself**: not by sending keys, not by approving. It goes to the operator in the blocked touch.
 - **A council split:** you break the tie, inside the goal's bindings, and record why.
 - **A refuted premise:** a lane whose report says `refuted` ends its WP `refuted` and defers its dependents; that is a finding, not a failure to retry.
+
+## Recovering a stopped WP
+
+When a WP is `blocked` or `held` for a cause you have since fixed outside the lane (your brief's wrong path or table header, a PR body, the repo config), put it back with the verb. Never edit `state.json` by hand.
+
+```
+conduct.mjs reset-wp --run <dir> --wp <id> --to <target> --why "<what you fixed>"
+```
+
+| `--to` | From | The WP becomes | Use it when |
+|---|---|---|---|
+| `check` | blocked | `amending` (or `dispatched` before any amendment) at `check` | the report or PR is fixed; re-run the lane's checks |
+| `checked` | blocked, with a PR recorded | the same, at `checked` | the report is right as written; rule its asks and adjudicate its table |
+| `prompt` | blocked | the same, at `wait`, its brief queued | the brief is fixed; a herdr lane whose agent exited is started first, an exec lane resumes its session |
+| `wait` | blocked, herdr lane | the same, at `wait`, the lane's deadline renewed | you restarted the herdr lane agent and sent its brief yourself |
+| `land` | blocked or held, PR not merged | `gate` at `land` | the PR is ready; rebase, gate and merge again |
+
+Under the run's lock the verb copies `state.json` to `state.before-reset-<wp>-<time>.json` beside it, sets the WP's reason to `reset-wp --to <target>: <why>`, and replaces its queue: `check`, `checked` and `land` keep a queued stop, so an agent still running is stopped first. It returns every WP deferred because of this one (directly or through another deferral) to `pending` and logs a `wp-reset` event on the `recovery` seam, which the run analysis counts as crossed by hand. When the build had ended (phase `release`, `analyze` or `showcase`, with no release run and no showcase touch filed), the run goes back to `build`: the pending action of the phase it leaves is dropped and the release is decided again when the build ends. The check and gate counters are kept, so a WP that has used its one check re-prompt blocks on the next failure. Then run `next`.
+
+Every target puts the WP back in a live state, so the scheduler's rules still hold: a WP whose Files overlap a live WP's, or any reset while every lane of the run's cap is in use, is refused until a lane finishes, and so is any reset while a merged-tree halt is open. It also refuses (exit 5) any other state or target, a WP with an open touch (answer it instead), an unverified lane (answer its liveness touch), a WP whose action is pending (record it first), and a run past its release or showcase. Exit 2 is an unknown WP or target, a missing `--why`, or a run another verb holds locked. A refusal writes nothing, no snapshot included.
 
 ## Repo config
 

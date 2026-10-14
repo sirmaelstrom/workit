@@ -772,6 +772,161 @@ test('ratify (c58b3a51): coverage follows the merge gate (a directory ends in /)
   assert.throws(() => build.ratify(unknown.state, { wpId: 'WP-03', paths: ['docs/new.md'], why: 'x' }, unknown.deps), { code: 5, message: /WP-02 \(pending\) owns a path.*no declared Files/ });
 });
 
+// ---- reset-wp (61d817db) ----
+
+test('reset-wp verb (61d817db): a WP blocked at its gate ends the build; reset --to land is refused while another writer holds the lock, then writes the snapshot, moves the run back to build, logs one recovery row, and every WP merges', async (t) => {
+  const h = harness(t, { config: JSON.stringify({ gateEnv: { DB: 7 } }), wps: RATIFY_WPS });
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.wp('WP-02').state, h.state.phase], ['blocked', 'release']);
+  assert.notEqual(h.wp('WP-03').state, 'merged');
+  writeFileSync(join(h.repo, '.workit', 'conduct.json'), fixture('build', 'conduct.json'));
+  const before = readFileSync(join(h.runDir, 'state.json'), 'utf8');
+  const run = (...args) => runConduct(['reset-wp', '--run', h.runDir, ...args], h.overrides());
+
+  // Held by another writer: refused, nothing written.
+  writeFileSync(join(h.runDir, 'state.lock'), JSON.stringify({ pid: 1, host: 'elsewhere', at: h.deps.timestamp(), token: 'x' }));
+  const locked = await run('--wp', 'WP-02', '--to', 'land', '--why', 'gateEnv fixed');
+  assert.equal(locked.code, 2);
+  assert.match(JSON.parse(locked.stdout).error, /locked by pid 1 on elsewhere/);
+  rmSync(join(h.runDir, 'state.lock'));
+  assert.equal(readFileSync(join(h.runDir, 'state.json'), 'utf8'), before);
+  assert.ok(!readdirSync(h.runDir).some((name) => name.startsWith('state.before-reset-')));
+
+  const done = await run('--wp', 'WP-02', '--to', 'land', '--why', 'the repo config gateEnv is fixed');
+  assert.equal(done.code, 0, done.stdout);
+  const out = JSON.parse(done.stdout);
+  assert.deepEqual([out.from, out.state, out.stage, out.phase.from, out.phase.to], [{ state: 'blocked', stage: null }, 'gate', 'land', 'release', 'build']);
+  assert.equal(readFileSync(out.snapshot, 'utf8'), before, 'the snapshot is the state.json the reset read');
+  assert.match(basename(out.snapshot), /^state\.before-reset-wp-02-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.json$/);
+  h.disk = true;
+  const after = h.current();
+  assert.deepEqual([after.phase, after.release.state, h.wp('WP-03').state, h.wp('WP-03').deferredBy ?? null], ['build', 'pending', 'pending', null]);
+  const rows = h.events().filter((e) => e.event === 'wp-reset');
+  assert.deepEqual(rows.map((e) => [e.step, e.seam, e.source, e.data.wpId, e.data.to, e.data.snapshot]), [['reset', 'recovery', 'manual', 'WP-02', 'land', out.snapshot]]);
+  assert.match(h.wp('WP-02').reason, /^reset-wp --to land: the repo config gateEnv is fixed$/);
+
+  assert.equal(await drive(h), null);
+  assert.deepEqual(h.current().wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  await analyzeRun(h.runDir, h.deps);
+  const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
+  assert.match(analysis, new RegExp(`^- recovery: by hand \\(${rows[0].actionId}\\)$`, 'm'));
+});
+
+// A run with one WP stopped in each shape the table names, for the refusals.
+function resetFixture(t, opts = {}) {
+  const h = harness(t, { wps: RATIFY_WPS, ...opts });
+  const lane = (extra = {}) => ({ backend: 'herdr', worktree: join(h.dir, 'wt'), paneId: 'p1', briefPath: join(h.runDir, 'lane-wp-02.md'), startedAt: h.deps.timestamp(), exitedAt: h.deps.timestamp(), ...extra });
+  writeFileSync(join(h.runDir, 'lane-wp-02.md'), 'Amendment 1: x\n');
+  writeFileSync(join(h.runDir, 'lane-wp-02-report.md'), '## Outcome\n\nbuilt\n');
+  Object.assign(h.wp('WP-02'), { state: 'blocked', stage: null, queue: [], lane: lane(), amendment: { n: 1, kind: 'check' }, pr: { number: 102 } });
+  Object.assign(h.wp('WP-03'), { state: 'deferred', deferredBy: 'WP-02' });
+  h.lane = lane;
+  h.reset = (to, extra = {}) => build.resetWp(h.state, { wpId: 'WP-02', to, why: 'a ruling', ...extra }, h.deps);
+  return h;
+}
+
+test('reset-wp (61d817db): the refused transitions, one row each', (t) => {
+  const rows = [
+    ['an unknown WP', (h) => build.resetWp(h.state, { wpId: 'WP-09', to: 'check', why: 'x' }, h.deps), 2, /no WP WP-09/],
+    ['an unknown target', (h) => h.reset('start'), 2, /--to must be one of check, checked, prompt, wait, land/],
+    ['no why', (h) => h.reset('check', { why: ' ' }), 2, /--why/],
+    ...['pending', 'dispatched', 'amending', 'pr', 'review', 'gate', 'deferred', 'merged', 'refuted'].map((from) => [
+      `a WP that is ${from}`, (h) => { h.wp('WP-02').state = from; return h.reset('check'); }, 5, new RegExp(`WP-02 is ${from}; --to check resets a WP that is blocked`)]),
+    ...['check', 'checked', 'prompt', 'wait'].map((to) => [`held --to ${to}`, (h) => { h.wp('WP-02').state = 'held'; return h.reset(to); }, 5, /is held; --to \w+ resets a WP that is blocked$/]),
+    ['a WP never dispatched', (h) => { h.wp('WP-02').lane = null; return h.reset('check'); }, 5, /no lane worktree/],
+    ['checked with no report', (h) => { rmSync(join(h.runDir, 'lane-wp-02-report.md')); return h.reset('checked'); }, 5, /no report at/],
+    ['prompt with no brief', (h) => { rmSync(join(h.runDir, 'lane-wp-02.md')); return h.reset('prompt'); }, 5, /no brief at/],
+    ['prompt on a herdr lane with no pane', (h) => { h.wp('WP-02').lane.paneId = null; return h.reset('prompt'); }, 5, /no pane/],
+    ['prompt on a running exec lane', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42, exitedAt: null }); return h.reset('prompt'); }, 5, /has not been observed to exit/],
+    ['land with no PR', (h) => { h.wp('WP-02').pr = null; return h.reset('land'); }, 5, /no PR to land/],
+    ['land with findings not adjudicated', (h) => { h.wp('WP-02').owed = { adjudicate: true, round: 1 }; return h.reset('land'); }, 5, /round 1 findings are not adjudicated; reset it --to checked/],
+    ['land on a merged PR',(h) => { h.wp('WP-02').merge = { sha: 'd'.repeat(40) }; return h.reset('land'); }, 5, /already merged/],
+    ['checked with no PR', (h) => { h.wp('WP-02').pr = null; return h.reset('checked'); }, 5, /no PR recorded; reset it --to check/],
+    ['wait on an exec lane', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42 }); return h.reset('wait'); }, 5, /exec lane; restart it with --to prompt/],
+    ['prompt on an exec lane with no session', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42 }); return h.reset('prompt'); }, 5, /no session id to resume/],
+    ['Files a live WP holds', (h) => { Object.assign(h.wp('WP-03'), { state: 'dispatched', files: ['lib/lanes.mjs'] }); return h.reset('check'); }, 5, /WP-03 \(dispatched\) holds a path in WP-02's Files/],
+    ...['prompt', 'check', 'land'].map((to) => [`no lane slot for ${to}`, (h) => { h.state.intent.lanesCap = 1; Object.assign(h.wp('WP-03'), { state: 'dispatched' }); return h.reset(to); }, 5, /1 lane\(s\) are live \(WP-03\) against the run's cap of 1/]),
+    ['a merged-tree halt', (h) => { h.state.build = { halts: [{ kind: 'merged', reason: 'WP-01 merged tree differs', touch: 3 }] }; return h.reset('land'); }, 5, /dispatch is halted \(WP-01 merged tree differs\); answer touch 3 first/],
+    ['an unverified lane', (h) => { h.wp('WP-02').lane.livenessHeld = true; return h.reset('check'); }, 5, /liveness is unverified/],
+    ['an open touch on the WP', (h) => { h.state.touches = [{ n: 1, wpId: 'WP-02', status: 'filed' }]; return h.reset('check'); }, 5, /touch 1 open/],
+    ['the WP\'s pending action', (h) => { h.state.pending = { id: '9-stop', wpId: 'WP-02', step: 'stop' }; return h.reset('check'); }, 5, /9-stop is pending/],
+    ...['intake', 'preapproval', 'spec', 'mint', 'closed', 'declined', 'sent-back'].map((phase) => [`phase ${phase}`, (h) => { h.state.phase = phase; return h.reset('check'); }, 5, new RegExp(`phase ${phase}`)]),
+    ['a filed showcase touch', (h) => { Object.assign(h.state, { phase: 'showcase', touches: [{ n: 2, kind: 'showcase', status: 'filed' }] }); h.state.release.state = 'not-exercised'; return h.reset('check'); }, 5, /showcase touch 2 is already filed/],
+    ['a release that ran', (h) => { h.state.phase = 'analyze'; h.state.release.state = 'merged'; return h.reset('check'); }, 5, /release is merged/],
+    ['a release in flight', (h) => { h.state.phase = 'release'; h.state.release.stage = 'gate'; return h.reset('check'); }, 5, /release is pending at gate/],
+  ];
+  // beforeChange runs after the last check and before the first change, so a
+  // refusal that never reached it changed nothing and wrote no snapshot.
+  for (const [name, call, code, message] of rows) {
+    const h = resetFixture(t);
+    let snapshot = 0;
+    h.reset = (to, extra = {}) => build.resetWp(h.state, { wpId: 'WP-02', to, why: 'a ruling', ...extra }, h.deps, { beforeChange: () => { snapshot += 1; } });
+    assert.throws(() => call(h), { code, message }, name);
+    assert.equal(snapshot, 0, `${name}: no snapshot is written for a refusal`);
+  }
+});
+
+test('reset-wp (61d817db): each target\'s stage, state and queue; a lane that exited is started before its prompt; wait renews the deadline; deferrals through a chain are lifted', async (t) => {
+  const shapes = (h) => h.wp('WP-02').queue.map((a) => `${a.step}${a.command?.includes('--amendment') ? ' --amendment' : ''}${a.command?.includes('--amend') ? ' --amend' : ''}`);
+  const h = resetFixture(t, { wps: [...RATIFY_WPS, { id: 'WP-04', files: ['lib/x.mjs'], dependsOn: ['WP-03'] }] });
+  Object.assign(h.wp('WP-04'), { state: 'deferred', deferredBy: 'WP-03' });
+  const out = h.reset('prompt');
+  assert.deepEqual([out.state, out.stage, shapes(h), out.undeferred], ['amending', 'wait', ['start', 'prompt --amendment'], ['WP-03', 'WP-04']]);
+  assert.deepEqual([h.wp('WP-03').state, h.wp('WP-04').state, h.wp('WP-04').deferredBy], ['pending', 'pending', null]);
+
+  const alive = resetFixture(t);
+  alive.wp('WP-02').lane.exitedAt = null;
+  alive.reset('prompt');
+  assert.deepEqual(shapes(alive), ['prompt --amendment'], 'a live herdr agent gets the prompt alone');
+  const prompted = resetFixture(t);
+  prompted.wp('WP-02').amendment = null;
+  assert.deepEqual([prompted.reset('prompt').state, shapes(prompted)], ['dispatched', ['start', 'prompt --amendment']], 'a lane that ran: every later prompt is an amendment to lane.mjs');
+  const never = resetFixture(t);
+  Object.assign(never.wp('WP-02'), { amendment: null, lane: never.lane({ startedAt: null, exitedAt: null }) });
+  assert.deepEqual(shapes((never.reset('prompt'), never)), ['start', 'prompt'], 'a lane that never started: the first prompt');
+  const exec = resetFixture(t);
+  exec.wp('WP-02').lane = exec.lane({ backend: 'exec', pid: 42, sessionId: 's-1' });
+  exec.reset('prompt');
+  assert.deepEqual(shapes(exec), ['prompt --amend'], 'an exec amendment resumes the session by a new spawn');
+  const execRan = resetFixture(t);
+  Object.assign(execRan.wp('WP-02'), { amendment: null, lane: execRan.lane({ backend: 'exec', pid: 42, sessionId: 's-1' }) });
+  execRan.reset('prompt');
+  assert.deepEqual(shapes(execRan), ['prompt --amend'], 'an exec lane that ran resumes its session, never a fresh one');
+
+  // A refused start (exit 7) re-arms the start and keeps the prompt queued behind it.
+  const refused = resetFixture(t);
+  refused.reset('prompt');
+  const start = { ...refused.wp('WP-02').queue[0], id: '9-start', phase: 'build', wpId: 'WP-02' };
+  await build.record(refused.state, start, { code: 7, stdout: '', stderr: 'low memory' }, refused.deps);
+  assert.deepEqual(shapes(refused), ['wait', 'start', 'prompt --amendment']);
+
+  const stop = { kind: 'shell', step: 'stop', part: 'stop', command: ['x'] };
+  for (const [to, state, stage] of [['check', 'amending', 'check'], ['checked', 'amending', 'checked'], ['land', 'gate', 'land']]) {
+    const r = resetFixture(t);
+    r.wp('WP-02').queue = [stop, { kind: 'author', step: 'ratify', part: 'ruling' }];
+    const done = r.reset(to);
+    assert.deepEqual([done.state, done.stage, done.queue, done.dropped], [state, stage, ['stop/stop'], ['ratify/ruling']], `${to}: an owed stop runs first`);
+  }
+  const live = resetFixture(t);
+  Object.assign(live.wp('WP-02'), { queue: [stop], lane: live.lane({ exitedAt: null }) });
+  assert.deepEqual(live.reset('prompt').dropped, ['stop/stop'], 'prompt wants the running agent');
+  const held = resetFixture(t);
+  Object.assign(held.wp('WP-02'), { state: 'held', heldOutside: ['CLAUDE.md'], heldUncited: ['c'.repeat(40)] });
+  assert.equal(held.reset('land').state, 'gate');
+  assert.deepEqual([held.wp('WP-02').heldOutside, held.wp('WP-02').heldUncited], [null, null]);
+  const rewound = resetFixture(t);
+  Object.assign(rewound.state, { phase: 'analyze' });
+  rewound.state.release.state = 'not-exercised';
+  rewound.reset('check');
+  assert.equal(rewound.state.phase, 'build');
+
+  const wait = resetFixture(t);
+  wait.tick(5 * 3600000);
+  wait.reset('wait');
+  const lane = wait.wp('WP-02').lane;
+  assert.deepEqual([lane.startedAt, lane.exitedAt, Date.parse(lane.deadline) - wait.deps.now()], [wait.deps.timestamp(), null, 120 * 60000]);
+});
+
 test('Needs conductor on a passing report (d9d4d664): the build rules before review; the ruling is an event and a rulings[] row, ratifies its path, amends the lane; a repeated ask is not ruled again', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   // The lane's amended report repeats the same ask.
