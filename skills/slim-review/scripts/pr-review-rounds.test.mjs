@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitPatchId, mapRebase, readRebase, readRoundTail, resolveRound, roundsAnswer, REBASE_COMMIT_CAP } from './pr-review-rounds.mjs';
+import { diffPreimages, gitPatchId, mapRebase, readRebase, readRoundTail, resolveRound, roundsAnswer, REBASE_COMMIT_CAP } from './pr-review-rounds.mjs';
 import { git, gitBackedGh } from './__fixtures__/git-gh.mjs';
 
 const LINES = (tag) => Array.from({ length: 12 }, (_, i) => `${tag} line ${i + 1}`).join('\n') + '\n';
@@ -299,6 +299,38 @@ test('a rebase that drops a reviewed merge carrying its own edit refuses', () =>
   assert.equal(r.answer.rebase.kind, 'refused');
   assert.match(r.answer.rebase.reason, /reviewed merge .* carried its own edits/);
   assert.notEqual(r.answer.round, 'reviewed');
+});
+
+test('one patch id at two places (identical context): the edit moved to the other block is not reviewed (workit#228 codex P1)', () => {
+  const dir = repo();
+  const block = ['alpha', 'beta', 'gamma', 'TARGET', 'delta', 'epsilon', 'zeta'];
+  writeFileSync(join(dir, 'd.txt'), ['head', ...block, 'sep 1', 'sep 2', 'sep 3', 'sep 4', ...block, 'tail', ''].join('\n'));
+  commit(dir, 'base: d.txt');
+  git(dir, ['checkout', '-q', '-b', 'pr']);
+  const text = git(dir, ['show', 'HEAD:d.txt']);
+  const at = (n) => { let i = -1; for (let k = 0; k < n; k++) i = text.indexOf('TARGET', i + 1); return i; };
+  writeFileSync(join(dir, 'd.txt'), `${text.slice(0, at(1))}EDITED${text.slice(at(1) + 'TARGET'.length)}`);
+  const reviewed = commit(dir, 'pr: edit the block');
+  // the same message and, by patch id, the same patch; but on the second block
+  advanceMain(dir, 'c.txt', 'c.txt line 1', 'c.txt line 1 (main)');
+  git(dir, ['checkout', '-q', '-B', 'pr', 'main']);
+  const moved = git(dir, ['show', 'HEAD:d.txt']);
+  writeFileSync(join(dir, 'd.txt'), `${moved.slice(0, at(2))}EDITED${moved.slice(at(2) + 'TARGET'.length)}`);
+  const head2 = commit(dir, 'pr: edit the block');
+  assert.equal(gitPatchId(git(dir, ['diff', `${reviewed}^`, reviewed])), gitPatchId(git(dir, ['diff', `${head2}^`, head2])), 'the probe: one patch id for edits at two places');
+  const r = round(dir, [full(reviewed)], head2);
+  assert.notEqual(r.answer.round, 'reviewed');
+  assert.notEqual(r.answer.rebase.kind, 'identical');
+});
+
+test('diffPreimages: context and removed lines per hunk; a created file and a quoted path', () => {
+  const d = [
+    'diff --git a/x.txt b/x.txt', 'index 1..2 100644', '--- a/x.txt', '+++ b/x.txt',
+    '@@ -1,3 +1,3 @@', ' one', '-two', '+TWO', ' three',
+    'diff --git a/n.txt b/n.txt', 'new file mode 100644', '--- /dev/null', '+++ b/n.txt', '@@ -0,0 +1 @@', '+new', '',
+  ].join('\n');
+  assert.deepEqual(diffPreimages(d), [{ path: 'x.txt', created: false, hunks: [['one', 'two', 'three']] }, { path: null, created: true, hunks: [[]] }]);
+  assert.equal(diffPreimages('diff --git "a/x y" "b/x y"\n--- "a/x y"\n+++ "b/x y"\n@@ -1 +1 @@\n-a\n+b\n'), null);
 });
 
 test('the mapping refuses a truncated or over-cap commit list before reading any diff', () => {

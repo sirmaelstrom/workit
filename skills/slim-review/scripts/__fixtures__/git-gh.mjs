@@ -45,14 +45,19 @@ export function gitBackedGh(dir, { base = 'main', repo = 'o/r', pr = 1 } = {}) {
   const calls = [];
   const runGh = (args) => {
     calls.push(args);
-    const diffAccept = args[1] === '-H' && args[2] === 'Accept: application/vnd.github.diff';
-    const path = diffAccept ? args[3] : args[1];
+    const accept = args[1] === '-H' ? args[2] : null;
+    const diffAccept = accept === 'Accept: application/vnd.github.diff';
+    const path = accept ? args[3] : args[1];
     if (args[0] !== 'api' || typeof path !== 'string') throw new Error(`unexpected gh call: ${args.join(' ')}`);
     if (!path.startsWith(`repos/${repo}/`)) throw new Error(`unexpected repo: ${path}`);
     const rest = path.slice(`repos/${repo}/`.length);
     if (!diffAccept && rest === `pulls/${pr}`) return JSON.stringify({ number: pr, base: { ref: base } });
     const compare = /^compare\/(.+)\.\.\.([^.]+)$/.exec(rest);
     if (compare) return diffAccept ? git(dir, ['diff', `${compare[1]}...${compare[2]}`]) : JSON.stringify(comparePayload(dir, compare[1], compare[2]));
+    const contents = /^contents\/(.+)\?ref=([0-9a-f]{7,40})$/.exec(rest);
+    if (contents && accept === 'Accept: application/vnd.github.raw') {
+      return git(dir, ['show', `${contents[2]}:${contents[1].split('/').map(decodeURIComponent).join('/')}`]);
+    }
     const commit = /^commits\/([0-9a-f]{7,40})$/.exec(rest);
     if (commit && diffAccept) return git(dir, ['diff', `${commit[1]}^`, commit[1]]);
     throw new Error(`unexpected gh call: ${args.join(' ')}`);

@@ -684,7 +684,10 @@ reports the mapping as `rebase: {kind, from, …}`:
   that failed: `kind` is `refused` or `unavailable` with a `reason`, and
   `problem` stands as above.
 
-Patch ids are `--verbatim`: line numbers are ignored, whitespace is not. In the
+Patch ids are `--verbatim`: line numbers are ignored, whitespace is not. Since
+a patch id can't tell two places with identical context apart, a match also
+needs each hunk's pre-image to occur exactly once in the file it applies to; a
+commit that fails that check reads as new. In the
 capped round a mapped rebase converges on its tail like any post-cap amendment,
 so a conflict resolution after the delta pass is checked by its control, not
 by a third review. A refusal is

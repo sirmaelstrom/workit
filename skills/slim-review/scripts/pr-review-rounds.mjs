@@ -162,12 +162,12 @@ export function gitPatchId(diff) {
  * Map the head's commits onto the reviewed patches. Pure.
  *
  *   chain     the head's commits past the base branch, oldest first, each
- *             { sha, reviewedSha, merge, patchId, clean }: `reviewedSha` when
+ *             { sha, reviewedSha, merge, patchId, located, clean }: `reviewedSha` when
  *             the same commit is in the reviewed head; `patchId` for a
  *             non-merge (null for an empty commit); `clean` for a merge whose
  *             own diff carries only base-branch content
  *   reviewed  the reviewed head's non-merge commits past the base that are
- *             NOT on the head by sha, each { sha, patchId, message }
+ *             NOT on the head by sha, each { sha, patchId, located, message }
  *
  * → { kind: 'identical', commits }
  *   { kind: 'delta', since, commits, fresh }   since = the last commit before
@@ -175,7 +175,9 @@ export function gitPatchId(diff) {
  *   { kind: 'refused', reason }
  *
  * Patches are matched one for one (a multiset): a reviewed patch accounts for
- * at most one head commit. A commit is new when it is a merge that is not
+ * at most one head commit. A patch id ignores line numbers, so a match also
+ * needs both commits `located` (each hunk's pre-image occurs exactly once in
+ * the file it applies to); an unlocated commit on either side never matches. A commit is new when it is a merge that is not
  * clean, or a non-empty non-merge no unmatched reviewed patch accounts for.
  * A reviewed patch the head no longer carries must have been REPLACED: a new
  * non-merge commit with the same commit message (a rebase keeps messages, and
@@ -192,15 +194,20 @@ export function mapRebase({ chain, reviewed }) {
   const messageOf = new Map();
   for (const r of reviewed ?? []) {
     if (r.patchId === null || r.patchId === undefined) continue; // an empty reviewed commit carried nothing
-    if (!unmatched.has(r.patchId)) unmatched.set(r.patchId, []);
-    unmatched.get(r.patchId).push(r.sha);
+    // an unlocated reviewed patch matches nothing, so only a replacement accounts for it
+    const key = r.located === false ? `unlocated:${r.sha}` : r.patchId;
     messageOf.set(r.sha, r.message);
+    if (!unmatched.has(key)) unmatched.set(key, []);
+    unmatched.get(key).push(r.sha);
   }
   let carried = 0;
   const fresh = chain.map((c) => {
     if (c.reviewedSha === true) { carried += 1; return false; }
     if (c.merge) return c.clean !== true;
     if (c.patchId === null) return false;
+    // A patch id is blind to line numbers: a patch whose hunks could apply at
+    // more than one place in its parent proves nothing about where it went.
+    if (c.located === false) return true;
     const shas = unmatched.get(c.patchId);
     if (!shas || shas.length === 0) return true;
     shas.shift();
@@ -243,6 +250,81 @@ function firstParentLine(payload, sha) {
   return { line: line.reverse() };
 }
 
+/** Past this many file reads, a rebase is not mapped (one read per changed file per commit). */
+export const REBASE_FILE_READ_CAP = 200;
+
+/**
+ * The pre-image of every hunk in a unified diff, per file. Pure.
+ *
+ * → [{ path, created, hunks: [[line, …], …] }], where `path` is the pre-image
+ * path and each hunk lists its context and removed lines in order; or null
+ * when a file header cannot be read (a quoted path), which locates nothing.
+ */
+export function diffPreimages(diffText) {
+  const files = [];
+  let file = null;
+  let hunk = null;
+  for (const raw of String(diffText ?? '').split('\n')) {
+    if (raw.startsWith('diff --git ')) {
+      file = { path: null, created: false, hunks: [] };
+      files.push(file);
+      hunk = null;
+      continue;
+    }
+    if (!file) continue;
+    if (raw.startsWith('@@')) {
+      if (!file.created && file.path === null) return null;
+      hunk = [];
+      file.hunks.push(hunk);
+      continue;
+    }
+    if (hunk === null) {
+      if (raw.startsWith('--- ')) {
+        const p = raw.slice(4).replace(/\r$/, '');
+        if (p === '/dev/null') file.created = true;
+        else if (p.startsWith('a/')) file.path = p.slice(2);
+        else return null;
+      }
+      continue; // index, mode, rename, +++ and Binary lines
+    }
+    if (raw.startsWith(' ') || raw.startsWith('-')) hunk.push(raw.slice(1));
+  }
+  return files;
+}
+
+/** How many times `block` occurs as consecutive lines of `lines`, counting to 2. */
+function occurrences(lines, block) {
+  let found = 0;
+  for (let i = 0; i + block.length <= lines.length && found < 2; i++) {
+    let j = 0;
+    while (j < block.length && lines[i + j] === block[j]) j++;
+    if (j === block.length) found++;
+  }
+  return found;
+}
+
+/**
+ * Whether a patch's place is fixed by its text: every hunk's pre-image occurs
+ * exactly once in the file it applies to, read at `parent` through `readFile`.
+ * Two patches with one patch id that are both located apply at the one place
+ * their shared text sits, so the id's blindness to line numbers is harmless.
+ * A created file is located (its place is the whole file); an unreadable
+ * header is not.
+ */
+export function patchLocated(diffText, parent, readFile) {
+  const files = diffPreimages(diffText);
+  if (!files) return false;
+  for (const f of files) {
+    if (f.created || f.hunks.length === 0) continue;
+    const content = readFile(f.path, parent);
+    const lines = content.split('\n');
+    for (const hunk of f.hunks) {
+      if (hunk.length === 0 ? content !== '' : occurrences(lines, hunk) !== 1) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Map the head `to` onto the reviewed head `from` by patch id, through the
  * given `gh` runner. Every read is GET. A read that fails, or a history this
@@ -257,6 +339,19 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
     if (typeof base !== 'string' || base === '') return { kind: 'unavailable', reason: 'the PR answered no base branch' };
     const compare = (a, b) => JSON.parse(runGh(['api', `repos/${repo}/compare/${a}...${b}`], { cwd }));
     const diff = (path) => runGh(['api', '-H', 'Accept: application/vnd.github.diff', path], { cwd });
+    let fileReads = 0;
+    const readFile = (path, ref) => {
+      fileReads += 1;
+      if (fileReads > REBASE_FILE_READ_CAP) throw new Error(`over the mapping cap of ${REBASE_FILE_READ_CAP} file reads`);
+      const encoded = path.split('/').map(encodeURIComponent).join('/');
+      return runGh(['api', '-H', 'Accept: application/vnd.github.raw', `repos/${repo}/contents/${encoded}?ref=${ref}`], { cwd });
+    };
+    // One commit's patch id, and whether its place in its first parent is fixed.
+    const commitPatch = (c) => {
+      const text = diff(`repos/${repo}/commits/${c.sha}`);
+      const patchId = patchIdOf(text);
+      return { patchId, located: patchId === null ? true : patchLocated(text, c.parents[0].sha, readFile) };
+    };
     const reviewed = firstParentLine(compare(base, from), from);
     if (reviewed.reason) return { kind: 'unavailable', reason: reviewed.reason };
     const headSide = firstParentLine(compare(base, to), to);
@@ -267,12 +362,18 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
     // Clean: the merge adds onto its second parent exactly what its first
     // parent added past their merge base — the branch's own changes and
     // nothing else, so no conflict resolution or edit rode in with it.
+    // Both diffs must be located, in the merge's second parent and in the
+    // parents' merge base, or one id could stand for edits at two places.
     const cleanMerge = (c) => {
       if (c.parents.length !== 2) return false;
       const [p1, p2] = c.parents.map((p) => p.sha);
-      const onto = patchIdOf(diff(`repos/${repo}/compare/${p2}...${c.sha}`));
-      const own = patchIdOf(diff(`repos/${repo}/compare/${p2}...${p1}`));
-      return onto !== null && onto === own;
+      const ontoText = diff(`repos/${repo}/compare/${p2}...${c.sha}`);
+      const ownText = diff(`repos/${repo}/compare/${p2}...${p1}`);
+      const onto = patchIdOf(ontoText);
+      if (onto === null || onto !== patchIdOf(ownText)) return false;
+      const mergeBase = compare(p2, p1)?.merge_base_commit?.sha;
+      if (typeof mergeBase !== 'string') return false;
+      return patchLocated(ontoText, p2, readFile) && patchLocated(ownText, mergeBase, readFile);
     };
     // A reviewed merge the head no longer carries must have been clean: an
     // edit that rode in with it was reviewed, and nothing here can match it
@@ -285,10 +386,10 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
     // reviewed merge's content reads new (reviewed again), never the reverse.
     const reviewedPatches = reviewed.line
       .filter((c) => !isMerge(c) && !headShas.has(c.sha))
-      .map((c) => ({ sha: c.sha, patchId: patchIdOf(diff(`repos/${repo}/commits/${c.sha}`)), message: c.commit?.message }));
+      .map((c) => ({ sha: c.sha, ...commitPatch(c), message: c.commit?.message }));
     const chain = headSide.line.map((c) => {
       if (reviewedShas.has(c.sha)) return { sha: c.sha, reviewedSha: true, merge: isMerge(c), patchId: null };
-      if (!isMerge(c)) return { sha: c.sha, merge: false, patchId: patchIdOf(diff(`repos/${repo}/commits/${c.sha}`)), message: c.commit?.message };
+      if (!isMerge(c)) return { sha: c.sha, merge: false, ...commitPatch(c), message: c.commit?.message };
       return { sha: c.sha, merge: true, clean: cleanMerge(c), patchId: null };
     });
     const mapped = mapRebase({ chain, reviewed: reviewedPatches });
