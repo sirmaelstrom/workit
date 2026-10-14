@@ -839,7 +839,8 @@ test('reset-wp (61d817db): the refused transitions, one row each', (t) => {
     ['prompt on a herdr lane with no pane', (h) => { h.wp('WP-02').lane.paneId = null; return h.reset('prompt'); }, 5, /no pane/],
     ['prompt on a running exec lane', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42, exitedAt: null }); return h.reset('prompt'); }, 5, /has not been observed to exit/],
     ['land with no PR', (h) => { h.wp('WP-02').pr = null; return h.reset('land'); }, 5, /no PR to land/],
-    ['land on a merged PR', (h) => { h.wp('WP-02').merge = { sha: 'd'.repeat(40) }; return h.reset('land'); }, 5, /already merged/],
+    ['land with findings not adjudicated', (h) => { h.wp('WP-02').owed = { adjudicate: true, round: 1 }; return h.reset('land'); }, 5, /round 1 findings are not adjudicated; reset it --to checked/],
+    ['land on a merged PR',(h) => { h.wp('WP-02').merge = { sha: 'd'.repeat(40) }; return h.reset('land'); }, 5, /already merged/],
     ['checked with no PR', (h) => { h.wp('WP-02').pr = null; return h.reset('checked'); }, 5, /no PR recorded; reset it --to check/],
     ['wait on an exec lane', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42 }); return h.reset('wait'); }, 5, /exec lane; restart it with --to prompt/],
     ['prompt on an exec lane with no session', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42 }); return h.reset('prompt'); }, 5, /no session id to resume/],
@@ -865,7 +866,7 @@ test('reset-wp (61d817db): the refused transitions, one row each', (t) => {
   }
 });
 
-test('reset-wp (61d817db): each target\'s stage, state and queue; a lane that exited is started before its prompt; wait renews the deadline; deferrals through a chain are lifted', (t) => {
+test('reset-wp (61d817db): each target\'s stage, state and queue; a lane that exited is started before its prompt; wait renews the deadline; deferrals through a chain are lifted', async (t) => {
   const shapes = (h) => h.wp('WP-02').queue.map((a) => `${a.step}${a.command?.includes('--amendment') ? ' --amendment' : ''}${a.command?.includes('--amend') ? ' --amend' : ''}`);
   const h = resetFixture(t, { wps: [...RATIFY_WPS, { id: 'WP-04', files: ['lib/x.mjs'], dependsOn: ['WP-03'] }] });
   Object.assign(h.wp('WP-04'), { state: 'deferred', deferredBy: 'WP-03' });
@@ -887,6 +888,17 @@ test('reset-wp (61d817db): each target\'s stage, state and queue; a lane that ex
   exec.wp('WP-02').lane = exec.lane({ backend: 'exec', pid: 42, sessionId: 's-1' });
   exec.reset('prompt');
   assert.deepEqual(shapes(exec), ['prompt --amend'], 'an exec amendment resumes the session by a new spawn');
+  const execRan = resetFixture(t);
+  Object.assign(execRan.wp('WP-02'), { amendment: null, lane: execRan.lane({ backend: 'exec', pid: 42, sessionId: 's-1' }) });
+  execRan.reset('prompt');
+  assert.deepEqual(shapes(execRan), ['prompt --amend'], 'an exec lane that ran resumes its session, never a fresh one');
+
+  // A refused start (exit 7) re-arms the start and keeps the prompt queued behind it.
+  const refused = resetFixture(t);
+  refused.reset('prompt');
+  const start = { ...refused.wp('WP-02').queue[0], id: '9-start', phase: 'build', wpId: 'WP-02' };
+  await build.record(refused.state, start, { code: 7, stdout: '', stderr: 'low memory' }, refused.deps);
+  assert.deepEqual(shapes(refused), ['wait', 'start', 'prompt --amendment']);
 
   const stop = { kind: 'shell', step: 'stop', part: 'stop', command: ['x'] };
   for (const [to, state, stage] of [['check', 'amending', 'check'], ['checked', 'amending', 'checked'], ['land', 'gate', 'land']]) {

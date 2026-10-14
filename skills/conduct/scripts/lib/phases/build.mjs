@@ -393,14 +393,16 @@ export const RESET_TARGETS = Object.freeze({
       () => (wp.lane.backend === 'herdr' && !wp.lane.paneId ? `${wp.id}'s herdr lane has no pane` : null),
       () => (wp.lane.backend !== 'herdr' && !laneExited(wp) ? `${wp.id}'s exec lane agent (pid ${wp.lane.pid}) has not been observed to exit; an exec lane is re-prompted by a new spawn, which a running agent refuses` : null),
       // `lane spawn --amend` reads the session id from the lane, else from its log.
-      () => (wp.lane.backend !== 'herdr' && wp.amendment && !wp.lane.sessionId && !deps.exists(wp.lane.logPath ?? laneLayout(state, wp).logPath)
+      () => (wp.lane.backend !== 'herdr' && (wp.amendment || wp.lane.startedAt) && !wp.lane.sessionId && !deps.exists(wp.lane.logPath ?? laneLayout(state, wp).logPath)
         ? `${wp.id}'s exec lane has no session id to resume (none recorded, no lane log)` : null)),
     queue: (state, wp, deps) => {
       const backend = backendOf(state, wp, deps);
-      if (backend.name === 'exec') return wp.amendment ? backend.prompt(wp, { amendment: true }) : backend.start(wp);
-      // Any prompt after a lane's first is an amendment to lane.mjs, so a lane
-      // that ever ran is re-prompted as one (with --no-ruling).
-      return [...(laneExited(wp) ? backend.start(wp) : []), ...backend.prompt(wp, { amendment: Boolean(wp.amendment || wp.lane.startedAt) })];
+      // A lane that ever ran is re-prompted as an amendment: herdr's lane.mjs
+      // treats any later prompt as one (--no-ruling), and an exec lane resumes
+      // its session (spawn --amend) rather than starting a fresh one.
+      const again = Boolean(wp.amendment || wp.lane.startedAt);
+      if (backend.name === 'exec') return again ? backend.prompt(wp, { amendment: true }) : backend.start(wp);
+      return [...(laneExited(wp) ? backend.start(wp) : []), ...backend.prompt(wp, { amendment: again })];
     },
   },
   wait: {
@@ -413,7 +415,9 @@ export const RESET_TARGETS = Object.freeze({
   land: {
     from: ['blocked', 'held'], state: () => 'gate', stage: 'land', queue: keepStops,
     needs: (state, wp) => firstProblem(() => hasLane(wp), () => (wp.pr?.number ? null : `${wp.id} has no PR to land`),
-      () => (wp.merge?.sha ? `${wp.id}'s PR is already merged (${wp.merge.sha}); a merged WP is never landed again` : null)),
+      () => (wp.merge?.sha ? `${wp.id}'s PR is already merged (${wp.merge.sha}); a merged WP is never landed again` : null),
+      // The gate does not read the owed adjudication; only the checked stage settles it.
+      () => (wp.owed?.adjudicate ? `${wp.id}'s review round ${wp.owed.round ?? '?'} findings are not adjudicated; reset it --to checked` : null)),
   },
 });
 
