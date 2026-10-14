@@ -839,6 +839,12 @@ test('reset-wp (61d817db): the refused transitions, one row each', (t) => {
     ['prompt on a herdr lane with no pane', (h) => { h.wp('WP-02').lane.paneId = null; return h.reset('prompt'); }, 5, /no pane/],
     ['prompt on a running exec lane', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42, exitedAt: null }); return h.reset('prompt'); }, 5, /has not been observed to exit/],
     ['land with no PR', (h) => { h.wp('WP-02').pr = null; return h.reset('land'); }, 5, /no PR to land/],
+    ['land on a merged PR', (h) => { h.wp('WP-02').merge = { sha: 'd'.repeat(40) }; return h.reset('land'); }, 5, /already merged/],
+    ['checked with no PR', (h) => { h.wp('WP-02').pr = null; return h.reset('checked'); }, 5, /no PR recorded; reset it --to check/],
+    ['wait on an exec lane', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42 }); return h.reset('wait'); }, 5, /exec lane; restart it with --to prompt/],
+    ['prompt on an exec lane with no session', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42 }); return h.reset('prompt'); }, 5, /no session id to resume/],
+    ['Files a live WP holds', (h) => { Object.assign(h.wp('WP-03'), { state: 'dispatched', files: ['lib/lanes.mjs'] }); return h.reset('check'); }, 5, /WP-03 \(dispatched\) holds a path in WP-02's Files/],
+    ['no lane slot for prompt', (h) => { h.state.intent.lanesCap = 1; Object.assign(h.wp('WP-03'), { state: 'dispatched' }); return h.reset('prompt'); }, 5, /1 lane\(s\) are live \(WP-03\) against the run's cap of 1/],
     ['an unverified lane', (h) => { h.wp('WP-02').lane.livenessHeld = true; return h.reset('check'); }, 5, /liveness is unverified/],
     ['an open touch on the WP', (h) => { h.state.touches = [{ n: 1, wpId: 'WP-02', status: 'filed' }]; return h.reset('check'); }, 5, /touch 1 open/],
     ['the WP\'s pending action', (h) => { h.state.pending = { id: '9-stop', wpId: 'WP-02', step: 'stop' }; return h.reset('check'); }, 5, /9-stop is pending/],
@@ -870,23 +876,36 @@ test('reset-wp (61d817db): each target\'s stage, state and queue; a lane that ex
   alive.wp('WP-02').lane.exitedAt = null;
   alive.reset('prompt');
   assert.deepEqual(shapes(alive), ['prompt --amendment'], 'a live herdr agent gets the prompt alone');
-  const first = resetFixture(t);
-  first.wp('WP-02').amendment = null;
-  assert.deepEqual([first.reset('prompt').state, shapes(first)], ['dispatched', ['start', 'prompt']], 'no amendment: the first prompt');
+  const prompted = resetFixture(t);
+  prompted.wp('WP-02').amendment = null;
+  assert.deepEqual([prompted.reset('prompt').state, shapes(prompted)], ['dispatched', ['start', 'prompt --amendment']], 'a lane that ran: every later prompt is an amendment to lane.mjs');
+  const never = resetFixture(t);
+  Object.assign(never.wp('WP-02'), { amendment: null, lane: never.lane({ startedAt: null, exitedAt: null }) });
+  assert.deepEqual(shapes((never.reset('prompt'), never)), ['start', 'prompt'], 'a lane that never started: the first prompt');
   const exec = resetFixture(t);
-  exec.wp('WP-02').lane = exec.lane({ backend: 'exec', pid: 42 });
+  exec.wp('WP-02').lane = exec.lane({ backend: 'exec', pid: 42, sessionId: 's-1' });
   exec.reset('prompt');
   assert.deepEqual(shapes(exec), ['prompt --amend'], 'an exec amendment resumes the session by a new spawn');
 
+  const stop = { kind: 'shell', step: 'stop', part: 'stop', command: ['x'] };
   for (const [to, state, stage] of [['check', 'amending', 'check'], ['checked', 'amending', 'checked'], ['land', 'gate', 'land']]) {
     const r = resetFixture(t);
-    r.wp('WP-02').queue = [{ kind: 'shell', step: 'stop', part: 'stop', command: ['x'] }];
+    r.wp('WP-02').queue = [stop, { kind: 'author', step: 'ratify', part: 'ruling' }];
     const done = r.reset(to);
-    assert.deepEqual([done.state, done.stage, done.queue, done.dropped], [state, stage, [], ['stop/stop']], to);
+    assert.deepEqual([done.state, done.stage, done.queue, done.dropped], [state, stage, ['stop/stop'], ['ratify/ruling']], `${to}: an owed stop runs first`);
   }
+  const live = resetFixture(t);
+  Object.assign(live.wp('WP-02'), { queue: [stop], lane: live.lane({ exitedAt: null }) });
+  assert.deepEqual(live.reset('prompt').dropped, ['stop/stop'], 'prompt wants the running agent');
   const held = resetFixture(t);
-  held.wp('WP-02').state = 'held';
+  Object.assign(held.wp('WP-02'), { state: 'held', heldOutside: ['CLAUDE.md'], heldUncited: ['c'.repeat(40)] });
   assert.equal(held.reset('land').state, 'gate');
+  assert.deepEqual([held.wp('WP-02').heldOutside, held.wp('WP-02').heldUncited], [null, null]);
+  const rewound = resetFixture(t);
+  Object.assign(rewound.state, { phase: 'analyze' });
+  rewound.state.release.state = 'not-exercised';
+  rewound.reset('check');
+  assert.equal(rewound.state.phase, 'build');
 
   const wait = resetFixture(t);
   wait.tick(5 * 3600000);
