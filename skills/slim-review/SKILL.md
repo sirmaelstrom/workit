@@ -465,8 +465,9 @@ lens ran (exit 6).
 Standalone, each refusal is exit 5. Under `--attempt-ref` it is an
 `input-mismatch` line with exit 1, raised before any lens start, so the attempt
 stays live for a corrected call. Amend with commits on top of the reviewed head.
-After a rebase or a merge from the base branch, the conductor decides how that
-head gets reviewed. Under `--attempt-ref` the same flag keeps the attempt's
+A rebase does not need a ruling: `rounds` maps it by patch id (below) and
+answers the `--since` that reviews only the commits the rebase changed. Under
+`--attempt-ref` the same flag keeps the attempt's
 claim, base and manifest unchanged and reviews the amendment inside it.
 
 Fix the delta pass's findings with controls, and the PR goes to the merge
@@ -651,16 +652,47 @@ head's round under the cap (§ 4):
 | `round` | Meaning | Also carries |
 |---|---|---|
 | `full` | no review yet: a full paired review is owed | `problem: null` |
-| `reviewed` | the last review is on this head | `last`, `problem: null` |
-| `delta` | a full review and no delta after it: round two, `lens --since <since>` | `since` (the last **full** review's head), `last`, `problem` |
-| `capped` | a delta after the last full review: no third review | `last`, `problem` |
+| `reviewed` | the last review is on this head, or this head is a patch-identical rebase of it | `last`, `problem: null`; `rebased_from` and `rebase` for a rebase |
+| `delta` | a full review and no delta after it: round two, `lens --since <since>` | `since` (the last **full** review's head, or after a mapped rebase the last commit before the first changed patch), `last`, `rebase?`, `problem` |
+| `capped` | a delta after the last full review: no third review | `last`, `rebase?`, `problem` |
 
 `last` is `{head, scope: "full"|"delta", review_id}`. In the delta round
 `problem` is why `<since>...<head>` is no amendment diff (the rule `lens --since`
 refuses by), or null. In the capped round it is why the head can't converge on
 its tail: not an ancestor, a merge from the base branch, or an incomplete commit
 list. A tail with no changed files, no merge and a complete commit list is null.
-A non-null `problem` is the conductor's call. A refusal is
+A non-null `problem` is the conductor's call.
+
+**A rebase is mapped, not refused.** When the tail from the last reviewed head
+diverged, or is ahead with a merge in it, `rounds` matches the head's commits
+past the base branch to the reviewed head's by `git patch-id --verbatim`, and
+reports the mapping as `rebase: {kind, from, …}`:
+- every patch already reviewed, and every reviewed patch still on the head (a
+  merge whose own diff is only base-branch content counts as none):
+  `reviewed`, with `rebased_from`;
+- some patches new: `kind: "delta"`, and the tail starts at the last commit
+  before the first new patch, so the delta pass reviews the changed commits and
+  everything after them. A reviewed patch the rebase rewrote (a conflict
+  resolution) must be replaced by a new commit with the same message, which
+  the delta reviews as it now stands. The delta diff does not show what the
+  replaced commit looked like, so a delta reviewer reads a rewritten commit as
+  new code, not as an interdiff;
+- no reviewed patch on the head (a force-push of unrelated content), a reviewed
+  patch the head dropped with no replacement, a reviewed merge carrying its
+  own edits that the head dropped, a first commit whose patch changed (the delta would
+  be the whole PR), a history that is not one first-parent line, or a read
+  that failed: `kind` is `refused` or `unavailable` with a `reason`, and
+  `problem` stands as above.
+
+Patch ids are `--verbatim`: line numbers are ignored, whitespace is not. Since
+a patch id can't tell two places with identical context apart, a match also
+needs every file the commit touches to be byte-identical in the two commits'
+parents (the base did not change it) and each hunk's pre-image to occur
+exactly once there. A commit that fails either check reads as new, so a rebase
+over a base that touched the PR's files gets a delta, never `reviewed`. In the
+capped round a mapped rebase converges on its tail like any post-cap amendment,
+so a conflict resolution after the delta pass is checked by its control, not
+by a third review. A refusal is
 `{"outcome":"refused","reason":…}` with the reasons `recognise` gives, plus
 `identity-unset` for a pinned identity with no login and `gh-failure` for a
 listing or compare it couldn't read. It never answers `full` from a read that

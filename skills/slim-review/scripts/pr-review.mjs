@@ -65,7 +65,7 @@ import {
 } from './pr-review-managed.mjs';
 import { emitOutcome, WITHDRAW_REASONS } from './pr-review-outcomes.mjs';
 import { buildMarker, recognise, postedReviewScope } from './pr-review-recognise.mjs';
-import { amendmentProblem, COMPARE_FILE_CAP, readTail, roundsAnswer } from './pr-review-rounds.mjs';
+import { amendmentProblem, COMPARE_FILE_CAP, readRoundTail, roundsAnswer } from './pr-review-rounds.mjs';
 import { filesFromDiff, guardReview, GUARD_ADJUDICATORS, GUARD_LENS, LANE_MARKER_ENV } from './pr-review-guard.mjs';
 
 // ---------------------------------------------------------------------------
@@ -2223,7 +2223,9 @@ export async function cmdRecognise(opts, {
  *
  * The scheduled half asks this before it claims; babysit asks the same
  * `roundsAnswer` in process. One JSON line, and only two outcomes: `ok` with
- * `round` (and `since` / `last` / `problem`), or `refused` with a reason — a
+ * `round` (and `since` / `last` / `rebased_from` / `rebase` / `problem`; a
+ * rebased head is mapped by patch id, pr-review-rounds.mjs), or `refused`
+ * with a reason — a
  * listing or compare that could not be read is refused `gh-failure`, never a
  * `full` answer, because a caller that read "full" would claim a second full
  * review. The posting identity is read as `recognise` reads it; a coordinator
@@ -2274,7 +2276,7 @@ export async function cmdRounds(opts, {
       .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
       .filter(Boolean);
     const last = reviews[reviews.length - 1];
-    if (last && last.head !== head) tail = readTail({ repo: opts.repo, cwd: opts.cwd, runGh, from: last.head, to: head });
+    if (last && last.head !== head) tail = readRoundTail({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh, from: last.head, to: head });
   } catch (err) {
     refuse('gh-failure', {}, `could not read the review listing or the tail compare for ${opts.repo}#${opts.pr}: ${err.message}`, 4);
     return undefined;
@@ -3450,8 +3452,9 @@ On a managed repository (see below), the coordinated flow replaces steps 2 and 3
            read-only: which reviews on this PR are already this identity's
   rounds   --pr <n> --repo owner/name --head <full sha>
            read-only: the head's review round under the cap —
-           {outcome:"ok", round: full|reviewed|delta|capped, since?, last?, problem}
-           or {outcome:"refused", reason}
+           {outcome:"ok", round: full|reviewed|delta|capped, since?, last?,
+           rebased_from?, rebase?, problem} or {outcome:"refused", reason};
+           a rebased head is mapped onto the reviewed one by patch id
   inflight --pr <n> --repo owner/name --head <full sha>
            read-only: the review attempts on this head that have not ended —
            {outcome:"ok", mode, inflight:[{attempt, origin, state}]}; exit 9 when

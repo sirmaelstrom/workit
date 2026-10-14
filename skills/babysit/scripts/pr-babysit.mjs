@@ -48,7 +48,7 @@ import { createClient, CLIENT_REASONS } from '../../slim-review/scripts/pr-revie
 import { loadCoordinatorToken, resolveManaged, MANAGED_MODES } from '../../slim-review/scripts/pr-review-managed.mjs';
 import { postedReviewScope } from '../../slim-review/scripts/pr-review-recognise.mjs';
 import { readReviewListing } from '../../slim-review/scripts/pr-review.mjs';
-import { cappedTailProblem, deltaTailProblem, readTail, reviewRound } from '../../slim-review/scripts/pr-review-rounds.mjs';
+import { cappedTailProblem, readRoundTail, resolveRound, reviewRound } from '../../slim-review/scripts/pr-review-rounds.mjs';
 
 // The round cap is the writer's (`pr-review.mjs rounds` answers the beat from
 // the same module); re-exported for this script's callers.
@@ -203,7 +203,7 @@ export function normaliseThreads(nodes) {
  * One observation of the PR: head (read twice, before and after), checks on
  * that head, review threads, the coordinator's attempts, the beat's gate.
  */
-export async function observe({ repo, pr, cwd }, deps) {
+export async function observe({ repo, pr, cwd, rebaseCache }, deps) {
   const readHead = () => deps.runGh(['pr', 'view', String(pr), '--repo', repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd }).trim();
   const headBefore = readHead();
   const [owner, name] = repo.split('/');
@@ -257,7 +257,7 @@ export async function observe({ repo, pr, cwd }, deps) {
       .map((r) => postedReviewScope(r, { serviceLogin: identity.login, replacedReviewIds }))
       .filter(Boolean);
     const last = reviews[reviews.length - 1];
-    if (last && last.head !== headBefore) tail = readTail({ repo, cwd, runGh: deps.runGh, from: last.head, to: headBefore });
+    if (last && last.head !== headBefore) tail = readRoundTail({ repo, pr, cwd, runGh: deps.runGh, from: last.head, to: headBefore, cache: rebaseCache });
   }
 
   const headAfter = readHead();
@@ -353,17 +353,28 @@ export function decide(obs, ctx) {
 
   // No posted, no live attempt on this head. The cap decides whether a claim
   // is owed at all, and at what scope.
-  const round = reviewRound(obs.reviews ?? [], obs.head);
+  // The writer's own round (`rounds` answers the beat from the same function),
+  // including its patch-id mapping of a rebased head.
+  const resolved = resolveRound({ reviews: obs.reviews ?? [], head: obs.head, tail: obs.tail });
+  const round = resolved.answer;
+  if (round.round === 'reviewed' && round.rebased_from) {
+    // A patch-identical rebase of the last reviewed head: no review is owed,
+    // so the head converges on controls alone, like a capped empty tail.
+    if (unresolved.length > 0) return { action: 'adjudicate', detail: `${unresolved.length} open thread(s)`, threads: unresolved, reviewId: round.last.review_id };
+    if (obs.checks.pending > 0) return { action: 'wait', detail: `checks pending: ${obs.checks.names.pending.join(', ')}` };
+    return { action: 'converged', reviewId: round.last.review_id, attempt: null, rebasedFrom: round.rebased_from };
+  }
   const skipped = round.round === 'delta' && ctx.deltaSkipped?.head === obs.head ? ctx.deltaSkipped.reason : null;
   if (round.round === 'capped' || skipped) {
     // No third review (and no delta for a skipped amendment): the head
     // converges on controls alone, and only on top of what was reviewed —
     // an ahead tail with no merge from base, or an empty one (the writer's
-    // `cappedTailProblem`, which `rounds` answers the beat with).
-    const tail = obs.tail;
-    const tailProblem = cappedTailProblem(tail, round.last.head, obs.head);
+    // `cappedTailProblem`, which `rounds` answers the beat with). After a
+    // mapped rebase the tail starts at the mapping's `since`.
+    const tail = resolved.tail;
+    const tailProblem = skipped ? cappedTailProblem(tail, resolved.from, obs.head) : round.problem;
     if (tailProblem) {
-      return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: round.last.head, problem: tailProblem }) };
+      return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: resolved.from, problem: tailProblem }) };
     }
     if (unresolved.length > 0) return { action: 'adjudicate', detail: `${unresolved.length} open thread(s)`, threads: unresolved, reviewId: round.last.review_id };
     if (obs.checks.pending > 0) return { action: 'wait', detail: `checks pending: ${obs.checks.names.pending.join(', ')}` };
@@ -373,15 +384,16 @@ export function decide(obs, ctx) {
       attempt: null,
       unreviewedTail: `${tail.from.slice(0, 7)}...${tail.to.slice(0, 7)}`,
       unreviewedCommits: tail.aheadBy,
+      ...(round.rebase?.kind === 'delta' ? { rebasedFrom: round.rebase.from } : {}),
       ...(skipped ? { deltaSkipped: skipped } : {}),
     };
   }
   const since = round.round === 'delta' ? round.since : undefined;
   if (since) {
     // Pre-checked with the writer's own rule, so a rebase costs no claim; the
-    // writer's refusal of the same `--since` is handled by the driver.
-    const problem = deltaTailProblem(obs.tail, since, obs.head);
-    if (problem) return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: since, problem }) };
+    // writer's refusal of the same `--since` is handled by the driver. After a
+    // mapped rebase `since` is the last commit before the first new patch.
+    if (round.problem) return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: since, problem: round.problem }) };
   }
   const claim = (detail) => ({ action: 'claim', detail, ...(since ? { since } : {}) });
 
@@ -497,15 +509,18 @@ export async function runLoop(opts, deps) {
     return finish({ outcome: 'blocked', reason: 'not-managed', owed: owedFor('not-managed', { repo: opts.repo, bounds }) }, ctx, deps, null);
   }
 
+  // A settled patch-id mapping per tail, so a poll over an unchanged rebased
+  // head re-reads no diffs (readRoundTail's `cache`).
+  const rebaseCache = new Map();
   let first = true;
   for (;;) {
-    const obs = await observe({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd }, deps);
+    const obs = await observe({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, rebaseCache }, deps);
     if (ctx.iterationHead === null) { ctx.iterationHead = obs.head; ctx.iterations = 1; persist(); }
     if (first && opts.skipDelta) {
       // The session that pushed the amendment judged it trivial; the judgment
       // covers this head only, and a later head is owed its delta again. A head
       // that moved during this first read is not the head that was judged.
-      const round = reviewRound(obs.reviews ?? [], obs.head).round;
+      const round = resolveRound({ reviews: obs.reviews ?? [], head: obs.head, tail: obs.tail }).answer.round;
       if (obs.headBefore !== obs.headAfter) log(`[babysit] --skip-delta dropped: the head moved ${obs.headBefore.slice(0, 7)} → ${obs.headAfter.slice(0, 7)} during the first read; run again on the head you judged`);
       else if (round === 'delta') { ctx.deltaSkipped = { head: obs.head, reason: opts.skipDelta }; persist(); }
       else log(`[babysit] --skip-delta ignored: head ${obs.head.slice(0, 7)} is in round '${round}', not the delta round`);
@@ -524,6 +539,7 @@ export async function runLoop(opts, deps) {
           attempt: d.attempt,
           checks: obs.checks,
           ...(d.unreviewedTail ? { unreviewed_tail: d.unreviewedTail, unreviewed_commits: d.unreviewedCommits } : {}),
+          ...(d.rebasedFrom ? { rebased_from: d.rebasedFrom } : {}),
           ...(d.deltaSkipped ? { delta_skipped: d.deltaSkipped } : {}),
           judgment_notes: ctx.judgmentNotes,
         }, ctx, deps, obs);
@@ -728,7 +744,7 @@ async function main() {
     const obs = await observe(opts, deps);
     const state = loadState(opts.statePath ?? defaultStatePath(opts.repo, opts.pr));
     const ctx = { repo: opts.repo, pr: opts.pr, bounds: { ...DEFAULT_BOUNDS, ...bounds }, iterationHead: state?.iterationHead ?? obs.head, iterations: state?.iterations ?? 1, startedAt: state?.startedAt ?? obs.at, claimsOnHead: state?.claimsOnHead ?? {}, deltaSkipped: state?.deltaSkipped ?? null };
-    console.log(JSON.stringify({ head: obs.head, checks: obs.checks, threads: obs.threads.length, unresolved: obs.threads.filter((t) => !t.resolved).length, attemptsOnHead: (obs.status?.attempts ?? []).filter((a) => a.head_sha === obs.head), reviews: obs.reviews, round: reviewRound(obs.reviews ?? [], obs.head).round, tail: obs.tail, health: obs.health, decision: decide(obs, ctx) }, null, 2));
+    console.log(JSON.stringify({ head: obs.head, checks: obs.checks, threads: obs.threads.length, unresolved: obs.threads.filter((t) => !t.resolved).length, attemptsOnHead: (obs.status?.attempts ?? []).filter((a) => a.head_sha === obs.head), reviews: obs.reviews, round: resolveRound({ reviews: obs.reviews ?? [], head: obs.head, tail: obs.tail }).answer.round, tail: obs.tail, health: obs.health, decision: decide(obs, ctx) }, null, 2));
     return;
   }
   const receipt = await runLoop({ ...opts, bounds }, deps);

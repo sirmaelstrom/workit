@@ -199,7 +199,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    pass, gets the delta pass before the merge. T2 adds three checks. When the
    base branch moved during review, test the tree that will land (rebase and
    re-run, or run the suite on the merge result) rather than the reviewed
-   branch alone. The row names how each challenge escalation ("Human
+   branch alone. A rebase costs no review ruling: the rounds map it by patch
+   id, so an unchanged rebase reads reviewed and a conflict resolution gets a
+   delta over the commits it changed. The row names how each challenge escalation ("Human
    review required") was disposed of, including any confirmation of an
    operator ruling that the challenge asks for. And an amendment made after
    the challenge on the amended tree is post-cap at T2: it merges on its
