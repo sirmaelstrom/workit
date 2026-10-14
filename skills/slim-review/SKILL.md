@@ -686,8 +686,10 @@ reports the mapping as `rebase: {kind, from, …}`:
 
 Patch ids are `--verbatim`: line numbers are ignored, whitespace is not. Since
 a patch id can't tell two places with identical context apart, a match also
-needs each hunk's pre-image to occur exactly once in the file it applies to; a
-commit that fails that check reads as new. In the
+needs every file the commit touches to be byte-identical in the two commits'
+parents (the base did not change it) and each hunk's pre-image to occur
+exactly once there. A commit that fails either check reads as new, so a rebase
+over a base that touched the PR's files gets a delta, never `reviewed`. In the
 capped round a mapped rebase converges on its tail like any post-cap amendment,
 so a conflict resolution after the delta pass is checked by its control, not
 by a third review. A refusal is

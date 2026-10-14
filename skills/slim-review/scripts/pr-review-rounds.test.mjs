@@ -323,13 +323,38 @@ test('one patch id at two places (identical context): the edit moved to the othe
   assert.notEqual(r.answer.rebase.kind, 'identical');
 });
 
+test('a block the base moved between sections, unique on each side: the edit under the other section is not reviewed (workit#228 delta codex P1)', () => {
+  const dir = repo();
+  const block = ['alpha', 'beta', 'gamma', 'TARGET', 'delta', 'epsilon', 'zeta'];
+  const file = (userBlock, adminBlock) => ['[USER]', ...userBlock, '[ADMIN]', 'admin 1', 'admin 2', 'admin 3', 'admin 4', ...adminBlock, 'end', ''].join('\n');
+  writeFileSync(join(dir, 'f.txt'), file(block, []));
+  commit(dir, 'base: f.txt');
+  git(dir, ['checkout', '-q', '-b', 'pr']);
+  edit(dir, 'a.txt', 'a.txt line 2', 'a.txt line 2 (pr)');
+  commit(dir, 'pr: a');
+  writeFileSync(join(dir, 'f.txt'), file(block.map((l) => (l === 'TARGET' ? 'EDITED' : l)), []));
+  const reviewed = commit(dir, 'pr: edit the block');
+  // the base moves the block from USER to ADMIN; it is unique on both sides
+  git(dir, ['checkout', '-q', 'main']);
+  writeFileSync(join(dir, 'f.txt'), file([], block));
+  commit(dir, 'main: move the block under ADMIN');
+  git(dir, ['checkout', '-q', '-B', 'pr', 'main']);
+  edit(dir, 'a.txt', 'a.txt line 2', 'a.txt line 2 (pr)');
+  const first = commit(dir, 'pr: a');
+  writeFileSync(join(dir, 'f.txt'), file([], block.map((l) => (l === 'TARGET' ? 'EDITED' : l))));
+  const moved = commit(dir, 'pr: edit the block');
+  assert.equal(gitPatchId(git(dir, ['diff', `${reviewed}^`, reviewed])), gitPatchId(git(dir, ['diff', `${moved}^`, moved])), 'the probe: one patch id, an edit under another section');
+  const r = round(dir, [full(reviewed)], moved);
+  assert.deepEqual([r.answer.round, r.answer.since, r.answer.rebase.kind, r.answer.rebase.commits], ['delta', first, 'delta', 1]);
+});
+
 test('diffPreimages: context and removed lines per hunk; a created file and a quoted path', () => {
   const d = [
     'diff --git a/x.txt b/x.txt', 'index 1..2 100644', '--- a/x.txt', '+++ b/x.txt',
     '@@ -1,3 +1,3 @@', ' one', '-two', '+TWO', ' three',
     'diff --git a/n.txt b/n.txt', 'new file mode 100644', '--- /dev/null', '+++ b/n.txt', '@@ -0,0 +1 @@', '+new', '',
   ].join('\n');
-  assert.deepEqual(diffPreimages(d), [{ path: 'x.txt', created: false, hunks: [['one', 'two', 'three']] }, { path: null, created: true, hunks: [[]] }]);
+  assert.deepEqual(diffPreimages(d), [{ path: 'x.txt', newPath: 'x.txt', created: false, hunks: [['one', 'two', 'three']] }, { path: null, newPath: 'n.txt', created: true, hunks: [[]] }]);
   assert.equal(diffPreimages('diff --git "a/x y" "b/x y"\n--- "a/x y"\n+++ "b/x y"\n@@ -1 +1 @@\n-a\n+b\n'), null);
 });
 

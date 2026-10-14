@@ -24,6 +24,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 /** GitHub's compare API returns at most this many files, with no page past it. */
 export const COMPARE_FILE_CAP = 300;
@@ -175,9 +176,10 @@ export function gitPatchId(diff) {
  *   { kind: 'refused', reason }
  *
  * Patches are matched one for one (a multiset): a reviewed patch accounts for
- * at most one head commit. A patch id ignores line numbers, so a match also
- * needs both commits `located` (each hunk's pre-image occurs exactly once in
- * the file it applies to); an unlocated commit on either side never matches. A commit is new when it is a merge that is not
+ * at most one head commit. The reader binds each `patchId` to the commit's
+ * place (`patchPlace`: the touched files' parent content, each hunk unique),
+ * so equal ids are the same edits on the same files; `located: false` (no
+ * fixed place) never matches on either side. A commit is new when it is a merge that is not
  * clean, or a non-empty non-merge no unmatched reviewed patch accounts for.
  * A reviewed patch the head no longer carries must have been REPLACED: a new
  * non-merge commit with the same commit message (a rebase keeps messages, and
@@ -256,9 +258,11 @@ export const REBASE_FILE_READ_CAP = 200;
 /**
  * The pre-image of every hunk in a unified diff, per file. Pure.
  *
- * → [{ path, created, hunks: [[line, …], …] }], where `path` is the pre-image
- * path and each hunk lists its context and removed lines in order; or null
- * when a file header cannot be read (a quoted path), which locates nothing.
+ * → [{ path, newPath, created, hunks: [[line, …], …] }], where `path` is the
+ * pre-image path (null for a created file), `newPath` the post-image path
+ * (null for a deleted one), and each hunk lists its context and removed lines
+ * in order; or null when a file header cannot be read (a quoted path), which
+ * places nothing.
  */
 export function diffPreimages(diffText) {
   const files = [];
@@ -266,7 +270,7 @@ export function diffPreimages(diffText) {
   let hunk = null;
   for (const raw of String(diffText ?? '').split('\n')) {
     if (raw.startsWith('diff --git ')) {
-      file = { path: null, created: false, hunks: [] };
+      file = { path: null, newPath: null, created: false, hunks: [] };
       files.push(file);
       hunk = null;
       continue;
@@ -284,8 +288,12 @@ export function diffPreimages(diffText) {
         if (p === '/dev/null') file.created = true;
         else if (p.startsWith('a/')) file.path = p.slice(2);
         else return null;
+      } else if (raw.startsWith('+++ ')) {
+        const p = raw.slice(4).replace(/\r$/, '');
+        if (p.startsWith('b/')) file.newPath = p.slice(2);
+        else if (p !== '/dev/null') return null;
       }
-      continue; // index, mode, rename, +++ and Binary lines
+      continue; // index, mode, rename and Binary lines
     }
     if (raw.startsWith(' ') || raw.startsWith('-')) hunk.push(raw.slice(1));
   }
@@ -304,25 +312,40 @@ function occurrences(lines, block) {
 }
 
 /**
- * Whether a patch's place is fixed by its text: every hunk's pre-image occurs
- * exactly once in the file it applies to, read at `parent` through `readFile`.
- * Two patches with one patch id that are both located apply at the one place
- * their shared text sits, so the id's blindness to line numbers is harmless.
- * A created file is located (its place is the whole file); an unreadable
- * header is not.
+ * Where a patch applies, as a key two patches can be compared by, or null
+ * when its place is not fixed. Read at `parent` through `readFile`.
+ *
+ * The key names every file the patch touches with a hash of that file's
+ * whole content in the parent (a created file by its new path alone). Two
+ * patches with one patch id and one place key change byte-identical files
+ * with the same text; and with every hunk's pre-image occurring exactly once
+ * in its file, that text can sit at one place only, so the edits are the same
+ * edits at the same place. A patch id alone is blind to line numbers: equal
+ * ids over files the base changed (an identical block moved between
+ * sections, say) can be edits at different places, which is why the key
+ * carries the files' content and not only the uniqueness. Null (never a
+ * match) for: a hunk whose pre-image is not unique, a file with no readable
+ * path (binary, a pure rename, a quoted path).
  */
-export function patchLocated(diffText, parent, readFile) {
+export function patchPlace(diffText, parent, readFile) {
   const files = diffPreimages(diffText);
-  if (!files) return false;
+  if (!files) return null;
+  const parts = [];
   for (const f of files) {
-    if (f.created || f.hunks.length === 0) continue;
+    if (f.created) {
+      if (!f.newPath) return null;
+      parts.push(`+${f.newPath}`);
+      continue;
+    }
+    if (f.path === null || f.hunks.length === 0) return null;
     const content = readFile(f.path, parent);
     const lines = content.split('\n');
     for (const hunk of f.hunks) {
-      if (hunk.length === 0 ? content !== '' : occurrences(lines, hunk) !== 1) return false;
+      if (hunk.length === 0 ? content !== '' : occurrences(lines, hunk) !== 1) return null;
     }
+    parts.push(`${f.path}\0${createHash('sha256').update(content).digest('hex')}`);
   }
-  return true;
+  return parts.sort().join('\n');
 }
 
 /**
@@ -339,18 +362,26 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
     if (typeof base !== 'string' || base === '') return { kind: 'unavailable', reason: 'the PR answered no base branch' };
     const compare = (a, b) => JSON.parse(runGh(['api', `repos/${repo}/compare/${a}...${b}`], { cwd }));
     const diff = (path) => runGh(['api', '-H', 'Accept: application/vnd.github.diff', path], { cwd });
-    let fileReads = 0;
+    const files = new Map();
     const readFile = (path, ref) => {
-      fileReads += 1;
-      if (fileReads > REBASE_FILE_READ_CAP) throw new Error(`over the mapping cap of ${REBASE_FILE_READ_CAP} file reads`);
-      const encoded = path.split('/').map(encodeURIComponent).join('/');
-      return runGh(['api', '-H', 'Accept: application/vnd.github.raw', `repos/${repo}/contents/${encoded}?ref=${ref}`], { cwd });
+      const key = `${ref}:${path}`;
+      if (!files.has(key)) {
+        if (files.size >= REBASE_FILE_READ_CAP) throw new Error(`over the mapping cap of ${REBASE_FILE_READ_CAP} file reads`);
+        const encoded = path.split('/').map(encodeURIComponent).join('/');
+        files.set(key, runGh(['api', '-H', 'Accept: application/vnd.github.raw', `repos/${repo}/contents/${encoded}?ref=${ref}`], { cwd }));
+      }
+      return files.get(key);
     };
-    // One commit's patch id, and whether its place in its first parent is fixed.
+    // One commit's match key: its patch id bound to its place in its first
+    // parent (`patchPlace`), so equal keys are the same edits on the same
+    // file contents. A commit whose place is not fixed is unlocated.
     const commitPatch = (c) => {
       const text = diff(`repos/${repo}/commits/${c.sha}`);
       const patchId = patchIdOf(text);
-      return { patchId, located: patchId === null ? true : patchLocated(text, c.parents[0].sha, readFile) };
+      if (patchId === null) return { patchId: null, located: true };
+      const place = patchPlace(text, c.parents[0].sha, readFile);
+      if (place === null) return { patchId, located: false };
+      return { patchId: `${patchId}:${createHash('sha256').update(place).digest('hex')}`, located: true };
     };
     const reviewed = firstParentLine(compare(base, from), from);
     if (reviewed.reason) return { kind: 'unavailable', reason: reviewed.reason };
@@ -362,8 +393,10 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
     // Clean: the merge adds onto its second parent exactly what its first
     // parent added past their merge base — the branch's own changes and
     // nothing else, so no conflict resolution or edit rode in with it.
-    // Both diffs must be located, in the merge's second parent and in the
-    // parents' merge base, or one id could stand for edits at two places.
+    // Both diffs must have one place key, in the merge's second parent and in
+    // the parents' merge base: the files the branch touched are byte-identical
+    // in both (the base did not change them), or one id could stand for edits
+    // at two places.
     const cleanMerge = (c) => {
       if (c.parents.length !== 2) return false;
       const [p1, p2] = c.parents.map((p) => p.sha);
@@ -373,7 +406,8 @@ export function readRebase({ repo, pr, cwd, runGh, from, to, patchIdOf = gitPatc
       if (onto === null || onto !== patchIdOf(ownText)) return false;
       const mergeBase = compare(p2, p1)?.merge_base_commit?.sha;
       if (typeof mergeBase !== 'string') return false;
-      return patchLocated(ontoText, p2, readFile) && patchLocated(ownText, mergeBase, readFile);
+      const ontoPlace = patchPlace(ontoText, p2, readFile);
+      return ontoPlace !== null && ontoPlace === patchPlace(ownText, mergeBase, readFile);
     };
     // A reviewed merge the head no longer carries must have been clean: an
     // edit that rode in with it was reviewed, and nothing here can match it
