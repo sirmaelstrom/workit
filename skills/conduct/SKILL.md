@@ -98,6 +98,8 @@ Every lane brief carries this rule. Each WP's `**Runtime exercise:**` field name
 
 ## Self-recovery before a blocked stop
 
+Delta review starts at the head of the latest full review. A later ruling or check-fix amendment does not move that boundary past fixes still awaiting review. When an amendment needs a herdr lane whose agent has exited, the conductor starts the lane before sending the amendment; a live lane keeps its agent.
+
 Try these first. A blocked touch is for what they can't settle.
 
 - **A failed review seat:** re-run it once; then use a seat outside the author's model family, never one the operator excluded.

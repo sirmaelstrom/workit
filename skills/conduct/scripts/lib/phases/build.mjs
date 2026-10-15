@@ -712,7 +712,9 @@ function startAmendment(state, wp, deps, { retry = false, answer = null, ...fiel
   wp.amendment = retry && prev ? { ...prev, n, retryReason: fields.reason } : { n, since: wp.pr?.head ?? null, ...fields, kind: fields.kind ?? 'check' };
   setState(state, wp, 'amending', fields.reason, deps);
   wp.stage = 'wait';
-  wp.queue = [...(wp.queue ?? []), amendmentBrief(state, wp, wp.amendment), ...backendOf(state, wp, deps).prompt(wp, { amendment: true, answer })];
+  const backend = backendOf(state, wp, deps);
+  const restart = backend.name === 'herdr' && laneExited(wp) ? backend.start(wp) : [];
+  wp.queue = [...(wp.queue ?? []), amendmentBrief(state, wp, wp.amendment), ...restart, ...backend.prompt(wp, { amendment: true, answer })];
 }
 
 // One re-prompt per failed check expectation; a second failure blocks.
@@ -894,8 +896,11 @@ function expand(state, wp, deps) {
     }
     case 'delta': {
       // One delta pass per full review; a later tail is the gate's post-cap inspection.
-      const since = wp.amendment?.since;
-      if (!since || since === wp.pr?.head || (wp.reviews ?? []).at(-1)?.scope !== 'full') return go([], 'land');
+      // A ruling may start after executable findings fixes. Its amendment's
+      // `since` is not the boundary of work the full review covered.
+      const review = (wp.reviews ?? []).at(-1);
+      const since = review?.head;
+      if (!since || since === wp.pr?.head || review.scope !== 'full') return go([], 'land');
       return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
     }
     case 'land':
@@ -1453,10 +1458,14 @@ function recordOwn(state, wp, action, result, deps) {
       const absolute = changed.map((path) => join(wp.lane.worktree, path));
       wp.queue.shift();
       if (action.part === 'amend-diff') {
+        const since = (wp.reviews ?? []).at(-1)?.head;
+        // A saved action from an older conductor may have diffed from a
+        // later amendment. Recompute the range rather than trust its result.
+        if (action.command.at(-2) !== since) return (wp.stage = 'delta');
         // An executable line: any changed file that is not Markdown, tests and fixtures counted (D19.7, D20).
         if (!changed.some((path) => !path.toLowerCase().endsWith('.md') || isTestPath(path))) return (wp.stage = 'land');
         setState(state, wp, 'review', null, deps);
-        wp.queue = emitting(state, wp, deps, () => withMeta(state, wp, deltaReviewActions(state, wp, wp.amendment.since, { report, changedPaths: absolute })));
+        wp.queue = emitting(state, wp, deps, () => withMeta(state, wp, deltaReviewActions(state, wp, since, { report, changedPaths: absolute })));
         return (wp.stage = wp.state === 'blocked' ? null : 'reviewed');
       }
       const config = repoConfig(state, deps);

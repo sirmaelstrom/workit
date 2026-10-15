@@ -1454,6 +1454,77 @@ test('council meta and args (D20): meta precedes council_review; its args; a mis
   assert.equal(h.wp('WP-02').state, 'merged');
 });
 
+test('Shopfloor WP-14: a report-only ruling after executable findings fixes reviews from the full review head', async (t) => {
+  for (const council of [false, true]) {
+    const h = harness(t, { council, wps: [TWO[0], { ...TWO[1], tier: council ? 'T2' : 'T1' }] });
+    const report = council ? 'report-council-amendment.md' : 'report-amendment.md';
+    h.findings = { 'WP-02': [3, 0] };
+    h.synth = [{ findings: 2, seats: ['gpt-6.1-sol'] }, { findings: 0, seats: ['gpt-6.1-sol'] }];
+    h.reports = { 'WP-02': ['report-built.md', report, report] };
+    h.onPerform = (action) => {
+      if (action.step === 'prompt' && h.spawns['WP-02'] === 2) {
+        appendFileSync(join(h.runDir, 'lane-wp-02-report.md'), '\n## Needs conductor\n\n(a) Keep the existing name?\n(a) Keep it.\n(b) Rename it.\n');
+      }
+    };
+    await drive(h, { until: (a) => a.part === 'amendment' && a.amendment?.kind === 'findings' });
+    const reviewed = h.wp('WP-02').reviews.at(-1).head;
+    h.answer = (action) => action.part === 'amend-diff'
+      ? ok(action.command.at(-2) === reviewed ? 'lib/lanes.mjs\nREADME.md\n' : 'README.md\n') : undefined;
+    await drive(h, { until: (a) => a.step === 'rebase' });
+    const diff = of(h, 'WP-02').find((a) => a.part === 'amend-diff');
+    assert.notEqual(h.wp('WP-02').amendment.since, reviewed, 'the ruling started after the executable fixes');
+    assert.equal(diff.command.at(-2), reviewed, 'the diff includes fixes made before the ruling amendment');
+    const delta = of(h, 'WP-02').filter((a) => a.land?.scope === 'delta');
+    assert.ok(delta.length > 0, `council ${council}: a Markdown-only ruling cannot hide executable fixes`);
+    assert.ok(delta.every((a) => a.land.since === reviewed));
+    assert.equal(h.wp('WP-02').reviews.at(-1).scope, 'delta');
+  }
+});
+
+test('Shopfloor resume: a saved amendment diff from after the fixes is recomputed from the reviewed head', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3, 0] };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+  const old = await drive(h, { until: (a) => a.part === 'amend-diff' });
+  const reviewed = h.wp('WP-02').reviews.at(-1).head;
+  old.command.splice(-2, 1, h.wp('WP-02').pr.head);
+  saveState(h.state, h.deps);
+  h.disk = true;
+  await recordPending(h, ok('README.md\n'));
+  const replacement = await drive(h, { until: (a) => a.part === 'amend-diff' || a.step === 'rebase' });
+  assert.equal(replacement.part, 'amend-diff', 'a stale Markdown-only result cannot reach the gate');
+  assert.equal(replacement.command.at(-2), reviewed);
+  assert.notEqual(replacement.id, old.id);
+  await drive(h, { until: (a) => a.step === 'rebase' });
+  assert.equal(h.wp('WP-02').reviews.at(-1).scope, 'delta');
+});
+
+test('Shopfloor recovery 4b: a findings amendment restarts an exited herdr lane before prompting, and keeps a live lane', async (t) => {
+  for (const exited of [true, false]) {
+    const h = resetFixture(t, { herdr: true, council: true });
+    const wp = h.wp('WP-02');
+    Object.assign(wp, {
+      state: 'review', stage: 'reviewed', tier: 'T2', amendment: { n: 2, since: sha('a', 2), kind: 'ruling' },
+      pr: { number: 102, head: sha('c', 2) },
+      reviews: [{ round: 2, scope: 'delta', head: sha('c', 2), findings: 2, ids: ['C2-1', 'C2-2'] }],
+      lane: h.lane({ exitedAt: exited ? h.deps.timestamp() : null }),
+    });
+    const action = await drive(h, { until: (a) => a.wpId === wp.id && ['start', 'prompt'].includes(a.step) });
+    assert.equal(action.step, exited ? 'start' : 'prompt');
+    if (exited) {
+      h.tick(3600000);
+      await recordPending(h, await perform(h, action));
+      assert.equal(wp.lane.exitedAt, null);
+      assert.equal(wp.lane.startedAt, h.deps.timestamp());
+      assert.ok(Date.parse(wp.lane.deadline) > h.deps.now());
+      const prompt = await drive(h, { until: (a) => a.wpId === wp.id && a.step === 'prompt' });
+      assert.ok(prompt.command.includes('--amendment'));
+    }
+    assert.equal(of(h, wp.id).filter((a) => a.step === 'start').length, exited ? 1 : 0);
+  }
+});
+
 test('zero findings (D20): a post or a council synthesis with findings 0 goes straight to the rebase; findings null → an amendment brief', async (t) => {
   for (const council of [false, true]) {
     const h = harness(t, { council, wps: [TWO[0], { ...TWO[1], tier: council ? 'T2' : 'T1' }] });
