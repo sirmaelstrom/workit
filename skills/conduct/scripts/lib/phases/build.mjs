@@ -23,8 +23,9 @@ import { basename, dirname, join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
-import { chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
-import { deltaBaseline, verifyDeltaRecovery } from '../delta-recovery.mjs';
+import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
+import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
+import { briefPaths } from '../../../../../scripts/lane.mjs';
 import {
   councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
   recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
@@ -47,6 +48,7 @@ const UNCERTAIN_BLOCK = 3;
 const NO_CI_WINDOW_MS = 30 * 60000;
 const STALL_FAILS = 3;
 const STALL_MS = 30 * 60000;
+const REVIEW_STALL_MS = 75 * 60000;
 const ASK_MARKER = /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\([a-f]\)(?:\*\*|__)?\s*/i;
 const GUARD_VERDICTS = ['confirmed', 'refuted', 'judgment'];
 const FILL = { '{pr.number}': (wp) => wp.pr?.number, '{pr.head}': (wp) => wp.pr?.head, '{merge.sha}': (wp) => wp.merge?.sha };
@@ -58,7 +60,29 @@ const contractPath = (state) => join(state.runDir, '_lane-contract.md');
 const latestRound = (wp) => Math.max(0, ...(wp.reviews ?? []).map((review) => review.round ?? 0));
 const backendOf = (state, wp, deps) => laneBackend(state, deps, wp.lane?.backend ?? 'exec');
 function recoveryBaseline(state, wp, deps) {
-  try { return deltaBaseline(wp); }
+  try {
+    const review = (wp.reviews ?? []).at(-1);
+    if (review?.scope === 'full' && wp.deltaRecovery && wp.deltaRecovery.reviewedHead !== review.head) wp.deltaRecovery = null;
+    if (!wp.deltaRecovery && (wp.rebases ?? []).some((r) => r.from !== r.to) && review?.scope === 'full' && review.head !== wp.pr?.head) {
+      let proof;
+      try { proof = verifyDeltaRecovery(wp, review.head, deps); }
+      catch (error) { if (!(error instanceof ConductError)) throw error; }
+      proof ??= discoverDeltaRecovery(wp, deps);
+      if (!proof) {
+        const head = deps.exec('git', ['-C', wp.lane.worktree, 'rev-parse', 'HEAD']);
+        const dirty = deps.exec('git', ['-C', wp.lane.worktree, 'status', '--porcelain']);
+        if (head.code !== 0 || head.stdout.trim() !== wp.pr.head || dirty.code !== 0 || dirty.stdout.trim()) {
+          throw new ConductError(5, `${wp.id}: cannot review the rebased candidate until its worktree is clean and HEAD matches its recorded PR head`);
+        }
+        wp.fullReviewOwed = { head: wp.pr.head, reason: 'no verified reviewed prefix after the rebase' };
+        appendEvent(state, deps, { event: 'full-review-owed', data: { wpId: wp.id, ...wp.fullReviewOwed } });
+        return null;
+      }
+      wp.deltaRecovery = proof;
+      appendEvent(state, deps, { event: 'delta-baseline-mapped', data: { wpId: wp.id, ...proof } });
+    }
+    return deltaBaseline(wp);
+  }
   catch (error) {
     if (!(error instanceof ConductError)) throw error;
     block(state, wp, deps, error.message);
@@ -241,13 +265,30 @@ function amendmentBrief(state, wp, amendment) {
   const marker = `Amendment ${amendment.n}: ${amendment.retryReason ?? amendment.reason}`;
   return {
     kind: 'author', step: 'brief', part: 'amendment', outPath, amendment, marker, expects: { type: 'file' },
-    instruction: `Rewrite ${outPath} as amendment ${amendment.n} for ${wp.id}'s lane (same worktree, same report ${laneLayout(state, wp).reportPath}): ${retry}${AMEND_TEXT[kind](amendment)} The lane appends ## Amendment ${amendment.n} to its report (lane contract § Finish, step 4). Start the file with this line, verbatim: ${marker}. Record {}.`,
+    instruction: `Rewrite ${outPath} as amendment ${amendment.n} for ${wp.id}'s lane (same worktree, same report ${laneLayout(state, wp).reportPath}): ${retry}${AMEND_TEXT[kind](amendment)} Keep question and option text unchanged under Needs conductor; record resolutions on a separate indented Resolution: line. The lane appends ## Amendment ${amendment.n} to its report (lane contract § Finish, step 4). Start the file with this line, verbatim: ${marker}. Record {}.`,
   };
 }
 
 // An ask is a question and one of its options: the same option text under a
 // different question is a different ask.
-const askId = (ask) => `${ask.question ?? ''}\n${ask.text}`;
+// Resolution annotations are presentation, not a new question. Preserve the
+// old identity format so already-recorded rulings remain usable on resume.
+function askText(text) {
+  let line = text.replace(/\*\*/g, '').replace(/\s*\[resolved[^\]]*\]/gi, '').replace(/\s*\(resolved[^)]*\)/gi, '').trim();
+  const annotation = /^(\d+[.)]\s+)?Resolved by amendment \d+\b/i.exec(line);
+  if (!annotation) return line;
+  let tail = line.slice(annotation[0].length).trimStart();
+  if (tail.startsWith('(')) {
+    let depth = 0;
+    for (let i = 0; i < tail.length; i++) {
+      if (tail[i] === '(') depth++;
+      if (tail[i] === ')' && --depth === 0) { tail = tail.slice(i + 1); break; }
+    }
+  }
+  return `${annotation[1] ?? ''}${tail.replace(/^[\s:.—-]+/, '')}`;
+}
+export const askId = (ask) => `${ask.question ?? ''}\n${ask.text}`.split('\n').map(askText).join('\n').trim();
+const askRuled = (wp, ask) => (wp.ruledAsks ?? []).some((id) => askId({ text: id }) === askId(ask));
 
 // A ruling on a lane's asks (part ask) or on a guard row (part guard, D20).
 function rulingAction(state, wp, { asks = null, row = null }) {
@@ -895,7 +936,7 @@ function expand(state, wp, deps) {
     case 'checked': {
       // A passing report's `## Needs conductor` asks are ruled before review or
       // adjudication, one question per ruling.
-      const open = (wp.asks ?? []).filter((ask) => !(wp.ruledAsks ?? []).includes(askId(ask)));
+      const open = (wp.asks ?? []).filter((ask) => !askRuled(wp, ask));
       if (open.length) return go([rulingAction(state, wp, { asks: open.filter((ask) => (ask.question ?? null) === (open[0].question ?? null)) })], 'checked');
       const findings = Boolean(wp.reviews?.length && wp.owed?.adjudicate);
       if (findings && !adjudicate(state, wp, deps)) return undefined;
@@ -925,6 +966,7 @@ function expand(state, wp, deps) {
       const review = (wp.reviews ?? []).at(-1);
       const since = recoveryBaseline(state, wp, deps);
       if (wp.state === 'blocked') return undefined;
+      if (wp.fullReviewOwed) return go([prDiff(state)], null);
       if (!since || since === wp.pr?.head || review.scope !== 'full') return go([], 'land');
       return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
     }
@@ -1166,7 +1208,11 @@ function alarm(state, wp, deps, why) {
       args: { event_type: 'note', source: 'cli', user_id: deps.env?.WORKIT_LEDGER_USER || 'conduct', payload: { content: text } },
       instruction: 'Call ledger_write with these args and record its raw result.' });
   }
-  wp.queue = [...out, ...(wp.queue ?? [])];
+  const queue = wp.queue ?? [];
+  // A pending action must remain at the head until its result is recorded.
+  // Polling it can enqueue alarms, but cannot displace or replay that work.
+  const at = state.pending?.wpId === wp.id ? Math.min(1, queue.length) : 0;
+  wp.queue = [...queue.slice(0, at), ...out, ...queue.slice(at)];
 }
 
 // A non-zero exit is a failure unless it printed a verdict: JSON with no
@@ -1207,11 +1253,23 @@ function failStreak(state, wp, action, result, deps, stateBefore) {
 
 // A WP with work queued, or live, whose state and stage have not moved for
 // STALL_MS. A lane at work (a lane poll queued) is left to the lane deadline.
+export function observePending(state, deps) { watchStalls(state, deps); }
 function watchStalls(state, deps) {
   const now = deps.now();
   for (const wp of state.wps) {
     const watched = LIVE_STATES.includes(wp.state) || Boolean(wp.queue?.length);
-    const at = `${wp.state}|${wp.stage ?? ''}`;
+    const head = wp.queue?.[0];
+    const reviewing = ['review', 'council'].includes(head?.step);
+    let seats = '';
+    if (head?.step === 'council' && head.part === 'review' && head.args?.output_dir) {
+      try {
+        const progress = JSON.parse(readText(deps, join(head.args.output_dir, 'review-progress.json')));
+        // Starting or finishing a seat advances progress; a capacity wait and
+        // the model run each get their deadline. Heartbeats never extend it.
+        seats = Object.entries(progress.seats ?? {}).map(([name, seat]) => `${name}:${seat.status}:${seat.startedAt ?? ''}`).sort().join(',');
+      } catch { /* A consumer without progress artifacts uses the action clock. */ }
+    }
+    const at = `${wp.state}|${wp.stage ?? ''}${reviewing ? `|${head.step}|${head.part ?? ''}|${head.command?.join(' ') ?? head.tool ?? ''}|${seats}` : ''}`;
     const laneAtWork = Boolean(wp.queue?.some((action) => action.step === 'wait'));
     if (!watched || wp.progress?.at !== at || laneAtWork) {
       wp.progress = watched ? { at, since: new Date(now).toISOString() } : null;
@@ -1220,7 +1278,8 @@ function watchStalls(state, deps) {
     }
     if (wp.stall) continue;
     const still = now - Date.parse(wp.progress.since);
-    if (still >= STALL_MS) alarm(state, wp, deps, `no state or stage change for ${Math.round(still / 60000)} minutes (${wp.state}${wp.stage ? ` at ${wp.stage}` : ''})`);
+    const limit = reviewing ? REVIEW_STALL_MS : STALL_MS;
+    if (still >= limit) alarm(state, wp, deps, `no state or stage change for ${Math.round(still / 60000)} minutes (${wp.state}${wp.stage ? ` at ${wp.stage}` : ''})${reviewing ? `; waiting on ${head.step}/${head.part ?? ''}` : ''}`);
   }
 }
 
@@ -1401,7 +1460,7 @@ function recordRuling(state, wp, action, deps) {
   // Every open question is ruled before the lane hears any of them: its next
   // report may not repeat a question it is still waiting on.
   const ruling = { file, ruled: value.ruled, evidence: value.evidence, question: asks?.[0]?.question ?? null };
-  if ((wp.asks ?? []).some((ask) => !(wp.ruledAsks ?? []).includes(askId(ask)))) {
+  if ((wp.asks ?? []).some((ask) => !askRuled(wp, ask))) {
     wp.heldRulings = [...(wp.heldRulings ?? []), ruling];
     return undefined;
   }
@@ -1428,6 +1487,13 @@ function recordOwn(state, wp, action, result, deps) {
       if (!deps.exists(action.outPath)) throw new ConductError(2, `the brief ${action.outPath} was not written`);
       if (action.marker && !(readText(deps, action.outPath) ?? '').includes(action.marker)) {
         throw new ConductError(2, `the brief ${action.outPath} does not carry amendment ${action.amendment.n}'s marker line: ${action.marker}`);
+      }
+      {
+        const roots = [wp.lane.worktree];
+        if (basename(dirname(wp.lane.worktree)) === 'projects') roots.push(dirname(dirname(wp.lane.worktree)));
+        const missing = briefPaths(readText(deps, action.outPath) ?? '').filter((path) => !covered(allowedMissing(state, wp), path)
+          && !roots.some((root) => deps.exists(join(root, path))));
+        if (missing.length) throw new ConductError(2, `brief preflight: paths not found: ${missing.join(', ')}. Correct the repo-relative paths in ${action.outPath}, or declare intentionally created files as Create paths. Record this same author action again; the lane has not been prompted.`);
       }
       return ok();
     case 'ruling': return recordRuling(state, wp, action, deps) ?? true;
@@ -1485,6 +1551,7 @@ function recordOwn(state, wp, action, result, deps) {
       if (action.part === 'amend-diff') {
         const since = recoveryBaseline(state, wp, deps);
         if (wp.state === 'blocked') return true;
+        if (wp.fullReviewOwed) return (wp.stage = 'delta');
         // A saved action from an older conductor may have diffed from a
         // later amendment. Recompute the range rather than trust its result.
         if (action.command.at(-2) !== since) return (wp.stage = 'delta');
@@ -1499,6 +1566,8 @@ function recordOwn(state, wp, action, result, deps) {
       const config = repoConfig(state, deps);
       wp.changedPaths = changed;
       wp.tier = tierFor(wp, changed, Array.isArray(config.contractPaths) ? config.contractPaths : []);
+      if (wp.fullReviewOwed && effectiveTier(wp) === 'T0') wp.tier = 'T1';
+      wp.fullReviewOwed = null;
       if (effectiveTier(wp) === 'T0') return (wp.stage = 'land');
       setState(state, wp, 'review', null, deps);
       const round = latestRound(wp) + 1;

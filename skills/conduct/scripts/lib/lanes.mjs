@@ -794,9 +794,10 @@ function checkLane(state, wp, flags, deps) {
     const ahead = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'rev-list', '--count', `${wp.lane?.base}..HEAD`]);
     if (ahead.code !== 0 || !(Number(ahead.stdout.trim()) >= 1)) failures.push(`the branch has no commit past base ${wp.lane?.base} (${ahead.code === 0 ? `${ahead.stdout.trim()} commits` : said(ahead)})`);
     // The lane contract's evidence rules, against the report and the lane's diff.
-    const diff = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'diff', '--no-color', '--no-ext-diff', '--no-renames', `${wp.lane?.base}...HEAD`]);
+    const diff = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', `${wp.lane?.base}...HEAD`]);
     if (diff.code !== 0) failures.push(`the evidence checks did not run: git diff from base ${wp.lane?.base}: ${said(diff)}`);
-    failures.push(...reportEvidenceProblems(text, { diff: diff.code === 0 ? diff.stdout : null, reportPath: lane.reportPath, exists: deps.exists }));
+    failures.push(...reportEvidenceProblems(text, { diff: diff.code === 0 ? diff.stdout : null, reportPath: lane.reportPath, exists: deps.exists,
+      readSource: (_file, blob) => { if (!blob) return null; const source = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'show', blob]); return source.code === 0 ? source.stdout : null; } }));
     if (flags.pr !== undefined) {
       if (!/^\d+$/.test(String(flags.pr))) return reply(2, { ok: false, error: `--pr needs a PR number, got ${flags.pr}` });
       const view = deps.exec('gh', ['pr', 'view', String(flags.pr), '--repo', state.intent.repo.remote, '--json', 'headRefName,state,body']);

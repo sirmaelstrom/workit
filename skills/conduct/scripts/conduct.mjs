@@ -35,6 +35,8 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   analyze --run <dir>
   ratify --run <dir> --wp <id> --paths <path,path> --why <text>
   reset-wp --run <dir> --wp <id> --to check|checked|prompt|wait|land|delta [--baseline <sha>] --why <text>
+  ci-checks --run <dir> --wp <id> --head <sha> --checks <name,name> --why <text>
+  upgrade-root --run <dir> --why <text> (invoke from destination root at an author/wait action)
   lane <spawn|alive|check|reap> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]`;
 
@@ -43,7 +45,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline']);
+  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -108,7 +110,13 @@ function stamp(state, spec) {
 // The pending action, or the current phase's next one. A handler that changes
 // the phase without an action hands over to the next phase's handler.
 async function emit(state, deps) {
-  if (state.pending) return state.pending;
+  if (state.pending) {
+    if (state.phase === 'build') {
+      const build = await loadModule(deps, 'lib/phases/build.mjs', 'phase handler build');
+      if (build.observePending) { build.observePending(state, deps); saveState(state, deps); }
+    }
+    return state.pending;
+  }
   for (let hop = 0; hop < 8; hop += 1) {
     if (TERMINAL_PHASES.includes(state.phase)) return { kind: 'done', phase: state.phase };
     const handler = await loadModule(deps, `lib/phases/${state.phase}.mjs`, `phase handler ${state.phase}`);
@@ -449,6 +457,60 @@ async function resetWpVerb(tokens, deps) {
   });
 }
 
+async function ciChecksVerb(tokens, deps) {
+  const flags = parseFlags(tokens);
+  const wpId = stringFlag(flags, 'wp'), head = stringFlag(flags, 'head'), why = stringFlag(flags, 'why');
+  const names = stringFlag(flags, 'checks').split(',').map((s) => s.trim());
+  if (!/^[a-f0-9]{40}$/i.test(head) || names.some((name) => !name) || new Set(names).size !== names.length) throw new ConductError(2, 'ci-checks needs a full head SHA and distinct non-empty check names');
+  return transact(flags, deps, (state) => {
+    const wp = state.wps.find((item) => item.id.toLowerCase() === wpId.toLowerCase());
+    if (!wp || wp.pr?.head !== head || !['blocked', 'held', 'gate', 'pr'].includes(wp.state)) throw new ConductError(5, 'ci-checks: WP must be at landing or held, with that recorded PR head');
+    wp.ciCheckPolicy = { head, names, why, at: deps.timestamp() };
+    appendEvent(state, deps, { event: 'ci-check-policy', data: { wpId: wp.id, ...wp.ciCheckPolicy } });
+    saveState(state, deps);
+    return { out: { ok: true, wpId: wp.id, policy: wp.ciCheckPolicy, next: 'Reset a blocked WP --to land to re-run its gate. Readable branch protection always takes precedence.' } };
+  });
+}
+
+async function upgradeRootVerb(tokens, deps) {
+  const flags = parseFlags(tokens), why = stringFlag(flags, 'why'), runDir = runDirFlag(flags);
+  return withStateLock(runDir, deps, () => {
+    const state = loadState(runDir, deps);
+    if (state.pending && !['author', 'wait'].includes(state.pending.kind)) throw new ConductError(5, `upgrade-root: record pending action ${state.pending.id} first; executable actions cannot be migrated safely (upgrade at an author or wait action)`);
+    if (state.pluginRoot === deps.pluginRoot) return { out: { ok: true, unchanged: true, pluginRoot: state.pluginRoot } };
+    const from = state.pluginRoot;
+    for (const file of ['scripts/lane.mjs', 'skills/conduct/scripts/conduct.mjs', 'skills/slim-review/scripts/pr-review.mjs']) {
+      if (!deps.exists(join(deps.pluginRoot, file))) throw new ConductError(4, `upgrade-root: destination lacks ${file}`);
+    }
+    const snapshot = join(runDir, `state.before-upgrade-${deps.timestamp().replace(/[:.]/g, '-')}.json`);
+    if (deps.exists(snapshot)) throw new ConductError(2, 'upgrade-root: snapshot already exists; retry');
+    deps.write(snapshot, deps.read(statePath(runDir)));
+    const migrate = (value) => {
+      if (typeof value === 'string') {
+        const root = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return value.replace(new RegExp(`${root}(?=$|[\\\\/\\s'"\x60),])`, 'g'), () => deps.pluginRoot);
+      }
+      if (Array.isArray(value)) return value.map(migrate);
+      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, migrate(item)]));
+      return value;
+    };
+    // Only executable queues and the contract use root paths; historical
+    // review/ruling receipts retain their original provenance.
+    for (const wp of state.wps) {
+      wp.queue = migrate(wp.queue ?? []);
+      if (wp.owed?.queue) wp.owed.queue = migrate(wp.owed.queue);
+    }
+    if (state.release?.queue) state.release.queue = migrate(state.release.queue);
+    state.pending = migrate(state.pending);
+    if (state.build?.contract) state.build.contract = migrate(state.build.contract);
+    state.pluginRoot = deps.pluginRoot;
+    state.handover = { ...(state.handover ?? {}), pluginUpgrade: { from, to: deps.pluginRoot, why, at: deps.timestamp() } };
+    appendEvent(state, deps, { event: 'plugin-upgraded', data: { from, to: deps.pluginRoot, why, snapshot } });
+    saveState(state, deps);
+    return { out: { ok: true, snapshot, pluginRoot: state.pluginRoot, next: `Use ${join(state.pluginRoot, 'skills/conduct/scripts/conduct.mjs')} for every subsequent verb. Drivers must resolve state.pluginRoot on each invocation.` } };
+  });
+}
+
 // The answer adapter's lookup and wait (lib/answer.mjs): read-only, unlocked.
 async function awaitAnswerVerb(tokens, deps) {
   const module = await loadModule(deps, 'lib/answer.mjs', 'module');
@@ -457,6 +519,7 @@ async function awaitAnswerVerb(tokens, deps) {
 
 const VERBS = {
   intake, next, record, answer, status, analyze, 'await-answer': awaitAnswerVerb, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
+  'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb,
   lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
 };

@@ -15,6 +15,43 @@ import {
 // `--live` and an entry-point check.
 import { listsWorktree, s1Verdict, s2Verdict, stimulusFired, teardownSteps } from './lane-smoke.mjs';
 
+test('Shopfloor Rust comments and JS quoted examples are not executable JavaScript tests', () => {
+  const diff = (file, rows) => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -0,0 +1,${rows.length} @@\n${rows.map((s) => `+${s}`).join('\n')}\n`;
+  assert.deepEqual(reportEvidenceProblems('', { diff: diff('tests/explain.rs', ['/// returns it (`tsx` in the old notes)', '/// sealing it (`explain.test.ts:79-88`)']) }), []);
+  const js = diff('src/a.test.ts', ['// it("comment example", () => {});', '/* test("block example", () => {}); */', 'const prose = \'it("string example", fn)\';', 'test("real regression", () => {});']);
+  const problems = reportEvidenceProblems('', { diff: js });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /1 new test\(s\).*real regression/);
+  const commentContext = 'diff --git a/src/a.test.ts b/src/a.test.ts\n--- a/src/a.test.ts\n+++ b/src/a.test.ts\n@@ -1,2 +1,4 @@\n /*\n+it("documentation only", fn)\n */\n+test("real after comment", fn)\n';
+  const withContext = reportEvidenceProblems('', { diff: commentContext });
+  assert.equal(withContext.length, 1);
+  assert.match(withContext[0], /1 new test\(s\).*real after comment/);
+  const middle = diff('src/a.test.ts', ['it("inside unseen comment", fn)']);
+  assert.deepEqual(reportEvidenceProblems('', { diff: middle, readSource: () => '/*\nit("inside unseen comment", fn)\n*/' }), []);
+  const regex = diff('src/a.test.ts', ['const matcher = /it("documentation only", fn)/;', "const apostrophe = /'/;", 'test("after regex", fn);']);
+  assert.match(reportEvidenceProblems('', { diff: regex }).join(), /1 new test\(s\).*after regex/);
+});
+
+test('copied amendment rows retain their earlier controls and explicit citations compose', () => {
+  const row = '| C1-1 | fixed | NC1 | abcdef1 |';
+  const table = '| Comment | Verdict | Evidence | Commit |\n|---|---|---|---|\n';
+  const first = `## Amendment 1\n${table}${row}\n\n### Negative controls\n\n**NC1: C1-1 guard removed**\n\n\`\`\`\nFAIL regression\n\`\`\`\n`;
+  assert.deepEqual(reportEvidenceProblems(`${first}\n## Amendment 2\n${table}${row}\n`), []);
+  assert.deepEqual(reportEvidenceProblems(`${first}\n## Amendment 2\n${table}| C1-1 | fixed | NC1 measured the failure; abbreviated prose | abcdef1 |\n`), []);
+  assert.match(reportEvidenceProblems(`${first}\n## Amendment 2\n${table}| C1-1 | fixed | NC1 and NC2 | abcdef1 |\n`).join(), /fixed row C1-1 has no control/);
+  assert.deepEqual(reportEvidenceProblems(`${first}\n## Amendment 2\n${table}| C1-1 | fixed | Amendment 1 NC1 | bcdef12 |\n`), []);
+  assert.match(reportEvidenceProblems(`${first}\n## Amendment 2\n${table}| C1-1 | fixed | NC1 | bcdef12 |\n`).join(), /fixed row C1-1 has no control/);
+});
+
+test('added text resembling a diff header cannot replace another file source blob', () => {
+  const a = 'a'.repeat(40), b = 'b'.repeat(40), old = 'c'.repeat(40);
+  const diff = `diff --git a/tests/a.test.js b/tests/a.test.js\nindex ${old}..${a} 100644\n--- a/tests/a.test.js\n+++ b/tests/a.test.js\n@@ -0,0 +1 @@\n+test("real a", fn);\ndiff --git a/tests/b.test.js b/tests/b.test.js\nindex ${old}..${b} 100644\n--- a/tests/b.test.js\n+++ b/tests/b.test.js\n@@ -0,0 +1,3 @@\n+/*\n+++ b/tests/a.test.js\n+*/\n`;
+  const reads = [];
+  const problems = reportEvidenceProblems('', { diff, readSource: (file, blob) => { reads.push([file, blob]); return blob === a ? 'test("real a", fn);' : '/*\n++ b/tests/a.test.js\n*/'; } });
+  assert.match(problems.join(), /1 new test\(s\).*real a/);
+  assert.equal(reads.find(([file]) => file === 'tests/a.test.js')[1], a);
+});
+
 // Every fixture path is built from tmpdir with path.join, and every
 // platform-dependent branch is chosen through deps — the suite gates merge from
 // a Linux runner, so a Windows-shaped literal here is a broken gate there.
@@ -4233,7 +4270,7 @@ test('207dbaf1 / C3: --expect-report exits 5 naming a missing Debrief heading; N
   assert.deepEqual(green.output.evidence.problems, []);
   // The only call is the lane's diff from its base, for the evidence checks (e4ad108b).
   // Three dots: a base ref that moved on after the lane started adds nothing (council round 1).
-  assert.deepEqual(f.calls.map((call) => [call.program, ...call.args]), Array(2).fill(['git', '-C', f.dir, 'diff', '--no-color', '--no-ext-diff', '--no-renames', 'main...feat/lane-a']));
+  assert.deepEqual(f.calls.map((call) => [call.program, ...call.args]), Array(2).fill(['git', '-C', f.dir, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', 'main...feat/lane-a']));
   assert.equal(green.output.evidence.diffChecks, 'ran');
 
   // The diff checks' other branches (council round 1): no base on the record skips them and says so;

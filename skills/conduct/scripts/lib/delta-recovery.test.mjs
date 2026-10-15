@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git } from '../../../slim-review/scripts/__fixtures__/git-gh.mjs';
 import { gitPatchId } from '../../../slim-review/scripts/pr-review-rounds.mjs';
-import { deltaBaseline, verifyDeltaRecovery } from './delta-recovery.mjs';
+import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from './delta-recovery.mjs';
+import { next as buildNext, record as buildRecord } from './phases/build.mjs';
+import { recordRebase, gateCheck, recordLandStep } from './land.mjs';
 
 const text = (tag) => Array.from({ length: 15 }, (_, i) => `${tag} line ${i + 1}`).join('\n') + '\n';
 function commit(dir, message) {
@@ -66,6 +68,81 @@ test('delta reset maps a rebased reviewed prefix and leaves the executable fixes
   assert.equal(JSON.stringify(h.wp), before, 'verification changes no run state');
   assert.deepEqual(git(h.dir, ['diff', '--name-only', proof.baseline, h.head]).trim().split('\n'), ['README.md', 'b.txt']);
   assert.equal(deltaBaseline({ ...h.wp, deltaRecovery: proof }), h.baseline);
+});
+
+test('automatic mapping discovers only the verified reviewed prefix after a rebase', () => {
+  const h = scenario();
+  assert.equal(discoverDeltaRecovery(h.wp, h.deps).baseline, h.baseline);
+  const changed = scenario({ changedParent: true });
+  assert.equal(discoverDeltaRecovery(changed.wp, changed.deps), null);
+});
+
+test('the build requests a full review after a changed-parent rebase instead of dispatching an unproved delta', () => {
+  const h = scenario({ changedParent: true });
+  Object.assign(h.wp, { state: 'pr', stage: 'delta', queue: [], files: ['a.txt', 'b.txt'], lane: { ...h.wp.lane, backend: 'exec', exitedAt: new Date().toISOString() } });
+  const state = { phase: 'build', runDir: h.dir, pluginRoot: h.dir, slug: 'mapping-control', wps: [h.wp], touches: [], adapters: {},
+    intent: { agent: 'codex', repo: { path: h.dir, remote: 'test/test', defaultBranch: 'main' }, lanesCap: 1 }, authority: { budgetUsd: 1000 }, build: { contract: 'fixture', halts: [] } };
+  const deps = { ...h.deps, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => false };
+  const action = buildNext(state, deps);
+  assert.equal(action.step, 'review');
+  assert.equal(action.part, 'diff');
+  assert.match(h.wp.fullReviewOwed.reason, /no verified reviewed prefix/);
+  assert.equal(h.wp.deltaRecovery, undefined);
+  buildRecord(state, action, { code: 0, stdout: 'a.txt\nb.txt\n', stderr: '' }, deps);
+  assert.equal(h.wp.state, 'review');
+  assert.equal(h.wp.stage, 'reviewed');
+  assert.equal(h.wp.queue.some((item) => item.land?.scope === 'delta'), false);
+  assert.ok(h.wp.queue.length > 0);
+});
+
+test('a later full review retires the old rebase proof before reviewing its own tail', () => {
+  const h = scenario();
+  h.wp.deltaRecovery = verifyDeltaRecovery(h.wp, h.baseline, h.deps);
+  const currentReview = git(h.dir, ['rev-parse', 'HEAD~1']).trim();
+  h.wp.reviews.push({ scope: 'full', head: currentReview, round: 3 });
+  Object.assign(h.wp, { state: 'pr', stage: 'delta', queue: [], files: ['a.txt', 'b.txt'], lane: { ...h.wp.lane, backend: 'exec', exitedAt: new Date().toISOString() } });
+  const state = { phase: 'build', runDir: h.dir, pluginRoot: h.dir, slug: 'mapping-control', wps: [h.wp], touches: [], adapters: {},
+    intent: { agent: 'codex', repo: { path: h.dir, remote: 'test/test', defaultBranch: 'main' }, lanesCap: 1 }, authority: { budgetUsd: 1000 }, build: { contract: 'fixture', halts: [] } };
+  const action = buildNext(state, { ...h.deps, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => true });
+  assert.equal(action.part, 'amend-diff');
+  assert.equal(action.command.at(-2), currentReview);
+  assert.equal(h.wp.deltaRecovery.reviewedHead, currentReview);
+  assert.equal(h.wp.deltaRecovery.kind, 'ancestor');
+});
+
+test('landing revalidates legacy patch-only receipts and sends a changed-parent rebase to full review', () => {
+  for (const changedParent of [false, true]) {
+    const h = scenario({ changedParent });
+    git(h.dir, ['update-ref', 'refs/remotes/origin/main', h.newBase]);
+    const receipt = recordRebase({}, { ...h.wp, rebases: [] }, { from: h.from, to: h.head, newBase: h.newBase }, h.deps);
+    assert.equal(receipt.equivalent, !changedParent);
+    const wp = { ...h.wp, tier: 'T1', state: 'gate', files: ['a.txt', 'b.txt', 'README.md'], queue: [],
+      reviews: [{ scope: 'full', round: 1, head: h.from, verdicts: [], resolved: [] }],
+      // A saved pre-fix run claims equivalence using patch IDs alone.
+      rebases: [{ ...receipt, equivalent: true, equivalenceProof: undefined }] };
+    const state = { runDir: h.dir, pluginRoot: h.dir, intent: { repo: { path: h.dir, remote: 'test/test', defaultBranch: 'main' } },
+      authority: { merge: true }, adapters: {}, mergeLock: { wpId: wp.id }, wps: [wp] };
+    const ok = (value = '') => ({ code: 0, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr: '' });
+    const exec = (program, args, options) => {
+      if (program === 'git') return args[2] === 'fetch' ? ok() : h.deps.exec(program, args, options);
+      if (program === 'node') return ok();
+      assert.equal(program, 'gh');
+      if (args[0] === 'pr') return ok({ headRefOid: h.head, baseRefName: 'main', state: 'OPEN', body: '## Merge danger\n\nDoor: two-way\nBlast radius: fixture\n' });
+      if (args[1].includes('/check-runs')) return ok({ total_count: 1, check_runs: [{ id: 1, name: 'proof', status: 'completed', conclusion: 'success' }] });
+      if (args[1].includes('/status?')) return ok({ total_count: 0, statuses: [] });
+      if (args[1].includes('/required_status_checks')) return ok({ contexts: ['proof'], checks: [] });
+      throw new Error(`unexpected mocked remote call ${args.join(' ')}`);
+    };
+    const verdict = gateCheck(state, wp, { exec, now: Date.now });
+    assert.equal(verdict.ok, !changedParent, JSON.stringify(verdict));
+    if (changedParent) {
+      assert.equal(verdict.needsFullReview, true);
+      const out = recordLandStep(state, wp, { step: 'gate', part: 'gate', kind: 'shell' }, { code: 5, stdout: JSON.stringify(verdict), stderr: '' }, { exec });
+      assert.equal(out.outcome, 'continue');
+      assert.ok(out.patch.queue.some((action) => action.step === 'review'));
+      assert.equal(out.patch.queue.some((action) => action.land?.scope === 'delta'), false);
+    }
+  }
 });
 
 test('delta reset cannot advance the baseline past an unreviewed fix or select the candidate itself', () => {

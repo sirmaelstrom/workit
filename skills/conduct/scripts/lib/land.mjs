@@ -35,6 +35,7 @@ import { createHash } from 'node:crypto';
 import { ConductError, STEP_SEAM, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
 import { mergeDanger } from '../../../../scripts/lane.mjs';
+import { patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-review/scripts/pr-review-rounds.mjs';
 
 const WAIT_MS = 60000;
 const PENDING_BLOCK_MS = 30 * 60000;
@@ -183,7 +184,7 @@ export function deltaReviewActions(state, wp, sinceHead, { report = null, change
   const latest = (wp.reviews ?? []).at(-1);
   const verified = latest?.scope === 'full' && recovery?.reviewedHead === latest.head
     && recovery?.baseline === sinceHead && recovery?.head === wp.pr.head;
-  if (!verified && (wp.rebases ?? []).some((rebase) => rebase.from === sinceHead && rebase.from !== rebase.to)) {
+  if (!verified && (wp.rebases ?? []).some((rebase) => rebase.from !== rebase.to)) {
     throw new ConductError(2, `${wp.id}: no delta review after a rebase (${sinceHead.slice(0, 7)} is not an ancestor of the rebased head); a full review is owed`);
   }
   const round = latestRound(wp) + 1;
@@ -230,24 +231,29 @@ const TABLE_HEADER = /^\|\s*Comment\s*\|\s*Verdict\s*\|\s*Evidence\s*\|\s*Commit
 
 // The rows of an `## Amendment N` table, which ends at the first line after its
 // header that is not a table row. Without `since`, the latest section's table;
-// with it, the table of the latest section numbered `since` or later that has
-// one, so an amendment that only fixed a check (no table) does not hide the
-// findings table before it, and a table from an earlier round never answers.
+// with it, compose tables numbered `since` or later by finding id. A later
+// ruling replaces only its own row; an earlier round never answers this one.
 // A table quoted inside a code fence is never the table.
 export function parseAmendmentTable(reportText, { since = null } = {}) {
   const headerAt = (section) => section.lines.findIndex((line) => !line.fenced && TABLE_HEADER.test(line.text.trim()));
   const sections = amendmentSections(reportText);
   const candidates = since === null ? sections.slice(-1) : sections.filter((section) => section.n >= since && headerAt(section) >= 0);
-  const section = candidates.at(-1);
-  if (!section) return [];
-  const header = headerAt(section);
-  if (header < 0) return [];
   const body = [];
-  for (const { text: line, fenced } of section.lines.slice(header + 1)) {
+  for (const section of candidates) {
+   const header = headerAt(section);
+   if (header < 0) continue;
+   const rows = [];
+   for (const { text: line, fenced } of section.lines.slice(header + 1)) {
     if (fenced || !line.trim().startsWith('|')) break;
     if (/^\|[\s:|-]+\|$/.test(line.trim())) continue;
     const [comment, verdict, evidence, commit] = splitRow(line);
-    body.push({ comment, verdict: String(verdict ?? '').toLowerCase(), evidence: evidence ?? '', commit: rowCommits(commit)?.join(',') ?? null });
+    rows.push({ comment, verdict: String(verdict ?? '').toLowerCase(), evidence: evidence ?? '', commit: rowCommits(commit)?.join(',') ?? null });
+   }
+   // Replace earlier answers by finding id, but preserve duplicates within
+   // one table so the adjudication validator can reject ambiguity.
+   const ids = new Set(rows.map((row) => String(row.comment).replace(/^#/, '')));
+   for (let i = body.length - 1; i >= 0; i--) if (ids.has(String(body[i].comment).replace(/^#/, ''))) body.splice(i, 1);
+   body.push(...rows);
   }
   return body;
 }
@@ -268,7 +274,8 @@ export function recordAdjudication(state, wp, verdicts) {
     if (row.verdict === 'fixed' && !rowCommits(row.commit)) throw new ConductError(2, `comment ${comment}: a fixed row needs its commit sha (several are comma-separated)`);
     return { comment, verdict: row.verdict, evidence: row.evidence ?? '', commit: row.commit ?? null, ...(row.adjudicator ? { adjudicator: row.adjudicator } : {}) };
   });
-  const latest = { ...reviews.at(-1), verdicts: [...(reviews.at(-1).verdicts ?? []), ...rows] };
+  const replaced = new Set(rows.map((row) => row.comment));
+  const latest = { ...reviews.at(-1), verdicts: [...(reviews.at(-1).verdicts ?? []).filter((row) => !replaced.has(row.comment)), ...rows] };
   // Council ids have no PR thread; conductor rows go to a ruling first.
   const replyRows = rows.filter((row) => /^\d+$/.test(row.comment) && row.verdict !== 'conductor');
   const replies = join(reviewsDir(state, wp), 'replies');
@@ -357,20 +364,58 @@ export function rebaseActions(state, wp) {
 // A whitespace-preserving id of the WP's diff, from output git does not
 // colour or transform. An empty id for a non-empty diff is unreadable (null).
 function patchId(wt, a, b, exec) {
-  const diff = exec('git', ['-C', wt, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', a, b]);
-  if (diff.code !== 0) return null;
-  if (diff.stdout === '') return '';
+  const diff = exec('git', ['-C', wt, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--full-index', a, b]);
+  if (diff.code !== 0) return { id: null, diff: null };
+  if (diff.stdout === '') return { id: '', diff: '' };
   const id = exec('git', ['-C', wt, 'patch-id', '--verbatim'], { input: diff.stdout });
   const value = id.code === 0 ? id.stdout.trim().split(/\s+/)[0] ?? '' : '';
-  return value === '' ? null : value;
+  return { id: value === '' ? null : value, diff: diff.stdout };
 }
 
-// Equal verbatim patch-ids mean the review of `from` covers `to` (D13, with
-// whitespace kept). An unreadable id is never equivalent.
+function measureRebase(wt, { from, to, oldBase, newBase }, exec) {
+  const before = patchId(wt, oldBase, from, exec), after = patchId(wt, newBase, to, exec);
+  const ids = { from: before.id, to: after.id };
+  let placeHash = null;
+  if (ids.from !== null && ids.from === ids.to) {
+    if (before.diff === '' && after.diff === '') placeHash = createHash('sha256').update('').digest('hex');
+    else if (/^diff --git /m.test(before.diff ?? '') && /^diff --git /m.test(after.diff ?? '')) {
+      const files = new Map();
+      const read = (path, ref) => {
+        const key = `${ref}:${path}`;
+        if (!files.has(key)) {
+          if (files.size >= REBASE_FILE_READ_CAP) throw new ConductError(5, 'rebase mapping file-read cap');
+          const result = exec('git', ['-C', wt, 'show', key]);
+          if (result.code !== 0) throw new ConductError(5, 'rebase mapping parent file unreadable');
+          files.set(key, result.stdout);
+        }
+        return files.get(key);
+      };
+      try {
+        const oldPlace = patchPlace(before.diff, oldBase, read), newPlace = patchPlace(after.diff, newBase, read);
+        if (oldPlace !== null && oldPlace === newPlace) placeHash = createHash('sha256').update(oldPlace).digest('hex');
+      } catch { /* Missing/ambiguous parent evidence requires a full review. */ }
+    }
+  }
+  return { from, to, oldBase, newBase, patchIds: ids, equivalent: from === to || placeHash !== null,
+    ...(placeHash ? { equivalenceProof: { version: 1, from, to, oldBase, newBase, placeHash } } : {}) };
+}
+
+// Patch identity alone does not preserve coverage when parent files changed.
 export function recordRebase(state, wp, { from, to, newBase }, deps) {
   const oldBase = (wp.rebases ?? []).at(-1)?.newBase ?? wp.lane.base;
-  const ids = { from: patchId(wp.lane.worktree, oldBase, from, deps.exec), to: patchId(wp.lane.worktree, newBase, to, deps.exec) };
-  return { from, to, oldBase, newBase, patchIds: ids, equivalent: ids.from !== null && ids.from === ids.to };
+  return measureRebase(wp.lane.worktree, { from, to, oldBase, newBase }, deps.exec);
+}
+
+function verifiedRebase(wp, rebase, exec) {
+  if (rebase.from === rebase.to) return { ...rebase, equivalent: true };
+  if (!rebase.equivalent) return rebase;
+  const proof = rebase.equivalenceProof;
+  if (proof?.version === 1 && /^[0-9a-f]{64}$/.test(proof.placeHash ?? '')
+    && ['from', 'to', 'oldBase', 'newBase'].every((key) => proof[key] === rebase[key])) return rebase;
+  if (!rebase.oldBase || !rebase.newBase) return { ...rebase, equivalent: false };
+  // Old runs have only a patch-id receipt. Re-prove its immutable Git objects
+  // before carrying coverage through it; never silently upgrade the receipt.
+  return measureRebase(wp.lane.worktree, rebase, exec);
 }
 
 // `gh api --paginate` prints one JSON object per page with nothing between
@@ -442,7 +487,7 @@ function readRuns(state, sha, exec) {
 // The checks the head must carry: the branch's required status checks (the
 // union of `contexts` and `checks`) when readable, else the names that ran on
 // the base commit.
-function expectedChecks(state, wt, exec) {
+function expectedChecks(state, wt, exec, wp, head) {
   const def = defaultOf(state);
   const required = exec('gh', ['api', `repos/${repoOf(state)}/branches/${encodeURIComponent(def)}/protection/required_status_checks`]);
   if (required.code === 0) {
@@ -455,6 +500,9 @@ function expectedChecks(state, wt, exec) {
     return { names: [...new Set([...contexts, ...checks.map((check) => check.context)])] };
   }
   if (!/HTTP 40[34]/.test(required.stderr)) return { failure: `required status checks unreadable: ${first(required.stderr)}` };
+  // Explicit migration policy is scoped to one WP/head. It cannot suppress
+  // any failed check, and never overrides readable branch protection.
+  if (wp.ciCheckPolicy?.head === head && wp.ciCheckPolicy.names?.length) return { names: wp.ciCheckPolicy.names };
   const base = exec('git', ['-C', wt, 'rev-parse', `origin/${def}`]);
   if (base.code !== 0) return { failure: `base commit unreadable: ${first(base.stderr)}` };
   const ran = readRuns(state, base.stdout.trim(), exec);
@@ -475,7 +523,7 @@ function ciCondition(state, wp, head, { exec, now }) {
   }
   const red = runs.filter((run) => !GREEN.has(run.conclusion));
   if (red.length) return { failure: `CI failed at head: ${red.map((run) => `${run.name} (${run.conclusion})`).join(', ')}`, cause: 'ci' };
-  const expected = expectedChecks(state, wp.lane.worktree, exec);
+  const expected = expectedChecks(state, wp.lane.worktree, exec, wp, head);
   if (expected.failure) return { failure: expected.failure, cause: 'infra' };
   const names = new Set(runs.map((run) => run.name));
   const absent = expected.names.filter((name) => !names.has(name));
@@ -620,7 +668,7 @@ function reviewCondition(wp, head, exec, notTrivial) {
   if (effectiveTier(wp) === 'T0') return { tail: `${wp.lane.base}..${head} (T0)` };
   const anchor = (wp.reviews ?? []).at(-1);
   if (!anchor) return { failure: 'no review of this WP', cause: 'review-uncovered' };
-  const rebases = wp.rebases ?? [];
+  const rebases = (wp.rebases ?? []).map((rebase) => verifiedRebase(wp, rebase, exec));
   if (rebases.filter((rebase) => !rebase.equivalent).length >= 2) return { failure: 'a second rebase changed the WP\'s diff: held for the operator', cause: 'tail-out-of-bounds' };
   if (anchor.head === head) return {};
   const changed = { failure: 'rebase changed the WP\'s diff: full review of the rebased head', cause: 'full-review', needsFullReview: true };
@@ -802,15 +850,26 @@ function recordCouncil(state, wp, action, r) {
   if (action.part === 'review') {
     const paths = action.args?.artifact_paths ?? [];
     if (!paths.length) return result('block', `council review round ${land.round} was dispatched with no artifact_paths: nothing to review`);
+    const previous = land.retry ? wp.councilStage : null;
     const seats = Object.entries(r.models ?? {}).filter(([, seat]) => seat?.status === 'success').map(([name]) => name);
-    if (r.error || !seats.length) return result('block', `council review round ${land.round} has no usable seat: ${r.error ?? 'every seat failed'}`);
+    if ((r.error || !seats.length) && !previous?.seats?.length) return result('block', `council review round ${land.round} has no usable seat: ${r.error ?? 'every seat failed'}`);
     // Delta only when the dispatched review carried the delta diff.
     const scope = land.scope === 'delta' && land.deltaDiff && paths.includes(land.deltaDiff) ? 'delta' : 'full';
-    return result('continue', null, { councilStage: { round: land.round, usable: seats.length, seats, scope } });
+    const usable = [...new Set([...(previous?.seats ?? []), ...seats])];
+    const requested = [...new Set([...(previous?.requested ?? []), ...(action.args.models ?? []), ...Object.keys(r.models ?? {})])];
+    const missing = requested.filter((seat) => !usable.includes(seat));
+    const stage = { round: land.round, usable: usable.length, seats: usable, scope, ...(land.retry || missing.length ? { requested, missing } : {}) };
+    if (missing.length) {
+      if ((land.retry ?? 0) >= 2) return result('block', `council review round ${land.round} still lacks coverage from ${missing.join(', ')} after two retries`);
+      const retry = { ...action, args: { ...action.args, models: missing }, land: { ...land, retry: (land.retry ?? 0) + 1 } };
+      return result('continue', null, { councilStage: stage, queue: [retry, ...rest(wp, action)] });
+    }
+    return result('continue', null, { councilStage: stage });
   }
   if (action.part === 'synthesize') {
     const stage = wp.councilStage;
     if (stage?.round !== land.round) return result('block', `council synthesis for round ${land.round} has no recorded review stage`);
+    if (stage.missing?.length) return result('block', `council synthesis round ${land.round} still lacks coverage from ${stage.missing.join(', ')}`);
     const seats = Array.isArray(r.seats) ? r.seats.filter((seat) => typeof seat === 'string' && seat) : [];
     if (r.error || !Number.isInteger(r.findings) || r.findings < 0 || !seats.length || !seats.every((seat) => (stage.seats ?? []).includes(seat))) {
       return result('block', `council synthesis round ${land.round} is unusable: ${r.error ?? 'needs an integer findings count and seats that succeeded at review'}`);
