@@ -912,6 +912,16 @@ test('a no-op rebase (from === to) leaves its since-head delta-reviewable', () =
   assert.ok(delta.filter((a) => a.part === 'lens').every((a) => a.command.includes('--since') && a.command.includes(HEAD)));
 });
 
+test('an explicit delta reset may use its verified ancestor; a proof for another candidate cannot bypass the rebase refusal', () => {
+  const head = sha('c');
+  const wp = makeWp({
+    reviewMode: 'standalone', pr: { number: 7, head }, rebases: [{ from: HEAD, to: head, equivalent: true }],
+    deltaRecovery: { kind: 'ancestor', reviewedHead: HEAD, baseline: HEAD, head },
+  });
+  assert.ok(deltaReviewActions(makeState(), wp, HEAD).some((a) => a.part === 'lens' && a.command.includes(HEAD)));
+  assert.throws(() => deltaReviewActions(makeState(), { ...wp, deltaRecovery: { ...wp.deltaRecovery, head: sha('d') } }, HEAD), /no delta review after a rebase/);
+});
+
 test('t2Actions: council off → every available lens and no other; on → council_review, synthesize, challenge', () => {
   const off = t2Actions(makeState(), makeWp({ reviewMode: 'standalone' }), { round: 1 });
   assert.deepEqual(off.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]), ['codex', 'astra', 'opus']);

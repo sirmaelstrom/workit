@@ -34,7 +34,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   status --run <dir>
   analyze --run <dir>
   ratify --run <dir> --wp <id> --paths <path,path> --why <text>
-  reset-wp --run <dir> --wp <id> --to check|checked|prompt|wait|land --why <text>
+  reset-wp --run <dir> --wp <id> --to check|checked|prompt|wait|land|delta [--baseline <sha>] --why <text>
   lane <spawn|alive|check|reap> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]`;
 
@@ -43,7 +43,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to']);
+  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -433,6 +433,7 @@ async function resetWpVerb(tokens, deps) {
   const wpId = stringFlag(flags, 'wp');
   const to = stringFlag(flags, 'to');
   const why = stringFlag(flags, 'why');
+  const baseline = flags.baseline === undefined ? null : stringFlag(flags, 'baseline');
   return transact(flags, deps, async (state) => {
     const module = await loadModule(deps, 'lib/phases/build.mjs', 'module');
     const beforeChange = () => {
@@ -442,7 +443,7 @@ async function resetWpVerb(tokens, deps) {
       deps.write(path, deps.read(statePath(state.runDir)));
       return path;
     };
-    const out = module.resetWp(state, { wpId, to, why }, deps, { beforeChange });
+    const out = module.resetWp(state, { wpId, to, why, baseline }, deps, { beforeChange });
     saveState(state, deps);
     return { out: { ok: true, ...out, next: `conduct.mjs next --run ${state.runDir}` } };
   });

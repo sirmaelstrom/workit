@@ -24,6 +24,7 @@ import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
 import { chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
+import { deltaBaseline, verifyDeltaRecovery } from '../delta-recovery.mjs';
 import {
   councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
   recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
@@ -56,6 +57,14 @@ const spineOn = (state) => state.adapters?.spine?.on === true;
 const contractPath = (state) => join(state.runDir, '_lane-contract.md');
 const latestRound = (wp) => Math.max(0, ...(wp.reviews ?? []).map((review) => review.round ?? 0));
 const backendOf = (state, wp, deps) => laneBackend(state, deps, wp.lane?.backend ?? 'exec');
+function recoveryBaseline(state, wp, deps) {
+  try { return deltaBaseline(wp); }
+  catch (error) {
+    if (!(error instanceof ConductError)) throw error;
+    block(state, wp, deps, error.message);
+    return null;
+  }
+}
 const waitSpec = (step, waitMs, instruction = `Wait ${waitMs / 1000} s.`) => ({ kind: 'wait', step, waitMs, instruction });
 const shell = (step, part, command, extra = {}) => ({ kind: 'shell', step, part, command, expects: { type: 'none' },
   instruction: `Run this exact argv (no shell), and record its { code, stdout, stderr }.`, ...extra });
@@ -370,7 +379,8 @@ export function ratify(state, { wpId, paths, why }, deps) {
 // - prompt: re-send the lane its current brief; a lane whose agent has exited is started first.
 // - wait: poll a herdr lane the conductor restarted outside the verbs; its deadline is renewed.
 // - land: rebase, gate and merge the PR again.
-// check, checked and land keep a queued stop (an agent still running is
+// - delta: verify a supplied baseline and review the uncovered tail.
+// check, checked, land and delta keep a queued stop (an agent still running is
 // stopped before anything else runs); prompt and wait want the agent.
 const laneWork = (wp) => (wp.amendment ? 'amending' : 'dispatched');
 const hasLane = (wp) => (wp.lane?.backend && wp.lane?.worktree ? null : `${wp.id} has no lane worktree (it was never dispatched)`);
@@ -418,6 +428,13 @@ export const RESET_TARGETS = Object.freeze({
       () => (wp.merge?.sha ? `${wp.id}'s PR is already merged (${wp.merge.sha}); a merged WP is never landed again` : null),
       // The gate does not read the owed adjudication; only the checked stage settles it.
       () => (wp.owed?.adjudicate ? `${wp.id}'s review round ${wp.owed.round ?? '?'} findings are not adjudicated; reset it --to checked` : null)),
+  },
+  delta: {
+    from: ['blocked', 'held'], state: () => 'pr', stage: 'delta', queue: keepStops,
+    needs: (state, wp, deps) => firstProblem(() => hasLane(wp),
+      () => (wp.pr?.number && wp.pr?.head ? null : `${wp.id} has no PR head recorded; reset it --to check`),
+      () => (wp.merge?.sha ? `${wp.id}'s PR is already merged (${wp.merge.sha})` : null),
+      () => (deps.exists(laneLayout(state, wp).reportPath) ? null : `${wp.id} has no report at ${laneLayout(state, wp).reportPath}`)),
   },
 });
 
@@ -474,11 +491,12 @@ function rewindPhase(state, deps) {
 // pending one, an open touch or an unverified lane on the WP, or a phase that
 // cannot go back to build (exit 5). `beforeChange` runs after every check and
 // before the first change (the verb writes its snapshot there).
-export function resetWp(state, { wpId, to, why }, deps, { beforeChange = () => null } = {}) {
+export function resetWp(state, { wpId, to, why, baseline = null }, deps, { beforeChange = () => null } = {}) {
   const wp = (state.wps ?? []).find((candidate) => candidate.id === wpId);
   if (!wp) throw new ConductError(2, `reset-wp: no WP ${wpId} in this run`);
   const target = Object.hasOwn(RESET_TARGETS, to ?? '') ? RESET_TARGETS[to] : null;
   if (!target) throw new ConductError(2, `reset-wp: --to must be one of ${Object.keys(RESET_TARGETS).join(', ')} (got ${to ?? 'none'})`);
+  if (baseline !== null && to !== 'delta') throw new ConductError(2, 'reset-wp: --baseline is only valid with --to delta');
   if (typeof why !== 'string' || !why.trim()) throw new ConductError(2, 'reset-wp: --why <the ruling> is required');
   const refuse = (reason) => { throw new ConductError(5, `reset-wp: ${reason}`); };
   if (!target.from.includes(wp.state)) refuse(`${wp.id} is ${wp.state}; --to ${to} resets a WP that is ${target.from.join(' or ')}`);
@@ -490,6 +508,7 @@ export function resetWp(state, { wpId, to, why }, deps, { beforeChange = () => n
   if (state.pending?.wpId === wp.id) refuse(`${wp.id}'s action ${state.pending.id} is pending; perform and record it first`);
   const blocker = rewindRefusal(state) ?? admissionRefusal(state, wp);
   if (blocker) refuse(blocker);
+  const recovery = to === 'delta' ? verifyDeltaRecovery(wp, baseline, deps) : null;
   // Built before the snapshot: an emitter that throws leaves nothing behind.
   const nextQueue = target.queue ? target.queue(state, wp, deps) : [];
 
@@ -505,6 +524,11 @@ export function resetWp(state, { wpId, to, why }, deps, { beforeChange = () => n
   wp.queue = nextQueue;
   wp.failStreak = null;
   wp.stall = null;
+  if (recovery) {
+    wp.deltaRecovery = recovery;
+    wp.gate = null;
+    if (state.mergeLock?.wpId === wp.id) state.mergeLock = null;
+  }
   // A held WP's markers belong to the hold it leaves; the gate sets them again if they still hold.
   if (from.state === 'held') Object.assign(wp, { heldOutside: null, heldUncited: null });
   // Every WP deferred because of this one, directly or through another
@@ -526,9 +550,9 @@ export function resetWp(state, { wpId, to, why }, deps, { beforeChange = () => n
   state.seq += 1;
   appendEvent(state, deps, {
     actionId: `${state.seq}-reset`, step: 'reset', kind: 'reset', event: 'wp-reset', source: 'manual',
-    data: { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, why: why.trim(), snapshot },
+    data: { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, why: why.trim(), snapshot, ...(recovery ? { deltaRecovery: recovery } : {}) },
   });
-  return { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, snapshot };
+  return { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, snapshot, ...(recovery ? { deltaRecovery: recovery } : {}) };
 }
 
 function guardReply(state, wp, row, ruled) {
@@ -899,7 +923,8 @@ function expand(state, wp, deps) {
       // A ruling may start after executable findings fixes. Its amendment's
       // `since` is not the boundary of work the full review covered.
       const review = (wp.reviews ?? []).at(-1);
-      const since = review?.head;
+      const since = recoveryBaseline(state, wp, deps);
+      if (wp.state === 'blocked') return undefined;
       if (!since || since === wp.pr?.head || review.scope !== 'full') return go([], 'land');
       return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
     }
@@ -1458,12 +1483,15 @@ function recordOwn(state, wp, action, result, deps) {
       const absolute = changed.map((path) => join(wp.lane.worktree, path));
       wp.queue.shift();
       if (action.part === 'amend-diff') {
-        const since = (wp.reviews ?? []).at(-1)?.head;
+        const since = recoveryBaseline(state, wp, deps);
+        if (wp.state === 'blocked') return true;
         // A saved action from an older conductor may have diffed from a
         // later amendment. Recompute the range rather than trust its result.
         if (action.command.at(-2) !== since) return (wp.stage = 'delta');
         // An executable line: any changed file that is not Markdown, tests and fixtures counted (D19.7, D20).
-        if (!changed.some((path) => !path.toLowerCase().endsWith('.md') || isTestPath(path))) return (wp.stage = 'land');
+        if (!wp.deltaRecovery || wp.deltaRecovery.reviewedHead !== (wp.reviews ?? []).at(-1)?.head) {
+          if (!changed.some((path) => !path.toLowerCase().endsWith('.md') || isTestPath(path))) return (wp.stage = 'land');
+        }
         setState(state, wp, 'review', null, deps);
         wp.queue = emitting(state, wp, deps, () => withMeta(state, wp, deltaReviewActions(state, wp, since, { report, changedPaths: absolute })));
         return (wp.stage = wp.state === 'blocked' ? null : 'reviewed');
