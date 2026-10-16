@@ -2139,6 +2139,62 @@ test('gate command after a no-op rebase: the amended head gets its delta review 
   assert.ok(fix.to && fix.to !== fix.from, JSON.stringify(fix));
 });
 
+// Quest 1b3dec9f: the conductor's visual read at the merge gate, end to end.
+test('visual read (1b3dec9f): a UI WP\'s passing gate asks for a read of its frames; a malformed read is refused, a failed rule is a gate amendment, and the fixed head merges after a clean read', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  const frame = join(h.runDir, 'lane-wp-02-target.png');
+  writeFileSync(frame, 'png');
+  h.state.design = { source: join(h.workshopDir, 'work-packages', '_orchestrator.md'), rules: [{ n: 1, text: '**Palette:** ink and copper' }, { n: 2, text: '**Type scale:** 11/13/20' }, { n: 4, text: '**Fit to view:** the floor fills the canvas' }] };
+  h.wp('WP-02').visualRules = [1, 4];
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+  const reads = [];
+  h.answer = (a) => {
+    if (a.part !== 'visual') return undefined;
+    reads.push(a);
+    return { head: a.land.head, frames: [frame], rules: { 1: 'pass', 4: reads.length === 1 ? 'fail: the floor fills half the width' : 'pass' } };
+  };
+  h.wp('WP-02').skills = ['frontend-design:frontend-design'];
+  const first = await drive(h, { until: (a) => a.part === 'visual' });
+  // Council r1: the brief renders both new slots.
+  const brief = readFileSync(of(h, 'WP-02').find((a) => a.step === 'brief' && a.part === 'brief').outPath, 'utf8');
+  assert.match(brief, /^\*\*Skills to load with the Skill tool before you build:\*\* frontend-design:frontend-design\.$/m);
+  assert.match(brief, /^\*\*Visual rules:\*\* 1, 4 of .*_orchestrator\.md\. When this names rules/m);
+  assert.ok(!/<skills>|<visual rules>/.test(brief), 'no slot left unfilled');
+  assert.equal(first.kind, 'inspect');
+  assert.deepEqual(first.rules.map((rule) => rule.n), [1, 4], 'only the WP\'s rules, with their text');
+  assert.equal(h.wp('WP-02').gate.ok, false, 'a gate owing its visual read is not ok');
+  assert.ok(!h.trace.some((a) => a.step === 'merge'));
+  // Refused with exit 2 and nothing written: a missing rule, a frame that is not there.
+  assert.throws(() => build.record(h.state, first, { head: first.land.head, frames: [frame], rules: { 1: 'pass' } }, h.deps), (error) => error.code === 2 && /missing 4/.test(error.message));
+  assert.throws(() => build.record(h.state, first, { head: first.land.head, frames: [join(h.runDir, 'absent.png')], rules: { 1: 'pass', 4: 'pass' } }, h.deps), (error) => error.code === 2 && /no frame at/.test(error.message));
+  assert.equal(h.wp('WP-02').visualReads, undefined);
+
+  assert.equal(await drive(h), null);
+  const wp = h.wp('WP-02');
+  assert.equal(wp.state, 'merged', wp.reason);
+  assert.equal(reads.length, 2);
+  assert.notEqual(reads[0].land.head, reads[1].land.head, 'the second read is of the amended head');
+  assert.match(wp.gateFixes[0].reason, /^visual read at [0-9a-f]{40}: rule 4 fail: the floor fills half the width$/);
+  const amendment = of(h, 'WP-02').find((a) => a.part === 'amendment');
+  assert.match(amendment.instruction, /rule 4 fail: the floor fills half the width/);
+  assert.deepEqual(wp.visualReads.map((read) => read.rules), [{ 1: 'pass', 4: 'fail: the floor fills half the width' }, { 1: 'pass', 4: 'pass' }]);
+  const merge = indexWhere(h, (a) => a.wpId === 'WP-02' && a.step === 'merge');
+  assert.ok(merge > h.trace.indexOf(reads[1]), 'the merge follows the clean read');
+  await analyzeRun(h.runDir, h.deps);
+  const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
+  assert.match(analysis, /^## Visual reads$/m);
+  assert.match(analysis, /^- WP-02 at [0-9a-f]{7}: fail; pass 1; fail 4 \(the floor fills half the width\) \(frames: .*lane-wp-02-target\.png\)$/m);
+  assert.match(analysis, /^- WP-02 at [0-9a-f]{7}: pass; pass 1, 4 \(frames: /m);
+});
+
+test('lane brief (1b3dec9f, council r1): a WP naming no skills and no visual rules renders "none" in both slots', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  await drive(h, { until: (a) => a.step === 'prompt' });
+  const brief = readFileSync(of(h, 'WP-02').find((a) => a.step === 'brief' && a.part === 'brief').outPath, 'utf8');
+  assert.match(brief, /^\*\*Skills to load with the Skill tool before you build:\*\* none\.$/m);
+  assert.match(brief, /^\*\*Visual rules:\*\* none\. /m);
+});
+
 // The harness's git answers every ancestry and patch check, so the mapped
 // baseline here is the harness's; delta-recovery.test.mjs maps it in real git.
 test('gate command after a rebase that moved the head: the gate fix gets a delta review from the verified baseline, never a block', async (t) => {

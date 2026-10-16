@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseWorkPackages, filesDisjoint, dispatchable } from './schedule.mjs';
+import { parseDesignDirection, parseWorkPackages, filesDisjoint, dispatchable } from './schedule.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKSHOP = join(HERE, '..', '__fixtures__', 'lanes', 'workshop');
@@ -237,7 +237,7 @@ test('dispatchable: a WP depending on a held, blocked or refuted WP is never dis
 
 // A workshop in a temp dir: an orchestrator naming each WP's wave and model,
 // and one wp-*.md per WP with the given body.
-function workshop(t, wps, { modelColumn = true, waveNames = {} } = {}) {
+function workshop(t, wps, { modelColumn = true, waveNames = {}, design = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'workit-schedule-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const packages = join(dir, 'work-packages');
@@ -246,7 +246,103 @@ function workshop(t, wps, { modelColumn = true, waveNames = {} } = {}) {
   const plan = [...new Set(entries.map(([, spec]) => spec.wave))].map((wave) => `Wave ${wave}: ${entries.filter(([, spec]) => spec.wave === wave).map(([id]) => `[${id}: ${waveNames[id] ?? 'x'}]`).join(' ')}`);
   const rows = entries.map(([id, spec]) => (modelColumn ? `| ${id}: name ${id} | ${spec.wave} | p | s | ${spec.model} |` : `| ${id}: name ${id} | ${spec.wave} | p | s |`));
   const header = modelColumn ? ['| Package | Wave | Project | Spec | Model |', '|---|---|---|---|---|'] : ['| Package | Wave | Project | Spec |', '|---|---|---|---|'];
-  writeFileSync(join(packages, '_orchestrator.md'), ['# O', '', '## Wave Plan', '', ...plan, '', '## Package Inventory', '', ...header, ...rows, ''].join('\n'));
+  writeFileSync(join(packages, '_orchestrator.md'), ['# O', '', '## Wave Plan', '', ...plan, '', ...(design === null ? [] : ['## Design direction', '', design, '']),
+    '## Package Inventory', '', ...header, ...rows, ''].join('\n'));
   for (const [id, spec] of entries) writeFileSync(join(packages, `${id.toLowerCase()}-x.md`), `# ${id}: name ${id}\n\n${spec.body}`);
   return dir;
 }
+
+// Quest 1b3dec9f: the design direction a UI goal's spec carries, the rules each
+// WP's frames are read against at its gate, and the polish WP that ends the run.
+const DESIGN = [
+  '<!-- 9. **Palette:** a commented example is template guidance, not a rule -->',
+  '1. **Palette:** ink #0e0b0a, copper #b87333; no other accent.',
+  '2. **Type scale:** 11 / 13 / 20 px;',
+  '   labels uppercase at 11.',
+  '3. **Iconography:** one glyph per station, drawn in ink.',
+  '4. **Fit to view:** the floor fills the canvas with a margin at load.',
+  '5. Tabs stay on one row at 360 px.',
+].join('\n');
+const FILES = (path) => `**Files:**\n- Modify \`${path}\`\n`;
+const uiWorkshop = (t, overrides = {}, design = DESIGN) => workshop(t, {
+  'WP-01': { wave: 1, model: 'opus', body: `${FILES('a.mjs')}\n**Visual rules:** 1, 4,3\n` },
+  'WP-02': { wave: 1, model: 'opus', body: `${FILES('b.mjs')}\n**Visual rules:** none: no UI\n` },
+  'WP-03': { wave: 2, model: 'opus', body: `${FILES('c.mjs')}\n**Skills:** \`frontend-design:frontend-design\`\n\n**Visual rules:** all\n` },
+  ...overrides,
+}, { design });
+
+test('design direction (1b3dec9f): numbered rules with their continuation lines; visual rules by number, all or none; the polish WP\'s skills', (t) => {
+  const dir = uiWorkshop(t);
+  const rules = parseDesignDirection(readFileSync(join(dir, 'work-packages', '_orchestrator.md'), 'utf8'));
+  assert.deepEqual(rules.map((rule) => rule.n), [1, 2, 3, 4, 5], 'the commented rule 9 is not a rule');
+  assert.equal(rules[1].text, '**Type scale:** 11 / 13 / 20 px; labels uppercase at 11.');
+  const wps = parseWorkPackages(dir);
+  assert.deepEqual(wps.map((wp) => wp.visualRules), [[1, 3, 4], [], [1, 2, 3, 4, 5]]);
+  assert.deepEqual(wps.map((wp) => wp.skills), [[], [], ['frontend-design:frontend-design']]);
+  assert.deepEqual(parseDesignDirection('# no section\n'), [], 'no section: no rules, no error');
+  const template = readFileSync(join(HERE, '..', '..', '..', '..', 'reference', 'templates', '_orchestrator.template.md'), 'utf8');
+  assert.match(template, /^## Design direction$/m, 'the template shows the section');
+  assert.deepEqual(parseDesignDirection(template), [], 'commented out in the template, so a non-UI orchestrator copied from it has none');
+});
+
+test('design direction (1b3dec9f, council r1): an indented list stays in its rule; an unindented non-rule line ends it; the heading\'s case is ignored', () => {
+  const text = ['# O', '', '## Design Direction', '', DESIGN.replace('   labels uppercase at 11.', '   1. labels uppercase at 11\n   2. figures at 20'),
+    'Viewport: 1512 x 785.', '- a trailing bullet', '```', 'fenced', '```', '', '## Package Inventory', ''].join('\n');
+  const rules = parseDesignDirection(text);
+  assert.deepEqual(rules.map((rule) => rule.n), [1, 2, 3, 4, 5], 'the nested 1. and 2. are not rules, and no duplicate is reported');
+  assert.equal(rules[1].text, '**Type scale:** 11 / 13 / 20 px; 1. labels uppercase at 11 2. figures at 20');
+  assert.equal(rules[4].text, 'Tabs stay on one row at 360 px.', 'the trailing prose, bullet and fence are not rule 5');
+});
+
+test('design direction (1b3dec9f): a missing label, a repeated number or an empty section is a parse error', (t) => {
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, {}, DESIGN.replace('**Iconography:**', '**Icons:**'))), /no rule opening with \*\*Iconography:\*\*/);
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, {}, `${DESIGN}\n3. Again.`)), /rule 3 is numbered twice/);
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, {}, 'Prose, no rule.')), /holds no numbered rule/);
+});
+
+test('visual rules (1b3dec9f): an unknown number, or rules with no design direction, is a parse error', (t) => {
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, { 'WP-02': { wave: 1, model: 'opus', body: `${FILES('b.mjs')}\n**Visual rules:** 2, 7\n` } })), /WP-02: \*\*Visual rules:\*\* "7" is not a rule number/);
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, { 'WP-02': { wave: 1, model: 'opus', body: `${FILES('b.mjs')}\n**Visual rules:** two\n` } })), /"two" is not a rule number/);
+  const plain = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: `${FILES('a.mjs')}\n**Visual rules:** 1\n` } });
+  assert.throws(() => parseWorkPackages(plain), /names rules, but the spec has no ## Design direction/);
+});
+
+test('polish WP (1b3dec9f): with a design direction, the last wave is one WP naming frontend-design', (t) => {
+  const shared = { 'WP-04': { wave: 2, model: 'opus', body: FILES('d.mjs') } };
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, shared)), /last wave must be one polish WP .*wave 2 holds WP-03, WP-04 without frontend-design/);
+  const unnamed = { 'WP-03': { wave: 2, model: 'opus', body: `${FILES('c.mjs')}\n**Skills:** unslop\n` } };
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, unnamed)), /wave 2 holds WP-03 without frontend-design/);
+  const plain = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: FILES('a.mjs') }, 'WP-02': { wave: 1, model: 'opus', body: FILES('b.mjs') } });
+  assert.equal(parseWorkPackages(plain).length, 2, 'no design direction: no polish WP is required');
+  // Council r1: an unrelated plugin's skill of the same name is not frontend-design.
+  const foreign = { 'WP-03': { wave: 2, model: 'opus', body: `${FILES('c.mjs')}\n**Skills:** missing-plugin:frontend-design\n\n**Visual rules:** all\n` } };
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, foreign)), /wave 2 holds WP-03 without frontend-design/);
+  const bare = { 'WP-03': { wave: 2, model: 'opus', body: `${FILES('c.mjs')}\n**Skills:** frontend-design\n\n**Visual rules:** all\n` } };
+  assert.equal(parseWorkPackages(uiWorkshop(t, bare)).length, 3, 'the bare skill name stands');
+});
+
+test('slim review (1b3dec9f): a fenced example is not the design direction, its rules or a WP\'s skills; the polish WP waits on every WP across a wave gap', (t) => {
+  const fenced = ['# O', '', 'Example:', '', '```markdown', '## Design direction', '', DESIGN, '```', ''].join('\n');
+  assert.deepEqual(parseDesignDirection(fenced), [], 'a fenced example section is no section');
+  // Delta pass: four spaces then backticks is indented code, not a fence, so the heading after it stands.
+  const indented = ['# O', '', '    ```', '    indented code', '', '## Design direction', '', DESIGN, ''].join('\n');
+  assert.deepEqual(parseDesignDirection(indented).map((rule) => rule.n), [1, 2, 3, 4, 5]);
+  const quoted = { 'WP-03': { wave: 2, model: 'opus', body: `${FILES('c.mjs')}\n\`\`\`\n**Skills:** frontend-design:frontend-design\n\`\`\`\n\n**Skills:** none\n\n**Visual rules:** all\n` } };
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, quoted)), /wave 2 holds WP-03 without frontend-design/, 'the fenced Skills line is not the declaration');
+  const gap = uiWorkshop(t, {
+    'WP-02': { wave: 1, model: 'opus', body: `${FILES('b.mjs')}\n**Visual rules:** none\n` },
+    'WP-03': { wave: 3, model: 'opus', body: `${FILES('c.mjs')}\n**Skills:** frontend-design:frontend-design\n\n**Visual rules:** all\n` },
+  });
+  const wps = parseWorkPackages(gap);
+  assert.deepEqual(wps.find((wp) => wp.id === 'WP-03').dependsOn, ['WP-01', 'WP-02']);
+  const state = { intent: { lanesCap: 4 }, wps: wps.map((wp) => ({ ...wp, state: 'pending' })) };
+  assert.deepEqual(dispatchable(state).map((wp) => wp.id), ['WP-01', 'WP-02'], 'the polish WP does not start beside WP-01');
+});
+
+test('polish WP (1b3dec9f, council r1): its visual rules cover every rule; partial, none or absent is a parse error', (t) => {
+  const polish = (rules) => ({ 'WP-03': { wave: 2, model: 'opus', body: `${FILES('c.mjs')}\n**Skills:** frontend-design:frontend-design\n${rules}` } });
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, polish('\n**Visual rules:** 1, 2, 3, 4\n'))), /WP-03 is the polish WP, so its \*\*Visual rules:\*\* must cover every design-direction rule \(`all`\); it leaves out 5/);
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, polish('\n**Visual rules:** none\n'))), /it leaves out 1, 2, 3, 4, 5/);
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, polish(''))), /it leaves out 1, 2, 3, 4, 5/);
+  assert.deepEqual(parseWorkPackages(uiWorkshop(t, polish('\n**Visual rules:** 5, 4, 3, 2, 1\n')))[2].visualRules, [1, 2, 3, 4, 5], 'every number listed is the same as all');
+});

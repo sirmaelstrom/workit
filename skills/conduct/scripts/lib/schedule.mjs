@@ -154,18 +154,25 @@ function waves(orchestrator) {
 // (**Review tier:** `T2`) is the value. The value is the first token after the label and must
 // be T0, T1 or T2. No declaration is T1; a value outside the three, or two different values,
 // is a parse error.
-function reviewTier(text, where) {
+// The lines a document declares, not quotes: fenced blocks and `>` lines
+// dropped. A fence opens or closes indented at most three spaces (CommonMark);
+// four is indented code, not a fence.
+function declaredLines(text) {
   let fence = null;
-  const prose = text.split(/\r?\n/).filter((line) => {
+  return String(text ?? '').split(/\r?\n/).filter((line) => {
     if (fence) {
-      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1];
+      const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line)?.[1];
       if (close && close[0] === fence.char && close.length >= fence.len) fence = null;
       return false;
     }
-    const open = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
+    const open = /^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
     if (open) { fence = { char: (open[1] ?? open[2])[0], len: (open[1] ?? open[2]).length }; return false; }
     return !/^\s*>/.test(line);
-  }).map((line) => line
+  });
+}
+
+function reviewTier(text, where) {
+  const prose = declaredLines(text).map((line) => line
     .replace(/(\*\*Review tier:\*\*\s*)(`+)\s*([^`\s]+)\s*\2(?!`)/g, '$1$3')
     .replace(/(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, '')).join('\n');
   const values = new Set([...prose.matchAll(/\*\*Review tier:\*\*\s*(\S*)/g)].map((match) => match[1].replace(/[,;.]$/, '')));
@@ -175,11 +182,74 @@ function reviewTier(text, where) {
   return values.size ? [...values][0] : 'T1';
 }
 
+// The design-direction labels /spec writes for a goal with a UI; each must
+// open one of the section's numbered rules.
+export const DESIGN_LABELS = Object.freeze(['Palette', 'Type scale', 'Iconography', 'Fit to view']);
+
+// `## Design direction` (heading case ignored): numbered rules at column 0
+// (`1. **Palette:** …`), each joined with its indented continuation lines. An
+// unindented line that is not a rule (prose, a bullet) ends the rule before
+// it, and an indented list inside a rule stays part of it. HTML comments,
+// fenced blocks and `>` lines are examples or guidance, not the section or its
+// rules (declaredLines). No section is []. A section without a rule,
+// a repeated number, or a missing label is a parse error: a UI goal's gate
+// reads these rules by number.
+const DESIGN_HEADING = /^## design direction\s*$/i;
+export function parseDesignDirection(text, where = 'Design direction') {
+  const lines = declaredLines(String(text ?? '').replace(/<!--[\s\S]*?-->/g, ''));
+  const start = lines.findIndex((line) => DESIGN_HEADING.test(line.trim()));
+  if (start < 0) return [];
+  const end = lines.findIndex((line, i) => i > start && /^##\s/.test(line));
+  const rules = [];
+  let open = false;
+  for (const line of lines.slice(start + 1, end < 0 ? lines.length : end)) {
+    const numbered = /^(\d+)\.\s+(.*)$/.exec(line);
+    if (numbered) {
+      rules.push({ n: Number(numbered[1]), text: numbered[2].trim() });
+      open = true;
+    } else if (!line.trim()) continue;
+    else if (/^\s/.test(line) && open) rules.at(-1).text += ` ${line.trim()}`;
+    else open = false;
+  }
+  if (!rules.length) throw new ConductError(2, `${where}: ## Design direction holds no numbered rule`);
+  const repeated = rules.find((rule, i) => rules.findIndex((other) => other.n === rule.n) !== i);
+  if (repeated) throw new ConductError(2, `${where}: design-direction rule ${repeated.n} is numbered twice`);
+  const missing = DESIGN_LABELS.filter((label) => !rules.some((rule) => rule.text.toLowerCase().startsWith(`**${label.toLowerCase()}:**`)));
+  if (missing.length) throw new ConductError(2, `${where}: ## Design direction has no rule opening with ${missing.map((label) => `**${label}:**`).join(', ')}`);
+  return rules;
+}
+
+// `**Visual rules:**` names the design-direction rules a WP's screenshots are
+// read against at its merge gate: rule numbers, `all`, or `none`/empty.
+export function visualRules(text, design, where) {
+  const value = fieldText(declaredLines(text), 'Visual rules');
+  const first = (value ?? '').split('\n')[0].replace(/`/g, '').trim();
+  if (!first || /^none\b/i.test(first)) return [];
+  if (!design.length) throw new ConductError(2, `${where}: **Visual rules:** names rules, but the spec has no ## Design direction`);
+  if (/^all\b/i.test(first)) return design.map((rule) => rule.n);
+  const tokens = first.replace(/[.;]$/, '').split(/[\s,]+/).filter(Boolean);
+  const numbers = tokens.map((token) => (/^\d+$/.test(token) ? Number(token) : NaN));
+  const bad = tokens.find((token, i) => Number.isNaN(numbers[i]) || !design.some((rule) => rule.n === numbers[i]));
+  if (bad !== undefined) throw new ConductError(2, `${where}: **Visual rules:** "${bad}" is not a rule number of the ## Design direction`);
+  return [...new Set(numbers)].sort((a, b) => a - b);
+}
+
+// `**Skills:**`: the skills the lane brief names, comma-separated.
+export function skillsField(text) {
+  const value = fieldText(declaredLines(text), 'Skills');
+  if (!value || /^none\b/i.test(value)) return [];
+  return value.split('\n')[0].split(',').map((skill) => skill.replace(/`/g, '').trim()).filter(Boolean);
+}
+
+// The frontend-design plugin's skill, by its plugin-qualified or bare name only.
+export const namesFrontendDesign = (skills) => (skills ?? []).some((skill) => /^(frontend-design:)?frontend-design$/.test(skill));
+
 export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(path, 'utf8'), list = readdirSync } = {}) {
   const dir = join(workshopDir, 'work-packages');
   const orchestrator = read(join(dir, '_orchestrator.md'));
   const waveOf = waves(orchestrator);
   const rows = inventory(orchestrator);
+  const design = parseDesignDirection(orchestrator, '_orchestrator.md');
   const wps = list(dir).filter((name) => /^wp-.*\.md$/i.test(name)).sort().map((name) => {
     const specPath = join(dir, name);
     const text = read(specPath);
@@ -193,13 +263,28 @@ export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(p
       id, name: rows.get(id)?.name || heading[2].trim(), specPath, wave: waveOf.get(id), files: parseFiles(text, id), creates: parseFiles(text, id, { verbs: ['Create'] }),
       precondition: fieldText(lines, 'Precondition') ?? '', verification: fieldText(lines, 'Verification'), tier,
       model: rows.get(id)?.model ?? 'opus', runtimeExercise: fieldText(lines, 'Runtime exercise') ?? '',
+      visualRules: visualRules(text, design, id), skills: skillsField(text),
     };
   });
+  // A UI goal ends on its polish: the last wave is one WP, after every
+  // functional WP, its brief names the frontend-design skill, and its frames
+  // are read against every rule (`**Visual rules:** all`).
+  if (design.length && wps.length) {
+    const last = Math.max(...wps.map((wp) => wp.wave));
+    const tail = wps.filter((wp) => wp.wave === last);
+    if (tail.length !== 1 || !namesFrontendDesign(tail[0].skills)) {
+      throw new ConductError(2, `the orchestrator has a ## Design direction, so its last wave must be one polish WP whose **Skills:** names frontend-design (wave ${last} holds ${tail.map((wp) => `${wp.id}${namesFrontendDesign(wp.skills) ? '' : ' without frontend-design'}`).join(', ')})`);
+    }
+    const unread = design.map((rule) => rule.n).filter((n) => !tail[0].visualRules.includes(n));
+    if (unread.length) throw new ConductError(2, `${tail[0].id} is the polish WP, so its **Visual rules:** must cover every design-direction rule (\`all\`); it leaves out ${unread.join(', ')}`);
+  }
   // dependsOn: the ids the Precondition names from earlier waves, union the
-  // whole immediately preceding wave.
+  // whole immediately preceding wave. The polish WP depends on every other WP,
+  // so a gap in the wave numbers cannot start it beside functional work.
+  const polish = design.length && wps.length ? wps.find((wp) => wp.wave === Math.max(...wps.map((other) => other.wave)))?.id : null;
   return wps.map((wp) => {
     const named = (wp.precondition.match(WP_ID) ?? []).filter((id) => waveOf.has(id) && waveOf.get(id) < wp.wave);
-    const previous = wps.filter((other) => other.wave === wp.wave - 1).map((other) => other.id);
+    const previous = wps.filter((other) => (wp.id === polish ? other.id !== wp.id : other.wave === wp.wave - 1)).map((other) => other.id);
     return { ...wp, dependsOn: [...new Set([...named, ...previous])].sort() };
   });
 }

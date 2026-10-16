@@ -4,7 +4,7 @@
 // the anchor as WP-00's quest; spine off mints nothing.
 import { basename, join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
-import { parseWorkPackages } from '../schedule.mjs';
+import { parseDesignDirection, parseWorkPackages } from '../schedule.mjs';
 import { wpRecord } from './spec.mjs';
 
 // spine_author is idempotent per (campaign, key), so a bare `wp-01`, or one
@@ -37,6 +37,9 @@ function workshopWps(state, deps) {
   }
   if (!parsed.length) throw defect(`${join(state.workshopDir, 'work-packages')} holds no wp-*.md work package`);
   state.wps = parsed.map(wpRecord);
+  // The rules the merge gate reads a UI WP's frames against (parseWorkPackages checked them).
+  const rules = parseDesignDirection(deps.read(orchestrator), orchestrator);
+  state.design = rules.length ? { source: orchestrator, rules } : null;
   appendEvent(state, deps, { step: 'mint', event: 'minted', data: { wps: parsed.length, source: 'workshop' } });
 }
 

@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import {
   tierFor, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions, recordLandStep, runLandVerb,
-  parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord,
+  parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord, visualReadProblem,
 } from './land.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
 import { runConduct } from '../conduct.mjs';
@@ -1368,6 +1368,52 @@ test('C1-1/C2-13 the inspection: the gate queues it (validated), its record bind
   for (const bad of [true, { ...inspect, files: [] }, { ...inspect, tail: 'nope' }, { ...inspect, findingsHash: undefined }]) {
     assert.equal(recordLandStep(makeState(), makeWp(), GATE_ACTION, gateResult({ causes: ['inspect'], inspect: bad }), { now: () => NOW }).outcome, 'block', JSON.stringify(bad));
   }
+});
+
+// Quest 1b3dec9f: the conductor's visual read at the merge gate.
+test('visual read (1b3dec9f): a passing gate queues it first; the latest read of the head decides; a release or a WP without rules skips it', () => {
+  const FRAME = join(RUN, 'lane-wp-01-target.png');
+  const exists = (path) => path === FRAME;
+  const state = makeState({ design: { source: join('/', 'ws', '_orchestrator.md'), rules: [{ n: 1, text: '**Palette:** ink' }, { n: 3, text: '**Iconography:** glyphs' }, { n: 4, text: '**Fit to view:** fills' }] } });
+  const wp = makeWp({ visualRules: [1, 4] });
+  const owed = recordLandStep(state, wp, GATE_ACTION, GATE_OK, { now: () => NOW });
+  const [action] = owed.patch.queue;
+  assert.deepEqual([owed.outcome, owed.patch.gate.ok, action.kind, action.step, action.part], ['continue', false, 'inspect', 'gate', 'visual']);
+  assert.deepEqual([action.land.head, action.land.rules, action.rules.map((rule) => rule.n)], [HEAD, [1, 4], [1, 4]]);
+  assert.match(action.instruction, /from the pixels, not the code/);
+  const pass = recordLandStep(state, wp, action, { head: HEAD, frames: [FRAME], rules: { 1: 'pass', 4: ' pass ' } }, { exists });
+  assert.deepEqual([pass.outcome, pass.patch.queue[0].part, pass.patch.visualReads], ['continue', 'gate', [{ head: HEAD, frames: [FRAME], rules: { 1: 'pass', 4: 'pass' } }]]);
+  const passed = recordLandStep(state, { ...wp, ...pass.patch, queue: [] }, GATE_ACTION, GATE_OK, { now: () => NOW });
+  assert.deepEqual([passed.outcome, passed.patch.gate.ok, passed.patch.queue], ['continue', true, undefined], 'a clean read of this head lets the gate pass');
+  const fail = recordLandStep(state, wp, action, { head: HEAD, frames: [FRAME], rules: { 1: 'pass', 4: 'fail: half the width is empty' } }, { exists });
+  assert.deepEqual([fail.outcome, fail.reason], ['amend', `visual read at ${HEAD}: rule 4 fail: half the width is empty`]);
+  // The lane pushed nothing: the same head's latest read still fails, so the gate amends again.
+  const failedWp = { ...wp, visualReads: [...pass.patch.visualReads, ...fail.patch.visualReads] };
+  const again = recordLandStep(state, failedWp, GATE_ACTION, GATE_OK, { now: () => NOW });
+  assert.deepEqual([again.outcome, again.patch.gate.ok], ['amend', false]);
+  // A malformed record reaching the recorder blocks rather than passing.
+  assert.equal(recordLandStep(state, wp, action, { head: HEAD, frames: [FRAME], rules: { 1: 'pass' } }, { exists }).outcome, 'block');
+  // A WP naming no rules, and the release, pass straight on.
+  assert.equal(recordLandStep(state, makeWp(), GATE_ACTION, GATE_OK, { now: () => NOW }).patch.queue, undefined);
+  const release = { ...wp, id: 'release' };
+  assert.equal(recordLandStep(state, release, GATE_ACTION, ok(gateJson({ ok: true, door: undefined })), { now: () => NOW }).patch.queue, undefined);
+});
+
+test('visualReadProblem (1b3dec9f): head, absolute existing frames, exactly the WP\'s rules, and pass or fail with a why', () => {
+  const FRAME = join(RUN, 'f.png');
+  const action = { land: { head: HEAD, rules: [1, 4] } };
+  const check = (r) => visualReadProblem(action, r, (path) => path === FRAME);
+  const good = { head: HEAD, frames: [FRAME], rules: { 1: 'pass', 4: 'fail: tabs wrap' } };
+  assert.equal(check(good), null);
+  assert.match(check({ ...good, head: sha('c') }), /must name head/);
+  assert.match(check({ ...good, frames: [] }), /non-empty list of absolute paths/);
+  assert.match(check({ ...good, frames: ['f.png'] }), /absolute paths/);
+  assert.match(check({ ...good, frames: [join(RUN, 'gone.png')] }), /no frame at/);
+  assert.match(check({ ...good, rules: [] }), /rules must be/);
+  assert.match(check({ ...good, rules: { 1: 'pass' } }), /missing 4/);
+  assert.match(check({ ...good, rules: { 1: 'pass', 4: 'pass', 2: 'pass' } }), /not this WP's: 2/);
+  assert.match(check({ ...good, rules: { 1: 'ok', 4: 'pass' } }), /rule 1: a verdict is/);
+  assert.match(check({ ...good, rules: { 1: 'pass', 4: 'fail:' } }), /rule 4: a verdict is/);
 });
 
 test('C1-11 a rebase conflict queues the abort; the abort\'s record is the amendment', () => {
