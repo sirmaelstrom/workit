@@ -26,7 +26,12 @@ const sha = (c) => c.repeat(40);
 const HEAD = sha('a');
 const BASE = sha('b');
 const BASE_TIP = sha('9');
+const provedRebase = (entry) => {
+  const r = { oldBase: BASE, newBase: BASE_TIP, ...entry };
+  return { ...r, equivalenceProof: { version: 1, from: r.from, to: r.to, oldBase: r.oldBase, newBase: r.newBase, placeHash: 'f'.repeat(64) } };
+};
 const NOW = Date.parse('2026-10-04T20:00:00.000Z');
+const PROOF_PATCH = 'diff --git a/proof.txt b/proof.txt\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..1111111111111111111111111111111111111111\n--- /dev/null\n+++ b/proof.txt\n@@ -0,0 +1 @@\n+proof\n';
 const minutesAgo = (n) => new Date(NOW - n * 60000).toISOString();
 
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' });
@@ -108,7 +113,7 @@ function gateExec(o = {}) {
     }
     if (program === 'git' && args[2] === 'diff' && has('--name-only')) return ok(rows.join('\n'));
     if (program === 'git' && args[2] === 'diff' && has('--quiet')) return { code: diffQuiet, stdout: '', stderr: '' };
-    if (program === 'git' && args[2] === 'diff') return ok(diffs[`${args.at(-2)} ${args.at(-1)}`] ?? `diff ${args.at(-2)} ${args.at(-1)}\n`);
+    if (program === 'git' && args[2] === 'diff') return ok(diffs[`${args.at(-2)} ${args.at(-1)}`] ?? (has('--full-index') ? PROOF_PATCH : `diff ${args.at(-2)} ${args.at(-1)}\n`));
     if (program === 'git' && args[2] === 'patch-id') return ok(Object.hasOwn(patchIds, options.input) ? patchIds[options.input] : `p0 ${sha('0')}\n`);
     // A range named in `revLists` answers its own commits; any other range answers the tail's.
     if (program === 'git' && args[2] === 'rev-list') return ok((revLists[args[3]] ?? tailCommits).join('\n'));
@@ -290,6 +295,26 @@ test('C1-2 expected checks: an unprotected base falls back to the checks that ra
   assert.deepEqual(gate(makeState(), makeWp(), { required: { code: 1, stdout: '', stderr: 'gh: Server Error (HTTP 502)' } }).causes, ['infra']);
 });
 
+test('a 403 CI migration policy is head-bound and cannot hide required or failed checks', () => {
+  const policy = { head: HEAD, names: ['Tests (node --test)'], why: 'scaffold job renamed' };
+  const forbidden = { code: 1, stdout: '', stderr: 'gh: Resource not accessible (HTTP 403)' };
+  const oldBase = derived((page) => { page.check_runs[0].name = 'obsolete check'; });
+  const wp = makeWp({ ciCheckPolicy: policy, gate: { head: HEAD, pendingSince: minutesAgo(11) } });
+  assert.equal(gate(makeState(), wp, { required: forbidden, baseRuns: oldBase }).ok, true);
+  assert.match(gate(makeState(), { ...wp, ciCheckPolicy: { ...policy, head: BASE } }, { required: forbidden, baseRuns: oldBase }).failures.join(), /obsolete check/);
+  assert.match(gate(makeState(), wp, { required: ok(JSON.stringify({ contexts: ['Protected'], checks: [] })) }).failures.join(), /Protected/);
+  assert.match(gate(makeState(), wp, { required: forbidden, ci: FAILED }).failures.join(), /CI failed/);
+  assert.match(gate(makeState(), { ...wp, ciCheckPolicy: { ...policy, names: ['Missing'] } }, { required: forbidden }).failures.join(), /Missing/);
+});
+
+test('later ruling rows replace their finding while preserving the rest of the round', () => {
+  const table = (n, rows) => `## Amendment ${n}\n\n| Comment | Verdict | Evidence | Commit |\n|---|---|---|---|\n${rows}\n\n`;
+  const text = table(1, '| C3-1 | judgment | first | — |\n| C3-2 | refuted | kept | — |') + table(2, '| C3-1 | refuted | ruled | — |');
+  const rows = parseAmendmentTable(text, { since: 1 });
+  assert.deepEqual(rows.map((r) => [r.comment, r.evidence]), [['C3-2', 'kept'], ['C3-1', 'ruled']]);
+  assert.deepEqual(parseAmendmentTable(text, { since: 2 }).map((r) => r.comment), ['C3-1']);
+});
+
 test('C2-4 required checks are the union of contexts and checks: a checks-only protection still requires its check', () => {
   const checksOnly = ok(JSON.stringify({ strict: true, contexts: [], checks: [{ context: 'Deploy gate', app_id: 1 }] }));
   const out = gate(makeState(), makeWp({ gate: { head: HEAD, pendingSince: minutesAgo(11) } }), { required: checksOnly });
@@ -445,7 +470,7 @@ test('C2-8 test paths: names anywhere, test/ tests/ spec/ only at the root; skil
 
 test('post-cap after an equivalent rebase: the tail is computed against the pre-rebase from', () => {
   const pre = sha('7');
-  const wp = postCapWp({ rebases: [{ from: pre, to: HEAD, oldBase: BASE, newBase: sha('8'), equivalent: true }] });
+  const wp = postCapWp({ rebases: [provedRebase({ from: pre, to: HEAD, oldBase: BASE, newBase: sha('8'), equivalent: true })] });
   const exec = gateExec(TAIL);
   const out = gateCheck(makeState(), inspected(wp), { exec, now: () => NOW });
   assert.deepEqual([out.ok, out.unreviewedTail], [true, `${D}..${pre} (post-cap)`]);
@@ -454,7 +479,7 @@ test('post-cap after an equivalent rebase: the tail is computed against the pre-
 
 test('C1-7 review → equivalent rebase → amendment → gate: the tail past the rebased head is classified', () => {
   const t = sha('7');
-  const wp = makeWp({ reviews: [{ round: 1, scope: 'full', head: sha('f'), verdicts: [] }], rebases: [{ from: sha('f'), to: t, equivalent: true }] });
+  const wp = makeWp({ reviews: [{ round: 1, scope: 'full', head: sha('f'), verdicts: [] }], rebases: [provedRebase({ from: sha('f'), to: t, equivalent: true })] });
   const docs = gate(makeState(), wp, { tailFiles: ['README.md'], ancestry: { [`${sha('f')}..${HEAD}`]: 1 } });
   assert.deepEqual([docs.ok, docs.unreviewedTail], [true, `${t}..${HEAD} (trivial)`]);
   const code = gate(makeState(), wp, { tailFiles: ['lib/x.mjs'], ancestry: { [`${sha('f')}..${HEAD}`]: 1 } });
@@ -463,7 +488,7 @@ test('C1-7 review → equivalent rebase → amendment → gate: the tail past th
 
 test('C2-1 review A → equivalent rebase B → amendment C → equivalent rebase D: coverage for B..C, bound to head D', () => {
   const [A, B, C] = [sha('4'), sha('5'), sha('6')];
-  const rebases = [{ from: A, to: B, equivalent: true }, { from: C, to: HEAD, equivalent: true }];
+  const rebases = [provedRebase({ from: A, to: B, equivalent: true }), provedRebase({ from: C, to: HEAD, equivalent: true })];
   const ancestry = { [`${A}..${C}`]: 1 };
   const docs = gate(makeState(), makeWp({ reviews: [{ round: 1, scope: 'full', head: A, verdicts: [] }], rebases }), { tailFiles: ['README.md'], ancestry });
   assert.deepEqual([docs.ok, docs.unreviewedTail], [true, `${B}..${C} (trivial)`]);
@@ -480,7 +505,7 @@ test('f424b70b gate-fix tail: the round-2 anchor, an equivalent rebase, then a o
   // and the lane's one-line fix sits on B as HEAD.
   const [A, B] = [sha('4'), sha('5')];
   const anchor = { round: 2, scope: 'delta', since: sha('f'), head: A, reviewId: 'review-2', verdicts: [{ comment: '1', verdict: 'fixed', commit: sha('3') }] };
-  const base = { reviews: [anchor], rebases: [{ from: A, to: B, equivalent: true }] };
+  const base = { reviews: [anchor], rebases: [provedRebase({ from: A, to: B, equivalent: true })] };
   const opts = { tailFiles: ['lib/x.test.mjs'], tailCommits: [HEAD], ancestry: { [`${A}..${HEAD}`]: 1 } };
   const uncovered = gate(makeState(), makeWp(base), opts);
   assert.deepEqual([uncovered.causes, uncovered.uncited], [['tail-uncited'], [HEAD]], 'without the recorded gate fix the tail has an uncited commit');
@@ -502,7 +527,7 @@ test('f424b70b gate-fix inspection: the inspection carries the gate failure it r
   const [A, B, C] = [sha('4'), sha('5'), sha('6')];
   const reason = 'the gate command exited 1 at the rebased head: analysis.test.ts:120 expects a null operating cost';
   const anchor = { round: 2, scope: 'delta', since: sha('f'), head: A, reviewId: 'review-2', verdicts: [] };
-  const wp = makeWp({ reviews: [anchor], rebases: [{ from: A, to: B, equivalent: true }], gateFixes: [{ from: B, reason }] });
+  const wp = makeWp({ reviews: [anchor], rebases: [provedRebase({ from: A, to: B, equivalent: true })], gateFixes: [{ from: B, reason }] });
   const opts = { tailFiles: ['lib/x.test.mjs'], tailCommits: [HEAD], ancestry: { [`${A}..${HEAD}`]: 1 } };
   const needs = gate(makeState(), wp, opts);
   assert.deepEqual(needs.inspect.gateFailures, [reason]);
@@ -601,7 +626,7 @@ test('pending ≠ failure: in_progress is pending (code 6); 31 minutes past pend
 test('equivalent rebase covered; a non-equivalent rebase needs a full review even for a docs-only diff', () => {
   const from = sha('f');
   const reviewed = { reviews: [{ round: 1, scope: 'full', head: from, verdicts: [] }] };
-  const covered = gate(makeState(), makeWp({ ...reviewed, rebases: [{ from, to: HEAD, equivalent: true }] }));
+  const covered = gate(makeState(), makeWp({ ...reviewed, rebases: [provedRebase({ from, to: HEAD, equivalent: true })] }));
   assert.deepEqual([covered.ok, covered.unreviewedTail], [true, null]);
   const changed = gate(makeState(), makeWp({ ...reviewed, rebases: [{ from, to: HEAD, equivalent: false }] }), { tailFiles: ['README.md'] });
   assert.deepEqual([changed.ok, changed.needsFullReview, changed.causes], [false, true, ['full-review']]);
@@ -615,20 +640,25 @@ test('C1-15/C2-12 a second non-equivalent rebase is held, with the serialized ca
   assert.deepEqual([recorded.outcome, recorded.patch.mergeLock, recorded.patch.queue], ['held', null, []]);
 });
 
-test('recordRebase: equal verbatim patch-ids are equivalent; the patch-id call gets the controlled diff as input (C1-5, C1-16)', () => {
+test('recordRebase: patch identity and place both establish equivalence; patch-id receives the controlled diff', () => {
   const from = sha('f');
   const newBase = sha('9');
   const wp = makeWp();
-  const same = gateExec({ patchIds: { [`diff ${BASE} ${from}\n`]: 'pid1', [`diff ${newBase} ${HEAD}\n`]: 'pid1' } });
+  const patch = 'diff --git a/new.txt b/new.txt\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..1111111111111111111111111111111111111111\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+new content\n';
+  const ranges = { [`${BASE} ${from}`]: patch, [`${newBase} ${HEAD}`]: patch };
+  const same = gateExec({ diffs: ranges, patchIds: { [patch]: 'pid1' } });
   const entry = recordRebase(makeState(), wp, { from, to: HEAD, newBase }, { exec: same });
-  assert.deepEqual(entry, { from, to: HEAD, oldBase: BASE, newBase, patchIds: { from: 'pid1', to: 'pid1' }, equivalent: true });
+  const { equivalenceProof, ...receipt } = entry;
+  assert.deepEqual(receipt, { from, to: HEAD, oldBase: BASE, newBase, patchIds: { from: 'pid1', to: 'pid1' }, equivalent: true });
+  assert.match(equivalenceProof.placeHash, /^[a-f0-9]{64}$/);
   const diffCalls = same.calls.filter((call) => call.args[2] === 'diff');
   assert.ok(diffCalls.every((call) => ['--no-color', '--no-ext-diff', '--no-textconv'].every((flag) => call.args.includes(flag))));
   const ids = same.calls.filter((call) => call.args[2] === 'patch-id');
-  assert.deepEqual(ids.map((call) => [call.args[3], call.input]), [['--verbatim', `diff ${BASE} ${from}\n`], ['--verbatim', `diff ${newBase} ${HEAD}\n`]]);
-  const differ = gateExec({ patchIds: { [`diff ${BASE} ${from}\n`]: 'pid1', [`diff ${newBase} ${HEAD}\n`]: 'pid2' } });
+  assert.deepEqual(ids.map((call) => [call.args[3], call.input]), [['--verbatim', patch], ['--verbatim', patch]]);
+  const changedPatch = patch.replace('+new content', '+different content');
+  const differ = gateExec({ diffs: { ...ranges, [`${newBase} ${HEAD}`]: changedPatch }, patchIds: { [patch]: 'pid1', [changedPatch]: 'pid2' } });
   assert.equal(recordRebase(makeState(), wp, { from, to: HEAD, newBase }, { exec: differ }).equivalent, false);
-  const empty = gateExec({ patchIds: { [`diff ${BASE} ${from}\n`]: '', [`diff ${newBase} ${HEAD}\n`]: '' } });
+  const empty = gateExec({ diffs: ranges, patchIds: { [patch]: '' } });
   assert.deepEqual(recordRebase(makeState(), wp, { from, to: HEAD, newBase }, { exec: empty }).patchIds, { from: null, to: null });
   const none = gateExec({ diffs: { [`${BASE} ${from}`]: '', [`${newBase} ${HEAD}`]: '' } });
   assert.equal(recordRebase(makeState(), wp, { from, to: HEAD, newBase }, { exec: none }).equivalent, true);
@@ -945,13 +975,37 @@ test('council review is recorded (D20) after its stages succeed, and the gate ac
   const state = makeState({ adapters: { council: { on: true } } });
   let wp = makeWp({ reviews: [], tier: 'T2' });
   const [review, synth] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
-  const staged = recordLandStep(state, wp, review, { output_dir: 'x', models: { astra: { status: 'success' }, codex: { status: 'failed' } } }, {});
+  const staged = recordLandStep(state, wp, review, { output_dir: 'x', models: { astra: { status: 'success' } } }, {});
   assert.deepEqual([staged.outcome, staged.patch.councilStage], ['continue', { round: 1, usable: 1, seats: ['astra'], scope: 'full' }]);
   wp = { ...wp, ...staged.patch };
   const out = recordLandStep(state, wp, synth, { findings: 2, seats: ['astra'] }, {});
   assert.deepEqual(out.patch.reviews, [{ round: 1, scope: 'full', since: null, tier: 'T2', head: HEAD, lenses: ['astra'], reviewId: synth.args.review_dir, findings: 2, verdicts: [], resolved: [] }]);
   assert.equal(out.patch.councilStage, null);
   assert.equal(gate(state, { ...wp, ...out.patch }).ok, true);
+});
+
+test('a missing council seat is retried alone and synthesis cannot hide the coverage gap', () => {
+  const state = makeState({ adapters: { council: { on: true } } });
+  let wp = makeWp({ reviews: [], tier: 'T2' });
+  const [review, synth] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib/x.mjs')] });
+  wp.queue = [review, synth];
+  const out = recordLandStep(state, wp, review, { models: { astra: { status: 'success' }, sol: { status: 'timeout' } } }, {});
+  assert.deepEqual(out.patch.queue[0].args.models, ['sol']);
+  wp = { ...wp, ...out.patch };
+  assert.match(recordLandStep(state, wp, synth, { findings: 0, seats: ['astra'] }, {}).reason, /lacks coverage/);
+  const failedRetry = recordLandStep(state, wp, wp.queue[0], { models: { sol: { status: 'failed' } } }, {});
+  assert.equal(failedRetry.outcome, 'continue');
+  assert.equal(failedRetry.patch.queue[0].land.retry, 2);
+  const done = recordLandStep(state, wp, wp.queue[0], { models: { sol: { status: 'success' } } }, {});
+  assert.deepEqual(done.patch.councilStage.seats, ['astra', 'sol']);
+  assert.deepEqual(done.patch.councilStage.missing, []);
+  const capped = { ...wp.queue[0], land: { ...wp.queue[0].land, retry: 2 } };
+  assert.equal(recordLandStep(state, wp, capped, { models: { sol: { status: 'failed' }, astra: { status: 'success' } } }, {}).outcome, 'block');
+});
+
+test('review A followed by fixes B and an unproved rebase C cannot dispatch delta A..C', () => {
+  const wp = makeWp({ reviews: [{ scope: 'full', head: BASE, round: 1 }], rebases: [{ from: sha('c'), to: HEAD, equivalent: false }] });
+  assert.throws(() => deltaReviewActions(makeState(), wp, BASE), /full review is owed/);
 });
 
 test('council synthesize counts Minor findings: a Minor-only round is not recorded as zero', () => {
@@ -1099,7 +1153,7 @@ test('parseAmendmentTable since: the latest table at or after the owed amendment
   // Without since, only the latest section is read (unchanged).
   assert.deepEqual(parseAmendmentTable(table(1, '101') + checkFix(2)), []);
   // A re-carried table in 2 is the newer one.
-  assert.deepEqual(ids(table(1, '101') + table(2, '102'), 1), ['102']);
+  assert.deepEqual(ids(table(1, '101') + table(2, '102'), 1), ['101', '102']);
   // Round 2's findings are owed from amendment 3: round 1's table never answers them.
   assert.deepEqual(ids(table(1, '101') + checkFix(2) + checkFix(3), 3), []);
   assert.deepEqual(ids(table(1, '101') + table(3, '301') + checkFix(4), 3), ['301']);

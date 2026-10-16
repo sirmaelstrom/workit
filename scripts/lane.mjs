@@ -2083,6 +2083,31 @@ const DISCLOSED = /(?<![\w-])(?:vacuous|stayed green|did not go red|did not fail
 const TEST_FILE = /(^|\/)(__tests__|tests?|e2e)\/|\.(test|spec)\.[cm]?[jt]sx?$/;
 // A test declaration, not a member call (`/re/.test('x')`); the name may sit on the next line.
 const TEST_NAME = /(?<![.\w$])(?:it|test)(?:\.(?:only|skip|todo|each\([^)]*\)))?\s*\(\s*(['"`])((?:\\.|(?!\1)[^\\\n])+)\1/g;
+// Positions outside JS comments and string literals. The declaration's name
+// stays in the original text for TEST_NAME, but a quoted example is not code.
+function executablePositions(text) {
+  const code = new Set();
+  let mode = null;
+  let regexClass = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], next = text[i + 1];
+    if (mode === '//') { if (c === '\n') mode = null; continue; }
+    if (mode === '/*') { if (c === '*' && next === '/') { mode = null; i++; } continue; }
+    if (mode === 'regex') {
+      if (c === '\\') i++;
+      else if (c === '[') regexClass = true;
+      else if (c === ']') regexClass = false;
+      else if (c === '/' && !regexClass) mode = null;
+      continue;
+    }
+    if (mode) { if (c === '\\') i++; else if (c === mode) mode = null; continue; }
+    if (c === '/' && (next === '/' || next === '*')) { mode = c + next; i++; continue; }
+    if (c === '/' && /(?:^|[=(:,[!&|?{};])\s*$|\b(?:return|throw|case|yield|await)\s*$/.test(text.slice(0, i))) { mode = 'regex'; regexClass = false; continue; }
+    if (c === '"' || c === "'" || c === '`') { mode = c; continue; }
+    code.add(i);
+  }
+  return code;
+}
 // Comment syntax by file type, so `#private`, a CSS `#id` or a C# `#region` is not a comment.
 const COMMENT_STYLES = [
   { files: /\.(?:[cm]?[jt]sx?|svelte|vue|cs|go|rs|scss)$/, whole: /^\s*(?:\/\/+|\/\*+|\*+(?!\/)|<!--)\s?(.*?)(?:\*\/|-->)?\s*$/, trailing: /\s\/\/\s(.*)$/ },
@@ -2179,7 +2204,7 @@ function words(text) {
 }
 
 // The added lines of a unified diff, by file, with their new line numbers.
-function addedLines(diff) {
+function addedLines(diff, { context = false } = {}) {
   const added = [];
   let file = null;
   let next = 0;
@@ -2204,8 +2229,11 @@ function addedLines(diff) {
       continue;
     }
     if (!file || header) continue;
-    if (raw.startsWith('+')) added.push({ file, line: next++, text: raw.slice(1) });
-    else if (!raw.startsWith('-') && !raw.startsWith('\\')) next++;
+    if (raw.startsWith('+')) added.push({ file, line: next++, text: raw.slice(1), added: true });
+    else if (raw.startsWith(' ')) {
+      if (context) added.push({ file, line: next, text: raw.slice(1), added: false });
+      next++;
+    }
   }
   return added;
 }
@@ -2225,7 +2253,7 @@ const listed = (items) => items.join('; ');
 // the lane's diff (base..head, unified). Empty means they hold. `exists` and
 // `reportPath` resolve the screenshots; without a diff the two diff checks are
 // skipped, and the caller says so.
-export function reportEvidenceProblems(text, { diff = null, reportPath = null, exists = () => false } = {}) {
+export function reportEvidenceProblems(text, { diff = null, reportPath = null, exists = () => false, readSource = () => null } = {}) {
   const lines = markdownLines(text);
   const problems = [];
   const controlSections = sectionsTitled(lines, /^Negative controls\b/i);
@@ -2246,20 +2274,37 @@ export function reportEvidenceProblems(text, { diff = null, reportPath = null, e
   // controls: a control whose lead names the row's id, or a control its
   // Evidence cell names, unless the cell says `no control: <why>`. A control
   // quoted only in the table cell is a fragment. (Each control is checked above.)
+  const priorRows = new Map();
+  const priorControls = new Map();
   sectionsTitled(lines, /^Amendment \d+\b/).filter((section) => section.heading.level === 2).forEach((amendment) => {
     const records = sectionsTitled(amendment.body, /^Negative controls\b/i).flatMap((section) => recordsOf(section.body).records);
+    const amendmentNumber = Number(/^Amendment (\d+)/i.exec(amendment.heading.title)[1]);
     for (const line of amendment.body) {
-      const row = /^\s*\|\s*`?([^|`]+?)`?\s*\|\s*fixed\s*\|((?:\\\||[^|])*)\|/i.exec(line.fenced ? '' : line.text);
+      const row = /^\s*\|\s*`?([^|`]+?)`?\s*\|\s*fixed\s*\|((?:\\\||[^|])*)\|\s*([^|]*)\|/i.exec(line.fenced ? '' : line.text);
       if (!row || /\bno control:\s*\S/i.test(row[2])) continue;
       const id = row[1].trim().replace(/^#/, '');
+      // Repeated historical rows retain their evidence. New evidence can
+      // explicitly cite an earlier amendment's named control.
+      const previous = priorRows.get(id);
+      const commit = row[3].replace(/[`\s]/g, '').toLowerCase();
+      const copied = previous?.row === line.text.trim();
+      const labels = (row[2].match(CONTROL_LABEL) ?? []).map((name) => name.toLowerCase());
+      const inherited = previous?.commit === commit && /^[0-9a-f]{7,40}(?:,[0-9a-f]{7,40})*$/.test(commit)
+        && labels.length > 0 && labels.every((name) => previous.controls.includes(name));
+      const cited = [...row[2].matchAll(/\bAmendment (\d+)\b/gi)].flatMap((match) => priorControls.get(Number(match[1])) ?? []);
+      const available = [...records, ...cited];
       const names = [id, ...(row[2].match(CONTROL_LABEL) ?? [])];
-      const named = names.some((name) => {
+      const matched = names.filter((name) => {
         const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const within = new RegExp(`(?<![\\w-])${escaped}(?![\\d-])`, 'i');
-        return records.some((record) => within.test(record.label));
+        return available.some((record) => within.test(record.label));
       });
-      if (!named) problems.push(`${amendment.heading.title}: fixed row ${id} has no control under its Negative controls, and its Evidence does not say "no control: <why>" (rule 6)`);
+      const named = matched.length > 0;
+      if (!named && !copied && !inherited) problems.push(`${amendment.heading.title}: fixed row ${id} has no control under its Negative controls or a cited earlier amendment, and its Evidence does not say "no control: <why>" (rule 6)`);
+      if (named || copied || inherited) priorRows.set(id, { row: line.text.trim(), commit,
+        controls: [...new Set([...matched.map((name) => name.toLowerCase()), ...((copied || inherited) ? previous.controls : [])])] });
     }
+    priorControls.set(amendmentNumber, records);
   });
 
   // Rule 14: a screenshot is this lane's file beside the report,
@@ -2299,7 +2344,21 @@ export function reportEvidenceProblems(text, { diff = null, reportPath = null, e
   const named = (name, text) => new RegExp(`(?<![\\w])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`).test(text);
   const unnamed = [];
   const runs = [];
-  for (const row of added.filter((entry) => TEST_FILE.test(entry.file))) {
+  const blobs = new Map();
+  let blob = null;
+  let inHunk = false;
+  let newHeader = false;
+  for (const line of String(diff).split(/\r?\n/)) {
+    if (line.startsWith('diff --git ')) { blob = null; inHunk = false; newHeader = false; }
+    if (line.startsWith('@@ ')) inHunk = true;
+    if (inHunk) continue;
+    const index = /^index [0-9a-f]{40}\.\.([0-9a-f]{40})(?:\s|$)/i.exec(line);
+    if (index) blob = index[1];
+    if (newHeader && line.startsWith('+++ b/') && blob && !/^0+$/.test(blob)) blobs.set(line.slice(6), blob);
+    newHeader = line.startsWith('--- ');
+  }
+  const sourceFiles = new Set();
+  for (const row of addedLines(diff, { context: true }).filter((entry) => TEST_FILE.test(entry.file) && /\.[cm]?[jt]sx?$/.test(entry.file))) {
     const last = runs.at(-1);
     if (last && last.file === row.file && last.end + 1 === row.line) {
       last.rows.push(row);
@@ -2309,12 +2368,21 @@ export function reportEvidenceProblems(text, { diff = null, reportPath = null, e
     }
   }
   for (const run of runs) {
-    const text = run.rows.map((row) => row.text).join('\n');
+    const source = readSource(run.file, blobs.get(run.file) ?? null);
+    if (typeof source === 'string' && sourceFiles.has(run.file)) continue;
+    if (typeof source === 'string') sourceFiles.add(run.file);
+    const full = typeof source === 'string';
+    const text = full ? source : run.rows.map((row) => row.text).join('\n');
+    const changed = new Set(added.filter((row) => row.file === run.file).map((row) => row.line));
+    const executable = executablePositions(text);
     for (const match of text.matchAll(TEST_NAME)) {
+      if (!executable.has(match.index)) continue;
       const raw = match[2].replace(/\\(.)/g, '$1');
       const name = raw.includes('${') ? raw.slice(0, raw.indexOf('${')).trim() : raw;
       if (!name || named(name, controlRuns) || named(name, claimText)) continue;
-      const line = run.rows[text.slice(0, match.index).split('\n').length - 1].line;
+      const offset = text.slice(0, match.index).split('\n').length - 1;
+      const line = full ? offset + 1 : run.rows[offset].line;
+      if (!changed.has(line)) continue;
       unnamed.push(`${run.file}:${line} "${raw.slice(0, 80)}"`);
     }
   }
@@ -2360,7 +2428,7 @@ function requireLaneDir(opts, lane, deps) {
 function laneDiff(opts, deps, lane) {
   if (!lane.path || !lane.base) return { diff: null, diffChecks: 'did not run: the lane record has no worktree or base' };
   requireLaneDir(opts, lane, deps);
-  const diff = call(deps, 'git', ['-C', lane.path, 'diff', '--no-color', '--no-ext-diff', '--no-renames', `${lane.base}...${lane.branch ?? 'HEAD'}`]);
+  const diff = call(deps, 'git', ['-C', lane.path, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', `${lane.base}...${lane.branch ?? 'HEAD'}`]);
   if (diff.code !== 0) throw new LaneError(EXIT.ERROR, `git diff for the report's evidence checks failed: ${diff.stderr.trim()}`);
   return { diff: diff.stdout, diffChecks: 'ran' };
 }
@@ -2401,7 +2469,8 @@ async function checkLane(opts, deps, state) {
     } else {
       const text = deps.read(path);
       const { diff, diffChecks } = laneDiff(opts, deps, lane);
-      const problems = [...reportShapeProblems(text), ...reportEvidenceProblems(text, { diff, reportPath: path, exists: deps.exists })];
+      const problems = [...reportShapeProblems(text), ...reportEvidenceProblems(text, { diff, reportPath: path, exists: deps.exists,
+        readSource: (_file, blob) => { if (!blob) return null; const source = call(deps, 'git', ['-C', lane.path, 'show', blob]); return source.code === 0 ? source.stdout : null; } })];
       evidence = { path, problems, diffChecks };
       if (problems.length > 0) failedExpectation = `--expect-report ${path}: ${problems.join('; ')}`;
     }

@@ -125,10 +125,13 @@ const idOfWorktree = (path) => /-(wp-\d+)$/.exec(path)?.[1].toUpperCase();
 // Rules are [regex over "program args…", (h, match, input) → result]; a
 // test's own h.rules come first.
 const BASE_RULES = [
+  [/^git -C \S+ diff --no-color --no-ext-diff --no-textconv --no-renames --full-index \w+ \w+$/, () => ok('diff --git a/proof.txt b/proof.txt\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..1111111111111111111111111111111111111111\n--- /dev/null\n+++ b/proof.txt\n@@ -0,0 +1 @@\n+proof\n')],
+  [/^git -C \S+ rev-parse --verify ([0-9a-f]{40})\^\{commit\}$/, (h, m) => ok(`${m[1]}\n`)],
+  [/^git -C \S+ status --porcelain$/, () => ok()],
   [/Get-CimInstance|ps -o lstart/, (h) => ok(h.identity ? `${IDENTITY}\n` : '')],
   [/^git -C \S+ rev-list --count \S+\.\.HEAD$/, () => ok('1\n')],
   // The lane's diff for the report's evidence checks (e4ad108b): empty unless a test sets one.
-  [/^git -C \S+ diff --no-color --no-ext-diff --no-renames \S+\.\.HEAD$/, (h) => ok(h.laneDiff ?? '')],
+  [/^git -C \S+ diff --no-color --no-ext-diff --no-textconv --full-index --no-renames \S+\.\.HEAD$/, (h) => ok(h.laneDiff ?? '')],
   [/^gh pr view (\d+) --repo o\/r --json headRefName,state,body$/, (h, m) => {
     const id = `WP-${String(Number(m[1]) - 100).padStart(2, '0')}`;
     // The lane's PR body: its report plus the `## Merge danger` section (fca05d92).
@@ -534,6 +537,78 @@ test('waits are wall-clock deadlines: an unreadable meter is re-read after 5 min
 });
 
 const stalledEvents = (h) => h.events().filter((e) => e.event === 'stalled');
+
+test('a progressing 35-minute review avoids a stall; a reviewer with no progress still alarms after its deadline', async (t) => {
+  const h = harness(t, { herdr: true, notify: true, ledger: true, env: { WORKIT_NOTIFY_CMD: 'notify-me' }, wps: [TWO[0], TWO[1]] });
+  await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'review' && a.part === 'lens' });
+  // Watch starts on next, before an action is emitted. Another WP's next
+  // observes the pending review without inventing a completed result.
+  const pending = h.state.pending.id;
+  const next = async () => {
+    saveState(h.state, h.deps);
+    const out = await runConduct(['next', '--run', h.runDir], h.overrides());
+    h.state = loadState(h.runDir, h.deps);
+    assert.equal(JSON.parse(out.stdout).action.id, pending);
+  };
+  await next();
+  h.tick(35 * 60000);
+  await next();
+  assert.deepEqual(stalledEvents(h), []);
+  h.tick(41 * 60000);
+  await next();
+  saveState(h.state, h.deps);
+  assert.equal(stalledEvents(h).length, 1);
+  assert.match(stalledEvents(h)[0].data.why, /waiting on review\/lens/);
+  const original = h.state.pending;
+  assert.equal(h.wp('WP-02').queue[0].step, 'review');
+  assert.deepEqual(h.wp('WP-02').queue.slice(1, 3).map((a) => a.part), ['notify', 'ledger']);
+  await next();
+  assert.equal(h.wp('WP-02').queue.filter((a) => a.step === 'alarm').length, 2);
+  await recordPending(h, await perform(h, original));
+  assert.equal(h.wp('WP-02').queue.filter((a) => a.step === 'alarm').length, 2);
+  assert.equal(h.wp('WP-02').queue.some((a) => JSON.stringify(a.command) === JSON.stringify(original.command)), false, 'the completed review is removed exactly once');
+});
+
+test('brief preflight refuses a crate-relative typo before prompting and accepts the corrected author action', async (t) => {
+  const h = harness(t, { herdr: true, wps: [TWO[0], TWO[1]] });
+  const action = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'brief' });
+  await perform(h, action);
+  writeFileSync(action.outPath, `${readFileSync(action.outPath, 'utf8')}\nInspect \`src/nonexistent.rs\`.\n`);
+  h.wp('WP-02').files = [...h.wp('WP-02').files, 'src/nonexistent.rs'];
+  assert.throws(() => build.record(h.state, action, {}, h.deps), /brief preflight/);
+  assert.equal(h.wp('WP-02').state, 'dispatched');
+  assert.equal(of(h, 'WP-02').some((a) => a.step === 'prompt'), false);
+  writeFileSync(action.outPath, readFileSync(action.outPath, 'utf8').replace('Inspect `src/nonexistent.rs`.', 'Inspect the declared WP files.'));
+  await build.record(h.state, action, {}, h.deps);
+});
+
+test('a Rust seat starting after capacity wait gets its own deadline, while heartbeats cannot hide a dead seat', async (t) => {
+  const h = harness(t, { herdr: true, council: true, wps: [TWO[0], { ...TWO[1], tier: 'T2' }] });
+  const action = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'council' && a.part === 'review' });
+  mkdirSync(action.args.output_dir, { recursive: true });
+  const path = join(action.args.output_dir, 'review-progress.json');
+  const publish = (status, startedAt = null) => writeFileSync(path, JSON.stringify({ updatedAt: h.deps.timestamp(), seats: { sol: { status, startedAt } } }));
+  const poll = async () => {
+    saveState(h.state, h.deps);
+    const out = await runConduct(['next', '--run', h.runDir], h.overrides());
+    h.state = loadState(h.runDir, h.deps);
+    assert.equal(JSON.parse(out.stdout).action.id, action.id);
+  };
+  publish('queued');
+  await poll();
+  h.tick(50 * 60000);
+  const started = h.deps.timestamp();
+  publish('running', started);
+  await poll();
+  h.tick(26 * 60000);
+  publish('running', started);
+  await poll();
+  assert.equal(stalledEvents(h).length, 0);
+  h.tick(50 * 60000);
+  publish('running', started);
+  await poll();
+  assert.equal(stalledEvents(h).length, 1);
+});
 
 test('stall alarm: a lane stop failing three times in a row raises one `stalled` event and one notify call (kind stalled); the run goes on and merges', async (t) => {
   const h = harness(t, { herdr: true, notify: true, env: { WORKIT_NOTIFY_CMD: 'notify-me' }, wps: [TWO[0], TWO[1]] });
@@ -1921,7 +1996,7 @@ test('shell strings (D18, D19): the gate command is shellArgv on win32 and linux
 test('non-equivalent rebase (D13): differing patch-ids → a full review (round + 1) before the merge; equal patch-ids → no new review', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   let calls = 0;
-  h.patchId = (input) => ((calls += 1) <= 2 ? input.replace(/\W/g, '').slice(0, 40) : 'f'.repeat(40));
+  h.patchId = () => ((calls += 1) <= 2 ? String(calls).repeat(40) : 'f'.repeat(40));
   assert.equal(await drive(h), null);
   const posts = of(h, 'WP-02').filter((a) => a.step === 'post');
   assert.deepEqual(posts.map((a) => a.land.round), [1, 2]);
@@ -1962,7 +2037,9 @@ test('gate command after a no-op rebase: the amended head gets its delta review 
   assert.ok(fix.to && fix.to !== fix.from, JSON.stringify(fix));
 });
 
-test('gate command after a rebase that moved the head: the gate fix is reviewed from the rebased head, never across the rebase', async (t) => {
+// The harness's git answers every ancestry and patch check, so the mapped
+// baseline here is the harness's; delta-recovery.test.mjs maps it in real git.
+test('gate command after a rebase that moved the head: the gate fix gets a delta review from the verified baseline, never a block', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   h.gateCmdCode = { 'WP-02': [1] };
   h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
@@ -1972,10 +2049,10 @@ test('gate command after a rebase that moved the head: the gate fix is reviewed 
   const [rebase] = wp.rebases;
   assert.notEqual(rebase.from, rebase.to, 'the first rebase moved the head');
   assert.equal(wp.reviews[0].head, rebase.from, 'the full review predates the rebase');
-  const diff = of(h, 'WP-02').find((a) => a.part === 'amend-diff');
-  assert.equal(diff.command.at(-2), rebase.to);
+  const mapped = h.events().find((e) => e.event === 'delta-baseline-mapped' && e.data.wpId === 'WP-02');
+  assert.ok(mapped, 'the rebased baseline is verified before the delta review');
   const posts = of(h, 'WP-02').filter((a) => a.step === 'post');
-  assert.deepEqual(posts.map((a) => [a.land.round, a.land.scope, a.land.since ?? null]), [[1, 'full', null], [2, 'delta', rebase.to]]);
+  assert.deepEqual(posts.map((a) => [a.land.round, a.land.scope, a.land.since ?? null]), [[1, 'full', null], [2, 'delta', mapped.data.baseline]]);
   assert.equal(wp.deltaFrom, null, 'land clears the delta boundary');
 });
 

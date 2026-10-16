@@ -82,3 +82,24 @@ export function verifyDeltaRecovery(wp, baseline, deps) {
   }
   return { ...binding, kind: 'rebase', oldBase, newBase, patchId, placeHash: createHash('sha256').update(place).digest('hex') };
 }
+
+// Find the reviewed prefix on the new line without trusting commit messages
+// or a count of commits. Every candidate must pass the same patch/place proof
+// as an explicit recovery. A large or unprovable history fails closed.
+export function discoverDeltaRecovery(wp, deps) {
+  const reviewed = (wp.reviews ?? []).at(-1);
+  if (reviewed?.scope !== 'full' || wp.owed?.adjudicate) return null;
+  const run = (args) => deps.exec('git', ['-C', wp.lane.worktree, ...args]);
+  if (run(['merge-base', '--is-ancestor', reviewed.head, wp.pr.head]).code === 0) return null;
+  const rebase = (wp.rebases ?? []).at(-1);
+  if (!rebase?.newBase || !/^[0-9a-f]{7,40}$/i.test(rebase.newBase)) return null;
+  const candidates = run(['rev-list', '--reverse', '--max-count=257', `${rebase.newBase}..${wp.pr.head}`]);
+  if (candidates.code !== 0) return null;
+  const shas = candidates.stdout.trim().split(/\s+/).filter(Boolean);
+  if (shas.length > 256) return null;
+  for (const sha of shas) {
+    try { return verifyDeltaRecovery(wp, sha, deps); }
+    catch (error) { if (!(error instanceof ConductError)) throw error; }
+  }
+  return null;
+}

@@ -39,6 +39,7 @@ const IDENTITY = 'Sun Oct 4 18:00:00 2026 claude';
 const BASE = 'b'.repeat(40);
 const RELEASE_HEAD = 'e'.repeat(40);
 const LANE_COST = 0.25;
+const PROOF_PATCH = 'diff --git a/proof.txt b/proof.txt\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..1111111111111111111111111111111111111111\n--- /dev/null\n+++ b/proof.txt\n@@ -0,0 +1 @@\n+proof\n';
 const LIVE = ['dispatched', 'pr', 'review', 'amending', 'gate'];
 const OFF = ['herdr', 'notify', 'spend', 'spine', 'council', 'kb', 'verify'].flatMap((name) => ['--no-adapter', name]);
 const PRIVATE_PATHS = [/[A-Za-z]:[\\/]+(Users|Development)\b/i, /[\\/]Users[\\/][^\\/\s"]+[\\/]/];
@@ -126,7 +127,7 @@ const RULES = [
   }],
   [/^git -C \S+ rev-list --count \S+\.\.HEAD$/, () => ok('1\n')],
   // The lane's diff for the report's evidence checks (e4ad108b): empty unless a test sets one.
-  [/^git -C \S+ diff --no-color --no-ext-diff --no-renames \S+\.\.HEAD$/, (h) => ok(h.laneDiff ?? '')],
+  [/^git -C \S+ diff --no-color --no-ext-diff --no-textconv --full-index --no-renames \S+\.\.\.HEAD$/, (h) => ok(h.laneDiff ?? '')],
   [/^gh pr list --repo example\/scratch --head conduct\/\S+\/(wp-\d+) --state all --json number,headRefOid,state$/, (h, m) => {
     const id = m[1].toUpperCase();
     return ok(JSON.stringify([{ number: prOf(id), headRefOid: h.head(id), state: 'OPEN' }]));
@@ -159,6 +160,7 @@ const RULES = [
   [/^git -C \S+ (fetch origin|rebase origin\/main |push |add |commit )/, () => ok()],
   [/^git -C \S+ merge-base --is-ancestor /, () => ok()],
   [/^git -C \S+ diff --no-color --no-ext-diff --no-textconv (\w+) (\w+)$/, (h, m) => ok(`diff ${m[1]} ${m[2]}\n`)],
+  [/^git -C \S+ diff --no-color --no-ext-diff --no-textconv --no-renames --full-index (\w+) (\w+)$/, () => ok(PROOF_PATCH)],
   [/^git -C \S+ patch-id --verbatim$/, () => ok(`${'f'.repeat(40)} x\n`)],
   [/^git -C \S+ diff --quiet (?:--no-renames )?(\w+) (\w+)$/, (h, m) => ({ code: h.treeMismatch === m[2] ? 1 : 0, stdout: '', stderr: '' })],
   [/^git -C \S+ diff --name-only \S+ \S+$/, (h) => ok(h.amendDiff ?? 'src/x.mjs\n')],
