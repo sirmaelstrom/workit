@@ -139,16 +139,19 @@ export function pickReviewers(state, authorKind, { mode = 'standalone', author =
   const claude = state.agents?.claude?.on === true;
   const codex = state.agents?.codex?.on === true;
   const pair = reviewPairFor(author) ?? reviewPairFor('claude');
+  // No claude CLI: the pair's codex-harness lens alone, never the author's.
+  const withoutOpus = (where) => {
+    const lens = pair.find((l) => l !== 'opus');
+    return { lenses: [lens], singleLens: `${author}-authored PR${where} with no claude CLI: ${lens} is the only available lens that is not the author` };
+  };
   if (mode === 'managed') {
     if (!codex) return { impossible: 'managed repo needs the codex CLI' };
-    if (pair.includes('opus') && !claude) {
-      const lens = pair.find((l) => l !== 'opus');
-      return { lenses: [lens], singleLens: `${author}-authored PR on a managed repo with no claude CLI: ${lens} is the only available lens that is not the author` };
-    }
+    if (pair.includes('opus') && !claude) return withoutOpus(' on a managed repo');
     return { lenses: pair };
   }
   if (authorKind === 'codex' && claude && codex) return { lenses: pair };
-  if (codex) return { lenses: ['codex', 'astra'], ...(authorKind === 'codex' ? { sameFamily: true } : {}) };
+  if (codex && authorKind === 'codex' && pair.includes('opus')) return withoutOpus('');
+  if (codex) return { lenses: ['codex', 'astra'] };
   if (claude) return { lenses: ['opus'], singleLens: 'no codex CLI: opus is the only available lens', ...(authorKind === 'claude' ? { sameFamily: true } : {}) };
   return { impossible: 'no review CLI is available' };
 }

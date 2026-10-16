@@ -780,7 +780,13 @@ test('pickReviewers availability matrix (D19.12)', () => {
     { lenses: ['opus'], singleLens: 'no codex CLI: opus is the only available lens', sameFamily: true });
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'claude').lenses, ['codex', 'astra']);
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex').lenses, ['astra', 'opus']);
-  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex'), { lenses: ['codex', 'astra'], sameFamily: true });
+  // 2aadf72f: no claude CLI on a Sol-authored standalone PR is astra alone —
+  // the codex lens is Sol, the author. Terra's pair is codex + astra.
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex'),
+    { lenses: ['astra'], singleLens: 'sol-authored PR with no claude CLI: astra is the only available lens that is not the author' });
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { author: 'astra' }).lenses, ['codex']);
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { author: 'terra' }), { lenses: ['codex', 'astra'] });
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'claude'), { lenses: ['codex', 'astra'] });
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'claude', { mode: 'managed' }).lenses, ['codex', 'astra']);
   // 2aadf72f: the writer's claim seats the Sol author's pair, so a managed
   // codex-authored PR is reviewed by astra + opus when both CLIs are on.
