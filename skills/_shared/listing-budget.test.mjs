@@ -38,7 +38,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -76,8 +77,13 @@ export function readListingRow(file) {
   const name = ((block.match(/^name:\s*(.+)$/m) || [])[1] || basename(dirname(file))).trim();
   const raw = (block.match(/^description:\s*([\s\S]*?)(?=\r?\n[a-zA-Z-]+:\s|$)/m) || [])[1] || '';
   const description = raw.trim().replace(/^["']|["']$/g, '').replace(/\s+/g, ' ');
+  // `disable-model-invocation: true` keeps a skill out of the model's listing:
+  // it stays user-invoked (`/name`) and its description is not in context, so
+  // it costs the shared budget nothing. Charging those rows overstated the
+  // total by 1,094 of 8,960 chars on 2026-10-16 (blast-radius, chart, retro).
+  const listed = !/^disable-model-invocation:\s*["']?true["']?\s*$/im.test(block);
   // The listing renders one row as `- name: description`.
-  return { name, description, cost: name.length + description.length + 2 };
+  return { name, description, listed, cost: listed ? name.length + description.length + 2 : 0 };
 }
 
 test('no single skill description starves the rest of the listing', () => {
@@ -102,17 +108,47 @@ test("workit's whole listing fits a small-context session", () => {
   const rows = skillFiles().map(readListingRow);
   assert.ok(rows.length > 0, 'no SKILL.md files discovered — this guard did not run');
 
-  const total = rows.reduce((sum, row) => sum + row.cost, 0);
-  const worst = [...rows].sort((a, b) => b.cost - a.cost).slice(0, 3);
+  const listed = rows.filter((row) => row.listed);
+  const total = listed.reduce((sum, row) => sum + row.cost, 0);
+  const worst = [...listed].sort((a, b) => b.cost - a.cost).slice(0, 3);
 
   assert.ok(
     total <= MAX_TOTAL_LISTING_CHARS,
-    `workit's skill listing costs ${total} chars across ${rows.length} skills, over the ` +
+    `workit's skill listing costs ${total} chars across ${listed.length} listed skills ` +
+      `(${rows.length - listed.length} user-invoked skills excluded), over the ` +
       `${MAX_TOTAL_LISTING_CHARS} cap.\nThe budget scales with the context window, so going ` +
       `over degrades SILENTLY on small-context sessions — lowest-scoring skills lose their ` +
       `descriptions first and simply stop firing.\nBiggest contributors: ` +
       worst.map((r) => `${r.name} (${r.cost})`).join(', '),
   );
+});
+
+test('a disable-model-invocation row is free; every other row is charged', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'listing-budget-'));
+  try {
+    const row = (frontMatter) => {
+      const file = join(dir, 'SKILL.md');
+      writeFileSync(file, `---\nname: probe\ndescription: "Ten chars."\n${frontMatter}---\n\nbody\n`);
+      return readListingRow(file);
+    };
+    const charged = 'probe'.length + 'Ten chars.'.length + 2;
+    assert.deepEqual([row('').listed, row('').cost], [true, charged]);
+    assert.deepEqual([row('disable-model-invocation: false\n').listed, row('disable-model-invocation: false\n').cost], [true, charged]);
+    assert.deepEqual([row('disable-model-invocation: true\n').listed, row('disable-model-invocation: true\n').cost], [false, 0]);
+    assert.equal(row('disable-model-invocation: "true"\n').listed, false);
+    // The flag belongs to the front matter only; a body line quoting it is prose.
+    writeFileSync(join(dir, 'SKILL.md'), '---\nname: probe\ndescription: "Ten chars."\n---\n\ndisable-model-invocation: true\n');
+    assert.equal(readListingRow(join(dir, 'SKILL.md')).listed, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the exclusion is not vacuous: the repo has user-invoked skills and the guard sees them', () => {
+  // If this fails because the last disable-model-invocation skill was removed,
+  // delete this test; if it fails with that skill still present, the parser broke.
+  const unlisted = skillFiles().map(readListingRow).filter((row) => !row.listed).map((row) => row.name);
+  assert.ok(unlisted.length > 0, 'no disable-model-invocation skill detected under skills/');
 });
 
 test('every description states when NOT to use the skill', () => {
