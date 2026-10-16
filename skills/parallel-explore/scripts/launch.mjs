@@ -21,6 +21,7 @@
 import { spawn, execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
+import { removeWorktree } from './worktree-teardown.mjs';
 
 // ---------------------------------------------------------------------------
 // Args
@@ -34,7 +35,9 @@ function getArg(name, fallback) {
   return args[idx + 1] || fallback;
 }
 
-const promptsDir = resolve(getArg('prompts', ''));
+// resolve('') is the cwd, so the flag is checked before it is resolved.
+const promptsArg = getArg('prompts', '');
+const promptsDir = promptsArg ? resolve(promptsArg) : '';
 const workdir = resolve(getArg('workdir', process.cwd()));
 const model = getArg('model', 'sonnet');
 const useWorktree = args.includes('--worktree');
@@ -87,13 +90,12 @@ function createWorktree(branchName) {
   }
 }
 
+// A branch agent may link node_modules or a cache into its worktree;
+// removeWorktree unlinks every link before anything is deleted.
 function cleanupWorktrees() {
   for (const wt of worktrees) {
-    try {
-      execSync(`git worktree remove "${wt}" --force`, { cwd: workdir, stdio: 'pipe' });
-    } catch {
-      console.error(`Warning: failed to clean worktree ${wt}`);
-    }
+    const result = removeWorktree(workdir, wt);
+    if (!result.removed) console.error(`Warning: worktree ${wt} not removed: ${result.reason}`);
   }
 }
 
