@@ -34,7 +34,9 @@ import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
   priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor, visualReadProblem,
 } from '../land.mjs';
-import { READ_BACK_WAIT_MS, answerCommand, conductScript, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles } from '../touch.mjs';
+import {
+  QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
+} from '../touch.mjs';
 import { preapprovedRef } from './spec.mjs';
 
 // The lane-contract template's run-level slot prefixes (D17). `<repo A` also
@@ -711,15 +713,19 @@ function haltTouch(state, deps, reason, why, spendUsd = null) {
 // `conduct.mjs replan --run <dir> --plan <file>`. When mid-flight information
 // invalidates the run's plan, the conductor states the delta: why, and each
 // change with its door and whether it stays inside the approved scope. Every
-// change two-way and in scope: the delta proceeds on the run's pre-approval,
-// recorded (state.replans, a `replanned` event, rulings/replan-<n>.json, and
-// with the Spine adapter a receipt on the anchor). Anything wider halts
-// dispatch on a touch whose options carry the delta-plan. The verb records the
-// decision; the conductor makes the changes with the verbs that make them
-// (ratify, reset-wp, a ruling's amendment).
+// change two-way and in scope: the delta is approved on the run's
+// pre-approval. Anything wider halts dispatch on a touch whose question carries
+// the whole delta-plan. An approved re-plan (on the pre-approval, or the
+// operator's (a) or (c)) is applied before any other build work: the next
+// action is an `author` step in which the conductor makes the changes with the
+// verbs that make them (ratify, reset-wp, a ruling's amendment) and records
+// what it did. With the Spine adapter, an autonomous re-plan is then receipted
+// on the anchor. rulings/replan-<n>.json is the proposal as filed; state.json
+// and the run analysis carry what became of it.
 const REPLAN_DOORS = ['two-way', 'one-way'];
 export function replan(state, plan, deps) {
   if (state.phase !== 'build') throw new ConductError(5, `replan: the run is in phase ${state.phase}; a re-plan is made mid-build`);
+  state.build ??= { contract: null, halts: [] };
   const why = typeof plan?.why === 'string' ? plan.why.trim() : '';
   if (!why) throw new ConductError(2, 'replan: the plan needs "why", the information that invalidated the plan');
   const delta = Array.isArray(plan.delta) ? plan.delta : [];
@@ -731,6 +737,8 @@ export function replan(state, plan, deps) {
   });
   state.replans ??= [];
   if (state.replans.some((row) => row.mode === 'asked')) throw new ConductError(5, 'replan: a re-plan already waits on the operator; answer it first');
+  const unapplied = state.replans.find((row) => ['autonomous', 'operator'].includes(row.mode) && !row.applied);
+  if (unapplied) throw new ConductError(5, `replan: re-plan ${unapplied.n} is approved and not yet applied; run next and apply it first`);
   const n = state.replans.length + 1;
   const items = delta.map((item) => ({ change: item.change.trim(), door: item.door, inScope: item.inScope }));
   const wider = items.filter((item) => item.door !== 'two-way' || !item.inScope);
@@ -742,21 +750,28 @@ export function replan(state, plan, deps) {
     rests = `the authority in ${join(state.runDir, 'state.json')} (no approving touch recorded)`;
   }
   const row = { n, why, delta: items, rests, file, at: deps.timestamp(), mode: wider.length ? 'asked' : 'autonomous' };
+  // The operator decides from the question alone, so it carries the whole delta-plan or is refused before anything is written.
+  let question = null;
+  if (wider.length) {
+    const list = items.map((item, i) => `${i + 1}. ${item.change} (${item.door}${item.inScope ? '' : ', outside the approved scope'})`).join(' ');
+    const reasons = wider.map((item) => `change ${items.indexOf(item) + 1} is ${item.inScope ? 'a one-way door' : 'outside the approved scope'}`).join('; ');
+    question = `DO: rule on conduct ${state.slug}'s re-plan. New information: ${why}. The delta-plan: ${list} It needs you because ${reasons}; the pre-approval (${rests}) covers only two-way changes inside its scope. EXPECT: (a) the conductor applies these changes before any other build work; (b) the run keeps its original plan; (c) the conductor applies the plan as your text amends it (type the changes). Dispatch stays halted until you answer.`;
+    const length = filedLength(state, state.touches.length + 1, question);
+    if (length > QUESTION_MAX) throw new ConductError(2, `replan: the delta-plan's question would be ${length} chars, over spine_receipt's ${QUESTION_MAX}-char cap; shorten "why" or the changes so the operator sees the whole plan`);
+  }
   deps.mkdir(join(state.runDir, 'rulings'));
-  deps.write(join(state.runDir, file), `${JSON.stringify(row, null, 2)}\n`);
+  deps.write(join(state.runDir, file), `${JSON.stringify({ n, why, delta: items, rests, at: row.at, needs: wider.length ? 'the operator' : 'nothing: inside the pre-approval' }, null, 2)}\n`);
   if (!wider.length) {
-    // Receipted on the anchor by the build's next action (spine), else the event and the analysis carry it.
+    // Receipted on the anchor once applied (spine), else the event and the analysis carry it.
     row.receipt = spineOn(state) && state.intent?.anchor ? 'owed' : null;
     state.replans.push(row);
     appendEvent(state, deps, { step: 'replan', event: 'replanned', source: 'verb', data: { n, mode: 'autonomous', changes: items.length, rests: row.rests } });
     return { n, mode: 'autonomous', rests: row.rests, file: join(state.runDir, file) };
   }
-  const list = items.map((item, i) => `${i + 1}. ${item.change} (${item.door}${item.inScope ? '' : ', outside the approved scope'})`).join(' ');
-  const reasons = wider.map((item) => (item.inScope ? `"${item.change.slice(0, 60)}" is a one-way door` : `"${item.change.slice(0, 60)}" is outside the approved scope`)).join('; ');
   const touch = buildTouch(state, deps, 'replan', {
-    question: `DO: rule on conduct ${state.slug}'s re-plan. New information: ${why}. The delta-plan: ${list} It needs you because ${reasons}; the pre-approval (${row.rests}) covers only two-way changes inside its scope. EXPECT: (a) the conductor makes these changes; (b) the run keeps its original plan; (c) the changes as your text amends them. Dispatch resumes on any answer.`.slice(0, 2000),
+    question,
     options: [
-      option('a', 'Apply the delta-plan', `The conductor makes the ${items.length} change(s) listed; dispatch resumes.`),
+      option('a', 'Apply the delta-plan', `The conductor applies the ${items.length} change(s) before any other build work.`),
       option('b', 'Keep the original plan', 'Nothing changes; dispatch resumes on the plan you approved.'),
       option('c', 'Apply it with my changes', 'Type the changes; the conductor applies the plan as your text amends it.'),
     ],
@@ -770,25 +785,42 @@ export function replan(state, plan, deps) {
   return { n, mode: 'asked', touch: touch.n, file: join(state.runDir, file) };
 }
 
-// The anchor receipt an autonomous re-plan owes. A touch filed on the anchor
-// waits on the operator, and a later receipt would supersede its needs_input,
-// so the receipt is skipped then (as rotate's custody receipt is).
-function replanReceipt(state, deps) {
-  const row = (state.replans ?? []).find((entry) => entry.receipt === 'owed');
+// An approved re-plan is applied before any other build work: the conductor
+// makes the changes and writes what it did (or why it could not).
+function replanApply(state) {
+  const row = (state.replans ?? []).find((entry) => ['autonomous', 'operator'].includes(entry.mode) && !entry.applied);
   if (!row) return null;
-  const filed = (state.touches ?? []).filter((touch) => touch.status === 'filed');
-  if (filed.length) {
-    row.receipt = 'skipped';
-    appendEvent(state, deps, { step: 'replan', event: 'replan-receipt-skipped', data: { n: row.n, filed: filed.map((touch) => touch.tag) } });
-    return replanReceipt(state, deps);
-  }
+  const outPath = join(state.runDir, 'rulings', `replan-${row.n}-applied.json`);
+  const amended = row.answer?.text ? ` The operator's text, verbatim, amends it: ${row.answer.text}` : '';
+  return {
+    kind: 'author', step: 'replan', part: 'apply', replan: row.n, outPath, expects: { type: 'file' },
+    instruction: `Apply re-plan ${row.n} before anything else runs: ${row.delta.map((item, i) => `${i + 1}. ${item.change}`).join(' ')}${amended} Make each change with the verb that makes it (conduct.mjs ratify, reset-wp, or a ruling's amendment). Then write { "applied": true, "what": "<what you did>" } to outPath, or { "applied": false, "why": "<why it could not be applied>" }, and record {}.`,
+  };
+}
+
+function recordReplanApply(state, action, deps) {
+  const row = (state.replans ?? []).find((entry) => entry.n === action.replan);
+  if (!row) throw new ConductError(2, `no re-plan ${action.replan} in this run`);
+  const value = readJsonFile(deps, action.outPath, 're-plan application');
+  const said = value?.applied === true ? value.what : value?.applied === false ? value.why : null;
+  if (typeof said !== 'string' || !said.trim()) throw new ConductError(2, `${action.outPath} must be { "applied": true, "what": "…" } or { "applied": false, "why": "…" }`);
+  row.applied = { applied: value.applied, text: said.trim(), at: deps.timestamp() };
+  appendEvent(state, deps, { step: 'replan', event: value.applied ? 'replan-applied' : 'replan-not-applied', data: { n: row.n, text: said.trim() } });
+}
+
+// The anchor receipt an autonomous re-plan owes once applied. A touch filed
+// on the anchor waits on the operator, and a later receipt would supersede its
+// needs_input, so the receipt waits until no touch is filed.
+function replanReceipt(state) {
+  const row = (state.replans ?? []).find((entry) => entry.receipt === 'owed' && entry.applied);
+  if (!row || (state.touches ?? []).some((touch) => touch.status === 'filed')) return null;
   return {
     kind: 'agent-tool', step: 'replan', part: 'receipt', replan: row.n, tool: 'spine_receipt', expects: { type: 'json' },
     instruction: 'Call spine_receipt with these args and record its raw result.',
     args: {
       questId: state.intent.anchor, outcome: 'completed',
-      did: `conduct ${state.slug} (run ${state.runId}) re-planned inside its pre-approval (re-plan ${row.n}). Why: ${row.why.slice(0, 800)} What changed: ${row.delta.map((item, i) => `${i + 1}. ${item.change}`).join(' ').slice(0, 2000)} Every change is a two-way door inside the approved scope; it rests on ${row.rests}.`.slice(0, 4000),
-      stoppedAt: `re-plan ${row.n} recorded at ${row.file}; the run continues on the changed plan`,
+      did: `conduct ${state.slug} (run ${state.runId}) re-planned inside its pre-approval (re-plan ${row.n}). Why: ${row.why.slice(0, 800)} What changed: ${row.delta.map((item, i) => `${i + 1}. ${item.change}`).join(' ').slice(0, 1600)} Every change is a two-way door inside the approved scope; it rests on ${row.rests}. ${row.applied.applied ? 'Applied' : 'Not applied'}: ${row.applied.text.slice(0, 800)}`.slice(0, 4000),
+      stoppedAt: `re-plan ${row.n} recorded at ${row.file}; the run continues ${row.applied.applied ? 'on the changed plan' : 'on its original plan'}`,
     },
   };
 }
@@ -803,11 +835,13 @@ function recordReplanReceipt(state, action, result, deps) {
   appendEvent(state, deps, { step: 'replan', event: failed ? 'replan-receipt-failed' : 'replan-receipted', data: { n: row.n, ...(failed ? { error: failed } : { receipt: row.receiptId }) } });
 }
 
-// The operator's ruling on a wider re-plan: (a) or (c) apply it (c as their
-// text amends it), (b) keeps the original plan. Either way its halt clears.
+// The operator's ruling on a wider re-plan: (a) or (c) approve it (c as their
+// text amends it, so (c) needs the text), (b) keeps the original plan. The
+// halt clears; an approved plan's apply step runs before any other work.
 function answerReplan(state, touch, deps) {
   const row = (state.replans ?? []).find((entry) => entry.touch === touch.n);
   const { key, text, by, answeredAt } = touch.answer;
+  if (key === 'c' && !String(text ?? '').trim()) return refuse(state, touch, '(c) needs your changes as text', deps);
   if (row) Object.assign(row, { mode: key === 'b' ? 'declined' : 'operator', answer: { key, text: text ?? null, by, answeredAt } });
   state.build.halts = (state.build.halts ?? []).filter((entry) => entry.touch !== touch.n);
   syncHalt(state, deps);
@@ -1311,8 +1345,9 @@ function dispatch(state, wp, deps) {
 }
 
 function workAction(state, deps) {
-  const receipt = spineOn(state) ? replanReceipt(state, deps) : null;
-  if (receipt) return receipt;
+  // An approved re-plan is applied, then receipted, before any other build work.
+  const replanStep = replanApply(state) ?? (spineOn(state) ? replanReceipt(state) : null);
+  if (replanStep) return replanStep;
   for (const wp of byDispatch(state)) {
     fill(state, wp, deps);
     if (!wp.queue.length || wp.queue[0].kind === 'wait' || wp.lane?.livenessHeld) continue;
@@ -1928,7 +1963,7 @@ export function record(state, action, result = {}, deps) {
   if (action.yield) return recordYield(state, action);
   if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result);
   if (action.step === 'spend') return recordSpend(state, action, result, deps);
-  if (action.step === 'replan') return recordReplanReceipt(state, action, result, deps);
+  if (action.step === 'replan') return action.part === 'apply' ? recordReplanApply(state, action, deps) : recordReplanReceipt(state, action, result, deps);
   const wp = state.wps.find((candidate) => candidate.id === action.wpId);
   if (!wp) throw new ConductError(2, `action ${action.id} names no WP of this run (${action.wpId})`);
   // A malformed visual read is refused (exit 2, nothing written): fix the record and record again.

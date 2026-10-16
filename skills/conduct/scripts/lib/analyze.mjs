@@ -226,8 +226,9 @@ function preapproval(state) {
   // Mid-flight re-plans (quest e830d835): what each rested on and who allowed it.
   const replans = state.replans ?? [];
   if (replans.length) {
-    const how = { autonomous: 'inside the pre-approval', operator: 'applied on the operator\'s answer', declined: 'declined by the operator', asked: 'still waiting on the operator' };
-    out.push(`- re-plans: ${replans.length}`, ...replans.map((row) => `  - re-plan ${row.n}, ${how[row.mode] ?? row.mode}${row.touch ? ` (touch ${row.touch}${row.answer ? `: (${row.answer.key})${row.answer.text ? ` ${JSON.stringify(row.answer.text)}` : ''}` : ''})` : ''}; rests on ${row.rests}; why: ${row.why}; changes: ${row.delta.map((item) => `${item.change} [${item.door}${item.inScope ? '' : ', out of scope'}]`).join('; ')}${row.receipt ? `; anchor receipt ${row.receipt}` : ''}`));
+    const how = { autonomous: 'approved inside the pre-approval', operator: 'approved on the operator\'s answer', declined: 'declined by the operator', asked: 'still waiting on the operator' };
+    const applied = (row) => (row.applied ? `; ${row.applied.applied ? 'applied' : 'not applied'}: ${row.applied.text}` : ['autonomous', 'operator'].includes(row.mode) ? '; not yet applied' : '');
+    out.push(`- re-plans: ${replans.length}`, ...replans.map((row) => `  - re-plan ${row.n}, ${how[row.mode] ?? row.mode}${row.touch ? ` (touch ${row.touch}${row.answer ? `: (${row.answer.key})${row.answer.text ? ` ${JSON.stringify(row.answer.text)}` : ''}` : ''})` : ''}; rests on ${row.rests}; why: ${row.why}; changes: ${row.delta.map((item) => `${item.change} [${item.door}${item.inScope ? '' : ', out of scope'}]`).join('; ')}${applied(row)}${row.receipt ? `; anchor receipt ${row.receipt}` : ''}`));
   }
   const judgments = judgmentThreads(state);
   out.push(`- judgment threads: ${judgments.length}`, ...judgments.map((j) => `  - ${judgmentLine(j)}`));

@@ -155,9 +155,10 @@ conduct.mjs replan --run <dir> --plan <file>
 #         "delta": [ { "change": "<what changes>", "door": "two-way" | "one-way", "inScope": true | false } ] }
 ```
 
-- **Every change two-way and inside the approved scope:** the re-plan rests on the run's pre-approval and needs no operator. The verb writes `rulings/replan-<n>.json`; with the Spine adapter, the build's next action is a `completed` receipt on the anchor naming what changed, why, and the pre-approval it rests on. That receipt is skipped while a touch is filed on the anchor. Then make the changes with the verbs that make them (`ratify`, `reset-wp`, a ruling's amendment).
-- **Anything wider** (a one-way door, or a change outside the scope): dispatch halts on a touch whose options carry the delta-plan. (a) applies it, (b) keeps the original plan, (c) applies it as the operator's text amends it. Live lanes finish, and the build waits on the answer rather than ending. Any answer clears the halt.
-- Door and scope are your judgment, read the same way as a PR's `## Merge danger`. In doubt, it is `one-way`. One re-plan waits on the operator at a time. The run analysis lists every re-plan under the pre-approval audit.
+- **Every change two-way and inside the approved scope:** the re-plan rests on the run's pre-approval and needs no operator. The verb writes the proposal to `rulings/replan-<n>.json`.
+- **Anything wider** (a one-way door, or a change outside the scope): dispatch halts on a touch whose question carries the whole delta-plan. A plan too long for one question is refused (exit 2). (a) approves it, (b) keeps the original plan, (c) approves it as the operator's text amends it, so (c) needs the text. Live lanes finish, and the build waits on the answer rather than ending. Any usable answer clears the halt.
+- **An approved re-plan is applied first.** The build's next action is an `author` step: make each change with the verb that makes it (`ratify`, `reset-wp`, a ruling's amendment), then write `{ "applied": true, "what": "…" }` (or `{ "applied": false, "why": "…" }`) to its `outPath`. With the Spine adapter, an autonomous re-plan is then receipted on the anchor (`completed`: what changed, why, the pre-approval it rests on, what was applied). The receipt waits while a touch is filed on the anchor.
+- Door and scope are your judgment, read the same way as a PR's `## Merge danger`. In doubt, it is `one-way`. Only one re-plan may be open at a time: one waiting on the operator or one approved and not yet applied. The run analysis lists every re-plan under the pre-approval audit.
 
 ## Greenfield bootstrap
 

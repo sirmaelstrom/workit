@@ -534,8 +534,8 @@ async function replanVerb(tokens, deps) {
     const out = module.replan(state, plan, deps);
     saveState(state, deps);
     const then = out.mode === 'autonomous'
-      ? 'Make the changes with the verbs that make them (ratify, reset-wp, a ruling), then run next.'
-      : `Run next: touch ${out.touch} is filed and dispatch halts until the operator answers.`;
+      ? 'Run next: its first action is applying this re-plan (ratify, reset-wp, a ruling), before any other build work.'
+      : `Run next: touch ${out.touch} is open and dispatch halts until the operator answers.`;
     return { out: { ok: true, ...out, next: `conduct.mjs next --run ${state.runDir}`, then } };
   });
 }
