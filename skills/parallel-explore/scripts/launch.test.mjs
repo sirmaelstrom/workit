@@ -79,6 +79,13 @@ test('--spike refuses --worktree, a non-empty spike directory, and a spike root 
   assert.equal(inside.status, 1);
   assert.match(inside.stderr, /inside a git work tree/);
   assert.equal(existsSync(join(run, 'results', 'branch-2.md')), false, 'no branch launched');
+  // Review #249 delta: a GIT_CEILING_DIRECTORIES at the repo root must not hide the repo from the probe.
+  mkdirSync(join(repo, 'sub'));
+  const ceiling = spawnSync(process.execPath, [LAUNCH, '--prompts', join(run, 'prompts'), '--spike', '--spike-root', join(repo, 'sub', 'spikes')],
+    { env: { ...env, GIT_CEILING_DIRECTORIES: repo }, encoding: 'utf8', timeout: 60000 });
+  assert.equal(ceiling.status, 1, ceiling.stdout + ceiling.stderr);
+  assert.match(ceiling.stderr, /inside a git work tree/);
+  assert.equal(existsSync(join(repo, 'sub', 'spikes')), false, 'nothing created inside the repo');
   // Review #249: with no git on PATH nothing proves the directory is outside a repo, so it is refused.
   const noGit = spawnSync(process.execPath, [LAUNCH, '--prompts', join(run, 'prompts'), '--spike', '--spike-root', join(root, 'elsewhere')],
     { env: { ...env, PATH: join(root, 'bin') }, encoding: 'utf8', timeout: 60000 });

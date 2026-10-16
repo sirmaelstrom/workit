@@ -127,7 +127,12 @@ function refuseSpikeDir(dir) {
   // proves the directory is outside every repo. Exit 0 is inside (a work tree,
   // or a .git directory). Anything else, such as no git on PATH or a refused
   // "dubious ownership" repo, is an unproven isolation and is refused too.
-  const probe = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: nearestExisting(dir), encoding: 'utf8', env: { ...process.env, LC_ALL: 'C', LANGUAGE: 'C' } });
+  // Every GIT_* variable is dropped from the probe's env (review #249 delta):
+  // GIT_CEILING_DIRECTORIES, GIT_DIR or GIT_WORK_TREE would change what the
+  // probe discovers, and a ceiling at a repo root makes git answer "not a git
+  // repository" from inside it.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
+  const probe = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: nearestExisting(dir), encoding: 'utf8', env: { ...env, LC_ALL: 'C', LANGUAGE: 'C' } });
   if (probe.status === 0) {
     console.error(`Error: spike directory ${dir} is inside a git work tree; pass a --spike-root outside every repo`);
     process.exit(1);
