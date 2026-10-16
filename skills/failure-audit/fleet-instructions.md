@@ -55,10 +55,17 @@ Recovered-next-attempt platform/harness hiccups: wrong shell syntax for platform
   "model": "model from digest header/lines",
   "actor": "orchestrator|subagent|unknown",
   "caught_by": "self|review|ci|operator|none",
-  "severity": "minor|wasted-work|serious"
+  "severity": "minor|wasted-work|serious",
+  "doctrine_refs": [ { "section": "a heading from the doctrine list in your task message", "bite": "bite|no-bite|n-a" } ]
 }
 ```
 `caught_by=none` means the defect surfaced in evidence but was never corrected in-session. `severity=serious` is reserved for trust/authorization/data-loss class events.
+
+### doctrine_refs (added 2026-10-16, optional)
+Which doctrine sections this failure bears on, and whether each one bit. Your task message carries the list of doctrine section headings. Use only those, copied verbatim without the leading `#` marks. Until the doctrine has stable section ids, the heading text is the key. If no listed section bears on the failure, or your task message carries no list, write `[]`. Never invent a section.
+- `bite`: the situation the section governs occurred, and the agent's behavior shows the rule acting. It caught, corrected or limited the failure.
+- `no-bite`: the situation occurred, and the rule made no behavioral difference. The failure the section exists to prevent happened anyway.
+- `n-a`: you checked the section against this failure, and its situation did not occur. Record it only when someone might reasonably expect the section to apply.
 
 ## Session verdicts
 `failures_found` | `clean` (substantive session, no failures) | `trivial` (one-shot probe/greeting, no signal either way) | `unreadable` | `unread` (you did not read it — never silently missing).

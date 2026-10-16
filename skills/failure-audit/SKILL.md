@@ -75,7 +75,10 @@ Fleet contract: `fleet-instructions.md` in this skill dir — the **living copy*
 (schema v2 + seeded taxonomy; the baseline's copy is frozen provenance). Sonnet
 auditors, hands of ~5 digests, ~5 auditors per wave, results to
 `<run-dir>/fleet-results/W<n><A-E>.json` — give each auditor its digest list and
-its exact output path.
+its exact output path. Also give it the doctrine heading list for
+`doctrine_refs` (`grep -E '^#{2,3} ' {workspace}/data/memory/DOCTRINE.md`).
+An auditor without the list writes `[]`, and the run then carries no doctrine
+signal.
 
 - **Wave 1 is calibration:** include one hand that re-audits 2 digests from the
   *prior* run with known findings. Prior runs may not have preserved `digests/`
@@ -96,11 +99,20 @@ its exact output path.
 
 **4. Aggregate.**
 ```
-node ${CLAUDE_PLUGIN_ROOT}/skills/failure-audit/scripts/aggregate.mjs <run-dir>
+node ${CLAUDE_PLUGIN_ROOT}/skills/failure-audit/scripts/aggregate.mjs <run-dir> --doctrine {workspace}/data/memory/DOCTRINE.md
 ```
-Writes `aggregate.json` (byClass / byModel / bySeverity / byCaught / verdicts /
-friction). Exits nonzero on coverage gaps — run a patch hand for the gap
-digests, then re-aggregate.
+Writes `aggregate.json` (byClass / byModel / bySeverity / byCaught / byDoctrine /
+verdicts / friction). Exits nonzero on coverage gaps — run a patch hand for the gap
+digests, then re-aggregate. `byDoctrine` maps each doctrine section to its
+`bite` / `no-bite` / `n-a` counts, one per failure record. It is the audit side
+of the doctrine liveness join, and the quarterly doctrine review reads it by
+hand. The section-id grammar that would make the key stable is still owed
+(quest b74b4cfe), so a renamed heading splits its counts across two keys.
+Each section counts once per failure record. Malformed refs, sections outside
+the `--doctrine` heading list, repeats, and a section given two different bites
+are skipped and counted (`invalid` / `unknown` / `duplicate` /
+`conflictingDoctrineRefsSkipped`), never coerced. Without `--doctrine`, sections
+go unvalidated and `doctrineRefsValidated` is `false`.
 
 **5. Standing comparisons.**
 ```
