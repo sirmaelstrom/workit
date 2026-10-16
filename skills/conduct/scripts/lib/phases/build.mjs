@@ -725,6 +725,8 @@ function haltTouch(state, deps, reason, why, spendUsd = null) {
 const REPLAN_DOORS = ['two-way', 'one-way'];
 export function replan(state, plan, deps) {
   if (state.phase !== 'build') throw new ConductError(5, `replan: the run is in phase ${state.phase}; a re-plan is made mid-build`);
+  // An emitted action runs before anything a re-plan queues: re-plan only at a wait (slim review on #250).
+  if (state.pending && state.pending.kind !== 'wait') throw new ConductError(5, `replan: action ${state.pending.id} (${state.pending.kind}) is pending; perform and record it, and re-plan at a wait`);
   state.build ??= { contract: null, halts: [] };
   const why = typeof plan?.why === 'string' ? plan.why.trim() : '';
   if (!why) throw new ConductError(2, 'replan: the plan needs "why", the information that invalidated the plan');
@@ -794,18 +796,28 @@ function replanApply(state) {
   const amended = row.answer?.text ? ` The operator's text, verbatim, amends it: ${row.answer.text}` : '';
   return {
     kind: 'author', step: 'replan', part: 'apply', replan: row.n, outPath, expects: { type: 'file' },
-    instruction: `Apply re-plan ${row.n} before anything else runs: ${row.delta.map((item, i) => `${i + 1}. ${item.change}`).join(' ')}${amended} Make each change with the verb that makes it (conduct.mjs ratify, reset-wp, or a ruling's amendment). Then write { "applied": true, "what": "<what you did>" } to outPath, or { "applied": false, "why": "<why it could not be applied>" }, and record {}.`,
+    instruction: `Apply re-plan ${row.n} before anything else runs: ${row.delta.map((item, i) => `${i + 1}. ${item.change}`).join(' ')}${amended} Make each change with the verb that makes it (conduct.mjs ratify, reset-wp, or a ruling's amendment). A pending WP the plan no longer needs is dropped here: list it in "drop" (its dependents are deferred, so drop them too or keep it). Then write { "applied": true, "what": "<what you did>", "drop": ["<WP id>", …] } to outPath ("drop" optional), or { "applied": false, "why": "<why it could not be applied>" }, and record {}.`,
   };
 }
 
+// The apply record. `drop` is the one plan change no other verb makes: a
+// pending WP leaves the plan, ending `refuted` with the re-plan as its reason
+// (the terminal state the scheduler, the analysis and the showcase already
+// read; its dependents are deferred).
 function recordReplanApply(state, action, deps) {
   const row = (state.replans ?? []).find((entry) => entry.n === action.replan);
   if (!row) throw new ConductError(2, `no re-plan ${action.replan} in this run`);
   const value = readJsonFile(deps, action.outPath, 're-plan application');
   const said = value?.applied === true ? value.what : value?.applied === false ? value.why : null;
   if (typeof said !== 'string' || !said.trim()) throw new ConductError(2, `${action.outPath} must be { "applied": true, "what": "…" } or { "applied": false, "why": "…" }`);
-  row.applied = { applied: value.applied, text: said.trim(), at: deps.timestamp() };
-  appendEvent(state, deps, { step: 'replan', event: value.applied ? 'replan-applied' : 'replan-not-applied', data: { n: row.n, text: said.trim() } });
+  const drop = value.drop ?? [];
+  if (!Array.isArray(drop) || (drop.length && value.applied !== true)) throw new ConductError(2, `${action.outPath}: "drop" is a list of WP ids, and only with "applied": true`);
+  const dropped = drop.map((id) => state.wps.find((wp) => wp.id === id));
+  const bad = drop.find((id, i) => dropped[i]?.state !== 'pending');
+  if (bad !== undefined) throw new ConductError(2, `${action.outPath}: ${bad} is ${state.wps.find((wp) => wp.id === bad)?.state ?? 'not a WP of this run'}; only a pending WP is dropped (a started one is reset or ruled)`);
+  for (const wp of dropped) setState(state, wp, 'refuted', `dropped by re-plan ${row.n}: ${row.why}`, deps);
+  row.applied = { applied: value.applied, text: said.trim(), at: deps.timestamp(), ...(drop.length ? { dropped: [...drop] } : {}) };
+  appendEvent(state, deps, { step: 'replan', event: value.applied ? 'replan-applied' : 'replan-not-applied', data: { n: row.n, text: said.trim(), dropped: drop } });
 }
 
 // The anchor receipt an autonomous re-plan owes once applied. A touch filed
