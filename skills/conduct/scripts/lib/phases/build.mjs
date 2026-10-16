@@ -1562,8 +1562,11 @@ function recordOwn(state, wp, action, result, deps) {
       if (action.marker && !(readText(deps, action.outPath) ?? '').includes(action.marker)) {
         throw new ConductError(2, `the brief ${action.outPath} does not carry amendment ${action.amendment.n}'s marker line: ${action.marker}`);
       }
-      if (action.append && !(readText(deps, action.outPath) ?? '').includes(action.append.trim().split('\n')[0])) {
-        throw new ConductError(2, `the brief ${action.outPath} does not carry the appended section (${action.append.trim().split('\n')[0]}): append the action's append text verbatim`);
+      if (action.append) {
+        // Every line of the append, not only its heading (council review 1); CRLF and edge whitespace forgiven.
+        const lines = new Set((readText(deps, action.outPath) ?? '').split(/\r?\n/).map((line) => line.trim()));
+        const absent = action.append.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !lines.has(line));
+        if (absent.length) throw new ConductError(2, `the brief ${action.outPath} does not carry the appended section verbatim (${absent.length} line(s) missing, first: ${absent[0].slice(0, 80)}): append the action's append text verbatim`);
       }
       {
         const roots = [wp.lane.worktree];

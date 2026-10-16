@@ -256,8 +256,11 @@ async function intake(tokens, deps) {
   const ciError = workflows.code !== 0 ? workflows.stderr : ciWorkflows === null ? 'a workflows listing line is not JSON' : null;
   // The greenfield trigger (quest 977d3efb, answer (c)): no CI workflow, or a
   // near-empty history. Mint binds the bootstrap manifest to WP-01 when on.
-  const count = deps.exec('git', ['-C', repoPath, 'rev-list', '--count', 'HEAD']);
-  const commits = count.code === 0 && /^\d+$/.test(count.stdout.trim()) ? Number(count.stdout.trim()) : null;
+  // A shallow clone's count is not its history (council review 1): only a
+  // checkout git reports as not shallow is counted; anything else is unread.
+  const shallow = deps.exec('git', ['-C', repoPath, 'rev-parse', '--is-shallow-repository']);
+  const count = shallow.code === 0 && shallow.stdout.trim() === 'false' ? deps.exec('git', ['-C', repoPath, 'rev-list', '--count', 'HEAD']) : null;
+  const commits = count?.code === 0 && /^\d+$/.test(count.stdout.trim()) ? Number(count.stdout.trim()) : null;
   const { detectGreenfield } = await loadModule(deps, 'lib/bootstrap.mjs', 'module');
   const greenfield = detectGreenfield({ ciWorkflows, commits });
   const { adapters, agents } = detectAdapters({

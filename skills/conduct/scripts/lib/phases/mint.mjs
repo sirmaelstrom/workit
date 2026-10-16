@@ -46,12 +46,17 @@ function workshopWps(state, deps) {
 
 // A greenfield run (intake's trigger, quest 977d3efb) binds the bootstrap
 // manifest's paths to WP-01 (else WP-00) once, before any quest is minted.
+// A deep mint re-entered before its spine_author result re-parses the
+// workshop, so the binding is recomputed; the event is written only when the
+// binding differs from the one already recorded (council review 1).
 function bindGreenfield(state, deps) {
   if (!state.intent.greenfield?.on || state.wps.some((wp) => wp.bootstrap)) return;
   const wp = bindBootstrap(state, deps);
-  appendEvent(state, deps, { step: 'mint', event: 'bootstrap-bound', data: wp
-    ? { wp: wp.id, files: wp.bootstrap.files, failing: wp.bootstrap.failing }
-    : { wp: null, why: 'no WP-01 or WP-00 in the spec' } });
+  if (!wp) throw new ConductError(2, 'spec defect: a greenfield run needs a WP to carry the bootstrap, and the spec has none');
+  const bound = { wp: wp.id, files: wp.bootstrap.files, failing: wp.bootstrap.failing };
+  if (JSON.stringify(state.intent.greenfield.bound ?? null) === JSON.stringify(bound)) return;
+  state.intent.greenfield.bound = bound;
+  appendEvent(state, deps, { step: 'mint', event: 'bootstrap-bound', data: bound });
 }
 
 export function next(state, deps) {

@@ -599,7 +599,14 @@ test('the greenfield bootstrap WP\'s brief appends the bootstrap section; a brie
   assert.match(readFileSync(action.outPath, 'utf8'), /bootstrap --repo \S+ --write --offline/);
   writeFileSync(action.outPath, readFileSync(action.outPath, 'utf8').replace(action.append, ''));
   assert.throws(() => build.record(h.state, action, {}, h.deps), /does not carry the appended section/);
+  // Council review 1: the heading alone is not the section.
   await perform(h, action);
+  const run = action.append.split('\n').find((line) => line.startsWith('Run `node'));
+  writeFileSync(action.outPath, readFileSync(action.outPath, 'utf8').replace(run, ''));
+  assert.throws(() => build.record(h.state, action, {}, h.deps), /1 line\(s\) missing, first: Run `node/);
+  // CRLF line endings are forgiven.
+  await perform(h, action);
+  writeFileSync(action.outPath, readFileSync(action.outPath, 'utf8').replace(/\n/g, '\r\n'));
   await build.record(h.state, action, {}, h.deps);
   // A WP without the flag gets no append.
   const plain = harness(t, { herdr: true, wps: [{ id: 'WP-01', files: ['lib/state.mjs'], wave: 1 }] });
