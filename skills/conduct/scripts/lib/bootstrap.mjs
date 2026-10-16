@@ -48,11 +48,21 @@ function jsonField(text, dotted) {
   }
 }
 
+// A YAML file's markers count only outside comments: a full-line `#` comment
+// and a trailing ` #` comment are dropped before the search (review #243).
+// The search stays textual; it does not prove a job is wired to a trigger.
+const YAML = /\.ya?ml$/i;
+export function markerText(path, text) {
+  if (!YAML.test(path)) return text;
+  return text.split(/\r?\n/).filter((line) => !/^\s*#/.test(line)).map((line) => line.replace(/\s#.*$/, '')).join('\n');
+}
+
 export function checkItem(repo, item, fs) {
   const base = { id: item.id, path: item.path, why: item.why, ...(item.stack ? { stack: item.stack } : {}) };
-  const candidates = item.glob ? globFiles(repo, item.glob, fs) : (item.anyOf ?? [item.path]).filter((path) => fs.exists(join(repo, path)));
-  if (candidates.length === 0) return { ...base, status: 'missing', detail: item.glob ? `no file matches ${item.glob}` : `none of ${(item.anyOf ?? [item.path]).join(', ')}` };
-  const found = item.glob ? candidates : [candidates[0]];
+  const globs = [item.glob ?? []].flat();
+  const candidates = globs.length ? globs.flatMap((glob) => globFiles(repo, glob, fs)) : (item.anyOf ?? [item.path]).filter((path) => fs.exists(join(repo, path)));
+  if (candidates.length === 0) return { ...base, status: 'missing', detail: globs.length ? `no file matches ${globs.join(' or ')}` : `none of ${(item.anyOf ?? [item.path]).join(', ')}` };
+  const found = globs.length ? candidates : [candidates[0]];
   if (item.json) {
     const value = jsonField(fs.read(join(repo, found[0])), item.json);
     return value === undefined || value === null || value === ''
@@ -60,7 +70,7 @@ export function checkItem(repo, item, fs) {
       : { ...base, status: 'present', found: found[0] };
   }
   if (item.contains?.length) {
-    const texts = found.map((path) => fs.read(join(repo, path)));
+    const texts = found.map((path) => markerText(path, fs.read(join(repo, path))));
     const absent = item.contains.filter((marker) => !texts.some((text) => text.includes(marker)));
     if (absent.length) return { ...base, status: 'incomplete', found: found.join(', '), detail: `missing ${absent.map((m) => JSON.stringify(m)).join(', ')}` };
   }
@@ -88,7 +98,13 @@ export function checkSettings(repo, settings, exec) {
 }
 
 export function fillTemplate(text, values) {
-  return text.replace(/\{\{(name|year|owner)\}\}/g, (_, key) => values[key]);
+  return text.replace(/\{\{(name|year|owner|nodeVersionFile)\}\}/g, (_, key) => values[key]);
+}
+
+// The Node pin the generated CI points setup-node at: the one the repo already
+// has (the manifest accepts either), else the .nvmrc --write is about to add.
+export function nodeVersionFile(repo, exists) {
+  return !exists(join(repo, '.nvmrc')) && exists(join(repo, '.node-version')) ? '.node-version' : '.nvmrc';
 }
 
 export function bootstrap(repo, { write = false, offline = false, deps, templates, values }) {
@@ -103,7 +119,7 @@ export function bootstrap(repo, { write = false, offline = false, deps, template
       const target = join(repo, item.path);
       if (deps.exists(target)) continue; // another item already wrote this path
       deps.mkdir(dirname(target));
-      deps.write(target, fillTemplate(deps.read(join(templates, 'files', item.template)), values));
+      deps.write(target, fillTemplate(deps.read(join(templates, 'files', item.template)), { ...values, nodeVersionFile: nodeVersionFile(repo, deps.exists) }));
       written.push(item.path);
     }
   }

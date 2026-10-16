@@ -122,6 +122,25 @@ test('settings: an unreadable gh is unverified, never a pass; a private repo is 
   assert.ok(!offline.calls.some(([program]) => program === 'gh'), '--offline makes no gh call');
 });
 
+test('review #243: a .node-version repo gets CI that names it; .yaml workflows count; markers in comments do not', (t) => {
+  const repo = fixture(t, { 'package.json': '{"name":"demo","engines":{"node":">=24"}}', '.node-version': '24\n' });
+  bootstrap(repo, { write: true, deps: deps(), values: VALUES, templates: REPO_TEMPLATES });
+  assert.match(readFileSync(join(repo, '.github', 'workflows', 'ci.yml'), 'utf8'), /node-version-file: \.node-version\n/);
+  assert.equal(existsSync(join(repo, '.nvmrc')), false, 'the accepted pin is kept, not doubled');
+  // The same workflow under .yaml satisfies the item; --write adds no ci.yml beside it.
+  const yaml = fixture(t);
+  bootstrap(yaml, { write: true, deps: deps(), values: VALUES, templates: REPO_TEMPLATES });
+  const ci = join(yaml, '.github', 'workflows', 'ci.yml');
+  writeFileSync(join(yaml, '.github', 'workflows', 'ci.yaml'), readFileSync(ci, 'utf8'));
+  rmSync(ci);
+  const again = bootstrap(yaml, { write: true, deps: deps(), values: VALUES, templates: REPO_TEMPLATES });
+  assert.equal(byId(again).ci.status, 'present');
+  assert.equal(existsSync(ci), false);
+  // Markers that appear only in comments are absent.
+  writeFileSync(join(yaml, '.github', 'workflows', 'ci.yaml'), 'on: push\njobs: {}\n# pull_request concurrency: cancel-in-progress: true timeout-minutes: gitleaks\nname: x # gitleaks\n');
+  assert.match(byId(bootstrap(yaml, { deps: deps(), values: VALUES, templates: REPO_TEMPLATES })).ci.detail, /missing "pull_request", "concurrency:", "cancel-in-progress: true", "timeout-minutes:", "gitleaks"/);
+});
+
 test('fillTemplate replaces only its own three keys', () => {
   assert.equal(fillTemplate('{{name}} {{year}} {{owner}} ${{ github.ref }} {{other}}', VALUES), 'demo 2026 Owner Name ${{ github.ref }} {{other}}');
 });

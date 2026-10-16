@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc
+          node-version-file: {{nodeVersionFile}}
           cache: npm
       - run: npm ci
       # The repo's gate: keep it the same command AGENTS.md tells agents to run.
