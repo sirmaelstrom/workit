@@ -20,7 +20,7 @@
 //   { head, frames, rules }; council tools as their JSON.
 // - Patch: `mergeLock` and `dispatchHalt` are run-level; every other key is a
 //   WP field, applied as given: `reviewMode`, `rebaseFrom`, `rebases`,
-//   `threadIds`, `reviews`, `inspections`, `councilStage`, `retries`, `gate`
+//   `threadIds`, `reviews`, `inspections`, `visualReads`, `councilStage`, `retries`, `gate`
 //   (with `pendingSince`), `merge`, `pr`.
 // - WP-04 sets: `wps[].commit` (the WP's Commit line), `wps[].agent` (the
 //   lane's effective author), `wps[].files`, `wps[].tier` (tierFor's raise

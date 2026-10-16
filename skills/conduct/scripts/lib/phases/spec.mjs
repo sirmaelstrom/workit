@@ -2,7 +2,7 @@
 // chose, and turn depth none|lite into the single WP-00 record.
 import { join, resolve, win32 } from 'node:path';
 import { ConductError } from '../state.mjs';
-import { parseDesignDirection, visualRules } from '../schedule.mjs';
+import { parseDesignDirection, skillsField, visualRules } from '../schedule.mjs';
 
 // The touch whose answer set the authority: touch 1, or its blocked re-ask.
 function approvingTouch(state) {
@@ -89,10 +89,11 @@ export function record(state, action, result, deps) {
   } else if (depth === 'lite') {
     const specPath = join(state.workshopDir, 'spec.md');
     const text = deps.exists(specPath) ? deps.read(specPath) : '';
-    // A lite spec with a UI carries its design direction and WP-00's visual rules in spec.md.
+    // A lite spec with a UI carries its design direction, WP-00's visual rules and skills in spec.md.
     const design = parseDesignDirection(text, specPath);
     state.design = design.length ? { source: specPath, rules: design } : null;
-    state.wps = [wpRecord({ id: 'WP-00', name: state.intent.goal, specPath, runtimeExercise: runtimeExerciseField(text), visualRules: visualRules(text, design, specPath) })];
+    state.wps = [wpRecord({ id: 'WP-00', name: state.intent.goal, specPath, runtimeExercise: runtimeExerciseField(text),
+      visualRules: visualRules(text, design, specPath), skills: skillsField(text) })];
   } else {
     state.wps = [];
   }

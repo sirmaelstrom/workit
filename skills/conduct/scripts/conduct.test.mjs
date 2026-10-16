@@ -585,11 +585,12 @@ test('depth lite (1b3dec9f): spec.md\'s ## Design direction and **Visual rules:*
   assert.equal(refused.code, 2);
   assert.match(out(refused).error, /no rule opening with \*\*Fit to view:\*\*/);
   assert.equal(readState(runDir).wps.length, 0, 'nothing written');
-  writeFileSync(specPath, ['# Lite', '', '**Runtime exercise:** UI: load the page', '', '**Visual rules:** 1, 4', '', '## Design direction', '', ...rules, ''].join('\n'));
+  writeFileSync(specPath, ['# Lite', '', '**Runtime exercise:** UI: load the page', '', '**Skills:** frontend-design:frontend-design', '', '**Visual rules:** 1, 4', '', '## Design direction', '', ...rules, ''].join('\n'));
   const result = await record(f, runDir, spec.id, { depth: 'lite', workshopDir: state.workshopDir, gateCommand: 'node --test' });
   assert.equal(result.code, 0, result.stdout);
   const after = readState(runDir);
-  assert.deepEqual([after.wps[0].visualRules, after.design.rules.map((rule) => rule.n), after.design.source], [[1, 4], [1, 2, 3, 4], specPath]);
+  assert.deepEqual([after.wps[0].visualRules, after.wps[0].skills, after.design.rules.map((rule) => rule.n), after.design.source],
+    [[1, 4], ['frontend-design:frontend-design'], [1, 2, 3, 4], specPath]);
 });
 
 test('answer refuses non-tty', async (t) => {

@@ -2063,7 +2063,13 @@ test('visual read (1b3dec9f): a UI WP\'s passing gate asks for a read of its fra
     reads.push(a);
     return { head: a.land.head, frames: [frame], rules: { 1: 'pass', 4: reads.length === 1 ? 'fail: the floor fills half the width' : 'pass' } };
   };
+  h.wp('WP-02').skills = ['frontend-design:frontend-design'];
   const first = await drive(h, { until: (a) => a.part === 'visual' });
+  // Council r1: the brief renders both new slots.
+  const brief = readFileSync(of(h, 'WP-02').find((a) => a.step === 'brief' && a.part === 'brief').outPath, 'utf8');
+  assert.match(brief, /^\*\*Skills to load with the Skill tool before you build:\*\* frontend-design:frontend-design\.$/m);
+  assert.match(brief, /^\*\*Visual rules:\*\* 1, 4 of .*_orchestrator\.md\. When this names rules/m);
+  assert.ok(!/<skills>|<visual rules>/.test(brief), 'no slot left unfilled');
   assert.equal(first.kind, 'inspect');
   assert.deepEqual(first.rules.map((rule) => rule.n), [1, 4], 'only the WP\'s rules, with their text');
   assert.equal(h.wp('WP-02').gate.ok, false, 'a gate owing its visual read is not ok');
@@ -2089,6 +2095,14 @@ test('visual read (1b3dec9f): a UI WP\'s passing gate asks for a read of its fra
   assert.match(analysis, /^## Visual reads$/m);
   assert.match(analysis, /^- WP-02 at [0-9a-f]{7}: fail; pass 1; fail 4 \(the floor fills half the width\) \(frames: .*lane-wp-02-target\.png\)$/m);
   assert.match(analysis, /^- WP-02 at [0-9a-f]{7}: pass; pass 1, 4 \(frames: /m);
+});
+
+test('lane brief (1b3dec9f, council r1): a WP naming no skills and no visual rules renders "none" in both slots', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  await drive(h, { until: (a) => a.step === 'prompt' });
+  const brief = readFileSync(of(h, 'WP-02').find((a) => a.step === 'brief' && a.part === 'brief').outPath, 'utf8');
+  assert.match(brief, /^\*\*Skills to load with the Skill tool before you build:\*\* none\.$/m);
+  assert.match(brief, /^\*\*Visual rules:\*\* none\. /m);
 });
 
 // The harness's git answers every ancestry and patch check, so the mapped

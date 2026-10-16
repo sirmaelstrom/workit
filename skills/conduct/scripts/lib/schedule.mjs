@@ -179,23 +179,31 @@ function reviewTier(text, where) {
 // open one of the section's numbered rules.
 export const DESIGN_LABELS = Object.freeze(['Palette', 'Type scale', 'Iconography', 'Fit to view']);
 
-// `## Design direction`: numbered rules (`1. **Palette:** …`), a rule's
-// unnumbered lines joined to it; HTML comments are template guidance, not
-// rules. No section is []. A section without a rule, a repeated number, or a
-// missing label is a parse error: a UI goal's gate reads these rules by number.
+// `## Design direction` (heading case ignored): numbered rules at column 0
+// (`1. **Palette:** …`), each joined with its indented continuation lines. An
+// unindented line that is not a rule (prose, a bullet, a fence) ends the rule
+// before it, and an indented list inside a rule stays part of it. HTML comments
+// are template guidance, not rules. No section is []. A section without a rule,
+// a repeated number, or a missing label is a parse error: a UI goal's gate
+// reads these rules by number.
+const DESIGN_HEADING = /^## design direction\s*$/i;
 export function parseDesignDirection(text, where = 'Design direction') {
-  const clean = String(text ?? '').replace(/<!--[\s\S]*?-->/g, '');
-  const body = section(clean, 'Design direction').join('\n');
+  const lines = String(text ?? '').replace(/<!--[\s\S]*?-->/g, '').split(/\r?\n/);
+  const start = lines.findIndex((line) => DESIGN_HEADING.test(line.trim()));
+  if (start < 0) return [];
+  const end = lines.findIndex((line, i) => i > start && /^##\s/.test(line));
   const rules = [];
-  for (const line of body.split('\n')) {
-    const numbered = /^(\d+)\.\s+(.*)$/.exec(line.trim());
-    if (numbered) rules.push({ n: Number(numbered[1]), text: numbered[2].trim() });
-    else if (line.trim() && rules.length) rules.at(-1).text += ` ${line.trim()}`;
+  let open = false;
+  for (const line of lines.slice(start + 1, end < 0 ? lines.length : end)) {
+    const numbered = /^(\d+)\.\s+(.*)$/.exec(line);
+    if (numbered) {
+      rules.push({ n: Number(numbered[1]), text: numbered[2].trim() });
+      open = true;
+    } else if (!line.trim()) continue;
+    else if (/^\s/.test(line) && open) rules.at(-1).text += ` ${line.trim()}`;
+    else open = false;
   }
-  if (!rules.length) {
-    if (/^## Design direction\s*$/m.test(clean)) throw new ConductError(2, `${where}: ## Design direction holds no numbered rule`);
-    return [];
-  }
+  if (!rules.length) throw new ConductError(2, `${where}: ## Design direction holds no numbered rule`);
   const repeated = rules.find((rule, i) => rules.findIndex((other) => other.n === rule.n) !== i);
   if (repeated) throw new ConductError(2, `${where}: design-direction rule ${repeated.n} is numbered twice`);
   const missing = DESIGN_LABELS.filter((label) => !rules.some((rule) => rule.text.toLowerCase().startsWith(`**${label.toLowerCase()}:**`)));
@@ -219,13 +227,14 @@ export function visualRules(text, design, where) {
 }
 
 // `**Skills:**`: the skills the lane brief names, comma-separated.
-function skillsField(lines) {
-  const value = fieldText(lines, 'Skills');
+export function skillsField(text) {
+  const value = fieldText(String(text ?? '').split(/\r?\n/), 'Skills');
   if (!value || /^none\b/i.test(value)) return [];
   return value.split('\n')[0].split(',').map((skill) => skill.replace(/`/g, '').trim()).filter(Boolean);
 }
 
-export const namesFrontendDesign = (skills) => (skills ?? []).some((skill) => /(^|:)frontend-design$/.test(skill));
+// The frontend-design plugin's skill, by its plugin-qualified or bare name only.
+export const namesFrontendDesign = (skills) => (skills ?? []).some((skill) => /^(frontend-design:)?frontend-design$/.test(skill));
 
 export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(path, 'utf8'), list = readdirSync } = {}) {
   const dir = join(workshopDir, 'work-packages');
@@ -246,17 +255,20 @@ export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(p
       id, name: rows.get(id)?.name || heading[2].trim(), specPath, wave: waveOf.get(id), files: parseFiles(text, id), creates: parseFiles(text, id, { verbs: ['Create'] }),
       precondition: fieldText(lines, 'Precondition') ?? '', verification: fieldText(lines, 'Verification'), tier,
       model: rows.get(id)?.model ?? 'opus', runtimeExercise: fieldText(lines, 'Runtime exercise') ?? '',
-      visualRules: visualRules(text, design, id), skills: skillsField(lines),
+      visualRules: visualRules(text, design, id), skills: skillsField(text),
     };
   });
   // A UI goal ends on its polish: the last wave is one WP, after every
-  // functional WP, and its brief names the frontend-design skill.
+  // functional WP, its brief names the frontend-design skill, and its frames
+  // are read against every rule (`**Visual rules:** all`).
   if (design.length && wps.length) {
     const last = Math.max(...wps.map((wp) => wp.wave));
     const tail = wps.filter((wp) => wp.wave === last);
     if (tail.length !== 1 || !namesFrontendDesign(tail[0].skills)) {
       throw new ConductError(2, `the orchestrator has a ## Design direction, so its last wave must be one polish WP whose **Skills:** names frontend-design (wave ${last} holds ${tail.map((wp) => `${wp.id}${namesFrontendDesign(wp.skills) ? '' : ' without frontend-design'}`).join(', ')})`);
     }
+    const unread = design.map((rule) => rule.n).filter((n) => !tail[0].visualRules.includes(n));
+    if (unread.length) throw new ConductError(2, `${tail[0].id} is the polish WP, so its **Visual rules:** must cover every design-direction rule (\`all\`); it leaves out ${unread.join(', ')}`);
   }
   // dependsOn: the ids the Precondition names from earlier waves, union the
   // whole immediately preceding wave.

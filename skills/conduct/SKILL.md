@@ -104,10 +104,10 @@ Every lane brief carries this rule. Each WP's `**Runtime exercise:**` field name
 ## Visual reads
 
 A goal with a UI gets its pixels judged at the merge gate, not only its code (quest 1b3dec9f). `/spec` writes the rules (§ Stage 4 there); this skill enforces them:
-- **The rules.** The orchestrator's `## Design direction` (a lite spec's `spec.md`) holds numbered rules; among them, rules opening `**Palette:**`, `**Type scale:**`, `**Iconography:**` and `**Fit to view:**`. A section missing one, or with a number used twice, is a spec defect at mint.
+- **The rules.** The orchestrator's `## Design direction` (a lite spec's `spec.md`) holds numbered rules at column 0, each with its indented continuation lines; among them, rules opening `**Palette:**`, `**Type scale:**`, `**Iconography:**` and `**Fit to view:**`. A section missing one, or with a number used twice, is a spec defect at mint.
 - **Which WPs.** A WP's `**Visual rules:**` names rule numbers, `all`, or `none`. Its lane brief carries them, and the lane names its frames under `## Runtime exercise`.
-- **The polish WP.** With a design direction, the orchestrator's last wave is one WP whose `**Skills:**` names `frontend-design`. The lane brief names every skill a WP's `**Skills:**` lists.
-- **The read.** After the gate passes at a head, a WP with visual rules gets the `inspect` `visual` action; the merge waits on it. Each read is kept on the WP, and the run analysis lists them under `## Visual reads`.
+- **The polish WP.** With a design direction, the orchestrator's last wave is one WP whose `**Skills:**` names `frontend-design:frontend-design` and whose `**Visual rules:**` covers every rule. The lane brief names every skill a WP's `**Skills:**` lists.
+- **The read.** After the gate passes at a head, a WP with visual rules gets the `inspect` `visual` action; the merge waits on it. The record's `head` is your attestation that the frames show that head: the verb checks that the files exist, not where they came from. Each read is kept on the WP, and the run analysis lists them under `## Visual reads`.
 
 ## Self-recovery before a blocked stop
 
