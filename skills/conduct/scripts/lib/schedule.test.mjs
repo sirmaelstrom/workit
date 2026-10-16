@@ -321,6 +321,21 @@ test('polish WP (1b3dec9f): with a design direction, the last wave is one WP nam
   assert.equal(parseWorkPackages(uiWorkshop(t, bare)).length, 3, 'the bare skill name stands');
 });
 
+test('slim review (1b3dec9f): a fenced example is not the design direction, its rules or a WP\'s skills; the polish WP waits on every WP across a wave gap', (t) => {
+  const fenced = ['# O', '', 'Example:', '', '```markdown', '## Design direction', '', DESIGN, '```', ''].join('\n');
+  assert.deepEqual(parseDesignDirection(fenced), [], 'a fenced example section is no section');
+  const quoted = { 'WP-03': { wave: 2, model: 'opus', body: `${FILES('c.mjs')}\n\`\`\`\n**Skills:** frontend-design:frontend-design\n\`\`\`\n\n**Skills:** none\n\n**Visual rules:** all\n` } };
+  assert.throws(() => parseWorkPackages(uiWorkshop(t, quoted)), /wave 2 holds WP-03 without frontend-design/, 'the fenced Skills line is not the declaration');
+  const gap = uiWorkshop(t, {
+    'WP-02': { wave: 1, model: 'opus', body: `${FILES('b.mjs')}\n**Visual rules:** none\n` },
+    'WP-03': { wave: 3, model: 'opus', body: `${FILES('c.mjs')}\n**Skills:** frontend-design:frontend-design\n\n**Visual rules:** all\n` },
+  });
+  const wps = parseWorkPackages(gap);
+  assert.deepEqual(wps.find((wp) => wp.id === 'WP-03').dependsOn, ['WP-01', 'WP-02']);
+  const state = { intent: { lanesCap: 4 }, wps: wps.map((wp) => ({ ...wp, state: 'pending' })) };
+  assert.deepEqual(dispatchable(state).map((wp) => wp.id), ['WP-01', 'WP-02'], 'the polish WP does not start beside WP-01');
+});
+
 test('polish WP (1b3dec9f, council r1): its visual rules cover every rule; partial, none or absent is a parse error', (t) => {
   const polish = (rules) => ({ 'WP-03': { wave: 2, model: 'opus', body: `${FILES('c.mjs')}\n**Skills:** frontend-design:frontend-design\n${rules}` } });
   assert.throws(() => parseWorkPackages(uiWorkshop(t, polish('\n**Visual rules:** 1, 2, 3, 4\n'))), /WP-03 is the polish WP, so its \*\*Visual rules:\*\* must cover every design-direction rule \(`all`\); it leaves out 5/);
