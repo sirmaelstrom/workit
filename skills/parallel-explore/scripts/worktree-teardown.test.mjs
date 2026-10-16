@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { findLinks, removeWorktree, unlinkAll } from './worktree-teardown.mjs';
 
 const git = (cwd, args) => execFileSync('git', args, { cwd, stdio: 'pipe' }).toString();
@@ -76,11 +76,30 @@ test('a left-behind directory that cannot be deleted is a failure result, never 
   const locked = () => {
     throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
   };
-  const result = removeWorktree(repo, worktree, { git: () => '', rm: locked });
+  // git really unregisters the worktree and leaves its directory, as Git for
+  // Windows >= 2.54 does beside a junction.
+  const unregister = (args) => {
+    if (args[1] === 'remove') rmSync(join(repo, '.git', 'worktrees', basename(worktree)), { recursive: true, force: true });
+    return '';
+  };
+  const result = removeWorktree(repo, worktree, { git: unregister, rm: locked });
   assert.equal(result.removed, false);
-  assert.match(result.reason, /remains: EBUSY/);
+  assert.match(result.reason, /remains after git's removal: EBUSY/);
+  assert.equal(registered(repo, worktree), false, 'git unregistered it');
+  assert.ok(existsSync(worktree));
   assert.ok(intact(targets));
+  // The retry meets git's "is not a working tree" and still finishes the delete.
   assert.deepEqual(removeWorktree(repo, worktree), { removed: true }, 'the same worktree is removable once the lock is gone');
+  assert.equal(existsSync(worktree), false);
+});
+
+test('a git refusal other than an unregistered worktree still leaves the directory', (t) => {
+  const { repo, worktree } = fixture(t);
+  const refuse = () => {
+    throw Object.assign(new Error('boom'), { stderr: Buffer.from("fatal: 'wt' contains modified or untracked files\n") });
+  };
+  assert.equal(removeWorktree(repo, worktree, { git: refuse, rm: () => assert.fail('rm must not run') }).removed, false);
+  assert.ok(existsSync(worktree));
 });
 
 test('a git that fails leaves the worktree in place with the reason', (t) => {

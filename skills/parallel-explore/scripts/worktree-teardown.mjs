@@ -91,7 +91,10 @@ export function removeWorktree(repo, worktree, { git = runGit(repo), rm = rmSync
   try {
     git(['worktree', 'remove', '--force', worktree]);
   } catch (error) {
-    return { removed: false, reason: `git worktree remove failed: ${String(error.stderr ?? error.message).trim()}` };
+    const said = String(error.stderr ?? error.message).trim();
+    // An earlier call can leave the directory after git unregistered it; the
+    // retry finishes the delete below instead of stopping at git's refusal.
+    if (!/is not a working tree/.test(said)) return { removed: false, reason: `git worktree remove failed: ${said}` };
   }
   if (present(worktree)) {
     // Its links are gone, so what is left is plain files.
@@ -101,7 +104,7 @@ export function removeWorktree(repo, worktree, { git = runGit(repo), rm = rmSync
       // A file still held open (an agent's shell cwd on Windows) refuses here.
       rm(worktree, { recursive: true, force: true });
     } catch (error) {
-      return { removed: false, reason: `git unregistered ${worktree} but it remains: ${error.message}` };
+      return { removed: false, reason: `${worktree} remains after git's removal: ${error.message}` };
     }
     try {
       git(['worktree', 'prune']);
