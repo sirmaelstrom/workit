@@ -26,6 +26,7 @@ import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath }
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
 import { LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
+import { markLines } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
@@ -245,7 +246,9 @@ function recordContract(state, action, deps) {
   // review). The legacy source keeps its old heading-only check, unchanged.
   if (suite && suite.from !== LEGACY_LANE_FROM) {
     const flat = (value) => String(value).replace(/\s+/g, ' ').trim();
-    const deltas = text.split(/^## Run deltas\b/m).slice(1).join(' ').split(/^## /m)[0];
+    // Unfenced lines only: text quoted inside a fence is not an instruction.
+    const unfenced = markLines(text).filter((line) => !line.fenced).map((line) => line.text).join('\n');
+    const deltas = unfenced.split(/^## Run deltas\b/m).slice(1).join(' ').split(/^## /m)[0];
     if (!flat(deltas).includes(flat(suite.text))) {
       throw new ConductError(2, `the lane contract's ## Run deltas section does not carry the laneSuite text from ${suite.from}`);
     }

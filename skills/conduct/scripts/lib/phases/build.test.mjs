@@ -2051,6 +2051,9 @@ test('repo config split (e2b54cd3): record checks the laneSuite the contract act
   // A Run deltas heading without the text is refused too (workit#246 review).
   writeFileSync(first.outPath, fillTemplate({ ...first, append: '\n## Run deltas\n\n- something else\n\n## Emitted rule\n\nemitted rule\n' }));
   await assert.rejects(recordPending(h, {}), { code: 2, message: /does not carry the laneSuite text from AGENTS\.md/ });
+  // Nor does the text count when it sits only inside a fenced block (workit#246 delta review).
+  writeFileSync(first.outPath, fillTemplate({ ...first, append: '\n## Run deltas\n\nArtifact follows:\n\n```\nemitted rule\n```\n' }));
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /does not carry the laneSuite text from AGENTS\.md/ });
   writeFileSync(first.outPath, fillTemplate(first));
   await recordPending(h, {});
   assert.equal(h.state.build.laneSuiteFrom, 'AGENTS.md `## Lane suite`');
