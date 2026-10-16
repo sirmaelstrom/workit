@@ -32,12 +32,53 @@ const bump = (obj, key, n = 1) => { obj[key] = (obj[key] || 0) + n; };
 export const DOCTRINE_BITE = Object.freeze(['bite', 'no-bite', 'n-a']);
 
 /**
- * Pure aggregation over parsed auditor result objects.
- * `manifestDigests` (string[]) defines required coverage.
+ * The section keys a doctrine file offers: its `##` and `###` headings, text
+ * after the `#` marks, trimmed. The same lines the SKILL's step-3 grep hands
+ * the auditors, so a ref copied verbatim from that list matches here.
  */
-export function aggregateResults(results, manifestDigests) {
+export function doctrineSectionsFrom(text) {
+  return new Set(String(text).split(/\r?\n/).map((line) => /^#{2,3} (.+)$/.exec(line)?.[1]?.trim()).filter(Boolean));
+}
+
+/**
+ * One failure record's doctrine refs → Map(section → bite), one entry per
+ * section. Optional field: a record without it (every pre-2026-10-16 run)
+ * yields nothing. Skipped LOUDLY into `counts`, never coerced:
+ * - invalidDoctrineRefsSkipped: a non-array field, an empty section, an enum miss;
+ * - unknownDoctrineRefsSkipped: a section outside `sections` (when a list is given);
+ * - duplicateDoctrineRefsSkipped: a repeat of a section with the same bite;
+ * - conflictingDoctrineRefsSkipped: every ref to a section given two different bites.
+ */
+export function recordDoctrineRefs(failure, sections, counts) {
+  const refs = failure?.doctrine_refs;
+  if (refs === undefined) return new Map();
+  if (!Array.isArray(refs)) { counts.invalidDoctrineRefsSkipped++; return new Map(); }
+  const bites = new Map();
+  for (const ref of refs) {
+    const section = typeof ref?.section === 'string' ? ref.section.trim() : '';
+    if (!section || !DOCTRINE_BITE.includes(ref?.bite)) { counts.invalidDoctrineRefsSkipped++; continue; }
+    if (sections && !sections.has(section)) { counts.unknownDoctrineRefsSkipped++; continue; }
+    bites.set(section, [...(bites.get(section) ?? []), ref.bite]);
+  }
+  const out = new Map();
+  for (const [section, given] of bites) {
+    if (new Set(given).size > 1) { counts.conflictingDoctrineRefsSkipped += given.length; continue; }
+    counts.duplicateDoctrineRefsSkipped += given.length - 1;
+    out.set(section, given[0]);
+  }
+  return out;
+}
+
+/**
+ * Pure aggregation over parsed auditor result objects.
+ * `manifestDigests` (string[]) defines required coverage. `doctrineSections`
+ * (a Set from doctrineSectionsFrom) validates doctrine refs; null skips that check.
+ */
+export function aggregateResults(results, manifestDigests, { doctrineSections = null } = {}) {
   const agg = {
-    counts: { sessions: 0, duplicateSessionsSkipped: 0, invalidEntriesSkipped: 0, nonManifestEntriesSkipped: 0, failureRecords: 0, frictionEventTotal: 0, doctrineRefs: 0, invalidDoctrineRefsSkipped: 0 },
+    counts: { sessions: 0, duplicateSessionsSkipped: 0, invalidEntriesSkipped: 0, nonManifestEntriesSkipped: 0, failureRecords: 0, frictionEventTotal: 0,
+      doctrineRefs: 0, invalidDoctrineRefsSkipped: 0, unknownDoctrineRefsSkipped: 0, duplicateDoctrineRefsSkipped: 0, conflictingDoctrineRefsSkipped: 0 },
+    doctrineRefsValidated: Boolean(doctrineSections),
     verdicts: {},
     byClass: {},
     byModel: {},
@@ -76,15 +117,10 @@ export function aggregateResults(results, manifestDigests) {
         bump(agg.byModel[model], f.label, occ);
         bump(agg.bySeverity, f.severity || 'unspecified');
         bump(agg.byCaught, f.caught_by || 'unspecified');
-        // Optional field: a record without it (every pre-2026-10-16 run) adds
-        // nothing. A present-but-malformed field is skipped LOUDLY.
-        if (f.doctrine_refs !== undefined && !Array.isArray(f.doctrine_refs)) agg.counts.invalidDoctrineRefsSkipped++;
-        for (const ref of Array.isArray(f.doctrine_refs) ? f.doctrine_refs : []) {
-          const section = typeof ref?.section === 'string' ? ref.section.trim() : '';
-          if (!section || !DOCTRINE_BITE.includes(ref?.bite)) { agg.counts.invalidDoctrineRefsSkipped++; continue; }
+        for (const [section, bite] of recordDoctrineRefs(f, doctrineSections, agg.counts)) {
           agg.counts.doctrineRefs++;
           agg.byDoctrine[section] ??= Object.fromEntries(DOCTRINE_BITE.map((b) => [b, 0]));
-          agg.byDoctrine[section][ref.bite]++;
+          agg.byDoctrine[section][bite]++;
         }
       }
     }
@@ -95,9 +131,21 @@ export function aggregateResults(results, manifestDigests) {
 
 function main(argv) {
   const runDir = argv[2];
-  if (!runDir || !fs.existsSync(path.join(runDir, 'manifest.json'))) {
-    console.error('usage: node aggregate.mjs <run-dir>   (run dir must contain manifest.json)');
+  const doctrineAt = argv.indexOf('--doctrine');
+  const doctrinePath = doctrineAt > 2 ? argv[doctrineAt + 1] : null;
+  if (!runDir || !fs.existsSync(path.join(runDir, 'manifest.json')) || (doctrineAt > 2 && !doctrinePath)) {
+    console.error('usage: node aggregate.mjs <run-dir> [--doctrine <DOCTRINE.md>]   (run dir must contain manifest.json)');
     process.exit(2);
+  }
+  // A named doctrine file that is missing or has no headings would validate
+  // every ref as unknown: refuse rather than report an empty join.
+  let doctrineSections = null;
+  if (doctrinePath) {
+    doctrineSections = fs.existsSync(doctrinePath) ? doctrineSectionsFrom(fs.readFileSync(doctrinePath, 'utf8')) : new Set();
+    if (doctrineSections.size === 0) {
+      console.error(`aggregate: --doctrine ${doctrinePath} is missing or has no ## / ### headings, exit 2`);
+      process.exit(2);
+    }
   }
   const resultsDir = path.join(runDir, 'fleet-results');
   const resultFiles = fs.existsSync(resultsDir) ? fs.readdirSync(resultsDir).filter((f) => f.endsWith('.json')) : [];
@@ -107,13 +155,17 @@ function main(argv) {
   }
   const results = resultFiles.map((f) => JSON.parse(fs.readFileSync(path.join(resultsDir, f), 'utf8')));
   const manifestDigests = JSON.parse(fs.readFileSync(path.join(runDir, 'manifest.json'), 'utf8')).map((e) => e.digest);
-  const { agg, missing } = aggregateResults(results, manifestDigests);
+  const { agg, missing } = aggregateResults(results, manifestDigests, { doctrineSections });
 
   fs.writeFileSync(path.join(runDir, 'aggregate.json'), JSON.stringify(agg, null, 2));
   console.log(`aggregate.json written: ${agg.counts.sessions} sessions, ${agg.counts.failureRecords} failure records, verdicts ${JSON.stringify(agg.verdicts)}`);
   if (agg.counts.invalidEntriesSkipped) console.log(`⚠ invalid entries skipped: ${agg.counts.invalidEntriesSkipped}`);
   console.log(`doctrine refs: ${agg.counts.doctrineRefs} across ${Object.keys(agg.byDoctrine).length} section(s)`);
-  if (agg.counts.invalidDoctrineRefsSkipped) console.log(`⚠ invalid doctrine_refs entries skipped: ${agg.counts.invalidDoctrineRefsSkipped}`);
+  if (!doctrineSections) console.log('⚠ doctrine refs NOT validated against a heading list (pass --doctrine <DOCTRINE.md>)');
+  for (const [key, label] of [['invalidDoctrineRefsSkipped', 'invalid'], ['unknownDoctrineRefsSkipped', 'unknown-section'],
+    ['duplicateDoctrineRefsSkipped', 'duplicate'], ['conflictingDoctrineRefsSkipped', 'conflicting-bite']]) {
+    if (agg.counts[key]) console.log(`⚠ ${label} doctrine_refs entries skipped: ${agg.counts[key]}`);
+  }
   if (agg.counts.nonManifestEntriesSkipped) console.log(`⚠ non-manifest entries skipped (calibration leakage?): ${agg.counts.nonManifestEntriesSkipped}`);
   if (missing.length > 0) {
     console.error(`COVERAGE GAP — ${missing.length} manifest digest(s) with no valid audit entry:`);

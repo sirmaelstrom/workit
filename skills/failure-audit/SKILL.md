@@ -99,7 +99,7 @@ signal.
 
 **4. Aggregate.**
 ```
-node ${CLAUDE_PLUGIN_ROOT}/skills/failure-audit/scripts/aggregate.mjs <run-dir>
+node ${CLAUDE_PLUGIN_ROOT}/skills/failure-audit/scripts/aggregate.mjs <run-dir> --doctrine {workspace}/data/memory/DOCTRINE.md
 ```
 Writes `aggregate.json` (byClass / byModel / bySeverity / byCaught / byDoctrine /
 verdicts / friction). Exits nonzero on coverage gaps — run a patch hand for the gap
@@ -108,8 +108,11 @@ digests, then re-aggregate. `byDoctrine` maps each doctrine section to its
 of the doctrine liveness join, and the quarterly doctrine review reads it by
 hand. The section-id grammar that would make the key stable is still owed
 (quest b74b4cfe), so a renamed heading splits its counts across two keys.
-Malformed refs are skipped and counted (`invalidDoctrineRefsSkipped`), never
-coerced.
+Each section counts once per failure record. Malformed refs, sections outside
+the `--doctrine` heading list, repeats, and a section given two different bites
+are skipped and counted (`invalid` / `unknown` / `duplicate` /
+`conflictingDoctrineRefsSkipped`), never coerced. Without `--doctrine`, sections
+go unvalidated and `doctrineRefsValidated` is `false`.
 
 **5. Standing comparisons.**
 ```

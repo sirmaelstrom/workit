@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { computeDelta, readAuditHistory, MIN_SESSION_BYTES } from '../scripts/delta.mjs';
-import { aggregateResults, normalizeModel, DOCTRINE_BITE } from '../scripts/aggregate.mjs';
+import { aggregateResults, normalizeModel, DOCTRINE_BITE, doctrineSectionsFrom } from '../scripts/aggregate.mjs';
 import { compareRuns, readRun, SEEDED_TAXONOMY } from '../scripts/compare.mjs';
 
 const BIG = 'x'.repeat(2048);
@@ -125,6 +125,33 @@ test('aggregate: doctrine_refs join — enum counted per section, malformed refs
   assert.equal(agg.counts.invalidDoctrineRefsSkipped, 5);
   assert.equal(agg.counts.failureRecords, 4); // a bad ref never drops its failure record
   assert.equal(agg.byClass['unverified-claim-or-premise'], 3);
+});
+
+test('aggregate: one count per section per record; repeats collapse, conflicts and unknown sections skip loudly', () => {
+  const sections = doctrineSectionsFrom('# Title\n\n## Claims Carry Their Refutation\ntext\n### Correct the Carrier — Filing the Lesson Is Not Fixing the Corpus\n#### Too deep\n## Acceptable Failures *(revised 2026-08-13)*\n');
+  assert.deepEqual([...sections], ['Claims Carry Their Refutation', 'Correct the Carrier — Filing the Lesson Is Not Fixing the Corpus', 'Acceptable Failures *(revised 2026-08-13)*']);
+  const failures = [
+    { label: 'a', doctrine_refs: [
+      { section: 'Claims Carry Their Refutation', bite: 'bite' },
+      { section: 'Claims Carry Their Refutation', bite: 'bite' }, // same bite: one count, one duplicate
+      { section: 'Invented Section', bite: 'bite' }, // not in the list
+    ] },
+    { label: 'b', doctrine_refs: [
+      { section: 'Correct the Carrier — Filing the Lesson Is Not Fixing the Corpus', bite: 'bite' },
+      { section: 'Correct the Carrier — Filing the Lesson Is Not Fixing the Corpus', bite: 'no-bite' }, // conflict: both skipped
+    ] },
+  ];
+  const { agg } = aggregateResults([{ sessions: [{ digest: 'd1.md', verdict: 'failures_found', failures }] }], ['d1.md'], { doctrineSections: sections });
+  assert.deepEqual(agg.byDoctrine, { 'Claims Carry Their Refutation': { bite: 1, 'no-bite': 0, 'n-a': 0 } });
+  assert.equal(agg.counts.doctrineRefs, 1);
+  assert.equal(agg.counts.duplicateDoctrineRefsSkipped, 1);
+  assert.equal(agg.counts.unknownDoctrineRefsSkipped, 1);
+  assert.equal(agg.counts.conflictingDoctrineRefsSkipped, 2);
+  assert.equal(agg.doctrineRefsValidated, true);
+  // Without a list the invented section is kept, and the run says it was not validated.
+  const open = aggregateResults([{ sessions: [{ digest: 'd1.md', verdict: 'failures_found', failures }] }], ['d1.md']).agg;
+  assert.equal(open.byDoctrine['Invented Section'].bite, 1);
+  assert.equal(open.doctrineRefsValidated, false);
 });
 
 test('aggregate: a run with no doctrine_refs anywhere yields an empty join, not a missing key', () => {
