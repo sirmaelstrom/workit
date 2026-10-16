@@ -988,9 +988,14 @@ test('an explicit delta reset may use its verified ancestor; a proof for another
   assert.throws(() => deltaReviewActions(makeState(), { ...wp, deltaRecovery: { ...wp.deltaRecovery, head: sha('d') } }, HEAD), /no delta review after a rebase/);
 });
 
-test('t2Actions: council off → every available lens and no other; on → council_review, synthesize, challenge', () => {
-  const off = t2Actions(makeState(), makeWp({ reviewMode: 'standalone' }), { round: 1 });
-  assert.deepEqual(off.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]), ['codex', 'astra', 'opus']);
+test('t2Actions: council off → every available lens but the author\'s; on → council_review, synthesize, challenge', () => {
+  const lensesOf = (actions) => actions.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]);
+  // 2aadf72f (workit#240 review): opus is the Claude author's own model, codex the Sol author's.
+  assert.equal(makeState().intent.agent, 'claude');
+  assert.deepEqual(lensesOf(t2Actions(makeState(), makeWp({ reviewMode: 'standalone' }), { round: 1 })), ['codex', 'astra']);
+  assert.deepEqual(lensesOf(t2Actions(makeState(), makeWp({ reviewMode: 'standalone', agent: 'codex' }), { round: 1 })), ['astra', 'opus']);
+  // Only the author's own lens available: T1's same-family single lens stands, never an empty review.
+  assert.deepEqual(lensesOf(t2Actions(makeState({ agents: agents(true, false) }), makeWp({ reviewMode: 'standalone' }), { round: 1 })), ['opus']);
   const state = makeState({ adapters: { council: { on: true } } });
   const changed = [join(WT, 'lib', 'x.mjs')];
   const on = t2Actions(state, makeWp(), { round: 2, changedPaths: changed });

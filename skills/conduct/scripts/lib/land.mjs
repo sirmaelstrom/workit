@@ -36,7 +36,7 @@ import { ConductError, STEP_SEAM, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
 import { mergeDanger } from '../../../../scripts/lane.mjs';
 import { patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-review/scripts/pr-review-rounds.mjs';
-import { reviewPairFor } from '../../../slim-review/scripts/pr-review.mjs';
+import { AUTHOR_LENS, reviewPairFor } from '../../../slim-review/scripts/pr-review.mjs';
 import { laneModel } from './adapters.mjs';
 
 const WAIT_MS = 60000;
@@ -174,7 +174,13 @@ export function reviewActions(state, wp, { round = 1, report = null, since = nul
 function reviewSteps(state, wp, mode, meta) {
   const pick = pickReviewers(state, authorOf(state, wp), { mode, author: authorModelOf(state, wp) });
   if (pick.impossible) throw new ConductError(5, `${wp.id}: review impossible: ${pick.impossible}`);
-  const lenses = meta.all && mode === 'standalone' ? availableLenses(state) : pick.lenses;
+  // The no-council T2 fallback runs every available lens but the author's own
+  // (workit#240 review, codex P2): reviewer ≠ author holds at every tier.
+  const authorLens = AUTHOR_LENS[authorModelOf(state, wp)] ?? null;
+  // When the author's lens is the only one available, pickReviewers' single
+  // lens (flagged sameFamily) stands, as at T1.
+  const others = availableLenses(state).filter((lens) => lens !== authorLens);
+  const lenses = meta.all && mode === 'standalone' && others.length > 0 ? others : pick.lenses;
   const single = lenses.length === 1 ? (pick.singleLens ?? `${lenses[0]} is the only available lens`) : null;
   const dir = reviewsDir(state, wp);
   const script = prReview(state);
