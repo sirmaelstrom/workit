@@ -125,6 +125,10 @@ function spikeDir(branchName) {
   return dir;
 }
 
+// Every spike directory is checked before any branch launches, so a refusal
+// never leaves an earlier branch's agent running.
+const spikeDirs = spike ? new Map(promptFiles.map((f) => [basename(f, '.md'), spikeDir(basename(f, '.md'))])) : null;
+
 // A branch agent may link node_modules or a cache into its worktree;
 // removeWorktree unlinks every link before anything is deleted.
 function cleanupWorktrees() {
@@ -148,7 +152,7 @@ function launchBranch(promptFile, index) {
   const prompt = readFileSync(promptPath, 'utf-8');
   const resultPath = join(resultsDir, `${branchName}.md`);
 
-  const branchWorkdir = spike ? spikeDir(branchName) : useWorktree ? createWorktree(branchName) : workdir;
+  const branchWorkdir = spike ? spikeDirs.get(branchName) : useWorktree ? createWorktree(branchName) : workdir;
   // A spike writes and runs code, so it needs tool permissions; it runs only
   // in its own new directory outside every repo (spikeDir).
   const permission = spike ? ['--permission-mode', 'bypassPermissions'] : [];

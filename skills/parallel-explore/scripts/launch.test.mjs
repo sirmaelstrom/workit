@@ -64,11 +64,13 @@ test('--spike refuses --worktree, a non-empty spike directory, and a spike root 
   const both = launch('--spike-root', spikeRoot, '--worktree');
   assert.equal(both.status, 1);
   assert.match(both.stderr, /cannot be combined with --worktree/);
-  mkdirSync(join(spikeRoot, 'run-x', 'branch-1'), { recursive: true });
-  writeFileSync(join(spikeRoot, 'run-x', 'branch-1', 'left.txt'), 'an earlier spike\n');
+  // The second branch's directory is the stale one: the first must not have launched either.
+  mkdirSync(join(spikeRoot, 'run-x', 'branch-2'), { recursive: true });
+  writeFileSync(join(spikeRoot, 'run-x', 'branch-2', 'left.txt'), 'an earlier spike\n');
   const stale = launch('--spike-root', spikeRoot);
   assert.equal(stale.status, 1);
   assert.match(stale.stderr, /is not empty/);
+  assert.equal(existsSync(join(run, 'results', 'branch-1.md')), false, 'every spike directory is checked before any branch launches');
   const repo = join(root, 'repo');
   mkdirSync(repo);
   spawnSync('git', ['init', '-q', repo]);
