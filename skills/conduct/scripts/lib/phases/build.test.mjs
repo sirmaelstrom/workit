@@ -853,7 +853,12 @@ test('reset-wp verb (61d817db): a WP blocked at its gate ends the build; reset -
   const h = harness(t, { config: JSON.stringify({ gateEnv: { DB: 7 } }), wps: RATIFY_WPS });
   assert.equal(await drive(h), null);
   assert.deepEqual([h.wp('WP-02').state, h.state.phase], ['blocked', 'release']);
-  assert.notEqual(h.wp('WP-03').state, 'merged');
+  // 5a848b95: WP-02 blocks inside the final `next`, after that call's
+  // deferrals ran. The build still ends with its dependent deferred, never
+  // `pending`, so the showcase's unfinished list names it.
+  assert.deepEqual([h.wp('WP-03').state, h.wp('WP-03').deferredBy], ['deferred', 'WP-02']);
+  const ended = h.events().filter((e) => e.event === 'build-ended');
+  assert.deepEqual(ended.at(-1).data.wps.find((wp) => wp.id === 'WP-03')?.state, 'deferred', 'the build-ended row records it deferred too');
   writeFileSync(join(h.repo, '.workit', 'conduct.json'), fixture('build', 'conduct.json'));
   const before = readFileSync(join(h.runDir, 'state.json'), 'utf8');
   const run = (...args) => runConduct(['reset-wp', '--run', h.runDir, ...args], h.overrides());

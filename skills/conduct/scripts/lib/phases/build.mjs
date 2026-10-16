@@ -1368,6 +1368,11 @@ function chooseAction(state, deps) {
     const opened = announce(state);
     if (opened) return opened;
     if (action) return action;
+    // A WP that blocked during this pass did so after next()'s deferrals ran:
+    // run them again before deciding the build is over, so its dependents end
+    // `deferred` (named by the showcase), not `pending` (quest 5a848b95). One
+    // that is un-deferred instead is dispatchable, and the build goes on.
+    deferrals(state, deps);
     // A run touch (no wpId) still open stays open into the showcase (D16).
     if (settled(state, deps)) break;
     const waiting = yielders(state, deps);
