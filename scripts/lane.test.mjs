@@ -1610,6 +1610,19 @@ test('ef5a05fe: server_not_running while herdr server is alive fails the verb as
   assert.equal(row.state, HERDR_API_DEAD);
 });
 
+test('ef5a05fe (workit#244 review): a dead pane read inside stop\'s prompt wait is not given a second look', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { promptSignature: 'PS X:\\fixture\\lane>' });
+  f.processes = [HERDR_SERVER];
+  const ok = { code: 0, stdout: '{}', stderr: '' };
+  // The keys land, the first pane read is dead, and later reads would recover.
+  f.responses.push(ok, ok, ok, notRunning(), { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.output.state, HERDR_API_DEAD);
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.equal(f.calls.length, 4, 'no herdr call after the dead answer');
+});
+
 test('ef5a05fe: server_not_running with no live server, or another session\'s, stays the plain failure', async (t) => {
   for (const [processes, answer] of [[[], notRunning()], [[HERDR_SERVER], notRunning('C:\\\\x\\\\herdr\\\\sessions\\\\lab\\\\herdr.sock')]]) {
     const f = fixture(t);

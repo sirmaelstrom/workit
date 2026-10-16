@@ -2861,6 +2861,8 @@ async function stopAgent(opts, deps, lane) {
       patterns: promptPatterns(opts, deps),
     }, timeout);
   } catch (error) {
+    // An API-dead herdr is not a slow prompt: no second look (workit#244 review).
+    if (error?.details?.state === HERDR_API_DEAD) throw error;
     // Codex can draw its exit banner and only then repaint the prompt. Give
     // that hand-off one short second look before calling a completed exit a
     // failure; the agent listing is the deciding signal.
