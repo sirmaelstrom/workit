@@ -389,6 +389,12 @@ for (const [source, text] of [
   ['after a regex literal at line start', "/'/.test(s); /*"],
   ['after a regex literal following return', 'return /"/.test(s); /*'],
   ['after a division', 'const half = total / 2; /*'],
+  // 4291764475 / 4291764494 / 4291764485: a postfix ++/-- ends an operand; a control condition's ) does not.
+  ['after a division following postfix ++', 'const half = total++ / 2; /*'],
+  ['after a division following postfix --', 'const half = total-- / 2; /*'],
+  ['after a division following a call', 'const half = size(a) / 2; /*'],
+  ['after a regex literal following an if condition', "if (ok(a)) /'/.test(s); /*"],
+  ['after a regex literal following a while condition', "while (x) /'/.test(s); /*"],
 ]) {
   test(`350bfd99: a real opener ${source} is still reported`, () => {
     const [entry] = detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: `@@ -1,1 +1,4 @@\n ctx\n+${text}\n+test('x', () => {});\n+*/` }]);

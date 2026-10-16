@@ -253,12 +253,29 @@ function openCommentAt(text) {
   return open;
 }
 
-/** Whether a `/` after `before` starts a regex literal rather than a division. */
+/**
+ * Whether a `/` after `before` starts a regex literal rather than a division.
+ * A postfix `++`/`--` ends an operand, so the `/` after it divides. A `)` ends
+ * an operand too, except the condition of `if`/`while`/`for`/`with`, after
+ * which a statement (and so a regex) may start.
+ */
 function regexMayStart(before) {
   const code = before.trimEnd();
+  if (/(?:\+\+|--)$/.test(code)) return false;
+  if (code.endsWith(')')) return /(?<![\w$.])(?:if|while|for|with)\s*$/.test(code.slice(0, openingParen(code)));
   return code === ''
     || /[(,=:[!&|?{};+\-*%<>~^]$/.test(code)
     || /(?<![\w$.])(?:return|typeof|instanceof|case|in|of|delete|void|throw|new|yield|await|else|do)$/.test(code);
+}
+
+/** The index of the `(` matching the `)` that ends `code`, or 0 when unmatched. */
+function openingParen(code) {
+  let depth = 0;
+  for (let i = code.length - 1; i >= 0; i--) {
+    if (code[i] === ')') depth++;
+    else if (code[i] === '(' && --depth === 0) return i;
+  }
+  return 0;
 }
 
 /** The index of the `/` closing the regex literal opened at `start`, or -1. */
