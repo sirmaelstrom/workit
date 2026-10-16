@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, paneErrorLine, panePromptSignature,
   USAGE_TEXT, briefPaths, mergeDanger, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath, normalizeAgentArgs,
+  HERDR_API_DEAD, herdrServerPids, herdrSessionOf,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
 // `--live` and an entry-point check.
@@ -76,6 +77,12 @@ function fixture(t) {
       reaps.push([program, ...args]);
       return processListResult(handle.processes, program === 'pwsh' ? 'win32' : 'linux');
     }
+    // A cleaning sweep's herdr API probe (ef5a05fe) answers from `preflight`
+    // (a live, empty agent list unless a test sets it), outside the queue.
+    if (options.purpose === 'herdr-api-preflight') {
+      handle.preflights.push([program, ...args]);
+      return handle.preflight;
+    }
     if (program === 'taskkill' || program === 'kill') {
       reaps.push([program, ...args]);
       handle.processes = handle.processes.filter((row) => !args.includes(String(row.pid)));
@@ -97,6 +104,8 @@ function fixture(t) {
     memory: { code: 0, stdout: `${64 * 1024 * 1024}\r\n`, stderr: '' },
     reaps,
     processes: [],
+    preflights: [],
+    preflight: { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' },
   };
   return handle;
 }
@@ -1555,6 +1564,123 @@ test('Q-3: lane stop fails when agent list still contains the lane', async (t) =
   const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
   assert.equal(result.exit, 1);
   assert.match(result.output.error, /lane-a is still listed 10000 ms after the pane prompt returned/);
+});
+
+// ---- herdr API-dead (quest ef5a05fe) ----
+// The CLI's answer when nothing listens on the socket, captured live from
+// herdr 0.9.4-preview (2026-10-16) against a session with no server.
+const notRunning = (sock = 'X:\\\\fixture\\\\herdr\\\\herdr.sock') => ({
+  code: 1,
+  stdout: `{"id":"cli:agent:list","error":{"code":"server_not_running","message":"no herdr server is running at ${sock}; run \`herdr session attach\` to start or attach it"}}`,
+  stderr: '',
+});
+// The live `herdr server` process as Win32_Process printed it on 2026-10-16
+// (the install path shaped as X:\fixture).
+const HERDR_SERVER = { pid: 22800, cmd: '"X:\\fixture\\Herdr\\bin\\herdr.exe" server' };
+
+test('ef5a05fe: herdrServerPids reads a live `herdr server` for the right session, and nothing else', () => {
+  const rows = [
+    HERDR_SERVER,
+    { pid: 2, cmd: '/usr/local/bin/herdr server' },
+    { pid: 3, cmd: 'herdr --session lab server' },
+    { pid: 4, cmd: 'herdr server stop' },
+    { pid: 5, cmd: 'herdr agent list' },
+    { pid: 6, cmd: 'notherdr server' },
+    { pid: 7, cmd: '"C:\\herdr\\node.exe" x server' },
+    { pid: 8, cmd: '' },
+  ];
+  assert.deepEqual(herdrServerPids(rows), [22800, 2]);
+  assert.deepEqual(herdrServerPids(rows, 'lab'), [3]);
+  assert.equal(herdrSessionOf(notRunning().stdout), null);
+  assert.equal(herdrSessionOf(notRunning('C:\\\\x\\\\herdr\\\\sessions\\\\lab\\\\herdr.sock').stdout), 'lab');
+});
+
+test('ef5a05fe: server_not_running while herdr server is alive fails the verb as herdr-api-dead, in the output and the log row', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { promptSignature: 'PS X:\\fixture\\lane>' });
+  f.processes = [HERDR_SERVER];
+  f.responses.push(notRunning());
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.equal(result.output.state, HERDR_API_DEAD);
+  assert.deepEqual(result.output.serverPids, [22800]);
+  assert.match(result.output.error, /herdr API is dead: .*server_not_running while herdr server pid 22800 is alive/);
+  assert.equal(f.calls.length, 1, 'the verb stopped at the first dead answer');
+  const row = readFileSync(f.log, 'utf8').trim().split(/\r?\n/).map((line) => JSON.parse(line)).at(-1);
+  assert.equal(row.state, HERDR_API_DEAD);
+});
+
+test('ef5a05fe (workit#244 review): a dead pane read inside stop\'s prompt wait is not given a second look', async (t) => {
+  const f = fixture(t);
+  seedLane(f, { promptSignature: 'PS X:\\fixture\\lane>' });
+  f.processes = [HERDR_SERVER];
+  const ok = { code: 0, stdout: '{}', stderr: '' };
+  // The keys land, the first pane read is dead, and later reads would recover.
+  f.responses.push(ok, ok, ok, notRunning(), { code: 0, stdout: 'PS X:\\fixture\\lane>', stderr: '' }, { code: 0, stdout: '{"result":{"agents":[]}}', stderr: '' });
+  const result = await runLane(['stop', 'lane-a', '--timeout', '1000', '--log', f.log], { exec: f.exec, sleep: async () => {} });
+  assert.equal(result.output.state, HERDR_API_DEAD);
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.equal(f.calls.length, 4, 'no herdr call after the dead answer');
+});
+
+test('ef5a05fe: server_not_running with no live server, or another session\'s, stays the plain failure', async (t) => {
+  for (const [processes, answer] of [[[], notRunning()], [[HERDR_SERVER], notRunning('C:\\\\x\\\\herdr\\\\sessions\\\\lab\\\\herdr.sock')]]) {
+    const f = fixture(t);
+    seedLane(f, { promptSignature: 'PS X:\\fixture\\lane>' });
+    f.processes = processes;
+    f.responses.push(answer);
+    let clock = 0;
+    const result = await runLane(['stop', 'lane-a', '--timeout', '1', '--log', f.log], { exec: f.exec, now: () => clock, sleep: async (ms) => { clock += ms; } });
+    assert.notEqual(result.output.state, HERDR_API_DEAD);
+    assert.ok(f.calls.length > 1, 'the verb carried on past the answer, as before');
+  }
+});
+
+test('ef5a05fe: a cleaning sweep probes the herdr API first and removes nothing when it is dead; --list does not probe', async (t) => {
+  const sweepFixture = () => {
+    const f = fixture(t);
+    const root = join(f.dir, '.herdr', 'worktrees');
+    const lanePath = join(root, 'repo', 'lane-a');
+    writeFileSync(`${f.log}.state.json`, JSON.stringify({ creates: [{ path: lanePath, label: 'lane-a', paneId: 'w1:p9' }], lanes: {} }), 'utf8');
+    return { f, root };
+  };
+  const dead = sweepFixture();
+  dead.f.processes = [HERDR_SERVER];
+  dead.f.preflight = notRunning();
+  const refused = await runLane(['sweep', '--root', dead.root, '--log', dead.f.log], { exec: dead.f.exec, exists: fakeExists() });
+  assert.equal(refused.exit, EXIT_CODES.error);
+  assert.equal(refused.output.state, HERDR_API_DEAD);
+  assert.deepEqual(cleaningCalls(dead.f), [], 'the delegate never ran -Clean');
+  assert.equal(dead.f.preflights.length, 1);
+
+  const alive = sweepFixture();
+  alive.f.processes = [HERDR_SERVER];
+  const swept = await runLane(['sweep', '--root', alive.root, '--log', alive.f.log], { exec: alive.f.exec, exists: fakeExists() });
+  assert.equal(swept.exit, EXIT_CODES.ok);
+  assert.equal(cleaningCalls(alive.f).length, 1, 'a live API sweeps as before');
+
+  const listing = sweepFixture();
+  listing.f.preflight = notRunning();
+  listing.f.processes = [HERDR_SERVER];
+  await runLane(['sweep', '--root', listing.root, '--list', '--log', listing.f.log], { exec: listing.f.exec, exists: fakeExists() });
+  assert.equal(listing.f.preflights.length, 0, 'a list-only sweep removes nothing, so it does not probe');
+});
+
+test('ef5a05fe: an API-dead answer to the HOLD listing keeps what the delegate did and fails the sweep as herdr-api-dead', async (t) => {
+  const f = fixture(t);
+  const root = join(f.dir, '.herdr', 'worktrees');
+  const lanePath = join(root, 'repo', 'lane-a');
+  writeFileSync(`${f.log}.state.json`, JSON.stringify({
+    creates: [{ path: lanePath, label: 'lane-a', paneId: 'w1:p9' }],
+    lanes: { 'lane-a': { pane: 'w1:p9', path: lanePath } },
+  }), 'utf8');
+  f.processes = [HERDR_SERVER];
+  f.responses.push({ code: 0, stdout: 'HOLD lane', stderr: '' }, notRunning());
+  const result = await runLane(['sweep', '--root', root, '--log', f.log], { exec: f.exec, exists: fakeExists() });
+  assert.equal(result.exit, EXIT_CODES.error);
+  assert.equal(result.output.state, HERDR_API_DEAD);
+  assert.equal(result.output.sweptRoots, 1, 'the delegate\'s result is kept');
+  assert.deepEqual(result.output.herdrApiDead.serverPids, [22800]);
 });
 
 test('0d44bab7 amend 4: the late-prompt path re-reads the listing too and stops late once the agent drops out', async (t) => {
