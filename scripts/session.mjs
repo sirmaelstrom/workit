@@ -588,10 +588,20 @@ async function retire(opts, deps, state) {
   if (self && opts.expectSession) usage('retire self takes no --expect-session');
   const target = await resolveTarget(opts, state, opts.positional[0], deps);
   if (self && opts.mode !== 'exit') usage('retire self only supports --mode exit');
-  // herdr reissues pane ids: a pane whose live owner is another session (or
-  // one whose session cannot be read) is not the agent this retire was for.
-  if (opts.expectSession && !target.goneAgent && target.sessionId !== opts.expectSession) {
-    throw new SessionError(EXIT.blocked, `${target.pane} is owned by session ${target.sessionId ?? '(unreadable)'}, not ${opts.expectSession}: not retired`, { reason: 'session-mismatch', ownerSession: target.sessionId ?? null });
+  // herdr reissues pane ids and reuses names: a target whose live owner is
+  // another session (or one whose session cannot be read) is not the agent
+  // this retire was for. A pane target's session came from herdr already; a
+  // named or sidecar target's session is asked of herdr here, never taken
+  // from the sidecar record.
+  if (opts.expectSession && !target.goneAgent) {
+    let live = target.sessionId;
+    if (target.resolvedFrom !== 'herdr') {
+      const fetched = call(deps, ['agent', 'get', target.target]);
+      live = fetched.code === 0 ? sessionId(fetched.stdout) : null;
+    }
+    if (live !== opts.expectSession) {
+      throw new SessionError(EXIT.blocked, `${target.target} (pane ${target.pane}) is owned by session ${live ?? '(unreadable)'}, not ${opts.expectSession}: not retired`, { reason: 'session-mismatch', ownerSession: live ?? null });
+    }
   }
   const timeout = positive(opts.timeout, '--timeout', 60_000);
   const dialogAfter = positive(opts.dialogAfterMs, '--dialog-after-ms', 15_000);

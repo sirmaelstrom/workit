@@ -895,6 +895,23 @@ test('d3ce5461: retire --expect-session refuses a reissued pane whose live owner
   assert.equal(exitSent(f), true);
 });
 
+test('d3ce5461: retire --expect-session on a named target asks herdr for the live session; a stale sidecar record naming the expected session does not pass a reused name', async (t) => {
+  const old = '11111111-1111-4111-8111-111111111111';
+  for (const [live, exit] of [['44444444-4444-4444-8444-444444444444', 3], [old, 0]]) {
+    const f = fixture(t);
+    writeFileSync(`${f.log}.state.json`, JSON.stringify({ sessions: { predecessor: { name: 'predecessor', pane: 'pane:old', sessionId: old } }, chains: [] }), 'utf8');
+    f.handler = (_program, args) => {
+      const key = `${args[0]} ${args[1]}`;
+      if (key === 'agent get') return { code: 0, stdout: herdrShapes.agentGet({ pane: 'pane:old', session: live }), stderr: '' };
+      return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+    };
+    const result = await runSession(['retire', 'predecessor', '--mode', 'exit', '--expect-session', old, '--log', f.log], { exec: f.exec, env: env() });
+    assert.equal(result.exit, exit, JSON.stringify(result.output));
+    assert.equal(exitSent(f), exit === 0, `live ${live}`);
+    assert.ok(callsFor(f, 'agent').some((call) => call.args[1] === 'get' && call.args[2] === 'predecessor'), 'herdr was asked');
+  }
+});
+
 test('P1b: an agent that already exited (agent_not_running) is gone, for retire --mode close and watch --until gone', async (t) => {
   // Verbatim herdr shape from a chain whose caller had exited before the successor retired it (2026-09-28).
   const notRunning = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_running","message":"agent is no longer running in the target pane"},"id":"cli:agent:wait"}' };
