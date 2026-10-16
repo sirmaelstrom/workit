@@ -213,6 +213,40 @@ function countBy(lines, keyOf) {
 }
 
 /**
+ * Where the block comment this line leaves open starts, or -1 when it leaves
+ * none open. A lexical scan, not a parser: text inside quotes ('…', "…", `…`,
+ * backslash escapes honoured) opens nothing, so a glob such as 'scripts/**'
+ * is not a comment; a `//` line comment ends the scan; a comment closed on the
+ * same line is skipped. A quote still open at the end of the line holds the
+ * rest of it. One line at a time: a template literal or string spanning lines
+ * is not tracked, so a `/*` on its second line still counts.
+ */
+function openCommentAt(text) {
+  let open = -1;
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = null;
+    } else if (open !== -1) {
+      if (c === '*' && text[i + 1] === '/') {
+        open = -1;
+        i++;
+      }
+    } else if (c === "'" || c === '"' || c === '`') {
+      quote = c;
+    } else if (c === '/' && text[i + 1] === '*') {
+      open = i;
+      i++;
+    } else if (c === '/' && text[i + 1] === '/') {
+      break;
+    }
+  }
+  return open;
+}
+
+/**
  * Added block-comment openers (`/*` or `/**`) that swallow a test: walking the
  * post-change lines the patch shows, in order, an opener added by this change
  * whose comment holds a test declaration or an assertion before the comment
@@ -246,8 +280,9 @@ function commentedOutTests(added, context) {
       }
       continue;
     }
-    const at = line.text.lastIndexOf('/*');
-    if (!line.isAdded || at === -1 || line.text.indexOf('*/', at + 2) !== -1) continue;
+    if (!line.isAdded) continue;
+    const at = openCommentAt(line.text);
+    if (at === -1) continue;
     open = { opener: line, hit: swallows(line.text.slice(at + 2)) };
   }
   if (open) found.push(open.opener);
