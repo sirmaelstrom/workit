@@ -27,12 +27,15 @@ export function samePath(a, b, platform) {
 
 export function next(state) {
   const ref = preapprovedRef(state);
+  // Intake's greenfield trigger (quest 977d3efb) also puts D1, the stack
+  // decision, through /spec's stack attack (quest 061b526a).
+  const greenfield = state.intent.greenfield?.on === true ? ['--greenfield'] : [];
   return {
     kind: 'skill', step: 'spec', skill: 'workit:spec',
     // skillArgv is the transport (one element per argument, nothing to quote);
     // skillArgs is its display form.
-    skillArgv: [state.intent.goal, '--workshop', state.workshopDir, '--preapproved', ref],
-    skillArgs: `${state.intent.goal} --workshop ${state.workshopDir} --preapproved "${ref}"`,
+    skillArgv: [state.intent.goal, '--workshop', state.workshopDir, '--preapproved', ref, ...greenfield],
+    skillArgs: `${state.intent.goal} --workshop ${state.workshopDir} --preapproved "${ref}"${greenfield.length ? ' --greenfield' : ''}`,
     expects: { type: 'json', fields: ['depth', 'workshopDir'] },
     instruction: 'Invoke the skill with skillArgv, one argument per element. /spec reports in prose; record a JSON object you compose from its report: { "depth": "none|lite|deep", "workshopDir": "<the workshop it wrote to>", "reviewLevel": "<its review level, if any>", "gateCommand": "<the repo\'s gate command; required for none and lite>" }. A deep run\'s WPs come from work-packages/ in the workshop; the record carries no list of them.',
   };

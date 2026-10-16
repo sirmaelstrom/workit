@@ -21,7 +21,7 @@ Pick the execution surface by the **phase** of work, not just its size:
 
 The conductor stays the *orchestrator*: it decides, delegates, and integrates the distilled result. It does not absorb the bulk tokens.
 
-**Carve-out: the blind second read.** A consequential plan gets a second model's opening before that model sees the plan (`${CLAUDE_PLUGIN_ROOT}/reference/patterns/blind-second-read.md`). That read goes to a model from another vendor family through this skill's invocation, at high effort, and it is planning work on purpose. The conductor still owns the plan. The leaf writes an independent opening from the problem, the constraints and the evidence, and the conductor reconciles it with its own plan. Never send it the conductor's draft plan.
+**Carve-out: the blind second read.** A consequential plan gets a second model's opening before that model sees the plan (`${CLAUDE_PLUGIN_ROOT}/reference/patterns/blind-second-read.md`). That read goes to a model from another vendor family through this skill's invocation, at high effort, and it is planning work on purpose. The conductor still owns the plan. The leaf writes an independent opening from the problem, the constraints and the evidence, and the conductor reconciles it with its own plan. Never send it the conductor's draft plan. The **stack attack** (`${CLAUDE_PLUGIN_ROOT}/reference/patterns/stack-attack.md`, `/spec --greenfield`) uses the same invocation but the opposite input rule. Its one turn attacks the drafted stack decision (D1), so it is sent that draft on purpose.
 
 ## Select by Circumstance, Not Loyalty
 

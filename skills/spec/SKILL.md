@@ -64,7 +64,9 @@ For deep specs, parse the `--review` flag. If not specified, auto-select:
 
 ### Conductor flags
 
-`/conduct` invokes this skill with two more flags. Neither changes what the pipeline produces; they say where it writes and whether the operator has already answered the review gate.
+`/conduct` invokes this skill with two more flags, and with a third on a greenfield repo. The first two don't change what the pipeline produces; they say where it writes and whether the operator has already answered the review gate. The third adds one step before D1.
+
+- **`--greenfield`**: `/conduct`'s intake found a greenfield repo, meaning no CI workflow can gate a PR, or HEAD has at most 3 commits (quest 977d3efb). D1 is then the stack decision, and it isn't ruled until the stack attack has run (§ Stage 2 *Greenfield: attack D1 before ruling it*; lite: § Write spec.md). You can also pass the flag by hand for any spec that picks the stack of a new codebase.
 
 - **`--workshop <abs>`** — an absolute path; quote it in every command that uses it. Phase 1b (deep) and Setup step 2 (lite) create the workshop at that path instead of deriving `{workspace}/data/outputs/workshops/{slug}`, or use it as it is: the directory may already exist, because the conductor creates the run dir inside it first. Existing content is not an error; don't overwrite it. The slug is the path's basename. Wherever this skill says `{workshop_path}` or `{spec-dir}`, it means this path. The invoker starts you in the target repo's root, so Phase 1a takes the project from the current directory and doesn't ask.
 - **`--preapproved "<ref>"`** — the operator's approval, given earlier and recorded, covers this spec's review gate. `<ref>` is quoted because it holds spaces. It is one of the three forms below, and it comes only from the invoker's argument: **never write, guess or reconstruct a ref.**
@@ -184,6 +186,15 @@ Run stages 1-4 sequentially. For each stage:
 - For each decision: list options, state tradeoffs (one line each), **choose one**, document reasoning.
 - Mark decisions where you're uncertain as `[DECISION: D3 — low confidence, alternatives close]`.
 - Use the `parallel-explore` pattern mentally — consider at least 2 approaches before choosing.
+
+#### Greenfield: attack D1 before ruling it (`--greenfield` only)
+- Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/stack-attack.md`. Follow its procedure and use its lens prompt verbatim, filling only the slots.
+- **D1 is the stack decision.** Draft it with its options, the drafted choice and the core loop, marked `[DECISION: D1 — pending stack attack]`. Don't rule it yet. The other decisions can be drafted meanwhile, but none that depends on the stack is ruled before D1.
+- **Run the lens**: one turn from a model of another vendor family, the same `codex exec` invocation as the blind second read. Save it as `stack-attack-<model>-<YYYY-MM-DD>.md`. It reads the draft on purpose, because attacking the draft is its job.
+- **`Verdict: no credible alternative`**: rule D1 as drafted, and answer the attack's strongest point in D1's reasoning.
+- **`Verdict: credible alternative`**: run 2–3 throwaway spikes of the core loop through `parallel-explore` § Spike mode. The branches are the drafted stack plus each alternative the lens named. Rule D1 from the spike synthesis's measured numbers. Spike code never enters the workshop.
+- **D1 ends with** `Stack attack: <verdict> (<file>)`, plus `Spikes: <synthesis path>; worst case <branches × timeout>, took <wall-clock>` when spikes ran. Phase 9's summary repeats that line. With a verified `--preapproved`, neither step waits for a person. The build's budget gate does not meter the spikes at dispatch; only the spend adapter's first reading counts them, afterwards (`parallel-explore` § Spike mode, *Cost check*).
+- The lens file and the spike synthesis are supporting material, outside the council's required layout. Pass them to Phase 8 as `artifact_paths` so the council sees why D1 holds.
 
 #### Stage 3: Verification
 - Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/verification-criteria.md`
@@ -447,6 +458,7 @@ Present the completed spec summary:
 **Estimated execution:** {autonomous WPs} autonomous, {review WPs} need review
 **Dependency order:** {summary}
 **Assumptions:** {every `[ASSUMPTION: …]` flag, one line each; required with `--preapproved`, where no gate shows them to a person}
+**Stack attack:** {with `--greenfield` only: D1's `Stack attack:` line, and `Spikes:` when they ran}
 **Review:** {review_level} — {N} fresh-eyes waves, {N} council lenses, {N} amendments applied
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 **Cost:** {total $ and tokens, from cost-report}
@@ -498,6 +510,8 @@ Run a quick self-review: ambiguity scan, grounding check, constraint coverage. F
 
 **A goal with a UI:** add the `## Design direction` section (deep Stage 4) and a `**Visual rules:** <rule numbers | all>` line, so `/conduct` reads the change's frames against those rules at the merge gate.
 
+**Greenfield (`--greenfield`)?** D1 is the stack decision. Draft it as `[DECISION: D1 — pending stack attack]` and run the stack attack before you rule it, exactly as deep Stage 2 does (*Greenfield: attack D1 before ruling it*): the lens first, and spikes only on `Verdict: credible alternative`. D1 ends with the `Stack attack:` line.
+
 **One-way door?** When a decision in the lite spec is a one-way door, write `## Problem` and `## Constraints` first and dispatch the blind second read (deep Stage 1, `blind-second-read` pattern) on those two sections plus the files you read. Then write `## Decisions` and reconcile the two before the self-review.
 
 ### Council Review (opt-in — `--review=full`)
@@ -539,6 +553,7 @@ node "${CLAUDE_SKILL_DIR}/scripts/spec-cost.mjs" report --state "{workshop}/cost
 **Depth:** lite — single document
 **Review:** {self-review only | self-review + council: N lenses, N amendments applied}
 **Assumptions:** {every `[ASSUMPTION: …]` flag, one line each; required with `--preapproved`, where no gate shows them to a person}
+**Stack attack:** {with `--greenfield` only: D1's `Stack attack:` line, and `Spikes:` when they ran}
 **Cost:** {total $ and tokens, from cost-report}
 
 Ready for execution.
