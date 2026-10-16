@@ -7,7 +7,7 @@ description: "Take a goal end to end: spec, parallel lanes, review, merge, analy
 
 `/conduct "<goal>" --repo <abs path to a git checkout>` runs a goal from intent to a merged, analyzed result: it specs the goal, splits it into work packages (WPs), builds each in its own lane, reviews and merges each PR, runs the release recipe if the repo declares one, and writes a run analysis. The operator is asked twice: **touch 1** before `/spec` runs (what authority the run has) and **touch 2** at the showcase (accept, accept with notes, or send back). A third touch, the blocked stop, opens only when a fork can't be settled from evidence.
 
-You drive a one-shot state machine, `${CLAUDE_SKILL_DIR}/scripts/conduct.mjs`. Each verb reads `state.json`, does one bounded thing, writes state and exits. The conductor is you, repeating **intake → next → perform → record**; the run's state is the files under its run dir, not your context, so a rotated conductor resumes with `--resume <run dir>`.
+You drive a one-shot state machine, `${CLAUDE_SKILL_DIR}/scripts/conduct.mjs`. Each verb reads `state.json`, does one bounded thing, writes state and exits. The conductor is you, repeating **intake → next → perform → record**; the run's state is the files under its run dir, not your context, so a rotated conductor resumes from it (§ Rotating the conductor).
 
 ```
 /conduct "<goal>" --repo <abs path>
@@ -145,6 +145,24 @@ Every target puts the WP back in a live state, so the scheduler's rules still ho
 - A private repo's report names `${CLAUDE_PLUGIN_ROOT}/reference/templates/repo/public-flip-checklist.md`. That list covers branch protection, secret scanning, push protection, Dependabot alerts and private vulnerability reporting, which a private free-plan repo cannot turn on, as commands to run on the day it goes public.
 
 The build does not run this check yet. Wiring it into the WP-01 gate waits on a ruling (quest 977d3efb).
+
+## Rotating the conductor
+
+When your context runs high (the session-chain skill's rotation policy), hand the run to a fresh conductor with the verb. Never write the handoff by hand.
+
+```
+conduct.mjs rotate --run <dir> --why "<why now>" [--model <id> --effort <level>] [--name <successor>]
+```
+
+Run it right after a `record`, before you perform the action that record printed: the successor performs that action as given. It writes `<run>/handoff-<n>.md` from `state.json` (the phase, the pending action, every WP with its lane, PR and queued step, open touches, the authority and spend) and prints what to do next:
+- **Inside herdr** (`HERDR_ENV=1` and `HERDR_PANE_ID` set; `--model` and `--effort` required) it prints a `session.mjs chain` argv with the handoff and `--log <run>/session-chain.jsonl`. Run it as your last tool call. If it exits nonzero and the successor was briefed (`callerRetirement: exit-refused`), end your turn: the successor takes custody. Otherwise run `next` from your own pane: it cancels the rotation and gives you the pending action back.
+- **Outside herdr** start a fresh session with `Read <handoff> and execute it exactly.` and end your turn.
+
+The successor's first call is `next --custody <n>` (the handoff gives it); custody never starts without it. It exits 5 when rotation `<n>` was cancelled or superseded: that session is not the run's conductor and ends its turn. Otherwise it emits **custody** before anything else, and until custody is taken `record` accepts only custody steps and every other writing verb (`ratify`, `reset-wp`, `ci-checks`, `lane spawn`, `upgrade-root`) exits 5:
+1. Retire the predecessor: `session.mjs retire <its pane> --mode close --expect-session <its session>`; if that exits nonzero, `--mode exit+close`. The session comes from the chain row in `<run>/session-chain.jsonl` for this handoff and pane, so a pane id herdr has reissued to another agent is never retired. If both fail, if no chain row names the session, or if the predecessor ran outside herdr, an `author` step asks for `<run>/custody-<n>.json`: `{ "gone": true, "evidence": "…" }` once you have seen it end, or `{ "cancel": true, "why": "…" }` when you are that predecessor and no successor took over.
+2. With the Spine adapter, a `paused` receipt on the anchor naming the rotation, the handoff and how the predecessor was retired. It is skipped while a touch is filed on the anchor, so the operator's ask stays the latest receipt. A receipt that fails is logged and never blocks custody.
+
+Then the run emits its pending action again, by the same id (a pending hand-back is consumed and read back, as on any resume), and the build polls every live lane from its queue: nothing is re-armed by hand. From the predecessor's pane, once the successor has started custody, `next` and `record` exit 5. A second `rotate` while one is open exits 5, and so does `rotate` at the showcase (the analysis is already written; a fresh session resumes with `next --resume`). Each step is an event on the `rotation` seam, so the run analysis shows the row as owned.
 
 ## Repo config
 

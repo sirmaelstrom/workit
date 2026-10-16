@@ -18,6 +18,7 @@ import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from '
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, filedLength, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
+import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -27,7 +28,7 @@ const PLUGIN_ROOT = resolve(SCRIPTS_DIR, '../../..');
 const USAGE = `usage: conduct.mjs <verb> [flags]
   intake --goal <text> --repo <abs> [--anchor <quest id>] [--budget <usd>] [--lanes 1-4] [--agent claude|codex]
          [--adapter <name>]... [--no-adapter <name>]... [--release <json file>] [--runs-root <dir>]
-  next --run <dir>                 (also: next --resume <dir>, or conduct.mjs --resume <dir>)
+  next --run <dir> [--custody <n>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
   await-answer --run <dir> --touch <n> [--once] [--interval-ms <ms>] [--timeout-ms <ms>]
@@ -37,6 +38,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   reset-wp --run <dir> --wp <id> --to check|checked|prompt|wait|land|delta [--baseline <sha>] --why <text>
   ci-checks --run <dir> --wp <id> --head <sha> --checks <name,name> --why <text>
   upgrade-root --run <dir> --why <text> (invoke from destination root at an author/wait action)
+  rotate --run <dir> --why <text> [--model <id> --effort <level>] [--name <successor>]
   lane <spawn|alive|check|reap> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]
   bootstrap --repo <abs> [--write] [--offline]   (no run: check a repo against the greenfield manifest)`;
@@ -46,7 +48,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks']);
+  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -97,9 +99,17 @@ function openRun(flags, deps) {
   return { runDir, state };
 }
 
-// A state transaction: load, change and save under the run's lock.
-function transact(flags, deps, fn) {
-  return withStateLock(runDirFlag(flags), deps, () => fn(openRun(flags, deps).state));
+// A state transaction: load, change and save under the run's lock. While a
+// rotation is open only custody moves the run: every other writer is refused
+// unless it is one of next, record (custody steps only), answer (the
+// operator's) or rotate (which names the open rotation itself).
+function transact(flags, deps, fn, { duringRotation = false } = {}) {
+  return withStateLock(runDirFlag(flags), deps, () => {
+    const { state } = openRun(flags, deps);
+    const rotation = duringRotation ? null : openRotation(state);
+    if (rotation) throw new ConductError(5, `rotation ${rotation.attempt} is open: custody comes first (next), and nothing else changes the run until it is taken or cancelled`);
+    return fn(state);
+  });
 }
 
 function stamp(state, spec) {
@@ -109,8 +119,20 @@ function stamp(state, spec) {
 }
 
 // The pending action, or the current phase's next one. A handler that changes
-// the phase without an action hands over to the next phase's handler.
-async function emit(state, deps) {
+// the phase without an action hands over to the next phase's handler. An open
+// rotation's custody steps (lib/rotate.mjs) come before either; the pending
+// action stays where it is and is emitted again once custody is taken.
+async function emit(state, deps, { custody = null } = {}) {
+  const rotation = openRotation(state);
+  if (rotation) {
+    const spec = custodyNext(state, rotation, deps, { custody });
+    if (spec && spec !== rotation.action) {
+      rotation.action = stamp(state, spec);
+      appendEvent(state, deps, { actionId: rotation.action.id, step: spec.step, seam: rotation.action.seam, kind: spec.kind, event: 'emitted' });
+    }
+    saveState(state, deps);
+    if (spec) return rotation.action;
+  }
   if (state.pending) {
     if (state.phase === 'build') {
       const build = await loadModule(deps, 'lib/phases/build.mjs', 'phase handler build');
@@ -292,11 +314,16 @@ async function intake(tokens, deps) {
 
 // `next` (and `--resume`) on a pending spine hand-back is the resume: the
 // hand-back is consumed and the touch is read back again.
+// `--custody <n>` is a rotated-in successor's first call: refused when
+// rotation n was cancelled or superseded (lib/rotate.mjs custodyFence).
 async function next(tokens, deps) {
-  return transact(parseFlags(tokens), deps, async (state) => {
+  const flags = parseFlags(tokens);
+  return transact(flags, deps, async (state) => {
+    const custody = flags.custody === undefined ? null : String(flags.custody);
+    if (custody !== null) custodyFence(state, custody);
     if (state.pending?.handBack) resumeHandBack(state, deps);
-    return { out: { ok: true, action: await emit(state, deps) } };
-  });
+    return { out: { ok: true, action: await emit(state, deps, { custody }) } };
+  }, { duringRotation: true });
 }
 
 function readResult(flags, deps) {
@@ -334,7 +361,25 @@ async function record(tokens, deps) {
   return transact(flags, deps, async (state) => {
     const id = stringFlag(flags, 'action');
     // A replay of the last record changes nothing and re-emits the next action.
+    // From the rotated-out conductor's pane it is refused: its re-emit would
+    // cancel the open rotation, and a replay must not change custody.
+    if (id === state.lastRecorded && rotatedOut(state, deps)) throw new ConductError(5, `rotation ${openRotation(state).attempt} is open: a replay changes nothing; cancel it with next from your own pane, or end your turn`);
     if (id === state.lastRecorded) return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id), noop: true } };
+    // While a rotation is open only its custody step can be recorded.
+    const rotation = openRotation(state);
+    if (rotation) {
+      const step = rotation.action;
+      if (rotatedOut(state, deps)) throw new ConductError(5, `rotation ${rotation.attempt} is open and you are r${rotation.from}, the conductor that rotated: only its successor records custody`);
+      if (!step || step.id !== id) throw new ConductError(5, `action ${id} is not the pending action: custody of rotation ${rotation.attempt} comes first (${step ? `record ${step.id}` : 'run next'})`);
+      recordCustody(state, rotation, step, readResult(flags, deps), deps);
+      state.lastRecorded = id;
+      appendEvent(state, deps, {
+        actionId: id, step: step.step, seam: step.seam, kind: step.kind, event: 'recorded',
+        source: flags.manual === true ? 'manual' : 'next', phase: step.phase, data: {},
+      });
+      saveState(state, deps);
+      return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id) } };
+    }
     const action = state.pending;
     if (!action || action.id !== id) throw new ConductError(5, `action ${id} is not the pending action (${action?.id ?? 'none pending'})`);
     const result = readResult(flags, deps);
@@ -359,7 +404,7 @@ async function record(tokens, deps) {
     // exit 3, no authority, and the next action re-files the touch.
     if (outcome?.refused) return { code: 3, out: { ok: false, refused: outcome.refused, recorded: id, phase: state.phase, action: next } };
     return { out: { ok: true, phase: state.phase, action: next } };
-  });
+  }, { duringRotation: true });
 }
 
 // An operator's answer to a core touch. stdinIsTTY comes from isatty(0) and
@@ -377,7 +422,7 @@ async function answer(tokens, deps) {
     appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'answered', source: 'tty', data: { n: touch.n, key: touch.answer.key } });
     saveState(state, deps);
     return { out: { ok: true, touch } };
-  });
+  }, { duringRotation: true });
 }
 
 async function status(tokens, deps) {
@@ -386,6 +431,7 @@ async function status(tokens, deps) {
     `conduct ${state.slug}: phase ${state.phase}`,
     `repo: ${state.intent.repo.path} (${state.intent.repo.remote})`,
     `pending: ${state.pending ? `${state.pending.id} (${state.pending.kind}) ${state.pending.instruction ?? ''}` : 'none'}`,
+    ...(openRotation(state) ? [`rotation ${openRotation(state).attempt} open: r${openRotation(state).from} → r${openRotation(state).to}, handoff ${openRotation(state).handoff}; custody comes first`] : []),
     ...state.touches.map((touch) => `touch ${touch.n} ${touch.kind}: ${touch.status}${touch.answer ? ` (${touch.answer.key} by ${touch.answer.by})` : ''}`),
     ...state.wps.map((wp) => `${wp.id} ${wp.state}${wp.questId ? ` quest ${wp.questId}` : ''}`),
   ];
@@ -477,6 +523,7 @@ async function upgradeRootVerb(tokens, deps) {
   const flags = parseFlags(tokens), why = stringFlag(flags, 'why'), runDir = runDirFlag(flags);
   return withStateLock(runDir, deps, () => {
     const state = loadState(runDir, deps);
+    if (openRotation(state)) throw new ConductError(5, 'upgrade-root: a rotation is open; take custody (next) before moving the run');
     if (state.pending && !['author', 'wait'].includes(state.pending.kind)) throw new ConductError(5, `upgrade-root: record pending action ${state.pending.id} first; executable actions cannot be migrated safely (upgrade at an author or wait action)`);
     if (state.pluginRoot === deps.pluginRoot) return { out: { ok: true, unchanged: true, pluginRoot: state.pluginRoot } };
     const from = state.pluginRoot;
@@ -512,6 +559,19 @@ async function upgradeRootVerb(tokens, deps) {
   });
 }
 
+// The conductor hands the run to a successor (lib/rotate.mjs rotate): the
+// handoff is written from state, the chain argv printed, and the successor's
+// first `next` emits custody before the pending action.
+async function rotateVerb(tokens, deps) {
+  const flags = parseFlags(tokens);
+  const text = (name) => (typeof flags[name] === 'string' ? flags[name] : null);
+  return transact(flags, deps, async (state) => {
+    const out = rotate(state, { why: text('why'), model: text('model'), effort: text('effort'), name: text('name') }, deps);
+    saveState(state, deps);
+    return { out: { ok: true, ...out } };
+  }, { duringRotation: true });
+}
+
 // The answer adapter's lookup and wait (lib/answer.mjs): read-only, unlocked.
 async function awaitAnswerVerb(tokens, deps) {
   const module = await loadModule(deps, 'lib/answer.mjs', 'module');
@@ -520,7 +580,7 @@ async function awaitAnswerVerb(tokens, deps) {
 
 const VERBS = {
   intake, next, record, answer, status, analyze, 'await-answer': awaitAnswerVerb, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
-  'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb,
+  'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb, rotate: rotateVerb,
   lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
   bootstrap: async (tokens, deps) => {

@@ -35,6 +35,7 @@ export const USAGE_TEXT = `session <verb> [options] — one Claude-session lifec
   brief  <name|pane> --file <abs> [--wait [--timeout <ms>]]
   watch  <name|pane> [--until idle|done|blocked|gone]... --timeout <ms>
   retire <self|parent|name|pane> --mode exit|close|exit+close [--timeout <ms>] [--dialog-after-ms <ms>] [--capture-final]
+         [--expect-session <id>]  refuse (exit 3) when the target's live owner is another session
   chain  --handoff <abs> --model <id> --effort <lvl> --name <successor> [--no-retire]
          [--successor-timeout <ms>]  one deadline from the split for busy retries, start and readiness (default 90000)
   status [--chain <id>] [--last]
@@ -63,7 +64,7 @@ function parseArgs(argv) {
   const values = new Set([
     '--name', '--model', '--effort', '--cwd', '--from', '--direction', '--mode', '--from-session',
     '--permission-mode', '--timeout', '--file', '--log', '--workspace-root', '--handoff', '--chain',
-    '--successor-timeout', '--dialog-after-ms',
+    '--successor-timeout', '--dialog-after-ms', '--expect-session',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -584,8 +585,24 @@ async function retire(opts, deps, state) {
   if (!['exit', 'close', 'exit+close'].includes(opts.mode)) usage('--mode must be exit, close, or exit+close');
   const self = opts.positional[0] === 'self';
   if (self || opts.positional[0] === 'parent') opts.currentPane = inHerdr(deps);
+  if (self && opts.expectSession) usage('retire self takes no --expect-session');
   const target = await resolveTarget(opts, state, opts.positional[0], deps);
   if (self && opts.mode !== 'exit') usage('retire self only supports --mode exit');
+  // herdr reissues pane ids and reuses names: a target whose live owner is
+  // another session (or one whose session cannot be read) is not the agent
+  // this retire was for. A pane target's session came from herdr already; a
+  // named or sidecar target's session is asked of herdr here, never taken
+  // from the sidecar record.
+  if (opts.expectSession && !target.goneAgent) {
+    let live = target.sessionId;
+    if (target.resolvedFrom !== 'herdr') {
+      const fetched = call(deps, ['agent', 'get', target.target]);
+      live = fetched.code === 0 ? sessionId(fetched.stdout) : null;
+    }
+    if (live !== opts.expectSession) {
+      throw new SessionError(EXIT.blocked, `${target.target} (pane ${target.pane}) is owned by session ${live ?? '(unreadable)'}, not ${opts.expectSession}: not retired`, { reason: 'session-mismatch', ownerSession: live ?? null });
+    }
+  }
   const timeout = positive(opts.timeout, '--timeout', 60_000);
   const dialogAfter = positive(opts.dialogAfterMs, '--dialog-after-ms', 15_000);
   if (self) return { self, target, timeout };
