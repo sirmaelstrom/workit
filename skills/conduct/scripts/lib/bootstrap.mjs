@@ -224,8 +224,8 @@ export function bootstrapBrief(state, wp, worktree) {
     '## Greenfield bootstrap', '',
     `Intake found a greenfield repo (${state.intent.greenfield.why.join('; ')}), so this WP also brings the repo up to the greenfield manifest. The land gate holds it, as an amendment, until \`bootstrap --offline\` exits 0 on your worktree with every file it reads committed.`, '',
     `The conductor added these manifest paths to this WP's Files, beyond the Files list in the WP spec; for them this section is the scope: ${files}.`, '',
-    `Run \`node ${script} bootstrap --repo ${worktree} --write --offline\`, then finish by hand every item its report still lists under \`failing\` (a marker a file lacks, \`engines.node\`). Commit the files with this WP's work: an uncommitted or untracked manifest file fails the gate.`, '',
-    `Repo settings (\`deleteBranchOnMerge\`, branch protection) are not yours, and the gate checks files only. Run \`node ${script} bootstrap --repo ${worktree}\` once (read-only: it adds the settings check) and put each \`gh repo edit\` fix its report prints under \`## Follow-ups\`.`,
+    `Run \`node "${script}" bootstrap --repo "${worktree}" --write --offline\`, then finish by hand every item its report still lists under \`failing\` (a marker a file lacks, \`engines.node\`). Commit the files with this WP's work: an uncommitted or untracked manifest file fails the gate.`, '',
+    `Repo settings (\`deleteBranchOnMerge\`, branch protection) are not yours, and the gate checks files only. Run \`node "${script}" bootstrap --repo "${worktree}"\` once (read-only: it adds the settings check) and put each \`gh repo edit\` fix its report prints under \`## Follow-ups\`.`,
     '',
   ].join('\n');
 }

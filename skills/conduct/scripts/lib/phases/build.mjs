@@ -26,7 +26,7 @@ import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath }
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
 import { LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
-import { isTopListItem, sectionLines } from '../markdown.mjs';
+import { isTopListItem, markLines, sectionLines } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import { bootstrapBrief } from '../bootstrap.mjs';
 import {
@@ -1563,10 +1563,14 @@ function recordOwn(state, wp, action, result, deps) {
         throw new ConductError(2, `the brief ${action.outPath} does not carry amendment ${action.amendment.n}'s marker line: ${action.marker}`);
       }
       if (action.append) {
-        // Every line of the append, not only its heading (council review 1); CRLF and edge whitespace forgiven.
-        const lines = new Set((readText(deps, action.outPath) ?? '').split(/\r?\n/).map((line) => line.trim()));
-        const absent = action.append.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !lines.has(line));
-        if (absent.length) throw new ConductError(2, `the brief ${action.outPath} does not carry the appended section verbatim (${absent.length} line(s) missing, first: ${absent[0].slice(0, 80)}): append the action's append text verbatim`);
+        // The whole append, as one block of the brief's own text: every
+        // non-blank line in order (council review 1), none inside a code
+        // fence (review #248: a quoted copy is not an instruction). CRLF,
+        // blank lines and edge whitespace are forgiven.
+        const want = action.append.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        const have = markLines(readText(deps, action.outPath) ?? '').filter((line) => line.text.trim());
+        const carried = have.some((_, i) => want.every((line, j) => have[i + j] && !have[i + j].fenced && have[i + j].text.trim() === line));
+        if (!carried) throw new ConductError(2, `the brief ${action.outPath} does not carry the appended section (${want[0]}) verbatim, in order and outside any code fence: append the action's append text verbatim`);
       }
       {
         const roots = [wp.lane.worktree];

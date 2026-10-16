@@ -237,11 +237,13 @@ test('bootstrapWp and bindBootstrap: WP-01 of a deep spec, else WP-00; Files and
   assert.ok(wp.creates.includes('.github/workflows/ci.yml') && !wp.creates.includes('README.md'));
   assert.deepEqual(state.wps[1].files, ['src/b.ts'], 'no other WP is touched');
   assert.ok(wp.bootstrap.failing.includes('ci'));
-  const brief = bootstrapBrief(state, wp, '/wt');
+  // Review #248: both paths are quoted, so a path with a space survives the shell.
+  const brief = bootstrapBrief(state, wp, '/my wt');
+  const script = join(PLUGIN_ROOT, 'skills', 'conduct', 'scripts', 'conduct.mjs');
   assert.match(brief, /^## Greenfield bootstrap$/m);
-  assert.ok(brief.includes(`node ${join(PLUGIN_ROOT, 'skills', 'conduct', 'scripts', 'conduct.mjs')} bootstrap --repo /wt --write --offline`));
+  assert.ok(brief.includes(`node "${script}" bootstrap --repo "/my wt" --write --offline`), brief);
   assert.ok(brief.includes('`.github/workflows/ci.yml`'));
-  assert.ok(brief.includes(`node ${join(PLUGIN_ROOT, 'skills', 'conduct', 'scripts', 'conduct.mjs')} bootstrap --repo /wt\` once (read-only`), 'the settings fix comes from a read-only online run the brief names');
+  assert.ok(brief.includes(`node "${script}" bootstrap --repo "/my wt"\` once (read-only`), 'the settings fix comes from a read-only online run the brief names');
   // Off: nothing changes.
   const off = { ...state, intent: { ...state.intent, greenfield: { on: false, why: [] } }, wps: [{ id: 'WP-01', files: [] }] };
   assert.equal(bindBootstrap(off, deps()), null);

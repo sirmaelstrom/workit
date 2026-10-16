@@ -603,7 +603,12 @@ test('the greenfield bootstrap WP\'s brief appends the bootstrap section; a brie
   await perform(h, action);
   const run = action.append.split('\n').find((line) => line.startsWith('Run `node'));
   writeFileSync(action.outPath, readFileSync(action.outPath, 'utf8').replace(run, ''));
-  assert.throws(() => build.record(h.state, action, {}, h.deps), /1 line\(s\) missing, first: Run `node/);
+  assert.throws(() => build.record(h.state, action, {}, h.deps), /does not carry the appended section/);
+  // Review #248: the section quoted inside a code fence is not the brief's own instruction.
+  await perform(h, action);
+  const plainBrief = readFileSync(action.outPath, 'utf8').replace(action.append, '');
+  writeFileSync(action.outPath, `${plainBrief}\n## Artifacts\n\n\`\`\`markdown\n${action.append}\n\`\`\`\n`);
+  assert.throws(() => build.record(h.state, action, {}, h.deps), /outside any code fence/);
   // CRLF line endings are forgiven.
   await perform(h, action);
   writeFileSync(action.outPath, readFileSync(action.outPath, 'utf8').replace(/\n/g, '\r\n'));
