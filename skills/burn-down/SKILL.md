@@ -301,6 +301,16 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    instrument clause resident and unconsumed in all 14 sessions. Lanes get both
    clauses from `reference/templates/lane-contract.template.md` rule 7.
 
+8. **Re-plan inside the pre-approval.** When mid-flight information shows the
+   queue's plan is wrong, or another course is clearly better, you may re-plan
+   without asking only when every changed item stays inside the approved scope
+   and is a two-way door. Receipt the delta on the run anchor: what changed,
+   why, and which pre-approval receipt it rests on. Anything wider, such as a
+   one-way door, new scope, or a dropped item the operator asked for, halts with
+   a `needs_input` whose `ask.options` carry the delta-plan. `/conduct` does
+   this with its `replan` verb (`skills/conduct/SKILL.md` § Re-planning
+   mid-flight). Quest e830d835.
+
 ## Stopping
 
 **At a PR boundary:** no handoff. The board plus the run doc plus the

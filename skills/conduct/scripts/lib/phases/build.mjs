@@ -14,7 +14,8 @@
 // state.build { contract, halts, spendOkFor }; authority.budgetSource; wps[]
 // stage, amendment, checkAmends, gateAmends, owed, asks, replyIds, rulingSeq,
 // deferredBy, changedPaths, gateCmd, noCi, cleanup, lane.uncertain,
-// lane.livenessHeld; halts[] kinds budget | meter | merged, a meter's dueAt;
+// lane.livenessHeld; halts[] kinds budget | meter | merged | replan, a meter's dueAt;
+// state.replans[] (n, why, delta, rests, file, mode, touch, receipt, answer);
 // touches[] build (why the build opened it), applied, announced, waitLeftMs,
 // waitDueAt, guard, spendUsd; a queued wait's remainingMs and dueAt; an
 // emitted action's wpId and, on a yielding wait, `yield: true`; a spend
@@ -34,6 +35,7 @@ import {
   priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor, visualReadProblem,
 } from '../land.mjs';
 import { READ_BACK_WAIT_MS, answerCommand, conductScript, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles } from '../touch.mjs';
+import { preapprovedRef } from './spec.mjs';
 
 // The lane-contract template's run-level slot prefixes (D17). `<repo A` also
 // matches `<repo A worktrees: …>`; a `<repo B` line is deleted in a
@@ -704,6 +706,113 @@ function haltTouch(state, deps, reason, why, spendUsd = null) {
   syncHalt(state, deps);
 }
 
+// ---- re-plan inside the pre-approval (quest e830d835) ----
+
+// `conduct.mjs replan --run <dir> --plan <file>`. When mid-flight information
+// invalidates the run's plan, the conductor states the delta: why, and each
+// change with its door and whether it stays inside the approved scope. Every
+// change two-way and in scope: the delta proceeds on the run's pre-approval,
+// recorded (state.replans, a `replanned` event, rulings/replan-<n>.json, and
+// with the Spine adapter a receipt on the anchor). Anything wider halts
+// dispatch on a touch whose options carry the delta-plan. The verb records the
+// decision; the conductor makes the changes with the verbs that make them
+// (ratify, reset-wp, a ruling's amendment).
+const REPLAN_DOORS = ['two-way', 'one-way'];
+export function replan(state, plan, deps) {
+  if (state.phase !== 'build') throw new ConductError(5, `replan: the run is in phase ${state.phase}; a re-plan is made mid-build`);
+  const why = typeof plan?.why === 'string' ? plan.why.trim() : '';
+  if (!why) throw new ConductError(2, 'replan: the plan needs "why", the information that invalidated the plan');
+  const delta = Array.isArray(plan.delta) ? plan.delta : [];
+  if (!delta.length) throw new ConductError(2, 'replan: the plan needs a non-empty "delta"');
+  delta.forEach((item, i) => {
+    if (typeof item?.change !== 'string' || !item.change.trim()) throw new ConductError(2, `replan: delta[${i}].change must say what changes`);
+    if (!REPLAN_DOORS.includes(item.door)) throw new ConductError(2, `replan: delta[${i}].door must be two-way or one-way (in doubt, one-way)`);
+    if (typeof item.inScope !== 'boolean') throw new ConductError(2, `replan: delta[${i}].inScope must be true or false: is the change inside the approved scope?`);
+  });
+  state.replans ??= [];
+  if (state.replans.some((row) => row.mode === 'asked')) throw new ConductError(5, 'replan: a re-plan already waits on the operator; answer it first');
+  const n = state.replans.length + 1;
+  const items = delta.map((item) => ({ change: item.change.trim(), door: item.door, inScope: item.inScope }));
+  const wider = items.filter((item) => item.door !== 'two-way' || !item.inScope);
+  const file = join('rulings', `replan-${n}.json`);
+  let rests;
+  try {
+    rests = preapprovedRef(state);
+  } catch {
+    rests = `the authority in ${join(state.runDir, 'state.json')} (no approving touch recorded)`;
+  }
+  const row = { n, why, delta: items, rests, file, at: deps.timestamp(), mode: wider.length ? 'asked' : 'autonomous' };
+  deps.mkdir(join(state.runDir, 'rulings'));
+  deps.write(join(state.runDir, file), `${JSON.stringify(row, null, 2)}\n`);
+  if (!wider.length) {
+    // Receipted on the anchor by the build's next action (spine), else the event and the analysis carry it.
+    row.receipt = spineOn(state) && state.intent?.anchor ? 'owed' : null;
+    state.replans.push(row);
+    appendEvent(state, deps, { step: 'replan', event: 'replanned', source: 'verb', data: { n, mode: 'autonomous', changes: items.length, rests: row.rests } });
+    return { n, mode: 'autonomous', rests: row.rests, file: join(state.runDir, file) };
+  }
+  const list = items.map((item, i) => `${i + 1}. ${item.change} (${item.door}${item.inScope ? '' : ', outside the approved scope'})`).join(' ');
+  const reasons = wider.map((item) => (item.inScope ? `"${item.change.slice(0, 60)}" is a one-way door` : `"${item.change.slice(0, 60)}" is outside the approved scope`)).join('; ');
+  const touch = buildTouch(state, deps, 'replan', {
+    question: `DO: rule on conduct ${state.slug}'s re-plan. New information: ${why}. The delta-plan: ${list} It needs you because ${reasons}; the pre-approval (${row.rests}) covers only two-way changes inside its scope. EXPECT: (a) the conductor makes these changes; (b) the run keeps its original plan; (c) the changes as your text amends them. Dispatch resumes on any answer.`.slice(0, 2000),
+    options: [
+      option('a', 'Apply the delta-plan', `The conductor makes the ${items.length} change(s) listed; dispatch resumes.`),
+      option('b', 'Keep the original plan', 'Nothing changes; dispatch resumes on the plan you approved.'),
+      option('c', 'Apply it with my changes', 'Type the changes; the conductor applies the plan as your text amends it.'),
+    ],
+    allowFreeText: true,
+  });
+  row.touch = touch.n;
+  state.replans.push(row);
+  (state.build.halts ??= []).push({ kind: 'replan', reason: `re-plan ${n} waits on the operator (touch ${touch.n})`, touch: touch.n });
+  syncHalt(state, deps);
+  appendEvent(state, deps, { step: 'replan', event: 'replan-asked', source: 'verb', data: { n, touch: touch.n, changes: items.length, wider: wider.length } });
+  return { n, mode: 'asked', touch: touch.n, file: join(state.runDir, file) };
+}
+
+// The anchor receipt an autonomous re-plan owes. A touch filed on the anchor
+// waits on the operator, and a later receipt would supersede its needs_input,
+// so the receipt is skipped then (as rotate's custody receipt is).
+function replanReceipt(state, deps) {
+  const row = (state.replans ?? []).find((entry) => entry.receipt === 'owed');
+  if (!row) return null;
+  const filed = (state.touches ?? []).filter((touch) => touch.status === 'filed');
+  if (filed.length) {
+    row.receipt = 'skipped';
+    appendEvent(state, deps, { step: 'replan', event: 'replan-receipt-skipped', data: { n: row.n, filed: filed.map((touch) => touch.tag) } });
+    return replanReceipt(state, deps);
+  }
+  return {
+    kind: 'agent-tool', step: 'replan', part: 'receipt', replan: row.n, tool: 'spine_receipt', expects: { type: 'json' },
+    instruction: 'Call spine_receipt with these args and record its raw result.',
+    args: {
+      questId: state.intent.anchor, outcome: 'completed',
+      did: `conduct ${state.slug} (run ${state.runId}) re-planned inside its pre-approval (re-plan ${row.n}). Why: ${row.why.slice(0, 800)} What changed: ${row.delta.map((item, i) => `${i + 1}. ${item.change}`).join(' ').slice(0, 2000)} Every change is a two-way door inside the approved scope; it rests on ${row.rests}.`.slice(0, 4000),
+      stoppedAt: `re-plan ${row.n} recorded at ${row.file}; the run continues on the changed plan`,
+    },
+  };
+}
+
+// A failed receipt is recorded and never stops the build.
+function recordReplanReceipt(state, action, result, deps) {
+  const row = (state.replans ?? []).find((entry) => entry.n === action.replan);
+  if (!row) return;
+  const failed = spineAckFailure(action, result);
+  row.receipt = failed ? 'failed' : 'filed';
+  row.receiptId = failed ? null : result?.id ?? null;
+  appendEvent(state, deps, { step: 'replan', event: failed ? 'replan-receipt-failed' : 'replan-receipted', data: { n: row.n, ...(failed ? { error: failed } : { receipt: row.receiptId }) } });
+}
+
+// The operator's ruling on a wider re-plan: (a) or (c) apply it (c as their
+// text amends it), (b) keeps the original plan. Either way its halt clears.
+function answerReplan(state, touch, deps) {
+  const row = (state.replans ?? []).find((entry) => entry.touch === touch.n);
+  const { key, text, by, answeredAt } = touch.answer;
+  if (row) Object.assign(row, { mode: key === 'b' ? 'declined' : 'operator', answer: { key, text: text ?? null, by, answeredAt } });
+  state.build.halts = (state.build.halts ?? []).filter((entry) => entry.touch !== touch.n);
+  syncHalt(state, deps);
+}
+
 // An unreadable or unset meter is its own halt reason: only a successful
 // spend read clears it, re-tried every READ_BACK_WAIT_MS (no budget answer does).
 function meterHalt(state, deps, reason) {
@@ -742,6 +851,7 @@ function refuse(state, touch, why, deps) {
 // A run touch's (a) clears its own halt: for the budget only with "budget
 // <USD>" above the spend at the halt, which becomes authority.budgetUsd.
 function answerRunTouch(state, touch, deps) {
+  if (touch.build === 'replan') return answerReplan(state, touch, deps);
   const { key, text } = touch.answer;
   const halt = (state.build.halts ?? []).find((entry) => entry.touch === touch.n);
   if (key === 'b') {
@@ -1201,6 +1311,8 @@ function dispatch(state, wp, deps) {
 }
 
 function workAction(state, deps) {
+  const receipt = spineOn(state) ? replanReceipt(state, deps) : null;
+  if (receipt) return receipt;
   for (const wp of byDispatch(state)) {
     fill(state, wp, deps);
     if (!wp.queue.length || wp.queue[0].kind === 'wait' || wp.lane?.livenessHeld) continue;
@@ -1401,7 +1513,9 @@ function settled(state, deps) {
   const busy = state.wps.some((wp) => LIVE_STATES.includes(wp.state) || laneOccupied(wp) || wp.queue?.length
     || (wp.state === 'pending' && wp.notBefore && Date.parse(wp.notBefore) > now));
   const metering = (state.build.halts ?? []).some((entry) => entry.kind === 'meter') && !budgetEnded(state);
-  return !busy && !metering && !openBuildTouches(state).some((touch) => touch.wpId) && !dispatchable(state, { now }).length;
+  // A re-plan's touch halts the run until it is answered: the build waits on it.
+  const replanning = openBuildTouches(state).some((touch) => touch.wpId || touch.build === 'replan');
+  return !busy && !metering && !replanning && !dispatchable(state, { now }).length;
 }
 
 export function next(state, deps) {
@@ -1814,6 +1928,7 @@ export function record(state, action, result = {}, deps) {
   if (action.yield) return recordYield(state, action);
   if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result);
   if (action.step === 'spend') return recordSpend(state, action, result, deps);
+  if (action.step === 'replan') return recordReplanReceipt(state, action, result, deps);
   const wp = state.wps.find((candidate) => candidate.id === action.wpId);
   if (!wp) throw new ConductError(2, `action ${action.id} names no WP of this run (${action.wpId})`);
   // A malformed visual read is refused (exit 2, nothing written): fix the record and record again.

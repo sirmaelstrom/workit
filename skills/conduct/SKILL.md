@@ -145,6 +145,20 @@ Under the run's lock the verb copies `state.json` to `state.before-reset-<wp>-<t
 
 Every target puts the WP back in a live state, so the scheduler's rules still hold: a WP whose Files overlap a live WP's, or any reset while every lane of the run's cap is in use, is refused until a lane finishes, and so is any reset while a merged-tree halt is open. It also refuses (exit 5) any other state or target, a WP with an open touch (answer it instead), an unverified lane (answer its liveness touch), a WP whose action is pending (record it first), and a run past its release or showcase. Exit 2 is an unknown WP or target, a missing `--why`, or a run another verb holds locked. A refusal writes nothing, no snapshot included.
 
+## Re-planning mid-flight
+
+When information that arrives mid-build shows the plan is wrong, or that another course is clearly better (a WP's premise refuted by a merged one, a cheaper route a lane found), restate the plan as a delta and record it before acting on it (quest e830d835):
+
+```
+conduct.mjs replan --run <dir> --plan <file>
+# file: { "why": "<the new information>",
+#         "delta": [ { "change": "<what changes>", "door": "two-way" | "one-way", "inScope": true | false } ] }
+```
+
+- **Every change two-way and inside the approved scope:** the re-plan rests on the run's pre-approval and needs no operator. The verb writes `rulings/replan-<n>.json`; with the Spine adapter, the build's next action is a `completed` receipt on the anchor naming what changed, why, and the pre-approval it rests on. That receipt is skipped while a touch is filed on the anchor. Then make the changes with the verbs that make them (`ratify`, `reset-wp`, a ruling's amendment).
+- **Anything wider** (a one-way door, or a change outside the scope): dispatch halts on a touch whose options carry the delta-plan. (a) applies it, (b) keeps the original plan, (c) applies it as the operator's text amends it. Live lanes finish, and the build waits on the answer rather than ending. Any answer clears the halt.
+- Door and scope are your judgment, read the same way as a PR's `## Merge danger`. In doubt, it is `one-way`. One re-plan waits on the operator at a time. The run analysis lists every re-plan under the pre-approval audit.
+
 ## Greenfield bootstrap
 
 `conduct.mjs bootstrap --repo <abs> [--write] [--offline]` checks a repo against the greenfield manifest (`${CLAUDE_PLUGIN_ROOT}/reference/templates/repo/manifest.json`). The manifest's standard is a repo prepared as if it will go public: README, LICENSE, SECURITY.md, `AGENTS.md` with a `CLAUDE.md` `@AGENTS.md` stub, `.editorconfig`, `.gitignore`, a CI workflow that runs on PRs, cancels superseded runs, sets `timeout-minutes` and scans with gitleaks, dependabot, and a PR template carrying `## Merge danger`. A repo with `package.json` adds a Node pin, `engines.node`, a formatter config and npm in dependabot. The one repo setting checked is `deleteBranchOnMerge`.
