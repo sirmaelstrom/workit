@@ -7,12 +7,18 @@
  *
  * Usage:
  *   node launch.mjs --prompts <dir> --workdir <dir> [--model sonnet] [--worktree] [--timeout 600]
+ *   node launch.mjs --prompts <dir> --spike [--spike-root <dir>] [--model sonnet] [--timeout 1800]
  *
  * --prompts    Directory containing branch prompt files (branch-1.md, branch-2.md, ...)
  * --workdir    Working directory for claude processes
  * --model      Model to use: sonnet (default), opus, haiku
  * --worktree   Use git worktrees for isolation (creates temp worktrees per branch)
  * --timeout    Per-branch timeout in seconds (default: 600)
+ * --spike      Spike mode (SKILL.md § Spike mode): each branch runs in its own new,
+ *              empty directory <spike-root>/<run>/<branch>, outside every repo, with
+ *              --permission-mode bypassPermissions so it can write and run throwaway
+ *              code. Not combinable with --worktree.
+ * --spike-root Parent of the spike directories (default: <os tmpdir>/parallel-explore-spikes)
  *
  * Output: writes results to <prompts>/../results/ with one file per branch
  * Exit: 0 if all branches complete, 1 if any fail or timeout
@@ -21,6 +27,7 @@
 import { spawn, execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { removeWorktree } from './worktree-teardown.mjs';
 
 // ---------------------------------------------------------------------------
@@ -41,10 +48,16 @@ const promptsDir = promptsArg ? resolve(promptsArg) : '';
 const workdir = resolve(getArg('workdir', process.cwd()));
 const model = getArg('model', 'sonnet');
 const useWorktree = args.includes('--worktree');
+const spike = args.includes('--spike');
+const spikeRoot = resolve(getArg('spike-root', join(tmpdir(), 'parallel-explore-spikes')));
 const timeoutSec = parseInt(getArg('timeout', '600'), 10);
 
 if (!promptsDir || !existsSync(promptsDir)) {
   console.error('Error: --prompts directory required and must exist');
+  process.exit(1);
+}
+if (spike && useWorktree) {
+  console.error('Error: --spike runs each branch in its own empty directory; it cannot be combined with --worktree');
   process.exit(1);
 }
 
@@ -69,6 +82,7 @@ console.log(`Branches:  ${promptFiles.length}`);
 console.log(`Model:     ${model}`);
 console.log(`Workdir:   ${workdir}`);
 console.log(`Worktree:  ${useWorktree}`);
+if (spike) console.log(`Spikes:    ${join(spikeRoot, basename(dirname(promptsDir)))}`);
 console.log(`Timeout:   ${timeoutSec}s`);
 console.log(`Results:   ${resultsDir}\n`);
 
@@ -88,6 +102,27 @@ function createWorktree(branchName) {
     console.error(`Warning: worktree creation failed for ${branchName}, falling back to workdir`);
     return workdir;
   }
+}
+
+// Spike mode: <spike-root>/<run dir name>/<branch>, created new and empty.
+// A directory left by an earlier launch of the same run is refused, so one
+// spike never reads another's code; a path inside a git work tree is refused,
+// so a spike never writes into a repo.
+function spikeDir(branchName) {
+  const dir = join(spikeRoot, basename(dirname(promptsDir)), branchName);
+  if (existsSync(dir) && readdirSync(dir).length > 0) {
+    console.error(`Error: spike directory ${dir} is not empty; remove it or launch the run under a new name`);
+    process.exit(1);
+  }
+  mkdirSync(dir, { recursive: true });
+  try {
+    execSync('git rev-parse --is-inside-work-tree', { cwd: dir, stdio: 'pipe' });
+    console.error(`Error: spike directory ${dir} is inside a git work tree; pass a --spike-root outside every repo`);
+    process.exit(1);
+  } catch {
+    // not inside a work tree: the expected case
+  }
+  return dir;
 }
 
 // A branch agent may link node_modules or a cache into its worktree;
@@ -113,7 +148,10 @@ function launchBranch(promptFile, index) {
   const prompt = readFileSync(promptPath, 'utf-8');
   const resultPath = join(resultsDir, `${branchName}.md`);
 
-  const branchWorkdir = useWorktree ? createWorktree(branchName) : workdir;
+  const branchWorkdir = spike ? spikeDir(branchName) : useWorktree ? createWorktree(branchName) : workdir;
+  // A spike writes and runs code, so it needs tool permissions; it runs only
+  // in its own new directory outside every repo (spikeDir).
+  const permission = spike ? ['--permission-mode', 'bypassPermissions'] : [];
 
   return new Promise((resolve) => {
     const startTime = Date.now();
@@ -122,7 +160,7 @@ function launchBranch(promptFile, index) {
     // shell:true keeps `claude` resolvable as a Windows .cmd shim, but the
     // untrusted prompt is passed via stdin (never the shell) to avoid injection;
     // only fixed, safe flags are in argv.
-    const child = spawn('claude', ['-p', '--output-format', 'text', '--model', modelArg], {
+    const child = spawn('claude', ['-p', '--output-format', 'text', '--model', modelArg, ...permission], {
       cwd: branchWorkdir,
       shell: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -143,7 +181,7 @@ function launchBranch(promptFile, index) {
       console.log(`[${branchName}] ${status} in ${elapsed}s`);
 
       // Write result regardless of exit code — partial results are still useful
-      const header = `<!-- branch: ${branchName} | model: ${model} | exit: ${code} | time: ${elapsed}s -->\n\n`;
+      const header = `<!-- branch: ${branchName} | model: ${model} | exit: ${code} | time: ${elapsed}s${spike ? ` | spike: ${branchWorkdir}` : ''} -->\n\n`;
       writeFileSync(resultPath, header + (stdout || `[No output. stderr: ${stderr}]`), 'utf-8');
 
       resolve({

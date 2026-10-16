@@ -232,6 +232,17 @@ Produce only a short chat-side summary: the recommendation, the run directory pa
 - `merge-best-parts`: Only when explicitly requested. Name exactly which element comes from which branch and why. A merge that can't trace every element to a source branch is a Frankenstein.
 - `keep-N-for-human-review`: Present top N with tradeoff analysis, no recommendation. User decides.
 
+## Spike mode
+
+One caller runs branches that write code: `/spec`'s stack-attack step (`${CLAUDE_PLUGIN_ROOT}/reference/patterns/stack-attack.md`). It runs only when the stack lens has named a credible alternative to the drafted stack decision. Each branch builds the same core loop in one stack and measures it, so the comparison rests on numbers rather than designs. This is the one exception to "no code is written". It covers spikes of a stack decision only. Anything else that needs running code goes to `prototype`.
+
+- **Branches:** 2 or 3. One is the drafted stack and the rest are the lens's alternatives. The axis is the stack, and nothing else varies.
+- **Hold constant:** the core loop, the input size, the machine, and the measurement command. Each branch brief states all four verbatim.
+- **Required Output** replaces the design schema with: `## Stack` (versions), `## What I built` (file list), `## How to run it` (the exact command), `## Measurement` (the settling number the lens named, the command that printed it, and its output, quoted), `## What fought me` (toolchain, library or platform friction, with time lost), and `## Verdict for this stack` (one paragraph). A branch that could not build the loop says so under `## Measurement`. A build failure is a result.
+- **Dispatch:** `node "${CLAUDE_SKILL_DIR}/scripts/launch.mjs" --prompts "<run-dir>/prompts" --spike --timeout 3600 --model sonnet`. `--spike` gives each branch a new, empty directory at `<spike-root>/<run>/<branch>` and passes `--permission-mode bypassPermissions` so the branch can install and run things. The default spike root is the OS temp directory. The launcher refuses a spike directory that is not empty, one inside a git work tree, and `--worktree` alongside `--spike`. Each branch prompt also says: write only inside your current directory, touch no repository, and push nothing.
+- **Cost check:** state it before dispatch as in step 4, at the spike timeout. Under `/conduct` the operator's touch-1 budget covers it, and a run over budget stops at the budget touch as usual.
+- **Synthesis:** `pick-one`, ranked on the measurement first and friction second. The recommendation cites each branch's number. The spike directories stay outside the repo and are deleted when the decision is recorded.
+
 ## Invocation
 
 **Simple:**
@@ -261,7 +272,7 @@ synthesis_mode: pick-one
 - "Everyone has good points" summaries
 - Overbuilding the launcher script (it's plumbing, not architecture)
 - Letting branches mutate shared state
-- Treating exploration as implementation — no code is written, only designs
+- Treating exploration as implementation — no code is written, only designs (the one exception is § Spike mode, for a stack decision's core-loop spikes)
 - Front-loading multiple LLM reasoning passes before any exploration launches
 - Skipping the cost check on Opus runs
 

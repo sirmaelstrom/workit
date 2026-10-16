@@ -16,7 +16,7 @@ import { resolveRecipe, recipeArgv } from './lib/recipe.mjs';
 import { shellArgv, spawnDetached, pidAlive } from './lib/exec.mjs';
 import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, resumeCommand, shellLiteral, filedLength, QUESTION_MAX } from './lib/touch.mjs';
 import { validateGrant } from './lib/phases/preapproval.mjs';
-import { samePath } from './lib/phases/spec.mjs';
+import { samePath, next as specNext } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1448,6 +1448,23 @@ test('C17: a missing --result-file is a structured exit 2 naming the path', asyn
   const result = await f.run(['record', '--run', runDir, '--action', action.id, '--result-file', missing]);
   assert.equal(result.code, 2);
   assert.ok(out(result).error.includes(missing));
+});
+
+// Quest 061b526a: intake's greenfield trigger (intent.greenfield, quest
+// 977d3efb) sends /spec through the stack attack; any other run does not.
+test('the /spec action carries --greenfield exactly when intent.greenfield is on', () => {
+  const state = (greenfield) => ({
+    intent: { goal: GOAL, ...(greenfield === undefined ? {} : { greenfield }) }, workshopDir: join('/', 'ws'), runDir: join('/', 'ws', 'run'),
+    authority: { record: 'touches/1-authority.json' }, adapters: { spine: { on: false } }, touches: [],
+  });
+  const on = specNext(state({ on: true, why: ['no CI workflow can gate a PR'] }));
+  assert.equal(on.skillArgv.at(-1), '--greenfield');
+  assert.equal(on.skillArgv.filter((arg) => arg === '--greenfield').length, 1);
+  assert.match(on.skillArgs, / --greenfield$/);
+  for (const off of [undefined, { on: false, why: [] }]) {
+    const action = specNext(state(off));
+    assert.ok(!action.skillArgv.includes('--greenfield') && !action.skillArgs.includes('--greenfield'));
+  }
 });
 
 test('C18: skillArgv carries a goal with quotes and flag-like text as one argument', async (t) => {
