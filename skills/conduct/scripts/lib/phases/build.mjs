@@ -27,8 +27,8 @@ import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, rec
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import {
-  councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
-  recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
+  PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
+  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
 } from '../land.mjs';
 import { READ_BACK_WAIT_MS, answerCommand, conductScript, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles } from '../touch.mjs';
 
@@ -716,7 +716,7 @@ function answerGuard(state, wp, touch, deps) {
   const row = touch.guard;
   wp.rulings = [...(wp.rulings ?? []), { n: null, file: touch.file, ruled: verdict, escalate: false, touch: touch.n }];
   setState(state, wp, 'review', `operator ruled ${verdict} on comment ${row.comment} (touch ${touch.n})`, deps);
-  wp.queue = [...wp.queue, ...conductorVerdict(state, wp, row, verdict, deps), ...(wp.owed?.queue ?? [])];
+  wp.queue = [...wp.queue, ...conductorVerdict(state, wp, row, verdict, deps, touch.answer.text), ...(wp.owed?.queue ?? [])];
   if (wp.owed) wp.owed.queue = [];
   wp.stage = 'resolve';
 }
@@ -724,11 +724,17 @@ function answerGuard(state, wp, touch, deps) {
 // The conductor's verdict on a guard row: a PR comment gets the conductor
 // reply (then its resolve); a council finding has no PR comment, so the
 // verdict is recorded as an `adjudicated` event and nothing is posted.
-function conductorVerdict(state, wp, row, verdict, deps) {
+function conductorVerdict(state, wp, row, verdict, deps, why = null) {
   if (/^C\d+-\d+$/.test(row.comment)) {
     appendEvent(state, deps, { step: 'adjudicate', event: 'adjudicated', data: { wpId: wp.id, rows: [{ comment: row.comment, verdict, adjudicator: 'conductor' }] } });
-    // The round's PR record, still to be posted, shows the ruling rather than `conductor`.
-    if (wp.pendingRecord) wp.pendingRecord.rows = wp.pendingRecord.rows.map((pending) => (pending.comment === row.comment ? { ...pending, verdict: `${verdict} (conductor)` } : pending));
+    // The round's PR record, still to be posted, shows the ruling rather than
+    // `conductor`, and carries the ruling's reason beside the lane's Evidence:
+    // the next round's reviewers read this row (council review of #242).
+    const ruling = typeof why === 'string' && why.trim() ? ` Ruling: ${why.trim()}` : '';
+    if (wp.pendingRecord) {
+      wp.pendingRecord.rows = wp.pendingRecord.rows.map((pending) => (pending.comment === row.comment
+        ? { ...pending, verdict: `${verdict} (conductor)`, evidence: `${pending.evidence ?? ''}${ruling}`.trim() } : pending));
+    }
     return [];
   }
   wp.replyIds = [...(wp.replyIds ?? []), row.comment];
@@ -963,6 +969,10 @@ function expand(state, wp, deps) {
       if (record) {
         deps.mkdir(dirname(record.path));
         deps.write(record.path, record.body);
+        // The next council round reads this round's rulings (land.mjs t2Actions).
+        const prior = join(dirname(record.path), PRIOR_ADJUDICATION_FILE);
+        deps.write(prior, priorAdjudicationBody(record.body));
+        wp.priorAdjudication = { path: prior, round: (wp.reviews ?? []).at(-1)?.round ?? null };
       }
       return go([...(record ? [record.action] : []), ...(wp.replyIds?.length ? resolveThreadActions(state, wp, wp.replyIds) : [])], 'delta');
     }
@@ -1468,7 +1478,7 @@ function recordRuling(state, wp, action, deps) {
   appendEvent(state, deps, { step: 'ruling', event: 'ruled', data: { wpId: wp.id, n, file, ruled: value.ruled, ratified } });
   wp.queue.shift();
   if (row) {
-    wp.queue = [...conductorVerdict(state, wp, row, value.ruled, deps), ...wp.queue];
+    wp.queue = [...conductorVerdict(state, wp, row, value.ruled, deps, value.evidence), ...wp.queue];
     return undefined;
   }
   // Every open question is ruled before the lane hears any of them: its next

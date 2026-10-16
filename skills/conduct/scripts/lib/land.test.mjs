@@ -1005,9 +1005,18 @@ test('t2Actions: council off → every available lens but the author\'s; on → 
   const workshop = join(RUN, 'council', 'wp-01');
   assert.deepEqual(on[0].args, {
     workshop_path: `${workshop}${sep}`, output_dir: `${join(workshop, 'review-2')}${sep}`,
-    surface: 'code', code_root: WT, artifact_paths: changed, round: 2, profile: 'code',
+    surface: 'code', code_root: WT, artifact_paths: changed, round: 2, profile: 'conduct-code',
   });
   assert.equal(Object.hasOwn(on[0].args, 'models'), false);
+  // A recorded prior adjudication leads round 2's artifacts; round 1 never carries one.
+  const prior = join(RUN, 'council', 'wp-01', 'review-1', 'adjudication-for-next-round.md');
+  const recorded = { path: prior, round: 1 };
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: recorded }), { round: 2, changedPaths: changed })[0].args.artifact_paths, [prior, ...changed]);
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: recorded }), { round: 1, changedPaths: changed })[0].args.artifact_paths, changed);
+  // Council review of #242: round 1 findings, round 2 zero findings (no resolve,
+  // no new file), round 3 must not get round 1's rulings as "the previous round".
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: recorded }), { round: 3, changedPaths: changed })[0].args.artifact_paths, changed);
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: prior }), { round: 2, changedPaths: changed })[0].args.artifact_paths, changed, 'an unbound path is never sent');
   assert.equal(on[1].head, HEAD);
   assert.deepEqual(on[1].expects, { type: 'json', fields: ['findings', 'seats'] });
 });
@@ -1065,6 +1074,15 @@ test('C1-3/C2-11 a council round is not coverage when a stage failed, a seat fai
   assert.equal(recordLandStep(state, wp, review, { error: 'All models failed', models: {} }, {}).outcome, 'block');
   const [emptyReview] = t2Actions(state, wp, { round: 1 });
   assert.match(recordLandStep(state, wp, emptyReview, usableModels, {}).reason, /no artifact_paths/);
+  // The prior round's adjudication alone is context, not a review (council review of #242).
+  const prior = join(RUN, 'council', 'wp-01', 'review-1', 'adjudication-for-next-round.md');
+  const [contextOnly] = t2Actions(state, makeWp({ reviews: [], tier: 'T2', priorAdjudication: { path: prior, round: 1 } }), { round: 2 });
+  assert.deepEqual(contextOnly.args.artifact_paths, [prior]);
+  assert.match(recordLandStep(state, wp, contextOnly, usableModels, {}).reason, /no artifact_paths/);
+  // An MCP error result names its cause from `content` (the unknown-profile refusal).
+  const refused = recordLandStep(state, wp, review, { isError: true, content: [{ type: 'text', text: 'Unknown profile: "conduct-code". Registered profiles: spec, code' }] }, {});
+  assert.equal(refused.outcome, 'block');
+  assert.match(refused.reason, /Unknown profile: "conduct-code"/);
   const noStage = recordLandStep(state, wp, synth, { findings: 0, seats: ['astra'] }, {});
   assert.deepEqual([noStage.outcome, noStage.patch.reviews], ['block', undefined]);
   const staged = makeWp({ reviews: [], tier: 'T2', councilStage: { round: 1, usable: 1, seats: ['astra'], scope: 'full' } });
