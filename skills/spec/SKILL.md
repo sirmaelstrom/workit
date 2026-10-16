@@ -170,6 +170,13 @@ Run stages 1-4 sequentially. For each stage:
 - Ground every claim in code you actually read in Phase 1.
 - Surface hidden assumptions as `[ASSUMPTION: A1]`, `[ASSUMPTION: A2]`, etc.
 
+#### Blind second read (consequential specs)
+- Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/blind-second-read.md`
+- A deep spec counts as consequential by default. A lite spec counts when one of its decisions is a one-way door. Record the call in one line at the top of `decisions.md`.
+- **Dispatch it now, before Stage 2 is written.** Send `problem-statement.md`, the constraints known so far (the operator's words, applicable CORRECTIONS entries, binding rulings) and the Phase 1 evidence to a model from another vendor family (`codex-delegate`'s carve-out). Do not send any draft decision. It runs while you write Stages 2-4.
+- Writes `blind-read-<model>-<YYYY-MM-DD>.md`, which is conditional and stays out of the council's required layout. It holds the verbatim opening and the reconciliation table. Reconcile before Phase 3. Each disagreement either amends a decision or stays open as a `[DECISION: Dn — low confidence]` flag for the Phase 4 gate. Keep the table out of `decisions.md`, because the ambiguity scan there would flag its comparison wording.
+- This read does not replace the Phase 8 council. The council reviews the finished spec, and the blind read checks the framing before the spec exists.
+
 #### Stage 2: Decisions
 - Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/decision-resolution.md`
 - Output: `decisions.md`
@@ -486,6 +493,8 @@ A single document with four concise sections:
 ```
 
 Run a quick self-review: ambiguity scan, grounding check, constraint coverage. Fix issues.
+
+**One-way door?** When a decision in the lite spec is a one-way door, write `## Problem` and `## Constraints` first and dispatch the blind second read (deep Stage 1, `blind-second-read` pattern) on those two sections plus the files you read. Then write `## Decisions` and reconcile the two before the self-review.
 
 ### Council Review (opt-in — `--review=full`)
 

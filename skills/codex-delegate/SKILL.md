@@ -21,6 +21,8 @@ Pick the execution surface by the **phase** of work, not just its size:
 
 The conductor stays the *orchestrator*: it decides, delegates, and integrates the distilled result. It does not absorb the bulk tokens.
 
+**Carve-out: the blind second read.** A consequential plan gets a second model's opening before that model sees the plan (`${CLAUDE_PLUGIN_ROOT}/reference/patterns/blind-second-read.md`). That read goes to a model from another vendor family through this skill's invocation, at high effort, and it is planning work on purpose. The conductor still owns the plan. The leaf writes an independent opening from the problem, the constraints and the evidence, and the conductor reconciles it with its own plan. Never send it the conductor's draft plan.
+
 ## Select by Circumstance, Not Loyalty
 
 Apply the self-containment gate first, then select the least expensive surface that fits:
@@ -216,7 +218,7 @@ Codex prints a header, the transcript, and a `tokens used` line. The final assis
 
 - Delegating a task that needs mid-session context (fails the self-containment gate) — you'll serialize the context into the prompt and spend the tokens anyway, or get a wrong answer.
 - Accepting an unbounded handback ("here's everything I found, plus the files") — the contract must cap it *before* the run.
-- Delegating planning, orchestration, or judgment — leaf agents execute well-specified work; they do not carry your session's intent.
+- Delegating planning, orchestration, or judgment — leaf agents execute well-specified work; they do not carry your session's intent. (The blind second read above is carved out: it informs the conductor's plan rather than replacing it.)
 - Reaching for a metered runner (Grok, API Luna) because its alias is registered — the roster is two plan-covered tiers, and "it was available" is not a spend rationale.
 - Piping codex's full session log or scratch files back into the conductor "for reference".
 - Using this as a parallelism engine on the $20 tier — it's a cost valve, not a compute farm.
