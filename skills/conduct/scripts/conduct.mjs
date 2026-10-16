@@ -38,9 +38,10 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   ci-checks --run <dir> --wp <id> --head <sha> --checks <name,name> --why <text>
   upgrade-root --run <dir> --why <text> (invoke from destination root at an author/wait action)
   lane <spawn|alive|check|reap> --run <dir> --wp <id> [sub-verb flags]
-  land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]`;
+  land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]
+  bootstrap --repo <abs> [--write] [--offline]   (no run: check a repo against the greenfield manifest)`;
 
-const BOOLEAN_FLAGS = new Set(['manual', 'once']);
+const BOOLEAN_FLAGS = new Set(['manual', 'once', 'write', 'offline']);
 const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
@@ -522,6 +523,11 @@ const VERBS = {
   'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb,
   lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
+  bootstrap: async (tokens, deps) => {
+    const { runBootstrapVerb } = await loadModule(deps, 'lib/bootstrap.mjs', 'module');
+    const { code, report } = runBootstrapVerb(parseFlags(tokens), deps);
+    return { code, out: report };
+  },
 };
 
 // overrides is the in-process test seam; main() passes none.
