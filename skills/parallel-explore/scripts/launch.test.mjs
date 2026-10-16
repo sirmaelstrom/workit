@@ -70,7 +70,8 @@ test('--spike refuses --worktree, a non-empty spike directory, and a spike root 
   const stale = launch('--spike-root', spikeRoot);
   assert.equal(stale.status, 1);
   assert.match(stale.stderr, /is not empty/);
-  assert.equal(existsSync(join(run, 'results', 'branch-1.md')), false, 'every spike directory is checked before any branch launches');
+  assert.equal(existsSync(join(spikeRoot, 'run-x', 'branch-1')), false, 'every spike directory is checked before any is created or launched');
+  assert.equal(existsSync(join(run, 'results', 'branch-1.md')), false);
   const repo = join(root, 'repo');
   mkdirSync(repo);
   spawnSync('git', ['init', '-q', repo]);

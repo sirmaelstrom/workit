@@ -108,26 +108,37 @@ function createWorktree(branchName) {
 // A directory left by an earlier launch of the same run is refused, so one
 // spike never reads another's code; a path inside a git work tree is refused,
 // so a spike never writes into a repo.
-function spikeDir(branchName) {
-  const dir = join(spikeRoot, basename(dirname(promptsDir)), branchName);
+function nearestExisting(path) {
+  let at = path;
+  while (!existsSync(at) && dirname(at) !== at) at = dirname(at);
+  return at;
+}
+
+function refuseSpikeDir(dir) {
   if (existsSync(dir) && readdirSync(dir).length > 0) {
     console.error(`Error: spike directory ${dir} is not empty; remove it or launch the run under a new name`);
     process.exit(1);
   }
-  mkdirSync(dir, { recursive: true });
+  let inside = false;
   try {
-    execSync('git rev-parse --is-inside-work-tree', { cwd: dir, stdio: 'pipe' });
+    execSync('git rev-parse --is-inside-work-tree', { cwd: nearestExisting(dir), stdio: 'pipe' });
+    inside = true;
+  } catch {
+    // not inside a work tree (or no git on PATH: ASSUMPTION, then nothing can be refused here)
+  }
+  if (inside) {
     console.error(`Error: spike directory ${dir} is inside a git work tree; pass a --spike-root outside every repo`);
     process.exit(1);
-  } catch {
-    // not inside a work tree: the expected case
   }
-  return dir;
 }
 
-// Every spike directory is checked before any branch launches, so a refusal
-// never leaves an earlier branch's agent running.
-const spikeDirs = spike ? new Map(promptFiles.map((f) => [basename(f, '.md'), spikeDir(basename(f, '.md'))])) : null;
+// Every spike directory is checked before any is created or any branch
+// launches, so a refusal leaves nothing behind: no directory, no agent.
+const spikeDirs = spike ? new Map(promptFiles.map((f) => [basename(f, '.md'), join(spikeRoot, basename(dirname(promptsDir)), basename(f, '.md'))])) : null;
+if (spike) {
+  for (const dir of spikeDirs.values()) refuseSpikeDir(dir);
+  for (const dir of spikeDirs.values()) mkdirSync(dir, { recursive: true });
+}
 
 // A branch agent may link node_modules or a cache into its worktree;
 // removeWorktree unlinks every link before anything is deleted.
