@@ -5,6 +5,7 @@ import { ConductError } from '../state.mjs';
 import { ADAPTERS, AGENTS, laneModel } from '../adapters.mjs';
 import { QUESTION_MAX, filedLength, openTouch, touchAction, recordTouch } from '../touch.mjs';
 import { chooseBackend } from '../lanes.mjs';
+import { configLine } from '../repo-config.mjs';
 
 const GRANT_KEYS = ['merge', 'release', 'budgetUsd', 'scope'];
 
@@ -75,7 +76,14 @@ function touchOne(state, deps = {}, { bound = false } = {}) {
   // The briefing comes first, as touch 2's does: what the run will do, with
   // what authority, at what cost, and where its lanes can be watched. The
   // probe details the answer rests on follow, under Details.
-  const render = (detail) => [
+  // The workspace config's sha256 is always on touch 1 (the anchor receipt):
+  // it is the run's pin. The legacy and the none lines are notes, dropped when
+  // they would overrun the cap, so a repo without a workspace file is refused
+  // at intake exactly when it was before.
+  const pinned = intent.repoConfig ?? null;
+  const pinLine = pinned?.source === 'workspace' ? configLine(pinned) : null;
+  const legacyLine = pinned && pinned.source !== 'workspace' && !bound ? configLine(pinned) : null;
+  const render = (detail, legacy) => [
     `Proposed: on ${intent.repo.remote}, spec the goal, build it in lanes, review each PR, then ${noCi
       ? `hold every PR open (no CI on ${intent.repo.remote} can gate a PR, so nothing merges)`
       : `merge it at the gate${release ? ' and run the release recipe' : ''}`}. Budget $${intent.budgetUsd}, ${metered ? 'metered' : 'unmetered'}.`,
@@ -88,13 +96,15 @@ function touchOne(state, deps = {}, { bound = false } = {}) {
     `Agents: ${AGENTS.map((name) => `${name} ${describe(state.agents[name])}`).join('; ')}`,
     `Lane agent: ${intent.agent}; models: opus = ${laneModel(intent.agent, 'opus')}, sonnet = ${laneModel(intent.agent, 'sonnet')}`,
     release ? `Release recipe: ${JSON.stringify(intent.release)}` : 'release: none',
+    ...(pinLine ? [pinLine] : legacy ? [legacy] : []),
     noCi
       ? `CI workflows that can gate a PR: ${intent.ciWorkflows ?? 'unreadable, treated as 0'}. No CI workflows exist on ${intent.repo.remote} that can gate a PR, so only hold-at-PR authority is offered: (b), (c) capped at no merge and no release, or (d).`
       : `CI workflows that can gate a PR: ${ci}`,
     budget,
   ].join('\n');
-  const detailed = why ? render(why) : null;
-  const question = detailed && filedLength(state, 1, detailed) <= QUESTION_MAX ? detailed : render(null);
+  const fits = (text) => filedLength(state, 1, text) <= QUESTION_MAX;
+  const candidates = [why && legacyLine ? render(why, legacyLine) : null, why ? render(why, null) : null, legacyLine ? render(null, legacyLine) : null];
+  const question = candidates.find((text) => text && fits(text)) ?? render(null, null);
   const options = [
     { key: 'a', label: 'Approve as proposed', consequence: `Merge each PR at the gate, ${release ? 'run the release recipe' : 'no release (no recipe)'}, budget $${intent.budgetUsd}.` },
     { key: 'b', label: 'Approve, but hold at PR boundaries', consequence: 'The run builds and reviews; every PR stays open for the showcase, and nothing merges or releases.' },

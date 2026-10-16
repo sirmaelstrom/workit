@@ -1975,6 +1975,96 @@ test('repo config gateEnv and gateBackground: the gate command carries the expan
   assert.deepEqual([Object.hasOwn(bare, 'env'), Object.hasOwn(bare, 'background')], [false, false]);
 });
 
+// e2b54cd3: the split. A workspace config pinned at intake replaces the
+// checkout's .workit/conduct.json; laneSuite comes from AGENTS.md.
+function pinWorkspace(h, config) {
+  const path = join(h.dir, 'data', 'config', 'conduct', 'o', 'r.json');
+  h.state.intent.repoConfig = { source: 'workspace', path, workspacePath: path, sha256: 'f'.repeat(64), config };
+  writeFileSync(join(h.runDir, 'state.json'), JSON.stringify(h.state));
+  return path;
+}
+
+test('repo config split (e2b54cd3): the pinned workspace config replaces the checkout file at the gate and the land check; AGENTS.md ## Lane suite fills the contract', async (t) => {
+  const legacy = JSON.stringify({ gateEnv: { X: 'legacy' }, laneSuite: 'legacy suite', contractPaths: [] });
+  const h = harness(t, { config: legacy, gateCommand: 'npm test', wps: [TWO[0], TWO[1]] });
+  const path = pinWorkspace(h, { gateEnv: { X: 'pinned-{run}' }, gateBackground: true });
+  writeFileSync(join(h.repo, 'AGENTS.md'), '# Repo\n\n## Lane suite\n\nRun the full suite\nbefore the PR boundary.\n\n### Notes\n\nnested\n\n## Commit policy\n\nnot this\n');
+  const first = await step(h);
+  const isolation = Object.entries(first.slots).find(([slot]) => slot.startsWith('<Per-repo lane isolation'))[1];
+  assert.equal(isolation, 'Run the full suite before the PR boundary.');
+  assert.match(first.append, /- \*\*Suite ownership \(AGENTS\.md `## Lane suite`\):\*\* Run the full suite before the PR boundary\. This overrides rule 9/);
+  writeFileSync(first.outPath, fillTemplate(first));
+  await recordPending(h, {});
+  assert.equal(h.state.build.laneSuiteFrom, 'AGENTS.md `## Lane suite`');
+  // A lane (or anyone) rewriting the checkout's legacy file mid-run changes nothing.
+  writeFileSync(join(h.repo, '.workit', 'conduct.json'), JSON.stringify({ gateEnv: { X: 'tampered' } }));
+  assert.equal(await drive(h), null);
+  const gate = of(h, 'WP-02').find((a) => a.step === 'gate-cmd');
+  assert.deepEqual(gate.env, { X: 'pinned-demo' });
+  assert.equal(gate.background, true);
+  assert.ok(!h.calls.some((call) => call.includes('show origin/main:.workit/conduct.json')), 'the land check reads the pin, not the base file');
+  await analyzeRun(h.runDir, h.deps);
+  const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
+  assert.ok(analysis.includes(`- repo config: ${path}, sha256 ${'f'.repeat(64)}, pinned at intake; laneSuite from AGENTS.md \`## Lane suite\``), analysis);
+  assert.doesNotMatch(analysis, /Deprecated/);
+});
+
+test('repo config split (e2b54cd3): the pinned contractPaths set the tier; a run with no pin reads the legacy file as before and the analysis calls it deprecated', async (t) => {
+  // The fixture's legacy contractPaths do not name lib/x.mjs: T1 unless the pin does.
+  const pinned = harness(t, { council: true, wps: [TWO[0], TWO[1]] });
+  pinWorkspace(pinned, { contractPaths: ['lib/x.mjs'] });
+  pinned.diff = { 'WP-02': 'lib/x.mjs\n' };
+  await drive(pinned, { until: (a) => a.wpId === 'WP-02' && (a.part === 'meta' || a.part === 'managed') });
+  assert.equal(pinned.wp('WP-02').tier, 'T2');
+
+  const legacy = harness(t, { wps: [TWO[0], TWO[1]] });
+  legacy.state.intent.repoConfig = { source: 'repo', path: join(legacy.repo, '.workit', 'conduct.json'), workspacePath: '/ws/data/config/conduct/o/r.json', sha256: 'a'.repeat(64), config: null };
+  writeFileSync(join(legacy.runDir, 'state.json'), JSON.stringify(legacy.state));
+  assert.equal(await drive(legacy), null);
+  assert.equal(legacy.state.build.laneSuiteFrom, '`.workit/conduct.json` laneSuite');
+  assert.ok(legacy.calls.some((call) => call.includes('show origin/main:.workit/conduct.json')), 'the land check still reads the base file');
+  await analyzeRun(legacy.runDir, legacy.deps);
+  const analysis = readFileSync(join(legacy.runDir, 'run-analysis.md'), 'utf8');
+  assert.match(analysis, /^- repo config: \.workit\/conduct\.json in the product repo; laneSuite from `\.workit\/conduct\.json` laneSuite\. Deprecated location \(it still works\): move its conduct-only keys to \/ws\/data\/config\/conduct\/o\/r\.json and move laneSuite to the repo's AGENTS\.md under "## Lane suite"\.$/m);
+});
+
+test('repo config split (e2b54cd3): a run whose state predates the split keeps the legacy laneSuite even when AGENTS.md has a ## Lane suite', async (t) => {
+  const h = harness(t);
+  assert.equal(h.state.intent.repoConfig, undefined, 'the harness state is a pre-split state');
+  writeFileSync(join(h.repo, 'AGENTS.md'), '## Lane suite\n\nnew rule\n');
+  const first = await step(h);
+  const isolation = Object.entries(first.slots).find(([slot]) => slot.startsWith('<Per-repo lane isolation'))[1];
+  assert.equal(isolation, JSON.parse(fixture('build', 'conduct.json')).laneSuite);
+  assert.match(first.append, /Suite ownership \(`\.workit\/conduct\.json` laneSuite\)/);
+});
+
+test('repo config split (e2b54cd3): record checks the laneSuite the contract action was built from, not a re-read', async (t) => {
+  const h = harness(t, { config: JSON.stringify({ contractPaths: [] }) });
+  pinWorkspace(h, {});
+  writeFileSync(join(h.repo, 'AGENTS.md'), '## Lane suite\n\nemitted rule\n');
+  const first = await step(h);
+  assert.deepEqual(first.laneSuite, { text: 'emitted rule', from: 'AGENTS.md `## Lane suite`' });
+  // The section is removed after emission: the contract still needs its Run deltas, and provenance stays.
+  writeFileSync(join(h.repo, 'AGENTS.md'), '# nothing here\n');
+  writeFileSync(first.outPath, fillTemplate({ ...first, append: undefined }));
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /declares laneSuite \(AGENTS\.md `## Lane suite`\)/ });
+  // A Run deltas heading without the text is refused too (workit#246 review).
+  writeFileSync(first.outPath, fillTemplate({ ...first, append: '\n## Run deltas\n\n- something else\n\n## Emitted rule\n\nemitted rule\n' }));
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /does not carry the laneSuite text from AGENTS\.md/ });
+  // Nor does the text count when it sits only inside a fenced block (workit#246 delta review).
+  // Only the emitted Suite ownership line, as a line of the section itself, counts (workit#246 delta reviews):
+  // not fenced, not quoted, not under a later heading of any level.
+  const line = first.append.split('\n').find((text) => text.startsWith('- **Suite ownership'));
+  for (const bypass of [`\`\`\`\n${line}\n\`\`\``, `> ${line}`, `### Artifacts\n\n${line}`, `# Artifacts\n\n${line}`,
+    `    ${line}`, `Artifacts\n---------\n${line}`, `Artifacts\n=========\n${line}`]) {
+    writeFileSync(first.outPath, fillTemplate({ ...first, append: `\n## Run deltas\n\nArtifact follows:\n\n${bypass}\n` }));
+    await assert.rejects(recordPending(h, {}), { code: 2, message: /does not carry the laneSuite text from AGENTS\.md/ }, bypass);
+  }
+  writeFileSync(first.outPath, fillTemplate(first));
+  await recordPending(h, {});
+  assert.equal(h.state.build.laneSuiteFrom, 'AGENTS.md `## Lane suite`');
+});
+
 test('repo config gateEnv that is not an object of strings blocks the WP at its gate and releases the merge lock', async (t) => {
   const h = harness(t, { config: JSON.stringify({ gateEnv: { OBSERVATORY_TEST_DB: 7 } }), gateCommand: 'npm test', wps: [TWO[0], TWO[1]] });
   await drive(h, { until: (a, hh) => hh.wp('WP-02').state === 'blocked' });

@@ -5,6 +5,7 @@
 import { join } from 'node:path';
 import { STEP_SEAM, TOUCH_SEAM, loadState, readEvents } from './state.mjs';
 import { firstLine } from './adapters.mjs';
+import { analysisLine as repoConfigLine } from './repo-config.mjs';
 
 const VERDICT_TEXT = { exercised: 'exercised', vacuous: 'vacuous', 'not-exercised': 'not exercised', 'no-surface': 'no runtime surface', missing: 'missing' };
 const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
@@ -215,6 +216,7 @@ function preapproval(state) {
   const a = state.authority ?? {};
   const out = [`- authority: merge ${a.merge ? 'yes' : 'no'}, release ${a.release ? 'yes' : 'no'}, budget ${usd(a.budgetUsd ?? 0)}, scope: ${a.scope}`];
   if (a.grant) out.push(`- grant: ${a.grant}; the operator's text, verbatim: ${JSON.stringify(a.notes ?? '')}`);
+  out.push(repoConfigLine(state));
   const merges = mergedPrs(state);
   out.push(`- merges: ${merges.length}`);
   for (const m of merges) {

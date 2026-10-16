@@ -384,6 +384,18 @@ test('trivial is docs only: tests, fixtures and behavior-bearing Markdown are no
   assert.equal(gate(makeState(), olderReview(), { tailFiles: ['docs/contract.md'], config }).ok, false);
 });
 
+test('trivial set from the pinned workspace config (e2b54cd3): the pin decides, the base file is never read', () => {
+  const pin = (config) => makeState({ intent: { ...makeState().intent, repoConfig: { source: 'workspace', path: '/ws/o/r.json', workspacePath: '/ws/o/r.json', sha256: 'f'.repeat(64), config } } });
+  // The base file would make SKILL.md trivial; the pin keeps the default list, so it is not.
+  const baseSaysTrivial = JSON.stringify({ trivialExclude: [] });
+  const strict = gateExec({ tailFiles: ['skills/conduct/SKILL.md'], config: baseSaysTrivial });
+  assert.equal(gateCheck(pin({}), olderReview(), { exec: strict, now: () => NOW }).ok, false);
+  assert.ok(!strict.calls.some((call) => call.program === 'git' && call.args[2] === 'show'), 'the base file is not read');
+  // And the other way: the pin's empty trivialExclude makes it trivial; its contractPaths are never trivial.
+  assert.equal(gate(pin({ trivialExclude: [], contractPaths: ['docs/contract.md'] }), olderReview(), { tailFiles: ['skills/conduct/SKILL.md'] }).ok, true);
+  assert.equal(gate(pin({ trivialExclude: [], contractPaths: ['docs/contract.md'] }), olderReview(), { tailFiles: ['docs/contract.md'], config: baseSaysTrivial }).ok, false);
+});
+
 test('C1-6 a production file renamed to .md is not a docs-only tail: the tail is read with --no-renames', () => {
   const exec = gateExec({ tailFiles: ['lib/x.mjs', 'lib/x.md'], renames: { 'lib/x.mjs': 'lib/x.md' } });
   const out = gateCheck(makeState(), olderReview(), { exec, now: () => NOW });

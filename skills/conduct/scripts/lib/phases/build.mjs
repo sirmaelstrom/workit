@@ -25,6 +25,8 @@ import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
+import { LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
+import { isTopListItem, sectionLines } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
@@ -117,10 +119,27 @@ function setState(state, wp, to, reason, deps) {
   appendEvent(state, deps, { event: 'wp-state', data: { wpId: wp.id, from, to, reason: wp.reason ?? null } });
 }
 
-// The target repo's .workit/conduct.json (absent → {}).
-function repoConfig(state, deps) {
+// The conduct-only keys: the workspace config pinned at intake, else the
+// target repo's legacy .workit/conduct.json read from the checkout as before
+// (absent → {}). lib/repo-config.mjs owns the split.
+function legacyConfig(state, deps) {
   const path = join(state.intent.repo.path, '.workit', 'conduct.json');
   return deps.exists(path) ? readJsonFile(deps, path, 'repo config') : {};
+}
+
+function repoConfig(state, deps) {
+  return pinnedConfig(state) ?? legacyConfig(state, deps);
+}
+
+// The lane-facing laneSuite: the checkout's AGENTS.md `## Lane suite`
+// section, else the legacy file's laneSuite. { text, from } or null. A run
+// whose state predates the split (no intent.repoConfig) reads only the legacy
+// file, as it did when it started.
+function laneSuiteOf(state, deps) {
+  const legacy = () => laneSuiteFrom({ agentsText: null, legacyConfig: legacyConfig(state, deps) });
+  if (!state.intent.repoConfig) return legacy();
+  const agentsText = readText(deps, join(state.intent.repo.path, 'AGENTS.md'));
+  return laneSuiteFrom({ agentsText, legacyConfig: null }) ?? legacy();
 }
 
 // Deep: the orchestrator's `## Gate Commands` line for the WP's wave; none and
@@ -134,7 +153,7 @@ function gateCommands(state, deps) {
 
 const gateCommandFor = (state, wp, deps) => gateCommands(state, deps).get(state.spec?.depth === 'deep' ? wp.wave : null) ?? '';
 
-// The gate command's env, from .workit/conduct.json `gateEnv` (string values).
+// The gate command's env, from the repo config's `gateEnv` (string values).
 // `{run}` and `{wp}` become the run slug and the WP id as lowercase
 // identifiers, so a repo can give the conductor's suite its own test database:
 // the gate runs under the merge lock, so one per run never runs twice at once.
@@ -142,7 +161,7 @@ export function gateEnvFor(state, wp, config) {
   const env = config.gateEnv;
   if (env === undefined) return {};
   if (!env || typeof env !== 'object' || Array.isArray(env) || Object.values(env).some((value) => typeof value !== 'string')) {
-    throw new ConductError(2, '.workit/conduct.json gateEnv must be an object of string values');
+    throw new ConductError(2, `${pinnedConfig(state) ? state.intent.repoConfig.path : '.workit/conduct.json'} gateEnv must be an object of string values`);
   }
   const ident = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.replaceAll('{run}', ident(state.slug)).replaceAll('{wp}', ident(wp.id))]));
@@ -175,16 +194,25 @@ function slotSpans(line) {
   return spans;
 }
 
-function runDeltas(laneSuite) {
-  return ['', '## Run deltas', '',
-    `- **Suite ownership (\`.workit/conduct.json\` laneSuite):** ${laneSuite} This overrides rule 9's "the full suite at the merge candidate is the conductor's, so don't run it" for this run.`, ''].join('\n');
+const suiteLine = (laneSuite, from) => `- **Suite ownership (${from}):** ${laneSuite} This overrides rule 9's "the full suite at the merge candidate is the conductor's, so don't run it" for this run.`;
+
+function runDeltas(laneSuite, from) {
+  return ['', '## Run deltas', '', suiteLine(laneSuite, from), ''].join('\n');
+}
+
+// The block-level list items of the contract's `## Run deltas` section, with
+// sectionText's boundaries (the next ATX or setext heading, or a thematic
+// break): fenced, quoted and indented-code lines are not instructions.
+function runDeltaLines(text) {
+  return sectionLines(text, 'Run deltas').filter(isTopListItem).map((line) => line.text);
 }
 
 function contractAction(state, deps) {
   const template = join(deps.pluginRoot ?? state.pluginRoot, 'reference', 'templates', 'lane-contract.template.md');
   const text = readText(deps, template);
   if (text === null) throw new ConductError(2, `the lane-contract template is unreadable at ${template}`);
-  const laneSuite = repoConfig(state, deps).laneSuite;
+  const suite = laneSuiteOf(state, deps);
+  const laneSuite = suite?.text;
   const { remote, defaultBranch } = state.intent.repo;
   const gates = [...new Set(gateCommands(state, deps).values())].filter(Boolean);
   const value = (prefix, span) => ({
@@ -203,9 +231,11 @@ function contractAction(state, deps) {
     const prefix = RUN_SLOTS.find((candidate) => span.startsWith(candidate));
     if (prefix) slots[span] = value(prefix, span);
   }
-  const append = typeof laneSuite === 'string' && laneSuite.trim() ? runDeltas(laneSuite) : null;
+  const append = typeof laneSuite === 'string' && laneSuite.trim() ? runDeltas(laneSuite, suite.from) : null;
   return {
     kind: 'author', step: 'contract', template, outPath: contractPath(state), slots, ...(append ? { append } : {}), expects: { type: 'file' },
+    // What this action was built from, so record checks the same text.
+    laneSuite: suite ?? null,
     instruction: `Copy ${template} to ${contractPath(state)}, replacing each key of slots (its exact text, brackets included) with its value; a null value deletes the whole line that holds the slot. Leave every other <…> placeholder as it is.${append ? ' Then append the append text verbatim.' : ''} Record {}.`,
   };
 }
@@ -215,11 +245,25 @@ function recordContract(state, action, deps) {
   if (text === null) throw new ConductError(2, `the lane contract ${action.outPath} was not written`);
   const left = RUN_SLOTS.filter((prefix) => text.includes(prefix));
   if (left.length) throw new ConductError(2, `the lane contract still holds run-level slots: ${left.join(', ')}`);
-  const laneSuite = repoConfig(state, deps).laneSuite;
-  if (typeof laneSuite === 'string' && laneSuite.trim() && !/^## Run deltas\b/m.test(text)) {
-    throw new ConductError(2, 'the repo declares laneSuite, and the lane contract has no ## Run deltas section saying it overrides rule 9');
+  // The emitted action's laneSuite; an action stored by an older conduct.mjs has none, so it is read again.
+  const suite = Object.hasOwn(action, 'laneSuite') ? action.laneSuite : laneSuiteOf(state, deps);
+  if (suite && !/^## Run deltas\b/m.test(text)) {
+    throw new ConductError(2, `the repo declares laneSuite (${suite.from}), and the lane contract has no ## Run deltas section saying it overrides rule 9`);
+  }
+  // For an AGENTS.md laneSuite the emitted Suite ownership line itself must be
+  // a line of the Run deltas section: unfenced, unquoted, before any further
+  // heading (workit#246 review). The legacy source keeps its old heading-only
+  // check, unchanged.
+  if (suite && suite.from !== LEGACY_LANE_FROM) {
+    const flat = (value) => String(value).replace(/\s+/g, ' ').trim();
+    const want = flat(suiteLine(suite.text, suite.from));
+    if (!runDeltaLines(text).some((line) => flat(line) === want)) {
+      throw new ConductError(2, `the lane contract's ## Run deltas section does not carry the laneSuite text from ${suite.from}`);
+    }
   }
   state.build.contract = action.outPath;
+  // Where the lane-facing text came from, for the run analysis.
+  state.build.laneSuiteFrom = suite?.from ?? null;
 }
 
 // ---- authored actions ----
