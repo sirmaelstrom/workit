@@ -217,9 +217,13 @@ function countBy(lines, keyOf) {
  * none open. A lexical scan, not a parser: text inside quotes ('…', "…", `…`,
  * backslash escapes honoured) opens nothing, so a glob such as 'scripts/**'
  * is not a comment; a `//` line comment ends the scan; a comment closed on the
- * same line is skipped. A quote still open at the end of the line holds the
- * rest of it. One line at a time: a template literal or string spanning lines
- * is not tracked, so a `/*` on its second line still counts.
+ * same line is skipped. A regex literal (`/'/`, `/[/*]/`) is skipped whole,
+ * so a quote or a `/*` inside it opens nothing; a `/` is read as one where an
+ * operand may start (line start, after an operator or `(`, `,`, `;` …, or after
+ * a keyword such as `return`), and as division elsewhere. A quote still open at
+ * the end of the line holds the rest of it. One line at a time: a template
+ * literal or string spanning lines is not tracked, so a `/*` on its second
+ * line still counts.
  */
 function openCommentAt(text) {
   let open = -1;
@@ -241,9 +245,33 @@ function openCommentAt(text) {
       i++;
     } else if (c === '/' && text[i + 1] === '/') {
       break;
+    } else if (c === '/' && regexMayStart(text.slice(0, i))) {
+      const end = regexEnd(text, i);
+      if (end !== -1) i = end;
     }
   }
   return open;
+}
+
+/** Whether a `/` after `before` starts a regex literal rather than a division. */
+function regexMayStart(before) {
+  const code = before.trimEnd();
+  return code === ''
+    || /[(,=:[!&|?{};+\-*%<>~^]$/.test(code)
+    || /(?<![\w$.])(?:return|typeof|instanceof|case|in|of|delete|void|throw|new|yield|await|else|do)$/.test(code);
+}
+
+/** The index of the `/` closing the regex literal opened at `start`, or -1. */
+function regexEnd(text, start) {
+  let inClass = false;
+  for (let j = start + 1; j < text.length; j++) {
+    const c = text[j];
+    if (c === '\\') j++;
+    else if (c === '[') inClass = true;
+    else if (c === ']') inClass = false;
+    else if (c === '/' && !inClass) return j;
+  }
+  return -1;
 }
 
 /**

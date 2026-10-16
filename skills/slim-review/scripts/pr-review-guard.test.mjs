@@ -369,6 +369,8 @@ for (const [source, text] of [
   ['an escaped quote inside the string', "const s = 'it\\'s in a/**';"],
   ['a // line comment', '// globs such as src/** are matched by name'],
   ['a comment closed on the line', '/* a */ x(); /**/'],
+  ['a regex literal', 'assert.match(text, /a\\/*b/);'],
+  ['a regex character class', 'const sep = /[/*]/;'],
 ]) {
   test(`350bfd99: a /* inside ${source} opens no comment`, () => {
     assert.deepEqual(detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: addedThen(text) }]), []);
@@ -382,6 +384,11 @@ for (const [source, text] of [
   ['after a closed comment', '/* a */ /*'],
   ['as a JSDoc /** at line start', '/**'],
   ['whose comment text holds a quote', "/* don't run"],
+  // 4291712233 / 4291712242: a quote inside a regex literal is not a string.
+  ['after a regex literal holding a quote', "const re = /'/; /*"],
+  ['after a regex literal at line start', "/'/.test(s); /*"],
+  ['after a regex literal following return', 'return /"/.test(s); /*'],
+  ['after a division', 'const half = total / 2; /*'],
 ]) {
   test(`350bfd99: a real opener ${source} is still reported`, () => {
     const [entry] = detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: `@@ -1,1 +1,4 @@\n ctx\n+${text}\n+test('x', () => {});\n+*/` }]);
