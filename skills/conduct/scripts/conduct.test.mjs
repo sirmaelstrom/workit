@@ -1364,6 +1364,42 @@ test('C12: only workflows that can gate a PR count as CI', async (t) => {
   assert.equal(readState(out(await intake(g)).runDir).intent.ciWorkflows, 1);
 });
 
+// Quest 977d3efb, answer (c): intake auto-detects a greenfield repo; mint
+// binds the bootstrap manifest to WP-00 (WP-01 in a deep run).
+const REAL_PLUGIN_ROOT = join(HERE, '..', '..', '..');
+test('greenfield: no CI turns the trigger on, touch 1 says so, and mint binds the manifest to WP-00', async (t) => {
+  const f = fixture(t);
+  f.table[WORKFLOWS] = captured('gh-actions-workflows-dependabot-only.json');
+  const { runDir, spec } = await toCoreSpec(f, [], 'b');
+  const state = readState(runDir);
+  assert.deepEqual(state.intent.greenfield, { on: true, why: ['no CI workflow can gate a PR'], commits: null });
+  assert.match(readFileSync(join(runDir, 'touches', '1.md'), 'utf8'), /Greenfield \(no CI workflow can gate a PR\): WP-01 \(WP-00 in a one-WP run\) also adds/);
+  // Recording the spec emits the next action, so mint runs here (the real plugin root holds the manifest).
+  const real = { pluginRoot: REAL_PLUGIN_ROOT };
+  const minted = await record(f, runDir, spec.id, { depth: 'none', workshopDir: state.workshopDir, gateCommand: 'node --test' }, real);
+  assert.equal(minted.code, 0, minted.stdout);
+  assert.equal((await f.run(['next', '--run', runDir], real)).code, 0);
+  const wp = readState(runDir).wps[0];
+  assert.equal(wp.id, 'WP-00');
+  assert.ok(wp.bootstrap.files.includes('.github/workflows/ci.yml') && wp.files.includes('README.md') && wp.creates.includes('LICENSE'));
+  assert.deepEqual(events(runDir).filter((e) => e.event === 'bootstrap-bound').map((e) => e.data.wp), ['WP-00']);
+});
+
+test('greenfield: a near-empty history turns it on with CI present; an established repo stays off and binds nothing', async (t) => {
+  const f = fixture(t);
+  f.table[`git -C ${f.repo} rev-list --count HEAD`] = { code: 0, stdout: '2\n', stderr: '' };
+  const near = readState(out(await intake(f)).runDir);
+  assert.deepEqual([near.intent.ciWorkflows, near.intent.greenfield], [1, { on: true, why: ['2 commits on HEAD'], commits: 2 }]);
+  const g = fixture(t);
+  g.table[`git -C ${g.repo} rev-list --count HEAD`] = { code: 0, stdout: '412\n', stderr: '' };
+  const { runDir, spec } = await toCoreSpec(g);
+  assert.deepEqual(readState(runDir).intent.greenfield, { on: false, why: [], commits: 412 });
+  assert.doesNotMatch(readFileSync(join(runDir, 'touches', '1.md'), 'utf8'), /Greenfield/);
+  // The fixture's plugin root has no manifest: an off run never reads it.
+  assert.equal((await record(g, runDir, spec.id, { depth: 'none', workshopDir: readState(runDir).workshopDir, gateCommand: 'node --test' })).code, 0);
+  assert.equal(readState(runDir).wps[0].bootstrap, undefined);
+});
+
 test('C14: recording an unanswered core touch keeps it pending, with no new id', async (t) => {
   const f = fixture(t);
   const { runDir, action } = out(await intake(f));

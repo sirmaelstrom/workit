@@ -40,6 +40,7 @@ import { mergeDanger } from '../../../../scripts/lane.mjs';
 import { patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-review/scripts/pr-review-rounds.mjs';
 import { AUTHOR_LENS, reviewPairFor } from '../../../slim-review/scripts/pr-review.mjs';
 import { laneModel } from './adapters.mjs';
+import { gateBootstrap } from './bootstrap.mjs';
 
 const WAIT_MS = 60000;
 const PENDING_BLOCK_MS = 30 * 60000;
@@ -813,6 +814,9 @@ export function gateCheck(state, wp, { exec, now }) {
   const threads = exec('node', [prReview(state), 'threads', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--unresolved']);
   if (threads.code === 8) fail('unresolved review threads', 'threads');
   else if (threads.code !== 0) fail(`threads unreadable (exit ${threads.code}): ${first(threads.stderr)}`, 'infra');
+  // (2a) the greenfield bootstrap WP: the manifest check on its worktree (quest 977d3efb).
+  const boot = gateBootstrap(state, wp, exec);
+  if (boot) fail(boot.failure, boot.cause);
   const config = notTrivialPatterns(state, wt, exec);
   if (config.failure) fail(config.failure, 'infra');
   const review = head ? reviewCondition(wp, head, exec, config.patterns ?? DEFAULT_NOT_TRIVIAL.map(globRegex)) : { failure: 'review coverage not read: no head', cause: 'infra' };

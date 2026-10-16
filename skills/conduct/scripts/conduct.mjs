@@ -254,6 +254,12 @@ async function intake(tokens, deps) {
   const workflows = deps.exec('gh', ['api', '--paginate', `repos/${remote}/actions/workflows`, '--jq', '.workflows[]']);
   const ciWorkflows = workflows.code === 0 ? gatingWorkflows(workflows.stdout) : null;
   const ciError = workflows.code !== 0 ? workflows.stderr : ciWorkflows === null ? 'a workflows listing line is not JSON' : null;
+  // The greenfield trigger (quest 977d3efb, answer (c)): no CI workflow, or a
+  // near-empty history. Mint binds the bootstrap manifest to WP-01 when on.
+  const count = deps.exec('git', ['-C', repoPath, 'rev-list', '--count', 'HEAD']);
+  const commits = count.code === 0 && /^\d+$/.test(count.stdout.trim()) ? Number(count.stdout.trim()) : null;
+  const { detectGreenfield } = await loadModule(deps, 'lib/bootstrap.mjs', 'module');
+  const greenfield = detectGreenfield({ ciWorkflows, commits });
   const { adapters, agents } = detectAdapters({
     env: deps.env, exec: deps.exec, exists: deps.exists, declared: options.declared, forcedOff: options.forcedOff,
     platform: deps.platform, resolveCodex: deps.resolveCodex,
@@ -281,7 +287,7 @@ async function intake(tokens, deps) {
       intent: {
         goal: options.goal, repo: { path: repoPath, remote, defaultBranch: repoInfo.defaultBranchRef?.name ?? null },
         anchor: typeof flags.anchor === 'string' ? flags.anchor : null, campaign: null,
-        budgetUsd: options.budgetUsd, lanesCap: options.lanesCap, agent, release: recipe, ciWorkflows, repoConfig,
+        budgetUsd: options.budgetUsd, lanesCap: options.lanesCap, agent, release: recipe, ciWorkflows, repoConfig, greenfield,
       },
       agents, adapters,
       phase: options.spine ? 'intake' : 'preapproval',
@@ -309,7 +315,7 @@ async function intake(tokens, deps) {
     const state = draft();
     // The goal in full: touch 1 cites it by this file when it is long.
     deps.write(join(runDir, 'goal.md'), `${options.goal}\n`);
-    appendEvent(state, deps, { step: 'intake', event: 'intake', source: 'next', data: { remote, ciWorkflows, ciError } });
+    appendEvent(state, deps, { step: 'intake', event: 'intake', source: 'next', data: { remote, ciWorkflows, ciError, greenfield } });
     saveState(state, deps);
     return { out: { ok: true, runDir, action: await emit(state, deps) } };
   });

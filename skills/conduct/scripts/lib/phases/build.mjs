@@ -28,6 +28,7 @@ import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../de
 import { LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
 import { isTopListItem, sectionLines } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
+import { bootstrapBrief } from '../bootstrap.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
   priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor, visualReadProblem,
@@ -272,6 +273,8 @@ function briefAction(state, wp, deps) {
   const lane = laneLayout(state, wp);
   const outPath = wp.lane?.briefPath ?? lane.briefPath;
   const template = join(deps.pluginRoot ?? state.pluginRoot, 'skills', 'conduct', 'templates', 'lane-brief.md');
+  // The greenfield bootstrap WP's brief carries the verb to run (quest 977d3efb, writer (d)).
+  const append = wp.bootstrap ? bootstrapBrief(state, wp, wp.lane?.worktree ?? lane.worktree) : null;
   return {
     kind: 'author', step: 'brief', part: 'brief', template, outPath, expects: { type: 'file' },
     slots: {
@@ -281,7 +284,8 @@ function briefAction(state, wp, deps) {
       '<skills>': (wp.skills ?? []).length ? wp.skills.join(', ') : 'none',
       '<visual rules>': (wp.visualRules ?? []).length ? `${wp.visualRules.join(', ')} of ${state.design?.source ?? 'the spec\'s ## Design direction'}` : 'none',
     },
-    instruction: `Copy ${template} to ${outPath}, replacing each key of slots with its value. Record {}.${wp.runtimeExercise ? '' : ' The WP names no runtime exercise: the brief asks the lane to name the surface and its check.'}`,
+    ...(append ? { append } : {}),
+    instruction: `Copy ${template} to ${outPath}, replacing each key of slots with its value.${append ? ' Then append the append text verbatim.' : ''} Record {}.${wp.runtimeExercise ? '' : ' The WP names no runtime exercise: the brief asks the lane to name the surface and its check.'}`,
   };
 }
 
@@ -1557,6 +1561,9 @@ function recordOwn(state, wp, action, result, deps) {
       if (!deps.exists(action.outPath)) throw new ConductError(2, `the brief ${action.outPath} was not written`);
       if (action.marker && !(readText(deps, action.outPath) ?? '').includes(action.marker)) {
         throw new ConductError(2, `the brief ${action.outPath} does not carry amendment ${action.amendment.n}'s marker line: ${action.marker}`);
+      }
+      if (action.append && !(readText(deps, action.outPath) ?? '').includes(action.append.trim().split('\n')[0])) {
+        throw new ConductError(2, `the brief ${action.outPath} does not carry the appended section (${action.append.trim().split('\n')[0]}): append the action's append text verbatim`);
       }
       {
         const roots = [wp.lane.worktree];

@@ -149,6 +149,94 @@ export function bootstrap(repo, { write = false, offline = false, deps, template
   };
 }
 
+// ---- the /conduct wiring (quest 977d3efb, operator answer (c) + writer (d)) ----
+
+// The gate cause a failing bootstrap check carries. land.mjs classifies any
+// cause it does not name as an amendment, so this one is lane-fixable.
+export const BOOTSTRAP_CAUSE = 'bootstrap';
+// "A near-empty history": at most this many commits on the checkout's HEAD.
+export const NEAR_EMPTY_COMMITS = 3;
+
+// The intake trigger (answer (c)): on when the repo has no CI workflow that
+// can gate a PR (ciWorkflows 0) or a near-empty history. An unread workflow
+// count (null) is not a trigger on its own: a gh failure must not turn the
+// check on for an established repo. An unread commit count is not one either.
+export function detectGreenfield({ ciWorkflows, commits }) {
+  const why = [];
+  if (ciWorkflows === 0) why.push('no CI workflow can gate a PR');
+  if (Number.isInteger(commits) && commits <= NEAR_EMPTY_COMMITS) why.push(`${commits} commit${commits === 1 ? '' : 's'} on HEAD`);
+  return { on: why.length > 0, why, commits: Number.isInteger(commits) ? commits : null };
+}
+
+// The paths the bootstrap WP's lane may need to write (writer (d)): every
+// manifest item that does not pass at intake, with every stack's items
+// counted as applicable (WP-01 of a greenfield run often creates the
+// package.json that turns the node items on). An incomplete item adds the
+// file it found as well as its default path. `creates` holds the ones absent
+// from the checkout, so the brief preflight lets the brief name them.
+export function bootstrapScope(repo, { deps, templates }) {
+  const fs = { exists: deps.exists, read: deps.read, list: deps.list };
+  const manifest = loadManifest(deps.read, templates);
+  const items = [...manifest.items, ...Object.entries(manifest.stacks ?? {}).flatMap(([name, stack]) => stack.items.map((item) => ({ ...item, stack: name })))];
+  const failing = items.map((item) => checkItem(repo, item, fs)).filter((result) => result.status !== 'present');
+  const files = [...new Set(failing.flatMap((result) => [result.path, ...String(result.found ?? '').split(', ').filter(Boolean)]))];
+  return { files, creates: files.filter((path) => !deps.exists(join(repo, path))), failing: failing.map((result) => result.id) };
+}
+
+// The WP that carries the bootstrap: WP-01 of a deep spec, else the single
+// WP-00 of a none|lite one. Null when neither exists.
+export function bootstrapWp(wps) {
+  return wps.find((wp) => /^wp-0*1$/i.test(wp.id)) ?? wps.find((wp) => /^wp-0*0$/i.test(wp.id)) ?? null;
+}
+
+// Mint binds the scope to that WP, read from the repo checkout then: its
+// Files and Create paths gain the manifest paths, and `wp.bootstrap` (the
+// paths and the items failing at mint) turns the land gate's check on.
+export function bindBootstrap(state, deps) {
+  if (!state.intent.greenfield?.on) return null;
+  const wp = bootstrapWp(state.wps);
+  if (!wp) return null;
+  let scope;
+  try {
+    scope = bootstrapScope(state.intent.repo.path, { deps, templates: repoTemplates(deps.pluginRoot ?? state.pluginRoot) });
+  } catch (error) {
+    if (error instanceof ConductError) throw error;
+    throw new ConductError(4, `the greenfield manifest is unreadable under ${repoTemplates(deps.pluginRoot ?? state.pluginRoot)}: ${error.message}`);
+  }
+  wp.files = [...new Set([...(wp.files ?? []), ...scope.files])];
+  wp.creates = [...new Set([...(wp.creates ?? []), ...scope.creates])];
+  wp.bootstrap = { files: scope.files, failing: scope.failing };
+  return wp;
+}
+
+// The lane brief's addition for the bootstrap WP: run the verb with --write,
+// finish what it reports for a hand edit, and leave repo settings alone.
+export function bootstrapBrief(state, wp, worktree) {
+  const script = join(state.pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs');
+  const files = wp.bootstrap.files.length ? wp.bootstrap.files.map((path) => `\`${path}\``).join(', ') : 'none (every item passed at mint)';
+  return [
+    '## Greenfield bootstrap', '',
+    `Intake found a greenfield repo (${state.intent.greenfield.why.join('; ')}), so this WP also brings the repo up to the greenfield manifest. The land gate holds it, as an amendment, until \`bootstrap --offline\` exits 0 on your worktree.`, '',
+    `Run \`node ${script} bootstrap --repo ${worktree} --write --offline\`, then finish by hand every item its report still lists under \`failing\` (a marker a file lacks, \`engines.node\`). Commit the files with this WP's work. Your Files include the manifest paths: ${files}.`, '',
+    'Repo settings (`deleteBranchOnMerge`, branch protection) are not yours: the gate checks files only. Put any `gh repo edit` fix the online report prints under `## Follow-ups`.',
+    '',
+  ].join('\n');
+}
+
+// The land gate's check, for the bootstrap WP only: the verb, offline, run on
+// the lane's worktree. Exit 3 is the lane-fixable failure; any other non-zero
+// exit is infrastructure.
+export function gateBootstrap(state, wp, exec) {
+  if (!wp.bootstrap) return null;
+  const script = join(state.pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs');
+  const r = exec('node', [script, 'bootstrap', '--repo', wp.lane.worktree, '--offline']);
+  if (r.code === 0) return null;
+  let report = null;
+  try { report = JSON.parse(r.stdout); } catch { report = null; }
+  if (r.code === 3 && Array.isArray(report?.failing)) return { failure: `bootstrap check fails: ${report.failing.join('; ')}`, cause: BOOTSTRAP_CAUSE };
+  return { failure: `bootstrap check unreadable (exit ${r.code}): ${String(r.stderr || r.stdout || '').trim().split(/\r?\n/)[0]}`, cause: 'infra' };
+}
+
 // `conduct.mjs bootstrap --repo <abs> [--write] [--offline]`: no run dir;
 // prints one JSON object and exits 0 (all pass) or 3.
 export function runBootstrapVerb(flags, deps) {
