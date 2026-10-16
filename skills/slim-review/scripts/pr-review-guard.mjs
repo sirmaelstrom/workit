@@ -213,6 +213,85 @@ function countBy(lines, keyOf) {
 }
 
 /**
+ * Where the block comment this line leaves open starts, or -1 when it leaves
+ * none open. A lexical scan, not a parser: text inside quotes ('…', "…", `…`,
+ * backslash escapes honoured) opens nothing, so a glob such as 'scripts/**'
+ * is not a comment; a `//` line comment ends the scan; a comment closed on the
+ * same line is skipped. A regex literal (`/'/`, `/[/*]/`) is skipped whole,
+ * so a quote or a `/*` inside it opens nothing; a `/` is read as one where an
+ * operand may start (line start, after an operator or `(`, `,`, `;` …, or after
+ * a keyword such as `return`), and as division elsewhere. A quote still open at
+ * the end of the line holds the rest of it. One line at a time: a template
+ * literal or string spanning lines is not tracked, so a `/*` on its second
+ * line still counts.
+ */
+function openCommentAt(text) {
+  let open = -1;
+  let quote = null;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === '\\') i++;
+      else if (c === quote) quote = null;
+    } else if (open !== -1) {
+      if (c === '*' && text[i + 1] === '/') {
+        open = -1;
+        i++;
+      }
+    } else if (c === "'" || c === '"' || c === '`') {
+      quote = c;
+    } else if (c === '/' && text[i + 1] === '*') {
+      open = i;
+      i++;
+    } else if (c === '/' && text[i + 1] === '/') {
+      break;
+    } else if (c === '/' && regexMayStart(text.slice(0, i))) {
+      const end = regexEnd(text, i);
+      if (end !== -1) i = end;
+    }
+  }
+  return open;
+}
+
+/**
+ * Whether a `/` after `before` starts a regex literal rather than a division.
+ * A postfix `++`/`--` ends an operand, so the `/` after it divides. A `)` ends
+ * an operand too, except the condition of `if`/`while`/`for`/`with`, after
+ * which a statement (and so a regex) may start.
+ */
+function regexMayStart(before) {
+  const code = before.trimEnd();
+  if (/(?:\+\+|--)$/.test(code)) return false;
+  if (code.endsWith(')')) return /(?<![\w$.])(?:if|while|for|with)\s*$/.test(code.slice(0, openingParen(code)));
+  return code === ''
+    || /[(,=:[!&|?{};+\-*%<>~^]$/.test(code)
+    || /(?<![\w$.])(?:return|typeof|instanceof|case|in|of|delete|void|throw|new|yield|await|else|do)$/.test(code);
+}
+
+/** The index of the `(` matching the `)` that ends `code`, or 0 when unmatched. */
+function openingParen(code) {
+  let depth = 0;
+  for (let i = code.length - 1; i >= 0; i--) {
+    if (code[i] === ')') depth++;
+    else if (code[i] === '(' && --depth === 0) return i;
+  }
+  return 0;
+}
+
+/** The index of the `/` closing the regex literal opened at `start`, or -1. */
+function regexEnd(text, start) {
+  let inClass = false;
+  for (let j = start + 1; j < text.length; j++) {
+    const c = text[j];
+    if (c === '\\') j++;
+    else if (c === '[') inClass = true;
+    else if (c === ']') inClass = false;
+    else if (c === '/' && !inClass) return j;
+  }
+  return -1;
+}
+
+/**
  * Added block-comment openers (`/*` or `/**`) that swallow a test: walking the
  * post-change lines the patch shows, in order, an opener added by this change
  * whose comment holds a test declaration or an assertion before the comment
@@ -246,8 +325,9 @@ function commentedOutTests(added, context) {
       }
       continue;
     }
-    const at = line.text.lastIndexOf('/*');
-    if (!line.isAdded || at === -1 || line.text.indexOf('*/', at + 2) !== -1) continue;
+    if (!line.isAdded) continue;
+    const at = openCommentAt(line.text);
+    if (at === -1) continue;
     open = { opener: line, hit: swallows(line.text.slice(at + 2)) };
   }
   if (open) found.push(open.opener);

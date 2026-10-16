@@ -357,6 +357,51 @@ test('4117560929: an opened block comment around moved tests is reported; a JSDo
   assert.deepEqual(detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: "@@ -1,1 +1,5 @@\n ctx\n+/**\n+ * helper\n+ */\n+/* eslint-disable no-console */\n+if (process.platform === 'win32') {" }]), []);
 });
 
+// 350bfd99: an added line whose only `/*` sits inside a string literal opened
+// a "comment" that never closed. Each line below drew a false guard thread.
+const addedThen = (text) => `@@ -1,1 +1,3 @@\n ctx\n+${text}\n+  assert.ok(run());`;
+for (const [source, text] of [
+  ['workit#246 conduct.test.mjs:584', "[{ contractPaths: 'scripts/**' }, /contractPaths must be an array of non-empty glob strings/],"],
+  ['workit#246 repo-config.test.mjs:37', "const text = JSON.stringify({ contractPaths: ['a/**'], gateBackground: true });"],
+  ['workit#248 land.test.mjs:1273', "const failing = { code: 3, stdout: JSON.stringify({ ok: false, failing: ['readme: missing (none of README.md)', 'ci: missing (no file matches .github/workflows/*.yml)'] }), stderr: '' };"],
+  ['double quotes', 'const glob = "src/**/*.ts";'],
+  ['backticks', 'const glob = `${root}/**`;'],
+  ['an escaped quote inside the string', "const s = 'it\\'s in a/**';"],
+  ['a // line comment', '// globs such as src/** are matched by name'],
+  ['a comment closed on the line', '/* a */ x(); /**/'],
+  ['a regex literal', 'assert.match(text, /a\\/*b/);'],
+  ['a regex character class', 'const sep = /[/*]/;'],
+]) {
+  test(`350bfd99: a /* inside ${source} opens no comment`, () => {
+    assert.deepEqual(detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: addedThen(text) }]), []);
+  });
+}
+
+for (const [source, text] of [
+  ['after a single-quoted string', "run('a'); /*"],
+  ['after a string that holds a /*', 'run("a/*b"); /*'],
+  ['after a string with an escaped quote', "const s = 'it\\'s'; /*"],
+  ['after a closed comment', '/* a */ /*'],
+  ['as a JSDoc /** at line start', '/**'],
+  ['whose comment text holds a quote', "/* don't run"],
+  // 4291712233 / 4291712242: a quote inside a regex literal is not a string.
+  ['after a regex literal holding a quote', "const re = /'/; /*"],
+  ['after a regex literal at line start', "/'/.test(s); /*"],
+  ['after a regex literal following return', 'return /"/.test(s); /*'],
+  ['after a division', 'const half = total / 2; /*'],
+  // 4291764475 / 4291764494 / 4291764485: a postfix ++/-- ends an operand; a control condition's ) does not.
+  ['after a division following postfix ++', 'const half = total++ / 2; /*'],
+  ['after a division following postfix --', 'const half = total-- / 2; /*'],
+  ['after a division following a call', 'const half = size(a) / 2; /*'],
+  ['after a regex literal following an if condition', "if (ok(a)) /'/.test(s); /*"],
+  ['after a regex literal following a while condition', "while (x) /'/.test(s); /*"],
+]) {
+  test(`350bfd99: a real opener ${source} is still reported`, () => {
+    const [entry] = detectTestWeakening([{ filename: 'a.test.mjs', status: 'modified', patch: `@@ -1,1 +1,4 @@\n ctx\n+${text}\n+test('x', () => {});\n+*/` }]);
+    assert.deepEqual(entry?.items.map((item) => [item.kind, item.line, item.text]), [['disabled-added', 2, text]]);
+  });
+}
+
 for (const [id, patch] of [
   ['4117560930 (codex)', "@@ -1,3 +1,3 @@\n-test('critical', () => {\n-  verifyPayment();\n+test('placeholder', () => {\n+  noop();\n });"],
   ['4117560933 (astra)', "@@ -1,3 +1,2 @@\n-test('rejects invalid input', () => {\n-  checkRejectsInvalidInput();\n+test('placeholder', () => {\n });"],
