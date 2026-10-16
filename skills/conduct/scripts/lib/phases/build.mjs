@@ -524,6 +524,9 @@ export const RESET_TARGETS = Object.freeze({
       // The gate does not read the owed adjudication; only the checked stage settles it.
       () => (wp.owed?.adjudicate ? `${wp.id}'s review round ${wp.owed.round ?? '?'} findings are not adjudicated; reset it --to checked` : null)),
   },
+  // A WP a re-plan dropped goes back into the plan: the scheduler dispatches it
+  // again like any pending WP, so it takes no lane here (Amendment 1, e830d835).
+  pending: { from: ['dropped'], state: () => 'pending', stage: null, needs: () => null, queue: () => [] },
   delta: {
     from: ['blocked', 'held'], state: () => 'pr', stage: 'delta', queue: keepStops,
     needs: (state, wp, deps) => firstProblem(() => hasLane(wp),
@@ -533,7 +536,7 @@ export const RESET_TARGETS = Object.freeze({
   },
 });
 
-// Every target puts the WP in a live state, so it takes a lane under the
+// Every target but `pending` puts the WP in a live state, so it takes a lane under the
 // scheduler's rules (schedule.mjs dispatchable): Files disjoint from every
 // live or lane-holding WP, and a slot under the run's lane cap. A WP whose own
 // lane still holds its slot already has one. A merged-tree halt is the
@@ -601,7 +604,8 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   const touch = (state.touches ?? []).find((candidate) => candidate.wpId === wp.id && candidate.status !== 'answered');
   if (touch) refuse(`${wp.id} has touch ${touch.n} open; its answer resumes the WP`);
   if (state.pending?.wpId === wp.id) refuse(`${wp.id}'s action ${state.pending.id} is pending; perform and record it first`);
-  const blocker = rewindRefusal(state) ?? admissionRefusal(state, wp);
+  // `--to pending` takes no lane: the scheduler admits the WP when it dispatches it.
+  const blocker = rewindRefusal(state) ?? (to === 'pending' ? null : admissionRefusal(state, wp));
   if (blocker) refuse(blocker);
   const recovery = to === 'delta' ? verifyDeltaRecovery(wp, baseline, deps) : null;
   // Built before the snapshot: an emitter that throws leaves nothing behind.
@@ -626,6 +630,7 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   }
   // A held WP's markers belong to the hold it leaves; the gate sets them again if they still hold.
   if (from.state === 'held') Object.assign(wp, { heldOutside: null, heldUncited: null });
+  if (from.state === 'dropped') wp.droppedBy = null;
   // Every WP deferred because of this one, directly or through another
   // deferral, goes back to pending; the next `next` defers again any that
   // still waits on a stopped WP.
@@ -801,9 +806,10 @@ function replanApply(state) {
 }
 
 // The apply record. `drop` is the one plan change no other verb makes: a
-// pending WP leaves the plan, ending `refuted` with the re-plan as its reason
-// (the terminal state the scheduler, the analysis and the showcase already
-// read; its dependents are deferred).
+// pending WP leaves the plan as `dropped`, with the re-plan as its reason. A
+// drop is a two-way door inside the run: `reset-wp --to pending` puts the WP
+// back, and the scheduler dispatches it again. Until then its dependents are
+// deferred, and the analysis and the showcase name it as not finished.
 function recordReplanApply(state, action, deps) {
   const row = (state.replans ?? []).find((entry) => entry.n === action.replan);
   if (!row) throw new ConductError(2, `no re-plan ${action.replan} in this run`);
@@ -815,7 +821,10 @@ function recordReplanApply(state, action, deps) {
   const dropped = drop.map((id) => state.wps.find((wp) => wp.id === id));
   const bad = drop.find((id, i) => dropped[i]?.state !== 'pending');
   if (bad !== undefined) throw new ConductError(2, `${action.outPath}: ${bad} is ${state.wps.find((wp) => wp.id === bad)?.state ?? 'not a WP of this run'}; only a pending WP is dropped (a started one is reset or ruled)`);
-  for (const wp of dropped) setState(state, wp, 'refuted', `dropped by re-plan ${row.n}: ${row.why}`, deps);
+  for (const wp of dropped) {
+    setState(state, wp, 'dropped', `dropped by re-plan ${row.n}: ${row.why} (restore: reset-wp --wp ${wp.id} --to pending)`, deps);
+    wp.droppedBy = row.n;
+  }
   row.applied = { applied: value.applied, text: said.trim(), at: deps.timestamp(), ...(drop.length ? { dropped: [...drop] } : {}) };
   appendEvent(state, deps, { step: 'replan', event: value.applied ? 'replan-applied' : 'replan-not-applied', data: { n: row.n, text: said.trim(), dropped: drop } });
 }
@@ -1265,7 +1274,7 @@ function deferrals(state, deps) {
   const byId = new Map(state.wps.map((wp) => [wp.id, wp]));
   // "Nothing else is live": no WP holds a live state and none can be dispatched.
   const live = state.wps.some((wp) => LIVE_STATES.includes(wp.state)) || dispatchable(state, { now: deps.now() }).length > 0;
-  const stuck = (dep) => ['held', 'refuted', 'deferred'].includes(dep.state) || (dep.state === 'blocked' && !live);
+  const stuck = (dep) => ['held', 'refuted', 'dropped', 'deferred'].includes(dep.state) || (dep.state === 'blocked' && !live);
   for (let changed = true, round = 0; changed && round < state.wps.length + 1; round += 1) {
     changed = false;
     for (const wp of state.wps) {
@@ -1275,7 +1284,7 @@ function deferrals(state, deps) {
         setState(state, wp, 'deferred', `depends on ${dep.id}, which is ${dep.state}`, deps);
         wp.deferredBy = dep.id;
         changed = true;
-      } else if (wp.state === 'deferred' && wp.deferredBy && !['held', 'refuted', 'deferred', 'blocked'].includes(byId.get(wp.deferredBy)?.state)) {
+      } else if (wp.state === 'deferred' && wp.deferredBy && !['held', 'refuted', 'dropped', 'deferred', 'blocked'].includes(byId.get(wp.deferredBy)?.state)) {
         setState(state, wp, 'pending', null, deps);
         wp.deferredBy = null;
         changed = true;

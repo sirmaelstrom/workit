@@ -368,6 +368,10 @@ test('showcase briefing: notDone names an unfinished WP as a whole word, and abo
   const one = [{ id: 'WP-01', state: 'blocked' }];
   assert.throws(read(one, 'WP-010 was dropped.'), { code: 2, message: /does not name WP-01/ });
   assert.equal(read(one, 'WP-01 blocked at its check.')().notDone, 'WP-01 blocked at its check.');
+  // e830d835 Amendment 1: a WP a re-plan dropped did not finish, so the briefing names it.
+  const dropped = [{ id: 'WP-03', state: 'dropped' }];
+  assert.throws(read(dropped, 'Everything landed.'), { code: 2, message: /does not name WP-03/ });
+  assert.equal(read(dropped, 'WP-03 was dropped by a re-plan.')().notDone, 'WP-03 was dropped by a re-plan.');
   const seven = Array.from({ length: 7 }, (_, i) => ({ id: `WP-0${i + 1}`, state: 'held' }));
   assert.throws(read(seven, '7 tests passed; nothing remains unfinished.'), { code: 2, message: /"7 WPs"/ });
   assert.equal(read(seven, 'All 7 WPs are held at their PRs.')().notDone, 'All 7 WPs are held at their PRs.');

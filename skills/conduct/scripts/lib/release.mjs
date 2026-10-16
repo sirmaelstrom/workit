@@ -105,7 +105,7 @@ export function releaseEligible(state) {
   const wps = state.wps ?? [];
   if (!state.intent?.release) return { ok: false, reason: 'no recipe' };
   if (wps.some((wp) => wp.state === 'held')) return { ok: false, reason: 'held' };
-  if (wps.some((wp) => ['blocked', 'deferred', 'refuted'].includes(wp.state))) return { ok: false, reason: 'incomplete build' };
+  if (wps.some((wp) => ['blocked', 'deferred', 'refuted', 'dropped'].includes(wp.state))) return { ok: false, reason: 'incomplete build' };
   if (state.authority?.release !== true) return { ok: false, reason: 'no release authority' };
   if (wps.length === 0 || !wps.every((wp) => wp.state === 'merged')) return { ok: false, reason: 'incomplete build' };
   return { ok: true, reason: null };

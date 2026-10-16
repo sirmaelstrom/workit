@@ -410,18 +410,28 @@ test('replan (e830d835): two-way changes inside the scope proceed on the pre-app
   assert.match(apply.instruction, /^Apply re-plan 1 before anything else runs: 1\. fold WP-03 into a test on WP-02 Make each change/);
   assert.deepEqual(h.trace.slice(mark).map((a) => a.step), ['replan'], 'the apply step is the first action after the pending wait');
   const receipt = await drive(h, { until: (a) => a.step === 'replan' && a.part === 'receipt' });
-  assert.equal(h.wp('WP-03').state, 'refuted');
-  assert.match(h.wp('WP-03').reason, /^dropped by re-plan 1: WP-02 found/);
+  assert.equal(h.wp('WP-03').state, 'dropped');
+  assert.match(h.wp('WP-03').reason, /^dropped by re-plan 1: WP-02 found .* \(restore: reset-wp --wp WP-03 --to pending\)$/);
   assert.deepEqual([receipt.kind, receipt.tool, receipt.args.questId, receipt.args.outcome], ['agent-tool', 'spine_receipt', ANCHOR, 'completed']);
   assert.match(receipt.args.did, /re-planned inside its pre-approval \(re-plan 1\)\. Why: WP-02 found .* What changed: 1\. fold WP-03 into a test on WP-02 Every change is a two-way door inside the approved scope; it rests on .*\. Applied: dropped WP-03/);
   assert.equal(await drive(h), null);
   assert.equal(h.state.replans[0].receipt, 'filed');
   assert.deepEqual(h.events().filter((e) => e.step === 'replan').map((e) => e.event), ['replanned', 'replan-applied', 'replan-receipted']);
-  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'refuted']);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'dropped']);
   assert.ok(!of(h, 'WP-03').some((a) => a.step === 'brief'), 'the dropped WP never dispatched');
   await analyzeRun(h.runDir, h.deps);
-  assert.match(readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8'), /^  - re-plan 1, approved inside the pre-approval; rests on .*; why: WP-02 found .*; changes: fold WP-03 into a test on WP-02 \[two-way\]; applied: dropped WP-03; WP-02 carries its regression test; anchor receipt filed$/m);
-  h.state.phase = 'release';
+  const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
+  assert.match(analysis, /^  - re-plan 1, approved inside the pre-approval; rests on .*; why: WP-02 found .*; changes: fold WP-03 into a test on WP-02 \[two-way\]; applied: dropped WP-03; WP-02 carries its regression test; anchor receipt filed$/m);
+  assert.match(analysis, /^- WP-03 \(name WP-03\): dropped: dropped by re-plan 1: /m, 'the analysis names the dropped WP');
+  // Amendment 1: a drop is two-way inside the run. reset-wp --to pending restores it, and the build dispatches it again.
+  assert.equal(h.state.phase, 'release');
+  const restored = build.resetWp(h.state, { wpId: 'WP-03', to: 'pending', why: 'the parser case came back' }, h.deps);
+  assert.deepEqual([restored.from.state, restored.state, h.state.phase, h.wp('WP-03').droppedBy], ['dropped', 'pending', 'build', null]);
+  h.answer = null;
+  assert.equal(await drive(h), null);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  assert.ok(of(h, 'WP-03').some((a) => a.step === 'brief'), 'the restored WP was dispatched');
+  assert.throws(() => build.resetWp(h.state, { wpId: 'WP-02', to: 'pending', why: 'x' }, h.deps), (error) => error.code === 5 && /WP-02 is merged; --to pending resets a WP that is dropped/.test(error.message));
   refused({ why: REPLAN_WHY, delta: [{ change: 'x', door: 'two-way', inScope: true }] }, 5, /a re-plan is made mid-build/);
 });
 
