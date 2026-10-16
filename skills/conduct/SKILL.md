@@ -136,6 +136,16 @@ Under the run's lock the verb copies `state.json` to `state.before-reset-<wp>-<t
 
 Every target puts the WP back in a live state, so the scheduler's rules still hold: a WP whose Files overlap a live WP's, or any reset while every lane of the run's cap is in use, is refused until a lane finishes, and so is any reset while a merged-tree halt is open. It also refuses (exit 5) any other state or target, a WP with an open touch (answer it instead), an unverified lane (answer its liveness touch), a WP whose action is pending (record it first), and a run past its release or showcase. Exit 2 is an unknown WP or target, a missing `--why`, or a run another verb holds locked. A refusal writes nothing, no snapshot included.
 
+## Greenfield bootstrap
+
+`conduct.mjs bootstrap --repo <abs> [--write] [--offline]` checks a repo against the greenfield manifest (`${CLAUDE_PLUGIN_ROOT}/reference/templates/repo/manifest.json`). The manifest's standard is a repo prepared as if it will go public: README, LICENSE, SECURITY.md, `AGENTS.md` with a `CLAUDE.md` `@AGENTS.md` stub, `.editorconfig`, `.gitignore`, a CI workflow that runs on PRs, cancels superseded runs, sets `timeout-minutes` and scans with gitleaks, dependabot, and a PR template carrying `## Merge danger`. A repo with `package.json` adds a Node pin, `engines.node`, a formatter config and npm in dependabot. The one repo setting checked is `deleteBranchOnMerge`.
+
+- It prints one JSON report. Exit 0 means every applicable item passes, 3 means something is missing, incomplete or unverified (`failing` lists each), and 2 is a usage error. A setting `gh` cannot read is `unverified`, never a pass. `--offline` skips settings and says so.
+- `--write` copies a template (`reference/templates/repo/files/`) for each missing file. It fills `{{name}}`, `{{year}}` and `{{owner}}` (the repo directory, the UTC year, and `git config user.name`). It never rewrites a file that exists. A file that lacks a required marker, and `engines.node`, are reported for a hand edit. It writes the working tree only: no commit, no branch, and no change to a repo setting. The report prints the `gh repo edit` fix.
+- A private repo's report names `${CLAUDE_PLUGIN_ROOT}/reference/templates/repo/public-flip-checklist.md`. That list covers branch protection, secret scanning, push protection, Dependabot alerts and private vulnerability reporting, which a private free-plan repo cannot turn on, as commands to run on the day it goes public.
+
+The build does not run this check yet. Wiring it into the WP-01 gate waits on a ruling (quest 977d3efb).
+
 ## Repo config
 
 The target repo's `.workit/conduct.json` may carry, beside `release`:

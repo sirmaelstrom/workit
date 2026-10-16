@@ -73,6 +73,7 @@ Copyable skeletons for the key workshop files. Located in `templates/`.
 | `meta.json.template` | Workshop metadata — title, slug, status, projects, tags. Field reference included. | meta.json.template |
 | `problem-statement.template.md` | Problem capture — self-contained description, current state, what solved looks like | problem-statement.template.md |
 | `post-mortem.template.md` | Campaign post-mortem — summary, timeline, findings, analysis, cross-campaign comparison, feed-back checklist | post-mortem.template.md |
+| `repo/manifest.json` + `repo/files/` | Greenfield repo standard: the required-files manifest and its templates, checked and filled by `conduct.mjs bootstrap`; `repo/public-flip-checklist.md` is what waits for the repo to go public | repo/ |
 | `lane-contract.template.md` | Build-lane contract for a burn-down — hard rules (assertions carry their refutation; reports and PR bodies via Edit/Write; doc sentences made false are Follow-ups; briefs read for their limits; runtime verification is part of done), the boundary question, setup, finish | lane-contract.template.md |
 
 ## Superseded
