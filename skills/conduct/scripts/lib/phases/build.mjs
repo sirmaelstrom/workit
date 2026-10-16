@@ -734,7 +734,7 @@ export function replan(state, plan, deps) {
   const n = state.replans.length + 1;
   const items = delta.map((item) => ({ change: item.change.trim(), door: item.door, inScope: item.inScope }));
   const wider = items.filter((item) => item.door !== 'two-way' || !item.inScope);
-  const file = join('rulings', `replan-${n}.json`);
+  const file = `rulings/replan-${n}.json`;
   let rests;
   try {
     rests = preapprovedRef(state);
