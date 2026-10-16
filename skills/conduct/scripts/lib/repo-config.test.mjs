@@ -70,12 +70,17 @@ test('sectionText: the first ## or ### heading by title, case ignored, up to the
   // Council round 1: indented ATX, a BOM, setext headings and thematic breaks.
   assert.equal(sectionText('   ## Lane suite\nindented\n', 'Lane suite'), 'indented');
   assert.equal(sectionText('    ## Lane suite\nfour spaces is code\n', 'Lane suite'), null);
-  assert.equal(sectionText('﻿## Lane suite\nbom\n', 'Lane suite'), 'bom');
+  assert.equal(sectionText(`${String.fromCharCode(0xfeff)}## Lane suite\nbom\n`, 'Lane suite'), 'bom');
   assert.equal(sectionText('Lane suite\n----------\nsetext body\n\nCommit policy\n=============\nnot this\n', 'Lane suite'), 'setext body');
   assert.equal(sectionText('## Lane suite\nmine\n\nOther section\n---\npolicy text\n', 'Lane suite'), 'mine');
   assert.equal(sectionText('## Lane suite\nmine\n\n***\n\nafter a break\n', 'Lane suite'), 'mine');
   assert.equal(sectionText('## Lane suite\nmine\n\n---\n\nafter a break\n', 'Lane suite'), 'mine');
   assert.equal(sectionText('## Lane suite\n```\n---\n## x\n```\nafter the fence\n', 'Lane suite'), '--- ## x after the fence');
+  // Challenge round 1: `---` after a list item is a thematic break; a multi-line setext heading leaves no text behind.
+  assert.equal(sectionText('## Lane suite\n- Use own DB per run.\n- Never run the full suite.\n---\nafter\n', 'Lane suite'), '- Use own DB per run. - Never run the full suite.');
+  assert.equal(sectionText('## Lane suite\nUse own DB.\n\nPolicy line one\nline two\n---\nnot this\n', 'Lane suite'), 'Use own DB.');
+  assert.equal(sectionText('## Lane suite\n> quoted rule\n---\n', 'Lane suite'), '> quoted rule');
+  assert.equal(sectionText('Intro line\nLane suite\n---\nbody\n', 'Lane suite'), null, 'a two-line setext heading is not titled "Lane suite"');
 });
 
 test('laneSuiteFrom: AGENTS.md first, the legacy laneSuite second, else null', () => {
