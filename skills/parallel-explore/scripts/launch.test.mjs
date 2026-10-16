@@ -79,6 +79,12 @@ test('--spike refuses --worktree, a non-empty spike directory, and a spike root 
   assert.equal(inside.status, 1);
   assert.match(inside.stderr, /inside a git work tree/);
   assert.equal(existsSync(join(run, 'results', 'branch-2.md')), false, 'no branch launched');
+  // Review #249: with no git on PATH nothing proves the directory is outside a repo, so it is refused.
+  const noGit = spawnSync(process.execPath, [LAUNCH, '--prompts', join(run, 'prompts'), '--spike', '--spike-root', join(root, 'elsewhere')],
+    { env: { ...env, PATH: join(root, 'bin') }, encoding: 'utf8', timeout: 60000 });
+  assert.equal(noGit.status, 1, noGit.stdout + noGit.stderr);
+  assert.match(noGit.stderr, /cannot establish that spike directory .* is outside every repo/);
+  assert.equal(existsSync(join(root, 'elsewhere')), false, 'nothing created');
 });
 
 test('without --spike the argv carries no permission mode', (t) => {

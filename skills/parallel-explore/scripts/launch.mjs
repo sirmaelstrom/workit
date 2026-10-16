@@ -15,7 +15,8 @@
  * --worktree   Use git worktrees for isolation (creates temp worktrees per branch)
  * --timeout    Per-branch timeout in seconds (default: 600)
  * --spike      Spike mode (SKILL.md § Spike mode): each branch runs in its own new,
- *              empty directory <spike-root>/<run>/<branch>, outside every repo, with
+ *              empty directory <spike-root>/<run>/<branch> (refused unless git proves it is
+ *              outside every repo; this places the branch, it does not confine it), with
  *              --permission-mode bypassPermissions so it can write and run throwaway
  *              code. Not combinable with --worktree.
  * --spike-root Parent of the spike directories (default: <os tmpdir>/parallel-explore-spikes)
@@ -24,7 +25,7 @@
  * Exit: 0 if all branches complete, 1 if any fail or timeout
  */
 
-import { spawn, execSync } from 'node:child_process';
+import { spawn, spawnSync, execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -107,7 +108,10 @@ function createWorktree(branchName) {
 // Spike mode: <spike-root>/<run dir name>/<branch>, created new and empty.
 // A directory left by an earlier launch of the same run is refused, so one
 // spike never reads another's code; a path inside a git work tree is refused,
-// so a spike never writes into a repo.
+// so a spike never STARTS in a repo. This places the branch; it does not
+// confine it (review #249): with bypassPermissions an agent can still write
+// any absolute path, and only its prompt ("write only inside your current
+// directory") asks it not to. ASSUMPTION: the prompt holds.
 function nearestExisting(path) {
   let at = path;
   while (!existsSync(at) && dirname(at) !== at) at = dirname(at);
@@ -119,15 +123,18 @@ function refuseSpikeDir(dir) {
     console.error(`Error: spike directory ${dir} is not empty; remove it or launch the run under a new name`);
     process.exit(1);
   }
-  let inside = false;
-  try {
-    execSync('git rev-parse --is-inside-work-tree', { cwd: nearestExisting(dir), stdio: 'pipe' });
-    inside = true;
-  } catch {
-    // not inside a work tree (or no git on PATH: ASSUMPTION, then nothing can be refused here)
-  }
-  if (inside) {
+  // Fail closed (review #249): only git's own "not a git repository" answer
+  // proves the directory is outside every repo. Exit 0 is inside (a work tree,
+  // or a .git directory). Anything else, such as no git on PATH or a refused
+  // "dubious ownership" repo, is an unproven isolation and is refused too.
+  const probe = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: nearestExisting(dir), encoding: 'utf8', env: { ...process.env, LC_ALL: 'C', LANGUAGE: 'C' } });
+  if (probe.status === 0) {
     console.error(`Error: spike directory ${dir} is inside a git work tree; pass a --spike-root outside every repo`);
+    process.exit(1);
+  }
+  if (!/not a git repository/i.test(String(probe.stderr ?? ''))) {
+    const why = probe.error ? probe.error.message : String(probe.stderr ?? '').trim().split(/\r?\n/)[0] || `git exited ${probe.status}`;
+    console.error(`Error: cannot establish that spike directory ${dir} is outside every repo (${why}); spikes run only where git says "not a git repository"`);
     process.exit(1);
   }
 }
@@ -164,8 +171,9 @@ function launchBranch(promptFile, index) {
   const resultPath = join(resultsDir, `${branchName}.md`);
 
   const branchWorkdir = spike ? spikeDirs.get(branchName) : useWorktree ? createWorktree(branchName) : workdir;
-  // A spike writes and runs code, so it needs tool permissions; it runs only
-  // in its own new directory outside every repo (spikeDir).
+  // A spike writes and runs code, so it needs tool permissions. It starts in
+  // its own new directory outside every repo (refuseSpikeDir); nothing here
+  // confines it to that directory.
   const permission = spike ? ['--permission-mode', 'bypassPermissions'] : [];
 
   return new Promise((resolve) => {

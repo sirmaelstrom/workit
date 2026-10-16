@@ -49,7 +49,7 @@ Verdict: credible alternative | no credible alternative
 
 Run `parallel-explore` in **spike mode** (its SKILL.md § Spike mode). There are 2 or 3 branches: the drafted stack and each credible alternative the lens named. Each branch builds the same core loop in its stack and prints the spike's settling number. Every branch prompt holds these constant: the core loop, the input size, the machine, and the measurement command. Synthesis is `pick-one` and recommends a stack from the measured numbers. A branch whose build failed is evidence about that stack, not a tie. Rule D1 from the synthesis, citing each branch's number. When the spikes contradict the lens, the numbers win, and D1 says so.
 
-Spike code is throwaway. It lives in the spike directories outside the repo and never enters the workshop or a work package.
+Spike code is throwaway. Each branch starts in its own spike directory outside the repo and is told to write only there; the launcher places it but does not confine it. Spike code never goes into the workshop or a work package. The synthesis quotes numbers, not code.
 
 ## Evidence and falsifier
 
