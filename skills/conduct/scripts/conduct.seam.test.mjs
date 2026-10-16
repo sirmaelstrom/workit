@@ -1281,21 +1281,34 @@ test('rotate (d3ce5461): mid-build with two live lanes, the handoff comes from s
   assert.match(text, new RegExp(`retire r1 \\(herdr pane w1:p1\\).*paused receipt on the anchor ${ANCHOR}`));
   assert.match(text, /^Live or queued: WP-02, WP-03\./m);
 
-  // The rotated conductor can neither record past custody nor rotate again.
+  // The rotated conductor can neither record past custody nor rotate again;
+  // no other writing verb moves the run while custody is open.
   const late = await h.run(['record', '--run', h.runDir, '--action', pending.id, '--result', JSON.stringify({ code: 4, stdout: '', stderr: 'timeout' })]);
   assert.equal(late.code, 5, late.stdout);
-  assert.match(out(late).error, /custody of rotation 1 comes first \(run next\)/);
+  assert.match(out(late).error, /you are r1, the conductor that rotated/);
   assert.equal((await h.run(['rotate', '--run', h.runDir, ...ROTATE])).code, 5);
+  const frozen = h.state();
+  for (const argv of [['ratify', '--run', h.runDir, '--wp', 'WP-02', '--paths', 'src/y.mjs', '--why', 'x'],
+    ['reset-wp', '--run', h.runDir, '--wp', 'WP-02', '--to', 'check', '--why', 'x'], ['lane', 'spawn', '--run', h.runDir, '--wp', 'WP-02']]) {
+    const refused = await h.run(argv);
+    assert.equal(refused.code, 5, `${argv[0]}: ${refused.stdout}`);
+    assert.match(out(refused).error, /rotation 1 is open: custody comes first/);
+  }
+  assert.deepEqual(h.state().wps, frozen.wps, 'a refused verb writes nothing');
 
   // The successor, in its own pane. Once it has started custody, the rotated
-  // conductor's next is refused rather than cancelling the rotation under it.
+  // conductor's next and record are refused rather than cancelling under it.
   h.deps.env.HERDR_PANE_ID = 'w1:p2';
-  const first = out(await h.run(['next', '--run', h.runDir])).action;
+  const first = out(await h.run(['next', '--run', h.runDir, '--custody', '1'])).action;
   assert.deepEqual([first.step, first.part, first.command.slice(2)], ['custody', 'retire-close', ['retire', 'w1:p1', '--mode', 'close', '--log', log]]);
-  const old = await h.run(['next', '--run', h.runDir], { env: { ...h.deps.env, HERDR_PANE_ID: 'w1:p1' } });
+  const asOld = { env: { ...h.deps.env, HERDR_PANE_ID: 'w1:p1' } };
+  const old = await h.run(['next', '--run', h.runDir], asOld);
   assert.equal(old.code, 5, old.stdout);
   assert.match(out(old).error, /you are r1, rotated out/);
+  const oldRecord = await h.run(['record', '--run', h.runDir, '--action', first.id, '--result', JSON.stringify({ code: 0, stdout: '', stderr: '' })], asOld);
+  assert.equal(oldRecord.code, 5, oldRecord.stdout);
   assert.equal(h.state().rotations[0].status, 'open');
+  assert.equal(h.state().rotations[0].retire, null);
 
   const mark = h.trace.length;
   h.pending = first;
@@ -1334,6 +1347,11 @@ test('rotate (d3ce5461): a chain that did not hand over — the rotating conduct
   assert.equal(out(again).action.id, pending.id);
   assert.equal(h.state().rotations[0].status, 'cancelled');
   assert.deepEqual(h.events().filter((e) => e.event === 'rotation-cancelled').map((e) => e.data.why), ['r1 ran next from its own pane w1:p1']);
+  // A successor briefed anyway (chain exit-refused) is fenced out at its first call.
+  const late = await h.run(['next', '--run', h.runDir, '--custody', '1'], { env: { ...h.deps.env, HERDR_PANE_ID: 'w1:p2' } });
+  assert.equal(late.code, 5, late.stdout);
+  assert.match(out(late).error, /rotation 1 was cancelled; r1 kept the run/);
+  assert.equal(h.state().pending.id, pending.id, 'the fenced call changed nothing');
   const second = await h.run(['rotate', '--run', h.runDir, ...ROTATE]);
   assert.deepEqual([out(second).rotation, out(second).from, out(second).to, out(second).handoff], [2, 1, 2, join(h.runDir, 'handoff-2.md')]);
   assert.match(readFileSync(join(h.runDir, 'handoff-2.md'), 'utf8'), /^## Earlier rotations\n\n- 1: r1 → r2 at \S+, cancelled: context at 41%$/m);

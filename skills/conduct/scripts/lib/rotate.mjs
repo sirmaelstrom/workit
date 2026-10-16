@@ -5,16 +5,33 @@
 // pending action itself is never moved: custody runs in front of it, and an
 // older conduct.mjs that ignores `rotations` still sees it.
 import { join } from 'node:path';
-import { ConductError, appendEvent } from './state.mjs';
+import { ConductError, TERMINAL_PHASES, appendEvent } from './state.mjs';
 import { LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { conductScript, shellLiteral, spineAckFailure } from './touch.mjs';
 
 export const SESSION_LOG = 'session-chain.jsonl';
-const TERMINAL = ['closed', 'declined', 'sent-back'];
 
 export function openRotation(state) {
   const last = state.rotations?.at(-1);
   return last?.status === 'open' ? last : null;
+}
+
+// `next --custody <attempt>`, the successor's first call (its handoff names
+// it): a successor whose rotation was cancelled, or superseded by a later
+// one, is not the run's conductor and is refused before anything is emitted.
+export function custodyFence(state, attempt) {
+  const rotations = state.rotations ?? [];
+  const rotation = rotations.find((candidate) => String(candidate.attempt) === String(attempt));
+  if (!rotation) throw new ConductError(2, `next --custody ${attempt}: this run has no rotation ${attempt}`);
+  if (rotation.status === 'cancelled') throw new ConductError(5, `rotation ${attempt} was cancelled; r${rotation.from} kept the run, so you are not its conductor: end your turn`);
+  if (rotation !== rotations.at(-1)) throw new ConductError(5, `rotation ${attempt} is superseded by rotation ${rotations.at(-1).attempt}; you are not the run's conductor: end your turn`);
+}
+
+// The pane of the conductor that rotated, when it is the caller here.
+export function rotatedOut(state, deps) {
+  const rotation = openRotation(state);
+  const here = herdrPane(deps);
+  return rotation?.caller.pane && here === rotation.caller.pane ? rotation : null;
 }
 
 // Conductor numbers count rotations that took custody: r1 is the conductor
@@ -30,7 +47,11 @@ const herdrPane = (deps) => (deps.env?.HERDR_ENV === '1' && deps.env?.HERDR_PANE
 // handoff tells the successor to perform it as given).
 export function rotate(state, { why, model = null, effort = null, name = null }, deps) {
   if (typeof why !== 'string' || !why.trim()) throw new ConductError(2, 'rotate: --why <text> is required');
-  if (TERMINAL.includes(state.phase)) throw new ConductError(5, `rotate: the run is ${state.phase}; there is nothing to hand over`);
+  if (TERMINAL_PHASES.includes(state.phase)) throw new ConductError(5, `rotate: the run is ${state.phase}; there is nothing to hand over`);
+  // The analysis is written before the showcase opens; a rotation then would
+  // be missing from it. The showcase ends the turn anyway: a fresh session
+  // resumes it with next --resume.
+  if (state.phase === 'showcase') throw new ConductError(5, 'rotate: the run analysis is written and the showcase waits on the operator; a fresh session resumes it with next --resume, no rotation needed');
   const open = openRotation(state);
   if (open) throw new ConductError(5, `rotate: rotation ${open.attempt} is open (handoff ${open.handoff}); its successor takes custody with next, or the conductor that rotated cancels it by running next from its own pane`);
   const pane = herdrPane(deps);
@@ -87,7 +108,7 @@ export function handoffText(state, rotation) {
   const on = Object.entries(state.adapters ?? {}).filter(([, adapter]) => adapter?.on).map(([name]) => name);
   const custody = [
     rotation.caller.pane ? `retire r${rotation.from} (herdr pane ${rotation.caller.pane}) with session.mjs, \`close\` then \`exit+close\`` : `confirm r${rotation.from} has ended (it ran outside herdr, so nothing can retire it for you)`,
-    ...(anchor ? [`file a paused receipt on the anchor ${anchor}`] : []),
+    ...(anchor ? [`file a paused receipt on the anchor ${anchor} (skipped while a touch waits on the operator)`] : []),
   ];
   const lanes = state.wps.filter((wp) => LIVE_STATES.includes(wp.state) || laneOccupied(wp) || wp.queue?.length);
   const bookedUsd = state.wps.reduce((total, wp) => total + (Number(wp.lane?.costUsd) || 0), 0);
@@ -104,8 +125,8 @@ export function handoffText(state, rotation) {
     '## First steps',
     '',
     `1. Read \`${join(state.pluginRoot, 'skills', 'conduct', 'SKILL.md')}\` (§ The loop, § Rotating the conductor).`,
-    `2. Run \`node ${shellLiteral(script)} next --run ${shellLiteral(state.runDir)}\`. Its first actions are custody, emitted by the run: ${custody.join('; then ')}. Perform and record each as § The loop says.`,
-    `3. The run then emits its pending action again${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''}. r${rotation.from} ran \`rotate\` before performing it, so perform it as given, then keep looping.`,
+    `2. Run \`node ${shellLiteral(script)} next --run ${shellLiteral(state.runDir)} --custody ${rotation.attempt}\`. If it exits 5, this rotation was cancelled or superseded: you are not the run's conductor, so end your turn. Otherwise its first actions are custody, emitted by the run: ${custody.join('; then ')}. Perform and record each as § The loop says.`,
+    `3. The run then emits its pending action again${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''}, or, when that was a hand-back, reads the touch back as any resume does. r${rotation.from} ran \`rotate\` before performing it, so perform it as given, then keep looping with plain \`next\`.`,
     '',
     'Never edit state.json. Never run `rotate` before custody is taken.',
     '',
@@ -116,6 +137,7 @@ export function handoffText(state, rotation) {
     `- Repo: \`${intent.repo?.path ?? ''}\` (${intent.repo?.remote ?? 'no remote'}, default branch ${intent.repo?.defaultBranch ?? 'unknown'})`,
     `- Phase: ${state.phase}; anchor: ${anchor ?? 'none'}; adapters on: ${on.join(', ') || 'none'}`,
     `- Authority: merge ${Boolean(state.authority?.merge)}, release ${Boolean(state.authority?.release)}, budget ${money(state.authority?.budgetUsd ?? 0)} (${state.authority?.metered ? 'metered by the spend adapter' : 'unmetered'}); ${spend}`,
+    `- Approved scope (binding; it can be narrower than the goal): ${line(state.authority?.scope ?? intent.goal).slice(0, 600)}${typeof state.authority?.grant === 'string' ? ` (grant \`${join(state.runDir, state.authority.grant)}\`)` : ''}${state.authority?.notes ? `; operator notes: ${line(state.authority.notes).slice(0, 400)}` : ''}`,
     '',
     '## Pending action',
     '',
@@ -188,7 +210,15 @@ export function custodyNext(state, rotation, deps) {
   if (caller && rotation.retire === null) return retireAction(state, rotation, 'close');
   if (caller && rotation.retire === 'close-failed') return retireAction(state, rotation, 'exit+close');
   if (['exit-close-failed', null].includes(rotation.retire)) return confirmAction(state, rotation);
-  if (rotation.receipt === null && state.adapters?.spine?.on && state.intent?.anchor) return receiptAction(state, rotation);
+  if (rotation.receipt === null && state.adapters?.spine?.on && state.intent?.anchor) {
+    // A touch filed on the anchor waits on the operator: a later receipt
+    // would supersede its needs_input on the board and hide an answer from
+    // the latest-receipt read-back. Custody then files nothing.
+    const filed = (state.touches ?? []).filter((touch) => touch.status === 'filed');
+    if (!filed.length) return receiptAction(state, rotation);
+    rotation.receipt = 'skipped';
+    appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-receipt-skipped', source: 'next', data: { attempt: rotation.attempt, filed: filed.map((touch) => touch.tag) } });
+  }
   rotation.status = 'custody';
   rotation.custodyAt = deps.timestamp();
   appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-taken', source: 'next', data: { attempt: rotation.attempt, from: rotation.from, to: rotation.to, retire: rotation.retire, receipt: rotation.receipt, pane: rotation.successor.pane } });

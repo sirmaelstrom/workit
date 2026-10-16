@@ -18,7 +18,7 @@ import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from '
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, filedLength, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
-import { custodyNext, openRotation, recordCustody, rotate } from './lib/rotate.mjs';
+import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -28,7 +28,7 @@ const PLUGIN_ROOT = resolve(SCRIPTS_DIR, '../../..');
 const USAGE = `usage: conduct.mjs <verb> [flags]
   intake --goal <text> --repo <abs> [--anchor <quest id>] [--budget <usd>] [--lanes 1-4] [--agent claude|codex]
          [--adapter <name>]... [--no-adapter <name>]... [--release <json file>] [--runs-root <dir>]
-  next --run <dir>                 (also: next --resume <dir>, or conduct.mjs --resume <dir>)
+  next --run <dir> [--custody <n>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
   await-answer --run <dir> --touch <n> [--once] [--interval-ms <ms>] [--timeout-ms <ms>]
@@ -48,7 +48,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name']);
+  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -99,9 +99,17 @@ function openRun(flags, deps) {
   return { runDir, state };
 }
 
-// A state transaction: load, change and save under the run's lock.
-function transact(flags, deps, fn) {
-  return withStateLock(runDirFlag(flags), deps, () => fn(openRun(flags, deps).state));
+// A state transaction: load, change and save under the run's lock. While a
+// rotation is open only custody moves the run: every other writer is refused
+// unless it is one of next, record (custody steps only), answer (the
+// operator's) or rotate (which names the open rotation itself).
+function transact(flags, deps, fn, { duringRotation = false } = {}) {
+  return withStateLock(runDirFlag(flags), deps, () => {
+    const { state } = openRun(flags, deps);
+    const rotation = duringRotation ? null : openRotation(state);
+    if (rotation) throw new ConductError(5, `rotation ${rotation.attempt} is open: custody comes first (next), and nothing else changes the run until it is taken or cancelled`);
+    return fn(state);
+  });
 }
 
 function stamp(state, spec) {
@@ -306,11 +314,15 @@ async function intake(tokens, deps) {
 
 // `next` (and `--resume`) on a pending spine hand-back is the resume: the
 // hand-back is consumed and the touch is read back again.
+// `--custody <n>` is a rotated-in successor's first call: refused when
+// rotation n was cancelled or superseded (lib/rotate.mjs custodyFence).
 async function next(tokens, deps) {
-  return transact(parseFlags(tokens), deps, async (state) => {
+  const flags = parseFlags(tokens);
+  return transact(flags, deps, async (state) => {
+    if (flags.custody !== undefined) custodyFence(state, flags.custody);
     if (state.pending?.handBack) resumeHandBack(state, deps);
     return { out: { ok: true, action: await emit(state, deps) } };
-  });
+  }, { duringRotation: true });
 }
 
 function readResult(flags, deps) {
@@ -353,6 +365,7 @@ async function record(tokens, deps) {
     const rotation = openRotation(state);
     if (rotation) {
       const step = rotation.action;
+      if (rotatedOut(state, deps)) throw new ConductError(5, `rotation ${rotation.attempt} is open and you are r${rotation.from}, the conductor that rotated: only its successor records custody`);
       if (!step || step.id !== id) throw new ConductError(5, `action ${id} is not the pending action: custody of rotation ${rotation.attempt} comes first (${step ? `record ${step.id}` : 'run next'})`);
       recordCustody(state, rotation, step, readResult(flags, deps), deps);
       state.lastRecorded = id;
@@ -387,7 +400,7 @@ async function record(tokens, deps) {
     // exit 3, no authority, and the next action re-files the touch.
     if (outcome?.refused) return { code: 3, out: { ok: false, refused: outcome.refused, recorded: id, phase: state.phase, action: next } };
     return { out: { ok: true, phase: state.phase, action: next } };
-  });
+  }, { duringRotation: true });
 }
 
 // An operator's answer to a core touch. stdinIsTTY comes from isatty(0) and
@@ -405,7 +418,7 @@ async function answer(tokens, deps) {
     appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'answered', source: 'tty', data: { n: touch.n, key: touch.answer.key } });
     saveState(state, deps);
     return { out: { ok: true, touch } };
-  });
+  }, { duringRotation: true });
 }
 
 async function status(tokens, deps) {
@@ -552,7 +565,7 @@ async function rotateVerb(tokens, deps) {
     const out = rotate(state, { why: text('why'), model: text('model'), effort: text('effort'), name: text('name') }, deps);
     saveState(state, deps);
     return { out: { ok: true, ...out } };
-  });
+  }, { duringRotation: true });
 }
 
 // The answer adapter's lookup and wait (lib/answer.mjs): read-only, unlocked.
