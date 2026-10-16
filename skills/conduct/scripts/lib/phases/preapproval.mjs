@@ -100,6 +100,8 @@ function touchOne(state, deps = {}, { bound = false } = {}) {
     noCi
       ? `CI workflows that can gate a PR: ${intent.ciWorkflows ?? 'unreadable, treated as 0'}. No CI workflows exist on ${intent.repo.remote} that can gate a PR, so only hold-at-PR authority is offered: (b), (c) capped at no merge and no release, or (d).`
       : `CI workflows that can gate a PR: ${ci}`,
+    // The greenfield trigger widens WP-01's scope: the operator sees it before approving.
+    ...(intent.greenfield?.on ? [`Greenfield (${intent.greenfield.why.join('; ')}): WP-01 (WP-00 in a one-WP run) also adds the bootstrap manifest's missing files, and its gate holds until \`conduct bootstrap --offline\` passes.`] : []),
     budget,
   ].join('\n');
   const fits = (text) => filedLength(state, 1, text) <= QUESTION_MAX;

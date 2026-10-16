@@ -4,7 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootstrap, fillTemplate, loadManifest, repoTemplates, runBootstrapVerb } from './bootstrap.mjs';
+import {
+  NEAR_EMPTY_COMMITS, bindBootstrap, bootstrap, bootstrapBrief, bootstrapScope, bootstrapWp, detectGreenfield, fillTemplate, loadManifest, repoName,
+  repoTemplates, runBootstrapVerb,
+} from './bootstrap.mjs';
 import { runConduct } from '../conduct.mjs';
 
 const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
@@ -159,4 +162,90 @@ test('the verb: exit 3 with gaps, 0 once complete, 2 without --repo', async (t) 
   assert.equal(JSON.parse(viaCli.stdout).ok, true);
   const usage = await runConduct(['bootstrap'], { ...d, importModule: (rel) => import(new URL(`../${rel}`, import.meta.url)) });
   assert.equal(usage.code, 2);
+});
+
+// ---- the /conduct wiring (quest 977d3efb: trigger (c), writer (d)) ----
+
+test('mint re-entry rebinds the same scope without a second bootstrap-bound event (council review 1)', async (t) => {
+  const { next: mintNext } = await import('./phases/mint.mjs');
+  const repo = fixture(t);
+  let stamps = 0;
+  const d = { ...deps(), timestamp: () => { stamps += 1; return '2026-10-16T00:00:00.000Z'; } };
+  const state = {
+    pluginRoot: PLUGIN_ROOT, phase: 'mint', seq: 0, spec: { depth: 'none' }, adapters: { spine: { on: false } },
+    intent: { repo: { path: repo }, greenfield: { on: true, why: ['no CI workflow can gate a PR'] } }, wps: [{ id: 'WP-00', files: [], creates: [] }],
+  };
+  mintNext(state, d);
+  assert.equal(stamps, 1);
+  assert.equal(state.intent.greenfield.bound.wp, 'WP-00');
+  // A deep re-parse drops wp.bootstrap; the recomputed binding is the same one.
+  state.wps = [{ id: 'WP-00', files: [], creates: [] }];
+  mintNext(state, d);
+  assert.equal(stamps, 1, 'no second event for the same binding');
+  assert.ok(state.wps[0].bootstrap, 'the re-parsed WP is bound again');
+});
+
+test('repoName: origin\'s repository names the templates, not a lane worktree\'s directory (council review 1)', () => {
+  const exec = (url) => (program, args) => (args.includes('remote.origin.url') ? { code: url ? 0 : 1, stdout: url ? `${url}\n` : '', stderr: '' } : { code: 1, stdout: '', stderr: '' });
+  const wt = join('/', 'projects', 'shop-wt-demo-wp-01');
+  assert.equal(repoName(wt, exec('https://github.com/o/shop.git')), 'shop');
+  assert.equal(repoName(wt, exec('git@github.com:o/shop.git')), 'shop');
+  assert.equal(repoName(wt, exec('https://github.com/o/shop')), 'shop');
+  assert.equal(repoName(wt, exec(null)), 'shop-wt-demo-wp-01', 'no origin: the directory');
+});
+
+test('detectGreenfield: on for no CI workflow or a near-empty history; an unread count is not a trigger', () => {
+  assert.deepEqual(detectGreenfield({ ciWorkflows: 0, commits: 40 }), { on: true, why: ['no CI workflow can gate a PR'], commits: 40 });
+  assert.deepEqual(detectGreenfield({ ciWorkflows: 2, commits: NEAR_EMPTY_COMMITS }), { on: true, why: [`${NEAR_EMPTY_COMMITS} commits on HEAD`], commits: NEAR_EMPTY_COMMITS });
+  assert.deepEqual(detectGreenfield({ ciWorkflows: 2, commits: 1 }).why, ['1 commit on HEAD']);
+  assert.equal(detectGreenfield({ ciWorkflows: 0, commits: 1 }).why.length, 2);
+  assert.equal(detectGreenfield({ ciWorkflows: 2, commits: NEAR_EMPTY_COMMITS + 1 }).on, false);
+  assert.deepEqual(detectGreenfield({ ciWorkflows: null, commits: null }), { on: false, why: [], commits: null });
+});
+
+test('bootstrapScope: every failing applicable item\'s path; a stack counts when the repo has or the WP plans its file; creates are the absent ones', (t) => {
+  const repo = fixture(t, { 'README.md': '# mine\n', 'CLAUDE.md': '# no import\n', '.github/workflows/build.yml': 'on: push\n' });
+  // Council review 1: a stack the repo neither has nor the WP plans adds nothing.
+  const bare = bootstrapScope(repo, { deps: deps(), templates: REPO_TEMPLATES, wpFiles: ['src/main.rs'] });
+  assert.ok(!bare.files.includes('.nvmrc') && !bare.files.includes('package.json'));
+  const scope = bootstrapScope(repo, { deps: deps(), templates: REPO_TEMPLATES, wpFiles: ['package.json', 'src/index.ts'] });
+  assert.ok(!scope.files.includes('README.md'), 'a passing item adds no path');
+  for (const path of ['CLAUDE.md', 'LICENSE', '.github/workflows/ci.yml', '.github/workflows/build.yml', '.nvmrc', 'package.json', '.prettierrc', '.github/dependabot.yml']) {
+    assert.ok(scope.files.includes(path), `${path} is in scope`);
+  }
+  assert.equal(scope.files.filter((path) => path === '.github/dependabot.yml').length, 1, 'a shared path is listed once');
+  assert.ok(!scope.creates.includes('CLAUDE.md') && !scope.creates.includes('.github/workflows/build.yml'), 'an existing file is not a Create path');
+  assert.ok(scope.creates.includes('LICENSE') && scope.creates.includes('.github/workflows/ci.yml'));
+  assert.ok(scope.failing.includes('claude-stub') && scope.failing.includes('engines'));
+});
+
+test('bootstrapWp and bindBootstrap: WP-01 of a deep spec, else WP-00; Files and Create paths widen once', (t) => {
+  assert.equal(bootstrapWp([{ id: 'WP-02' }, { id: 'WP-01' }]).id, 'WP-01');
+  assert.equal(bootstrapWp([{ id: 'WP-00' }]).id, 'WP-00');
+  // Council review 1: a workshop numbered from WP-02 binds its first WP, never nothing.
+  assert.equal(bootstrapWp([{ id: 'WP-03', wave: 1 }, { id: 'WP-02', wave: 2 }, { id: 'WP-10', wave: 1 }]).id, 'WP-03');
+  assert.equal(bootstrapWp([]), null);
+  const repo = fixture(t, { 'README.md': '# mine\n' });
+  const state = {
+    pluginRoot: PLUGIN_ROOT, intent: { repo: { path: repo }, greenfield: { on: true, why: ['no CI workflow can gate a PR'] } },
+    wps: [{ id: 'WP-01', files: ['src/a.ts', 'LICENSE'], creates: ['src/a.ts'] }, { id: 'WP-02', files: ['src/b.ts'], creates: [] }],
+  };
+  const wp = bindBootstrap(state, deps());
+  assert.equal(wp.id, 'WP-01');
+  assert.equal(wp.files.filter((path) => path === 'LICENSE').length, 1);
+  assert.ok(wp.files.includes('src/a.ts') && wp.files.includes('.github/workflows/ci.yml'));
+  assert.ok(wp.creates.includes('.github/workflows/ci.yml') && !wp.creates.includes('README.md'));
+  assert.deepEqual(state.wps[1].files, ['src/b.ts'], 'no other WP is touched');
+  assert.ok(wp.bootstrap.failing.includes('ci'));
+  // Review #248: both paths are quoted, so a path with a space survives the shell.
+  const brief = bootstrapBrief(state, wp, '/my wt');
+  const script = join(PLUGIN_ROOT, 'skills', 'conduct', 'scripts', 'conduct.mjs');
+  assert.match(brief, /^## Greenfield bootstrap$/m);
+  assert.ok(brief.includes(`node "${script}" bootstrap --repo "/my wt" --write --offline`), brief);
+  assert.ok(brief.includes('`.github/workflows/ci.yml`'));
+  assert.ok(brief.includes(`node "${script}" bootstrap --repo "/my wt"\` once (read-only`), 'the settings fix comes from a read-only online run the brief names');
+  // Off: nothing changes.
+  const off = { ...state, intent: { ...state.intent, greenfield: { on: false, why: [] } }, wps: [{ id: 'WP-01', files: [] }] };
+  assert.equal(bindBootstrap(off, deps()), null);
+  assert.deepEqual(off.wps[0], { id: 'WP-01', files: [] });
 });

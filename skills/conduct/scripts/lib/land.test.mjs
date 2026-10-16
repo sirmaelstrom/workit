@@ -82,11 +82,14 @@ const TWO_WAY = '## Merge danger\n\nDoor: two-way\nBlast radius: the fixture WP\
 // row; without it, a `renames` pair collapses to its destination (git's default).
 function gateExec(o = {}) {
   const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, threads = 0, inflight = 0,
-    config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], revLists = {}, diffQuiet = 0, patchIds = {}, diffs = {}, pr = {} } = o;
+    config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], revLists = {}, diffQuiet = 0, patchIds = {}, diffs = {}, pr = {},
+    bootstrap = null, bootStatus = ok('') } = o;
   const calls = [];
   const exec = (program, args, options = {}) => {
     calls.push({ program, args, input: options.input });
     const has = (flag) => args.includes(flag);
+    if (program === 'node' && args[1] === 'bootstrap' && bootstrap) return bootstrap;
+    if (program === 'git' && args[2] === 'status' && args.includes('--ignored')) return bootStatus;
     if (program === 'git' && args[2] === 'rev-parse') return ok(`${args[3] === 'HEAD' ? head : BASE_TIP}\n`);
     if (program === 'gh' && args[1] === 'view') {
       // A WP's view asks for the body (its `## Merge danger`, fca05d92); the release's does not.
@@ -1263,6 +1266,39 @@ test('threads get resolved (D19.9): table → replies → thread ids → resolve
 
 const GATE_ACTION = { kind: 'shell', step: 'gate', part: 'gate', command: ['node', 'conduct.mjs', 'land', 'gate'] };
 const gateResult = (out) => ({ code: 5, stdout: gateJson({ failures: ['x'], ...out }), stderr: '' });
+
+// Quest 977d3efb: the greenfield bootstrap WP's gate runs `bootstrap --offline`
+// on its worktree; exit 3 fails it with cause `bootstrap`, an amendment.
+test('gateCheck: the bootstrap WP fails with cause bootstrap while the verb exits 3; other WPs never run it', () => {
+  const failing = { code: 3, stdout: JSON.stringify({ ok: false, failing: ['readme: missing (none of README.md)', 'ci: missing (no file matches .github/workflows/*.yml)'] }), stderr: '' };
+  const boot = { files: ['README.md'], failing: ['readme'] };
+  const exec = gateExec({ bootstrap: failing });
+  const red = gateCheck(makeState(), makeWp({ bootstrap: boot }), { exec, now: () => NOW });
+  assert.equal(red.ok, false);
+  assert.deepEqual(red.causes, ['bootstrap']);
+  assert.match(red.failures[0], /^bootstrap check fails: readme: missing/);
+  const call = exec.calls.find((c) => c.program === 'node' && c.args[1] === 'bootstrap');
+  assert.deepEqual(call.args, [join(PLUGIN, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'bootstrap', '--repo', WT, '--offline']);
+  const amend = recordLandStep(makeState(), makeWp({ bootstrap: boot }), GATE_ACTION, { code: 5, stdout: JSON.stringify(red), stderr: '' }, { now: () => NOW });
+  assert.deepEqual([amend.outcome, amend.reason], ['amend', red.failures[0]]);
+  const passed = ok(JSON.stringify({ ok: true, failing: [], items: [{ id: 'readme', found: 'README.md' }, { id: 'ci', found: '.github/workflows/ci.yml, .github/workflows/lint.yml' }] }));
+  const greenExec = gateExec({ bootstrap: passed });
+  assert.equal(gateCheck(makeState(), makeWp({ bootstrap: boot }), { exec: greenExec, now: () => NOW }).ok, true);
+  const statusCall = greenExec.calls.find((c) => c.program === 'git' && c.args[2] === 'status');
+  assert.deepEqual(statusCall.args.slice(-4), ['--', 'README.md', '.github/workflows/ci.yml', '.github/workflows/lint.yml'], 'every file the report read is checked against HEAD');
+  // Council review 1: a pass on files the lane never committed is not a pass.
+  const uncommitted = gate(makeState(), makeWp({ bootstrap: boot }), { bootstrap: passed, bootStatus: ok('?? README.md\n M .github/workflows/ci.yml\n') });
+  assert.deepEqual(uncommitted.causes, ['bootstrap']);
+  assert.match(uncommitted.failures[0], /not committed at HEAD: README\.md, \.github\/workflows\/ci\.yml$/);
+  assert.deepEqual(gate(makeState(), makeWp({ bootstrap: boot }), { bootstrap: passed, bootStatus: { code: 128, stdout: '', stderr: 'fatal: bad' } }).causes, ['infra']);
+  assert.deepEqual(gate(makeState(), makeWp({ bootstrap: boot }), { bootstrap: ok(JSON.stringify({ ok: true })) }).causes, ['infra'], 'a pass with no items is unreadable');
+  const broken = gate(makeState(), makeWp({ bootstrap: boot }), { bootstrap: { code: 2, stdout: '', stderr: 'bootstrap needs --repo' } });
+  assert.deepEqual(broken.causes, ['infra']);
+  // A WP without the flag never runs the verb, even when it would fail.
+  const plain = gateExec({ bootstrap: failing });
+  assert.equal(gateCheck(makeState(), makeWp(), { exec: plain, now: () => NOW }).ok, true);
+  assert.equal(plain.calls.filter((c) => c.args[1] === 'bootstrap').length, 0);
+});
 
 test('recordLandStep outcomes (D19.15)', () => {
   const state = makeState();

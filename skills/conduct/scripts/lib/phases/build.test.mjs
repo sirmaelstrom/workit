@@ -582,6 +582,42 @@ test('brief preflight refuses a crate-relative typo before prompting and accepts
   await build.record(h.state, action, {}, h.deps);
 });
 
+// Quest 977d3efb, writer (d): the bootstrap WP's brief carries the verb, its
+// absent manifest paths pass the preflight as Create paths, and a brief
+// written without the section is refused.
+test('the greenfield bootstrap WP\'s brief appends the bootstrap section; a brief without it is refused', async (t) => {
+  const h = harness(t, { herdr: true, wps: [{ id: 'WP-01', files: ['lib/state.mjs'], wave: 1 }] });
+  h.state.intent.greenfield = { on: true, why: ['no CI workflow can gate a PR'], commits: 1 };
+  Object.assign(h.state.wps[0], {
+    files: ['lib/state.mjs', '.github/workflows/ci.yml'], creates: ['.github/workflows/ci.yml'],
+    bootstrap: { files: ['.github/workflows/ci.yml'], failing: ['ci'] },
+  });
+  const action = await drive(h, { until: (a) => a.wpId === 'WP-01' && a.step === 'brief' });
+  assert.match(action.append, /^## Greenfield bootstrap$/m);
+  assert.match(action.instruction, /Then append the append text verbatim/);
+  await perform(h, action);
+  assert.match(readFileSync(action.outPath, 'utf8'), /bootstrap --repo \S+ --write --offline/);
+  writeFileSync(action.outPath, readFileSync(action.outPath, 'utf8').replace(action.append, ''));
+  assert.throws(() => build.record(h.state, action, {}, h.deps), /does not carry the appended section/);
+  // Council review 1: the heading alone is not the section.
+  await perform(h, action);
+  const run = action.append.split('\n').find((line) => line.startsWith('Run `node'));
+  writeFileSync(action.outPath, readFileSync(action.outPath, 'utf8').replace(run, ''));
+  assert.throws(() => build.record(h.state, action, {}, h.deps), /does not carry the appended section/);
+  // Review #248: the section quoted inside a code fence is not the brief's own instruction.
+  await perform(h, action);
+  const plainBrief = readFileSync(action.outPath, 'utf8').replace(action.append, '');
+  writeFileSync(action.outPath, `${plainBrief}\n## Artifacts\n\n\`\`\`markdown\n${action.append}\n\`\`\`\n`);
+  assert.throws(() => build.record(h.state, action, {}, h.deps), /outside any code fence/);
+  // CRLF line endings are forgiven.
+  await perform(h, action);
+  writeFileSync(action.outPath, readFileSync(action.outPath, 'utf8').replace(/\n/g, '\r\n'));
+  await build.record(h.state, action, {}, h.deps);
+  // A WP without the flag gets no append.
+  const plain = harness(t, { herdr: true, wps: [{ id: 'WP-01', files: ['lib/state.mjs'], wave: 1 }] });
+  assert.equal((await drive(plain, { until: (a) => a.step === 'brief' })).append, undefined);
+});
+
 test('a Rust seat starting after capacity wait gets its own deadline, while heartbeats cannot hide a dead seat', async (t) => {
   const h = harness(t, { herdr: true, council: true, wps: [TWO[0], { ...TWO[1], tier: 'T2' }] });
   const action = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'council' && a.part === 'review' });

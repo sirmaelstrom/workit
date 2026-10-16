@@ -6,6 +6,7 @@ import { basename, join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { parseDesignDirection, parseWorkPackages } from '../schedule.mjs';
 import { wpRecord } from './spec.mjs';
+import { bindBootstrap } from '../bootstrap.mjs';
 
 // spine_author is idempotent per (campaign, key), so a bare `wp-01`, or one
 // keyed by the goal's slug alone, would reuse another run's quest: the key
@@ -43,8 +44,24 @@ function workshopWps(state, deps) {
   appendEvent(state, deps, { step: 'mint', event: 'minted', data: { wps: parsed.length, source: 'workshop' } });
 }
 
+// A greenfield run (intake's trigger, quest 977d3efb) binds the bootstrap
+// manifest's paths to WP-01 (else WP-00) once, before any quest is minted.
+// A deep mint re-entered before its spine_author result re-parses the
+// workshop, so the binding is recomputed; the event is written only when the
+// binding differs from the one already recorded (council review 1).
+function bindGreenfield(state, deps) {
+  if (!state.intent.greenfield?.on || state.wps.some((wp) => wp.bootstrap)) return;
+  const wp = bindBootstrap(state, deps);
+  if (!wp) throw new ConductError(2, 'spec defect: a greenfield run needs a WP to carry the bootstrap, and the spec has none');
+  const bound = { wp: wp.id, files: wp.bootstrap.files, failing: wp.bootstrap.failing };
+  if (JSON.stringify(state.intent.greenfield.bound ?? null) === JSON.stringify(bound)) return;
+  state.intent.greenfield.bound = bound;
+  appendEvent(state, deps, { step: 'mint', event: 'bootstrap-bound', data: bound });
+}
+
 export function next(state, deps) {
   if (state.spec.depth === 'deep') workshopWps(state, deps);
+  bindGreenfield(state, deps);
   if (!state.adapters.spine?.on || state.spec.depth !== 'deep') {
     if (state.adapters.spine?.on) state.wps[0].questId = state.intent.anchor;
     state.phase = 'build';
