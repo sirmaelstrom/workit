@@ -375,6 +375,9 @@ export function ratify(state, { wpId, paths, why }, deps) {
 const laneWork = (wp) => (wp.amendment ? 'amending' : 'dispatched');
 const hasLane = (wp) => (wp.lane?.backend && wp.lane?.worktree ? null : `${wp.id} has no lane worktree (it was never dispatched)`);
 const laneExited = (wp) => !wp.lane?.startedAt || Boolean(wp.lane?.exitedAt);
+// The first head no delta check has seen: where the first amendment since the
+// last land started, else the latest review's head (a pre-fix saved state).
+const deltaSince = (wp) => wp.deltaFrom ?? (wp.reviews ?? []).at(-1)?.head ?? null;
 const keepStops = (state, wp) => (wp.queue ?? []).filter((action) => action.step === 'stop');
 const firstProblem = (...checks) => checks.reduce((found, check) => found ?? check(), null);
 
@@ -710,6 +713,9 @@ function startAmendment(state, wp, deps, { retry = false, answer = null, ...fiel
   const prev = wp.amendment;
   const n = (prev?.n ?? 0) + 1;
   wp.amendment = retry && prev ? { ...prev, n, retryReason: fields.reason } : { n, since: wp.pr?.head ?? null, ...fields, kind: fields.kind ?? 'check' };
+  // The delta boundary is the first amendment's start since the WP last
+  // reached land; a later ruling's amendment does not move it past fixes.
+  wp.deltaFrom ??= wp.pr?.head ?? null;
   setState(state, wp, 'amending', fields.reason, deps);
   wp.stage = 'wait';
   const backend = backendOf(state, wp, deps);
@@ -878,7 +884,11 @@ function expand(state, wp, deps) {
       wp.checkAmends = 0;
       if (wp.state !== 'pr') setState(state, wp, 'pr', null, deps);
       if (findings) return undefined;
-      if (!wp.reviews?.length) return go([prDiff(state)], null);
+      if (!wp.reviews?.length) {
+        // A full review covers every amendment before it.
+        wp.deltaFrom = null;
+        return go([prDiff(state)], null);
+      }
       return go([], 'delta');
     }
     case 'reviewed': {
@@ -899,13 +909,15 @@ function expand(state, wp, deps) {
       // A ruling may start after executable findings fixes. Its amendment's
       // `since` is not the boundary of work the full review covered.
       const review = (wp.reviews ?? []).at(-1);
-      const since = review?.head;
+      const since = deltaSince(wp);
       if (!since || since === wp.pr?.head || review.scope !== 'full') return go([], 'land');
       return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
     }
     case 'land':
       // A gate amendment's lane work ends here: its gate-fix range is closed at the head it pushed.
       for (const fix of wp.gateFixes ?? []) fix.to ??= wp.pr?.head ?? null;
+      // Every head before land has passed its delta check; the rebase starts a new line.
+      wp.deltaFrom = null;
       if (mergeLockFor(state, wp) === 'other') return go([waitSpec('rebase', WAIT_MS, `Wait: ${state.mergeLock.wpId} holds the merge lock.`)], 'land');
       if (wp.state !== 'gate') setState(state, wp, 'gate', null, deps);
       return go(rebaseActions(state, wp), 'gate');
@@ -1458,7 +1470,7 @@ function recordOwn(state, wp, action, result, deps) {
       const absolute = changed.map((path) => join(wp.lane.worktree, path));
       wp.queue.shift();
       if (action.part === 'amend-diff') {
-        const since = (wp.reviews ?? []).at(-1)?.head;
+        const since = deltaSince(wp);
         // A saved action from an older conductor may have diffed from a
         // later amendment. Recompute the range rather than trust its result.
         if (action.command.at(-2) !== since) return (wp.stage = 'delta');
