@@ -176,10 +176,14 @@ function reviewSteps(state, wp, mode, meta) {
 
 const latestRound = (wp) => Math.max(0, ...(wp.reviews ?? []).map((review) => review.round ?? 0));
 
-// One delta pass, before any rebase, so --since names an ancestor. A T2 WP
-// with the council on gets a council round dispatched as scope 'delta'.
+// One delta pass from an ancestor. A reset may supply a baseline it verified
+// after a rebase; an unverified pre-rebase head still requires a full review.
 export function deltaReviewActions(state, wp, sinceHead, { report = null, changedPaths = [] } = {}) {
-  if ((wp.rebases ?? []).some((rebase) => rebase.from === sinceHead && rebase.from !== rebase.to)) {
+  const recovery = wp.deltaRecovery;
+  const latest = (wp.reviews ?? []).at(-1);
+  const verified = latest?.scope === 'full' && recovery?.reviewedHead === latest.head
+    && recovery?.baseline === sinceHead && recovery?.head === wp.pr.head;
+  if (!verified && (wp.rebases ?? []).some((rebase) => rebase.from === sinceHead && rebase.from !== rebase.to)) {
     throw new ConductError(2, `${wp.id}: no delta review after a rebase (${sinceHead.slice(0, 7)} is not an ancestor of the rebased head); a full review is owed`);
   }
   const round = latestRound(wp) + 1;

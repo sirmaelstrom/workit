@@ -825,6 +825,94 @@ function resetFixture(t, opts = {}) {
   return h;
 }
 
+test('reset-wp --to delta: snapshots, reviews a report-only tail, then restarts the stopped lane for new findings', async (t) => {
+  const h = resetFixture(t, { herdr: true, council: true });
+  const wp = h.wp('WP-02');
+  wp.tier = 'T2';
+  h.synth = [{ findings: 2, seats: ['gpt-6.1-sol'] }];
+  const reviewed = sha('a', 2);
+  const head = sha('c', 2);
+  wp.pr.head = head;
+  wp.reviews = [{ round: 1, scope: 'full', head: reviewed, findings: 0 }];
+  h.heads[wp.id] = head;
+  h.rules.unshift(
+    [/^git -C \S+ rev-parse --verify ([0-9a-f]+)\^\{commit\}$/, (h, m) => ok(`${m[1]}\n`)],
+    [/^git -C \S+ rev-parse HEAD$/, () => ok(`${head}\n`)],
+    [/^git -C \S+ status --porcelain$/, () => ok()],
+  );
+  h.state.mergeLock = { wpId: wp.id };
+  wp.gate = { ok: false, head, failures: ['review does not cover head'], causes: ['review-uncovered'] };
+  saveState(h.state, h.deps);
+  const before = readFileSync(join(h.runDir, 'state.json'), 'utf8');
+  const reset = await runConduct(['reset-wp', '--run', h.runDir, '--wp', wp.id, '--to', 'delta', '--baseline', reviewed, '--why', 'review the uncovered fixes'], h.overrides());
+  assert.equal(reset.code, 0, reset.stdout);
+  const result = JSON.parse(reset.stdout);
+  assert.equal(readFileSync(result.snapshot, 'utf8'), before);
+  h.disk = true;
+  assert.deepEqual([h.wp(wp.id).state, h.wp(wp.id).stage, h.wp(wp.id).gate, h.current().mergeLock], ['pr', 'delta', null, null]);
+  assert.deepEqual(result.undeferred, ['WP-03']);
+  const diff = await drive(h, { until: (a) => a.part === 'amend-diff' });
+  assert.equal(diff.command.at(-2), reviewed);
+  const start = await drive(h, { until: (a) => ['start', 'rebase'].includes(a.step) });
+  assert.equal(h.wp(wp.id).reviews.at(-1).scope, 'delta', 'an explicit recovery reviews even a report-only tail');
+  assert.equal(start.step, 'start', 'new findings re-start the lane stopped during the original block');
+  await recordPending(h, await perform(h, start));
+  const prompt = await drive(h, { until: (a) => a.step === 'prompt' });
+  assert.ok(prompt.command.includes('--amendment'));
+  assert.equal(h.wp(wp.id).lane.exitedAt, null);
+  assert.equal(h.events().filter((e) => e.event === 'wp-reset').length, 1);
+});
+
+test('a refused delta reset writes no snapshot and leaves run state and events untouched', (t) => {
+  for (const [to, baseline, review, expected] of [
+    ['delta', null, { scope: 'full', head: sha('a', 2) }, 2],
+    ['land', sha('a', 2), { scope: 'full', head: sha('a', 2) }, 2],
+    ['delta', sha('a', 2), { scope: 'delta', head: sha('a', 2) }, 5],
+  ]) {
+    const h = resetFixture(t);
+    h.wp('WP-02').pr.head = sha('c', 2);
+    h.wp('WP-02').reviews = [review];
+    const before = JSON.stringify(h.state);
+    const events = h.events();
+    let snapshots = 0;
+    assert.throws(() => build.resetWp(h.state, { wpId: 'WP-02', to, baseline, why: 'a ruling' }, h.deps, { beforeChange: () => { snapshots += 1; } }), { code: expected });
+    assert.equal(snapshots, 0);
+    assert.equal(JSON.stringify(h.state), before);
+    assert.deepEqual(h.events(), events);
+  }
+});
+
+test('a moved delta-recovery candidate blocks without reviewing and can be reset again', async (t) => {
+  for (const pendingDiff of [false, true]) {
+    const h = resetFixture(t);
+    const wp = h.wp('WP-02');
+    const reviewed = sha('a', 2);
+    const previous = sha('b', 2);
+    const head = sha('c', 2);
+    Object.assign(wp, {
+      state: 'pr', stage: 'delta', pr: { number: 102, head },
+      reviews: [{ scope: 'full', head: reviewed, round: 1 }],
+      deltaRecovery: { reviewedHead: reviewed, baseline: reviewed, head: previous, kind: 'ancestor' },
+    });
+    if (pendingDiff) {
+      const action = { id: '99-review', wpId: wp.id, step: 'review', part: 'amend-diff', kind: 'shell', command: ['git', '-C', wp.lane.worktree, 'diff', '--name-only', reviewed, previous] };
+      wp.queue = [action];
+      h.state.pending = action;
+      await recordPending(h, ok('lib/lanes.mjs\n'));
+    } else await drive(h);
+    assert.equal(wp.state, 'blocked');
+    assert.match(wp.reason, /candidate moved/);
+    assert.equal(wp.reviews.length, 1);
+    h.rules.unshift(
+      [/^git -C \S+ rev-parse --verify ([0-9a-f]+)\^\{commit\}$/, (h, m) => ok(`${m[1]}\n`)],
+      [/^git -C \S+ rev-parse HEAD$/, () => ok(`${head}\n`)],
+      [/^git -C \S+ status --porcelain$/, () => ok()],
+    );
+    assert.equal(h.reset('delta', { baseline: reviewed }).state, 'pr');
+    assert.equal(wp.deltaRecovery.head, head);
+  }
+});
+
 test('reset-wp (61d817db): the refused transitions, one row each', (t) => {
   const rows = [
     ['an unknown WP', (h) => build.resetWp(h.state, { wpId: 'WP-09', to: 'check', why: 'x' }, h.deps), 2, /no WP WP-09/],
