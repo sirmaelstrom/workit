@@ -966,7 +966,7 @@ function expand(state, wp, deps) {
         // The next council round reads this round's rulings (land.mjs t2Actions).
         const prior = join(dirname(record.path), PRIOR_ADJUDICATION_FILE);
         deps.write(prior, priorAdjudicationBody(record.body));
-        wp.priorAdjudication = prior;
+        wp.priorAdjudication = { path: prior, round: (wp.reviews ?? []).at(-1)?.round ?? null };
       }
       return go([...(record ? [record.action] : []), ...(wp.replyIds?.length ? resolveThreadActions(state, wp, wp.replyIds) : [])], 'delta');
     }
