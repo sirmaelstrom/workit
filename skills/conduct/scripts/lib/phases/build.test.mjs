@@ -1542,7 +1542,7 @@ test('council meta and args (D20): meta precedes council_review; its args; a mis
   assert.equal(h.wp('WP-02').state, 'merged');
 });
 
-test('Shopfloor WP-14: a report-only ruling after executable findings fixes reviews from the full review head', async (t) => {
+test('a report-only ruling after executable findings fixes: the delta review starts where the findings amendment did', async (t) => {
   for (const council of [false, true]) {
     const h = harness(t, { council, wps: [TWO[0], { ...TWO[1], tier: council ? 'T2' : 'T1' }] });
     const report = council ? 'report-council-amendment.md' : 'report-amendment.md';
@@ -1569,7 +1569,7 @@ test('Shopfloor WP-14: a report-only ruling after executable findings fixes revi
   }
 });
 
-test('Shopfloor resume: a saved amendment diff from after the fixes is recomputed from the reviewed head', async (t) => {
+test('resume: a saved amendment diff from after the fixes is recomputed from the reviewed head', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   h.findings = { 'WP-02': [3, 0] };
   h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
@@ -1588,7 +1588,7 @@ test('Shopfloor resume: a saved amendment diff from after the fixes is recompute
   assert.equal(h.wp('WP-02').reviews.at(-1).scope, 'delta');
 });
 
-test('Shopfloor recovery 4b: a findings amendment restarts an exited herdr lane before prompting, and keeps a live lane', async (t) => {
+test('a findings amendment restarts an exited herdr lane before prompting, and keeps a live lane', async (t) => {
   for (const exited of [true, false]) {
     const h = resetFixture(t, { herdr: true, council: true });
     const wp = h.wp('WP-02');
@@ -1960,6 +1960,23 @@ test('gate command after a no-op rebase: the amended head gets its delta review 
   // f424b70b: the gate amendment's range runs from the failed head to the head its lane pushed.
   const [fix] = h.wp('WP-02').gateFixes;
   assert.ok(fix.to && fix.to !== fix.from, JSON.stringify(fix));
+});
+
+test('gate command after a rebase that moved the head: the gate fix is reviewed from the rebased head, never across the rebase', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.gateCmdCode = { 'WP-02': [1] };
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+  assert.equal(await drive(h), null);
+  const wp = h.wp('WP-02');
+  assert.equal(wp.state, 'merged', wp.reason);
+  const [rebase] = wp.rebases;
+  assert.notEqual(rebase.from, rebase.to, 'the first rebase moved the head');
+  assert.equal(wp.reviews[0].head, rebase.from, 'the full review predates the rebase');
+  const diff = of(h, 'WP-02').find((a) => a.part === 'amend-diff');
+  assert.equal(diff.command.at(-2), rebase.to);
+  const posts = of(h, 'WP-02').filter((a) => a.step === 'post');
+  assert.deepEqual(posts.map((a) => [a.land.round, a.land.scope, a.land.since ?? null]), [[1, 'full', null], [2, 'delta', rebase.to]]);
+  assert.equal(wp.deltaFrom, null, 'land clears the delta boundary');
 });
 
 test('tier from the recipe file (D17, D19.11): contractPaths or an added test raise T1 to T2; neither stays T1; WP-00 at depth none too', async (t) => {
