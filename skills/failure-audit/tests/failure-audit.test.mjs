@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { computeDelta, readAuditHistory, MIN_SESSION_BYTES } from '../scripts/delta.mjs';
-import { aggregateResults, normalizeModel } from '../scripts/aggregate.mjs';
+import { aggregateResults, normalizeModel, DOCTRINE_BITE } from '../scripts/aggregate.mjs';
 import { compareRuns, readRun, SEEDED_TAXONOMY } from '../scripts/compare.mjs';
 
 const BIG = 'x'.repeat(2048);
@@ -92,6 +92,46 @@ test('aggregate: counts valid contributions, dedups digests, reports coverage ga
   assert.equal(agg.byModel['opus-5']['shell-string-code-write'], 2); // model normalized
   assert.deepEqual(missing, ['d3.md']); // gap surfaces, never silent
   assert.equal(normalizeModel('claude-sonnet-5'), 'sonnet-5');
+});
+
+test('aggregate: doctrine_refs join — enum counted per section, malformed refs skipped loudly, absent field adds nothing', () => {
+  const results = [{
+    agent: 'W1A',
+    sessions: [
+      { digest: 'd1.md', verdict: 'failures_found', failures: [
+        { label: 'unverified-claim-or-premise', occurrences: 3, doctrine_refs: [
+          { section: 'Claims Carry Their Refutation', bite: 'no-bite' },
+          { section: '  Specification Through Testability ', bite: 'bite' }, // trimmed
+        ] },
+        { label: 'incomplete-sweep-before-pr', doctrine_refs: [
+          { section: 'Claims Carry Their Refutation', bite: 'n-a' },
+          { section: 'Claims Carry Their Refutation', bite: 'no_bite' }, // wrong spelling: skipped, not coerced
+          { section: '', bite: 'bite' }, // no section
+          { bite: 'bite' }, // no section key
+          null,
+        ] },
+        { label: 'shell-string-code-write', doctrine_refs: 'Externalized Intent' }, // not an array
+        { label: 'false-completion-signal' }, // absent: legacy record
+      ] },
+    ],
+  }];
+  const { agg } = aggregateResults(results, ['d1.md']);
+  assert.deepEqual(DOCTRINE_BITE, ['bite', 'no-bite', 'n-a']);
+  assert.deepEqual(agg.byDoctrine, {
+    'Claims Carry Their Refutation': { bite: 0, 'no-bite': 1, 'n-a': 1 }, // per record, not per occurrence
+    'Specification Through Testability': { bite: 1, 'no-bite': 0, 'n-a': 0 },
+  });
+  assert.equal(agg.counts.doctrineRefs, 3);
+  assert.equal(agg.counts.invalidDoctrineRefsSkipped, 5);
+  assert.equal(agg.counts.failureRecords, 4); // a bad ref never drops its failure record
+  assert.equal(agg.byClass['unverified-claim-or-premise'], 3);
+});
+
+test('aggregate: a run with no doctrine_refs anywhere yields an empty join, not a missing key', () => {
+  const { agg } = aggregateResults([{ sessions: [{ digest: 'd1.md', verdict: 'clean', failures: [] }] }], ['d1.md']);
+  assert.deepEqual(agg.byDoctrine, {});
+  assert.equal(agg.counts.doctrineRefs, 0);
+  assert.equal(agg.counts.invalidDoctrineRefsSkipped, 0);
 });
 
 test('compare: failed treatment, emergent labels, and the n basis in output', (t) => {

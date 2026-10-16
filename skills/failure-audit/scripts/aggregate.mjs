@@ -23,17 +23,31 @@ export function normalizeModel(model) {
 const bump = (obj, key, n = 1) => { obj[key] = (obj[key] || 0) + n; };
 
 /**
+ * The doctrine liveness enum a failure record's `doctrine_refs[]` entry carries
+ * (fleet-instructions.md, quest b74b4cfe). `bite`: the section's situation
+ * occurred and the rule changed behavior; `no-bite`: it occurred and the rule
+ * made no difference; `n-a`: the auditor checked the section and its situation
+ * did not occur. Anything else is skipped and counted, never coerced.
+ */
+export const DOCTRINE_BITE = Object.freeze(['bite', 'no-bite', 'n-a']);
+
+/**
  * Pure aggregation over parsed auditor result objects.
  * `manifestDigests` (string[]) defines required coverage.
  */
 export function aggregateResults(results, manifestDigests) {
   const agg = {
-    counts: { sessions: 0, duplicateSessionsSkipped: 0, invalidEntriesSkipped: 0, nonManifestEntriesSkipped: 0, failureRecords: 0, frictionEventTotal: 0 },
+    counts: { sessions: 0, duplicateSessionsSkipped: 0, invalidEntriesSkipped: 0, nonManifestEntriesSkipped: 0, failureRecords: 0, frictionEventTotal: 0, doctrineRefs: 0, invalidDoctrineRefsSkipped: 0 },
     verdicts: {},
     byClass: {},
     byModel: {},
     bySeverity: {},
     byCaught: {},
+    // section → { bite, no-bite, n-a }, counted per failure record (not per
+    // occurrence). Keyed by the section string the auditor gave; until the
+    // DOCTRINE section-id grammar ships that is the heading text, so a renamed
+    // heading splits its history across two keys.
+    byDoctrine: {},
     taxonomyNotes: [],
   };
   const manifestSet = new Set(manifestDigests ?? []);
@@ -62,6 +76,16 @@ export function aggregateResults(results, manifestDigests) {
         bump(agg.byModel[model], f.label, occ);
         bump(agg.bySeverity, f.severity || 'unspecified');
         bump(agg.byCaught, f.caught_by || 'unspecified');
+        // Optional field: a record without it (every pre-2026-10-16 run) adds
+        // nothing. A present-but-malformed field is skipped LOUDLY.
+        if (f.doctrine_refs !== undefined && !Array.isArray(f.doctrine_refs)) agg.counts.invalidDoctrineRefsSkipped++;
+        for (const ref of Array.isArray(f.doctrine_refs) ? f.doctrine_refs : []) {
+          const section = typeof ref?.section === 'string' ? ref.section.trim() : '';
+          if (!section || !DOCTRINE_BITE.includes(ref?.bite)) { agg.counts.invalidDoctrineRefsSkipped++; continue; }
+          agg.counts.doctrineRefs++;
+          agg.byDoctrine[section] ??= Object.fromEntries(DOCTRINE_BITE.map((b) => [b, 0]));
+          agg.byDoctrine[section][ref.bite]++;
+        }
       }
     }
   }
@@ -88,6 +112,8 @@ function main(argv) {
   fs.writeFileSync(path.join(runDir, 'aggregate.json'), JSON.stringify(agg, null, 2));
   console.log(`aggregate.json written: ${agg.counts.sessions} sessions, ${agg.counts.failureRecords} failure records, verdicts ${JSON.stringify(agg.verdicts)}`);
   if (agg.counts.invalidEntriesSkipped) console.log(`⚠ invalid entries skipped: ${agg.counts.invalidEntriesSkipped}`);
+  console.log(`doctrine refs: ${agg.counts.doctrineRefs} across ${Object.keys(agg.byDoctrine).length} section(s)`);
+  if (agg.counts.invalidDoctrineRefsSkipped) console.log(`⚠ invalid doctrine_refs entries skipped: ${agg.counts.invalidDoctrineRefsSkipped}`);
   if (agg.counts.nonManifestEntriesSkipped) console.log(`⚠ non-manifest entries skipped (calibration leakage?): ${agg.counts.nonManifestEntriesSkipped}`);
   if (missing.length > 0) {
     console.error(`COVERAGE GAP — ${missing.length} manifest digest(s) with no valid audit entry:`);
