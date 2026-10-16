@@ -643,7 +643,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   const lensesPresent = [...new Set(docs.map((item) => item.lens).filter(Boolean))];
   if (lensesPresent.length < 2 && !opts.singleLens) {
     const carried = lensesPresent.length === 1 ? `only the \`${lensesPresent[0]}\` lens` : 'no lens tag';
-    die(7, `the slim-review loop posts two lenses (codex + astra); this post carries ${carried}. Run the second lens and pass both --findings files, or pass --single-lens "<why the pair could not run>" to post one and stamp the reason into the review body. Nothing was posted.`);
+    die(7, `the slim-review loop posts two lenses (the author's pair: codex + astra for a Claude-authored PR, astra + opus for a Sol-authored one); this post carries ${carried}. Run the second lens and pass both --findings files, or pass --single-lens "<why the pair could not run>" to post one and stamp the reason into the review body. Nothing was posted.`);
     return;
   }
   // One review is one scope. A full handback and an amendment check (or two

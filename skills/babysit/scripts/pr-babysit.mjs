@@ -272,7 +272,9 @@ function owedFor(reason, ctx, extra = {}) {
   const head = (ctx.head ?? '').slice(0, 7);
   switch (reason) {
     case 'reviewer-never-answered': return `an attempt on head ${head} stayed live (${extra.state ?? 'in flight'}) for the whole ${ctx.bounds.maxWallMinutes} min budget — a person checks the writer/beat logs and either runs \`pr-review.mjs recover abandon\` on it or waits.`;
-    case 'attempt-failed': return `attempt ${extra.attempt ?? '?'} on head ${head} ended ${extra.state ?? 'failed'}/${extra.disposition ?? '?'} and this loop's claim allowance for that head is spent — a person reads the reason and runs \`pr-review.mjs claim\` if a retry is wanted.`;
+    case 'attempt-failed': return extra.attemptRefFile
+      ? `the claim on head ${head} answered no lens set (${extra.disposition ?? '?'}), so no lens ran and the attempt is still live — a person withdraws it (\`pr-review.mjs recover withdraw --attempt-ref ${extra.attemptRefFile} --reason "<why>"\`) and checks the writer and coordinator versions.`
+      : `attempt ${extra.attempt ?? '?'} on head ${head} ended ${extra.state ?? 'failed'}/${extra.disposition ?? '?'} and this loop's claim allowance for that head is spent — a person reads the reason and runs \`pr-review.mjs claim\` if a retry is wanted.`;
     case 'attempt-ended-no-retry': return `the automatic attempt on head ${head} ended ${extra.state ?? 'failed'}/${extra.disposition ?? '?'}; session claims are disabled (--session-claims 0) — a person runs \`pr-review.mjs claim\` or pushes a new head.`;
     case 'ci-failed': return `check(s) failing on head ${head}: ${(extra.names ?? []).join(', ') || '?'} — fix and push a new head, then run again.`;
     case 'head-moved-limit': return `the head moved ${ctx.iterations} time(s), past --max-heads ${ctx.bounds.maxHeads} — a person decides whether to keep going (run again with a higher bound).`;
@@ -566,6 +568,11 @@ export async function runLoop(opts, deps) {
         log(`[babysit] ${d.since ? `delta attempt (since ${d.since.slice(0, 7)})` : 'attempt'} on ${obs.head.slice(0, 7)}: ${r.ok ? `posted review ${r.review_id}` : `${r.phase} → ${r.reason}`}`);
         if (!r.ok && r.phase === 'claim' && (r.reason === 'paused' || r.reason === 'disabled')) {
           return finish({ outcome: 'blocked', reason: r.reason === 'paused' ? 'plan-paused' : 'disabled', owed: owedFor(r.reason === 'paused' ? 'plan-paused' : 'disabled', { ...ctx, head: obs.head }), head: obs.head }, ctx, deps, obs);
+        }
+        // A claim that answered no lens set started nothing; waiting on it
+        // would only run out the wall budget. Block now, naming the live ref.
+        if (!r.ok && r.phase === 'claim' && r.reason === 'lens-set-mismatch' && r.attempt_ref_file) {
+          return finish({ outcome: 'blocked', reason: 'attempt-failed', owed: owedFor('attempt-failed', { ...ctx, head: obs.head }, { disposition: 'lens-set-mismatch', attemptRefFile: r.attempt_ref_file }), head: obs.head }, ctx, deps, obs);
         }
         // The writer refused `--since` before any lens start (a rebase, a merge
         // from base, a sha on the base branch). A block, never a full review:

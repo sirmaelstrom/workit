@@ -36,6 +36,8 @@ import { ConductError, STEP_SEAM, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
 import { mergeDanger } from '../../../../scripts/lane.mjs';
 import { patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-review/scripts/pr-review-rounds.mjs';
+import { reviewPairFor } from '../../../slim-review/scripts/pr-review.mjs';
+import { laneModel } from './adapters.mjs';
 
 const WAIT_MS = 60000;
 const PENDING_BLOCK_MS = 30 * 60000;
@@ -69,8 +71,22 @@ const result = (outcome, reason = null, patch = {}) => ({ outcome, reason, patch
 // Unknown or missing tiers are treated as T2, everywhere.
 export const effectiveTier = (wp) => (['T0', 'T1', 'T2'].includes(wp.tier) ? wp.tier : 'T2');
 const authorOf = (state, wp) => wp.agent ?? state.intent.agent;
-// A lane agent → the writer's `claim --author` value.
-export const claimAuthor = (agent) => (agent === 'codex' ? 'sol' : agent);
+
+/**
+ * The PR's authoring model, as the writer's `claim --author` names it (quest
+ * 2aadf72f). A claude lane is `claude`. A codex lane is read from the model it
+ * ran (laneModel): an explicit gpt-*astra* or gpt-*terra* id names that
+ * author, and every other codex model, the GPT-6.1 Sol default included, is `sol`.
+ */
+export function claimAuthor(agent, model) {
+  if (agent !== 'codex') return agent;
+  let resolved = '';
+  try { resolved = laneModel(agent, model); } catch { resolved = ''; }
+  if (/astra/i.test(resolved)) return 'astra';
+  if (/terra/i.test(resolved)) return 'terra';
+  return 'sol';
+}
+const authorModelOf = (state, wp) => claimAuthor(authorOf(state, wp), wp.model);
 
 function parseJson(text) {
   try {
@@ -117,15 +133,21 @@ export function tierFor(wp, changedPaths = [], contractPaths = []) {
 }
 
 // Lens availability: opus iff claude is on; codex and astra iff codex is on.
-export function pickReviewers(state, authorKind, { mode = 'standalone' } = {}) {
+// `author` is the authoring model (claimAuthor); a codex lane defaults to sol.
+// Its pair is the writer's (reviewPairFor), so neither lens is the author.
+export function pickReviewers(state, authorKind, { mode = 'standalone', author = claimAuthor(authorKind) } = {}) {
   const claude = state.agents?.claude?.on === true;
   const codex = state.agents?.codex?.on === true;
+  const pair = reviewPairFor(author) ?? reviewPairFor('claude');
   if (mode === 'managed') {
     if (!codex) return { impossible: 'managed repo needs the codex CLI' };
-    if (authorKind === 'codex') return { lenses: ['astra'], singleLens: 'codex-authored PR on a managed repo: astra is the only lens outside the author family' };
-    return { lenses: ['codex', 'astra'] };
+    if (pair.includes('opus') && !claude) {
+      const lens = pair.find((l) => l !== 'opus');
+      return { lenses: [lens], singleLens: `${author}-authored PR on a managed repo with no claude CLI: ${lens} is the only available lens that is not the author` };
+    }
+    return { lenses: pair };
   }
-  if (authorKind === 'codex' && claude && codex) return { lenses: ['astra', 'opus'] };
+  if (authorKind === 'codex' && claude && codex) return { lenses: pair };
   if (codex) return { lenses: ['codex', 'astra'], ...(authorKind === 'codex' ? { sameFamily: true } : {}) };
   if (claude) return { lenses: ['opus'], singleLens: 'no codex CLI: opus is the only available lens', ...(authorKind === 'claude' ? { sameFamily: true } : {}) };
   return { impossible: 'no review CLI is available' };
@@ -147,7 +169,7 @@ export function reviewActions(state, wp, { round = 1, report = null, since = nul
 }
 
 function reviewSteps(state, wp, mode, meta) {
-  const pick = pickReviewers(state, authorOf(state, wp), { mode });
+  const pick = pickReviewers(state, authorOf(state, wp), { mode, author: authorModelOf(state, wp) });
   if (pick.impossible) throw new ConductError(5, `${wp.id}: review impossible: ${pick.impossible}`);
   const lenses = meta.all && mode === 'standalone' ? availableLenses(state) : pick.lenses;
   const single = lenses.length === 1 ? (pick.singleLens ?? `${lenses[0]} is the only available lens`) : null;
@@ -164,9 +186,9 @@ function reviewSteps(state, wp, mode, meta) {
     const ref = join(dir, `attempt-ref-r${meta.round}.json`);
     land.attemptRef = ref;
     // The writer's claim needs the authoring model (reviewer ≠ author, quest
-    // 2aadf72f). A codex lane builds on GPT-6.1 Sol (adapters.mjs), so it is `sol`.
+    // 2aadf72f); it answers the same pair pickReviewers chose.
     actions.push(shell('review', 'claim', ['node', script, 'claim', '--pr', pr, '--repo', repo, '--attempt-ref-out', ref,
-      '--author', claimAuthor(authorOf(state, wp)),
+      '--author', authorModelOf(state, wp),
       ...(single ? ['--single-lens', single, '--lens', lenses[0]] : [])], { land }));
     for (const lens of lenses) actions.push(shell('review', 'lens', ['node', script, 'lens', '--attempt-ref', ref, '--lens', lens, ...extra], { cwd: wp.lane.worktree, land }));
     actions.push(shell('post', 'post', ['node', script, 'post', '--attempt-ref', ref], { land }));
@@ -814,7 +836,7 @@ function recordReview(state, wp, action, r) {
   if (action.part === 'managed') {
     const mode = parseJson(r.stdout)?.mode;
     if (mode !== 'managed' && mode !== 'standalone') return result('block', `review mode unreadable: ${first(r.stdout) || first(r.stderr)}`);
-    const pick = pickReviewers(state, authorOf(state, wp), { mode });
+    const pick = pickReviewers(state, authorOf(state, wp), { mode, author: authorModelOf(state, wp) });
     if (pick.impossible) return result('block', pick.impossible, { reviewMode: mode });
     return result('continue', null, { reviewMode: mode, queue: [...reviewSteps(state, wp, mode, action.land), ...after] });
   }

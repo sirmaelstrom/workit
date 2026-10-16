@@ -662,12 +662,16 @@ test('2aadf72f: a Sol-authored PR is claimed with --author sol and reviewed by a
   assert.deepEqual(lenses, ['astra', 'opus'], 'the lenses the claim answered, in order');
 });
 
-test('2aadf72f: a claim that answers no lens set runs no lens', async () => {
+test('2aadf72f: a claim that answers no lens set runs no lens and blocks at once, naming the live attempt-ref', async () => {
   const { w, deps } = world();
   const spawn = deps.spawnWriter;
   deps.spawnWriter = (args) => { const out = spawn(args); if (args[0] === 'claim') delete out.required_lenses; return out; };
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1, maxWallMinutes: 1 } }, deps);
+  const started = w.clock;
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1, maxWallMinutes: 90 } }, deps);
   assert.equal(w.writerCalls.filter((c) => c[0] === 'lens').length, 0);
+  assert.deepEqual([r.outcome, r.reason], ['blocked', 'attempt-failed']);
+  assert.match(r.owed, /recover withdraw --attempt-ref ref-/);
+  assert.ok(w.clock - started < 60 * 1000, 'blocked without running out the wall budget');
 });
 
 test('2aadf72f: run without a known --author exits 4 before anything runs', () => {

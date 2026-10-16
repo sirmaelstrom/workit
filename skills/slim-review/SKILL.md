@@ -194,8 +194,10 @@ by the reviewer, even when the worktree was already dirty before it ran.
 Every run is the shadow arm now: two lenses, both posted, both adjudicated with
 `reply --verdict`, so the measurement log accumulates unique-to-lens confirmed
 catches on every PR instead of on the ones someone remembered to name. Post the
-two handbacks with repeated flags: `post --findings codex.json --findings
-astra.json`. Where both lenses anchor the same defect on the same line, post
+two handbacks with repeated flags, one per lens of the author's pair (Reviewer ≠
+author, above): `post --findings codex.json --findings astra.json` for a
+Claude-authored PR, `--findings astra.json --findings opus.json` for a
+Sol-authored one. Where both lenses anchor the same defect on the same line, post
 both — the duplicate is the agreement signal — and **reply to each comment**
 with its own `--verdict`: `reply` posts to one comment id and records one
 measurement row attributed to that comment's lens, so a single reply would
@@ -433,10 +435,11 @@ code nobody changed. Run one delta pass per lens against the head round one
 reviewed:
 
 ```bash
+# one per lens of the author's pair; a Claude-authored PR shown (codex, astra)
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens --pr <n> --repo <owner/name> \
   --lens codex --since <reviewed head sha> --cwd "<checkout>" --out "$REVIEW_DIR/codex-delta.json" \
   [--context-file "$REVIEW_DIR/uncertainty.md"]
-# the same with --lens astra, then:
+# the same with the pair's other lens (--lens astra here), then:
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post --pr <n> --repo <owner/name> \
   --findings "$REVIEW_DIR/codex-delta.json" --findings "$REVIEW_DIR/astra-delta.json"
 ```
