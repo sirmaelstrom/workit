@@ -2052,8 +2052,13 @@ test('repo config split (e2b54cd3): record checks the laneSuite the contract act
   writeFileSync(first.outPath, fillTemplate({ ...first, append: '\n## Run deltas\n\n- something else\n\n## Emitted rule\n\nemitted rule\n' }));
   await assert.rejects(recordPending(h, {}), { code: 2, message: /does not carry the laneSuite text from AGENTS\.md/ });
   // Nor does the text count when it sits only inside a fenced block (workit#246 delta review).
-  writeFileSync(first.outPath, fillTemplate({ ...first, append: '\n## Run deltas\n\nArtifact follows:\n\n```\nemitted rule\n```\n' }));
-  await assert.rejects(recordPending(h, {}), { code: 2, message: /does not carry the laneSuite text from AGENTS\.md/ });
+  // Only the emitted Suite ownership line, as a line of the section itself, counts (workit#246 delta reviews):
+  // not fenced, not quoted, not under a later heading of any level.
+  const line = first.append.split('\n').find((text) => text.startsWith('- **Suite ownership'));
+  for (const bypass of [`\`\`\`\n${line}\n\`\`\``, `> ${line}`, `### Artifacts\n\n${line}`, `# Artifacts\n\n${line}`]) {
+    writeFileSync(first.outPath, fillTemplate({ ...first, append: `\n## Run deltas\n\nArtifact follows:\n\n${bypass}\n` }));
+    await assert.rejects(recordPending(h, {}), { code: 2, message: /does not carry the laneSuite text from AGENTS\.md/ }, bypass);
+  }
   writeFileSync(first.outPath, fillTemplate(first));
   await recordPending(h, {});
   assert.equal(h.state.build.laneSuiteFrom, 'AGENTS.md `## Lane suite`');

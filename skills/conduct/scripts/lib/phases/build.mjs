@@ -194,9 +194,26 @@ function slotSpans(line) {
   return spans;
 }
 
+const suiteLine = (laneSuite, from) => `- **Suite ownership (${from}):** ${laneSuite} This overrides rule 9's "the full suite at the merge candidate is the conductor's, so don't run it" for this run.`;
+
 function runDeltas(laneSuite, from) {
-  return ['', '## Run deltas', '',
-    `- **Suite ownership (${from}):** ${laneSuite} This overrides rule 9's "the full suite at the merge candidate is the conductor's, so don't run it" for this run.`, ''].join('\n');
+  return ['', '## Run deltas', '', suiteLine(laneSuite, from), ''].join('\n');
+}
+
+// The unfenced lines of the contract's `## Run deltas` section, up to the
+// next heading of any level.
+function runDeltaLines(text) {
+  const out = [];
+  let inside = false;
+  for (const line of markLines(text)) {
+    if (line.fenced) continue;
+    if (/^ {0,3}#{1,6}(?:\s|$)/.test(line.text)) {
+      inside = /^## Run deltas\b/.test(line.text);
+      continue;
+    }
+    if (inside) out.push(line.text);
+  }
+  return out;
 }
 
 function contractAction(state, deps) {
@@ -242,14 +259,14 @@ function recordContract(state, action, deps) {
   if (suite && !/^## Run deltas\b/m.test(text)) {
     throw new ConductError(2, `the repo declares laneSuite (${suite.from}), and the lane contract has no ## Run deltas section saying it overrides rule 9`);
   }
-  // The AGENTS.md text must reach the Run deltas section itself (workit#246
-  // review). The legacy source keeps its old heading-only check, unchanged.
+  // For an AGENTS.md laneSuite the emitted Suite ownership line itself must be
+  // a line of the Run deltas section: unfenced, unquoted, before any further
+  // heading (workit#246 review). The legacy source keeps its old heading-only
+  // check, unchanged.
   if (suite && suite.from !== LEGACY_LANE_FROM) {
     const flat = (value) => String(value).replace(/\s+/g, ' ').trim();
-    // Unfenced lines only: text quoted inside a fence is not an instruction.
-    const unfenced = markLines(text).filter((line) => !line.fenced).map((line) => line.text).join('\n');
-    const deltas = unfenced.split(/^## Run deltas\b/m).slice(1).join(' ').split(/^## /m)[0];
-    if (!flat(deltas).includes(flat(suite.text))) {
+    const want = flat(suiteLine(suite.text, suite.from));
+    if (!runDeltaLines(text).some((line) => flat(line) === want)) {
       throw new ConductError(2, `the lane contract's ## Run deltas section does not carry the laneSuite text from ${suite.from}`);
     }
   }
