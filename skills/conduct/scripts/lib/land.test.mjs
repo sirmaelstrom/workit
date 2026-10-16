@@ -831,7 +831,7 @@ test('reviewActions: managed observatory → claim, lens ×2, post on one attemp
   assert.equal(managed.reviewMode, 'managed');
   const ref = join(REVIEWS, 'attempt-ref-r1.json');
   assert.deepEqual(managed.queue.map((a) => a.command.slice(2)), [
-    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref],
+    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'claude'],
     ['lens', '--attempt-ref', ref, '--lens', 'codex'],
     ['lens', '--attempt-ref', ref, '--lens', 'astra'],
     ['post', '--attempt-ref', ref],
@@ -862,7 +862,7 @@ test('managed single-lens: a codex-authored PR on observatory claims with --sing
   const ref = join(REVIEWS, 'attempt-ref-r1.json');
   const reason = pickReviewers(state, 'codex', { mode: 'managed' }).singleLens;
   assert.deepEqual(queue.map((a) => a.command.slice(2)), [
-    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--single-lens', reason, '--lens', 'astra'],
+    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'sol', '--single-lens', reason, '--lens', 'astra'],
     ['lens', '--attempt-ref', ref, '--lens', 'astra'],
     ['post', '--attempt-ref', ref],
   ]);
@@ -891,7 +891,7 @@ test('deltaReviewActions: managed claims a fresh round; standalone passes --sinc
   const managed = deltaReviewActions(OBS(), makeWp({ reviewMode: 'managed' }), since);
   const ref = join(REVIEWS, 'attempt-ref-r2.json');
   assert.deepEqual(managed.map((a) => a.command.slice(2)), [
-    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref],
+    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'claude'],
     ['lens', '--attempt-ref', ref, '--lens', 'codex', '--since', since],
     ['lens', '--attempt-ref', ref, '--lens', 'astra', '--since', since],
     ['post', '--attempt-ref', ref],

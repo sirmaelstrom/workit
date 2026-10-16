@@ -63,7 +63,8 @@ and the coordinator admits only one attempt per head.
 For the PR's **current head** `H`, either:
 
 - **a reviewed head.** The coordinator holds a **posted** paired attempt on `H`
-  (lenses codex + astra), or `H` is a patch-identical rebase of the last
+  (the author's pair: codex + astra for a Claude-authored PR, astra + opus for
+  a Sol-authored one), or `H` is a patch-identical rebase of the last
   reviewed head (no attempt on `H`; the receipt carries `rebased_from`), **or**
 - **the tail after the cap.** `H` is past round two (or its delta was skipped,
   below), and the last posted review's head is an ancestor of `H` (or, after
@@ -88,13 +89,18 @@ open thread, or a pending check never satisfies it.
 ```bash
 SCRIPT="${CLAUDE_SKILL_DIR}/scripts/pr-babysit.mjs"
 node "$SCRIPT" run --pr <n> --repo <owner/name> --cwd "<ABSOLUTE CHECKOUT OF THE PR HEAD>" \
+  --author <claude|sol|astra|terra> \
   [--context-file "$REVIEW_DIR/uncertainty.md"] [--skip-delta "<why the amendment is trivial>"]
 ```
 
+`--author` is the PR's authoring model, read from its commits or the lane
+record. The writer's claim turns it into the pair (slim-review "Reviewer ≠
+author"), and `run` exits 4 without it.
+
 `run` observes, decides, and then does one of three things. It waits (bounded).
-It claims the head through the coordinated writer (`claim → lens codex → lens
-astra → post`), with `--since` in round two. Or it returns to you. Exit codes
-are the contract:
+It claims the head through the coordinated writer (`claim --author → lens ×2 in
+the order the claim answered → post`), with `--since` in round two. Or it
+returns to you. Exit codes are the contract:
 
 | Exit | Outcome | Your move |
 |---|---|---|

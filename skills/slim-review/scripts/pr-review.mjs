@@ -251,6 +251,45 @@ const LENS_MODELS = {
 const LENSES = new Set(Object.keys(LENS_MODELS));
 const LENS_LIST = [...LENSES].join('|');
 const isCodexLens = (lens) => lens === 'codex' || lens === 'astra';
+
+/**
+ * Reviewer ≠ author (SKILL.md "Reviewer ≠ author", quest 2aadf72f): the PR's
+ * authoring model → the two lenses that review it. `codex` is GPT-6 Sol, so a
+ * Sol-authored PR takes astra + opus; a Claude-authored PR takes codex + astra;
+ * an Astra-authored PR takes codex + opus; a Terra-authored PR keeps codex +
+ * astra, since the codex seat is no longer Terra. The order is the lens order
+ * a caller runs them in. A claim takes its pair from here and nowhere else.
+ */
+export const AUTHOR_PAIRS = Object.freeze({
+  claude: Object.freeze(['codex', 'astra']),
+  sol: Object.freeze(['astra', 'opus']),
+  astra: Object.freeze(['codex', 'opus']),
+  terra: Object.freeze(['codex', 'astra']),
+});
+/** The lens that IS the author's model, or null when no lens is (Terra). */
+export const AUTHOR_LENS = Object.freeze({ claude: 'opus', sol: 'codex', astra: 'astra', terra: null });
+export const AUTHOR_LIST = Object.keys(AUTHOR_PAIRS).join('|');
+
+/** The review pair for an author, or null for an author the table does not name. */
+export function reviewPairFor(author) {
+  return Object.hasOwn(AUTHOR_PAIRS, author) ? [...AUTHOR_PAIRS[author]] : null;
+}
+
+/**
+ * Why a claim's lens selection would seat the author's own model, or null.
+ * Without `--single-lens` the pair comes from AUTHOR_PAIRS; with it, the one
+ * lens defaults to the pair's first and an explicit lens must not be the author's.
+ */
+export function claimLensProblem({ author, singleLens, lens }) {
+  if (!reviewPairFor(author)) {
+    return `claim needs --author ${AUTHOR_LIST}: the PR's authoring model picks the review pair (reviewer ≠ author). Read it from the PR's commits or the lane record; never assume`;
+  }
+  if (singleLens && lens !== undefined && lens === AUTHOR_LENS[author]) {
+    return `claim --single-lens --lens ${lens} would seat the author's own model (--author ${author}); pick a lens from ${AUTHOR_PAIRS[author].join(' or ')}`;
+  }
+  return null;
+}
+
 const FINDING_KEYS = new Set(['severity', 'title', 'path', 'line', 'body', 'lens']);
 /**
  * Keys a persisted findings document may carry.
@@ -1359,13 +1398,6 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
     mkdirSync(dirname(promptPath), { recursive: true });
     writeFileSync(promptPath, prompt, 'utf8');
   }
-  const tooLong = claudePromptProblem(opts.lens, prompt, reasoning);
-  if (tooLong) {
-    rmSync(tempDir, { recursive: true, force: true });
-    die(5, `${tooLong}. The reviewer was not run.`);
-    return;
-  }
-
   let raw;
   let wallMs;
   try {
@@ -1383,13 +1415,12 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
       return { dirty, head: dirty.length > 0 ? { moved: false, failure: null } : restoreHead(run, cwd, headBefore) };
     };
     const started = now();
-    // Claude's -p mode on this box does not consume stdin (the live probe
-    // returned a stale placeholder result), so its prompt is positional.
+    // Every lens reads its prompt on stdin. `claude -p` with no positional
+    // prompt reads stdin (re-probed 2026-10-16 on Claude Code 2.1.301 with this
+    // exact argv and a 41,208-character prompt: the schema'd answer came back),
+    // so no prompt size meets the Windows command-line ceiling (quest 2aadf72f).
     try {
-      raw = run(program, opts.lens === 'opus' ? [...argv, prompt] : argv, {
-        ...(isCodexLens(opts.lens) ? { input: prompt } : {}),
-        cwd,
-      });
+      raw = run(program, argv, { input: prompt, cwd });
     } catch (err) {
       // A reviewer that moved HEAD and then failed still gets it put back.
       let unrestored = null;
@@ -1711,24 +1742,15 @@ export function commandLineProblem(program, args, { platform = process.platform 
     : null;
 }
 
-/** The claude-kind lens argv, prompt excluded: `claude -p` takes the prompt positionally. */
+/**
+ * The claude-kind lens argv. It carries no prompt: `claude -p` reads the prompt
+ * on stdin, so the command line is this fixed argv whatever the diff's size.
+ */
 function claudeLensArgv(model, reasoning) {
   return ['-p', '--model', model, '--effort', reasoning, '--permission-mode', 'bypassPermissions', '--disallowedTools', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', '--output-format', 'json', '--json-schema', readFileSync(SCHEMA_PATH, 'utf8')];
 }
 
 const claudeProgram = () => (process.platform === 'win32' ? 'claude.exe' : 'claude');
-
-/**
- * Refuse a claude-kind prompt the OS would reject at spawn. `claude -p` reads
- * its prompt from argv: its help documents no prompt file, and the stdin probe
- * recorded at the spawn site returned a stale placeholder. So a large amendment
- * or uncertainty block is refused here, before any spend, not at CreateProcess.
- */
-function claudePromptProblem(lens, prompt, reasoning = LENS_MODELS[lens].reasoning) {
-  if (isCodexLens(lens)) return null;
-  const problem = commandLineProblem(claudeProgram(), [...claudeLensArgv(LENS_MODELS[lens].model, reasoning), prompt]);
-  return problem ? `${problem}; the ${lens} lens takes its prompt as one command-line argument. Run codex or astra (stdin), or narrow the input` : null;
-}
 
 // --- the review POST -------------------------------------------------------
 
@@ -2013,6 +2035,15 @@ export async function cmdClaim(opts, {
     emitOutcome({ outcome: 'refused', reason, ...extra }, log);
     die(code, message);
   };
+  // 0. the pair. A usage error (exit 2, no outcome line): the D12 reason table
+  //    is vendored by both repositories, so no reason is minted for it here.
+  //    Checked before anything is read, so a missing author spends nothing.
+  const lensProblem = claimLensProblem(opts);
+  if (lensProblem) {
+    die(2, lensProblem);
+    return undefined;
+  }
+  const pair = reviewPairFor(opts.author);
   const resolved = resolveCoordinator({ env, homeDir });
   if (!resolved.ok) {
     refuse(resolved.reason, { directory: resolved.directory }, resolved.message);
@@ -2109,7 +2140,7 @@ export async function cmdClaim(opts, {
     worker_key: workerKey,
     owner_label: opts.ownerLabel ?? 'session',
     manifest: produced.manifest,
-    required_lenses: opts.singleLens ? [opts.lens ?? 'codex'] : ['codex', 'astra'],
+    required_lenses: opts.singleLens ? [opts.lens ?? pair[0]] : pair,
     ...(opts.singleLens ? { exception_reason: opts.singleLens } : {}),
     ...(opts.supersede === undefined ? {} : { supersede_review_id: Number(opts.supersede), actor: IDENTITY_ACTOR, reason: opts.reason }),
   });
@@ -2496,7 +2527,7 @@ function runLensModel({ lens, cwd, prompt, prFilePaths, coverageSource, run, fin
     const started = now();
     let raw;
     try {
-      raw = run(program, lens === 'opus' ? [...argv, prompt] : argv, { ...(isCodexLens(lens) ? { input: prompt } : {}), cwd });
+      raw = run(program, argv, { input: prompt, cwd });
     } catch (err) {
       return { ok: false, reason: classifyLensFailure(err), message: `lens ${lens} failed: ${err.message}` };
     }
@@ -2723,12 +2754,6 @@ async function cmdLensCoordinated(opts, {
     return undefined;
   }
   const input = reviewInput(payload, amendmentPayload);
-  const tooLong = claudePromptProblem(opts.lens, input.prompt);
-  if (tooLong) {
-    emit({ outcome: 'refused', reason: 'diff-too-large', prompt_chars: input.prompt.length, ...(opts.dryRun ? { dry_run: true } : {}) });
-    die(1, `${tooLong}; the model was not invoked and no lens start was spent.`);
-    return undefined;
-  }
 
   // The dry run renders from the same pinned inputs and stops before anything
   // mutating: a start consumed by a preview is a start the real run cannot have.
@@ -3410,7 +3435,7 @@ const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
                                                coverage held to that diff's files. Exit 5 when
                                                <sha> is not an ancestor, is on the base branch,
                                                or the range holds a merge commit
-           exit 5 also when an opus prompt would not fit on one command line
+           every lens reads its prompt on stdin, so no prompt meets a command-line cap
   post     --pr <n> --repo owner/name --findings <file> --findings <file> [--dry-run] [--force-post]
            [--single-lens "<reason>"]   posting one lens is exit 7 unless the reason is given (it is stamped into the review)
   threads  --pr <n> --repo owner/name [--unresolved]
@@ -3435,12 +3460,16 @@ On a managed repository (see below), the coordinated flow replaces steps 2 and 3
   manifest --pr <n> --repo owner/name
            read-only: the pinned file list between two head reads, as
            {manifest, base_sha}. The one manifest producer
-  claim    --pr <n> --repo owner/name [--supersede <review id> --reason "<why>"]
-           [--single-lens "<why>" --lens codex|astra] [--owner-label <label>]
+  claim    --pr <n> --repo owner/name --author claude|sol|astra|terra
+           [--supersede <review id> --reason "<why>"]
+           [--single-lens "<why>" --lens codex|astra|opus] [--owner-label <label>]
            [--attempt-ref-out <path>]
            allocates one attempt for the current head and writes the attempt-ref
-           file (owner-only) whose path it prints
-  lens     --attempt-ref <file> --lens codex|astra [--out <findings.json>]
+           file (owner-only) whose path it prints. --author is the PR's authoring
+           model and picks the pair: claude → codex+astra, sol → astra+opus,
+           astra → codex+opus, terra → codex+astra. Exit 2 without it, or when
+           --single-lens names the author's own lens
+  lens     --attempt-ref <file> --lens codex|astra|opus [--out <findings.json>]
            [--prompt-out <path>] [--dry-run] [--context-file <file>] [--since <sha>]
            one lens execution against the pinned diff. --out defaults to the
            attempt's own directory
@@ -3480,8 +3509,8 @@ Common:
 
 Lens safety:
   --lens         codex (GPT-6 Sol), astra (GPT-6 Astra), or opus; run one lens per
-                 invocation, never the PR authoring model — the default loop
-                 runs codex AND astra and posts both handbacks
+                 invocation, never the PR authoring model — the loop runs the
+                 author's pair (claim --author) and posts both handbacks
   --reasoning    defaults to high for codex, low for astra and opus
   --measure-log  overrides the per-lens JSONL log (otherwise a workspace root is required)
   --dry-run      prints the exact reviewer argv and prompt path without running it
@@ -3577,6 +3606,7 @@ export function parseArgs(argv) {
       case '--post-attempted-at': opts.postAttemptedAt = next(); break;
       case '--attempt-ref-out': opts.attemptRefOut = next(); break;
       case '--owner-label': opts.ownerLabel = next(); break;
+      case '--author': opts.author = next(); break;
       case '--head': opts.head = next(); break;
       case '--run': opts.run = next(); break;
       case '--attempt': {
@@ -3655,6 +3685,7 @@ function main(argv) {
       if (!opts.repo) fail(2, 'claim needs --repo owner/name');
       if (opts.supersede !== undefined && !opts.reason) fail(2, 'claim --supersede needs --reason "<why>" — it is logged verbatim on the row');
       if (opts.singleLens && opts.lens && !LENSES.has(opts.lens)) fail(2, `claim --lens must be one of ${LENS_LIST}`);
+      { const problem = claimLensProblem(opts); if (problem) fail(2, problem); }
       return cmdClaim(opts);
     case 'recognise':
       if (!opts.repo) fail(2, 'recognise needs --repo owner/name');

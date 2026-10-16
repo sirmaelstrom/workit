@@ -69,6 +69,8 @@ const result = (outcome, reason = null, patch = {}) => ({ outcome, reason, patch
 // Unknown or missing tiers are treated as T2, everywhere.
 export const effectiveTier = (wp) => (['T0', 'T1', 'T2'].includes(wp.tier) ? wp.tier : 'T2');
 const authorOf = (state, wp) => wp.agent ?? state.intent.agent;
+// A lane agent → the writer's `claim --author` value.
+export const claimAuthor = (agent) => (agent === 'codex' ? 'sol' : agent);
 
 function parseJson(text) {
   try {
@@ -161,7 +163,10 @@ function reviewSteps(state, wp, mode, meta) {
   if (mode === 'managed') {
     const ref = join(dir, `attempt-ref-r${meta.round}.json`);
     land.attemptRef = ref;
+    // The writer's claim needs the authoring model (reviewer ≠ author, quest
+    // 2aadf72f). A codex lane builds on GPT-6.1 Sol (adapters.mjs), so it is `sol`.
     actions.push(shell('review', 'claim', ['node', script, 'claim', '--pr', pr, '--repo', repo, '--attempt-ref-out', ref,
+      '--author', claimAuthor(authorOf(state, wp)),
       ...(single ? ['--single-lens', single, '--lens', lenses[0]] : [])], { land }));
     for (const lens of lenses) actions.push(shell('review', 'lens', ['node', script, 'lens', '--attempt-ref', ref, '--lens', lens, ...extra], { cwd: wp.lane.worktree, land }));
     actions.push(shell('post', 'post', ['node', script, 'post', '--attempt-ref', ref], { land }));
