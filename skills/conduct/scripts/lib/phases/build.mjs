@@ -392,7 +392,8 @@ function applyRatify(state, wp, paths, why, deps) {
   // No Files means an unknown scope, which conflicts with every WP; a ratified
   // path would make it look complete. The same holds for the owner check.
   if (!wp.files?.length) throw new ConductError(5, `ratify: ${wp.id} has no declared Files (an unknown scope); ratifying would define its whole scope`);
-  const owner = state.wps.find((other) => other !== wp && !['merged', 'refuted'].includes(other.state) && !filesDisjoint(normal, other.files ?? []));
+  // A dropped WP gives up its paths, so a re-plan can fold them into another WP (its restore then waits on Files, as any dispatch does).
+  const owner = state.wps.find((other) => other !== wp && !['merged', 'refuted', 'dropped'].includes(other.state) && !filesDisjoint(normal, other.files ?? []));
   if (owner) throw new ConductError(5, `ratify: ${owner.id} (${owner.state}) owns a path in ${normal.join(', ')}${owner.files?.length ? '' : ' (it has no declared Files)'}; lanes run on disjoint Files`);
   wp.files = [...new Set([...(wp.files ?? []), ...normal])];
   wp.ratified = [...(wp.ratified ?? []), { paths: normal, why, at: deps.timestamp() }];
@@ -1053,7 +1054,8 @@ function merged(state, wp, deps) {
   // the reading, by the meter: a herdr lane logs no cost, so the meter is its
   // only booking.
   const laneBooked = (other) => Number.isFinite(Number(other.lane?.costUsd ?? NaN)) || Boolean(other.lane?.exitedAt && !closedAfter(other));
-  const unbooked = (other) => !['merged', 'refuted'].includes(other.state) || (Boolean(other.lane?.startedAt) && !laneBooked(other));
+  // A dropped WP has no dispatch planned: it is projected again only once restored.
+  const unbooked = (other) => !['merged', 'refuted', 'dropped'].includes(other.state) || (Boolean(other.lane?.startedAt) && !laneBooked(other));
   const left = state.wps.filter(unbooked).length;
   const per = laneProjection(state, deps);
   const projected = Math.round((booked + left * per.usd) * 100) / 100;

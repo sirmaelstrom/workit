@@ -423,6 +423,12 @@ test('replan (e830d835): two-way changes inside the scope proceed on the pre-app
   const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
   assert.match(analysis, /^  - re-plan 1, approved inside the pre-approval; rests on .*; why: WP-02 found .*; changes: fold WP-03 into a test on WP-02 \[two-way\]; applied: dropped WP-03; WP-02 carries its regression test; anchor receipt filed$/m);
   assert.match(analysis, /^- WP-03 \(name WP-03\): dropped: dropped by re-plan 1: /m, 'the analysis names the dropped WP');
+  // Amendment 1 delta pass: a dropped WP is no future lane in the spend projection, and gives up its paths to a ratify.
+  assert.deepEqual(h.events().filter((e) => e.event === 'spend-projection' && e.data.wpId === 'WP-02').map((e) => e.data.wpsLeft), [0]);
+  const fold = structuredClone(h.state);
+  fold.wps[1].state = 'dispatched';
+  build.ratify(fold, { wpId: 'WP-02', paths: [...h.wp('WP-03').files], why: 'fold WP-03 into WP-02' }, h.deps);
+  assert.ok(h.wp('WP-03').files.every((path) => fold.wps[1].files.includes(path)));
   // Amendment 1: a drop is two-way inside the run. reset-wp --to pending restores it, and the build dispatches it again.
   assert.equal(h.state.phase, 'release');
   const restored = build.resetWp(h.state, { wpId: 'WP-03', to: 'pending', why: 'the parser case came back' }, h.deps);
