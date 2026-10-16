@@ -34,6 +34,7 @@ import { join, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ConductError, STEP_SEAM, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
+import { pinnedConfig } from './repo-config.mjs';
 import { mergeDanger } from '../../../../scripts/lane.mjs';
 import { patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-review/scripts/pr-review-rounds.mjs';
 import { AUTHOR_LENS, reviewPairFor } from '../../../slim-review/scripts/pr-review.mjs';
@@ -46,7 +47,7 @@ const MAX_RETRIES = 3;
 const TAIL_LINE_CAP = 400;
 const GREEN = new Set(['success', 'neutral', 'skipped']);
 // Markdown that carries behavior is never a trivial tail (`trivialExclude` in
-// .workit/conduct.json replaces this list; contractPaths are always added).
+// the repo config replaces this list; contractPaths are always added).
 export const DEFAULT_NOT_TRIVIAL = ['skills/**/SKILL.md', 'reference/templates/**', 'agents/**', 'commands/**', '.claude-plugin/**'];
 // The reason `claim` prints when the head already carries this identity's review.
 export const ALREADY_REVIEWED = 'already-posted';
@@ -611,8 +612,12 @@ function inflightCondition(state, wp, head, { exec, now }) {
   return { pending: true };
 }
 
-// The repo config on the base branch, so a PR cannot widen its own trivial set.
+// The repo config as the run pinned it, so a PR cannot widen its own trivial
+// set: the workspace config's intake snapshot (its sha256 is on touch 1), else
+// the legacy .workit/conduct.json on the base branch.
 function notTrivialPatterns(state, wt, exec) {
+  const pinned = pinnedConfig(state);
+  if (pinned) return { patterns: notTrivialGlobs(pinned).map(globRegex) };
   const shown = exec('git', ['-C', wt, 'show', `origin/${defaultOf(state)}:.workit/conduct.json`]);
   let config = {};
   if (shown.code === 0) {
@@ -621,9 +626,10 @@ function notTrivialPatterns(state, wt, exec) {
   } else if (!/does not exist|exists on disk, but not in/.test(shown.stderr)) {
     return { failure: `repo config unreadable: ${first(shown.stderr)}` };
   }
-  const globs = [...(Array.isArray(config.trivialExclude) ? config.trivialExclude : DEFAULT_NOT_TRIVIAL), ...(config.contractPaths ?? [])];
-  return { patterns: globs.map(globRegex) };
+  return { patterns: notTrivialGlobs(config).map(globRegex) };
 }
+
+const notTrivialGlobs = (config) => [...(Array.isArray(config.trivialExclude) ? config.trivialExclude : DEFAULT_NOT_TRIVIAL), ...(config.contractPaths ?? [])];
 
 function ancestor(wt, a, b, exec) {
   const code = exec('git', ['-C', wt, 'merge-base', '--is-ancestor', a, b]).code;

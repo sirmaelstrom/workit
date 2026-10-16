@@ -16,6 +16,7 @@ import {
 } from './lib/state.mjs';
 import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
+import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, filedLength, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
 import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
@@ -260,7 +261,9 @@ async function intake(tokens, deps) {
   if (flags.agent !== undefined && !agents[flags.agent].on) refuse(5, `--agent ${flags.agent} is not available: ${agents[flags.agent].detail}`);
   const agent = flags.agent ?? AGENTS.find((name) => agents[name].on);
   if (!agent) refuse(5, `no lane agent CLI on PATH (${AGENTS.map((name) => `${name}: ${agents[name].detail}`).join('; ')})`);
-  const recipe = resolveRecipe({ flagPath: typeof flags.release === 'string' ? resolve(flags.release) : null, repoPath, read: deps.read });
+  // The workspace config is read once here and pinned (lib/repo-config.mjs).
+  const repoConfig = resolveRepoConfig({ remote, repoPath, env: deps.env, exists: deps.exists, read: deps.read });
+  const recipe = resolveRecipe({ flagPath: typeof flags.release === 'string' ? resolve(flags.release) : null, repoPath, read: deps.read, repoConfig });
   if (recipe !== null) {
     const checked = validateRecipe(recipe);
     if (!checked.ok) throw new ConductError(2, `invalid release recipe: ${checked.problems.join('; ')}`);
@@ -278,7 +281,7 @@ async function intake(tokens, deps) {
       intent: {
         goal: options.goal, repo: { path: repoPath, remote, defaultBranch: repoInfo.defaultBranchRef?.name ?? null },
         anchor: typeof flags.anchor === 'string' ? flags.anchor : null, campaign: null,
-        budgetUsd: options.budgetUsd, lanesCap: options.lanesCap, agent, release: recipe, ciWorkflows,
+        budgetUsd: options.budgetUsd, lanesCap: options.lanesCap, agent, release: recipe, ciWorkflows, repoConfig,
       },
       agents, adapters,
       phase: options.spine ? 'intake' : 'preapproval',
@@ -296,7 +299,7 @@ async function intake(tokens, deps) {
     const projected = draft();
     const length = filedLength(projected, 1, preapproval.touchOneQuestion(projected, deps, { bound: true }));
     if (length > QUESTION_MAX) {
-      refuse(8, `touch 1's question would be ${length} chars, over spine_receipt's ${QUESTION_MAX}-char cap: shorten the release recipe or the repo path (a long goal is already cited by file)`);
+      refuse(8, `touch 1's question would be ${length} chars, over spine_receipt's ${QUESTION_MAX}-char cap: shorten the release recipe, the repo path${repoConfig.source === 'workspace' ? ' or the workspace config path' : ''} (a long goal is already cited by file)`);
     }
   }
 
