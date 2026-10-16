@@ -119,17 +119,20 @@ test('a gate fix after a rebase of the reviewed head is diffed from the verified
     try { return { code: 0, stdout: git(dir, args.slice(2), options?.input), stderr: '' }; }
     catch (error) { return { code: error.status ?? 1, stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? '') }; }
   };
-  const wp = {
-    id: 'WP-02', state: 'pr', stage: 'delta', queue: [], files: ['a.txt', 'b.txt'], owed: { adjudicate: false }, deltaFrom: rebased,
-    lane: { worktree: dir, base: oldBase, backend: 'exec', exitedAt: new Date().toISOString() }, pr: { number: 16, head },
-    reviews: [{ scope: 'full', round: 1, head: reviewed }], rebases: [{ from: reviewed, to: rebased, oldBase, newBase, equivalent: true }],
-  };
-  const state = { phase: 'build', runDir: dir, pluginRoot: dir, slug: 'gate-fix-control', wps: [wp], touches: [], adapters: {},
-    intent: { agent: 'codex', repo: { path: dir, remote: 'test/test', defaultBranch: 'main' }, lanesCap: 1 }, authority: { budgetUsd: 1000 }, build: { contract: 'fixture', halts: [] } };
-  const action = buildNext(state, { exec, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => true });
-  assert.equal(action.part, 'amend-diff', wp.reason);
-  assert.equal(action.command.at(-2), rebased);
-  assert.equal(wp.deltaRecovery.baseline, rebased);
+  // A state saved before deltaFrom existed has none; the mapping covers it too.
+  for (const deltaFrom of [rebased, undefined]) {
+    const wp = {
+      id: 'WP-02', state: 'pr', stage: 'delta', queue: [], files: ['a.txt', 'b.txt'], owed: { adjudicate: false }, deltaFrom,
+      lane: { worktree: dir, base: oldBase, backend: 'exec', exitedAt: new Date().toISOString() }, pr: { number: 16, head },
+      reviews: [{ scope: 'full', round: 1, head: reviewed }], rebases: [{ from: reviewed, to: rebased, oldBase, newBase, equivalent: true }],
+    };
+    const state = { phase: 'build', runDir: dir, pluginRoot: dir, slug: 'gate-fix-control', wps: [wp], touches: [], adapters: {},
+      intent: { agent: 'codex', repo: { path: dir, remote: 'test/test', defaultBranch: 'main' }, lanesCap: 1 }, authority: { budgetUsd: 1000 }, build: { contract: 'fixture', halts: [] } };
+    const action = buildNext(state, { exec, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => true });
+    assert.equal(action.part, 'amend-diff', `deltaFrom ${deltaFrom}: ${wp.reason}`);
+    assert.equal(action.command.at(-2), rebased);
+    assert.equal(wp.deltaRecovery.baseline, rebased);
+  }
   assert.deepEqual(git(dir, ['diff', '--name-only', rebased, head]).trim().split('\n'), ['b.txt']);
   assert.notDeepEqual(git(dir, ['diff', '--name-only', reviewed, head]).trim().split('\n'), ['b.txt'], 'the unmapped range would carry the base change');
 });
