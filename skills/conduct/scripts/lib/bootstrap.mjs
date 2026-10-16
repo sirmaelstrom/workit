@@ -97,8 +97,11 @@ export function checkSettings(repo, settings, exec) {
   };
 }
 
+// Written files are LF whatever the checkout did to the template (a Windows
+// clone with core.autocrlf hands back CRLF): .editorconfig asks for LF, and
+// the Windows CI job caught a CRLF render (PR #243, run 38846428461).
 export function fillTemplate(text, values) {
-  return text.replace(/\{\{(name|year|owner|nodeVersionFile)\}\}/g, (_, key) => values[key]);
+  return text.replace(/\r\n/g, '\n').replace(/\{\{(name|year|owner|nodeVersionFile)\}\}/g, (_, key) => values[key]);
 }
 
 // The Node pin the generated CI points setup-node at: the one the repo already

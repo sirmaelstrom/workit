@@ -141,6 +141,10 @@ test('review #243: a .node-version repo gets CI that names it; .yaml workflows c
   assert.match(byId(bootstrap(yaml, { deps: deps(), values: VALUES, templates: REPO_TEMPLATES })).ci.detail, /missing "pull_request", "concurrency:", "cancel-in-progress: true", "timeout-minutes:", "gitleaks"/);
 });
 
+test('fillTemplate writes LF even from a CRLF checkout of the template', () => {
+  assert.equal(fillTemplate('a: {{name}}\r\nb: 1\r\n', VALUES), 'a: demo\nb: 1\n');
+});
+
 test('fillTemplate replaces only its own three keys', () => {
   assert.equal(fillTemplate('{{name}} {{year}} {{owner}} ${{ github.ref }} {{other}}', VALUES), 'demo 2026 Owner Name ${{ github.ref }} {{other}}');
 });
