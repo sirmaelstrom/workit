@@ -39,6 +39,14 @@ const isParagraph = (line) => Boolean(line && !line.fenced && line.text.trim() &
 // whole paragraph above it is the heading's text, not body. null when there is
 // no such heading or its body is empty.
 export function sectionText(text, title) {
+  const body = sectionLines(text, title).map((line) => line.text.trim());
+  return body.length ? body.join(' ') : null;
+}
+
+// The same section's non-blank lines, untrimmed, as markLines entries
+// ({ text, fenced }); fence markers are dropped and fenced content is kept,
+// marked fenced. [] when there is no such heading.
+export function sectionLines(text, title) {
   const want = String(title).trim().toLowerCase();
   const source = String(text ?? '');
   const lines = markLines(source.startsWith(BOM) ? source.slice(1) : source);
@@ -70,11 +78,15 @@ export function sectionText(text, title) {
       paragraphStart = body.length;
       continue;
     }
-    body.push(line.text.trim());
+    body.push(line);
     if (!isParagraph(line)) paragraphStart = body.length;
   }
-  return body.length ? body.join(' ') : null;
+  return body;
 }
+
+// A list item at block level (up to three spaces of indent): not fenced, not
+// indented code, not inside a block quote.
+export const isTopListItem = (line) => Boolean(line && !line.fenced && /^ {0,3}[-*+][ \t]/.test(line.text));
 
 // The report's `## Amendment N` sections in order: { n, lines }, where lines
 // are every line after the heading up to the next unfenced level-1/2 heading.

@@ -2055,7 +2055,8 @@ test('repo config split (e2b54cd3): record checks the laneSuite the contract act
   // Only the emitted Suite ownership line, as a line of the section itself, counts (workit#246 delta reviews):
   // not fenced, not quoted, not under a later heading of any level.
   const line = first.append.split('\n').find((text) => text.startsWith('- **Suite ownership'));
-  for (const bypass of [`\`\`\`\n${line}\n\`\`\``, `> ${line}`, `### Artifacts\n\n${line}`, `# Artifacts\n\n${line}`]) {
+  for (const bypass of [`\`\`\`\n${line}\n\`\`\``, `> ${line}`, `### Artifacts\n\n${line}`, `# Artifacts\n\n${line}`,
+    `    ${line}`, `Artifacts\n---------\n${line}`]) {
     writeFileSync(first.outPath, fillTemplate({ ...first, append: `\n## Run deltas\n\nArtifact follows:\n\n${bypass}\n` }));
     await assert.rejects(recordPending(h, {}), { code: 2, message: /does not carry the laneSuite text from AGENTS\.md/ }, bypass);
   }

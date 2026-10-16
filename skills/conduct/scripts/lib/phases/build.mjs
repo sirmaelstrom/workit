@@ -26,7 +26,7 @@ import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath }
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
 import { LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
-import { markLines } from '../markdown.mjs';
+import { isTopListItem, sectionLines } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
@@ -200,20 +200,11 @@ function runDeltas(laneSuite, from) {
   return ['', '## Run deltas', '', suiteLine(laneSuite, from), ''].join('\n');
 }
 
-// The unfenced lines of the contract's `## Run deltas` section, up to the
-// next heading of any level.
+// The block-level list items of the contract's `## Run deltas` section, with
+// sectionText's boundaries (the next ATX or setext heading, or a thematic
+// break): fenced, quoted and indented-code lines are not instructions.
 function runDeltaLines(text) {
-  const out = [];
-  let inside = false;
-  for (const line of markLines(text)) {
-    if (line.fenced) continue;
-    if (/^ {0,3}#{1,6}(?:\s|$)/.test(line.text)) {
-      inside = /^## Run deltas\b/.test(line.text);
-      continue;
-    }
-    if (inside) out.push(line.text);
-  }
-  return out;
+  return sectionLines(text, 'Run deltas').filter(isTopListItem).map((line) => line.text);
 }
 
 function contractAction(state, deps) {
