@@ -1596,7 +1596,7 @@ test('council meta and args (D20): meta precedes council_review; its args; a mis
   assert.equal(review.args.workshop_path, `${join(h.runDir, 'council', 'wp-02')}${sep}`);
   assert.equal(review.args.output_dir, `${join(h.runDir, 'council', 'wp-02', 'review-1')}${sep}`);
   assert.equal(review.args.code_root, wt);
-  assert.equal(review.args.profile, 'code');
+  assert.equal(review.args.profile, 'conduct-code');
   assert.ok(!('models' in review.args));
   assert.deepEqual(review.args.artifact_paths, [join(wt, 'src/a.mjs')]);
   await recordPending(h, await perform(h, review));
@@ -1618,6 +1618,13 @@ test('council meta and args (D20): meta precedes council_review; its args; a mis
   assert.ok(all.indexOf(record) < all.findIndex((a) => a.step === 'rebase'), 'the record is posted at adjudication, before landing');
   const second = all.findIndex((a) => a.tool === 'council_review' && a.args.round === 2);
   assert.ok(second > all.indexOf(brief), 'the delta council round');
+  // Round 2 is handed round 1's rulings (37676efe): the file is written at resolve and leads its artifacts.
+  const priorFile = join(h.runDir, 'council', 'wp-02', 'review-1', 'adjudication-for-next-round.md');
+  assert.equal(all[second].args.artifact_paths[0], priorFile);
+  const prior = readFileSync(priorFile, 'utf8');
+  assert.match(prior, /^# Prior round: findings already adjudicated \(context, not under review\)/);
+  assert.match(prior, /\| C1-2 \| refuted \| — \| `grep -n mergeLock lib\/land\.mjs` shows the release at :876 \|/);
+  assert.ok(!all.find((a) => a.tool === 'council_review' && a.args.round === 1).args.artifact_paths.includes(priorFile), 'round 1 has no prior round');
   assert.ok(all.findIndex((a) => a.step === 'rebase') > second);
   assert.equal(h.wp('WP-02').state, 'merged');
 });

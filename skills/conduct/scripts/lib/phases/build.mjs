@@ -27,8 +27,8 @@ import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, rec
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import {
-  councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable, rebaseActions,
-  recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
+  PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
+  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
 } from '../land.mjs';
 import { READ_BACK_WAIT_MS, answerCommand, conductScript, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles } from '../touch.mjs';
 
@@ -963,6 +963,10 @@ function expand(state, wp, deps) {
       if (record) {
         deps.mkdir(dirname(record.path));
         deps.write(record.path, record.body);
+        // The next council round reads this round's rulings (land.mjs t2Actions).
+        const prior = join(dirname(record.path), PRIOR_ADJUDICATION_FILE);
+        deps.write(prior, priorAdjudicationBody(record.body));
+        wp.priorAdjudication = prior;
       }
       return go([...(record ? [record.action] : []), ...(wp.replyIds?.length ? resolveThreadActions(state, wp, wp.replyIds) : [])], 'delta');
     }

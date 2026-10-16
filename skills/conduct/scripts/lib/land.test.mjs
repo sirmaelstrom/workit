@@ -1005,9 +1005,13 @@ test('t2Actions: council off → every available lens but the author\'s; on → 
   const workshop = join(RUN, 'council', 'wp-01');
   assert.deepEqual(on[0].args, {
     workshop_path: `${workshop}${sep}`, output_dir: `${join(workshop, 'review-2')}${sep}`,
-    surface: 'code', code_root: WT, artifact_paths: changed, round: 2, profile: 'code',
+    surface: 'code', code_root: WT, artifact_paths: changed, round: 2, profile: 'conduct-code',
   });
   assert.equal(Object.hasOwn(on[0].args, 'models'), false);
+  // A recorded prior adjudication leads round 2's artifacts; round 1 never carries one.
+  const prior = join(RUN, 'council', 'wp-01', 'review-1', 'adjudication-for-next-round.md');
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: prior }), { round: 2, changedPaths: changed })[0].args.artifact_paths, [prior, ...changed]);
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: prior }), { round: 1, changedPaths: changed })[0].args.artifact_paths, changed);
   assert.equal(on[1].head, HEAD);
   assert.deepEqual(on[1].expects, { type: 'json', fields: ['findings', 'seats'] });
 });

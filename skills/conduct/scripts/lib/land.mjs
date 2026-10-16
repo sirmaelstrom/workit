@@ -228,21 +228,47 @@ export function deltaReviewActions(state, wp, sinceHead, { report = null, change
   return reviewActions(state, wp, { round, report, since: sinceHead });
 }
 
+// /conduct's own council roster: the shared `code` profile minus
+// sonnet-5-carto (quest 37676efe; RC-3's yield audit: 21 unique carto findings
+// gave 8 fixes, 7 refuted, 6 judgment and one fixed A-class item). The profile
+// is config-owned in the review-council's models.json, like `code`; a server
+// without it refuses the call by name ("Unknown profile").
+export const CONDUCT_COUNCIL_PROFILE = 'conduct-code';
+
+// The file a council round's adjudication is handed to the next round in
+// (quest 37676efe: 5 of RC-3's round-2 findings repeated round-1 rulings).
+// Written at `resolve` beside the round's pr-record.md, and framed for a
+// reviewer rather than for the PR.
+export const PRIOR_ADJUDICATION_FILE = 'adjudication-for-next-round.md';
+
+export function priorAdjudicationBody(recordBody) {
+  return [
+    '# Prior round: findings already adjudicated (context, not under review)',
+    '',
+    'The lane ruled on each finding below in the previous council round. Do not raise one again unless this round\'s change touches the code it cites, or the Evidence cell is wrong; then say which, and quote the line.',
+    '',
+    recordBody,
+  ].join('\n');
+}
+
 // The council round's scope comes from its dispatch, never the round number.
 // A delta round first writes `git diff <since> <head>` into the run dir and
 // hands that file to the council, so the scope reaches the tool's input.
+// From round 2 on, the previous round's adjudication (wp.priorAdjudication,
+// set at `resolve`) goes in too.
 export function t2Actions(state, wp, { round = 1, changedPaths = [], report = null, scope = 'full', since = null } = {}) {
   if (!state.adapters?.council?.on) return reviewActions(state, wp, { round, report, all: true, since: scope === 'delta' ? since : null });
   const workshop = `${join(state.runDir, 'council', lower(wp))}${sep}`;
   const outDir = `${join(state.runDir, 'council', lower(wp), `review-${round}`)}${sep}`;
   const deltaDiff = scope === 'delta' ? join(state.runDir, 'council', lower(wp), `delta-r${round}.diff`) : null;
   const land = { round, scope, since, deltaDiff };
+  const prior = round > 1 && wp.priorAdjudication ? [wp.priorAdjudication] : [];
   const tool = (part, name, args, extra = {}) => ({ kind: 'agent-tool', step: 'council', seam: STEP_SEAM.council, part, tool: name,
     instruction: `Call ${name} with these args and record its result.`, args, expects: { type: 'json' }, land, ...extra });
   return [
     ...(deltaDiff ? [shell('council', 'delta-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', `--output=${deltaDiff}`, since, wp.pr.head], { land })] : []),
     tool('review', 'council_review', { workshop_path: workshop, output_dir: outDir, surface: 'code', code_root: wp.lane.worktree,
-      artifact_paths: [...(deltaDiff ? [deltaDiff] : []), ...changedPaths], round, profile: 'code' }),
+      artifact_paths: [...prior, ...(deltaDiff ? [deltaDiff] : []), ...changedPaths], round, profile: CONDUCT_COUNCIL_PROFILE }),
     tool('synthesize', 'council_synthesize', { review_dir: outDir, workshop_path: workshop }, {
       head: wp.pr.head, expects: { type: 'json', fields: ['findings', 'seats'] },
       instruction: 'Call council_synthesize, then record { findings: <count>, seats: [<usable seats>] } read from the synthesis. Count each synthesized finding once if any lens rated it Critical, Major or Minor; a finding every lens rated Note is not counted.',
