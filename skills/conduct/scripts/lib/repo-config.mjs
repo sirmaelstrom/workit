@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { ConductError, workspaceAncestor } from './state.mjs';
 import { sectionText } from './markdown.mjs';
+import { validateRecipe } from './recipe.mjs';
 
 export const WORKSPACE_KEYS = Object.freeze(['release', 'contractPaths', 'trivialExclude', 'gateEnv', 'gateBackground', 'laneEstimateUsd']);
 export const LEGACY_RELPATH = '.workit/conduct.json';
@@ -52,6 +53,12 @@ export function workspaceConfigProblems(config) {
   for (const key of Object.keys(config)) {
     if (key === 'laneSuite') problems.push(`laneSuite is lane-facing text: put it in the repo's AGENTS.md under a "## ${LANE_SUITE_HEADING}" heading`);
     else if (!WORKSPACE_KEYS.includes(key)) problems.push(`unknown key: ${key} (known: ${WORKSPACE_KEYS.join(', ')})`);
+  }
+  // Checked even when --release overrides it, and a present null is refused:
+  // a workspace file states a recipe or leaves the key out.
+  if (Object.hasOwn(config, 'release')) {
+    const checked = validateRecipe(config.release);
+    if (!checked.ok) problems.push(`release: ${checked.problems.join('; ')}`);
   }
   for (const key of ['contractPaths', 'trivialExclude']) {
     if (Object.hasOwn(config, key) && !isStrings(config[key])) problems.push(`${key} must be an array of non-empty glob strings`);
@@ -128,6 +135,9 @@ export function configLine(pinned) {
   if (!pinned) return null;
   if (pinned.source === 'workspace') return `Repo config: ${pinned.path}, sha256 ${pinned.sha256} (pinned for this run)`;
   if (pinned.source === 'repo') return `Repo config: ${LEGACY_RELPATH} in the repo (deprecated location)${pinned.sha256 ? `, sha256 ${pinned.sha256.slice(0, 12)}` : ''}`;
+  if (pinned.source === 'none') {
+    return `Repo config: none (${pinned.workspacePath ? `no ${pinned.workspacePath}` : 'no workspace root found'}, no ${LEGACY_RELPATH})`;
+  }
   return null;
 }
 
@@ -139,7 +149,9 @@ export function analysisLine(state) {
   const lane = from ? `; laneSuite from ${from}` : '';
   const target = pinned?.workspacePath ?? `<workspace>/data/config/conduct/${state?.intent?.repo?.remote ?? '<owner>/<repo>'}.json`;
   const moveLane = `move laneSuite to the repo's AGENTS.md under "## ${LANE_SUITE_HEADING}"`;
-  if (!pinned) return `- repo config: not recorded (the run predates the workspace config), so ${LEGACY_RELPATH} was read as before${lane}`;
+  if (!pinned) {
+    return `- repo config: not recorded (the run predates the workspace config), so ${LEGACY_RELPATH} was read as before${lane}. Deprecated location (it still works): move its conduct-only keys to <workspace>/data/config/conduct/${state?.intent?.repo?.remote ?? '<owner>/<repo>'}.json and ${moveLane}.`;
+  }
   if (pinned.source === 'repo') {
     return `- repo config: ${LEGACY_RELPATH} in the product repo${lane}. Deprecated location (it still works): move its conduct-only keys to ${target} and ${moveLane}.`;
   }

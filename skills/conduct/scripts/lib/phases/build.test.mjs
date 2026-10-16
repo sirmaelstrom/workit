@@ -2028,6 +2028,31 @@ test('repo config split (e2b54cd3): the pinned contractPaths set the tier; a run
   assert.match(analysis, /^- repo config: \.workit\/conduct\.json in the product repo; laneSuite from `\.workit\/conduct\.json` laneSuite\. Deprecated location \(it still works\): move its conduct-only keys to \/ws\/data\/config\/conduct\/o\/r\.json and move laneSuite to the repo's AGENTS\.md under "## Lane suite"\.$/m);
 });
 
+test('repo config split (e2b54cd3): a run whose state predates the split keeps the legacy laneSuite even when AGENTS.md has a ## Lane suite', async (t) => {
+  const h = harness(t);
+  assert.equal(h.state.intent.repoConfig, undefined, 'the harness state is a pre-split state');
+  writeFileSync(join(h.repo, 'AGENTS.md'), '## Lane suite\n\nnew rule\n');
+  const first = await step(h);
+  const isolation = Object.entries(first.slots).find(([slot]) => slot.startsWith('<Per-repo lane isolation'))[1];
+  assert.equal(isolation, JSON.parse(fixture('build', 'conduct.json')).laneSuite);
+  assert.match(first.append, /Suite ownership \(`\.workit\/conduct\.json` laneSuite\)/);
+});
+
+test('repo config split (e2b54cd3): record checks the laneSuite the contract action was built from, not a re-read', async (t) => {
+  const h = harness(t, { config: JSON.stringify({ contractPaths: [] }) });
+  pinWorkspace(h, {});
+  writeFileSync(join(h.repo, 'AGENTS.md'), '## Lane suite\n\nemitted rule\n');
+  const first = await step(h);
+  assert.deepEqual(first.laneSuite, { text: 'emitted rule', from: 'AGENTS.md `## Lane suite`' });
+  // The section is removed after emission: the contract still needs its Run deltas, and provenance stays.
+  writeFileSync(join(h.repo, 'AGENTS.md'), '# nothing here\n');
+  writeFileSync(first.outPath, fillTemplate({ ...first, append: undefined }));
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /declares laneSuite \(AGENTS\.md `## Lane suite`\)/ });
+  writeFileSync(first.outPath, fillTemplate(first));
+  await recordPending(h, {});
+  assert.equal(h.state.build.laneSuiteFrom, 'AGENTS.md `## Lane suite`');
+});
+
 test('repo config gateEnv that is not an object of strings blocks the WP at its gate and releases the merge lock', async (t) => {
   const h = harness(t, { config: JSON.stringify({ gateEnv: { OBSERVATORY_TEST_DB: 7 } }), gateCommand: 'npm test', wps: [TWO[0], TWO[1]] });
   await drive(h, { until: (a, hh) => hh.wp('WP-02').state === 'blocked' });

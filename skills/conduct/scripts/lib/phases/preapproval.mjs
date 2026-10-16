@@ -77,12 +77,12 @@ function touchOne(state, deps = {}, { bound = false } = {}) {
   // what authority, at what cost, and where its lanes can be watched. The
   // probe details the answer rests on follow, under Details.
   // The workspace config's sha256 is always on touch 1 (the anchor receipt):
-  // it is the run's pin. The legacy line is a note, dropped when it would
-  // overrun the cap, so a repo still on .workit/conduct.json is refused at
-  // intake exactly when it was before.
+  // it is the run's pin. The legacy and the none lines are notes, dropped when
+  // they would overrun the cap, so a repo without a workspace file is refused
+  // at intake exactly when it was before.
   const pinned = intent.repoConfig ?? null;
   const pinLine = pinned?.source === 'workspace' ? configLine(pinned) : null;
-  const legacyLine = pinned?.source === 'repo' && !bound ? configLine(pinned) : null;
+  const legacyLine = pinned && pinned.source !== 'workspace' && !bound ? configLine(pinned) : null;
   const render = (detail, legacy) => [
     `Proposed: on ${intent.repo.remote}, spec the goal, build it in lanes, review each PR, then ${noCi
       ? `hold every PR open (no CI on ${intent.repo.remote} can gate a PR, so nothing merges)`

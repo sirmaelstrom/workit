@@ -299,7 +299,7 @@ async function intake(tokens, deps) {
     const projected = draft();
     const length = filedLength(projected, 1, preapproval.touchOneQuestion(projected, deps, { bound: true }));
     if (length > QUESTION_MAX) {
-      refuse(8, `touch 1's question would be ${length} chars, over spine_receipt's ${QUESTION_MAX}-char cap: shorten the release recipe or the repo path (a long goal is already cited by file)`);
+      refuse(8, `touch 1's question would be ${length} chars, over spine_receipt's ${QUESTION_MAX}-char cap: shorten the release recipe, the repo path${repoConfig.source === 'workspace' ? ' or the workspace config path' : ''} (a long goal is already cited by file)`);
     }
   }
 

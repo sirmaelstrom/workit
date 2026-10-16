@@ -14,7 +14,7 @@ import { STEPS, STEP_SEAM, ConductError, resolveRunDir, readEvents, saveState, a
 import { detectAdapters, laneModel } from './lib/adapters.mjs';
 import { resolveRecipe, recipeArgv } from './lib/recipe.mjs';
 import { shellArgv, spawnDetached, pidAlive } from './lib/exec.mjs';
-import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, resumeCommand, shellLiteral, filedLength } from './lib/touch.mjs';
+import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, resumeCommand, shellLiteral, filedLength, QUESTION_MAX } from './lib/touch.mjs';
 import { validateGrant } from './lib/phases/preapproval.mjs';
 import { samePath } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
@@ -555,7 +555,26 @@ test('repo config at intake: a repo with only .workit/conduct.json reads it as b
   const none = repoConfigFixture(t);
   const bare = out(await intake(none.f, [], { env: none.env }));
   assert.equal(readState(bare.runDir).intent.repoConfig.source, 'none');
-  assert.doesNotMatch(bare.action.touch.question, /Repo config/);
+  assert.ok(bare.action.touch.question.includes(`Repo config: none (no ${none.wsPath}, no .workit/conduct.json)\n`), bare.action.touch.question);
+});
+
+test('repo config at intake: the legacy and none notes never push touch 1 over the cap (refusal 8 is decided without them)', async (t) => {
+  // A goal and recipe sized so touch 1 sits just under the cap without the note.
+  const { f } = repoConfigFixture(t, { legacy: { release: RECIPE } });
+  const { touchOneQuestion } = await import('./lib/phases/preapproval.mjs');
+  const seeded = readState(out(await intake(f, [])).runDir);
+  assert.equal(seeded.intent.repoConfig.source, 'repo');
+  const projected = (verify) => {
+    const state = { ...seeded, intent: { ...seeded.intent, release: { ...RECIPE, verify } } };
+    return { state, bound: touchOneQuestion(state, { env: {} }, { bound: true }), full: touchOneQuestion(state, { env: {} }) };
+  };
+  const base = projected(['x']);
+  const room = QUESTION_MAX - filedLength(base.state, 1, base.bound);
+  const tight = projected([`x${'y'.repeat(room - 2)}`]);
+  assert.ok(filedLength(tight.state, 1, tight.bound) <= QUESTION_MAX, 'the bound fits');
+  assert.doesNotMatch(tight.full, /Repo config/, 'the note is dropped rather than overrunning the cap');
+  assert.ok(filedLength(tight.state, 1, tight.full) <= QUESTION_MAX);
+  assert.match(base.full, /Repo config: \.workit\/conduct\.json in the repo \(deprecated location\)/);
 });
 
 test('repo config at intake: an invalid workspace file is exit 2 naming its problems, and nothing is written', async (t) => {
@@ -564,7 +583,8 @@ test('repo config at intake: an invalid workspace file is exit 2 naming its prob
     [{ bogus: 1 }, /unknown key: bogus/],
     [{ contractPaths: 'scripts/**' }, /contractPaths must be an array of non-empty glob strings/],
     [{ gateEnv: { A: 1 } }, /gateEnv must be an object of string values/],
-    [{ release: { ...RECIPE, pr: false } }, /invalid release recipe: pr must be true/],
+    [{ release: { ...RECIPE, pr: false } }, /release: pr must be true/],
+    [{ release: null }, /release: recipe must be a JSON object/],
     ['{ not json', /is not valid JSON/],
   ];
   for (const [workspace, pattern] of cases) {
@@ -574,6 +594,11 @@ test('repo config at intake: an invalid workspace file is exit 2 naming its prob
     assert.match(result.stdout + result.stderr, pattern);
     assert.deepEqual(readdirSync(f.runs), [], JSON.stringify(workspace));
   }
+  // An invalid workspace release is refused even when --release overrides it.
+  const { f, env } = repoConfigFixture(t, { workspace: { release: 42 } });
+  const overridden = await intake(f, ['--release', recipeFile(f, RECIPE)], { env });
+  assert.equal(overridden.code, 2, overridden.stdout);
+  assert.match(overridden.stdout + overridden.stderr, /release: recipe must be a JSON object/);
 });
 
 function libFilesUsingImportMetaUrl(libDir) {

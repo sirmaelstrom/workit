@@ -131,11 +131,14 @@ function repoConfig(state, deps) {
 }
 
 // The lane-facing laneSuite: the checkout's AGENTS.md `## Lane suite`
-// section, else the legacy file's laneSuite. { text, from } or null.
+// section, else the legacy file's laneSuite. { text, from } or null. A run
+// whose state predates the split (no intent.repoConfig) reads only the legacy
+// file, as it did when it started.
 function laneSuiteOf(state, deps) {
+  const legacy = () => laneSuiteFrom({ agentsText: null, legacyConfig: legacyConfig(state, deps) });
+  if (!state.intent.repoConfig) return legacy();
   const agentsText = readText(deps, join(state.intent.repo.path, 'AGENTS.md'));
-  const fromAgents = laneSuiteFrom({ agentsText, legacyConfig: null });
-  return fromAgents ?? laneSuiteFrom({ agentsText: null, legacyConfig: legacyConfig(state, deps) });
+  return laneSuiteFrom({ agentsText, legacyConfig: null }) ?? legacy();
 }
 
 // Deep: the orchestrator's `## Gate Commands` line for the WP's wave; none and
@@ -157,7 +160,7 @@ export function gateEnvFor(state, wp, config) {
   const env = config.gateEnv;
   if (env === undefined) return {};
   if (!env || typeof env !== 'object' || Array.isArray(env) || Object.values(env).some((value) => typeof value !== 'string')) {
-    throw new ConductError(2, 'repo config gateEnv must be an object of string values');
+    throw new ConductError(2, `${pinnedConfig(state) ? state.intent.repoConfig.path : '.workit/conduct.json'} gateEnv must be an object of string values`);
   }
   const ident = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.replaceAll('{run}', ident(state.slug)).replaceAll('{wp}', ident(wp.id))]));
@@ -222,6 +225,8 @@ function contractAction(state, deps) {
   const append = typeof laneSuite === 'string' && laneSuite.trim() ? runDeltas(laneSuite, suite.from) : null;
   return {
     kind: 'author', step: 'contract', template, outPath: contractPath(state), slots, ...(append ? { append } : {}), expects: { type: 'file' },
+    // What this action was built from, so record checks the same text.
+    laneSuite: suite ?? null,
     instruction: `Copy ${template} to ${contractPath(state)}, replacing each key of slots (its exact text, brackets included) with its value; a null value deletes the whole line that holds the slot. Leave every other <…> placeholder as it is.${append ? ' Then append the append text verbatim.' : ''} Record {}.`,
   };
 }
@@ -231,7 +236,8 @@ function recordContract(state, action, deps) {
   if (text === null) throw new ConductError(2, `the lane contract ${action.outPath} was not written`);
   const left = RUN_SLOTS.filter((prefix) => text.includes(prefix));
   if (left.length) throw new ConductError(2, `the lane contract still holds run-level slots: ${left.join(', ')}`);
-  const suite = laneSuiteOf(state, deps);
+  // The emitted action's laneSuite; an action stored by an older conduct.mjs has none, so it is read again.
+  const suite = Object.hasOwn(action, 'laneSuite') ? action.laneSuite : laneSuiteOf(state, deps);
   if (suite && !/^## Run deltas\b/m.test(text)) {
     throw new ConductError(2, `the repo declares laneSuite (${suite.from}), and the lane contract has no ## Run deltas section saying it overrides rule 9`);
   }
