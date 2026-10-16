@@ -20,13 +20,16 @@ function readJson(path, read, label) {
   }
 }
 
-// --release file > <repo>/.workit/conduct.json's `release` > null.
-export function resolveRecipe({ flagPath, repoPath, read }) {
+// --release file > the repo config's `release` > null. The repo config is the
+// workspace file pinned at intake (lib/repo-config.mjs) when `repoConfig`
+// carries one; otherwise <repo>/.workit/conduct.json, read as it always was.
+export function resolveRecipe({ flagPath, repoPath, read, repoConfig = null }) {
   if (flagPath) {
     const recipe = readJson(flagPath, read, '--release file');
     if (recipe === undefined) throw new ConductError(2, `--release file ${flagPath} does not exist`);
     return recipe;
   }
+  if (repoConfig?.source === 'workspace') return repoConfig.config?.release ?? null;
   const config = readJson(join(repoPath, '.workit', 'conduct.json'), read, 'repo config');
   return config?.release ?? null;
 }

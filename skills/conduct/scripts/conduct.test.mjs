@@ -8,6 +8,7 @@ import { tmpdir, hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { runConduct } from './conduct.mjs';
 import { STEPS, STEP_SEAM, ConductError, resolveRunDir, readEvents, saveState, appendEvent, withStateLock } from './lib/state.mjs';
 import { detectAdapters, laneModel } from './lib/adapters.mjs';
@@ -504,6 +505,75 @@ test('recipe at intake: stored verbatim and shown in touch 1', async (t) => {
   assert.deepEqual(resolveRecipe({ flagPath: null, repoPath: '/repo', read }), RECIPE);
   assert.equal(resolveRecipe({ flagPath: null, repoPath: '/elsewhere', read }), null);
   assert.deepEqual(recipeArgv('claude plugin update workit@workit'), ['claude', 'plugin', 'update', 'workit@workit']);
+});
+
+// e2b54cd3: conduct-only keys in the workspace, keyed by owner/repo; the
+// legacy .workit/conduct.json in the repo keeps working.
+function repoConfigFixture(t, { workspace, legacy } = {}) {
+  const f = fixture(t);
+  const root = join(f.dir, 'ws');
+  const env = { WORKIT_WORKSPACE_ROOT: root };
+  f.deps.env = env;
+  const wsPath = join(root, 'data', 'config', 'conduct', 'sirmaelstrom', 'workit.json');
+  if (workspace !== undefined) {
+    mkdirSync(dirname(wsPath), { recursive: true });
+    writeFileSync(wsPath, typeof workspace === 'string' ? workspace : JSON.stringify(workspace));
+  }
+  if (legacy !== undefined) {
+    mkdirSync(join(f.repo, '.workit'), { recursive: true });
+    writeFileSync(join(f.repo, '.workit', 'conduct.json'), JSON.stringify(legacy));
+  }
+  return { f, env, wsPath };
+}
+
+test('repo config at intake: the workspace file wins over the repo file, is pinned in state, and its sha256 is on touch 1', async (t) => {
+  const workspace = JSON.stringify({ release: { ...RECIPE, level: 'minor' }, contractPaths: ['scripts/lane.mjs'] });
+  const { f, env, wsPath } = repoConfigFixture(t, { workspace, legacy: { release: RECIPE, laneSuite: 'legacy suite' } });
+  const result = out(await intake(f, [], { env }));
+  const { intent } = readState(result.runDir);
+  const hash = createHash('sha256').update(workspace).digest('hex');
+  assert.equal(intent.release.level, 'minor');
+  assert.deepEqual(intent.repoConfig, { source: 'workspace', path: wsPath, workspacePath: wsPath, sha256: hash, config: JSON.parse(workspace) });
+  assert.ok(result.action.touch.question.includes(`Repo config: ${wsPath}, sha256 ${hash} (pinned for this run)`), result.action.touch.question);
+
+  // With the Spine adapter touch 1 is the anchor receipt: the pin is filed there.
+  const spine = repoConfigFixture(t, { workspace });
+  const flow = await toSpineReadBack(spine.f, [], GOAL);
+  assert.ok(flow.receipt.args.question.includes(`sha256 ${hash}`), flow.receipt.args.question);
+});
+
+test('repo config at intake: a repo with only .workit/conduct.json reads it as before, noted as deprecated on touch 1', async (t) => {
+  const { f, env, wsPath } = repoConfigFixture(t, { legacy: { release: RECIPE } });
+  const result = out(await intake(f, [], { env }));
+  const { intent } = readState(result.runDir);
+  assert.deepEqual(intent.release, RECIPE);
+  assert.equal(intent.repoConfig.source, 'repo');
+  assert.equal(intent.repoConfig.workspacePath, wsPath);
+  assert.equal(intent.repoConfig.config, null);
+  assert.match(result.action.touch.question, /Repo config: \.workit\/conduct\.json in the repo \(deprecated location\), sha256 [0-9a-f]{12}\n/);
+
+  const none = repoConfigFixture(t);
+  const bare = out(await intake(none.f, [], { env: none.env }));
+  assert.equal(readState(bare.runDir).intent.repoConfig.source, 'none');
+  assert.doesNotMatch(bare.action.touch.question, /Repo config/);
+});
+
+test('repo config at intake: an invalid workspace file is exit 2 naming its problems, and nothing is written', async (t) => {
+  const cases = [
+    [{ laneSuite: 'x' }, /laneSuite is lane-facing text: put it in the repo's AGENTS\.md under a \\?"## Lane suite\\?" heading/],
+    [{ bogus: 1 }, /unknown key: bogus/],
+    [{ contractPaths: 'scripts/**' }, /contractPaths must be an array of non-empty glob strings/],
+    [{ gateEnv: { A: 1 } }, /gateEnv must be an object of string values/],
+    [{ release: { ...RECIPE, pr: false } }, /invalid release recipe: pr must be true/],
+    ['{ not json', /is not valid JSON/],
+  ];
+  for (const [workspace, pattern] of cases) {
+    const { f, env } = repoConfigFixture(t, { workspace, legacy: { release: RECIPE } });
+    const result = await intake(f, [], { env });
+    assert.equal(result.code, 2, `${JSON.stringify(workspace)}: ${result.stdout}`);
+    assert.match(result.stdout + result.stderr, pattern);
+    assert.deepEqual(readdirSync(f.runs), [], JSON.stringify(workspace));
+  }
 });
 
 function libFilesUsingImportMetaUrl(libDir) {

@@ -17,6 +17,26 @@ export function markLines(text) {
   });
 }
 
+// The body of the first unfenced level-2 or level-3 heading whose text is
+// `title` (case ignored), up to the next unfenced heading of any level, as one
+// line: blank lines dropped, the rest trimmed and joined with a space. null
+// when there is no such heading or its body is empty.
+export function sectionText(text, title) {
+  const want = String(title).trim().toLowerCase();
+  let found = false;
+  const body = [];
+  for (const line of markLines(text)) {
+    const heading = line.fenced ? null : /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line.text);
+    if (!found) {
+      found = Boolean(heading && heading[1].length >= 2 && heading[1].length <= 3 && heading[2].toLowerCase() === want);
+      continue;
+    }
+    if (heading) break;
+    if (line.text.trim()) body.push(line.text.trim());
+  }
+  return body.length ? body.join(' ') : null;
+}
+
 // The report's `## Amendment N` sections in order: { n, lines }, where lines
 // are every line after the heading up to the next unfenced level-1/2 heading.
 export function amendmentSections(text) {

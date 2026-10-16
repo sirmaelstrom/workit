@@ -77,7 +77,7 @@ export function resolveRunDir({ repo, slug, env = {}, runsRoot, exists, home }) 
   return { workshopDir, runDir: join(workshopDir, 'run'), source };
 }
 
-function workspaceAncestor(repo, exists) {
+export function workspaceAncestor(repo, exists) {
   if (!repo) return null;
   for (let current = resolve(repo); ; current = dirname(current)) {
     if (exists(join(current, 'projects')) && exists(join(current, 'data'))) return current;

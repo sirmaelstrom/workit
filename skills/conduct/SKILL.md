@@ -17,7 +17,7 @@ You drive a one-shot state machine, `${CLAUDE_SKILL_DIR}/scripts/conduct.mjs`. E
          [--agent claude|codex]       # lane agent CLI; default: the first found
          [--adapter <name>]...        # declare spine | council | kb | verify | ledger
          [--no-adapter <name>]...     # force the core path for an adapter
-         [--release <json file>]      # a release recipe; else the repo's .workit/conduct.json
+         [--release <json file>]      # a release recipe; else the repo config's release (§ Repo config)
          [--runs-root <dir>]          # where the run dir goes
 /conduct --resume <run dir>           # continue a run
 ```
@@ -166,13 +166,19 @@ Then the run emits its pending action again, by the same id (a pending hand-back
 
 ## Repo config
 
-The target repo's `.workit/conduct.json` may carry, beside `release`:
+Conduct-only keys live in the workspace, keyed by the repo's GitHub identity: `<workspace>/data/config/conduct/<owner>/<repo>.json`. The workspace is `WORKIT_WORKSPACE_ROOT`, else the nearest ancestor of the repo holding both `projects/` and `data/`. `intake` reads that file once and pins it: it stores the parsed keys in `state.json` and puts the file's sha256 on touch 1, which with the Spine adapter is the anchor receipt. The build and the merge gate read only the pin. An edit to the file after intake does not reach the run. An unknown key, a key of the wrong type or a `laneSuite` in this file is exit 2 at intake.
+
+The lane-facing text goes in the repo's `AGENTS.md`, under a `## Lane suite` heading (`###` also counts). Its body, up to the next heading, is joined into one line and becomes the lane-isolation line of the lane contract and its `## Run deltas` entry. Keep it to a short paragraph.
+
+The workspace file may carry:
+- `release`: the release recipe (`--release` overrides it).
 - `contractPaths`: globs that raise a WP to T2.
 - `trivialExclude`: globs a tail never counts as trivial.
-- `laneSuite`: the lane-isolation line of the lane contract.
 - `gateEnv`: env for the conductor's gate command. `{run}` and `{wp}` become the run slug and the WP id as lowercase identifiers. Use it for a repo whose suite needs its own database per runner.
 - `gateBackground: true`: the gate command's action carries `background: true`.
 - `laneEstimateUsd`: what the budget gate counts for each live lane and the next WP until a lane has closed (then the mean of closed lanes is used); default 15.
+
+**Deprecated, still read:** `.workit/conduct.json` in the product repo, with the same keys plus `laneSuite`. With no workspace file it supplies the conduct-only keys as it always has: the build reads it from the checkout and the merge gate from `origin/<default>`. With no `## Lane suite` section in `AGENTS.md` it supplies `laneSuite`. Touch 1 and the run analysis's Pre-approval audit name it as a deprecated location. A run started before this split has no pin in `state.json` and reads the repo file the old way.
 
 ## Self-hosted runs
 
