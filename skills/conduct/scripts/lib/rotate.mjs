@@ -79,7 +79,7 @@ export function rotate(state, { why, model = null, effort = null, name = null },
   });
   const next = chain
     ? `Run this argv as your LAST tool call and make no tool call after it: ${JSON.stringify(chain)}. If it exits nonzero, read its output: when the successor was briefed (callerRetirement: exit-refused), end your turn with no further conduct.mjs call, since the successor takes custody; otherwise run conduct.mjs next from this pane, which cancels the rotation.`
-    : `Start a fresh conductor session and give it this one line: Read ${rotation.handoff} and execute it exactly. Then end your turn with no further conduct.mjs call. If no successor starts, run conduct.mjs next yourself: its custody step lets you cancel the rotation.`;
+    : `Start a fresh conductor session and give it this one line: Read ${rotation.handoff} and execute it exactly. Then end your turn with no further conduct.mjs call. If no successor starts, run conduct.mjs next --run <dir> --custody ${attempt} yourself: its custody step lets you cancel the rotation.`;
   return { rotation: attempt, from, to: rotation.to, handoff: rotation.handoff, chain: chain ? { command: chain } : null, next };
 }
 
@@ -185,15 +185,16 @@ function receiptAction(state, rotation) {
     args: {
       questId: state.intent.anchor, outcome: 'paused',
       did: `conduct ${state.slug} (run ${state.runId}): conductor r${rotation.from} rotated to r${rotation.to} (${line(rotation.why).slice(0, 600)}). Handoff: ${rotation.handoff}. r${rotation.from} was ${retired}.${rotation.successor.pane ? ` r${rotation.to} runs in herdr pane ${rotation.successor.pane}.` : ''}`,
-      stoppedAt: `custody of conduct ${state.slug} taken by r${rotation.to}; the run resumes at ${rotation.pendingId ? `its pending action ${rotation.pendingId}` : 'its next action'}`,
+      stoppedAt: `custody of conduct ${state.slug} taken by r${rotation.to}; the run resumes at ${state.pending?.id ? `its pending action ${state.pending.id}` : 'its next action'}`,
     },
   };
 }
 
 // The next custody step's spec, or null once custody is taken (or the rotation
 // was cancelled). Throws when the conductor that rotated asks after its
-// successor has started custody.
-export function custodyNext(state, rotation, deps) {
+// successor has started custody, and when custody would start without
+// `next --custody <attempt>` (the fence is then never skipped).
+export function custodyNext(state, rotation, deps, { custody = null } = {}) {
   const caller = rotation.caller.pane;
   const here = herdrPane(deps);
   if (caller && here === caller) {
@@ -206,6 +207,9 @@ export function custodyNext(state, rotation, deps) {
     return null;
   }
   if (rotation.action) return rotation.action;
+  if (rotation.retire === null && String(custody) !== String(rotation.attempt)) {
+    throw new ConductError(5, `rotation ${rotation.attempt} is open: its successor starts custody with next --custody ${rotation.attempt} (handoff ${rotation.handoff})`);
+  }
   if (rotation.retire === null && here && !rotation.successor.pane) rotation.successor.pane = here;
   if (caller && rotation.retire === null) return retireAction(state, rotation, 'close');
   if (caller && rotation.retire === 'close-failed') return retireAction(state, rotation, 'exit+close');

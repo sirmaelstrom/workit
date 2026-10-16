@@ -1363,7 +1363,11 @@ test('rotate (d3ce5461): outside herdr there is no chain and no pane to retire â
   assert.equal(rotated.chain, null);
   assert.match(rotated.next, /^Start a fresh conductor session and give it this one line: Read .*handoff-1\.md and execute it exactly\./);
   assert.match(readFileSync(rotated.handoff, 'utf8'), /confirm r1 has ended \(it ran outside herdr/);
-  const confirm = out(await h.run(['next', '--run', h.runDir])).action;
+  // Custody starts only through the fence: a plain next is refused.
+  const plain = await h.run(['next', '--run', h.runDir]);
+  assert.equal(plain.code, 5, plain.stdout);
+  assert.match(out(plain).error, /its successor starts custody with next --custody 1/);
+  const confirm = out(await h.run(['next', '--run', h.runDir, '--custody', '1'])).action;
   assert.deepEqual([confirm.kind, confirm.step, confirm.part, confirm.outPath], ['author', 'custody', 'confirm', join(h.runDir, 'custody-1.json')]);
   const recordConfirm = () => h.run(['record', '--run', h.runDir, '--action', confirm.id, '--result', '{}']);
   assert.equal((await recordConfirm()).code, 2, 'no file');
@@ -1377,7 +1381,7 @@ test('rotate (d3ce5461): outside herdr there is no chain and no pane to retire â
   // r2 rotates; its successor never starts, so r2 cancels from the confirm step.
   const second = out(await h.run(['rotate', '--run', h.runDir, '--why', 'again']));
   assert.deepEqual([second.from, second.to], [2, 3]);
-  const cancel = out(await h.run(['next', '--run', h.runDir])).action;
+  const cancel = out(await h.run(['next', '--run', h.runDir, '--custody', '2'])).action;
   writeFileSync(cancel.outPath, JSON.stringify({ cancel: true, why: 'no successor started' }));
   const resumed = await h.run(['record', '--run', h.runDir, '--action', cancel.id, '--result', '{}']);
   assert.equal(out(resumed).action.id, pending.id);

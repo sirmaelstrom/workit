@@ -122,10 +122,10 @@ function stamp(state, spec) {
 // the phase without an action hands over to the next phase's handler. An open
 // rotation's custody steps (lib/rotate.mjs) come before either; the pending
 // action stays where it is and is emitted again once custody is taken.
-async function emit(state, deps) {
+async function emit(state, deps, { custody = null } = {}) {
   const rotation = openRotation(state);
   if (rotation) {
-    const spec = custodyNext(state, rotation, deps);
+    const spec = custodyNext(state, rotation, deps, { custody });
     if (spec && spec !== rotation.action) {
       rotation.action = stamp(state, spec);
       appendEvent(state, deps, { actionId: rotation.action.id, step: spec.step, seam: rotation.action.seam, kind: spec.kind, event: 'emitted' });
@@ -319,9 +319,10 @@ async function intake(tokens, deps) {
 async function next(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
-    if (flags.custody !== undefined) custodyFence(state, flags.custody);
+    const custody = flags.custody === undefined ? null : String(flags.custody);
+    if (custody !== null) custodyFence(state, custody);
     if (state.pending?.handBack) resumeHandBack(state, deps);
-    return { out: { ok: true, action: await emit(state, deps) } };
+    return { out: { ok: true, action: await emit(state, deps, { custody }) } };
   }, { duringRotation: true });
 }
 
