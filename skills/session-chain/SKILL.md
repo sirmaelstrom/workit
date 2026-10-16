@@ -44,6 +44,8 @@ holds at every PR boundary with needs_input.
 ```
 
 **A brief that carries a plan.** When the handoff hands the successor a consequential plan to execute, such as a queue, a design or a multi-step migration, and the plan has had no blind second read, do that read before you write the handoff (`${CLAUDE_PLUGIN_ROOT}/reference/patterns/blind-second-read.md`). Cite its reconciliation in the handoff. When the context budget forbids it, write `Blind second read: owed` in the handoff with the inputs listed. The successor then dispatches the read from those inputs before it executes the plan, and it never forwards the plan itself. A successor that read the plan cannot serve as the blind reader.
+=======
+`retire <pane> --expect-session <id>` exits 3 (`reason: session-mismatch`) before any key or close when the pane's live herdr owner is another session, or its session can't be read: herdr reissues pane ids.
 
 A `/conduct` conductor does not use this template: `conduct.mjs rotate` writes its handoff and chain argv, and the run emits the successor's custody steps (conduct SKILL.md § Rotating the conductor).
 

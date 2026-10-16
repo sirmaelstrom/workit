@@ -361,6 +361,9 @@ async function record(tokens, deps) {
   return transact(flags, deps, async (state) => {
     const id = stringFlag(flags, 'action');
     // A replay of the last record changes nothing and re-emits the next action.
+    // From the rotated-out conductor's pane it is refused: its re-emit would
+    // cancel the open rotation, and a replay must not change custody.
+    if (id === state.lastRecorded && rotatedOut(state, deps)) throw new ConductError(5, `rotation ${openRotation(state).attempt} is open: a replay changes nothing; cancel it with next from your own pane, or end your turn`);
     if (id === state.lastRecorded) return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id), noop: true } };
     // While a rotation is open only its custody step can be recorded.
     const rotation = openRotation(state);

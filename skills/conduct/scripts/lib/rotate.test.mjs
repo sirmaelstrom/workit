@@ -59,6 +59,34 @@ test('rotate (d3ce5461): refused at the showcase and in a terminal phase; the ha
   assert.match(text, /next --run .+ --custody 1`/);
 });
 
+test('custody retire (d3ce5461): with no chain row naming r1\'s session for this handoff and pane, custody asks for confirmation instead of retiring a bare pane id; with one, the retire carries --expect-session', () => {
+  const s = state();
+  const rows = [];
+  const io = { ...deps({ HERDR_ENV: '1', HERDR_PANE_ID: 'w1:p1' }), exists: () => rows.length > 0, read: () => rows.map((row) => `${JSON.stringify(row)}\n`).join('') };
+  rotate(s, { why: 'context', model: 'm', effort: 'high' }, io);
+  const rotation = s.rotations[0];
+  const successor = { ...io, env: { HERDR_ENV: '1', HERDR_PANE_ID: 'w1:p2' } };
+  // A row for another handoff, and one for this handoff from another pane, do not count.
+  rows.push({ state: 'exit-sent', callerPane: 'w1:p1', callerSession: 'other-run', handoff: '/runs/other/run/handoff-1.md' });
+  rows.push({ state: 'exit-sent', callerPane: 'w9:p9', callerSession: 'other-pane', handoff: rotation.handoff });
+  const confirm = custodyNext(s, rotation, successor, { custody: 1 });
+  assert.equal(confirm.part, 'confirm');
+  assert.match(confirm.instruction, /no chain row for .*handoff-1\.md from pane w1:p1, so r1's session is unknown/);
+  const fresh = state();
+  rotate(fresh, { why: 'context', model: 'm', effort: 'high' }, io);
+  rows.push({ state: 'exit-sent', callerPane: 'w1:p1', callerSession: 'r1-session', handoff: fresh.rotations[0].handoff });
+  const retire = custodyNext(fresh, fresh.rotations[0], successor, { custody: 1 });
+  assert.deepEqual(retire.command.slice(2, 8), ['retire', 'w1:p1', '--mode', 'close', '--expect-session', 'r1-session']);
+});
+
+test('rotate (d3ce5461): a scope longer than 600 characters reaches the handoff whole', () => {
+  const scope = `${'only WP-01 and WP-02; '.repeat(40)}RESTRICTION_SENTINEL_DO_NOT_DEPLOY`;
+  const s = state({ authority: { merge: true, release: false, budgetUsd: 50, metered: false, scope, notes: null, grant: null } });
+  rotate(s, { why: 'context' }, deps());
+  assert.ok(scope.length > 600);
+  assert.ok(handoffText(s, s.rotations[0]).includes('RESTRICTION_SENTINEL_DO_NOT_DEPLOY'));
+});
+
 test('custody fence (d3ce5461): next --custody n refuses a cancelled or superseded rotation and an unknown one; an open or taken one passes', () => {
   const s = state();
   rotate(s, { why: 'first' }, deps());

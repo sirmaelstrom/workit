@@ -4,7 +4,7 @@
 // then a paused receipt on the anchor) before the run's pending action. The
 // pending action itself is never moved: custody runs in front of it, and an
 // older conduct.mjs that ignores `rotations` still sees it.
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { ConductError, TERMINAL_PHASES, appendEvent } from './state.mjs';
 import { LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { conductScript, shellLiteral, spineAckFailure } from './touch.mjs';
@@ -66,7 +66,7 @@ export function rotate(state, { why, model = null, effort = null, name = null },
     caller: { pane, model, effort },
     successor: { name: pane ? (name || `${state.slug}-r${from + 1}`) : null, pane: null },
     pendingId: state.pending?.id ?? null,
-    retire: null, receipt: null, action: null, custodyAt: null,
+    callerSession: null, retire: null, receipt: null, action: null, custodyAt: null,
   };
   (state.rotations ??= []).push(rotation);
   deps.write(rotation.handoff, handoffText(state, rotation));
@@ -137,7 +137,7 @@ export function handoffText(state, rotation) {
     `- Repo: \`${intent.repo?.path ?? ''}\` (${intent.repo?.remote ?? 'no remote'}, default branch ${intent.repo?.defaultBranch ?? 'unknown'})`,
     `- Phase: ${state.phase}; anchor: ${anchor ?? 'none'}; adapters on: ${on.join(', ') || 'none'}`,
     `- Authority: merge ${Boolean(state.authority?.merge)}, release ${Boolean(state.authority?.release)}, budget ${money(state.authority?.budgetUsd ?? 0)} (${state.authority?.metered ? 'metered by the spend adapter' : 'unmetered'}); ${spend}`,
-    `- Approved scope (binding; it can be narrower than the goal): ${line(state.authority?.scope ?? intent.goal).slice(0, 600)}${typeof state.authority?.grant === 'string' ? ` (grant \`${join(state.runDir, state.authority.grant)}\`)` : ''}${state.authority?.notes ? `; operator notes: ${line(state.authority.notes).slice(0, 400)}` : ''}`,
+    `- Approved scope (binding; it can be narrower than the goal): ${line(state.authority?.scope ?? intent.goal)}${typeof state.authority?.grant === 'string' ? ` (grant \`${join(state.runDir, state.authority.grant)}\`)` : ''}${state.authority?.notes ? `; operator notes: ${line(state.authority.notes)}` : ''}`,
     '',
     '## Pending action',
     '',
@@ -159,18 +159,38 @@ export function handoffText(state, rotation) {
 
 // ---- custody: emitted by `next` while a rotation is open ----
 
+// The predecessor's session id, from the row session.mjs chain wrote for this
+// handoff from the predecessor's pane, or null. herdr reissues pane ids, so
+// the retire is bound to this session (`--expect-session`), never to the pane alone.
+function chainedSession(state, rotation, deps) {
+  const log = sessionLog(state);
+  let text = '';
+  try {
+    if (!deps.exists?.(log)) return null;
+    text = deps.read(log);
+  } catch {
+    return null;
+  }
+  const rows = text.split(/\r?\n/).filter(Boolean).map((raw) => { try { return JSON.parse(raw); } catch { return null; } });
+  const mine = rows.filter((row) => typeof row?.handoff === 'string' && resolve(row.handoff) === resolve(rotation.handoff)
+    && row.callerPane === rotation.caller.pane && typeof row.callerSession === 'string' && row.callerSession);
+  return mine.at(-1)?.callerSession ?? null;
+}
+
 function retireAction(state, rotation, mode) {
   return {
     kind: 'shell', step: 'custody', part: `retire-${mode === 'close' ? 'close' : 'exit-close'}`, custody: rotation.attempt,
-    command: ['node', sessionScript(state), 'retire', rotation.caller.pane, '--mode', mode, '--log', sessionLog(state)],
-    instruction: `Retire conductor r${rotation.from} (pane ${rotation.caller.pane}): run this exact argv (no shell) and record its { code, stdout, stderr }, whatever its exit code.`,
+    command: ['node', sessionScript(state), 'retire', rotation.caller.pane, '--mode', mode, '--expect-session', rotation.callerSession, '--log', sessionLog(state)],
+    instruction: `Retire conductor r${rotation.from} (pane ${rotation.caller.pane}, session ${rotation.callerSession}): run this exact argv (no shell) and record its { code, stdout, stderr }, whatever its exit code.`,
   };
 }
 
 function confirmAction(state, rotation) {
-  const why = rotation.caller.pane
-    ? `session.mjs could not retire conductor r${rotation.from} in pane ${rotation.caller.pane} (close, then exit+close; ${SESSION_LOG} has both rows)`
-    : `conductor r${rotation.from} ran outside herdr, so no command can retire it`;
+  const why = !rotation.caller.pane
+    ? `conductor r${rotation.from} ran outside herdr, so no command can retire it`
+    : !rotation.callerSession
+      ? `${SESSION_LOG} has no chain row for ${rotation.handoff} from pane ${rotation.caller.pane}, so r${rotation.from}'s session is unknown and its pane id alone could name another agent`
+      : `session.mjs could not retire conductor r${rotation.from} in pane ${rotation.caller.pane} (close, then exit+close; ${SESSION_LOG} has both rows)`;
   return {
     kind: 'author', step: 'custody', part: 'confirm', custody: rotation.attempt, outPath: join(state.runDir, `custody-${rotation.attempt}.json`),
     instruction: `${why}. Two conductors must never drive one run. Confirm r${rotation.from} has ended (its pane or session is gone, or you closed it), then write ${'{ "gone": true, "evidence": "<what you observed>" }'} to outPath. If you are r${rotation.from} yourself and no successor took over, write ${'{ "cancel": true, "why": "<what happened>" }'} instead: the rotation is cancelled and you keep the run. Then record {}.`,
@@ -211,7 +231,8 @@ export function custodyNext(state, rotation, deps, { custody = null } = {}) {
     throw new ConductError(5, `rotation ${rotation.attempt} is open: its successor starts custody with next --custody ${rotation.attempt} (handoff ${rotation.handoff})`);
   }
   if (rotation.retire === null && here && !rotation.successor.pane) rotation.successor.pane = here;
-  if (caller && rotation.retire === null) return retireAction(state, rotation, 'close');
+  if (caller && rotation.retire === null && !rotation.callerSession) rotation.callerSession = chainedSession(state, rotation, deps);
+  if (caller && rotation.retire === null && rotation.callerSession) return retireAction(state, rotation, 'close');
   if (caller && rotation.retire === 'close-failed') return retireAction(state, rotation, 'exit+close');
   if (['exit-close-failed', null].includes(rotation.retire)) return confirmAction(state, rotation);
   if (rotation.receipt === null && state.adapters?.spine?.on && state.intent?.anchor) {

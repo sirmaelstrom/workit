@@ -863,6 +863,38 @@ test('7b6a5fe1 owner-4: a reused-name record cannot stand in for an unverifiable
   assert.equal(result.output.finalMessagePath, null);
 });
 
+test('d3ce5461: retire --expect-session refuses a reissued pane whose live owner is another session, or whose session is unreadable, before any key or close', async (t) => {
+  const reissued = '44444444-4444-4444-8444-444444444444';
+  for (const [get, expected] of [[liveGet(reissued), reissued], [noSession(), null]]) {
+    const f = fixture(t);
+    f.handler = (_program, args) => {
+      const key = `${args[0]} ${args[1]}`;
+      if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(), stderr: '' };
+      if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents: [{ name: 'unrelated-lane', pane_id: 'wF:p2A' }] }), stderr: '' };
+      if (key === 'agent get') return get;
+      return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+    };
+    const result = await runSession(['retire', 'wF:p2A', '--mode', 'exit+close', '--expect-session', '11111111-1111-4111-8111-111111111111', '--log', f.log], { exec: f.exec, env: env() });
+    assert.equal(result.exit, 3, JSON.stringify(result.output));
+    assert.deepEqual([result.output.reason, result.output.ownerSession], ['session-mismatch', expected]);
+    assert.equal(exitSent(f), false, 'no /exit to the unrelated owner');
+    assert.equal(callsFor(f, 'pane').some((call) => ['close', 'send-keys'].includes(call.args[1])), false);
+  }
+  // The expected session passes the check and retires as before.
+  const f = fixture(t);
+  const caller = '11111111-1111-4111-8111-111111111111';
+  f.handler = (_program, args) => {
+    const key = `${args[0]} ${args[1]}`;
+    if (key === 'pane get') return { code: 0, stdout: herdrShapes.paneGet(), stderr: '' };
+    if (key === 'agent list') return { code: 0, stdout: herdrShapes.envelope('agent:list', { agents: [{ name: 'old-conductor', pane_id: 'wF:p2A' }] }), stderr: '' };
+    if (key === 'agent get') return liveGet(caller);
+    return { code: 0, stdout: herdrShapes.empty(key.replace(' ', ':')), stderr: '' };
+  };
+  const ok = await runSession(['retire', 'wF:p2A', '--mode', 'exit', '--expect-session', caller, '--log', f.log], { exec: f.exec, env: env() });
+  assert.equal(ok.exit, 0, ok.output.error);
+  assert.equal(exitSent(f), true);
+});
+
 test('P1b: an agent that already exited (agent_not_running) is gone, for retire --mode close and watch --until gone', async (t) => {
   // Verbatim herdr shape from a chain whose caller had exited before the successor retired it (2026-09-28).
   const notRunning = { code: 1, stdout: '', stderr: '{"error":{"code":"agent_not_running","message":"agent is no longer running in the target pane"},"id":"cli:agent:wait"}' };

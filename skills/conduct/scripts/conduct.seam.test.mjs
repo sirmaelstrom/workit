@@ -18,7 +18,7 @@
 // from a fresh session), not here.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1241,8 +1241,8 @@ const shapeOf = (a) => [a.step, a.part ?? null, a.command ?? null];
 // session.mjs retire, answered per mode from `codes` (default exit 0).
 function retireRule(h, codes = {}) {
   h.retires = [];
-  h.rules = [[/^node (\S+session\.mjs) retire (\S+) --mode (\S+) --log (\S+)$/, (_, m) => {
-    h.retires.push([m[2], m[3], m[4]]);
+  h.rules = [[/^node (\S+session\.mjs) retire (\S+) --mode (\S+) --expect-session (\S+) --log (\S+)$/, (_, m) => {
+    h.retires.push([m[2], m[3], m[4], m[5]]);
     const code = codes[m[3]] ?? 0;
     return { code, stdout: JSON.stringify(code ? { error: 'watch timed out (synthetic)' } : { closed: true }), stderr: '' };
   }]];
@@ -1286,6 +1286,11 @@ test('rotate (d3ce5461): mid-build with two live lanes, the handoff comes from s
   const late = await h.run(['record', '--run', h.runDir, '--action', pending.id, '--result', JSON.stringify({ code: 4, stdout: '', stderr: 'timeout' })]);
   assert.equal(late.code, 5, late.stdout);
   assert.match(out(late).error, /you are r1, the conductor that rotated/);
+  // A replay of r1's last record would re-emit through custody and cancel the rotation: refused.
+  const replay = await h.run(['record', '--run', h.runDir, '--action', before.lastRecorded, '--result', '{}']);
+  assert.equal(replay.code, 5, replay.stdout);
+  assert.match(out(replay).error, /a replay changes nothing/);
+  assert.equal(h.state().rotations[0].status, 'open');
   assert.equal((await h.run(['rotate', '--run', h.runDir, ...ROTATE])).code, 5);
   const frozen = h.state();
   for (const argv of [['ratify', '--run', h.runDir, '--wp', 'WP-02', '--paths', 'src/y.mjs', '--why', 'x'],
@@ -1298,9 +1303,12 @@ test('rotate (d3ce5461): mid-build with two live lanes, the handoff comes from s
 
   // The successor, in its own pane. Once it has started custody, the rotated
   // conductor's next and record are refused rather than cancelling under it.
+  // The rows session.mjs chain writes from r1's pane name r1's session.
+  const R1 = '11111111-1111-4111-8111-111111111111';
+  for (const state of ['chained', 'exit-sent']) appendFileSync(log, `${JSON.stringify({ verb: 'chain', state, callerPane: 'w1:p1', callerSession: R1, handoff, successorPane: 'w1:p2' })}\n`);
   h.deps.env.HERDR_PANE_ID = 'w1:p2';
   const first = out(await h.run(['next', '--run', h.runDir, '--custody', '1'])).action;
-  assert.deepEqual([first.step, first.part, first.command.slice(2)], ['custody', 'retire-close', ['retire', 'w1:p1', '--mode', 'close', '--log', log]]);
+  assert.deepEqual([first.step, first.part, first.command.slice(2)], ['custody', 'retire-close', ['retire', 'w1:p1', '--mode', 'close', '--expect-session', R1, '--log', log]]);
   const asOld = { env: { ...h.deps.env, HERDR_PANE_ID: 'w1:p1' } };
   const old = await h.run(['next', '--run', h.runDir], asOld);
   assert.equal(old.code, 5, old.stdout);
@@ -1315,7 +1323,7 @@ test('rotate (d3ce5461): mid-build with two live lanes, the handoff comes from s
   assert.equal((await drive(h)).kind, 'done');
   const after = h.trace.slice(mark);
   assert.deepEqual(after.slice(0, 3).map((a) => `${a.step}/${a.part}`), ['custody/retire-close', 'custody/retire-exit-close', 'custody/receipt']);
-  assert.deepEqual(h.retires, [['w1:p1', 'close', log], ['w1:p1', 'exit+close', log]]);
+  assert.deepEqual(h.retires, [['w1:p1', 'close', R1, log], ['w1:p1', 'exit+close', R1, log]]);
   assert.deepEqual([after[2].tool, after[2].args.questId, after[2].args.outcome], ['spine_receipt', ANCHOR, 'paused']);
   assert.match(after[2].args.did, /conductor r1 rotated to r2 \(context at 41%\)\. Handoff: .*handoff-1\.md\. r1 was retired with exit\+close\. r2 runs in herdr pane w1:p2\./);
   // The pending action, by id, then every live lane's queued poll; no lane is dispatched again.
