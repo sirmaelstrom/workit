@@ -209,6 +209,7 @@ Run stages 1-4 sequentially. For each stage:
   - Any correction relevant to this spec's domain becomes an explicit Must-Not
   - Cross-repo changes share a wire format contract
 - Check KB for failure modes from similar past work. Inject relevant constraints.
+- **A goal with a UI gets a design direction.** Write a `## Design direction` section of numbered rules, each one a thing a screenshot can pass or fail. Four rules open with these labels: `**Palette:**` (the color tokens and where each one is used), `**Type scale:**` (sizes and weights, and what each is for), `**Iconography:**` (one rule for glyphs and icons), and `**Fit to view:**` (what fills the viewport at load). Add other rules as the goal needs. A deep spec puts the section in `work-packages/_orchestrator.md` (Stage 6); a lite spec puts it in `spec.md`. `/conduct` refuses a section without those four labels, and its merge gate reads each UI WP's frames against these rules by number.
 
 ### Phase 3: Self-Review
 
@@ -331,6 +332,7 @@ After approval, run stages 5-6:
   - **Files** as bullets that begin `- Create ` or `- Modify ` with the path as the first backticked token (a WP with no such bullet parses to an empty file set and runs alone).
   - `**Review tier:** T0|T1|T2`.
   - `**Runtime exercise:**` — the surface and the check, or `none: <why>`.
+- **With a design direction (Stage 4):** copy it into the orchestrator's `## Design direction`. Each WP that changes what the UI shows declares `**Visual rules:** <rule numbers | all>`, and its runtime exercise takes frames that can show them. Schedule one polish WP as the only WP of the last wave, after every functional WP: it declares `**Skills:** frontend-design:frontend-design` and `**Visual rules:** all`.
 - Tag each WP: `execution: autonomous` or `execution: review-needed` (HITL flag)
 - Dependency order (which WPs must complete before others can start)
 - Spec-level constraints in orchestrator (from constraints.md)
@@ -493,6 +495,8 @@ A single document with four concise sections:
 ```
 
 Run a quick self-review: ambiguity scan, grounding check, constraint coverage. Fix issues.
+
+**A goal with a UI:** add the `## Design direction` section (deep Stage 4) and a `**Visual rules:** <rule numbers | all>` line, so `/conduct` reads the change's frames against those rules at the merge gate.
 
 **One-way door?** When a decision in the lite spec is a one-way door, write `## Problem` and `## Constraints` first and dispatch the blind second read (deep Stage 1, `blind-second-read` pattern) on those two sections plus the files you read. Then write `## Decisions` and reconcile the two before the self-review.
 

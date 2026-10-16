@@ -175,11 +175,64 @@ function reviewTier(text, where) {
   return values.size ? [...values][0] : 'T1';
 }
 
+// The design-direction labels /spec writes for a goal with a UI; each must
+// open one of the section's numbered rules.
+export const DESIGN_LABELS = Object.freeze(['Palette', 'Type scale', 'Iconography', 'Fit to view']);
+
+// `## Design direction`: numbered rules (`1. **Palette:** …`), a rule's
+// unnumbered lines joined to it; HTML comments are template guidance, not
+// rules. No section is []. A section without a rule, a repeated number, or a
+// missing label is a parse error: a UI goal's gate reads these rules by number.
+export function parseDesignDirection(text, where = 'Design direction') {
+  const clean = String(text ?? '').replace(/<!--[\s\S]*?-->/g, '');
+  const body = section(clean, 'Design direction').join('\n');
+  const rules = [];
+  for (const line of body.split('\n')) {
+    const numbered = /^(\d+)\.\s+(.*)$/.exec(line.trim());
+    if (numbered) rules.push({ n: Number(numbered[1]), text: numbered[2].trim() });
+    else if (line.trim() && rules.length) rules.at(-1).text += ` ${line.trim()}`;
+  }
+  if (!rules.length) {
+    if (/^## Design direction\s*$/m.test(clean)) throw new ConductError(2, `${where}: ## Design direction holds no numbered rule`);
+    return [];
+  }
+  const repeated = rules.find((rule, i) => rules.findIndex((other) => other.n === rule.n) !== i);
+  if (repeated) throw new ConductError(2, `${where}: design-direction rule ${repeated.n} is numbered twice`);
+  const missing = DESIGN_LABELS.filter((label) => !rules.some((rule) => rule.text.toLowerCase().startsWith(`**${label.toLowerCase()}:**`)));
+  if (missing.length) throw new ConductError(2, `${where}: ## Design direction has no rule opening with ${missing.map((label) => `**${label}:**`).join(', ')}`);
+  return rules;
+}
+
+// `**Visual rules:**` names the design-direction rules a WP's screenshots are
+// read against at its merge gate: rule numbers, `all`, or `none`/empty.
+export function visualRules(text, design, where) {
+  const value = fieldText(String(text ?? '').split(/\r?\n/), 'Visual rules');
+  const first = (value ?? '').split('\n')[0].replace(/`/g, '').trim();
+  if (!first || /^none\b/i.test(first)) return [];
+  if (!design.length) throw new ConductError(2, `${where}: **Visual rules:** names rules, but the spec has no ## Design direction`);
+  if (/^all\b/i.test(first)) return design.map((rule) => rule.n);
+  const tokens = first.replace(/[.;]$/, '').split(/[\s,]+/).filter(Boolean);
+  const numbers = tokens.map((token) => (/^\d+$/.test(token) ? Number(token) : NaN));
+  const bad = tokens.find((token, i) => Number.isNaN(numbers[i]) || !design.some((rule) => rule.n === numbers[i]));
+  if (bad !== undefined) throw new ConductError(2, `${where}: **Visual rules:** "${bad}" is not a rule number of the ## Design direction`);
+  return [...new Set(numbers)].sort((a, b) => a - b);
+}
+
+// `**Skills:**`: the skills the lane brief names, comma-separated.
+function skillsField(lines) {
+  const value = fieldText(lines, 'Skills');
+  if (!value || /^none\b/i.test(value)) return [];
+  return value.split('\n')[0].split(',').map((skill) => skill.replace(/`/g, '').trim()).filter(Boolean);
+}
+
+export const namesFrontendDesign = (skills) => (skills ?? []).some((skill) => /(^|:)frontend-design$/.test(skill));
+
 export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(path, 'utf8'), list = readdirSync } = {}) {
   const dir = join(workshopDir, 'work-packages');
   const orchestrator = read(join(dir, '_orchestrator.md'));
   const waveOf = waves(orchestrator);
   const rows = inventory(orchestrator);
+  const design = parseDesignDirection(orchestrator, '_orchestrator.md');
   const wps = list(dir).filter((name) => /^wp-.*\.md$/i.test(name)).sort().map((name) => {
     const specPath = join(dir, name);
     const text = read(specPath);
@@ -193,8 +246,18 @@ export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(p
       id, name: rows.get(id)?.name || heading[2].trim(), specPath, wave: waveOf.get(id), files: parseFiles(text, id), creates: parseFiles(text, id, { verbs: ['Create'] }),
       precondition: fieldText(lines, 'Precondition') ?? '', verification: fieldText(lines, 'Verification'), tier,
       model: rows.get(id)?.model ?? 'opus', runtimeExercise: fieldText(lines, 'Runtime exercise') ?? '',
+      visualRules: visualRules(text, design, id), skills: skillsField(lines),
     };
   });
+  // A UI goal ends on its polish: the last wave is one WP, after every
+  // functional WP, and its brief names the frontend-design skill.
+  if (design.length && wps.length) {
+    const last = Math.max(...wps.map((wp) => wp.wave));
+    const tail = wps.filter((wp) => wp.wave === last);
+    if (tail.length !== 1 || !namesFrontendDesign(tail[0].skills)) {
+      throw new ConductError(2, `the orchestrator has a ## Design direction, so its last wave must be one polish WP whose **Skills:** names frontend-design (wave ${last} holds ${tail.map((wp) => `${wp.id}${namesFrontendDesign(wp.skills) ? '' : ' without frontend-design'}`).join(', ')})`);
+    }
+  }
   // dependsOn: the ids the Precondition names from earlier waves, union the
   // whole immediately preceding wave.
   return wps.map((wp) => {

@@ -28,7 +28,7 @@ import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../de
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
-  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor,
+  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor, visualReadProblem,
 } from '../land.mjs';
 import { READ_BACK_WAIT_MS, answerCommand, conductScript, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles } from '../touch.mjs';
 
@@ -234,6 +234,8 @@ function briefAction(state, wp, deps) {
       '<lane id>': lane.name, '<quest id>': wp.questId ?? 'none', '<lane contract path>': contractPath(state), '<report path>': lane.reportPath,
       '<worktree path>': wp.lane?.worktree ?? lane.worktree, '<branch name>': wp.lane?.branch ?? lane.branch, '<base sha>': wp.lane?.base ?? '',
       '<wp spec path>': wp.specPath ?? '', '<runtime exercise>': wp.runtimeExercise || '',
+      '<skills>': (wp.skills ?? []).length ? wp.skills.join(', ') : 'none',
+      '<visual rules>': (wp.visualRules ?? []).length ? `${wp.visualRules.join(', ')} of ${state.design?.source ?? 'the spec\'s ## Design direction'}` : 'none',
     },
     instruction: `Copy ${template} to ${outPath}, replacing each key of slots with its value. Record {}.${wp.runtimeExercise ? '' : ' The WP names no runtime exercise: the brief asks the lane to name the surface and its check.'}`,
   };
@@ -1756,6 +1758,11 @@ export function record(state, action, result = {}, deps) {
   if (action.step === 'spend') return recordSpend(state, action, result, deps);
   const wp = state.wps.find((candidate) => candidate.id === action.wpId);
   if (!wp) throw new ConductError(2, `action ${action.id} names no WP of this run (${action.wpId})`);
+  // A malformed visual read is refused (exit 2, nothing written): fix the record and record again.
+  if (action.kind === 'inspect' && action.part === 'visual') {
+    const problem = visualReadProblem(action, result, deps.exists);
+    if (problem) throw new ConductError(2, `visual read of ${wp.id}: ${problem}`);
+  }
   const before = wp.state;
   const out = recordStep(state, wp, action, result, deps);
   failStreak(state, wp, action, result, deps, before);

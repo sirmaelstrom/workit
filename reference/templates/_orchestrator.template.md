@@ -60,6 +60,19 @@ Wave 1: npx tsc --noEmit && npx vitest run
 Wave 2: npx tsc --noEmit && npx vitest run
 Wave 3: npx tsc --noEmit && npx vitest run
 
+<!-- A goal with a UI only: uncomment and fill. Numbered rules a screenshot can
+     pass or fail; four open with these labels (/conduct refuses the section
+     without them). UI WPs name rules in **Visual rules:**; the last wave is
+     one polish WP with **Skills:** frontend-design:frontend-design.
+
+## Design direction
+
+1. **Palette:** {tokens, and where each is used}
+2. **Type scale:** {sizes and weights, and what each is for}
+3. **Iconography:** {one rule for glyphs and icons}
+4. **Fit to view:** {what fills the viewport at load}
+-->
+
 ## Package Inventory
 
 <!-- Markdown table. 4 columns required, optional 5th column for Model.

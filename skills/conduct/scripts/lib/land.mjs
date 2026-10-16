@@ -16,7 +16,8 @@
 //   `waitMs` and re-queues what it waits on; `held` keeps the PR open, ends the
 //   WP's build and releases the merge lock. ConductErrors become `block`.
 // - Records: a shell action is recorded as { code, stdout, stderr }; the
-//   `inspect` action as { verdict, tail, head }; council tools as their JSON.
+//   `inspect` action as { verdict, tail, head }, or for its `visual` part as
+//   { head, frames, rules }; council tools as their JSON.
 // - Patch: `mergeLock` and `dispatchHalt` are run-level; every other key is a
 //   WP field, applied as given: `reviewMode`, `rebaseFrom`, `rebases`,
 //   `threadIds`, `reviews`, `inspections`, `councilStage`, `retries`, `gate`
@@ -30,7 +31,7 @@
 // `land merged` compares the squash tree with the checked head. That holds
 // only while the base does not move between the gate and the merge; a moved
 // base reads as a tree mismatch and halts dispatch, never as a pass.
-import { join, sep } from 'node:path';
+import { isAbsolute, join, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ConductError, STEP_SEAM, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
@@ -1019,6 +1020,39 @@ function inspectAction(state, wp, inspect, gate) {
     expects: { type: 'json', fields: ['verdict', 'tail', 'head'] } };
 }
 
+// The visual read (quest 1b3dec9f): a WP that names design-direction rules
+// (`**Visual rules:**`) merges only after the conductor has read its frames at
+// the gated head against those rules. A failed rule is a gate amendment.
+export function visualAction(state, wp, head, gate) {
+  const rules = (state.design?.rules ?? []).filter((rule) => wp.visualRules.includes(rule.n));
+  return { kind: 'inspect', step: 'gate', seam: STEP_SEAM.gate, part: 'visual',
+    instruction: `Visual read of ${wp.id} at ${head}. Open the frames its lane took at this head (its report's ## Runtime exercise names them; retake any frame taken at an earlier head with that section's command) and judge each design-direction rule in \`rules\` (from ${state.design?.source ?? 'the spec\'s ## Design direction'}) from the pixels, not the code. Record { "head": "${head}", "frames": ["<absolute path of each frame you read>"], "rules": { "<n>": "pass" | "fail: <what the frame shows>" } }, one entry for each of rules ${wp.visualRules.join(', ')}. A failed rule goes to the lane as a gate amendment.`,
+    rules, land: { head, rules: [...wp.visualRules], gate: requeue(gate) },
+    expects: { type: 'json', fields: ['head', 'frames', 'rules'] } };
+}
+
+const VISUAL_VERDICT = /^(pass|fail:\s*\S[\s\S]*)$/;
+
+// What is wrong with a visual read's record, or null. `exists` checks each frame.
+export function visualReadProblem(action, r, exists) {
+  const want = (action.land?.rules ?? []).map(String);
+  if (r?.head !== action.land?.head) return `the visual read must name head ${action.land?.head}`;
+  if (!Array.isArray(r.frames) || !r.frames.length || !r.frames.every((frame) => typeof frame === 'string' && isAbsolute(frame))) return 'frames must be a non-empty list of absolute paths to the frames you read';
+  const absent = r.frames.filter((frame) => !exists(frame));
+  if (absent.length) return `no frame at ${absent.join(', ')}`;
+  if (!r.rules || typeof r.rules !== 'object' || Array.isArray(r.rules)) return `rules must be { "<n>": "pass" | "fail: <why>" } for rules ${want.join(', ')}`;
+  const got = Object.keys(r.rules);
+  const missing = want.filter((n) => !got.includes(n));
+  const extra = got.filter((n) => !want.includes(n));
+  if (missing.length || extra.length) return `rules must hold exactly rules ${want.join(', ')}${missing.length ? `; missing ${missing.join(', ')}` : ''}${extra.length ? `; not this WP's: ${extra.join(', ')}` : ''}`;
+  const bad = got.filter((n) => typeof r.rules[n] !== 'string' || !VISUAL_VERDICT.test(r.rules[n].trim()));
+  if (bad.length) return `rule ${bad.join(', ')}: a verdict is "pass" or "fail: <what the frame shows>"`;
+  return null;
+}
+
+const visualFailures = (read) => Object.entries(read.rules ?? {}).filter(([, verdict]) => verdict.trim() !== 'pass');
+const visualReason = (read, failed) => `visual read at ${read.head}: ${failed.map(([n, verdict]) => `rule ${n} ${verdict.trim()}`).join('; ')}`;
+
 const validGate = (gate) => gate && typeof gate === 'object' && Array.isArray(gate.failures) && gate.failures.every((text) => typeof text === 'string')
   && (gate.causes === undefined || (Array.isArray(gate.causes) && gate.causes.every((cause) => typeof cause === 'string')));
 
@@ -1043,10 +1077,30 @@ function recordGate(state, wp, action, r, deps) {
     if (r.verdict !== 'addresses-findings') return result('held', `post-cap tail ${r.tail} does not address the findings`, { inspections });
     return result('continue', null, { inspections, queue: [action.land.gate, ...rest(wp, action)] });
   }
+  if (action.part === 'visual') {
+    const problem = visualReadProblem(action, r, deps.exists ?? (() => false));
+    if (problem) return result('block', `visual read unusable: ${problem}`);
+    const read = { head: r.head, frames: [...r.frames], rules: Object.fromEntries(Object.entries(r.rules).map(([n, verdict]) => [n, verdict.trim()])) };
+    const visualReads = [...(wp.visualReads ?? []), read];
+    const failed = visualFailures(read);
+    if (failed.length) return result('amend', visualReason(read, failed), { visualReads });
+    // The gate runs again at this head and finds the read.
+    return result('continue', null, { visualReads, queue: [action.land.gate, ...rest(wp, action)] });
+  }
   const gate = parseJson(r.stdout);
   if (![0, 5, 6].includes(r.code) || !validGate(gate)) return result('block', `land gate output unreadable (exit ${r.code}): ${first(r.stderr) || first(r.stdout)}`);
   const recorded = { gate: gateRecord(wp, gate, deps) };
   if (r.code === 0) {
+    // A WP that names visual rules passes only with a read of this head. The
+    // latest read of the head decides, so a failed rule the lane pushed no fix
+    // for amends again (and counts against the gate-amendment cap).
+    if (wp.id !== 'release' && (wp.visualRules ?? []).length) {
+      const read = (wp.visualReads ?? []).findLast((entry) => entry.head === gate.head);
+      const notOk = { gate: { ...recorded.gate, ok: false }, retries: 0 };
+      if (!read) return result('continue', `visual read owed at ${gate.head}`, { ...notOk, queue: [visualAction(state, wp, gate.head, action), ...rest(wp, action)] });
+      const failed = visualFailures(read);
+      if (failed.length) return result('amend', visualReason(read, failed), notOk);
+    }
     // Merge authority covers a two-way door only: a one-way or undeclared door
     // is held for the operator, whatever else the gate passed. The release PR
     // is the run's own and declares none.

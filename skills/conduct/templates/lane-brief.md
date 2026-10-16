@@ -8,6 +8,10 @@
 
 Never invoke `/conduct` from this lane: the conductor that dispatched you is already running.
 
+**Skills the WP names:** <skills>. Invoke each with the Skill tool before you build.
+
+**Visual rules:** <visual rules>. When this names rules, your `## Runtime exercise` names the frames (absolute paths) you took at your pushed head, one per rule or a few covering them. The conductor reads them against these rules at the merge gate, and a failed rule comes back to you as a gate amendment.
+
 ## Runtime exercise
 
 **The WP's runtime exercise:** <runtime exercise>

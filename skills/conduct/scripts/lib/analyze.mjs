@@ -116,6 +116,23 @@ function runtimeExercise(state) {
   return state.wps.map((wp) => `- ${wp.id}: ${VERDICT_TEXT[wp.runtimeVerdict] ?? 'missing'} (field: ${wp.runtimeExercise || 'none named'})`);
 }
 
+// The merge gate's visual reads (a UI WP's frames against the spec's design
+// direction): per WP, each read's head, its passes and its failures with why.
+function visualReads(state) {
+  const rows = state.wps.filter((wp) => (wp.visualRules ?? []).length);
+  if (!rows.length) return ['- no WP names visual rules'];
+  return rows.flatMap((wp) => {
+    const reads = wp.visualReads ?? [];
+    if (!reads.length) return [`- ${wp.id} (rules ${wp.visualRules.join(', ')}): no read recorded`];
+    return reads.map((read) => {
+      const entries = Object.entries(read.rules ?? {});
+      const pass = entries.filter(([, verdict]) => verdict === 'pass').map(([n]) => n);
+      const fail = entries.filter(([, verdict]) => verdict !== 'pass').map(([n, verdict]) => `${n} (${String(verdict).replace(/^fail:\s*/i, '')})`);
+      return `- ${wp.id} at ${String(read.head).slice(0, 7)}: ${fail.length ? 'fail' : 'pass'}; pass ${pass.join(', ') || 'none'}${fail.length ? `; fail ${fail.join('; ')}` : ''} (frames: ${(read.frames ?? []).join(', ')})`;
+    });
+  });
+}
+
 function timeWent(state, events) {
   const label = (e) => `${e.actionId ?? e.event}${e.data?.wpId ? ` ${e.data.wpId}` : ''}`;
   const gaps = events.slice(1).map((e, i) => ({ ms: Date.parse(e.ts) - Date.parse(events[i].ts), from: events[i], to: e }))
@@ -234,6 +251,7 @@ export async function analyzeRun(runDir, deps) {
     ['Touches', touches(state, events)],
     ['Seam coverage', seamCoverage(state, events)],
     ['Runtime exercise', runtimeExercise(state)],
+    ...(state.design?.rules?.length ? [['Visual reads', visualReads(state)]] : []),
     ['Where the time went', timeWent(state, events)],
     ['Catches by watcher position', catches(state, events)],
     ['Escapes', escapes(state, deps.exec)],

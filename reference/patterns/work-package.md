@@ -25,6 +25,8 @@ bold-label form (`**Files:**`, `**Runtime exercise:**`, `**Review tier:**`), and
 `spec-validate` rejects a WP that lacks them. The first six, plus those three, are
 required; **Commit** is recommended.
 
+Two optional fields, for a goal with a UI (the orchestrator then carries a `## Design direction`): `**Visual rules:** <rule numbers | all | none>` names the design-direction rules `/conduct`'s merge gate reads this WP's frames against, and `**Skills:** <skill>, …` names the skills the lane brief tells the lane to load (the polish WP that closes a UI goal names `frontend-design:frontend-design`). Same bold-label form.
+
 ## File-Per-Package Structure
 
 Work packages live as **individual files** in a `work-packages/` directory within the workshop, not as sections of a monolith document.
