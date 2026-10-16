@@ -324,6 +324,9 @@ test('polish WP (1b3dec9f): with a design direction, the last wave is one WP nam
 test('slim review (1b3dec9f): a fenced example is not the design direction, its rules or a WP\'s skills; the polish WP waits on every WP across a wave gap', (t) => {
   const fenced = ['# O', '', 'Example:', '', '```markdown', '## Design direction', '', DESIGN, '```', ''].join('\n');
   assert.deepEqual(parseDesignDirection(fenced), [], 'a fenced example section is no section');
+  // Delta pass: four spaces then backticks is indented code, not a fence, so the heading after it stands.
+  const indented = ['# O', '', '    ```', '    indented code', '', '## Design direction', '', DESIGN, ''].join('\n');
+  assert.deepEqual(parseDesignDirection(indented).map((rule) => rule.n), [1, 2, 3, 4, 5]);
   const quoted = { 'WP-03': { wave: 2, model: 'opus', body: `${FILES('c.mjs')}\n\`\`\`\n**Skills:** frontend-design:frontend-design\n\`\`\`\n\n**Skills:** none\n\n**Visual rules:** all\n` } };
   assert.throws(() => parseWorkPackages(uiWorkshop(t, quoted)), /wave 2 holds WP-03 without frontend-design/, 'the fenced Skills line is not the declaration');
   const gap = uiWorkshop(t, {

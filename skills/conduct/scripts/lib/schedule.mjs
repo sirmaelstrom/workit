@@ -154,16 +154,18 @@ function waves(orchestrator) {
 // (**Review tier:** `T2`) is the value. The value is the first token after the label and must
 // be T0, T1 or T2. No declaration is T1; a value outside the three, or two different values,
 // is a parse error.
-// The lines a document declares, not quotes: fenced blocks and `>` lines dropped.
+// The lines a document declares, not quotes: fenced blocks and `>` lines
+// dropped. A fence opens or closes indented at most three spaces (CommonMark);
+// four is indented code, not a fence.
 function declaredLines(text) {
   let fence = null;
   return String(text ?? '').split(/\r?\n/).filter((line) => {
     if (fence) {
-      const close = /^\s*(`{3,}|~{3,})\s*$/.exec(line)?.[1];
+      const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line)?.[1];
       if (close && close[0] === fence.char && close.length >= fence.len) fence = null;
       return false;
     }
-    const open = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
+    const open = /^ {0,3}(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
     if (open) { fence = { char: (open[1] ?? open[2])[0], len: (open[1] ?? open[2]).length }; return false; }
     return !/^\s*>/.test(line);
   });
