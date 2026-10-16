@@ -5,8 +5,10 @@ import { ConductError } from '../state.mjs';
 import { parseDesignDirection, skillsField, visualRules } from '../schedule.mjs';
 
 // The touch whose answer set the authority: touch 1, or its blocked re-ask.
+// A touch the build opened (budget, a re-plan, a halt) or the showcase sets
+// no authority, though it too has no WP (council on e830d835).
 function approvingTouch(state) {
-  return state.touches.filter((touch) => touch.status === 'answered' && touch.wpId === null).at(-1);
+  return state.touches.filter((touch) => touch.status === 'answered' && touch.wpId === null && !touch.build && touch.kind !== 'showcase').at(-1);
 }
 
 // The record that carries the run's authority: a (c) answer's validated grant

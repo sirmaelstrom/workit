@@ -38,6 +38,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   ratify --run <dir> --wp <id> --paths <path,path> --why <text>
   reset-wp --run <dir> --wp <id> --to check|checked|prompt|wait|land|delta [--baseline <sha>] --why <text>
   ci-checks --run <dir> --wp <id> --head <sha> --checks <name,name> --why <text>
+  replan --run <dir> --plan <json file>
   upgrade-root --run <dir> --why <text> (invoke from destination root at an author/wait action)
   rotate --run <dir> --why <text> [--model <id> --effort <level>] [--name <successor>]
   lane <spawn|alive|check|reap> --run <dir> --wp <id> [sub-verb flags]
@@ -49,7 +50,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody']);
+  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -516,6 +517,29 @@ async function resetWpVerb(tokens, deps) {
   });
 }
 
+// A mid-flight re-plan inside the pre-approval (lib/phases/build.mjs replan):
+// two-way changes inside the approved scope proceed, recorded; anything wider
+// halts dispatch on a touch whose options carry the delta-plan.
+async function replanVerb(tokens, deps) {
+  const flags = parseFlags(tokens);
+  const path = stringFlag(flags, 'plan');
+  return transact(flags, deps, async (state) => {
+    let plan;
+    try {
+      plan = JSON.parse(deps.read(path));
+    } catch (error) {
+      throw new ConductError(2, `replan: --plan ${path} is not a readable JSON file: ${error.message}`);
+    }
+    const module = await loadModule(deps, 'lib/phases/build.mjs', 'module');
+    const out = module.replan(state, plan, deps);
+    saveState(state, deps);
+    const then = out.mode === 'autonomous'
+      ? 'Run next: its first action is applying this re-plan (ratify, reset-wp, a ruling), before any other build work.'
+      : `Run next: touch ${out.touch} is open and dispatch halts until the operator answers.`;
+    return { out: { ok: true, ...out, next: `conduct.mjs next --run ${state.runDir}`, then } };
+  });
+}
+
 async function ciChecksVerb(tokens, deps) {
   const flags = parseFlags(tokens);
   const wpId = stringFlag(flags, 'wp'), head = stringFlag(flags, 'head'), why = stringFlag(flags, 'why');
@@ -592,7 +616,7 @@ async function awaitAnswerVerb(tokens, deps) {
 
 const VERBS = {
   intake, next, record, answer, status, analyze, 'await-answer': awaitAnswerVerb, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
-  'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb, rotate: rotateVerb,
+  'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb, rotate: rotateVerb, replan: replanVerb,
   lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
   bootstrap: async (tokens, deps) => {

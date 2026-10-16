@@ -38,7 +38,7 @@ export const BRIEF_FIELD_MAX = 200;
 // Up to this many unfinished WPs are named in notDone; above it, their count is.
 const NAMED_MAX = 6;
 const briefPath = (state) => join(state.runDir, 'showcase-brief.json');
-const unfinished = (state) => state.wps.filter((wp) => ['refuted', 'blocked', 'held', 'deferred'].includes(wp.state));
+const unfinished = (state) => state.wps.filter((wp) => ['refuted', 'dropped', 'blocked', 'held', 'deferred'].includes(wp.state));
 
 function briefAction(state) {
   const outPath = briefPath(state);
@@ -84,7 +84,7 @@ function question(state) {
   const list = (items, empty) => (items.length ? items.join('; ') : empty);
   const held = state.wps.filter((wp) => wp.state === 'held');
   const deferred = state.wps.filter((wp) => wp.state === 'deferred');
-  const stopped = state.wps.filter((wp) => ['refuted', 'blocked'].includes(wp.state));
+  const stopped = state.wps.filter((wp) => ['refuted', 'dropped', 'blocked'].includes(wp.state));
   const open = (state.touches ?? []).filter((touch) => touch.kind === 'blocked' && touch.status !== 'answered');
   const r = state.release ?? {};
   const analysis = join(state.runDir, 'run-analysis.md');

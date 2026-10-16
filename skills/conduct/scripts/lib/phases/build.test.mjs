@@ -14,7 +14,7 @@ import { join, dirname, basename, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as build from './build.mjs';
 import { RUN_SLOTS } from './build.mjs';
-import { wpRecord } from './spec.mjs';
+import { preapprovedRef, wpRecord } from './spec.mjs';
 import { STEPS, STEP_SEAM, saveState, readEvents, loadState } from '../state.mjs';
 import { runLaneVerb } from '../lanes.mjs';
 import { runLandVerb } from '../land.mjs';
@@ -373,6 +373,159 @@ const isWait = (a) => a.kind === 'wait';
 const firstNonWait = (h, from, id) => h.trace.slice(from + 1).find((a) => a.wpId === id && !isWait(a));
 
 // ---------------------------------------------------------------------------
+
+// Quest e830d835: a mid-flight re-plan inside the pre-approval.
+const REPLAN_WHY = 'WP-02 found the parser already handles the case WP-03 was to add';
+test('replan (e830d835): two-way changes inside the scope proceed on the pre-approval, receipted on the anchor; a bad plan or the wrong phase is refused', async (t) => {
+  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1], TWO[2]], lanes: 1 });
+  const refused = (plan, code, pattern) => assert.throws(() => build.replan(h.state, plan, h.deps), (error) => error.code === code && pattern.test(error.message));
+  // Slim review on #250: an emitted action would run before the re-plan; re-plan only at a wait.
+  await drive(h, { until: (a) => a.step === 'brief' && a.wpId === 'WP-02' });
+  refused({ why: REPLAN_WHY, delta: [{ change: 'x', door: 'two-way', inScope: true }] }, 5, /is pending; perform and record it, and re-plan at a wait/);
+  await drive(h, { until: (a) => a.kind === 'wait' });
+  assert.equal(h.wp('WP-03').state, 'pending');
+  refused({ why: ' ', delta: [] }, 2, /needs "why"/);
+  refused({ why: REPLAN_WHY, delta: [] }, 2, /non-empty "delta"/);
+  refused({ why: REPLAN_WHY, delta: [{ change: 'x', door: 'maybe', inScope: true }] }, 2, /two-way or one-way/);
+  refused({ why: REPLAN_WHY, delta: [{ change: 'x', door: 'two-way' }] }, 2, /inScope must be true or false/);
+  const out = build.replan(h.state, { why: REPLAN_WHY, delta: [{ change: 'fold WP-03 into a test on WP-02', door: 'two-way', inScope: true }] }, h.deps);
+  assert.deepEqual([out.n, out.mode], [1, 'autonomous']);
+  assert.equal(h.state.dispatchHalt, null, 'an autonomous re-plan halts nothing');
+  assert.equal(h.state.touches.length, 0, 'and asks nothing');
+  const record = JSON.parse(readFileSync(out.file, 'utf8'));
+  assert.deepEqual([record.why, record.delta[0].door, record.needs], [REPLAN_WHY, 'two-way', 'nothing: inside the pre-approval']);
+  assert.throws(() => build.replan(h.state, { why: 'again', delta: [{ change: 'x', door: 'two-way', inScope: true }] }, h.deps), (error) => error.code === 5 && /approved and not yet applied/.test(error.message));
+  // Council r1: the approved re-plan is applied before any other build work, then receipted.
+  const mark = h.trace.length;
+  h.answer = (a) => {
+    if (a.step !== 'replan' || a.part !== 'apply') return undefined;
+    // A bad drop (a WP that is not pending) is refused, nothing written; then the real one.
+    writeFileSync(a.outPath, JSON.stringify({ applied: true, what: 'x', drop: ['WP-01'] }));
+    assert.throws(() => build.record(h.state, h.state.pending, {}, h.deps), (error) => error.code === 2 && /WP-01 is merged; only a pending WP is dropped/.test(error.message));
+    writeFileSync(a.outPath, JSON.stringify({ applied: true, what: 'dropped WP-03; WP-02 carries its regression test', drop: ['WP-03'] }));
+    return {};
+  };
+  const apply = await drive(h, { until: (a) => a.step === 'replan' });
+  assert.deepEqual([apply.kind, apply.part], ['author', 'apply']);
+  assert.match(apply.instruction, /^Apply re-plan 1 before anything else runs: 1\. fold WP-03 into a test on WP-02 Make each change/);
+  assert.deepEqual(h.trace.slice(mark).map((a) => a.step), ['replan'], 'the apply step is the first action after the pending wait');
+  const receipt = await drive(h, { until: (a) => a.step === 'replan' && a.part === 'receipt' });
+  assert.equal(h.wp('WP-03').state, 'dropped');
+  assert.match(h.wp('WP-03').reason, /^dropped by re-plan 1: WP-02 found .* \(restore: reset-wp --wp WP-03 --to pending\)$/);
+  assert.deepEqual([receipt.kind, receipt.tool, receipt.args.questId, receipt.args.outcome], ['agent-tool', 'spine_receipt', ANCHOR, 'completed']);
+  assert.match(receipt.args.did, /re-planned inside its pre-approval \(re-plan 1\)\. Why: WP-02 found .* What changed: 1\. fold WP-03 into a test on WP-02 Every change is a two-way door inside the approved scope; it rests on .*\. Applied: dropped WP-03/);
+  assert.equal(await drive(h), null);
+  assert.equal(h.state.replans[0].receipt, 'filed');
+  assert.deepEqual(h.events().filter((e) => e.step === 'replan').map((e) => e.event), ['replanned', 'replan-applied', 'replan-receipted']);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'dropped']);
+  assert.ok(!of(h, 'WP-03').some((a) => a.step === 'brief'), 'the dropped WP never dispatched');
+  await analyzeRun(h.runDir, h.deps);
+  const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
+  assert.match(analysis, /^  - re-plan 1, approved inside the pre-approval; rests on .*; why: WP-02 found .*; changes: fold WP-03 into a test on WP-02 \[two-way\]; applied: dropped WP-03; WP-02 carries its regression test; anchor receipt filed$/m);
+  assert.match(analysis, /^- WP-03 \(name WP-03\): dropped: dropped by re-plan 1: /m, 'the analysis names the dropped WP');
+  // Amendment 1 delta pass: a dropped WP is no future lane in the spend projection, and gives up its paths to a ratify.
+  assert.deepEqual(h.events().filter((e) => e.event === 'spend-projection' && e.data.wpId === 'WP-02').map((e) => e.data.wpsLeft), [0]);
+  const fold = structuredClone(h.state);
+  fold.wps[1].state = 'dispatched';
+  build.ratify(fold, { wpId: 'WP-02', paths: [...h.wp('WP-03').files], why: 'fold WP-03 into WP-02' }, h.deps);
+  assert.ok(h.wp('WP-03').files.every((path) => fold.wps[1].files.includes(path)));
+  // Amendment 1: a drop is two-way inside the run. reset-wp --to pending restores it, and the build dispatches it again.
+  assert.equal(h.state.phase, 'release');
+  const restored = build.resetWp(h.state, { wpId: 'WP-03', to: 'pending', why: 'the parser case came back' }, h.deps);
+  assert.deepEqual([restored.from.state, restored.state, h.state.phase, h.wp('WP-03').droppedBy], ['dropped', 'pending', 'build', null]);
+  h.answer = null;
+  assert.equal(await drive(h), null);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  assert.ok(of(h, 'WP-03').some((a) => a.step === 'brief'), 'the restored WP was dispatched');
+  assert.throws(() => build.resetWp(h.state, { wpId: 'WP-02', to: 'pending', why: 'x' }, h.deps), (error) => error.code === 5 && /WP-02 is merged; --to pending resets a WP that is dropped/.test(error.message));
+  refused({ why: REPLAN_WHY, delta: [{ change: 'x', door: 'two-way', inScope: true }] }, 5, /a re-plan is made mid-build/);
+});
+
+test('replan (e830d835): a one-way or out-of-scope change halts dispatch on a touch carrying the delta-plan; the build waits for it; (b) keeps the plan and dispatch resumes', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1], TWO[2]], lanes: 1 });
+  await drive(h, { until: (a) => a.kind === 'wait' });
+  const out = build.replan(h.state, { why: REPLAN_WHY, delta: [
+    { change: 'drop WP-03', door: 'two-way', inScope: true },
+    { change: 'migrate the saved state format', door: 'one-way', inScope: true },
+    { change: 'add a CLI flag the goal never named', door: 'two-way', inScope: false },
+  ] }, h.deps);
+  assert.deepEqual([out.mode, out.touch], ['asked', 1]);
+  const [touch] = h.state.touches;
+  assert.equal(touch.build, 'replan');
+  assert.deepEqual(touch.options.map((o) => o.key), ['a', 'b', 'c']);
+  assert.match(touch.question, /The delta-plan: 1\. drop WP-03 \(two-way\) 2\. migrate the saved state format \(one-way\) 3\. add a CLI flag the goal never named \(two-way, outside the approved scope\)/);
+  assert.match(touch.question, /change 2 is a one-way door; change 3 is outside the approved scope/);
+  assert.match(h.state.dispatchHalt.reason, /re-plan 1 waits on the operator \(touch 1\)/);
+  assert.throws(() => build.replan(h.state, { why: 'again', delta: [{ change: 'x', door: 'two-way', inScope: true }] }, h.deps), (error) => error.code === 5);
+  // The build does not end, and WP-03 is not dispatched, while the touch is open.
+  const stop = await drive(h, { until: (a) => a.step === 'touch' && a.part === 'announce' });
+  assert.match(stop.instruction, /touches[\\/]1\.md/);
+  // Past the announce, the build only yields on the open touch: it never ends and never dispatches WP-03.
+  await assert.rejects(drive(h, { max: 200 }), /drive did not settle/);
+  assert.equal(h.wp('WP-03').state, 'pending');
+  assert.equal(h.wp('WP-02').state, 'merged', 'the live lane finished under the halt');
+  h.state.pending = null;
+  answerCore(h, 1, 'b');
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.state.replans[0].mode, h.state.replans[0].answer.key, h.state.dispatchHalt, h.state.build.halts.length], ['declined', 'b', null, 0]);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged'], 'the original plan ran');
+  assert.ok(!h.trace.some((a) => a.step === 'replan' && a.part === 'apply'), 'a declined re-plan is never applied');
+});
+
+test('replan (e830d835, council r1): (c) needs text; (a) and (c) are applied first; a plan too long for one question is refused before anything is written; build touches never become the authority', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1], TWO[2]], lanes: 1 });
+  await drive(h, { until: (a) => a.kind === 'wait' });
+  const huge = { why: 'x'.repeat(1900), delta: [{ change: 'migrate the saved state format', door: 'one-way', inScope: true }] };
+  assert.throws(() => build.replan(h.state, huge, h.deps), (error) => error.code === 2 && /over spine_receipt's 2000-char cap/.test(error.message));
+  assert.deepEqual([h.state.replans ?? [], h.state.touches.length, existsSync(join(h.runDir, 'rulings', 'replan-1.json'))], [[], 0, false], 'nothing written');
+  build.replan(h.state, { why: REPLAN_WHY, delta: [{ change: 'migrate the saved state format', door: 'one-way', inScope: true }] }, h.deps);
+  await drive(h, { until: (a) => a.step === 'touch' && a.part === 'announce' });
+  h.state.pending = null;
+  answerCore(h, 1, 'c', '   ');
+  await step(h);
+  const touch = h.state.touches[0];
+  assert.deepEqual([touch.status, touch.refusal, h.state.replans[0].mode], ['open', '(c) needs your changes as text', 'asked'], 'an empty (c) is refused and the halt stays');
+  assert.ok(h.state.dispatchHalt);
+  h.state.pending = null;
+  answerCore(h, 1, 'c', 'keep the old format readable for one release');
+  h.answer = (a) => {
+    if (a.step !== 'replan' || a.part !== 'apply') return undefined;
+    writeFileSync(a.outPath, JSON.stringify({ applied: false, why: 'the migration is a separate run' }));
+    return {};
+  };
+  const apply = await step(h);
+  assert.deepEqual([apply.step, apply.part], ['replan', 'apply']);
+  assert.match(apply.instruction, /The operator's text, verbatim, amends it: keep the old format readable for one release/);
+  assert.equal(h.state.dispatchHalt, null);
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.state.replans[0].mode, h.state.replans[0].applied.applied, h.state.replans[0].applied.text], ['operator', false, 'the migration is a separate run']);
+  // A later answered build touch (budget, a re-plan) is never the run's authority: touch 1 is.
+  const state = { ...h.state, authority: { record: null }, adapters: { spine: { on: false } }, touches: [
+    { n: 1, kind: 'preapproval', status: 'answered', wpId: null, answer: { answeredAt: 't1', by: 'operator:tty' } },
+    { n: 2, kind: 'blocked', build: 'budget', status: 'answered', wpId: null, answer: { answeredAt: 't2', by: 'operator:tty' } },
+    { n: 3, kind: 'showcase', status: 'answered', wpId: null, answer: { answeredAt: 't3', by: 'operator:tty' } },
+  ] };
+  assert.equal(preapprovedRef(state), `core:${h.runDir}/touches/1.json`);
+});
+
+test('replan (e830d835): the verb reads the plan file under the run lock; an unreadable plan is exit 2 and writes nothing', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1], TWO[2]], lanes: 1 });
+  await drive(h, { until: (a) => a.kind === 'wait' });
+  const bad = join(h.dir, 'bad-plan.json');
+  writeFileSync(bad, '{ not json');
+  const refused = await runConduct(['replan', '--run', h.runDir, '--plan', bad], h.overrides());
+  assert.equal(refused.code, 2);
+  assert.match(JSON.parse(refused.stdout).error, /is not a readable JSON file/);
+  assert.equal(loadState(h.runDir, h.deps).replans, undefined, 'nothing written');
+  const plan = join(h.dir, 'plan.json');
+  writeFileSync(plan, JSON.stringify({ why: REPLAN_WHY, delta: [{ change: 'fold WP-03 into a test on WP-02', door: 'two-way', inScope: true }] }));
+  const done = await runConduct(['replan', '--run', h.runDir, '--plan', plan], h.overrides());
+  assert.equal(done.code, 0, done.stderr);
+  const out = JSON.parse(done.stdout);
+  assert.deepEqual([out.ok, out.n, out.mode], [true, 1, 'autonomous']);
+  assert.match(out.then, /ratify, reset-wp, a ruling/);
+  assert.equal(loadState(h.runDir, h.deps).replans[0].receipt, null, 'core path: no anchor receipt owed');
+});
 
 test('lane contract: the first action; run-level slots refused (exit 2); per-lane placeholders stay; laneSuite fills the isolation slot', async (t) => {
   const h = harness(t);
