@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { decide, runLoop, summariseChecks, normaliseThreads, adjudicate, adjudicateVerb, unwrapClientResponse, fetchAllThreads, reviewRound, DEFAULT_BOUNDS, BLOCKED_REASONS, COMMENTS_PAGE } from './pr-babysit.mjs';
 import { buildMarker } from '../../slim-review/scripts/pr-review-recognise.mjs';
+import { reviewPairFor } from '../../slim-review/scripts/pr-review.mjs';
 
 const H1 = 'aaaaaaa1111111111111111111111111111111111';
 const H2 = 'bbbbbbb2222222222222222222222222222222222';
@@ -183,7 +184,7 @@ test('T1 workit#93 — the coordinator client answers an ENVELOPE; the loop read
 test('a real-shaped readStatus refusal names its code in the coordinator-unreachable owed text, not "refused"', async () => {
   const { w, deps } = world();
   deps.coordinator.readStatus = async () => ({ ok: false, code: 'unauthorized', source: 'coordinator', status: 401, message: 'coordinator refused the token' });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'coordinator-unreachable']);
   assert.match(r.owed, /readStatus: unauthorized — coordinator refused the token/);
   assert.doesNotMatch(r.owed, /refused —/);
@@ -299,10 +300,13 @@ function world(init = {}) {
       w.writerCalls.push(args);
       if (args[0] === 'claim') {
         if (w.health.paused) return { outcome: 'refused', reason: 'paused' };
+        // The writer's own table: --author picks the pair, or the claim is a usage error.
+        const lenses = reviewPairFor(args[args.indexOf('--author') + 1]);
+        if (!args.includes('--author') || !lenses) return { outcome: 'failed', reason: 'writer-exit-2', exitCode: 2 };
         const attempt = w.attempts.filter((a) => a.head_sha === w.head).length + 1;
-        w.attempts.push({ head_sha: w.head, attempt, state: 'claimed', disposition: null, review_id: null, origin: 'session' });
+        w.attempts.push({ head_sha: w.head, attempt, state: 'claimed', disposition: null, review_id: null, origin: 'session', lenses });
         if (w.onClaim) w.onClaim(w);
-        return { outcome: 'ok', attempt_ref_file: `ref-${w.head}-${attempt}`, retry: 'stop' };
+        return { outcome: 'ok', attempt_ref_file: `ref-${w.head}-${attempt}`, retry: 'stop', required_lenses: lenses };
       }
       if (args[0] === 'lens') {
         const a = w.attempts[w.attempts.length - 1];
@@ -312,7 +316,7 @@ function world(init = {}) {
         if (since && w.lensRefusesSince) return { outcome: 'refused', reason: 'input-mismatch', since, exitCode: 1 };
         if (w.lensOutcome === 'fail') { a.state = 'failed'; a.disposition = 'lens-error'; return { outcome: 'failed', reason: 'lens-error', retry: 'stop' }; }
         a.since = since;
-        a.state = args[args.indexOf('--lens') + 1] === 'astra' ? 'lens_done' : 'lens_running';
+        a.state = args[args.indexOf('--lens') + 1] === (a.lenses ?? ['codex', 'astra']).at(-1) ? 'lens_done' : 'lens_running';
         return { outcome: 'ok', retry: 'stop' };
       }
       if (args[0] === 'post') {
@@ -345,7 +349,7 @@ const openThread = (id) => ({ id: `T${id}`, isResolved: false, isOutdated: false
 test('end to end: claims the head, review posts with findings → adjudicate (exit shape), fix pushes a new head, second review clean → converged in two iterations', async () => {
   const { w, deps } = world({ findingsOnPost: (ww) => (ww.head === H1 ? [openThread(11)] : []) });
   const state = stateFile();
-  const r1 = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, bounds: { pollSeconds: 1 } }, deps);
+  const r1 = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, bounds: { pollSeconds: 1 } }, deps);
   assert.equal(r1.outcome, 'adjudicate');
   assert.equal(r1.threads.length, 1);
   assert.equal(w.writerCalls.filter((c) => c[0] === 'claim').length, 1);
@@ -356,7 +360,7 @@ test('end to end: claims the head, review posts with findings → adjudicate (ex
   assert.ok(w.threads[0].isResolved);
   w.head = H2;
 
-  const r2 = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, bounds: { pollSeconds: 1 } }, deps);
+  const r2 = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, bounds: { pollSeconds: 1 } }, deps);
   assert.equal(r2.outcome, 'converged');
   assert.equal(r2.head, H2);
   assert.equal(r2.iterations, 2);
@@ -369,7 +373,7 @@ test('end to end: claims the head, review posts with findings → adjudicate (ex
 
 test('end to end: the session claim fails on the head → the per-head allowance is spent → blocked attempt-failed with an owed sentence, no second claim', async () => {
   const { w, deps } = world({ lensOutcome: 'fail' });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
   assert.equal(r.outcome, 'blocked');
   assert.equal(r.reason, 'attempt-failed');
   assert.match(r.owed, /pr-review\.mjs claim/);
@@ -381,14 +385,14 @@ test('end to end: the session claim fails on the head → the per-head allowance
 test('end to end: the coordinator refuses the claim as paused → blocked plan-paused, nothing else spawned', async () => {
   const { w, deps } = world({ health: { enabled: true, paused: false } });
   w.health.paused = true; deps.coordinator.readHealth = async () => ({ enabled: true, paused: false }); // gate read green, claim refuses
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'plan-paused']);
   assert.deepEqual(w.writerCalls.map((c) => c[0]), ['claim']);
 });
 
 test('end to end: a reviewer that never answers blocks at the wall bound and the clock proves the wait was bounded', async () => {
   const { w, deps } = world({ attempts: [{ head_sha: H1, attempt: 1, state: 'lens_running', disposition: null, review_id: null, origin: 'beat' }] });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 600, maxWallMinutes: 30 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 600, maxWallMinutes: 30 } }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'reviewer-never-answered']);
   assert.ok(w.clock - T0 <= 40 * MIN, 'waited past the bound');
   assert.equal(w.writerCalls.length, 0, 'never claimed over a live attempt');
@@ -396,7 +400,7 @@ test('end to end: a reviewer that never answers blocks at the wall bound and the
 
 test('end to end: CI failure on the head blocks ci-failed without spending a lens', async () => {
   const { w, deps } = world({ checks: [{ name: 'verify', bucket: 'fail' }] });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'ci-failed']);
   assert.equal(w.writerCalls.length, 0);
 });
@@ -407,14 +411,14 @@ test('end to end: the head moving past --max-heads blocks head-moved-limit', asy
   // a live beat attempt keeps the loop waiting; each sleep moves the head
   w.attempts.push({ head_sha: H1, attempt: 1, state: 'claimed', disposition: null, review_id: null, origin: 'beat' });
   w.onClaim = (ww) => { ww.attempts[ww.attempts.length - 1].state = 'claimed'; };
-  deps.spawnWriter = (args) => { w.writerCalls.push(args); if (args[0] === 'claim') { w.attempts.push({ head_sha: w.head, attempt: 1, state: 'claimed' }); return { outcome: 'ok', attempt_ref_file: 'r' }; } return { outcome: 'ok' }; };
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1, maxHeads: 2 } }, deps);
+  deps.spawnWriter = (args) => { w.writerCalls.push(args); if (args[0] === 'claim') { w.attempts.push({ head_sha: w.head, attempt: 1, state: 'claimed' }); return { outcome: 'ok', attempt_ref_file: 'r', required_lenses: ['codex', 'astra'] }; } return { outcome: 'ok' }; };
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1, maxHeads: 2 } }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'head-moved-limit']);
 });
 
 test('end to end: delivery-unresolved on the head waits and is never re-posted, then blocks delivery-unresolved', async () => {
   const { w, deps } = world({ attempts: [{ head_sha: H1, attempt: 1, state: 'delivery-unresolved', disposition: null, review_id: null, origin: 'beat' }] });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 300, maxWallMinutes: 20 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 300, maxWallMinutes: 20 } }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'delivery-unresolved']);
   assert.equal(w.writerCalls.length, 0);
 });
@@ -422,7 +426,7 @@ test('end to end: delivery-unresolved on the head waits and is never re-posted, 
 test('a repository that is not managed blocks not-managed and touches nothing', async () => {
   const { w, deps } = world();
   deps.managed = { mode: 'standalone' };
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile() }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile() }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'not-managed']);
   assert.equal(w.ghCalls.length, 0);
 });
@@ -453,7 +457,7 @@ test('reviewRound reads the rounds from the posted reviews: none → full, full 
 
 test('round two is a delta pass: a posted full review on H1 and a new head H2 → both lens calls carry --since H1 under one claim, and the delta review converges H2', async () => {
   const { w, deps } = fullReviewedOnH1();
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
   assert.equal(w.writerCalls.filter((c) => c[0] === 'claim').length, 1);
   assert.deepEqual(lensCalls(w).map((c) => [c[c.indexOf('--lens') + 1], sinceOf(c)]), [['codex', H1], ['astra', H1]]);
   assert.equal(new Set(lensCalls(w).map((c) => c[c.indexOf('--attempt-ref') + 1])).size, 1, 'both lenses under the same attempt-ref');
@@ -466,13 +470,13 @@ test('the round-one head is recovered without a state file: --fresh over a PR wh
   writeFileSync(state, JSON.stringify({ iterationHead: H2, iterations: 1, startedAt: T0, claimsOnHead: {} }));
   // no coordinator row at all: a hand-run review is visible only on the PR
   const { w, deps } = fullReviewedOnH1({ attempts: [] });
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, resume: false, bounds: { pollSeconds: 1 } }, deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, resume: false, bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual(lensCalls(w).map(sinceOf), [H1, H1]);
 });
 
 test('a legacy marker-less review with a body is a full review (the reading claim gives it); another author\'s review and a reply container are not rounds', async () => {
   const legacy = fullReviewedOnH1({ reviews: [listed({ id: 1, head: H1, marker: false })], attempts: [] });
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, legacy.deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, legacy.deps);
   assert.deepEqual(lensCalls(legacy.w).map(sinceOf), [H1, H1]);
 
   const other = fullReviewedOnH1({ reviews: [listed({ id: 2, head: H1, login: 'someone-else' }), { ...listed({ id: 3, head: H1 }), body: '', reply_container: true }], attempts: [] });
@@ -481,7 +485,7 @@ test('a legacy marker-less review with a body is a full review (the reading clai
     if (args[0] === 'api' && args[1] === '--paginate' && /\/reviews\/\d+\/comments$/.test(args[2])) return 'true\n';
     return inner(args, o);
   })(other.deps.runGh);
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, other.deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, other.deps);
   assert.deepEqual(lensCalls(other.w).map(sinceOf), [null, null], 'no round by the posting identity → a full review');
 });
 
@@ -492,7 +496,7 @@ test('no third review: a posted delta on H2 and a new head H3, threads resolved,
     reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: H2, since: H1 })],
     threads: [{ ...openThread(21), isResolved: true }],
   });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, bounds: { pollSeconds: 1 } }, deps);
   assert.equal(r.outcome, 'converged');
   assert.equal(r.unreviewed_tail, 'bbbbbbb...ccccccc');
   assert.equal(r.unreviewed_commits, 1);
@@ -502,18 +506,18 @@ test('no third review: a posted delta on H2 and a new head H3, threads resolved,
 
   // --claim beat changes nothing: no claim, no waiting for the beat
   const beat = world({ head: H3, reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: H2, since: H1 })] });
-  const rb = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1, claim: 'beat' } }, beat.deps);
+  const rb = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1, claim: 'beat' } }, beat.deps);
   assert.equal(rb.outcome, 'converged');
   assert.equal(beat.w.writerCalls.length, 0);
 });
 
 test('no third review, and the tail must sit on top of what was reviewed: an open thread is your turn; a head that does not descend from the delta head blocks amendment-not-descendant', async () => {
   const open = world({ head: H3, reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: H2, since: H1 })], threads: [openThread(22)] });
-  const ro = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, open.deps);
+  const ro = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, open.deps);
   assert.deepEqual([ro.outcome, ro.review_id], ['adjudicate', 7002]);
 
   const rebased = world({ head: H3, history: [H1, H3], reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: H2, since: H1 })] });
-  const rr = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, rebased.deps);
+  const rr = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, rebased.deps);
   assert.deepEqual([rr.outcome, rr.reason], ['blocked', 'amendment-not-descendant']);
   assert.match(rr.owed, /conductor decides how this head is reviewed/);
   assert.equal(rebased.w.writerCalls.length, 0);
@@ -521,7 +525,7 @@ test('no third review, and the tail must sit on top of what was reviewed: an ope
 
 test('a refused delta blocks: the writer answers input-mismatch on the delta lens → blocked amendment-not-descendant, no second lens, no second claim, never a full review', async () => {
   const { w, deps } = fullReviewedOnH1({ lensRefusesSince: true });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'amendment-not-descendant']);
   assert.match(r.owed, /conductor decides how this head is reviewed/);
   assert.match(r.owed, /ref-bbbbbbb/, 'the owed names the live attempt-ref for the conductor');
@@ -555,7 +559,7 @@ test('a rebase mapped by patch id (quest d5390fa3): identical converges on contr
 
 test('a rebased head is refused before any claim: the delta pre-check runs the writer\'s own amendment rule over the compare', async () => {
   const { w, deps } = fullReviewedOnH1({ history: [H2] });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual([r.outcome, r.reason], ['blocked', 'amendment-not-descendant']);
   assert.match(r.owed, /not an ancestor/);
   assert.equal(w.writerCalls.length, 0);
@@ -565,20 +569,20 @@ test('--claim beat on round two: still a session claim with --since, and the dec
   const lines = [];
   const { w, deps } = fullReviewedOnH1();
   deps.log = (l) => lines.push(l);
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1, claim: 'beat' } }, deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1, claim: 'beat' } }, deps);
   assert.equal(w.writerCalls.filter((c) => c[0] === 'claim').length, 1);
   assert.deepEqual(lensCalls(w).map(sinceOf), [H1, H1]);
   assert.ok(lines.some((l) => /--claim beat does not apply to round two: the session claims the delta now/.test(l)), lines.join('\n'));
   // round one still waits for the beat
   const fresh = world();
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 60, maxWallMinutes: 2, claim: 'beat' } }, fresh.deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 60, maxWallMinutes: 2, claim: 'beat' } }, fresh.deps);
   assert.equal(fresh.w.writerCalls.length, 0);
 });
 
 test('--skip-delta: the amendment judged trivial → no delta claim; converged with delta_skipped and the tail in the receipt and the state file; the next head is owed its delta again', async () => {
   const state = stateFile();
   const { w, deps } = fullReviewedOnH1();
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, skipDelta: 'typo in a comment', bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, skipDelta: 'typo in a comment', bounds: { pollSeconds: 1 } }, deps);
   assert.equal(r.outcome, 'converged');
   assert.equal(r.delta_skipped, 'typo in a comment');
   assert.equal(r.unreviewed_tail, 'aaaaaaa...bbbbbbb');
@@ -586,7 +590,7 @@ test('--skip-delta: the amendment judged trivial → no delta claim; converged w
   assert.deepEqual(JSON.parse(readFileSync(state, 'utf8')).deltaSkipped, { head: H2, reason: 'typo in a comment' });
 
   w.head = H3;
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, bounds: { pollSeconds: 1 } }, deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual(lensCalls(w).map(sinceOf), [H1, H1], 'the skip covered H2 only');
 });
 
@@ -594,7 +598,7 @@ test('--skip-delta on round one is ignored (logged): the full review is still cl
   const lines = [];
   const { w, deps } = world();
   deps.log = (l) => lines.push(l);
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), skipDelta: 'x', bounds: { pollSeconds: 1 } }, deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), skipDelta: 'x', bounds: { pollSeconds: 1 } }, deps);
   assert.equal(w.writerCalls.filter((c) => c[0] === 'claim').length, 1);
   assert.ok(lines.some((l) => /--skip-delta ignored/.test(l)));
 });
@@ -602,10 +606,10 @@ test('--skip-delta on round one is ignored (logged): the full review is still cl
 test('--context-file reaches both lenses in round one and in round two', async () => {
   const { w, deps } = world({ findingsOnPost: (ww) => (ww.head === H1 ? [openThread(31)] : []) });
   const state = stateFile();
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, contextFile: '/abs/uncertainty.md', bounds: { pollSeconds: 1 } }, deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, contextFile: '/abs/uncertainty.md', bounds: { pollSeconds: 1 } }, deps);
   await adjudicate({ repo: 'o/r', pr: 1, cwd: '.', commentId: 31, verdict: 'confirmed', bodyFile: 'x.md', statePath: state }, deps);
   w.head = H2;
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, contextFile: '/abs/uncertainty.md', bounds: { pollSeconds: 1 } }, deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, contextFile: '/abs/uncertainty.md', bounds: { pollSeconds: 1 } }, deps);
   const calls = lensCalls(w);
   assert.equal(calls.length, 4);
   assert.ok(calls.every((c) => c[c.indexOf('--context-file') + 1] === '/abs/uncertainty.md'));
@@ -625,17 +629,17 @@ test('verdict fields: adjudicate --verdict judgment --adjudicator lane spawns re
   assert.ok(!reply2.includes('--adjudicator'), 'an existing caller is unchanged');
 
   assert.deepEqual(JSON.parse(readFileSync(state, 'utf8')).judgmentNotes, ['41']);
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual([r.outcome, r.judgment_notes], ['converged', ['41']]);
   // --fresh resets the bounds, not the verdicts already given
-  const fresh = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, resume: false, bounds: { pollSeconds: 1 } }, deps);
+  const fresh = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, resume: false, bounds: { pollSeconds: 1 } }, deps);
   assert.deepEqual(fresh.judgment_notes, ['41']);
 });
 
 test('reviews per PR are capped at 2 by construction: full on H1, fix H2 → delta, fix H3 → converged with no claim; two claims in all', async () => {
   const { w, deps } = world({ findingsOnPost: (ww) => (ww.head !== H3 ? [openThread(ww.head === H1 ? 51 : 52)] : []) });
   const state = stateFile();
-  const run = () => runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, bounds: { pollSeconds: 1 } }, deps);
+  const run = () => runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, bounds: { pollSeconds: 1 } }, deps);
   assert.equal((await run()).outcome, 'adjudicate');
   await adjudicate({ repo: 'o/r', pr: 1, cwd: '.', commentId: 51, verdict: 'confirmed', bodyFile: 'x.md', statePath: state }, deps);
   w.head = H2;
@@ -648,12 +652,44 @@ test('reviews per PR are capped at 2 by construction: full on H1, fix H2 → del
   assert.deepEqual(w.reviews.map((x) => /since=/.test(x.body) ? 'delta' : 'full'), ['full', 'delta']);
 });
 
+test('2aadf72f: a Sol-authored PR is claimed with --author sol and reviewed by astra then opus — never the codex (Sol) lens', async () => {
+  const { w, deps } = world();
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'sol', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  assert.equal(r.outcome, 'converged');
+  const claim = w.writerCalls.find((c) => c[0] === 'claim');
+  assert.equal(claim[claim.indexOf('--author') + 1], 'sol');
+  const lenses = w.writerCalls.filter((c) => c[0] === 'lens').map((c) => c[c.indexOf('--lens') + 1]);
+  assert.deepEqual(lenses, ['astra', 'opus'], 'the lenses the claim answered, in order');
+});
+
+test('2aadf72f: a claim that answers no lens set runs no lens and blocks at once, naming the live attempt-ref', async () => {
+  const { w, deps } = world();
+  const spawn = deps.spawnWriter;
+  deps.spawnWriter = (args) => { const out = spawn(args); if (args[0] === 'claim') delete out.required_lenses; return out; };
+  const started = w.clock;
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1, maxWallMinutes: 90 } }, deps);
+  assert.equal(w.writerCalls.filter((c) => c[0] === 'lens').length, 0);
+  assert.deepEqual([r.outcome, r.reason], ['blocked', 'attempt-failed']);
+  assert.match(r.owed, /recover withdraw --attempt-ref ref-/);
+  assert.ok(w.clock - started < 60 * 1000, 'blocked without running out the wall budget');
+});
+
+test('2aadf72f: run without a known --author exits 4 before anything runs', () => {
+  const script = join(dirname(fileURLToPath(import.meta.url)), 'pr-babysit.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'babysit-cli-'));
+  for (const extra of [[], ['--author', 'gpt']]) {
+    const r = spawnSync(process.execPath, [script, 'run', '--pr', '1', '--repo', 'o/r', '--cwd', dir, ...extra], { encoding: 'utf8' });
+    assert.equal(r.status, 4, r.stderr);
+    assert.match(r.stderr, /run needs --author claude\|sol\|astra\|terra/);
+  }
+});
+
 test('run refuses an unreadable or empty --context-file and an empty --skip-delta reason before anything runs (exit 4)', () => {
   const script = join(dirname(fileURLToPath(import.meta.url)), 'pr-babysit.mjs');
   const dir = mkdtempSync(join(tmpdir(), 'babysit-cli-'));
   const empty = join(dir, 'empty.md');
   writeFileSync(empty, '  \n');
-  const runCli = (extra) => spawnSync(process.execPath, [script, 'run', '--pr', '1', '--repo', 'o/r', '--cwd', dir, ...extra], { encoding: 'utf8' });
+  const runCli = (extra) => spawnSync(process.execPath, [script, 'run', '--pr', '1', '--repo', 'o/r', '--cwd', dir, '--author', 'claude', ...extra], { encoding: 'utf8' });
   const missing = runCli(['--context-file', join(dir, 'nope.md')]);
   assert.equal(missing.status, 4, missing.stderr);
   assert.match(missing.stderr, /--context-file could not be read/);
@@ -674,7 +710,7 @@ test('the posting identity is required: without it the head is never read as unr
   for (const [name, readIdentity] of Object.entries(shapes)) {
     const { w, deps } = fullReviewedOnH1();
     deps.coordinator.readIdentity = readIdentity;
-    const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+    const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
     assert.deepEqual([r.outcome, r.reason], ['blocked', 'identity-unset'], name);
     assert.match(r.owed, /identity --pin --reason/, name);
     assert.equal(w.writerCalls.length, 0, name);
@@ -691,7 +727,7 @@ test('identity-unset never over-matches: a network error, another refusal code, 
   for (const [name, arrange] of Object.entries(cases)) {
     const { w, deps } = fullReviewedOnH1();
     arrange(deps);
-    const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+    const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
     assert.deepEqual([r.outcome, r.reason], ['blocked', 'coordinator-unreachable'], name);
     assert.equal(w.writerCalls.length, 0, name);
   }
@@ -730,20 +766,20 @@ const postDelta = (over = {}) => world({ head: H3, reviews: [listed({ id: 7001, 
 
 test('T1 workit#116 (4116626534 i) — a post-delta tail with a merge from base, or a commit list too short to rule one out, blocks amendment-not-descendant; ancestry alone never converges it', async () => {
   const merged = postDelta({ onCompare: (p) => ({ ...p, commits: p.commits.map((c) => ({ ...c, parents: [{ sha: 'p' }, { sha: 'base' }] })) }) });
-  const rm = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, merged.deps);
+  const rm = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, merged.deps);
   assert.deepEqual([rm.outcome, rm.reason], ['blocked', 'amendment-not-descendant']);
   assert.match(rm.owed, /merge commit/);
   assert.equal(merged.w.writerCalls.length, 0);
 
   const partial = postDelta({ onCompare: (p) => ({ ...p, total_commits: 300 }) });
-  const rp = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, partial.deps);
+  const rp = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, partial.deps);
   assert.deepEqual([rp.outcome, rp.reason], ['blocked', 'amendment-not-descendant']);
   assert.match(rp.owed, /cannot be ruled out/);
 });
 
 test('T1 workit#116 (4116626534 i) — an ahead tail that changes no file (an empty commit to re-run CI) still converges on the tail', async () => {
   const empty = postDelta({ onCompare: (p) => ({ ...p, files: [] }) });
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, empty.deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, empty.deps);
   assert.deepEqual([r.outcome, r.unreviewed_tail], ['converged', 'bbbbbbb...ccccccc']);
 });
 
@@ -755,7 +791,7 @@ test('T1 workit#116 delta (4116653420, 4116653423) — a zero-file tail is exemp
   };
   for (const [name, onCompare] of Object.entries(cases)) {
     const { w, deps } = postDelta({ onCompare });
-    const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+    const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
     assert.deepEqual([r.outcome, r.reason], ['blocked', 'amendment-not-descendant'], name);
     assert.equal(w.writerCalls.length, 0, name);
   }
@@ -767,7 +803,7 @@ test('T1 workit#116 (4116626540) — --skip-delta is dropped when the head moves
   // the first observation reads H2 before and H3 after
   const { w, deps } = fullReviewedOnH1({ headReads: [H2, H3] });
   deps.log = (l) => lines.push(l);
-  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, skipDelta: 'judged on H2', bounds: { pollSeconds: 1 } }, deps);
+  const r = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, skipDelta: 'judged on H2', bounds: { pollSeconds: 1 } }, deps);
   assert.equal(r.delta_skipped, undefined);
   assert.deepEqual(lensCalls(w).map(sinceOf), [H1, H1], 'H3 got its delta pass');
   assert.equal(JSON.parse(readFileSync(state, 'utf8')).deltaSkipped, null);
@@ -777,20 +813,20 @@ test('T1 workit#116 (4116626540) — --skip-delta is dropped when the head moves
 test('T1 workit#116 (4116626543) — the context file is persisted: a resumed delta run without --context-file still passes it; a new flag replaces it; --fresh drops it', async () => {
   const { w, deps } = world({ findingsOnPost: (ww) => (ww.head === H1 ? [openThread(61)] : []) });
   const state = stateFile();
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, contextFile: '/abs/round-one.md', bounds: { pollSeconds: 1 } }, deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, contextFile: '/abs/round-one.md', bounds: { pollSeconds: 1 } }, deps);
   assert.equal(JSON.parse(readFileSync(state, 'utf8')).contextFile, '/abs/round-one.md');
   await adjudicate({ repo: 'o/r', pr: 1, cwd: '.', commentId: 61, verdict: 'confirmed', bodyFile: 'x.md', statePath: state }, deps);
   w.head = H2;
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, bounds: { pollSeconds: 1 } }, deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, bounds: { pollSeconds: 1 } }, deps);
   const calls = lensCalls(w);
   assert.deepEqual(calls.map(sinceOf), [null, null, H1, H1]);
   assert.ok(calls.every((c) => c[c.indexOf('--context-file') + 1] === '/abs/round-one.md'), 'the resumed delta pass carries the round-one context');
   assert.equal(JSON.parse(readFileSync(state, 'utf8')).contextFile, '/abs/round-one.md');
 
-  const replaced = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, contextFile: '/abs/round-two.md', bounds: { pollSeconds: 1 } }, deps);
+  const replaced = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, contextFile: '/abs/round-two.md', bounds: { pollSeconds: 1 } }, deps);
   assert.equal(replaced.outcome, 'converged');
   assert.equal(JSON.parse(readFileSync(state, 'utf8')).contextFile, '/abs/round-two.md');
-  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', statePath: state, resume: false, bounds: { pollSeconds: 1 } }, deps);
+  await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: state, resume: false, bounds: { pollSeconds: 1 } }, deps);
   assert.equal(JSON.parse(readFileSync(state, 'utf8')).contextFile, null);
 });
 
@@ -799,7 +835,7 @@ test('T1 workit#116 (4116626543) — run checks a context file taken from the st
   const dir = mkdtempSync(join(tmpdir(), 'babysit-cli-'));
   const state = join(dir, 'state.json');
   writeFileSync(state, JSON.stringify({ contextFile: join(dir, 'gone.md') }));
-  const r = spawnSync(process.execPath, [script, 'run', '--pr', '1', '--repo', 'o/r', '--cwd', dir, '--state', state], { encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [script, 'run', '--pr', '1', '--repo', 'o/r', '--cwd', dir, '--state', state, '--author', 'claude'], { encoding: 'utf8' });
   assert.equal(r.status, 4, r.stderr);
   assert.match(r.stderr, /--context-file \(from the state file\) could not be read/);
 });

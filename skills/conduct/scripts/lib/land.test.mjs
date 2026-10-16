@@ -6,7 +6,7 @@ import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
-  tierFor, pickReviewers, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
+  tierFor, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions, recordLandStep, runLandVerb,
   parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord,
 } from './land.mjs';
@@ -780,11 +780,23 @@ test('pickReviewers availability matrix (D19.12)', () => {
     { lenses: ['opus'], singleLens: 'no codex CLI: opus is the only available lens', sameFamily: true });
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'claude').lenses, ['codex', 'astra']);
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex').lenses, ['astra', 'opus']);
-  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex'), { lenses: ['codex', 'astra'], sameFamily: true });
+  // 2aadf72f: no claude CLI on a Sol-authored standalone PR is astra alone —
+  // the codex lens is Sol, the author. Terra's pair is codex + astra.
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex'),
+    { lenses: ['astra'], singleLens: 'sol-authored PR with no claude CLI: astra is the only available lens that is not the author' });
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { author: 'astra' }).lenses, ['codex']);
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { author: 'terra' }), { lenses: ['codex', 'astra'] });
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'claude'), { lenses: ['codex', 'astra'] });
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'claude', { mode: 'managed' }).lenses, ['codex', 'astra']);
-  const managedCodex = pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { mode: 'managed' });
+  // 2aadf72f: the writer's claim seats the Sol author's pair, so a managed
+  // codex-authored PR is reviewed by astra + opus when both CLIs are on.
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { mode: 'managed' }), { lenses: ['astra', 'opus'] });
+  const managedCodex = pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { mode: 'managed' });
   assert.deepEqual(managedCodex.lenses, ['astra']);
-  assert.ok(managedCodex.singleLens);
+  assert.match(managedCodex.singleLens, /sol-authored PR on a managed repo with no claude CLI/);
+  // An Astra-pinned codex lane is reviewed by codex + opus, never astra.
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { mode: 'managed', author: 'astra' }).lenses, ['codex', 'opus']);
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { author: 'astra' }).lenses, ['codex', 'opus']);
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, false) }), 'claude', { mode: 'managed' }), { impossible: 'managed repo needs the codex CLI' });
   const state = OBS({ agents: agents(true, false) });
   const [probe] = reviewActions(state, makeWp({ reviewMode: undefined }), { round: 1 });
@@ -831,7 +843,7 @@ test('reviewActions: managed observatory → claim, lens ×2, post on one attemp
   assert.equal(managed.reviewMode, 'managed');
   const ref = join(REVIEWS, 'attempt-ref-r1.json');
   assert.deepEqual(managed.queue.map((a) => a.command.slice(2)), [
-    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref],
+    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'claude'],
     ['lens', '--attempt-ref', ref, '--lens', 'codex'],
     ['lens', '--attempt-ref', ref, '--lens', 'astra'],
     ['post', '--attempt-ref', ref],
@@ -856,13 +868,37 @@ test('reviewActions: no codex CLI on a claude-authored standalone PR → one opu
   assert.deepEqual(queue.at(-1).command.slice(-2), ['--single-lens', 'no codex CLI: opus is the only available lens']);
 });
 
-test('managed single-lens: a codex-authored PR on observatory claims with --single-lens --lens astra; post never takes it', () => {
+test('2aadf72f: a codex-authored PR on observatory claims --author sol and runs astra then opus on one attempt-ref', () => {
   const state = OBS({ intent: { ...OBS().intent, agent: 'codex' } });
+  const { queue } = expanded(state, 'managed-observatory.json');
+  const ref = join(REVIEWS, 'attempt-ref-r1.json');
+  assert.deepEqual(queue.map((a) => a.command.slice(2)), [
+    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'sol'],
+    ['lens', '--attempt-ref', ref, '--lens', 'astra'],
+    ['lens', '--attempt-ref', ref, '--lens', 'opus'],
+    ['post', '--attempt-ref', ref],
+  ]);
+});
+
+test('2aadf72f: an Astra-pinned codex lane claims --author astra and is reviewed by codex + opus', () => {
+  const state = OBS({ intent: { ...OBS().intent, agent: 'codex' } });
+  const { queue } = expanded(state, 'managed-observatory.json', { round: 1 }, { model: 'gpt-6-astra' });
+  const claim = queue.find((a) => a.part === 'claim').command;
+  assert.equal(claim[claim.indexOf('--author') + 1], 'astra');
+  assert.deepEqual(queue.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]), ['codex', 'opus']);
+  assert.equal(claimAuthor('codex', undefined), 'sol');
+  assert.equal(claimAuthor('codex', 'opus'), 'sol', 'the default codex label is GPT-6.1 Sol');
+  assert.equal(claimAuthor('codex', 'gpt-5.6-terra'), 'terra');
+  assert.equal(claimAuthor('claude', 'sonnet'), 'claude');
+});
+
+test('managed single-lens: a codex-authored PR with no claude CLI claims with --single-lens --lens astra; post never takes it', () => {
+  const state = OBS({ intent: { ...OBS().intent, agent: 'codex' }, agents: agents(false, true) });
   const { queue } = expanded(state, 'managed-observatory.json');
   const ref = join(REVIEWS, 'attempt-ref-r1.json');
   const reason = pickReviewers(state, 'codex', { mode: 'managed' }).singleLens;
   assert.deepEqual(queue.map((a) => a.command.slice(2)), [
-    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--single-lens', reason, '--lens', 'astra'],
+    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'sol', '--single-lens', reason, '--lens', 'astra'],
     ['lens', '--attempt-ref', ref, '--lens', 'astra'],
     ['post', '--attempt-ref', ref],
   ]);
@@ -891,7 +927,7 @@ test('deltaReviewActions: managed claims a fresh round; standalone passes --sinc
   const managed = deltaReviewActions(OBS(), makeWp({ reviewMode: 'managed' }), since);
   const ref = join(REVIEWS, 'attempt-ref-r2.json');
   assert.deepEqual(managed.map((a) => a.command.slice(2)), [
-    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref],
+    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'claude'],
     ['lens', '--attempt-ref', ref, '--lens', 'codex', '--since', since],
     ['lens', '--attempt-ref', ref, '--lens', 'astra', '--since', since],
     ['post', '--attempt-ref', ref],
@@ -952,9 +988,14 @@ test('an explicit delta reset may use its verified ancestor; a proof for another
   assert.throws(() => deltaReviewActions(makeState(), { ...wp, deltaRecovery: { ...wp.deltaRecovery, head: sha('d') } }, HEAD), /no delta review after a rebase/);
 });
 
-test('t2Actions: council off → every available lens and no other; on → council_review, synthesize, challenge', () => {
-  const off = t2Actions(makeState(), makeWp({ reviewMode: 'standalone' }), { round: 1 });
-  assert.deepEqual(off.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]), ['codex', 'astra', 'opus']);
+test('t2Actions: council off → every available lens but the author\'s; on → council_review, synthesize, challenge', () => {
+  const lensesOf = (actions) => actions.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]);
+  // 2aadf72f (workit#240 review): opus is the Claude author's own model, codex the Sol author's.
+  assert.equal(makeState().intent.agent, 'claude');
+  assert.deepEqual(lensesOf(t2Actions(makeState(), makeWp({ reviewMode: 'standalone' }), { round: 1 })), ['codex', 'astra']);
+  assert.deepEqual(lensesOf(t2Actions(makeState(), makeWp({ reviewMode: 'standalone', agent: 'codex' }), { round: 1 })), ['astra', 'opus']);
+  // Only the author's own lens available: T1's same-family single lens stands, never an empty review.
+  assert.deepEqual(lensesOf(t2Actions(makeState({ agents: agents(true, false) }), makeWp({ reviewMode: 'standalone' }), { round: 1 })), ['opus']);
   const state = makeState({ adapters: { council: { on: true } } });
   const changed = [join(WT, 'lib', 'x.mjs')];
   const on = t2Actions(state, makeWp(), { round: 2, changedPaths: changed });

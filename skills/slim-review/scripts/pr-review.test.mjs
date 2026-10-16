@@ -70,6 +70,9 @@ import {
   amendmentProblem,
   readPostedFinding,
   commandLineProblem,
+  AUTHOR_PAIRS,
+  AUTHOR_LENS,
+  reviewPairFor,
 } from './pr-review.mjs';
 import {
   REASONS,
@@ -1317,8 +1320,8 @@ test('lens opus builds the constrained structured-output argv', () => {
   assert.ok(call.args.includes('json'));
   assert.ok(call.args.includes('--json-schema'));
   assert.equal(JSON.parse(call.args[call.args.indexOf('--json-schema') + 1]).additionalProperties, false);
-  assert.match(call.args.at(-1), /Review pull request #42/);
-  assert.equal(call.opts.input, undefined, 'Claude -p receives its prompt positionally on this host');
+  assert.equal(call.args.at(-2), '--json-schema', 'the schema is the last argument: no positional prompt follows it');
+  assert.match(call.opts.input, /Review pull request #42/, 'Claude -p reads its prompt on stdin (quest 2aadf72f)');
 });
 
 test('lens opus accepts fenced result JSON, structured_output, and ignores an empty structured_output in favor of result', () => {
@@ -4124,7 +4127,7 @@ test('claim pins the attempt, writes an owner-only attempt-ref file, and prints 
     const out = collector();
     const refOut = join(home, 'attempts', 'claimed.json');
     await cmdClaim(
-      { repo: PINNED_REPO, pr: String(PINNED_PR), attemptRefOut: refOut },
+      { repo: PINNED_REPO, pr: String(PINNED_PR), attemptRefOut: refOut, author: 'claude' },
       { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home },
     );
     const line = out.line();
@@ -4158,7 +4161,7 @@ test('claim refuses identity-unset, and a mismatched credential, before any mani
   await withCoordinatedInstall({ fake: unset }, async ({ home }) => {
     const seams = pinnedSeams();
     const out = collector();
-    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home });
+    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR), author: 'claude' },{ ...out.deps, runGh: seams.runGh, env: {}, homeDir: home });
     assert.equal(out.line().reason, 'identity-unset');
     assert.deepEqual(seams.calls, [], 'nothing was read and nothing was claimed');
     assert.deepEqual(unset.state.claims, []);
@@ -4167,18 +4170,105 @@ test('claim refuses identity-unset, and a mismatched credential, before any mani
   await withCoordinatedInstall({ fake: pinned }, async ({ home }) => {
     const seams = pinnedSeams({ login: OTHER_LOGIN });
     const out = collector();
-    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home });
+    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR), author: 'claude' },{ ...out.deps, runGh: seams.runGh, env: {}, homeDir: home });
     assert.equal(out.line().reason, 'identity-mismatch');
     assert.deepEqual(pinned.state.claims, [], 'a credential that would post as someone else never claims');
     assert.equal(seams.calls.some((args) => args.join(' ').includes('/files')), false, 'and never builds a manifest');
   });
 });
 
+// --- reviewer ≠ author (quest 2aadf72f) ------------------------------------
+
+test('2aadf72f: the author table never seats the author\'s own model, and matches SKILL.md', () => {
+  assert.deepEqual(AUTHOR_PAIRS, {
+    claude: ['codex', 'astra'],
+    sol: ['astra', 'opus'],
+    astra: ['codex', 'opus'],
+    terra: ['codex', 'astra'],
+  });
+  for (const [author, pair] of Object.entries(AUTHOR_PAIRS)) {
+    assert.equal(pair.length, 2, `${author}: a pair`);
+    assert.equal(pair.includes(AUTHOR_LENS[author]), false, `${author}: its own lens is not in its pair`);
+  }
+  assert.equal(reviewPairFor('gpt'), null);
+  assert.equal(reviewPairFor('toString'), null, 'an inherited key is not an author');
+  assert.equal(reviewPairFor(undefined), null);
+  // The skill's prose carries the same table: a change to one is a change to both.
+  const skill = readFileSync(join(dirname(SCRIPT), '..', 'SKILL.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.match(skill, /authored by a Claude session takes `codex` \+ `astra`/);
+  assert.match(skill, /authored by a GPT-6 Sol lane \(the build default since 2026-09-23\) takes `astra` \+ `opus`/);
+  assert.match(skill, /authored by an Astra lane takes `codex` \+ `opus`/);
+});
+
+test('2aadf72f: claim asks the coordinator for the author\'s pair — a Sol-authored PR is reviewed by astra + opus', async () => {
+  for (const [author, pair] of Object.entries(AUTHOR_PAIRS)) {
+    const fake = coordinatorFake({ requiredLenses: [...pair] });
+    await withCoordinatedInstall({ fake }, async ({ home }) => {
+      const out = collector();
+      await cmdClaim(
+        { repo: PINNED_REPO, pr: String(PINNED_PR), author, attemptRefOut: join(home, 'attempts', `${author}.json`) },
+        { ...out.deps, runGh: pinnedSeams({ reviewPages: [[]] }).runGh, env: {}, homeDir: home },
+      );
+      assert.deepEqual(out.deaths, [], author);
+      assert.deepEqual(fake.state.claims[0].required_lenses, [...pair], `${author} → ${pair.join('+')}`);
+      assert.equal(out.line().outcome, 'ok');
+    });
+  }
+});
+
+test('2aadf72f: claim without --author refuses with exit 2 before reading anything or building a client', async () => {
+  for (const author of [undefined, '', 'gpt-6-sol', 'opus']) {
+    await withProfile({}, async (home) => {
+      const out = collector();
+      const seams = pinnedSeams();
+      await cmdClaim(
+        { repo: PINNED_REPO, pr: String(PINNED_PR), ...(author === undefined ? {} : { author }) },
+        { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home, makeClient: () => { throw new Error('no client may be built'); } },
+      );
+      assert.equal(out.deaths[0]?.code, 2, String(author));
+      assert.match(out.deaths[0].message, /--author claude\|sol\|astra\|terra/);
+      assert.deepEqual(out.logs, [], 'a usage error mints no D12 reason');
+      assert.deepEqual(seams.calls, []);
+    });
+  }
+});
+
+test('2aadf72f: a single-lens claim never seats the author, and defaults to the pair\'s first lens', async () => {
+  await withProfile({}, async (home) => {
+    const out = collector();
+    await cmdClaim(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), author: 'sol', singleLens: 'astra only tonight', lens: 'codex' },
+      { ...out.deps, runGh: pinnedSeams().runGh, env: {}, homeDir: home, makeClient: () => { throw new Error('no client may be built'); } },
+    );
+    assert.equal(out.deaths[0]?.code, 2);
+    assert.match(out.deaths[0].message, /author's own model/);
+  });
+  const fake = coordinatorFake({ requiredLenses: ['astra'] });
+  await withCoordinatedInstall({ fake }, async ({ home }) => {
+    const out = collector();
+    await cmdClaim(
+      { repo: PINNED_REPO, pr: String(PINNED_PR), author: 'sol', singleLens: 'one seat tonight', attemptRefOut: join(home, 'attempts', 'single.json') },
+      { ...out.deps, runGh: pinnedSeams({ reviewPages: [[]] }).runGh, env: {}, homeDir: home },
+    );
+    assert.deepEqual(fake.state.claims[0].required_lenses, ['astra'], 'not the old codex default: codex is the Sol author');
+  });
+});
+
+test('2aadf72f: the claim CLI exits 2 without --author, and names the pairs', () => {
+  const bare = runCli(['claim', '--pr', '1', '--repo', 'o/r']);
+  assert.equal(bare.code, 2);
+  assert.match(bare.stderr, /claim needs --author claude\|sol\|astra\|terra/);
+  const self = runCli(['claim', '--pr', '1', '--repo', 'o/r', '--author', 'claude', '--single-lens', 'why', '--lens', 'opus']);
+  assert.equal(self.code, 2);
+  assert.match(self.stderr, /author's own model/);
+  assert.equal(parseArgs(['claim', '--author', 'sol']).author, 'sol');
+});
+
 test('claim imports a recognised review before claiming, and skips the recogniser under --supersede', async () => {
   const fake = coordinatorFake();
   await withCoordinatedInstall({ fake }, async ({ home }) => {
     const out = collector();
-    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...out.deps, runGh: pinnedSeams().runGh, env: {}, homeDir: home });
+    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR), author: 'claude' },{ ...out.deps, runGh: pinnedSeams().runGh, env: {}, homeDir: home });
     assert.equal(fake.state.imports.length, 1);
     assert.equal(fake.state.imports[0].review_id, 5152010493);
     assert.equal(fake.state.imports[0].author_login, SERVICE_LOGIN);
@@ -4188,7 +4278,7 @@ test('claim imports a recognised review before claiming, and skips the recognise
   await withCoordinatedInstall({ fake: superseding }, async ({ home }) => {
     const out = collector();
     await cmdClaim(
-      { repo: PINNED_REPO, pr: String(PINNED_PR), supersede: '5152010493', reason: 'the first review missed the guard' },
+      { repo: PINNED_REPO, pr: String(PINNED_PR), supersede: '5152010493', reason: 'the first review missed the guard', author: 'claude' },
       { ...out.deps, runGh: pinnedSeams().runGh, env: {}, homeDir: home },
     );
     assert.deepEqual(superseding.state.imports, [], 'an explicit supersede is the operator deciding; no dedupe runs');
@@ -4203,7 +4293,7 @@ test('claim reports a refusal with the ended row the operator is about to retry'
   const fake = coordinatorFake({ forced: { '/claim': { status: 409, json: { code: 'attempt-ended', ended } } } });
   await withCoordinatedInstall({ fake }, async ({ home }) => {
     const out = collector();
-    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR) }, { ...out.deps, runGh: pinnedSeams({ reviewPages: [[]] }).runGh, env: {}, homeDir: home });
+    await cmdClaim({ repo: PINNED_REPO, pr: String(PINNED_PR), author: 'claude' },{ ...out.deps, runGh: pinnedSeams({ reviewPages: [[]] }).runGh, env: {}, homeDir: home });
     const line = out.line();
     assert.equal(line.reason, 'attempt-ended');
     assert.equal(line.retry, 'stop');
@@ -5045,7 +5135,7 @@ test('a claim on an unprovisioned installation refuses managed-config-missing an
     const out = collector();
     const seams = pinnedSeams();
     await cmdClaim(
-      { repo: PINNED_REPO, pr: String(PINNED_PR) },
+      { repo: PINNED_REPO, pr: String(PINNED_PR), author: 'claude' },
       { ...out.deps, runGh: seams.runGh, env: {}, homeDir: home, makeClient: () => { throw new Error('no client may be built'); } },
     );
     assert.equal(out.line().reason, 'managed-config-missing');
@@ -5730,9 +5820,10 @@ test('control (d): today\'s callers — --verdict confirmed with no --adjudicato
   assert.deepEqual(readPostedFinding({ body: 'a human says hi', commit_id: POSTED_HEAD }), { lens: null, head: POSTED_HEAD, severity: null, scope: null });
 });
 
-test('M2 control: an opus prompt too long for one command-line argument is refused before any model spawn', () => {
+test('2aadf72f: an opus prompt past every command-line cap reaches claude -p on stdin, and the argv still launches', () => {
   // 140,000 characters: past Windows' 32,767-character command line and past
-  // Linux's 131,072-byte single-argument ceiling, so the refusal is platform-free.
+  // Linux's 131,072-byte single-argument ceiling. Before quest 2aadf72f the
+  // prompt rode argv, so this input was refused (exit 5) or died ENAMETOOLONG.
   withContextFile(`### Claims no control measures\n${'x'.repeat(140000)}\n`, (contextFile) => {
     const dir = mkdtempSync(join(tmpdir(), 'slim-review-opus-argv-'));
     const spawned = [];
@@ -5741,11 +5832,11 @@ test('M2 control: an opus prompt too long for one command-line argument is refus
       withNoManagedConfig(() => cmdLens(
         { pr: '42', repo: 'owner/repo', lens: 'opus', cwd: dir, out: join(dir, 'f.json'), measureLog: join(dir, 'm.jsonl'), contextFile },
         {
-          run: (program, args) => {
+          run: (program, args, opts = {}) => {
             if (args[0] === 'api') return 'src/a.ts\n';
             if (args.includes('status')) return '';
             if (args.includes('rev-parse')) return LENS_HEAD;
-            spawned.push({ program, args });
+            spawned.push({ program, args, input: opts.input });
             return JSON.stringify({ result: JSON.stringify(VALID) });
           },
           die: (code, message) => deaths.push({ code, message }),
@@ -5755,10 +5846,16 @@ test('M2 control: an opus prompt too long for one command-line argument is refus
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-    assert.deepEqual(spawned, [], 'the claude lens was never spawned');
-    assert.equal(deaths[0]?.code, 5);
-    // Windows says "command line", POSIX "command-line argument".
-    assert.match(deaths[0].message, /command[ -]line/);
+    assert.deepEqual(deaths, [], 'nothing is refused for size');
+    assert.equal(spawned.length, 1, 'the claude lens was spawned once');
+    const [{ program, args, input }] = spawned;
+    assert.equal(args[0], '-p');
+    assert.match(input, /Review pull request #42/, 'the prompt is the stdin');
+    assert.ok(input.length > 140000, 'the whole oversized prompt, untruncated');
+    assert.equal(args.some((arg) => String(arg).includes('Review pull request')), false, 'no prompt text on the command line');
+    for (const platform of ['win32', 'linux']) {
+      assert.equal(commandLineProblem(program, args, { platform }), null, `the argv launches on ${platform}`);
+    }
   });
 });
 

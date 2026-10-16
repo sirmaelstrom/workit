@@ -25,7 +25,8 @@
  * set and an `owed` sentence. Every wait has a bound. There is no merge path.
  *
  * Verbs:
- *   run        --pr <n> --repo <owner/name> --cwd <checkout> [--claim session|beat]
+ *   run        --pr <n> --repo <owner/name> --cwd <checkout> --author claude|sol|astra|terra
+ *              [--claim session|beat]
  *              [--max-heads 3] [--max-wall-minutes 90] [--poll-seconds 60]
  *              [--session-claims 1] [--state <file>] [--context-file <uncertainty.md>]
  *              [--skip-delta "<reason>"]
@@ -47,7 +48,7 @@ import { tmpdir } from 'node:os';
 import { createClient, CLIENT_REASONS } from '../../slim-review/scripts/pr-review-coordinator.mjs';
 import { loadCoordinatorToken, resolveManaged, MANAGED_MODES } from '../../slim-review/scripts/pr-review-managed.mjs';
 import { postedReviewScope } from '../../slim-review/scripts/pr-review-recognise.mjs';
-import { readReviewListing } from '../../slim-review/scripts/pr-review.mjs';
+import { AUTHOR_LIST, readReviewListing, reviewPairFor } from '../../slim-review/scripts/pr-review.mjs';
 import { cappedTailProblem, readRoundTail, resolveRound, reviewRound } from '../../slim-review/scripts/pr-review-rounds.mjs';
 
 // The round cap is the writer's (`pr-review.mjs rounds` answers the beat from
@@ -56,7 +57,6 @@ export { reviewRound };
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const WRITER_SCRIPT = resolve(HERE, '..', '..', 'slim-review', 'scripts', 'pr-review.mjs');
-export const REQUIRED_LENSES = Object.freeze(['codex', 'astra']);
 
 export const DEFAULT_BOUNDS = Object.freeze({
   maxHeads: 3,
@@ -272,7 +272,9 @@ function owedFor(reason, ctx, extra = {}) {
   const head = (ctx.head ?? '').slice(0, 7);
   switch (reason) {
     case 'reviewer-never-answered': return `an attempt on head ${head} stayed live (${extra.state ?? 'in flight'}) for the whole ${ctx.bounds.maxWallMinutes} min budget — a person checks the writer/beat logs and either runs \`pr-review.mjs recover abandon\` on it or waits.`;
-    case 'attempt-failed': return `attempt ${extra.attempt ?? '?'} on head ${head} ended ${extra.state ?? 'failed'}/${extra.disposition ?? '?'} and this loop's claim allowance for that head is spent — a person reads the reason and runs \`pr-review.mjs claim\` if a retry is wanted.`;
+    case 'attempt-failed': return extra.attemptRefFile
+      ? `the claim on head ${head} answered no lens set (${extra.disposition ?? '?'}), so no lens ran and the attempt is still live — a person withdraws it (\`pr-review.mjs recover withdraw --attempt-ref ${extra.attemptRefFile} --reason "<why>"\`) and checks the writer and coordinator versions.`
+      : `attempt ${extra.attempt ?? '?'} on head ${head} ended ${extra.state ?? 'failed'}/${extra.disposition ?? '?'} and this loop's claim allowance for that head is spent — a person reads the reason and runs \`pr-review.mjs claim\` if a retry is wanted.`;
     case 'attempt-ended-no-retry': return `the automatic attempt on head ${head} ended ${extra.state ?? 'failed'}/${extra.disposition ?? '?'}; session claims are disabled (--session-claims 0) — a person runs \`pr-review.mjs claim\` or pushes a new head.`;
     case 'ci-failed': return `check(s) failing on head ${head}: ${(extra.names ?? []).join(', ') || '?'} — fix and push a new head, then run again.`;
     case 'head-moved-limit': return `the head moved ${ctx.iterations} time(s), past --max-heads ${ctx.bounds.maxHeads} — a person decides whether to keep going (run again with a higher bound).`;
@@ -462,18 +464,23 @@ export function spawnWriterDefault(args, { cwd }) {
 
 /**
  * Claim the current head and run both lenses and the post through the writer.
+ * `author` is the PR's authoring model; the writer's claim turns it into the
+ * pair (reviewer ≠ author, quest 2aadf72f), and the lenses run are the set the
+ * claim answered, never a constant here.
  * `since` makes both lens calls a delta pass under the same attempt-ref;
  * `contextFile` (the `pr-review.mjs uncertainty` output) goes to both lenses
  * in either round. Returns { ok, refused?, reason?, review_id? }. Never
  * retries; a lens that answers `retry: lens-budget` is left to the next
  * observation (the attempt row says what happened).
  */
-export async function runAttempt({ repo, pr, cwd, since, contextFile }, deps) {
-  const claim = deps.spawnWriter(['claim', '--pr', String(pr), '--repo', repo, '--cwd', cwd], { cwd });
+export async function runAttempt({ repo, pr, cwd, since, contextFile, author }, deps) {
+  const claim = deps.spawnWriter(['claim', '--pr', String(pr), '--repo', repo, '--cwd', cwd, '--author', String(author)], { cwd });
   if (claim.outcome !== 'ok') return { ok: false, phase: 'claim', reason: claim.reason ?? claim.outcome, coordinator_code: claim.coordinator_code };
   const ref = claim.attempt_ref_file;
+  const lenses = Array.isArray(claim.required_lenses) ? claim.required_lenses : [];
+  if (lenses.length === 0) return { ok: false, phase: 'claim', reason: 'lens-set-mismatch', attempt_ref_file: ref };
   const lensExtra = [...(since ? ['--since', since] : []), ...(contextFile ? ['--context-file', contextFile] : [])];
-  for (const lens of REQUIRED_LENSES) {
+  for (const lens of lenses) {
     const r = deps.spawnWriter(['lens', '--attempt-ref', ref, '--lens', lens, '--cwd', cwd, ...lensExtra], { cwd });
     if (r.outcome !== 'ok') return { ok: false, phase: `lens:${lens}`, reason: r.reason ?? r.outcome, retry: r.retry, since: r.since, attempt_ref_file: ref };
   }
@@ -557,10 +564,15 @@ export async function runLoop(opts, deps) {
       case 'claim': {
         ctx.claimsOnHead[obs.head] = (ctx.claimsOnHead[obs.head] ?? 0) + 1;
         persist();
-        const r = await runAttempt({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, since: d.since, contextFile: ctx.contextFile }, deps);
+        const r = await runAttempt({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, since: d.since, contextFile: ctx.contextFile, author: opts.author }, deps);
         log(`[babysit] ${d.since ? `delta attempt (since ${d.since.slice(0, 7)})` : 'attempt'} on ${obs.head.slice(0, 7)}: ${r.ok ? `posted review ${r.review_id}` : `${r.phase} → ${r.reason}`}`);
         if (!r.ok && r.phase === 'claim' && (r.reason === 'paused' || r.reason === 'disabled')) {
           return finish({ outcome: 'blocked', reason: r.reason === 'paused' ? 'plan-paused' : 'disabled', owed: owedFor(r.reason === 'paused' ? 'plan-paused' : 'disabled', { ...ctx, head: obs.head }), head: obs.head }, ctx, deps, obs);
+        }
+        // A claim that answered no lens set started nothing; waiting on it
+        // would only run out the wall budget. Block now, naming the live ref.
+        if (!r.ok && r.phase === 'claim' && r.reason === 'lens-set-mismatch' && r.attempt_ref_file) {
+          return finish({ outcome: 'blocked', reason: 'attempt-failed', owed: owedFor('attempt-failed', { ...ctx, head: obs.head }, { disposition: 'lens-set-mismatch', attemptRefFile: r.attempt_ref_file }), head: obs.head }, ctx, deps, obs);
         }
         // The writer refused `--since` before any lens start (a rebase, a merge
         // from base, a sha on the base branch). A block, never a full review:
@@ -652,6 +664,7 @@ function parseArgs(argv) {
       case '--body-file': opts.bodyFile = next(); break;
       case '--adjudicator': opts.adjudicator = next(); break;
       case '--context-file': opts.contextFile = next(); break;
+      case '--author': opts.author = next(); break;
       case '--skip-delta': opts.skipDelta = next(); break;
       case '--json': opts.json = true; break;
       default: throw new Error(`unknown argument ${a}`);
@@ -701,6 +714,12 @@ async function main() {
     process.exit(4);
   }
   if (!opts.pr || !opts.repo || !opts.cwd) { console.error('--pr, --repo and --cwd are required'); process.exit(4); }
+  // Every run can reach a session claim (round two always is one), and the
+  // claim's pair is the author's. Checked here, before anything is observed.
+  if (opts.verb === 'run' && !reviewPairFor(opts.author)) {
+    console.error(`run needs --author ${AUTHOR_LIST}: the PR's authoring model picks the review pair (reviewer ≠ author). Read it from the PR's commits or the lane record`);
+    process.exit(4);
+  }
   if (opts.skipDelta !== undefined && String(opts.skipDelta).trim() === '') { console.error('--skip-delta needs a reason: it is written to the state file and the receipt'); process.exit(4); }
   // A resumed run reuses the context file the state file carries (runLoop does
   // the same fallback), so that path is checked here too.

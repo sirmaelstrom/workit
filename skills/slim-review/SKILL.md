@@ -113,11 +113,9 @@ the block under **"The author says these were not checked"**, framed as places
 to look and not claims to trust. Both lens paths do this, standalone and
 `--attempt-ref`.
 
-`--lens opus` takes its prompt as one command-line argument (`claude -p`
-documents no prompt file). A prompt the OS would refuse, about 32K characters on
-Windows, is refused before anything runs: exit 5 standalone, or a
-`diff-too-large` line before any lens start under `--attempt-ref`. Run codex or
-astra, which read the prompt on stdin, or narrow the input.
+Every lens reads its prompt on stdin, `--lens opus` included (`claude -p` with
+no positional prompt reads stdin), so no prompt size meets the Windows
+command-line cap.
 
 ### Reviewer ≠ author
 
@@ -126,7 +124,9 @@ a Claude session takes `codex` + `astra`; a PR authored by a GPT-6 Sol lane
 (the build default since 2026-09-23) takes `astra` + `opus`; a PR authored by
 an Astra lane takes `codex` + `opus`; an older PR authored by a Terra lane can
 take `codex` + `astra`, since the `codex` lens is no longer Terra. Read
-the author from the PR's commits or the lane record; never assume.
+the author from the PR's commits or the lane record; never assume. On a managed
+repository `claim --author claude|sol|astra|terra` turns the author into this
+pair, and refuses (exit 2) without it.
 
 Handback contract: `summary`, `coverage`, `examined_paths`, and `findings`.
 `examined_paths` must be EXACTLY the authoritative list. Context-only paths are
@@ -194,8 +194,10 @@ by the reviewer, even when the worktree was already dirty before it ran.
 Every run is the shadow arm now: two lenses, both posted, both adjudicated with
 `reply --verdict`, so the measurement log accumulates unique-to-lens confirmed
 catches on every PR instead of on the ones someone remembered to name. Post the
-two handbacks with repeated flags: `post --findings codex.json --findings
-astra.json`. Where both lenses anchor the same defect on the same line, post
+two handbacks with repeated flags, one per lens of the author's pair (Reviewer ≠
+author, above): `post --findings codex.json --findings astra.json` for a
+Claude-authored PR, `--findings astra.json --findings opus.json` for a
+Sol-authored one. Where both lenses anchor the same defect on the same line, post
 both — the duplicate is the agreement signal — and **reply to each comment**
 with its own `--verdict`: `reply` posts to one comment id and records one
 measurement row attributed to that comment's lens, so a single reply would
@@ -433,10 +435,11 @@ code nobody changed. Run one delta pass per lens against the head round one
 reviewed:
 
 ```bash
+# one per lens of the author's pair; a Claude-authored PR shown (codex, astra)
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens --pr <n> --repo <owner/name> \
   --lens codex --since <reviewed head sha> --cwd "<checkout>" --out "$REVIEW_DIR/codex-delta.json" \
   [--context-file "$REVIEW_DIR/uncertainty.md"]
-# the same with --lens astra, then:
+# the same with the pair's other lens (--lens astra here), then:
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post --pr <n> --repo <owner/name> \
   --findings "$REVIEW_DIR/codex-delta.json" --findings "$REVIEW_DIR/astra-delta.json"
 ```
@@ -576,11 +579,13 @@ claim  →  lens --attempt-ref (once per lens)  →  post --attempt-ref
 ```bash
 # 1. allocate. Prints the attempt-ref file's path; that file holds the key for
 #    every later call, so it is written owner-only and never leaves this host.
-node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" claim --pr <n> --repo <owner/name>
+#    --author is the PR's authoring model; the claim answers its required_lenses.
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" claim --pr <n> --repo <owner/name> --author <claude|sol|astra|terra>
 
-# 2. one invocation per required lens, against the diff pinned at claim time
-node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens --attempt-ref <file> --lens codex
-node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens --attempt-ref <file> --lens astra
+# 2. one invocation per lens in the claim's required_lenses, against the diff
+#    pinned at claim time (a Claude-authored PR: codex then astra)
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens --attempt-ref <file> --lens <first>
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens --attempt-ref <file> --lens <second>
 
 # 3. post both documents, checked against the pinned manifest
 node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" post --attempt-ref <file>
@@ -631,7 +636,7 @@ match, with the id, the author, and the marker if there is one. To review the
 head anyway, supersede the review you read there:
 
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" claim --pr <n> --repo <owner/name> \
+node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" claim --pr <n> --repo <owner/name> --author <model> \
   --supersede <review id> --reason "<why the first review is not the answer>"
 ```
 
