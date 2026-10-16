@@ -2048,6 +2048,9 @@ test('repo config split (e2b54cd3): record checks the laneSuite the contract act
   writeFileSync(join(h.repo, 'AGENTS.md'), '# nothing here\n');
   writeFileSync(first.outPath, fillTemplate({ ...first, append: undefined }));
   await assert.rejects(recordPending(h, {}), { code: 2, message: /declares laneSuite \(AGENTS\.md `## Lane suite`\)/ });
+  // A Run deltas heading without the text is refused too (workit#246 review).
+  writeFileSync(first.outPath, fillTemplate({ ...first, append: '\n## Run deltas\n\n- something else\n\n## Emitted rule\n\nemitted rule\n' }));
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /does not carry the laneSuite text from AGENTS\.md/ });
   writeFileSync(first.outPath, fillTemplate(first));
   await recordPending(h, {});
   assert.equal(h.state.build.laneSuiteFrom, 'AGENTS.md `## Lane suite`');

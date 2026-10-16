@@ -25,7 +25,7 @@ import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
-import { laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
+import { LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
@@ -240,6 +240,15 @@ function recordContract(state, action, deps) {
   const suite = Object.hasOwn(action, 'laneSuite') ? action.laneSuite : laneSuiteOf(state, deps);
   if (suite && !/^## Run deltas\b/m.test(text)) {
     throw new ConductError(2, `the repo declares laneSuite (${suite.from}), and the lane contract has no ## Run deltas section saying it overrides rule 9`);
+  }
+  // The AGENTS.md text must reach the Run deltas section itself (workit#246
+  // review). The legacy source keeps its old heading-only check, unchanged.
+  if (suite && suite.from !== LEGACY_LANE_FROM) {
+    const flat = (value) => String(value).replace(/\s+/g, ' ').trim();
+    const deltas = text.split(/^## Run deltas\b/m).slice(1).join(' ').split(/^## /m)[0];
+    if (!flat(deltas).includes(flat(suite.text))) {
+      throw new ConductError(2, `the lane contract's ## Run deltas section does not carry the laneSuite text from ${suite.from}`);
+    }
   }
   state.build.contract = action.outPath;
   // Where the lane-facing text came from, for the run analysis.
