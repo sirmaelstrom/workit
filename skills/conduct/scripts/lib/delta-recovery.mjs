@@ -4,10 +4,12 @@ import { gitPatchId, patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-revi
 
 // A reset's mapping belongs to one reviewed head and one candidate. A later
 // amendment or rebase must not silently reuse it for another candidate.
+// Without one, the baseline is the first head no delta check has seen: where
+// the first amendment since the last land started, else the reviewed head.
 export function deltaBaseline(wp) {
   const reviewed = (wp.reviews ?? []).at(-1)?.head;
   const recovery = wp.deltaRecovery;
-  if (!recovery || recovery.reviewedHead !== reviewed) return reviewed;
+  if (!recovery || recovery.reviewedHead !== reviewed) return wp.deltaFrom ?? reviewed;
   if (recovery.head !== wp.pr?.head) throw new ConductError(5, `delta recovery: ${wp.id}'s candidate moved; reset --to delta again to verify its baseline`);
   return recovery.baseline;
 }

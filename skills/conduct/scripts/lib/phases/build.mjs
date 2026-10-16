@@ -775,6 +775,9 @@ function startAmendment(state, wp, deps, { retry = false, answer = null, ...fiel
   const prev = wp.amendment;
   const n = (prev?.n ?? 0) + 1;
   wp.amendment = retry && prev ? { ...prev, n, retryReason: fields.reason } : { n, since: wp.pr?.head ?? null, ...fields, kind: fields.kind ?? 'check' };
+  // The delta boundary is the first amendment's start since the WP last
+  // reached land; a later ruling's amendment does not move it past fixes.
+  wp.deltaFrom ??= wp.pr?.head ?? null;
   setState(state, wp, 'amending', fields.reason, deps);
   wp.stage = 'wait';
   const backend = backendOf(state, wp, deps);
@@ -943,7 +946,11 @@ function expand(state, wp, deps) {
       wp.checkAmends = 0;
       if (wp.state !== 'pr') setState(state, wp, 'pr', null, deps);
       if (findings) return undefined;
-      if (!wp.reviews?.length) return go([prDiff(state)], null);
+      if (!wp.reviews?.length) {
+        // A full review covers every amendment before it.
+        wp.deltaFrom = null;
+        return go([prDiff(state)], null);
+      }
       return go([], 'delta');
     }
     case 'reviewed': {
@@ -973,6 +980,8 @@ function expand(state, wp, deps) {
     case 'land':
       // A gate amendment's lane work ends here: its gate-fix range is closed at the head it pushed.
       for (const fix of wp.gateFixes ?? []) fix.to ??= wp.pr?.head ?? null;
+      // Every head before land has passed its delta check; the rebase starts a new line.
+      wp.deltaFrom = null;
       if (mergeLockFor(state, wp) === 'other') return go([waitSpec('rebase', WAIT_MS, `Wait: ${state.mergeLock.wpId} holds the merge lock.`)], 'land');
       if (wp.state !== 'gate') setState(state, wp, 'gate', null, deps);
       return go(rebaseActions(state, wp), 'gate');

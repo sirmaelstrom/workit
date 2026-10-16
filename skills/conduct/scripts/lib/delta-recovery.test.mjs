@@ -95,6 +95,45 @@ test('the build requests a full review after a changed-parent rebase instead of 
   assert.ok(h.wp.queue.length > 0);
 });
 
+test('a gate fix after a rebase of the reviewed head is diffed from the verified image, never across the rebase', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'conduct-delta-gate-'));
+  git(dir, ['init', '-q', '-b', 'main']);
+  git(dir, ['config', 'commit.gpgsign', 'false']);
+  git(dir, ['config', 'core.autocrlf', 'false']);
+  writeFileSync(join(dir, 'a.txt'), text('a'));
+  writeFileSync(join(dir, 'b.txt'), text('b'));
+  writeFileSync(join(dir, 'c.txt'), text('c'));
+  const oldBase = commit(dir, 'base');
+  git(dir, ['checkout', '-qb', 'pr']);
+  edit(dir, 'a.txt', 'a line 1\n', 'a line 1 reviewed\n');
+  const reviewed = commit(dir, 'reviewed');
+  git(dir, ['checkout', '-q', 'main']);
+  edit(dir, 'c.txt', 'c line 15', 'base changed');
+  const newBase = commit(dir, 'base advance');
+  git(dir, ['checkout', '-q', 'pr']);
+  git(dir, ['rebase', '-q', 'main']);
+  const rebased = git(dir, ['rev-parse', 'HEAD']).trim();
+  edit(dir, 'b.txt', 'b line 1\n', 'b line 1 gate fix\n');
+  const head = commit(dir, 'gate fix');
+  const exec = (program, args, options) => {
+    try { return { code: 0, stdout: git(dir, args.slice(2), options?.input), stderr: '' }; }
+    catch (error) { return { code: error.status ?? 1, stdout: String(error.stdout ?? ''), stderr: String(error.stderr ?? '') }; }
+  };
+  const wp = {
+    id: 'WP-02', state: 'pr', stage: 'delta', queue: [], files: ['a.txt', 'b.txt'], owed: { adjudicate: false }, deltaFrom: rebased,
+    lane: { worktree: dir, base: oldBase, backend: 'exec', exitedAt: new Date().toISOString() }, pr: { number: 16, head },
+    reviews: [{ scope: 'full', round: 1, head: reviewed }], rebases: [{ from: reviewed, to: rebased, oldBase, newBase, equivalent: true }],
+  };
+  const state = { phase: 'build', runDir: dir, pluginRoot: dir, slug: 'gate-fix-control', wps: [wp], touches: [], adapters: {},
+    intent: { agent: 'codex', repo: { path: dir, remote: 'test/test', defaultBranch: 'main' }, lanesCap: 1 }, authority: { budgetUsd: 1000 }, build: { contract: 'fixture', halts: [] } };
+  const action = buildNext(state, { exec, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => true });
+  assert.equal(action.part, 'amend-diff', wp.reason);
+  assert.equal(action.command.at(-2), rebased);
+  assert.equal(wp.deltaRecovery.baseline, rebased);
+  assert.deepEqual(git(dir, ['diff', '--name-only', rebased, head]).trim().split('\n'), ['b.txt']);
+  assert.notDeepEqual(git(dir, ['diff', '--name-only', reviewed, head]).trim().split('\n'), ['b.txt'], 'the unmapped range would carry the base change');
+});
+
 test('a later full review retires the old rebase proof before reviewing its own tail', () => {
   const h = scenario();
   h.wp.deltaRecovery = verifyDeltaRecovery(h.wp, h.baseline, h.deps);
