@@ -18,6 +18,7 @@ import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from '
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, filedLength, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
+import { custodyNext, openRotation, recordCustody, rotate } from './lib/rotate.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -37,6 +38,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   reset-wp --run <dir> --wp <id> --to check|checked|prompt|wait|land|delta [--baseline <sha>] --why <text>
   ci-checks --run <dir> --wp <id> --head <sha> --checks <name,name> --why <text>
   upgrade-root --run <dir> --why <text> (invoke from destination root at an author/wait action)
+  rotate --run <dir> --why <text> [--model <id> --effort <level>] [--name <successor>]
   lane <spawn|alive|check|reap> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]
   bootstrap --repo <abs> [--write] [--offline]   (no run: check a repo against the greenfield manifest)`;
@@ -46,7 +48,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks']);
+  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -109,8 +111,20 @@ function stamp(state, spec) {
 }
 
 // The pending action, or the current phase's next one. A handler that changes
-// the phase without an action hands over to the next phase's handler.
+// the phase without an action hands over to the next phase's handler. An open
+// rotation's custody steps (lib/rotate.mjs) come before either; the pending
+// action stays where it is and is emitted again once custody is taken.
 async function emit(state, deps) {
+  const rotation = openRotation(state);
+  if (rotation) {
+    const spec = custodyNext(state, rotation, deps);
+    if (spec && spec !== rotation.action) {
+      rotation.action = stamp(state, spec);
+      appendEvent(state, deps, { actionId: rotation.action.id, step: spec.step, seam: rotation.action.seam, kind: spec.kind, event: 'emitted' });
+    }
+    saveState(state, deps);
+    if (spec) return rotation.action;
+  }
   if (state.pending) {
     if (state.phase === 'build') {
       const build = await loadModule(deps, 'lib/phases/build.mjs', 'phase handler build');
@@ -335,6 +349,20 @@ async function record(tokens, deps) {
     const id = stringFlag(flags, 'action');
     // A replay of the last record changes nothing and re-emits the next action.
     if (id === state.lastRecorded) return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id), noop: true } };
+    // While a rotation is open only its custody step can be recorded.
+    const rotation = openRotation(state);
+    if (rotation) {
+      const step = rotation.action;
+      if (!step || step.id !== id) throw new ConductError(5, `action ${id} is not the pending action: custody of rotation ${rotation.attempt} comes first (${step ? `record ${step.id}` : 'run next'})`);
+      recordCustody(state, rotation, step, readResult(flags, deps), deps);
+      state.lastRecorded = id;
+      appendEvent(state, deps, {
+        actionId: id, step: step.step, seam: step.seam, kind: step.kind, event: 'recorded',
+        source: flags.manual === true ? 'manual' : 'next', phase: step.phase, data: {},
+      });
+      saveState(state, deps);
+      return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id) } };
+    }
     const action = state.pending;
     if (!action || action.id !== id) throw new ConductError(5, `action ${id} is not the pending action (${action?.id ?? 'none pending'})`);
     const result = readResult(flags, deps);
@@ -386,6 +414,7 @@ async function status(tokens, deps) {
     `conduct ${state.slug}: phase ${state.phase}`,
     `repo: ${state.intent.repo.path} (${state.intent.repo.remote})`,
     `pending: ${state.pending ? `${state.pending.id} (${state.pending.kind}) ${state.pending.instruction ?? ''}` : 'none'}`,
+    ...(openRotation(state) ? [`rotation ${openRotation(state).attempt} open: r${openRotation(state).from} → r${openRotation(state).to}, handoff ${openRotation(state).handoff}; custody comes first`] : []),
     ...state.touches.map((touch) => `touch ${touch.n} ${touch.kind}: ${touch.status}${touch.answer ? ` (${touch.answer.key} by ${touch.answer.by})` : ''}`),
     ...state.wps.map((wp) => `${wp.id} ${wp.state}${wp.questId ? ` quest ${wp.questId}` : ''}`),
   ];
@@ -477,6 +506,7 @@ async function upgradeRootVerb(tokens, deps) {
   const flags = parseFlags(tokens), why = stringFlag(flags, 'why'), runDir = runDirFlag(flags);
   return withStateLock(runDir, deps, () => {
     const state = loadState(runDir, deps);
+    if (openRotation(state)) throw new ConductError(5, 'upgrade-root: a rotation is open; take custody (next) before moving the run');
     if (state.pending && !['author', 'wait'].includes(state.pending.kind)) throw new ConductError(5, `upgrade-root: record pending action ${state.pending.id} first; executable actions cannot be migrated safely (upgrade at an author or wait action)`);
     if (state.pluginRoot === deps.pluginRoot) return { out: { ok: true, unchanged: true, pluginRoot: state.pluginRoot } };
     const from = state.pluginRoot;
@@ -512,6 +542,19 @@ async function upgradeRootVerb(tokens, deps) {
   });
 }
 
+// The conductor hands the run to a successor (lib/rotate.mjs rotate): the
+// handoff is written from state, the chain argv printed, and the successor's
+// first `next` emits custody before the pending action.
+async function rotateVerb(tokens, deps) {
+  const flags = parseFlags(tokens);
+  const text = (name) => (typeof flags[name] === 'string' ? flags[name] : null);
+  return transact(flags, deps, async (state) => {
+    const out = rotate(state, { why: text('why'), model: text('model'), effort: text('effort'), name: text('name') }, deps);
+    saveState(state, deps);
+    return { out: { ok: true, ...out } };
+  });
+}
+
 // The answer adapter's lookup and wait (lib/answer.mjs): read-only, unlocked.
 async function awaitAnswerVerb(tokens, deps) {
   const module = await loadModule(deps, 'lib/answer.mjs', 'module');
@@ -520,7 +563,7 @@ async function awaitAnswerVerb(tokens, deps) {
 
 const VERBS = {
   intake, next, record, answer, status, analyze, 'await-answer': awaitAnswerVerb, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
-  'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb,
+  'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb, rotate: rotateVerb,
   lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
   bootstrap: async (tokens, deps) => {

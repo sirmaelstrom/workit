@@ -45,6 +45,8 @@ holds at every PR boundary with needs_input.
 
 **A brief that carries a plan.** When the handoff hands the successor a consequential plan to execute, such as a queue, a design or a multi-step migration, and the plan has had no blind second read, do that read before you write the handoff (`${CLAUDE_PLUGIN_ROOT}/reference/patterns/blind-second-read.md`). Cite its reconciliation in the handoff. When the context budget forbids it, write `Blind second read: owed` in the handoff with the inputs listed. The successor then dispatches the read from those inputs before it executes the plan, and it never forwards the plan itself. A successor that read the plan cannot serve as the blind reader.
 
+A `/conduct` conductor does not use this template: `conduct.mjs rotate` writes its handoff and chain argv, and the run emits the successor's custody steps (conduct SKILL.md § Rotating the conductor).
+
 `chain` / `retire self` must be your LAST tool call — make no tool call after it; write your final message and stop.
 
 A `chain` that exits nonzero did not retire you. Exit 4 with `reason: agent_pane_busy` means the successor pane never became a shell (`successorPaneKept` says why a pane was left open). Exit 4 with `outcome: successor-not-ready` leaves a successor in `successorPane` to inspect. Exit 1 with `callerRetirement: exit-refused` means the successor is briefed but your `/exit` was refused. Read the output before retrying or continuing.

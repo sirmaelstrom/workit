@@ -1229,6 +1229,146 @@ test('failure showcase (U4): a blocked WP and an open run touch are named in the
   assert.match(section(h.analysis(), 'Escapes'), /^run PRs: #100 WP-00 merged \(post-merge check failed\)$/m);
 });
 
+// ---- conductor rotation (d3ce5461) ----
+
+const ROTATE_SPINE = ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'spend'];
+const ROTATE = ['--why', 'context at 41%', '--model', 'claude-opus-5-5', '--effort', 'high'];
+const isLaneWait = (a) => a.kind === 'shell' && a.step === 'wait';
+const bothLanesUp = (h) => ['WP-02', 'WP-03'].every((id) => (h.spawns[id] ?? 0) >= 1);
+const queuedWork = (wp) => wp.queue.find((a) => a.kind !== 'wait');
+const shapeOf = (a) => [a.step, a.part ?? null, a.command ?? null];
+
+// session.mjs retire, answered per mode from `codes` (default exit 0).
+function retireRule(h, codes = {}) {
+  h.retires = [];
+  h.rules = [[/^node (\S+session\.mjs) retire (\S+) --mode (\S+) --log (\S+)$/, (_, m) => {
+    h.retires.push([m[2], m[3], m[4]]);
+    const code = codes[m[3]] ?? 0;
+    return { code, stdout: JSON.stringify(code ? { error: 'watch timed out (synthetic)' } : { closed: true }), stderr: '' };
+  }]];
+}
+
+// A run driven until WP-02 and WP-03 both have a lane up and a lane poll is pending.
+async function midBuild(t, { herdr = true } = {}) {
+  const h = seam(t, { herdr, h: { lives: { 'WP-02': 3, 'WP-03': 3 } } });
+  if (herdr) h.deps.env.HERDR_PANE_ID = 'w1:p1';
+  await start(h, herdr ? ROTATE_SPINE : OFF);
+  const pending = await drive(h, { until: (a) => isLaneWait(a) && bothLanesUp(h) });
+  return { h, pending };
+}
+
+test('rotate (d3ce5461): mid-build with two live lanes, the handoff comes from state and the chain argv is printed; the successor\'s next takes custody (close, then exit+close, then a paused receipt) and re-emits the pending lane poll by id; each live lane is polled again from its queue and none is dispatched again; the run closes', async (t) => {
+  const { h, pending } = await midBuild(t);
+  retireRule(h, { close: 4 });
+  const before = h.state();
+  const live = before.wps.filter((wp) => LIVE.includes(wp.state));
+  assert.deepEqual(live.map((wp) => wp.id), ['WP-02', 'WP-03']);
+  const queued = Object.fromEntries(live.map((wp) => [wp.id, queuedWork(wp)]));
+  assert.ok(Object.values(queued).every((a) => a?.step === 'wait' && a.command[1].endsWith('lane.mjs')), 'each live lane has its poll queued');
+
+  const rotated = await h.run(['rotate', '--run', h.runDir, ...ROTATE]);
+  assert.equal(rotated.code, 0, rotated.stdout + rotated.stderr);
+  const handoff = join(h.runDir, 'handoff-1.md');
+  const log = join(h.runDir, 'session-chain.jsonl');
+  assert.deepEqual([out(rotated).handoff, out(rotated).from, out(rotated).to], [handoff, 1, 2]);
+  assert.deepEqual(out(rotated).chain.command, ['node', join(h.plugin, 'scripts', 'session.mjs'), 'chain', '--handoff', handoff,
+    '--model', 'claude-opus-5-5', '--effort', 'high', '--name', 'seam-run-r2', '--log', log]);
+  assert.deepEqual(h.state().pending, before.pending, 'rotate leaves the pending action where it is');
+  const text = readFileSync(handoff, 'utf8');
+  assert.match(text, /^# conduct seam-run: conductor handoff r1 → r2$/m);
+  assert.ok(text.includes(`\`${pending.id}\` (shell, wait for ${pending.wpId})`), text);
+  for (const wp of live) assert.match(text, new RegExp(`^- ${wp.id} ${wp.state} at ${wp.stage}; lane herdr \`[^\`]+\` pane pane-${wp.id}.*queued next: wait`, 'm'));
+  assert.match(text, new RegExp(`retire r1 \\(herdr pane w1:p1\\).*paused receipt on the anchor ${ANCHOR}`));
+  assert.match(text, /^Live or queued: WP-02, WP-03\./m);
+
+  // The rotated conductor can neither record past custody nor rotate again.
+  const late = await h.run(['record', '--run', h.runDir, '--action', pending.id, '--result', JSON.stringify({ code: 4, stdout: '', stderr: 'timeout' })]);
+  assert.equal(late.code, 5, late.stdout);
+  assert.match(out(late).error, /custody of rotation 1 comes first \(run next\)/);
+  assert.equal((await h.run(['rotate', '--run', h.runDir, ...ROTATE])).code, 5);
+
+  // The successor, in its own pane. Once it has started custody, the rotated
+  // conductor's next is refused rather than cancelling the rotation under it.
+  h.deps.env.HERDR_PANE_ID = 'w1:p2';
+  const first = out(await h.run(['next', '--run', h.runDir])).action;
+  assert.deepEqual([first.step, first.part, first.command.slice(2)], ['custody', 'retire-close', ['retire', 'w1:p1', '--mode', 'close', '--log', log]]);
+  const old = await h.run(['next', '--run', h.runDir], { env: { ...h.deps.env, HERDR_PANE_ID: 'w1:p1' } });
+  assert.equal(old.code, 5, old.stdout);
+  assert.match(out(old).error, /you are r1, rotated out/);
+  assert.equal(h.state().rotations[0].status, 'open');
+
+  const mark = h.trace.length;
+  h.pending = first;
+  assert.equal((await drive(h)).kind, 'done');
+  const after = h.trace.slice(mark);
+  assert.deepEqual(after.slice(0, 3).map((a) => `${a.step}/${a.part}`), ['custody/retire-close', 'custody/retire-exit-close', 'custody/receipt']);
+  assert.deepEqual(h.retires, [['w1:p1', 'close', log], ['w1:p1', 'exit+close', log]]);
+  assert.deepEqual([after[2].tool, after[2].args.questId, after[2].args.outcome], ['spine_receipt', ANCHOR, 'paused']);
+  assert.match(after[2].args.did, /conductor r1 rotated to r2 \(context at 41%\)\. Handoff: .*handoff-1\.md\. r1 was retired with exit\+close\. r2 runs in herdr pane w1:p2\./);
+  // The pending action, by id, then every live lane's queued poll; no lane is dispatched again.
+  assert.deepEqual([after[3].id, after[3].command], [pending.id, pending.command]);
+  for (const wp of live) {
+    const resumed = after.slice(3).find((a) => a.wpId === wp.id);
+    assert.deepEqual(shapeOf(resumed), shapeOf(queued[wp.id]), wp.id);
+  }
+  assert.ok(!after.some((a) => live.some((wp) => wp.id === a.wpId) && ['admit', 'create', 'start', 'prompt'].includes(a.step)), 'no live lane is dispatched again');
+  assert.deepEqual([h.spawns['WP-02'], h.spawns['WP-03']], [1, 1]);
+  const state = h.state();
+  assert.deepEqual(state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  const [rotation] = state.rotations;
+  assert.deepEqual([rotation.status, rotation.retire, rotation.receipt, rotation.successor.pane, rotation.action], ['custody', 'exit+close', 'filed', 'w1:p2', null]);
+  assert.deepEqual(h.events().filter((e) => e.seam === 'rotation' && e.event !== 'emitted' && e.event !== 'recorded').map((e) => e.event),
+    ['rotated', 'custody-retire', 'custody-retire', 'custody-receipt', 'custody-taken']);
+  assert.match(row(h.analysis(), 'rotation'), /^- rotation: owned \(\d+-rotate, \d+-custody, \d+-custody, \d+-custody/);
+});
+
+test('rotate (d3ce5461): a chain that did not hand over — the rotating conductor\'s own next cancels the rotation and re-emits its pending action; inside herdr --model and --effort are required; the next rotation is attempt 2 and still r1 → r2', async (t) => {
+  const { h, pending } = await midBuild(t);
+  const bare = await h.run(['rotate', '--run', h.runDir, '--why', 'context']);
+  assert.equal(bare.code, 2);
+  assert.match(out(bare).error, /--model <id> and --effort <level> are required/);
+  assert.equal(h.state().rotations, undefined, 'a refused rotate writes nothing');
+  assert.equal((await h.run(['rotate', '--run', h.runDir, ...ROTATE])).code, 0);
+  const again = await h.run(['next', '--run', h.runDir]);
+  assert.equal(again.code, 0, again.stdout);
+  assert.equal(out(again).action.id, pending.id);
+  assert.equal(h.state().rotations[0].status, 'cancelled');
+  assert.deepEqual(h.events().filter((e) => e.event === 'rotation-cancelled').map((e) => e.data.why), ['r1 ran next from its own pane w1:p1']);
+  const second = await h.run(['rotate', '--run', h.runDir, ...ROTATE]);
+  assert.deepEqual([out(second).rotation, out(second).from, out(second).to, out(second).handoff], [2, 1, 2, join(h.runDir, 'handoff-2.md')]);
+  assert.match(readFileSync(join(h.runDir, 'handoff-2.md'), 'utf8'), /^## Earlier rotations\n\n- 1: r1 → r2 at \S+, cancelled: context at 41%$/m);
+});
+
+test('rotate (d3ce5461): outside herdr there is no chain and no pane to retire — custody asks for a confirmation file (refused until valid), files no receipt without the spine, and a later rotation can be cancelled the same way', async (t) => {
+  const { h, pending } = await midBuild(t, { herdr: false });
+  const rotated = out(await h.run(['rotate', '--run', h.runDir, '--why', 'context at 40%']));
+  assert.equal(rotated.chain, null);
+  assert.match(rotated.next, /^Start a fresh conductor session and give it this one line: Read .*handoff-1\.md and execute it exactly\./);
+  assert.match(readFileSync(rotated.handoff, 'utf8'), /confirm r1 has ended \(it ran outside herdr/);
+  const confirm = out(await h.run(['next', '--run', h.runDir])).action;
+  assert.deepEqual([confirm.kind, confirm.step, confirm.part, confirm.outPath], ['author', 'custody', 'confirm', join(h.runDir, 'custody-1.json')]);
+  const recordConfirm = () => h.run(['record', '--run', h.runDir, '--action', confirm.id, '--result', '{}']);
+  assert.equal((await recordConfirm()).code, 2, 'no file');
+  writeFileSync(confirm.outPath, JSON.stringify({ gone: true }));
+  assert.equal((await recordConfirm()).code, 2, 'no evidence');
+  writeFileSync(confirm.outPath, JSON.stringify({ gone: true, evidence: 'the old session window is closed' }));
+  const recorded = await recordConfirm();
+  assert.equal(recorded.code, 0, recorded.stdout);
+  assert.equal(out(recorded).action.id, pending.id, 'no receipt without the spine adapter; the pending action is next');
+  assert.deepEqual([h.state().rotations[0].status, h.state().rotations[0].retire], ['custody', 'confirmed']);
+  // r2 rotates; its successor never starts, so r2 cancels from the confirm step.
+  const second = out(await h.run(['rotate', '--run', h.runDir, '--why', 'again']));
+  assert.deepEqual([second.from, second.to], [2, 3]);
+  const cancel = out(await h.run(['next', '--run', h.runDir])).action;
+  writeFileSync(cancel.outPath, JSON.stringify({ cancel: true, why: 'no successor started' }));
+  const resumed = await h.run(['record', '--run', h.runDir, '--action', cancel.id, '--result', '{}']);
+  assert.equal(out(resumed).action.id, pending.id);
+  assert.equal(h.state().rotations[1].status, 'cancelled');
+  h.pending = out(resumed).action;
+  assert.equal((await drive(h)).kind, 'done');
+  assert.deepEqual(h.state().wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+});
+
 test('fixture paths: no file under __fixtures__/seam matches either Must 8 regex', () => {
   const files = [];
   const walk = (dir) => {

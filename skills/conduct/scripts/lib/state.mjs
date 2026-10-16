@@ -38,6 +38,8 @@ export const STEP_SEAM = Object.freeze({
   release: 'release',
   // The conductor's reset-wp verb: a recovery crossed by hand, counted in the run analysis.
   reset: 'recovery',
+  // The rotate verb and the successor's custody steps (lib/rotate.mjs).
+  rotate: 'rotation', custody: 'rotation',
   analyze: 'run-analysis',
   preapproval: TOUCH_SEAM, grant: TOUCH_SEAM, showcase: TOUCH_SEAM, 'showcase-brief': TOUCH_SEAM, touch: TOUCH_SEAM,
   spend: null, notify: null, receipt: null, stop: null, alarm: null,
