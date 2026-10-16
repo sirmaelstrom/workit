@@ -128,13 +128,20 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            helper created (from the sidecar), and --force is refused there.
            The delegate is HERDR_LANES_SCRIPT, else <workspace-root>/infrastructure/
            herdr-lanes.ps1, else that path from the cwd; if none exists, sweep
-           prints the command to run instead of guessing a location.
+           prints the command to run instead of guessing a location. A cleaning
+           sweep asks herdr for its agent list first and removes nothing when
+           the API is dead (below).
   admit    [--min-free-gb <n>] [--drain-free-gb <n>] [--require-reading]
            Read-only admission check, for a conductor before a start or a council
            dispatch: exit 0 admitted, 7 refused. Prints freeGb, the thresholds,
            and drain: true below --drain-free-gb (or LANE_DRAIN_FREE_GB, default 4).
            Off Windows freeGb is null and the check admits with a warning, unless
            --require-reading, which refuses a reading it cannot take.
+
+  herdr API dead: any verb whose herdr call answers server_not_running while a
+  \`herdr server\` process for that session is alive exits 1 with
+  state "herdr-api-dead" (output and log row) and the server pids. The UI can
+  still draw while no lane command reaches it; restarting herdr is the operator's call.
 
   --log <path>  JSONL instrumentation (default: <workspace>/data/outputs/projects/
                 agentic-practice-transfer/lanes/lane-log.jsonl, else ./lane-log.jsonl)
@@ -290,13 +297,62 @@ function herdrArgs(program, args) {
 }
 
 function call(deps, program, args, options = {}) {
-  const result = deps.exec(program, herdrArgs(program, args), options);
-  if (typeof result === 'string') return { code: 0, stdout: result, stderr: '' };
-  return {
-    code: result?.code ?? result?.exitCode ?? 0,
-    stdout: String(result?.stdout ?? ''),
-    stderr: String(result?.stderr ?? ''),
-  };
+  const raw = deps.exec(program, herdrArgs(program, args), options);
+  const result = typeof raw === 'string'
+    ? { code: 0, stdout: raw, stderr: '' }
+    : { code: raw?.code ?? raw?.exitCode ?? 0, stdout: String(raw?.stdout ?? ''), stderr: String(raw?.stderr ?? '') };
+  if (program === 'herdr') assertHerdrApiAlive(deps, args, result);
+  return result;
+}
+
+// ---- herdr API health (quest ef5a05fe) ----
+//
+// herdr's CLI answers {"error":{"code":"server_not_running",...}} when nothing
+// listens on its API socket. On 2026-10-02 (burn-down AB) the listener died
+// while the `herdr server` process, and the UI on it, kept running: every lane
+// command then read as "no server", and the conductor lost every pane without
+// a word. server_not_running while that server process is alive is a different
+// failure, API-dead, and every herdr call here surfaces it as one.
+export const HERDR_API_DEAD = 'herdr-api-dead';
+// The `purpose` a cleaning sweep's API probe carries in its exec options.
+export const HERDR_API_PREFLIGHT = 'herdr-api-preflight';
+
+// The session a server_not_running names, from its socket path
+// (`...\herdr\sessions\<name>\herdr.sock`), or null for the default session.
+// The CLI prints it inside JSON, so each separator may arrive escaped (`\\`).
+export function herdrSessionOf(text) {
+  return /[\\/]+sessions[\\/]+([^\\/"]+)[\\/]+herdr\.sock/i.exec(String(text))?.[1] ?? null;
+}
+
+// The pids of live `herdr server` processes for one session: a command line
+// whose last argument is `server` (not `server stop` or `server reload-config`),
+// carrying `--session <name>` exactly when the session is named.
+export function herdrServerPids(processes, session = null) {
+  return (processes ?? []).filter(({ cmd }) => {
+    const text = String(cmd ?? '').trim();
+    if (!/(^|[\\/\s"])herdr(\.exe)?"?(\s+\S+)*\s+server$/i.test(text)) return false;
+    const named = /\s--session[\s=]+"?([^\s"]+)/.exec(text)?.[1] ?? null;
+    return named === session;
+  }).map(({ pid }) => pid);
+}
+
+function assertHerdrApiAlive(deps, args, result) {
+  if (result.code === 0 || !/\bserver_not_running\b/.test(`${result.stdout}\n${result.stderr}`)) return;
+  const listing = processList(deps);
+  // No process list, no verdict: the caller keeps the plain failure.
+  if (listing.error) return;
+  const session = herdrSessionOf(`${result.stdout}\n${result.stderr}`);
+  const pids = herdrServerPids(listing.processes, session);
+  if (pids.length === 0) return;
+  const detail = result.stdout.trim() || result.stderr.trim();
+  throw new LaneError(
+    EXIT.ERROR,
+    `herdr API is dead: \`herdr ${args.join(' ')}\` answered server_not_running while herdr server pid ${pids.join(', ')} is alive. `
+      + 'The UI may still draw, but no lane command reaches it and every pane is unreachable from here. '
+      + 'Tell the operator; restarting herdr ends the panes, so it is their call.',
+    { state: HERDR_API_DEAD, serverPids: pids, ...(session ? { session } : {}), herdr: detail.slice(0, 400) },
+    { state: HERDR_API_DEAD },
+  );
 }
 
 function callOrFail(deps, program, args, options = {}) {
@@ -2778,7 +2834,9 @@ async function stopLane(opts, deps, state) {
         output: { state: 'stopped', panePrompt: true, agentListed: false, promptCheck: 'after-reap' },
         row: { ...laneInstrumentation(opts.name, lane, 'stopped'), promptCheck: 'after-reap' },
       });
-    } catch {
+    } catch (error) {
+      // An API-dead herdr is not a pane that still holds: say which it is.
+      if (error?.details?.state === HERDR_API_DEAD) throw error;
       // The pane still holds; the failure stands, with what was reaped.
     }
   }
@@ -3274,6 +3332,13 @@ async function sweepLanes(opts, deps, state) {
     };
   }
 
+  // A cleaning sweep first asks herdr whether its API answers. The delegate
+  // reads agents with `herdr agent list` and treats an unreadable answer as no
+  // agents, so with the API dead a lane still hosting an agent loses that
+  // HOLD. An API-dead answer throws here (assertHerdrApiAlive), before anything
+  // is removed. Any other failure is left to the delegate, as before.
+  if (!opts.list) call(deps, 'herdr', ['agent', 'list'], { purpose: HERDR_API_PREFLIGHT });
+
   // Every entry is visited. Throwing on the first nonzero exit left the C13
   // lanes unswept behind a failing legacy root — the alert-fan-out failure
   // where one dead target silences the rest.
@@ -3316,8 +3381,18 @@ async function sweepLanes(opts, deps, state) {
   // normal sweep's one-call-per-root behavior.
   const held = results.filter((entry) => /\bHOLD\b/i.test(entry.output));
   let holds = [];
+  // The delegate has already run, so an API-dead herdr here must not discard
+  // what it did: the sweep reports both, and fails.
+  let apiDead = null;
   if (held.length > 0) {
-    const listing = call(deps, 'herdr', ['agent', 'list']);
+    let listing;
+    try {
+      listing = call(deps, 'herdr', ['agent', 'list']);
+    } catch (error) {
+      if (error?.details?.state !== HERDR_API_DEAD) throw error;
+      apiDead = { error: error.message, ...error.details };
+      listing = { code: 1, stdout: '', stderr: '' };
+    }
     const agents = listing.code === 0 ? listedAgents(listing.stdout) : null;
     if (Array.isArray(agents)) {
       const heldLanes = Object.values(state.lanes ?? {}).filter((lane) => held.some((entry) => {
@@ -3356,15 +3431,16 @@ async function sweepLanes(opts, deps, state) {
     message: `HOLD candidate (split failed at ${candidate.at})`,
   }));
   return {
-    exit: swept.length === 0 ? EXIT.ERROR : EXIT.OK,
+    exit: swept.length === 0 || apiDead ? EXIT.ERROR : EXIT.OK,
     output: {
       delegated: true,
       roots: [...results, ...plan.filter((entry) => entry.skipped).map((entry) => ({ root: entry.root, skipped: entry.skipped }))],
       sweptRoots: swept.length,
       totalRoots: results.length,
       ...((holds.length > 0 || candidates.length > 0) ? { holds: [...holds, ...candidates] } : {}),
+      ...(apiDead ? { state: HERDR_API_DEAD, error: apiDead.error, herdrApiDead: apiDead } : {}),
     },
-    row: { lane: null, state: swept.length === results.length ? 'swept' : 'swept-partial' },
+    row: { lane: null, state: apiDead ? HERDR_API_DEAD : swept.length === results.length ? 'swept' : 'swept-partial' },
   };
 }
 
