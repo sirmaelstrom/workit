@@ -38,6 +38,17 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    row is **pre-authorized**: the item's session invokes that skill directly
    instead of stopping to ask. Composition is where this is cheap — the operator
    is present and rules in seconds (run 5 took two such rulings at planning).
+
+   **A long run's queue is a consequential plan.** That covers a queue that
+   lanes will run unattended and one that spans several sittings. Get a blind
+   second read before the operator sees your ranking
+   (`${CLAUDE_PLUGIN_ROOT}/reference/patterns/blind-second-read.md`). Give a
+   model from another vendor family the board read (the digest plus the
+   candidate notes), the operator's goal and exclusions verbatim, and the gates
+   and constraints. Do not give it your ordering. Reconcile its ordering,
+   exclusions and depth calls against yours, and then present the queue along
+   with the disagreements that changed it. A short queue the operator ranks
+   live in the sitting skips this.
 4. **Mint a run anchor quest.** Run-level receipts and observations land there;
    per-item receipts land on each item's own quest.
 5. **Write the run doc** — instantiate `reference/templates/run-log.md` (this
