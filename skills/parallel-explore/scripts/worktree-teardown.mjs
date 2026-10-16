@@ -46,7 +46,11 @@ export function findLinks(root) {
 // A target that had entries and has none afterwards means something followed
 // the link.
 export function unlinkAll(root) {
-  if (lstatSync(root).isSymbolicLink()) return `${root} is itself a link`;
+  try {
+    if (lstatSync(root).isSymbolicLink()) return `${root} is itself a link`;
+  } catch (error) {
+    return `could not read ${root}: ${error.message}`;
+  }
   let links;
   try {
     links = findLinks(root);
@@ -78,8 +82,9 @@ export function unlinkAll(root) {
 
 const runGit = (repo) => (args) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
 
-// Returns { removed: true } or { removed: false, reason }.
-export function removeWorktree(repo, worktree, { git = runGit(repo) } = {}) {
+// Returns { removed: true } or { removed: false, reason }; it never throws, so
+// a caller removing several worktrees reaches every one.
+export function removeWorktree(repo, worktree, { git = runGit(repo), rm = rmSync } = {}) {
   if (!present(worktree)) return { removed: true };
   const blocked = unlinkAll(worktree);
   if (blocked) return { removed: false, reason: blocked };
@@ -92,7 +97,12 @@ export function removeWorktree(repo, worktree, { git = runGit(repo) } = {}) {
     // Its links are gone, so what is left is plain files.
     const again = unlinkAll(worktree);
     if (again) return { removed: false, reason: again };
-    rmSync(worktree, { recursive: true, force: true });
+    try {
+      // A file still held open (an agent's shell cwd on Windows) refuses here.
+      rm(worktree, { recursive: true, force: true });
+    } catch (error) {
+      return { removed: false, reason: `git unregistered ${worktree} but it remains: ${error.message}` };
+    }
     try {
       git(['worktree', 'prune']);
     } catch {

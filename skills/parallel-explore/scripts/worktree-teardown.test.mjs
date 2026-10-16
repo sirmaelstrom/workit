@@ -71,6 +71,18 @@ test('a git that exits 0 and leaves the directory (Git for Windows >= 2.54 besid
   assert.ok(intact(targets));
 });
 
+test('a left-behind directory that cannot be deleted is a failure result, never a throw, so the next worktree is still removed', (t) => {
+  const { repo, worktree, targets } = fixture(t);
+  const locked = () => {
+    throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+  };
+  const result = removeWorktree(repo, worktree, { git: () => '', rm: locked });
+  assert.equal(result.removed, false);
+  assert.match(result.reason, /remains: EBUSY/);
+  assert.ok(intact(targets));
+  assert.deepEqual(removeWorktree(repo, worktree), { removed: true }, 'the same worktree is removable once the lock is gone');
+});
+
 test('a git that fails leaves the worktree in place with the reason', (t) => {
   const { repo, worktree, targets } = fixture(t);
   const fail = () => {
