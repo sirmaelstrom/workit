@@ -175,6 +175,11 @@ test('a T3 operator answer resumes the filed touch through the Spine read-back',
   const receipt = answered({ answer: { key: 'a', text: 'Approve', by: 'operator:t3', answeredAt: '2026-10-17T00:00:00Z' } });
   recordTouch(state, touch, action, { code: 0, stdout: JSON.stringify({ ok: true, answered: true, receipt }), stderr: '' });
   assert.deepEqual([touch.status, touch.answer.key, touch.answer.by], ['answered', 'a', 'operator:t3']);
+
+  const viaSpine = makeState({ adapters: { spine: { on: true }, answer: { on: false } } });
+  const spineTouch = viaSpine.touches[0];
+  recordTouch(viaSpine, spineTouch, touchAction(viaSpine, spineTouch), { quests: [{ latestReceipt: receipt }] });
+  assert.deepEqual([spineTouch.status, spineTouch.answer.key, spineTouch.answer.by], ['answered', 'a', 'operator:t3']);
 });
 
 test('a failed or unanswered lookup is not an answer: the first is refused (the read-back stays pending), the second waits', () => {
