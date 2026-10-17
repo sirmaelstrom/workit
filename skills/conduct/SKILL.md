@@ -37,6 +37,15 @@ so each invocation follows the run's recorded plugin root after an upgrade.
    - `inspect` with part `visual`: the visual read of a UI WP, owed before a WP whose `**Visual rules:**` names design-direction rules can pass its gate (§ Visual reads). Open the frames its lane took at the action's head, judge each rule in the action's `rules` from the pixels, and record `{ "head": "<the action's head>", "frames": ["<absolute path>", …], "rules": { "<n>": "pass" | "fail: <what the frame shows>" } }`, one entry per rule. A malformed record exits 2 and writes nothing. All pass: the gate runs again and finds the read. Any fail: a gate amendment carrying each failed rule, and the next head is read again.
    - `inspect` (any other part): a judgment step at the merge gate. Run the diff argv in `command` (the post-cap tail: commits added after the last review, as `fixed` rows of it or as a gate amendment's fix, which the gate labels `gate-fix`), read it against the findings the action names, and record `{ "verdict": "addresses-findings" | "unrelated-change", "tail": "<the action's tail>", "head": "<the action's head>" }`. `unrelated-change` holds the PR. A **trivial** tail gets no `inspect` step: the gate passes it and labels it `(trivial)`. A tail is trivial when it has no net diff, or when every path it changes is Markdown that is not a test or fixture and matches no `contractPaths` or `trivialExclude` glob (§ Repo config; without `trivialExclude`, `skills/**/SKILL.md`, `reference/templates/**`, `agents/**`, `commands/**` and `.claude-plugin/**` are never trivial).
    - `touch`: stop and tell the operator what the instruction says.
+     Pose any ask or list of choices as selectable options (AskUserQuestion in
+     T3), with the Dogan ask filed too when it needs a record; a T3 answer is
+     written back to Spine the same turn. Put the ask key in each option label
+     (`a — Full grant, $200`) and the receipt tag in the question
+     (`[ask <receiptId>]`). Use at most four options per question; split or
+     collapse a Dogan ask with five or six options. A headless lane with no
+     operator present files the Dogan ask only. Today, write a T3 answer as a
+     conductor receipt quoting it: `spine_receipt` cannot write `answered`. A
+     conduct touch still needs the Dogan press until the H12 mirror lands.
      - **Core path:** record `{}` after they have answered. An unanswered touch returns the same action with `answered: false`.
      - **Spine path:** a touch is receipt → read-back → hand-back. The hand-back (`handBack: true`) comes when a read-back finds no answer to this run's filing, including another run's answer to the same tag. An answer to this filing that can't be used is handled differently:
        - An answer that isn't stamped `operator:` is refused: `record` exits 3, and the touch is re-filed (`filing + 1`).

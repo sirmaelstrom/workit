@@ -1,6 +1,6 @@
 ---
 name: review
-description: "Review a target with an adaptive multi-reviewer pipeline: GitHub PR, local branch (pre-PR), working tree, file/directory, or plan/spec. Triggered by '/review', '/review <PR-URL>', '/review #<num>', '/review branch[:<name>]', '/review wt', '/review file <path>', '/review plan <path>', or 'review my branch / plan / changes'. Not for a single-lens pass at a PR boundary — use slim-review for that."
+description: "Review a target with an adaptive multi-reviewer pipeline: GitHub PR, local branch (pre-PR), working tree, file/directory, or plan/spec. Triggered by '/review', '/review <PR-URL>', '/review #<num>', '/review branch[:<name>]', '/review wt', '/review file <path>', '/review plan <path>', or 'review my branch / plan / changes'. This heavy pipeline is dormant (no main-session use in 60 days) pending the H1 pilot. Not for routine PR boundaries; use two-lens slim-review there."
 model: opus
 ---
 
@@ -19,7 +19,7 @@ Review a target with complexity-driven depth and dynamic reviewer composition. T
 
 If the argument is missing AND auto-detection is ambiguous, ask the user which target to review before proceeding.
 
-**Lighter option for a routine PR:** this skill is the in-session multi-reviewer pipeline — several Opus subagents, waves, convergence tracking. When the target is a single-surface PR you were about to merge on your own say-so, `slim-review` runs one external reviewer, posts its findings to the PR as line-anchored comments, and adjudicates them thread by thread at $0. Prefer it at routine PR boundaries and keep this skill for when several perspectives are genuinely worth the run.
+**Lighter option for a routine PR:** this skill is the in-session multi-reviewer pipeline — several Opus subagents, waves, convergence tracking. It is dormant pending the H1 pilot; there has been no main-session use in 60 days. At routine PR boundaries, `slim-review` runs two external reviewers, posts their findings to the PR as line-anchored comments, and adjudicates them thread by thread. Use this heavier pipeline when several perspectives and synthesis are worth the run.
 
 **Prompt templates:** Read from `${CLAUDE_SKILL_DIR}/reference/prompt-templates.md`
 **Archetype library:** Read from `${CLAUDE_SKILL_DIR}/reference/reviewer-archetypes.md`

@@ -312,7 +312,17 @@ After the renderer succeeds, point the operator at `review-gate.html` (one line 
 
 **With a verified `--preapproved "<ref>"` (§ Conductor flags, *Verifying a `--preapproved` ref*):** the gate is already answered. Set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Phase 6 without stopping. The `review-gate.json` above is still written and rendered, except under `--review=none`, which skips it as before.
 
-**Without `--preapproved`, or when its ref doesn't verify: STOP HERE.** Wait for human input. Do not proceed to decomposition without explicit approval.
+**Without `--preapproved`, or when its ref doesn't verify: STOP HERE.** Use the ask rule below. Wait for human input. Do not proceed to decomposition without explicit approval.
+
+**Ask rule for both review gates:** Pose any ask or list of choices as selectable
+options (AskUserQuestion in T3), with the Dogan ask filed too when it needs a
+record; a T3 answer is written back to Spine the same turn. Put the ask key in
+each option label (`a — Full grant, $200`) and the receipt tag in the question
+(`[ask <receiptId>]`) when a Spine ask exists. Use at most four options per
+question; split or collapse a Dogan ask with five or six options. A headless
+lane with no operator present files the Dogan ask only. For now, write a T3
+answer as a conductor receipt quoting it; `spine_receipt` cannot write
+`answered`.
 
 ### Phase 5: Revision (if needed)
 
@@ -524,7 +534,8 @@ Synthesize as in Phase 8b — convergence across vendor families is high-confide
 
 ### Present for Review
 
-Show a brief summary with flagged items. Wait for approval. Apply revisions if needed.
+Show a brief summary with flagged items. Use the ask rule above. Wait for approval.
+Apply revisions if needed.
 
 **With a verified `--preapproved "<ref>"` (§ Conductor flags, *Verifying a `--preapproved` ref*):** print the summary, set `meta.json` `gate` to `"preapproved <ref>"`, print one line naming the ref, and continue to Final Output without waiting.
 

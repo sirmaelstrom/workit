@@ -10,7 +10,7 @@
 2. **Log it** — Add to the project's CLAUDE.md with date and correct approach
 3. **Verify it works** — Next dispatch in that project should not repeat the mistake
 4. **Graduate cross-project** — When the same correction appears in 2+ project CLAUDE.md files, move it to the workspace's auto-memory store (one-fact file + index line). *(Routing updated 2026-08-05: the legacy global `CORRECTIONS.md` is now a closed, curated rule index — additions to it are a deliberate curation step, not the graduation default.)*
-5. **Prune** — Monthly review. Remove corrections that haven't recurred in 60+ days. They've either been internalized or are no longer relevant.
+5. **Prune** — Monthly review. Remove a rule only when the trap it guards is gone (the code or tool changed) or a measurement shows it no longer applies. Never remove on age alone: no recurrence can mean no opportunity.
 
 ## Format
 
