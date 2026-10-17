@@ -20,7 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runConduct } from './conduct.mjs';
 import { STEPS, readEvents } from './lib/state.mjs';
@@ -1951,6 +1951,119 @@ test('S4 recovery (council r3): an authority refused at the merge waits, and res
   assert.deepEqual(waits.map((a) => a.id), []);
   assert.ok(expired.state().wps.some((wp) => wp.state === 'held' && /grant_expired.*terminal/.test(wp.reason ?? '')), JSON.stringify(expired.state().wps.map((wp) => [wp.id, wp.state, wp.reason])));
   assert.ok(!expired.trace.slice(from).some((a) => a.phase === 'build' && ['start', 'prompt', 'fallback'].includes(a.step)), 'no paid act after the expiry');
+});
+
+// ---- council round 4: an act is admitted only at the stage that queues it ----
+
+const mergesArgv = (a) => a.command?.[0] === 'gh' && a.command[1] === 'pr' && a.command[2] === 'merge';
+// A rebase that moves nothing: every head stays the lane's, so an act a later
+// stage queues names the same heads an earlier stage's producers would.
+// A removal that removes, so the branch deletes queue behind it.
+const STABLE_REBASE = [
+  [/^git -C (\S+) rev-parse refs\/heads\/\S+ origin\/main$/, (h, m) => ok(`${headOf(h, idOfWorktree(m[1]))}\n${'9'.repeat(40)}\n`)],
+  [/^git -C \S+ worktree remove (\S+)$/, (h, m) => {
+    rmSync(m[1], { recursive: true, force: true });
+    return ok();
+  }],
+  [/^git -C \S+ worktree list --porcelain$/, (h) => ok(`worktree ${h.repo}\nHEAD ${BASE}\nbranch refs/heads/main\n`)],
+  [/^git -C \S+ update-ref -d /, () => ok()],
+];
+
+// `next` on the run put back to `snap`, with `edit` applied.
+async function trialAt(h, snap, edit) {
+  restore(h, snap);
+  editState(h, edit);
+  const result = await h.run(['next', '--run', h.runDir]);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  return { emitted: out(result).action, after: h.state() };
+}
+
+test('M1 stage (council r4, codex): a squash stored pending while the gate is recorded failed at its head, at the gate stage, is refused through next; the WP does not merge', async (t) => {
+  const h = seam(t);
+  phone(h);
+  await start(h, SPINE_ONLY);
+  const squash = await drive(h, { until: (a) => a.phase === 'build' && a.step === 'merge' && a.part === 'squash' });
+  const { emitted, after } = await trial(h, (state) => {
+    const wp = state.wps.find((each) => each.id === squash.wpId);
+    wp.gate = { ...wp.gate, ok: false };
+    wp.stage = 'gate';
+  });
+  const wp = after.wps.find((each) => each.id === squash.wpId);
+  t.diagnostic(`gate.ok:false, stage gate, pending ${squash.id} ${squash.command.join(' ')} → next emits ${emitted.id} ${emitted.step}/${emitted.part ?? ''} ${emitted.command?.join(' ') ?? ''}; ${wp.id} ${wp.state}`);
+  assert.ok(!mergesArgv(emitted), JSON.stringify(emitted));
+  assert.notEqual(wp.state, 'merged');
+});
+
+test('M1 stage (council r4, opus and cross-stage): each act that merges, deletes, pushes or removes, taken from the stage that queues it and stored pending at an earlier stage, is refused through next', async (t) => {
+  const h = seam(t, { h: { rules: STABLE_REBASE } });
+  phone(h);
+  await start(h, SPINE_ONLY);
+  const review = await drive(h, { until: (a) => a.phase === 'build' && a.step === 'review' });
+  const id = review.wpId;
+  const mine = (step, part) => (a) => a.phase === 'build' && a.wpId === id && a.step === step && a.part === part;
+  const snaps = [['review', snapshot(h), h.wp(id).state]];
+  await drive(h, { until: mine('gate-cmd', 'gate-cmd') });
+  snaps.push(['gate-cmd', snapshot(h), h.wp(id).state]);
+  await drive(h, { until: mine('merge', 'squash') });
+  snaps.push(['squash', snapshot(h), h.wp(id).state]);
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  assert.equal(h.wp(id).state, 'merged');
+  const later = [['rebase', 'push'], ['merge', 'squash'], ['stop', 'remove'], ['stop', 'branch-holder'], ['stop', 'branch'], ['stop', 'branch-remote']]
+    .map(([step, part]) => h.trace.find(mine(step, part)));
+  assert.ok(later.every(Boolean), JSON.stringify(later.map((a) => a?.part)));
+  // Each later act is earlier than the stages it is probed at.
+  const before = { push: ['review'], squash: ['review', 'gate-cmd'], remove: ['review', 'gate-cmd', 'squash'] };
+  let probed = 0;
+  const admitted = [];
+  for (const act of later) {
+    for (const [at, snap, wpState] of snaps.filter(([name]) => (before[act.part] ?? before.remove).includes(name))) {
+      const { emitted, after } = await trialAt(h, snap, (state) => { state.pending = { ...act, id: state.pending.id }; });
+      t.diagnostic(`${act.step}/${act.part} ${act.command.slice(3).join(' ')} stored pending at ${at} (wp ${wpState}) → next emits ${emitted.id} ${emitted.step ?? emitted.kind}/${emitted.part ?? ''}; ${id} ${after.wps.find((wp) => wp.id === id).state}`);
+      if (body(emitted) === body(act)) admitted.push(`${act.step}/${act.part} at ${at}`);
+      probed += 1;
+    }
+  }
+  assert.deepEqual(admitted, []);
+  assert.equal(probed, 15);
+});
+
+test('M2 containment (council r4, astra/codex): a council review whose artifact paths add a traversal out of the lane worktree, or a worktree file the recorded diff does not list, is refused through next', async (t) => {
+  const h = seam(t, { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } });
+  phone(h);
+  await start(h, [...SPINE_ONLY, '--adapter', 'council']);
+  const review = await drive(h, { until: (a) => a.step === 'council' && a.part === 'review' });
+  const worktree = review.args.code_root;
+  const traversal = `${worktree}${sep}..${sep}secret.txt`;
+  const probes = [
+    ['traversal', traversal, () => {}],
+    ['unrelated worktree file', join(worktree, 'unrelated.txt'), () => {}],
+    // The recorded set itself naming a traversal derives nothing.
+    ['recorded traversal', traversal, (wp) => wp.councilScope?.paths.push(`..${sep}secret.txt`)],
+  ];
+  for (const [name, extra, record] of probes) {
+    const { emitted, after } = await trial(h, (state) => {
+      record(state.wps.find((wp) => wp.id === review.wpId));
+      state.pending = { ...state.pending, args: { ...state.pending.args, artifact_paths: [...state.pending.args.artifact_paths, extra] } };
+    });
+    t.diagnostic(`${name}: council_review artifact_paths + ${extra} → next emits ${emitted.id} ${emitted.tool ?? emitted.step} ${JSON.stringify(emitted.args?.artifact_paths ?? null)}; ${review.wpId} ${after.wps.find((wp) => wp.id === review.wpId).state}`);
+    assert.ok(!(emitted.args?.artifact_paths ?? []).includes(extra), name);
+  }
+});
+
+test('M3 revision (council r4, astra): a council delta whose land.since and diff argv are both set to --output=<outside-file>, or to a sha other than the recorded baseline, is refused through next', async (t) => {
+  const h = seam(t, { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } });
+  phone(h);
+  await start(h, [...SPINE_ONLY, '--adapter', 'council']);
+  const delta = await drive(h, { until: (a) => a.step === 'council' && a.part === 'delta-diff' });
+  const since = delta.land.since;
+  assert.match(since, /^[0-9a-f]{40}$/);
+  const outside = join(h.dir, 'outside.txt');
+  for (const [name, value] of [['--output injection', `--output=${outside}`], ['another sha', 'f'.repeat(40)]]) {
+    const forged = { ...delta, land: { ...delta.land, since: value }, command: delta.command.map((arg) => (arg === since ? value : arg)) };
+    const { emitted, after } = await trial(h, (state) => { state.pending = forged; });
+    t.diagnostic(`${name}: land.since and argv → ${value} → next emits ${emitted.id} ${emitted.step}/${emitted.part ?? ''} ${emitted.command?.join(' ') ?? ''}; ${delta.wpId} ${after.wps.find((wp) => wp.id === delta.wpId).state}`);
+    assert.ok(!(emitted.command ?? []).includes(value) && emitted.land?.since !== value, name);
+  }
 });
 
 test('fixture paths: no file under __fixtures__/seam matches either Must 8 regex', () => {
