@@ -143,7 +143,10 @@ const RULES = [
   }],
   // The gate reads a WP PR's body for its door (fca05d92); the release PR's view has no body.
   [/^gh pr view (\d+) --repo example\/scratch --json headRefOid,baseRefName,state(,body)?$/, (h, m) => ok(JSON.stringify({ headRefOid: headOf(h, idOfPr(m[1])), baseRefName: 'main', state: 'OPEN', ...(m[2] ? { body: '## Merge danger\n\nDoor: two-way\nBlast radius: the seam WP\n' } : {}) }))],
-  [/^gh pr view (\d+) --repo example\/scratch --json mergeCommit$/, (h, m) => ok(JSON.stringify({ mergeCommit: { oid: mergeSha(idOfPr(m[1])) } }))],
+  // A PR has a merge commit once its squash ran.
+  [/^gh pr view (\d+) --repo example\/scratch --json mergeCommit$/, (h, m) => ok(JSON.stringify({
+    mergeCommit: h.calls.some((call) => call.startsWith(`gh pr merge ${m[1]} `)) ? { oid: mergeSha(idOfPr(m[1])) } : null,
+  }))],
   [/^gh pr diff (\d+) --repo example\/scratch --name-only$/, (h, m) => ok(h.diff?.[idOfPr(m[1])] ?? 'src/x.mjs\n')],
   [/^gh pr (ready|merge) /, () => ok()],
   [/^gh pr create --draft --repo example\/scratch /, () => ok('https://github.com/example/scratch/pull/200\n')],
@@ -1208,15 +1211,41 @@ test('pending re-emission (council r1, astra/codex): a merge, release or paid ac
     if (name === 'release') {
       assert.equal(h.state().release.state, 'failed');
       assert.match(h.state().release.reason, /authority proof invalid: statement_mismatch/);
+    } else if (name === 'paid') {
+      // Paid work waits on the authority hold; the WP is not ended (council r2, R3).
+      assert.match(h.state().dispatchHalt.reason, /authority proof invalid: statement_mismatch/, name);
+      assert.notEqual(h.wp(pending.wpId).state, 'held', name);
     } else {
       assert.equal(h.wp(pending.wpId).state, 'held', name);
       assert.match(h.wp(pending.wpId).reason, /authority proof invalid: statement_mismatch/, name);
     }
     h.pending = action;
-    await drive(h, { until: (a) => a.step === 'showcase' });
+    // Paid work then waits on the authority hold (council r2, R3) instead of ending.
+    await drive(h, { until: (a) => a.step === 'showcase' || authorityWait(a) });
     const again = h.trace.filter((a) => a.id !== pending.id && a.step === pending.step && a.part === pending.part && a.phase === pending.phase);
     assert.deepEqual(again.map((a) => a.id), [], `${name}: zero emission of the dropped act`);
   }
+});
+
+const authorityWait = (a) => a.kind === 'wait' && /authority refused/.test(a.instruction ?? '');
+
+test('paid replay (council r2, R5): configured and metered, a paid act left pending keeps its id on resume: a fresh spend read, then the same act, whose earlier result records; it runs once', async (t) => {
+  const h = seam(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' } });
+  phone(h);
+  await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'herdr', '--no-adapter', 'notify']);
+  const paid = await drive(h, { until: (a) => a.phase === 'build' && a.step === 'start' });
+  // The driver ran it and lost track of its output: next again.
+  const replay = out(await h.run(['next', '--run', h.runDir])).action;
+  assert.equal(replay.step, 'spend', JSON.stringify(replay));
+  const recorded = await h.run(['record', '--run', h.runDir, '--action', replay.id, '--result', JSON.stringify(await perform(h, replay))]);
+  assert.equal(recorded.code, 0, recorded.stdout + recorded.stderr);
+  const again = out(recorded).action;
+  t.diagnostic(`pending ${paid.id}; next → ${replay.id} spend; record → ${again.id} ${again.step}`);
+  assert.equal(again.id, paid.id, JSON.stringify(again));
+  assert.deepEqual(again.command, paid.command);
+  h.pending = again;
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  assert.equal(h.trace.filter((a) => a.step === 'start' && a.wpId === paid.wpId).length, 1, 'the act ran once');
 });
 
 test('post-merge cleanup (council r1, opus): the grant expiring right after the release merge, or in its after, verify or handover stage, still removes the release worktree; no other release command runs after the expiry', async (t) => {

@@ -4,9 +4,9 @@
 // and the budget raise. With no anchor every path is today's.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import * as pre from './phases/preapproval.mjs';
 import * as releasePhase from './phases/release.mjs';
 import * as spec from './phases/spec.mjs';
@@ -15,6 +15,9 @@ import { mergeActions, recordLandStep } from './land.mjs';
 import { releaseEligible } from './release.mjs';
 import { QUESTION_MAX, filedLength } from './touch.mjs';
 import { handoffText } from './rotate.mjs';
+import { authorityDisplay } from './authority.mjs';
+import { analyzeRun } from './analyze.mjs';
+import { appendEvent, saveState } from './state.mjs';
 import { testAnchor, testDeps, testGrant, grantConsequence, raiseConsequence, signedTouch } from '../test-deps.mjs';
 import { OperatorProofError, renderGrant, grantTag, verifyRecord } from '../../../_shared/operator-proof/operator-proof.mjs';
 import { signAnswer } from '../../../_shared/operator-proof/test-signer.mjs';
@@ -448,7 +451,7 @@ test('spec scope: /spec is held on zero authority, and WP-00\'s approved scope i
   assert.deepEqual([held.kind, held.step, held.held], ['wait', 'spec', true]);
   assert.ok(held.waitMs > 0);
   assert.match(held.reason, /authority proof invalid: statement_mismatch/);
-  assert.match(held.instruction, /re-file the authority touch and have the operator sign it/);
+  assert.match(held.instruction, /restore the signed record, or start a new run and sign its touch 1/);
   spec.record(tampered, held, {}, CONFIGURED);
   spec.record(tampered, action, { ...result, workshopDir: tampered.workshopDir }, CONFIGURED);
   assert.deepEqual([tampered.phase, existsSync(join(tampered.runDir, 'wp-00.md'))], ['spec', false]);
@@ -483,7 +486,8 @@ function mergedRelease(t, { recipe = RECIPE, stage = 'verify', queue = [] } = {}
   return state;
 }
 
-const recipeShell = (part, command) => ({ kind: 'shell', step: 'release', part, command, cwd: '/w', recipeCommand: command.join(' '), expects: { type: 'none' } });
+const RUN_ARGV = 'Run this exact argv (no shell), and record its { code, stdout, stderr }.';
+const recipeShell = (part, command) => ({ kind: 'shell', step: 'release', seam: 'release', part, command, cwd: '/w', recipeCommand: command.join(' '), expects: { type: 'none' }, instruction: RUN_ARGV });
 
 test('release emission (council r1, astra): a queued command the verified recipe does not derive is never emitted, though the recipe digest matches; the merged release still removes its worktree', (t) => {
   const recipe = { ...RECIPE, after: ['echo SAFE_RECIPE'] };
@@ -551,4 +555,156 @@ test('unknown default branch (council r1): the grant carries the literal "(unkno
   assert.equal(touch.grants.a.repo.defaultBranch, '(unknown)');
   assert.match(touch.options[0].consequence, /^Merge each PR to example\/scratch \(\(unknown\)\): yes, /);
   assert.doesNotMatch(touch.options[0].consequence, /main/);
+});
+
+// --- council round 2 --------------------------------------------------------------
+
+const EXPIRED = testDeps({ ...IO, readAnchor: testAnchor, now: () => T0 + 15 * DAY_MS });
+const PLUGIN_JSON = '{\n  "name": "widget",\n  "version": "0.1.0",\n  "scripts": {}\n}\n';
+
+// A configured release before its merge, with `queue` at `stage`.
+function openRelease(t, { stage, queue = [], release = {} } = {}) {
+  const state = run(t, { phase: 'release', wps: [{ id: 'WP-01', state: 'merged' }] });
+  approved(state, { release: true });
+  Object.assign(state.release, { stage, queue, worktree: '/w', branch: 'conduct/auth-run/release', base: 'b'.repeat(40), ...release });
+  return state;
+}
+
+// A configured release at its bump: a real worktree holding the recipe's bump file.
+function bumpRelease(t, { stage = 'bump' } = {}) {
+  const state = openRelease(t, { stage });
+  state.release.worktree = join(dirname(state.runDir), 'wt');
+  mkdirSync(join(state.release.worktree, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(state.release.worktree, '.claude-plugin', 'plugin.json'), PLUGIN_JSON);
+  return state;
+}
+
+// astra's probe: the signed recipe bumps only `version`; this queued edit adds scripts.postinstall.
+function forgedBump(state) {
+  const path = join(state.release.worktree, '.claude-plugin', 'plugin.json');
+  return {
+    kind: 'author', step: 'release', seam: 'release', part: 'bump', template: path, outPath: path,
+    slots: { '"scripts": {}': '"scripts": {"postinstall": "UNSIGNED_EDIT"}' },
+    bump: { file: '.claude-plugin/plugin.json', jsonPath: 'scripts.postinstall', to: 'UNSIGNED_EDIT', original: PLUGIN_JSON },
+    expects: { type: 'file' }, instruction: `Edit ${path} in place: replace the key of slots (its exact text, once) with its value, and change nothing else. Record {}.`,
+  };
+}
+
+test('release bump (council r2, astra): a version-only recipe never emits an edit to another JSON path; the genuine bump is emitted, and its replay after the edit stays pending', (t) => {
+  const forged = bumpRelease(t, { stage: 'commit' });
+  forged.release.queue = [forgedBump(forged)];
+  const emitted = releasePhase.next(forged, CONFIGURED);
+  assert.equal(emitted, null, JSON.stringify(emitted));
+  assert.equal(forged.release.state, 'failed');
+  assert.match(forged.release.reason, /^release held: release\/bump: /);
+
+  const genuine = bumpRelease(t);
+  const bump = releasePhase.next(genuine, CONFIGURED);
+  assert.deepEqual([bump.kind, bump.slots, bump.bump.jsonPath, bump.bump.to], ['author', { '"version": "0.1.0"': '"version": "0.1.1"' }, 'version', '0.1.1']);
+  // The driver made the edit, then lost its result: the replayed bump is the same act, re-checked.
+  genuine.pending = { id: '30-release', phase: 'release', ...bump };
+  writeFileSync(bump.outPath, PLUGIN_JSON.replace('"version": "0.1.0"', '"version": "0.1.1"'));
+  assert.equal(releasePhase.checkPending(genuine, CONFIGURED), true);
+});
+
+test('recordBump (council r2, astra): a forged bump whose edit leaves the recipe\'s JSON path is refused at record, though the file is exactly its slot edit', (t) => {
+  const state = bumpRelease(t, { stage: 'commit' });
+  const forged = forgedBump(state);
+  state.release.queue = [forged];
+  writeFileSync(forged.outPath, PLUGIN_JSON.replace('"scripts": {}', '"scripts": {"postinstall": "UNSIGNED_EDIT"}'));
+  releasePhase.record(state, { id: '31-release', phase: 'release', ...forged }, {}, CONFIGURED);
+  assert.equal(state.release.state, 'failed');
+  assert.match(state.release.reason, /^release held: release\/bump: /);
+});
+
+test('release kinds (council r2, codex): a queued agent-tool the release never derives is not emitted under a valid release grant', (t) => {
+  const tool = { kind: 'agent-tool', step: 'release', part: 'after', tool: 'spine_update', args: { questId: 'other', workState: 'done' }, expects: { type: 'json' }, instruction: 'Call spine_update with these args.' };
+  const state = mergedRelease(t, { stage: 'verify', queue: [tool] });
+  const emitted = releasePhase.next(state, CONFIGURED);
+  assert.notEqual(emitted.kind, 'agent-tool', JSON.stringify(emitted));
+  assert.deepEqual(emitted.command, ['git', '-C', resolve(state.intent.repo.path), 'worktree', 'remove', '/w']);
+  assert.match(state.release.heldAfterMerge, /release\/after: the queued agent-tool action is not one the release derives/);
+});
+
+test('cleanup exemption (council r2, codex): the derived worktree removal queued at setup, with the grant expired, holds and emits nothing', (t) => {
+  const state = openRelease(t, { stage: 'bump' });
+  const remove = { kind: 'shell', step: 'release', seam: 'release', part: 'remove', command: ['git', '-C', resolve(state.intent.repo.path), 'worktree', 'remove', '/w'],
+    expects: { type: 'none' }, instruction: 'Remove the merged release\'s worktree (no --force).' };
+  state.release.queue = [remove];
+  assert.equal(releasePhase.next(state, EXPIRED), null);
+  assert.deepEqual([state.release.state, state.phase], ['failed', 'analyze']);
+  assert.match(state.release.reason, /^release held: no release authority \(grant_expired\)/);
+});
+
+test('pending release act (council r2, astra): with the queue emptied, or at a stage that does not derive it, a pending act is refused and the release holds', (t) => {
+  const ready = { kind: 'shell', step: 'release', seam: 'release', part: 'ready', command: ['gh', 'pr', 'ready', '200', '--repo', 'example/scratch'], expects: { type: 'none' }, instruction: RUN_ARGV };
+  const empty = openRelease(t, { stage: 'merge', release: { pr: { number: 200, head: HEAD } } });
+  empty.touches[0].answer.signed.answer.text = 'release everything';
+  empty.pending = { id: '40-release', phase: 'release', ...ready };
+  assert.equal(releasePhase.checkPending(empty, CONFIGURED), false);
+  assert.equal(empty.release.state, 'failed');
+  assert.match(empty.release.reason, /^release held: /);
+
+  const early = openRelease(t, { stage: 'bump', queue: [ready], release: { pr: { number: 200, head: HEAD } } });
+  early.pending = { id: '41-release', phase: 'release', ...ready };
+  assert.equal(releasePhase.checkPending(early, CONFIGURED), false);
+  assert.equal(early.release.state, 'failed');
+  assert.match(early.release.reason, /release\/ready: the queued shell action is not one the release derives at its setup stage/);
+});
+
+test('pending squash (council r2, R4): refused on resume, the merge-commit lookup decides; merged, the post-merge cleanup runs and the release ends held; not merged, the release fails held', (t) => {
+  for (const merged of [true, false]) {
+    const state = openRelease(t, { stage: 'merge', release: {
+      version: { from: '0.1.0', to: '0.1.1' }, commit: 'chore(release): 0.1.1 (conduct auth-run)', pr: { number: 200, head: HEAD }, gate: { ok: true, head: HEAD },
+    } });
+    state.mergeLock = { wpId: 'release', since: new Date(T0).toISOString() };
+    const squash = releasePhase.next(state, CONFIGURED);
+    assert.deepEqual(squash.command.slice(0, 4), ['gh', 'pr', 'merge', '200']);
+    // The driver may have run the squash before the crash; the grant expired since.
+    state.pending = { id: '50-release', phase: 'release', ...squash };
+    assert.equal(releasePhase.checkPending(state, EXPIRED), false);
+    state.pending = null;
+    const lookup = releasePhase.next(state, EXPIRED);
+    assert.deepEqual(lookup?.command, ['gh', 'pr', 'view', '200', '--repo', 'example/scratch', '--json', 'mergeCommit'], JSON.stringify(lookup));
+    const oid = merged ? { oid: 'd'.repeat(40) } : null;
+    releasePhase.record(state, { id: '51-release', phase: 'release', ...lookup }, { code: 0, stdout: JSON.stringify({ mergeCommit: oid }), stderr: '' }, EXPIRED);
+    if (merged) {
+      assert.deepEqual(releasePhase.next(state, EXPIRED).command, ['git', '-C', resolve(state.intent.repo.path), 'worktree', 'remove', '/w']);
+      assert.match(state.release.heldAfterMerge, /^release held: no release authority \(grant_expired\)/);
+    } else {
+      assert.deepEqual([state.release.state, state.phase], ['failed', 'analyze']);
+      assert.match(state.release.reason, /^release held: no release authority \(grant_expired\)/);
+    }
+  }
+});
+
+test('display (council r2, sonnet): an anchor that cannot be read, for any reason, is labelled unverified; nothing is shown beside "verified"', (t) => {
+  const state = run(t, { phase: 'build' });
+  approved(state, { budgetUsd: 10 });
+  Object.assign(state.authority, { merge: true, budgetUsd: 100 });
+  for (const error of [new Error('EACCES: permission denied'), new OperatorProofError('anchor_unreadable')]) {
+    const shown = authorityDisplay(state, testDeps({ ...IO, readAnchor: () => { throw error; } }));
+    assert.match(shown.label, /^\(proof: unverified \(anchor unreadable\)/, error.message);
+    assert.doesNotMatch(shown.label, /proof: verified/);
+  }
+});
+
+test('analysis (council r2, sonnet): held, dropped and refused events are not seam evidence', async (t) => {
+  const state = run(t, { phase: 'analyze' });
+  const deps = testDeps({ ...IO, append: appendFileSync, rename: renameSync, remove: (path) => rmSync(path, { force: true }), pid: process.pid,
+    exec: () => ({ code: 1, stdout: '', stderr: 'not a repo' }) });
+  const refusals = [
+    { step: 'spec', event: 'spec-held', data: { reason: 'spec held: wrong run' } },
+    { actionId: '5-spec', step: 'spec', kind: 'wait', event: 'emitted', data: { held: true } },
+    { actionId: '5-spec', step: 'spec', kind: 'wait', event: 'recorded', data: { held: true } },
+    { actionId: '9-release', step: 'release', kind: 'shell', event: 'dropped' },
+    { step: 'release', event: 'release-held', data: { reason: 'release held: no release authority (grant_expired)' } },
+    { step: 'release', event: 'release', data: { state: 'failed', reason: 'release held: no release authority (grant_expired)' } },
+    { actionId: '7-merge', step: 'merge', kind: 'shell', event: 'dropped' },
+  ];
+  for (const event of refusals) appendEvent(state, deps, event);
+  saveState(state, deps);
+  await analyzeRun(state.runDir, deps);
+  const coverage = readFileSync(join(state.runDir, 'run-analysis.md'), 'utf8').split(/^## /m).find((part) => part.startsWith('Seam coverage\n'));
+  for (const row of ['spec-depth', 'workshop-scaffold', 'spec-review', 'release', 'merge-gate']) assert.match(coverage, new RegExp(`^- ${row}: not exercised`, 'm'), coverage);
 });
