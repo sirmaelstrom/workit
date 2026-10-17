@@ -188,17 +188,186 @@ export function readAnchor(path = anchorPath()) {
 }
 
 // --- Verifiers ----------------------------------------------------------------
+// Every field of a proof, a registration and a co-sign is untrusted: a bad one is
+// refused with a stable reason and never throws. Only programmer errors throw (a
+// non-anchor object, a missing server-side expectation).
 
-export function verifyAnswerProof(_args) {
-  return { ok: true };
+export function isFresh(signedAt, now = Date.now()) {
+  const at = isStr(signedAt) ? Date.parse(signedAt) : Number.NaN;
+  return now - at <= FRESH_PAST_MS && at - now <= FRESH_FUTURE_MS;
 }
 
-export function verifyRegistration(_args) {
-  return { ok: true };
+// Base64url without padding, strictly: text that does not re-encode to itself is malformed.
+function fromB64url(text) {
+  if (!isStr(text) || !/^[A-Za-z0-9_-]+$/.test(text)) return null;
+  const bytes = Buffer.from(text, 'base64url');
+  return bytes.toString('base64url') === text ? bytes : null;
 }
 
-export function verifyCosign(_args) {
-  return { ok: true };
+function jsonObject(text) {
+  try {
+    const value = JSON.parse(text);
+    return isObj(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+// The SPKI DER of a P-256 key, or null when it does not parse as one.
+function es256Spki(spki) {
+  const der = fromB64url(spki);
+  if (!der) return null;
+  try {
+    const key = createPublicKey({ key: der, format: 'der', type: 'spki' });
+    return key.asymmetricKeyType === 'ec' && key.asymmetricKeyDetails?.namedCurve === 'prime256v1' ? der : null;
+  } catch {
+    return null;
+  }
+}
+
+function requireAnchor(anchor) {
+  if (!isObj(anchor) || typeof anchor.configured !== 'boolean') throw new TypeError('anchor object required');
+}
+
+const ASSERTION_FIELDS = ['credentialId', 'statement', 'authenticatorData', 'clientDataJSON', 'signature'];
+
+// Absence first, then the version, then the fields. A co-sign carries no v; when
+// it does, it must be 1.
+function parseAssertion(proof, versioned) {
+  if (proof === null || proof === undefined) return { reason: REASONS.proof_absent };
+  if (isObj(proof) && proof.v !== 1 && (versioned || proof.v !== undefined)) return { reason: REASONS.unsupported_version };
+  if (!isObj(proof) || !ASSERTION_FIELDS.every((field) => isStr(proof[field]))) return { reason: REASONS.malformed_proof };
+  const authData = fromB64url(proof.authenticatorData);
+  const clientBytes = fromB64url(proof.clientDataJSON);
+  const signature = fromB64url(proof.signature);
+  const client = clientBytes && jsonObject(clientBytes.toString('utf8'));
+  const statement = jsonObject(proof.statement);
+  if (!authData || !client || !signature || !statement || !fromB64url(proof.credentialId)) return { reason: REASONS.malformed_proof };
+  if (!isStr(statement.signedAt) || Number.isNaN(Date.parse(statement.signedAt))) return { reason: REASONS.bad_timestamp };
+  return { reason: null, text: proof.statement, statement, authData, clientBytes, client, signature };
+}
+
+// The WebAuthn assertion checks, in their fixed order. The statement's own origin
+// must be the credential's as well as clientData's.
+function assertionReason({ text, statement, authData, clientBytes, client, signature }, credential) {
+  if (authData.length < 37) return REASONS.bad_authenticator_data;
+  if (client.type !== 'webauthn.get') return REASONS.type_mismatch;
+  if (client.challenge !== challengeFor(text).toString('base64url')) return REASONS.challenge_mismatch;
+  if (client.origin !== credential.origin || statement.origin !== credential.origin) return REASONS.origin_mismatch;
+  if (client.crossOrigin === true) return REASONS.cross_origin;
+  if (!authData.subarray(0, 32).equals(sha256(Buffer.from(credential.rpId, 'utf8')))) return REASONS.rp_mismatch;
+  if (credential.alg !== ES256) return REASONS.alg_unsupported;
+  if (!(authData[32] & FLAG_UP)) return REASONS.up_required;
+  if (!(authData[32] & FLAG_UV)) return REASONS.uv_required;
+  const key = es256Spki(credential.publicKeySpki);
+  if (!key) return REASONS.bad_key;
+  const signed = Buffer.concat([authData, sha256(clientBytes)]);
+  try {
+    return verifySignature('sha256', signed, { key, format: 'der', type: 'spki', dsaEncoding: 'der' }, signature) ? null : REASONS.bad_signature;
+  } catch {
+    return REASONS.bad_signature;
+  }
+}
+
+function verdict(anchor, reason, credential = null, authData = null) {
+  const flags = authData && authData.length >= 37 ? authData[32] : null;
+  return {
+    ok: reason === null, mode: reason === null ? 'verified' : 'refused', reason,
+    credentialId: credential ? credential.credentialId : null, anchorSha256: anchor.sha256 ?? null, epoch: anchor.epoch ?? null,
+    be: flags === null ? null : (flags & FLAG_BE) !== 0, bs: flags === null ? null : (flags & FLAG_BS) !== 0,
+  };
+}
+
+const unconfigured = (anchor) => ({
+  ok: true, mode: 'unconfigured', reason: null, credentialId: null, anchorSha256: null, epoch: anchor.epoch ?? 0, be: null, bs: null,
+});
+
+const credentialFor = (anchor, credentialId) => (Array.isArray(anchor.credentials) ? anchor.credentials : [])
+  .find((credential) => isObj(credential) && credential.credentialId === credentialId);
+
+// Did a registered credential sign this answer to this ask? ask === undefined
+// means the caller's row has no ask at all; ask === null is a legacy prose ask.
+export function verifyAnswerProof({ answer, question, ask, questId, askReceiptId, anchor } = {}) {
+  requireAnchor(anchor);
+  if (!anchor.configured) return unconfigured(anchor);
+  if (ask === undefined) return verdict(anchor, REASONS.ask_missing);
+  const proof = isObj(answer) ? answer.proof : undefined;
+  const parsed = parseAssertion(proof, true);
+  if (parsed.reason) return verdict(anchor, parsed.reason);
+  const credential = credentialFor(anchor, proof.credentialId);
+  if (!credential) return verdict(anchor, REASONS.unknown_credential);
+  const { statement } = parsed;
+  const rebuilt = answerStatement({
+    origin: statement.origin, questId, askReceiptId: statement.askReceiptId, question, ask,
+    key: answer.key, text: answer.text, signedAt: statement.signedAt,
+  });
+  if (rebuilt === null) return verdict(anchor, REASONS.malformed_proof, credential);
+  if (rebuilt !== parsed.text || (askReceiptId !== undefined && statement.askReceiptId !== askReceiptId)) {
+    return verdict(anchor, REASONS.statement_mismatch, credential);
+  }
+  return verdict(anchor, assertionReason(parsed, credential), credential, parsed.authData);
+}
+
+// A create() response checked against the origin and rpId the SERVER expects. It
+// shows the bytes are well formed; it cannot show that a phone made the key.
+export function verifyRegistration({
+  clientDataJSON, authenticatorData, credentialId, publicKeySpki, alg, label, expectedOrigin, expectedRpId, signedAt, now = Date.now(),
+} = {}) {
+  if (!isStr(expectedOrigin) || !isStr(expectedRpId)) throw new TypeError('expectedOrigin and expectedRpId are required, from the server');
+  const refuse = (reason) => ({ ok: false, mode: 'refused', reason, credential: null });
+  const authData = fromB64url(authenticatorData);
+  const clientBytes = fromB64url(clientDataJSON);
+  const client = clientBytes && jsonObject(clientBytes.toString('utf8'));
+  const id = fromB64url(credentialId);
+  if (!authData || !client || !id || !isStr(label) || label === '') return refuse(REASONS.malformed_proof);
+  if (!isStr(signedAt) || Number.isNaN(Date.parse(signedAt))) return refuse(REASONS.bad_timestamp);
+  if (authData.length < 37) return refuse(REASONS.bad_authenticator_data);
+  if (client.type !== 'webauthn.create') return refuse(REASONS.type_mismatch);
+  if (client.challenge !== challengeFor(registerBeginStatement({ origin: expectedOrigin, signedAt })).toString('base64url')) return refuse(REASONS.challenge_mismatch);
+  if (client.origin !== expectedOrigin) return refuse(REASONS.origin_mismatch);
+  if (client.crossOrigin === true) return refuse(REASONS.cross_origin);
+  if (!authData.subarray(0, 32).equals(sha256(Buffer.from(expectedRpId, 'utf8')))) return refuse(REASONS.rp_mismatch);
+  const flags = authData[32];
+  if (!(flags & FLAG_UP)) return refuse(REASONS.up_required);
+  if (!(flags & FLAG_UV)) return refuse(REASONS.uv_required);
+  // Attested credential data: AAGUID at 37, a 2-byte id length at 53, the id at 55.
+  if (!(flags & FLAG_AT) || authData.length < 55 || authData.length < 55 + authData.readUInt16BE(53)) return refuse(REASONS.bad_authenticator_data);
+  if (!authData.subarray(55, 55 + authData.readUInt16BE(53)).equals(id)) return refuse(REASONS.credential_id_mismatch);
+  if (alg !== ES256) return refuse(REASONS.alg_unsupported);
+  if (!es256Spki(publicKeySpki)) return refuse(REASONS.bad_key);
+  if (!isFresh(signedAt, now)) return refuse(REASONS.proof_stale);
+  return {
+    ok: true, mode: 'verified', reason: null,
+    credential: {
+      credentialId, publicKeySpki, alg: ES256, rpId: expectedRpId, origin: expectedOrigin,
+      registeredAt: new Date(now).toISOString(), label, be: (flags & FLAG_BE) !== 0, bs: (flags & FLAG_BS) !== 0,
+    },
+  };
+}
+
+// A registered credential signed registerCosignStatement for exactly the expected
+// new credential and origin, recently. An unconfigured anchor has nobody to co-sign.
+export function verifyCosign({ anchor, cosign, expect, now = Date.now() } = {}) {
+  requireAnchor(anchor);
+  if (!isObj(expect) || !isStr(expect.credentialId) || !isStr(expect.publicKeySpki) || !isStr(expect.origin)) {
+    throw new TypeError('expect {credentialId, publicKeySpki, origin} required');
+  }
+  if (!anchor.configured) return { ...verdict(anchor, REASONS.unknown_credential), mode: 'unconfigured' };
+  const parsed = parseAssertion(cosign, false);
+  if (parsed.reason) return verdict(anchor, parsed.reason);
+  const credential = credentialFor(anchor, cosign.credentialId);
+  if (!credential) return verdict(anchor, REASONS.unknown_credential);
+  const { statement } = parsed;
+  const rebuilt = registerCosignStatement({
+    credentialId: statement.credentialId, publicKeySpki: statement.publicKeySpki, origin: statement.origin, signedAt: statement.signedAt,
+  });
+  if (rebuilt === null) return verdict(anchor, REASONS.malformed_proof, credential);
+  if (rebuilt !== parsed.text) return verdict(anchor, REASONS.statement_mismatch, credential);
+  if (statement.credentialId !== expect.credentialId || statement.publicKeySpki !== expect.publicKeySpki || statement.origin !== expect.origin) {
+    return verdict(anchor, REASONS.cosign_mismatch, credential);
+  }
+  if (!isFresh(statement.signedAt, now)) return verdict(anchor, REASONS.proof_stale, credential);
+  return verdict(anchor, assertionReason(parsed, credential), credential, parsed.authData);
 }
 
 // --- Grant and raise tags ------------------------------------------------------
@@ -273,13 +442,110 @@ export function checkRaise(raise, askLike, key = 'a') {
 }
 
 // --- CLI commands, in process --------------------------------------------------
+// Each returns the CLI's line, {ok, mode, reason, credentialId, epoch, grant, scopeOk?}.
+// The CLI passes readAnchor() and Date.now(); nothing on its argv or environment
+// can replace either.
 
-export function verifyReceiptBody(_args) {
-  return { ok: true };
+// conduct's run correlation in a filed question: `<tag> (run <runId>/<filing>)`.
+const RUN_ID = /\(run ([^/\s)]+)\//;
+
+const refusal = (anchor, reason) => ({ ok: false, mode: 'refused', reason, credentialId: null, epoch: anchor.epoch ?? null, grant: null });
+
+// grant is printed only when its tag checks against the signed ask (or, when
+// unconfigured, the record's options). Configured, it must also be unexpired and
+// for the run the signed question names. scopeOk compares the NFC hash of the
+// scope text with the grant's scopeSha256.
+function withGrant(result, { anchor, grants, askLike, key, question, now, scopeText }) {
+  const out = { ok: result.ok, mode: result.mode, reason: result.reason, credentialId: result.credentialId, epoch: result.epoch, grant: null };
+  if (!out.ok) return out;
+  const refuse = (reason) => {
+    out.reason = reason;
+    if (anchor.configured) Object.assign(out, { ok: false, mode: 'refused' });
+  };
+  const candidate = isObj(grants) && isStr(key) && Object.hasOwn(grants, key) ? grants[key] : undefined;
+  if (candidate !== undefined) {
+    if (!checkGrant(candidate, askLike, key)) refuse(REASONS.grant_tag_mismatch);
+    else if (anchor.configured && now > Date.parse(candidate.notAfter)) refuse(REASONS.grant_expired);
+    else if (anchor.configured && (isStr(question) ? RUN_ID.exec(question)?.[1] : undefined) !== candidate.runId) refuse(REASONS.wrong_run);
+    else out.grant = candidate;
+  }
+  if (scopeText !== undefined) {
+    out.scopeOk = out.grant !== null && isStr(scopeText) && sha256Hex(nfc(scopeText)) === out.grant.scopeSha256;
+  }
+  return out;
 }
 
-export function verifyRecord(_args) {
-  return { ok: true };
+// conduct writes goal.md as `${goal}\n`; the grant hashes the goal itself.
+const goalScope = (goalText) => (isStr(goalText) ? goalText.replace(/\n$/, '') : goalText);
+
+// body is the spine_quest tool's JSON ({quests:[{id, latestReceipt}]}) or a bare
+// receipt row ({id, outcome, question, ask, answer}). state is conduct's state.json,
+// whose touch for this receipt supplies the grants.
+export function verifyReceiptBody({ body, quest, state, goalText, anchor, now = Date.now() } = {}) {
+  requireAnchor(anchor);
+  const fullQuest = isStr(quest) && UUID.test(quest);
+  let receipt;
+  let questId = quest;
+  if (isObj(body) && Array.isArray(body.quests)) {
+    if (!fullQuest) return refusal(anchor, REASONS.quest_id_not_full);
+    const entry = body.quests.find((candidate) => isObj(candidate) && isStr(candidate.id) && candidate.id !== '' && quest.toLowerCase().startsWith(candidate.id.toLowerCase()));
+    if (!entry) return refusal(anchor, REASONS.input_unreadable);
+    if (!UUID.test(entry.id)) return refusal(anchor, REASONS.quest_id_not_full);
+    questId = entry.id;
+    receipt = entry.latestReceipt;
+  } else if (isObj(body) && Object.hasOwn(body, 'outcome')) {
+    if (!fullQuest) return refusal(anchor, REASONS.quest_id_not_full);
+    receipt = body;
+  } else {
+    return refusal(anchor, REASONS.input_unreadable);
+  }
+  if (!isObj(receipt) || receipt.outcome !== 'answered') return refusal(anchor, REASONS.not_answered);
+  const answer = isObj(receipt.answer) ? receipt.answer : null;
+  let touch;
+  if (state !== undefined) {
+    const touches = isObj(state) && Array.isArray(state.touches) ? state.touches.filter(isObj) : [];
+    const prefix = (candidate) => (isStr(state.runId) ? `${candidate.tag} (run ${state.runId}/` : `${candidate.tag} `);
+    touch = (isStr(answer?.askReceiptId) ? touches.find((candidate) => candidate.receiptId === answer.askReceiptId) : undefined)
+      ?? (isStr(receipt.question) ? touches.find((candidate) => isStr(candidate.tag) && receipt.question.startsWith(prefix(candidate))) : undefined);
+  }
+  const result = verifyAnswerProof({
+    answer, question: receipt.question, ask: receipt.ask, questId,
+    askReceiptId: isStr(touch?.receiptId) ? touch.receiptId : undefined, anchor,
+  });
+  const askLike = !anchor.configured && Array.isArray(touch?.options) ? { options: touch.options } : receipt.ask;
+  return withGrant(result, {
+    anchor, grants: touch?.grants, askLike, key: answer?.key, question: receipt.question, now, scopeText: goalScope(goalText),
+  });
+}
+
+// record is a conduct touch record (touches/<n>.json) or an authority record
+// (touches/<n>-authority.json). The signed block is always answer.signed; an
+// authority record with a confirm block is verified through the confirm, and its
+// scopeOk comes from the record's own scope, not the goal.
+export function verifyRecord({ record, quest, goalText, anchor, now = Date.now() } = {}) {
+  requireAnchor(anchor);
+  if (!isObj(record)) return refusal(anchor, REASONS.input_unreadable);
+  let questId;
+  if (quest === 'none') {
+    // A core-only record has no anchor quest: valid only while nothing is signed.
+    if (anchor.configured) return refusal(anchor, REASONS.quest_id_not_full);
+  } else if (!isStr(quest) || !UUID.test(quest)) {
+    return refusal(anchor, REASONS.quest_id_not_full);
+  } else {
+    questId = quest;
+  }
+  const confirm = isObj(record.confirm) ? record.confirm : null;
+  const holder = confirm ?? record;
+  const recorded = isObj(holder.answer) ? holder.answer : {};
+  const signed = isObj(recorded.signed) ? recorded.signed : null;
+  if (anchor.configured && !signed) return refusal(anchor, REASONS.proof_absent);
+  const result = verifyAnswerProof({ answer: signed?.answer, question: signed?.question, ask: signed ? signed.ask : null, questId, anchor });
+  const key = isObj(signed?.answer) ? signed.answer.key : recorded.key;
+  const askLike = !anchor.configured && Array.isArray(holder.options) ? { options: holder.options } : signed?.ask;
+  return withGrant(result, {
+    anchor, grants: holder.grants, askLike, key, question: signed?.question, now,
+    scopeText: confirm ? (isStr(record.scope) ? record.scope : null) : goalScope(goalText),
+  });
 }
 
 // --- CLI -----------------------------------------------------------------------
