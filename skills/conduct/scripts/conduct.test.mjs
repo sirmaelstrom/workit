@@ -18,6 +18,9 @@ import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, res
 import { validateGrant } from './lib/phases/preapproval.mjs';
 import { samePath, next as specNext } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
+import { testDeps } from './test-deps.mjs';
+import { anchorFromFile } from '../../_shared/operator-proof/operator-proof.mjs';
+import { makeTestAnchor } from '../../_shared/operator-proof/test-signer.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '__fixtures__', 'intake');
@@ -727,6 +730,27 @@ test('answer refuses non-tty', async (t) => {
   const tty = await answer(f, runDir, 'a');
   assert.equal(tty.code, 0, tty.stdout);
   assert.equal(JSON.parse(readFileSync(recordPath, 'utf8')).tty, true);
+});
+
+test('an operator passkey refuses a core-only intake (exit 2) and a TTY answer (exit 3); a spine intake is not refused, and with no passkey both run as before', async (t) => {
+  const anchor = anchorFromFile(makeTestAnchor());
+  const f = fixture(t);
+  const refused = await intake(f, [], { readAnchor: () => anchor });
+  assert.equal(refused.code, 2, refused.stdout);
+  assert.equal(out(refused).error, 'an operator passkey is configured (~/.claude/operator-passkeys.json); run conduct with the Spine adapter so touches can be signed on the phone');
+  assert.deepEqual(readdirSync(f.runs), [], 'nothing written');
+  assert.equal((await intake(f, SPINE, { readAnchor: () => anchor })).code, 0);
+
+  // A core run begun before the passkey existed: its TTY answer is no longer authority.
+  const g = fixture(t);
+  const { runDir } = out(await intake(g));
+  const tty = await g.run(['answer', '--run', runDir, '--touch', '1', '--key', 'a'], { stdinIsTTY: true, readAnchor: () => anchor });
+  assert.equal(tty.code, 3, tty.stdout);
+  assert.equal(out(tty).error, 'operator:tty is not authority while an operator passkey is configured; answer on the phone');
+  assert.equal(readState(runDir).touches[0].status, 'open');
+  assert.equal((await answer(g, runDir, 'a')).code, 0);
+  const { answer: stored } = readState(runDir).touches[0];
+  assert.deepEqual([stored.key, stored.by, stored.proofMode, stored.signed], ['a', 'operator:tty', 'unconfigured', null]);
 });
 
 test('record refuses unattributed answer', async (t) => {
