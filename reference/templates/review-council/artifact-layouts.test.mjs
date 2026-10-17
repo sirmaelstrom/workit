@@ -15,3 +15,13 @@ test('council contract covers every concrete deep-stage output declared by the s
   assert.equal(contract.workshop.packagesDirectory, 'work-packages');
   assert.deepEqual(contract.lite, ['spec.md', 'spec-lite.md']);
 });
+
+test('challenge template keeps the consumer headings and placeholders with verification after them', () => {
+  const template = readFileSync(new URL('./challenge.md', import.meta.url), 'utf8');
+  const headings = [...template.matchAll(/^### (Upheld|Downgraded|Overturned|New Concerns|Verification)$/gm)].map((match) => match[1]);
+  assert.deepEqual(headings, ['Upheld', 'Downgraded', 'Overturned', 'New Concerns', 'Verification']);
+  assert.deepEqual([...template.matchAll(/{{([^}]+)}}/g)].map((match) => match[1]), [
+    'workshop_title', 'round', 'prior_findings',
+  ]);
+  assert.match(template, /Demoted to question: <finding> — <premise> — <check>/);
+});
