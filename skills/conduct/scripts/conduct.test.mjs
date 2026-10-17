@@ -18,6 +18,9 @@ import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, res
 import { validateGrant } from './lib/phases/preapproval.mjs';
 import { samePath, next as specNext } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
+import { testDeps } from './test-deps.mjs';
+import { anchorFromFile, verifyAnswerProof } from '../../_shared/operator-proof/operator-proof.mjs';
+import { makeTestAnchor, signAnswer } from '../../_shared/operator-proof/test-signer.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '__fixtures__', 'intake');
@@ -80,7 +83,7 @@ function fixture(t, deps = {}) {
     resolveCodex: () => 'codex', now: () => clock, timestamp: () => new Date((clock += 1000)).toISOString(),
     newRunId: () => RUN_ID, lockWaitMs: 0, importModule: testLoader, ...deps,
   };
-  return { dir, repo, runs, calls, table, deps: base, run: (argv, more = {}) => runConduct(argv, { ...base, ...more }) };
+  return { dir, repo, runs, calls, table, deps: base, run: (argv, more = {}) => runConduct(argv, testDeps({ ...base, ...more })) };
 }
 
 const out = (result) => JSON.parse(result.stdout);
@@ -729,6 +732,61 @@ test('answer refuses non-tty', async (t) => {
   assert.equal(JSON.parse(readFileSync(recordPath, 'utf8')).tty, true);
 });
 
+test('an operator passkey refuses a core-only intake (exit 2) and a TTY answer (exit 3); a spine intake is not refused, and with no passkey both run as before', async (t) => {
+  const anchor = anchorFromFile(makeTestAnchor());
+  const f = fixture(t);
+  const refused = await intake(f, [], { readAnchor: () => anchor });
+  assert.equal(refused.code, 2, refused.stdout);
+  assert.equal(out(refused).error, 'an operator passkey is configured (~/.claude/operator-passkeys.json); run conduct with the Spine adapter so touches can be signed on the phone');
+  assert.deepEqual(readdirSync(f.runs), [], 'nothing written');
+  assert.equal((await intake(f, SPINE, { readAnchor: () => anchor })).code, 0);
+
+  // A core run begun before the passkey existed: its TTY answer is no longer authority.
+  const g = fixture(t);
+  const { runDir } = out(await intake(g));
+  const tty = await g.run(['answer', '--run', runDir, '--touch', '1', '--key', 'a'], { stdinIsTTY: true, readAnchor: () => anchor });
+  assert.equal(tty.code, 3, tty.stdout);
+  assert.equal(out(tty).error, 'operator:tty is not authority while an operator passkey is configured; this core-only run cannot be approved: restart it with --adapter spine so its touches can be signed on the phone');
+  assert.equal(readState(runDir).touches[0].status, 'open');
+  assert.equal((await answer(g, runDir, 'a')).code, 0);
+  const { answer: stored } = readState(runDir).touches[0];
+  assert.deepEqual([stored.key, stored.by, stored.proofMode, stored.signed], ['a', 'operator:tty', 'unconfigured', null]);
+});
+
+// Council round 1: a phone signs the full quest uuid, so a prefix --anchor
+// must be resolved before any proof is checked against it.
+test('a prefix --anchor is resolved to the full quest uuid at the anchor step, and a phone-signed read-back over the uuid is answered', async (t) => {
+  const anchor = anchorFromFile(makeTestAnchor());
+  const configured = { readAnchor: () => anchor };
+  const f = fixture(t);
+  assert.equal(ANCHOR.length, 8);
+  const first = out(await intake(f, SPINE, configured));
+  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'), configured)).action;
+  assert.equal(readState(first.runDir).intent.anchor, ANCHOR_UUID);
+  const askId = '00000000-0000-4000-8000-0000000000f1';
+  const readBack = out(await record(f, first.runDir, receipt.id, { id: askId }, configured)).action;
+  const { question, ask } = receipt.args;
+  const answer = { key: 'a', text: null, by: 'operator:dogan', answeredAt: ANSWERED_AT, askReceiptId: askId };
+  answer.proof = signAnswer({ questId: ANCHOR_UUID, askReceiptId: askId, question, ask, answerKey: 'a' });
+  // The prefix is not what the phone signed.
+  assert.equal(verifyAnswerProof({ answer, question, ask, questId: ANCHOR, askReceiptId: askId, anchor }).reason, 'statement_mismatch');
+  const done = await record(f, first.runDir, readBack.id, { quests: [{ id: ANCHOR_UUID, latestReceipt: { id: 'r-1', outcome: 'answered', question, ask, answer } }] }, configured);
+  assert.equal(done.code, 0, done.stdout);
+  const touch = readState(first.runDir).touches[0];
+  assert.deepEqual([touch.status, touch.answer.proofMode], ['answered', 'verified']);
+});
+
+test('the anchor step refuses a spine_quest id that is only a prefix (exit 2): the anchor stays unresolved and nothing is filed', async (t) => {
+  const f = fixture(t);
+  const first = out(await intake(f, SPINE));
+  const short = fixtureJson('spine-quest-answered.json');
+  short.quests[0].id = ANCHOR;
+  const refused = await record(f, first.runDir, first.action.id, short);
+  assert.equal(refused.code, 2, refused.stdout);
+  assert.match(out(refused).error, /not a full quest uuid/);
+  assert.deepEqual([readState(first.runDir).phase, readState(first.runDir).touches.length], ['intake', 0]);
+});
+
 test('record refuses unattributed answer', async (t) => {
   const f = fixture(t);
   const { runDir, readBack } = await toSpineReadBack(f);
@@ -998,10 +1056,10 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   const second = openTouch(state, { kind: 'blocked', question: 'Q2', options }, deps);
   const filing = touchAction(state, first);
   assert.equal(filing.tool, 'spine_receipt');
-  recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' });
+  recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' }, testDeps(deps));
   assert.equal(touchAction(state, second), null);
   assert.equal(second.status, 'open');
-  recordTouch(state, first, touchAction(state, first), fixtureJson('spine-quest-answered.json'));
+  recordTouch(state, first, touchAction(state, first), fixtureJson('spine-quest-answered.json'), testDeps(deps));
   assert.equal(first.status, 'answered');
   const secondFiling = touchAction(state, second);
   assert.equal(secondFiling.tool, 'spine_receipt');
@@ -1151,7 +1209,7 @@ test('shell result shape (D18)', async (t) => {
 });
 
 test('no verb: usage on stderr, exit 2', async () => {
-  const result = await runConduct([]);
+  const result = await runConduct([], testDeps());
   assert.equal(result.code, 2);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /^usage: conduct\.mjs/);
@@ -1174,7 +1232,7 @@ test('terminal phases (D19.5): done with no handler loaded', async (t) => {
 test('resume: a fresh runConduct continues from the run dir alone', async (t) => {
   const f = fixture(t);
   const { runDir, spec } = await toCoreSpec(f);
-  const resumed = await runConduct(['--resume', runDir], { importModule: testLoader, pluginRoot: f.deps.pluginRoot });
+  const resumed = await runConduct(['--resume', runDir], testDeps({ importModule: testLoader, pluginRoot: f.deps.pluginRoot }));
   assert.deepEqual(out(resumed).action, spec);
 });
 

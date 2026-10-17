@@ -2040,7 +2040,7 @@ export function record(state, action, result = {}, deps) {
   state.build ??= { contract: null, halts: [] };
   if (action.step === 'contract') return recordContract(state, action, deps);
   if (action.yield) return recordYield(state, action);
-  if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result);
+  if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result, deps);
   if (action.step === 'spend') return recordSpend(state, action, result, deps);
   if (action.step === 'replan') return action.part === 'apply' ? recordReplanApply(state, action, deps) : recordReplanReceipt(state, action, result, deps);
   const wp = state.wps.find((candidate) => candidate.id === action.wpId);

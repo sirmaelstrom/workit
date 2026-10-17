@@ -12,6 +12,7 @@ import {
 } from './land.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
 import { runConduct } from '../conduct.mjs';
+import { testDeps } from '../test-deps.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '..', '__fixtures__', 'land');
@@ -1151,7 +1152,7 @@ test('C2-13 a rounds recovery with empty stdout reaches the recorder through the
   let outcome = null;
   const build = { next: () => ({ kind: 'done' }), record: (s, action, r, deps) => { outcome = recordLandStep(s, s.wps[0], action, r, deps); } };
   const out = await runConduct(['record', '--run', dir, '--action', '1-review', '--result', JSON.stringify({ code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' })],
-    { importModule: (relPath) => (relPath === 'lib/phases/build.mjs' ? build : import(pathToFileURL(join(HERE, '..', relPath)).href)) });
+    testDeps({ importModule: (relPath) => (relPath === 'lib/phases/build.mjs' ? build : import(pathToFileURL(join(HERE, '..', relPath)).href)) }));
   assert.equal(out.code, 0, out.stdout + out.stderr);
   assert.deepEqual([outcome.outcome, outcome.patch.queue], ['held', []]);
 });
