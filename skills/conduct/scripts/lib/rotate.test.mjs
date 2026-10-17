@@ -64,7 +64,8 @@ test('rotate (d3ce5461): refused at the showcase and in a terminal phase; the ha
   assert.match(handoffText(unsigned, unsigned.rotations[0]), /^- Authority: .* \(proof: UNCONFIGURED — answers not signed\)$/m);
   const signed = state({ touches: [{ n: 1, kind: 'preapproval', status: 'answered', wpId: null, grants: {}, answer: { key: 'a', proofMode: 'verified', credentialId: 'AAAAbbbbCCCCdddd', epoch: 2 } }] });
   rotate(signed, { why: 'context' }, deps());
-  assert.match(handoffText(signed, signed.rotations[0]), /^- Authority: .* \(proof: verified ••••CCCCdddd epoch 2\)$/m);
+  // Without the anchor reader the stored values are labelled a cached display (council r1).
+  assert.match(handoffText(signed, signed.rotations[0]), /^- Authority: .* \(proof: verified ••••CCCCdddd epoch 2\) \(cached display; acts use the signed grant\)$/m);
 });
 
 test('custody retire (d3ce5461): with no chain row naming r1\'s session for this handoff and pane, custody asks for confirmation instead of retiring a bare pane id; with one, the retire carries --expect-session', () => {

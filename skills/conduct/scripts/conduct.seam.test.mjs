@@ -1168,10 +1168,11 @@ test('runtime exercise (WP-07): a signed touch 1 (a) at $10 driven to the merge;
   const authority = verifiedAuthority(state, deps);
   t.diagnostic(`1. verifiedAuthority: ${JSON.stringify(authority)}`);
   assert.deepEqual([authority.budgetUsd, authority.proofMode, authority.merge, authority.reason], [10, 'verified', true, null]);
-  await analyzeRun(h.runDir, { exec: deps.exec, read: deps.read, write: deps.write, exists: deps.exists });
+  // The run report prints the verified authority beside "verified" (council r1).
+  await analyzeRun(h.runDir, { exec: deps.exec, read: deps.read, write: deps.write, exists: deps.exists, readAnchor: deps.readAnchor, now: deps.now });
   const line = /^- authority: .*$/m.exec(h.analysis())[0];
   t.diagnostic(`2. analysis: ${line}`);
-  assert.match(line, /\(proof: verified ••••[A-Za-z0-9_-]{8} epoch 0\)/);
+  assert.match(line, /^- authority: merge yes, release yes, budget \$10\.00, scope: .* \(proof: verified ••••[A-Za-z0-9_-]{8} epoch 0\)$/);
   build.record(state, { kind: 'shell', step: 'spend', part: 'spend', budgetFor: 'dispatch' }, { code: 0, stdout: '15\n', stderr: '' }, deps);
   const halt = state.build.halts.find((entry) => entry.kind === 'budget');
   t.diagnostic(`3. budget gate at $15: ${halt ? `halt: ${halt.reason}` : 'go'}`);
@@ -1180,6 +1181,66 @@ test('runtime exercise (WP-07): a signed touch 1 (a) at $10 driven to the merge;
   const forged = verifiedAuthority(h.state(), deps);
   t.diagnostic(`4. after editing touch.grants.a: ${JSON.stringify(forged)}`);
   assert.deepEqual([forged.budgetUsd, forged.merge, forged.reason], [0, false, 'grant_tag_mismatch']);
+});
+
+// ---- council round 1 ----
+
+const tamperProof = (state) => { state.touches[0].answer.signed.answer.text = 'merge everything'; };
+
+test('pending re-emission (council r1, astra/codex): a merge, release or paid act left pending is checked again on resume; after the proof is tampered, next drops it, holds, and emits nothing of it', async (t) => {
+  const cases = [
+    ['squash', (a) => a.step === 'merge' && a.part === 'squash' && a.phase === 'build'],
+    ['release', (a) => a.phase === 'release' && a.part === 'ready'],
+    ['paid', (a) => a.phase === 'build' && a.step === 'start'],
+  ];
+  for (const [name, at] of cases) {
+    const h = seam(t);
+    phone(h);
+    await start(h, SPINE_ONLY);
+    const pending = await drive(h, { until: at });
+    editState(h, tamperProof);
+    const result = await h.run(['next', '--run', h.runDir]);
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    const action = out(result).action;
+    t.diagnostic(`${name}: pending ${pending.id} ${pending.step}/${pending.part}; next → ${action.id ?? action.kind} ${action.step ?? ''}/${action.part ?? ''}`);
+    assert.notEqual(action.id, pending.id, name);
+    assert.notEqual(h.state().pending?.id, pending.id, name);
+    if (name === 'release') {
+      assert.equal(h.state().release.state, 'failed');
+      assert.match(h.state().release.reason, /authority proof invalid: statement_mismatch/);
+    } else {
+      assert.equal(h.wp(pending.wpId).state, 'held', name);
+      assert.match(h.wp(pending.wpId).reason, /authority proof invalid: statement_mismatch/, name);
+    }
+    h.pending = action;
+    await drive(h, { until: (a) => a.step === 'showcase' });
+    const again = h.trace.filter((a) => a.id !== pending.id && a.step === pending.step && a.part === pending.part && a.phase === pending.phase);
+    assert.deepEqual(again.map((a) => a.id), [], `${name}: zero emission of the dropped act`);
+  }
+});
+
+test('post-merge cleanup (council r1, opus): the grant expiring right after the release merge, or in its after, verify or handover stage, still removes the release worktree; no other release command runs after the expiry', async (t) => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const CLEANUP = ['remove', 'branch-holder', 'branch', 'branch-remote'];
+  for (const at of ['squash', 'merge-commit', 'merged', 'after', 'verify', 'remove']) {
+    const h = seam(t);
+    phone(h);
+    await start(h, SPINE_ONLY);
+    let expiredAt = null;
+    h.onEmit = (a) => {
+      if (expiredAt === null && a.phase === 'release' && a.part === at) {
+        h.clock += 15 * DAY;
+        expiredAt = h.trace.length - 1;
+      }
+    };
+    await drive(h, { until: (a) => a.step === 'showcase' });
+    assert.notEqual(expiredAt, null, at);
+    const later = h.trace.slice(expiredAt + 1).filter((a) => a.phase === 'release' && a.kind !== 'wait' && !a.touch);
+    t.diagnostic(`${at}: after the expiry ${later.map((a) => `${a.step}/${a.part}`).join(', ') || 'nothing'}; release ${h.state().release.state}: ${h.state().release.reason}`);
+    assert.deepEqual(later.filter((a) => !CLEANUP.includes(a.part)).map((a) => a.part), [], at);
+    if (at !== 'remove') assert.ok(later.some((a) => a.part === 'remove'), `${at}: the worktree removal ran`);
+    assert.equal(h.state().release.cleanup?.removed !== undefined, true, `${at}: cleanup recorded`);
+  }
 });
 
 test('E6 hand-back (spine): the showcase touch hands back the same way; the resumed read-back closes the run', async (t) => {

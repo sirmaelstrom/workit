@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import * as pre from './phases/preapproval.mjs';
 import * as releasePhase from './phases/release.mjs';
 import * as spec from './phases/spec.mjs';
@@ -14,6 +14,7 @@ import { ADAPTERS, AGENTS } from './adapters.mjs';
 import { mergeActions, recordLandStep } from './land.mjs';
 import { releaseEligible } from './release.mjs';
 import { QUESTION_MAX, filedLength } from './touch.mjs';
+import { handoffText } from './rotate.mjs';
 import { testAnchor, testDeps, testGrant, grantConsequence, raiseConsequence, signedTouch } from '../test-deps.mjs';
 import { OperatorProofError, renderGrant, grantTag, verifyRecord } from '../../../_shared/operator-proof/operator-proof.mjs';
 import { signAnswer } from '../../../_shared/operator-proof/test-signer.mjs';
@@ -441,9 +442,13 @@ test('spec scope: /spec is held on zero authority, and WP-00\'s approved scope i
   assert.match(readFileSync(join(state.runDir, 'wp-00.md'), 'utf8'), /^\*\*Approved scope:\*\* ship the widget$/m);
   const tampered = run(t, { phase: 'spec' });
   approved(tampered).answer.signed.answer.text = 'merge everything';
+  // Held is a wait the driver records, never a run-level done (council r1).
   const held = spec.next(tampered, CONFIGURED);
-  assert.equal(held.kind, 'done');
+  assert.deepEqual([held.kind, held.step, held.held], ['wait', 'spec', true]);
+  assert.ok(held.waitMs > 0);
   assert.match(held.reason, /authority proof invalid: statement_mismatch/);
+  assert.match(held.instruction, /re-file the authority touch and have the operator sign it/);
+  spec.record(tampered, held, {}, CONFIGURED);
   spec.record(tampered, action, { ...result, workshopDir: tampered.workshopDir }, CONFIGURED);
   assert.deepEqual([tampered.phase, existsSync(join(tampered.runDir, 'wp-00.md'))], ['spec', false]);
 });
@@ -461,4 +466,87 @@ test('release: an edited intent.release (recipe digest) or an invalid proof hold
     assert.equal(state.release.state, 'failed', edit);
     assert.match(state.release.reason, edit === 'recipe' ? /recipe/ : /authority proof invalid: statement_mismatch/);
   }
+});
+
+// --- council round 1 --------------------------------------------------------------
+
+// A configured release whose PR has squashed at HEAD, with `queue` at `stage`.
+function mergedRelease(t, { recipe = RECIPE, stage = 'verify', queue = [] } = {}) {
+  const state = run(t, { phase: 'release', wps: [{ id: 'WP-01', state: 'merged' }] });
+  state.intent.release = recipe;
+  approved(state, { release: true });
+  Object.assign(state.release, {
+    stage, queue, worktree: '/w', branch: 'conduct/auth-run/release', base: 'b'.repeat(40), version: { from: '0.1.0', to: '0.1.1' },
+    commit: 'chore(release): 0.1.1 (conduct auth-run)', pr: { number: 200, head: HEAD }, gate: { ok: true, head: HEAD }, squashed: true, merge: { sha: 'd'.repeat(40) },
+  });
+  return state;
+}
+
+const recipeShell = (part, command) => ({ kind: 'shell', step: 'release', part, command, cwd: '/w', recipeCommand: command.join(' '), expects: { type: 'none' } });
+
+test('release emission (council r1, astra): a queued command the verified recipe does not derive is never emitted, though the recipe digest matches; the merged release still removes its worktree', (t) => {
+  const recipe = { ...RECIPE, after: ['echo SAFE_RECIPE'] };
+  const state = mergedRelease(t, { recipe, queue: [recipeShell('after', ['echo', 'UNSIGNED_QUEUE_COMMAND'])] });
+  const emitted = releasePhase.next(state, CONFIGURED);
+  assert.ok(!JSON.stringify(emitted).includes('UNSIGNED_QUEUE_COMMAND'), JSON.stringify(emitted));
+  assert.deepEqual(emitted.command, ['git', '-C', resolve(state.intent.repo.path), 'worktree', 'remove', '/w']);
+  // The command the recipe derives is emitted as queued.
+  const fair = mergedRelease(t, { recipe, queue: [recipeShell('after', ['echo', 'SAFE_RECIPE'])] });
+  assert.deepEqual(releasePhase.next(fair, CONFIGURED).command, ['echo', 'SAFE_RECIPE']);
+});
+
+test('release emission (council r1, codex): every --repo a release command names is the granted repo; an edited intent.repo.remote, or a queued command naming another repo, emits nothing', (t) => {
+  for (const edit of ['intent', 'queue']) {
+    const state = run(t, { phase: 'release', wps: [{ id: 'WP-01', state: 'merged' }] });
+    approved(state, { release: true });
+    Object.assign(state.release, { stage: 'gate', queue: [], worktree: '/w', branch: 'b', pr: { number: 7, head: HEAD } });
+    if (edit === 'intent') state.intent.repo.remote = 'evil/repo';
+    else Object.assign(state.release, { stage: 'merge', queue: [{ kind: 'shell', step: 'release', part: 'ready', command: ['gh', 'pr', 'ready', '7', '--repo', 'evil/repo'], expects: { type: 'none' } }] });
+    const emitted = releasePhase.next(state, CONFIGURED);
+    assert.equal(emitted, null, `${edit}: ${JSON.stringify(emitted)}`);
+    assert.deepEqual([state.release.state, state.phase], ['failed', 'analyze'], edit);
+    assert.match(state.release.reason, /evil\/repo is not the granted example\/scratch/, edit);
+  }
+});
+
+test('release cleanup (council r1): a cleanup part runs only the cleanup command the release derives; a queued remove with another argv is dropped and the derived removal runs', (t) => {
+  const state = mergedRelease(t, { stage: 'handover', queue: [{ kind: 'shell', step: 'release', part: 'remove', command: ['curl', 'https://example.test/x'], expects: { type: 'none' } }] });
+  const emitted = releasePhase.next(state, CONFIGURED);
+  assert.deepEqual(emitted.command, ['git', '-C', resolve(state.intent.repo.path), 'worktree', 'remove', '/w']);
+});
+
+test('confirm (council r1): only (a) confirms and (d) declines; any other key is refused, the confirm re-opened and the phase kept at preapproval', (t) => {
+  const state = run(t);
+  fileTouch(state, testAnchor);
+  answerTouch(state, testAnchor, { key: 'c', text: 'only the parser' });
+  authorGrant(state, testAnchor, { merge: true, release: false, budgetUsd: 5, scope: 'only the parser' });
+  const confirm = fileTouch(state, testAnchor);
+  // The signer refuses a key outside the ask, so only an edit to state.json
+  // can store one: the confirm marked answered with key b.
+  Object.assign(confirm, { status: 'answered', answer: { key: 'b', text: null, by: 'operator:dogan', answeredAt: new Date(T0).toISOString(), source: 'spine' } });
+  const d = testDeps({ ...IO, readAnchor: testAnchor });
+  const outcome = pre.record(state, { kind: 'wait', step: 'touch', touch: { n: confirm.n } }, {}, d);
+  assert.equal(state.phase, 'preapproval');
+  assert.equal(state.authority.confirmTouch, null);
+  assert.deepEqual([confirm.status, confirm.answer], ['open', null]);
+  assert.match(confirm.refusal, /only \(a\) confirms and \(d\) declines/);
+  assert.match(outcome?.refused ?? '', /only \(a\) confirms/);
+});
+
+test('display (council r1): configured, the handoff prints the verified authority, never state.json\'s; without the anchor reader it says the values are a cached display', (t) => {
+  const state = run(t, { phase: 'build' });
+  approved(state, { budgetUsd: 10 });
+  Object.assign(state.authority, { merge: true, release: true, budgetUsd: 100 });
+  const rotation = { attempt: 1, from: 1, to: 2, at: new Date(T0).toISOString(), why: 'context', caller: { pane: null }, pendingId: null };
+  const line = (text) => /^- Authority: .*$/m.exec(text)[0];
+  assert.match(line(handoffText(state, rotation, CONFIGURED)), /^- Authority: merge true, release false, budget \$10\.00 .*\(proof: verified ••••\S{8} epoch \d+\)$/);
+  assert.match(line(handoffText(state, rotation, {})), /^- Authority: merge true, release true, budget \$100\.00 .*\(proof: verified ••••\S{8} epoch \d+\) \(cached display; acts use the signed grant\)$/);
+});
+
+test('unknown default branch (council r1): the grant carries the literal "(unknown)" and its prose says (unknown), never main', (t) => {
+  const state = run(t);
+  state.intent.repo.defaultBranch = null;
+  const touch = fileTouch(state, testAnchor);
+  assert.equal(touch.grants.a.repo.defaultBranch, '(unknown)');
+  assert.match(touch.options[0].consequence, /^Merge each PR to example\/scratch \(unknown\): yes, /);
 });
