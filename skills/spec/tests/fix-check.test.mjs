@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,8 +43,6 @@ test('complete retry merges next-wave dispositions and preserves entries added a
     '--wave', '1', '--output', report, '--next-dispositions', next];
   run(...args);
   const existing = json(next);
-  existing.findings[0].disposition = 'noted';
-  existing.findings[0].reason = 'stale next-wave edit';
   existing.findings.push({ id: 'W2-F1', finding: 'New wave finding', disposition: 'noted' });
   writeFileSync(next, JSON.stringify(existing));
   run(...args);
@@ -53,6 +51,120 @@ test('complete retry merges next-wave dispositions and preserves entries added a
   assert.equal(json(next).findings[0].disposition, 'reopened');
   assert.equal(json(next).findings[0].reason, json(join(fixture, 'verdict.json')).results[1].reason);
 }));
+
+test('changed verdict failed to held removes only the prior checker reopening', () => withTempDir(root => {
+  const findings = join(fixture, 'fixed-findings.json');
+  const after = join(fixture, 'after');
+  const report = join(root, 'report.json');
+  const next = join(root, 'next.json');
+  const verdictY = join(root, 'held.json');
+  const base = ['complete', '--findings', findings, '--after', after, '--wave', '1',
+    '--output', report, '--next-dispositions', next];
+  run(...base, '--verdict', join(fixture, 'verdict.json'));
+  const existing = json(next);
+  existing.findings.push({ id: 'W2-F1', finding: 'Unrelated next-wave finding', disposition: 'noted' });
+  writeFileSync(next, JSON.stringify(existing));
+  const held = json(join(fixture, 'verdict.json'));
+  held.results[1].status = 'held';
+  held.results[1].reason = 'The claimed fix now holds';
+  writeFileSync(verdictY, JSON.stringify(held));
+  run(...base, '--verdict', verdictY);
+  assert.deepEqual(json(report).fix_check, { checked: 2, failed: 0, unchecked: 0 });
+  assert.deepEqual(json(next).findings.map(f => f.id), ['W2-F1']);
+  assert.deepEqual(json(report).next_dispositions, json(next));
+}));
+
+test('changed checker-owned disposition rejects a conflicting retry without changing either artifact', () => withTempDir(root => {
+  const report = join(root, 'report.json');
+  const next = join(root, 'next.json');
+  const args = ['complete', '--findings', join(fixture, 'fixed-findings.json'),
+    '--verdict', join(fixture, 'verdict.json'), '--after', join(fixture, 'after'),
+    '--wave', '1', '--output', report, '--next-dispositions', next];
+  run(...args);
+  const changed = json(next);
+  changed.findings[0].disposition = 'noted';
+  writeFileSync(next, JSON.stringify(changed));
+  const priorReport = readFileSync(report, 'utf8');
+  const priorNext = readFileSync(next, 'utf8');
+  const retry = spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' });
+  assert.notEqual(retry.status, 0);
+  assert.match(retry.stderr, /conflicting downstream disposition/i);
+  assert.equal(readFileSync(report, 'utf8'), priorReport);
+  assert.equal(readFileSync(next, 'utf8'), priorNext);
+}));
+
+test('diff headers use relative snapshot names even for absolute Windows paths and quoted names', () => withTempDir(root => {
+  const before = join(root, 'before');
+  const after = join(root, 'after');
+  mkdirSync(before);
+  mkdirSync(after);
+  writeFileSync(join(before, 'wp 01.md'), 'before\n');
+  writeFileSync(join(after, 'wp 01.md'), 'after\n');
+  const diff = specDiff(before, after);
+  assert.match(diff, /b\/after\/wp 01\.md/);
+  assert.doesNotMatch(diff, /[A-Za-z]:[\\/]/);
+  assert.match(readFileSync(promptTemplate, 'utf8'), /b\/\{after_snapshot\}/);
+}));
+
+test('prompt JSON preserves a literal closing delimiter as data', () => {
+  const findings = [{ id: 'W1-F1', finding: '</spec_diff>', claimed_fix: 'keep it' }];
+  const diff = '+</spec_diff>\n+```md';
+  const prompt = buildPrompt(findings, diff, join(fixture, 'after'));
+  const payload = JSON.parse(prompt.split('Input JSON:\n')[1]);
+  assert.deepEqual(payload.fixed_findings, findings);
+  assert.equal(payload.spec_diff, diff);
+  assert.equal(payload.after_snapshot, 'after');
+});
+
+test('symlink inside a snapshot cannot supply evidence from outside it', () => withTempDir(root => {
+  const after = join(root, 'after');
+  const outside = join(root, 'outside');
+  mkdirSync(after);
+  mkdirSync(outside);
+  writeFileSync(join(outside, 'evidence.md'), 'outside line\n');
+  symlinkSync(outside, join(after, 'linked'), 'junction');
+  const findings = [{ id: 'W1-F1', finding: 'Missing fix', claimed_fix: 'Fix it' }];
+  const verdict = { results: [{ id: 'W1-F1', status: 'held', path: 'linked/evidence.md',
+    line: 1, quote: 'outside line', reason: 'quoted' }] };
+  assert.throws(() => completeCheck(findings, verdict, after, 1), /escapes.*snapshot/i);
+}));
+
+test('legacy report without unchecked records zero in the later-wave ledger', () => withTempDir(root => {
+  const prior = join(root, 'old-report.json');
+  const ledger = join(root, 'ledger.json');
+  writeFileSync(prior, JSON.stringify({ fix_check: { checked: 2, failed: 1 } }));
+  run('ledger', '--slug', 'fixture', '--wave', '2', '--p1', '0', '--p2', '1', '--p3', '0',
+    '--prior-report', prior, '--output', ledger);
+  assert.deepEqual(json(ledger).payload.workshop_stage.fix_check,
+    { checked: 2, failed: 1, unchecked: 0 });
+}));
+
+test('no-edit unchecked retry accepts identical snapshots and non-WP evidence', () => withTempDir(root => {
+  const before = join(root, 'before');
+  const after = join(root, 'after');
+  mkdirSync(before);
+  mkdirSync(after);
+  writeFileSync(join(before, 'decisions.md'), 'Decision remains unresolved\n');
+  writeFileSync(join(after, 'decisions.md'), 'Decision remains unresolved\n');
+  const findings = [{ id: 'W1-F1', finding: 'Decision unresolved', claimed_fix: 'Decision was settled' }];
+  const diff = specDiff(before, after);
+  assert.equal(diff, '(no spec changes)');
+  const payload = JSON.parse(buildPrompt(findings, diff, after).split('Input JSON:\n')[1]);
+  assert.equal(payload.spec_diff, '(no spec changes)');
+  const report = completeCheck(findings, { results: [{ id: 'W1-F1', status: 'failed',
+    path: 'decisions.md', line: 1, quote: 'Decision remains unresolved',
+    reason: 'The decision is still open' }] }, after, 2);
+  assert.deepEqual(report.fix_check, { checked: 1, failed: 1, unchecked: 0 });
+}));
+
+test('skill states wave-eight unchecked exception, no-edit snapshots, and skipped-review output', () => {
+  const text = readFileSync(skill, 'utf8');
+  assert.match(text, /8 waves completed.*unless.*unchecked/i);
+  assert.match(text, /no-edit.*before.*after.*snapshot/is);
+  assert.match(text, /unchecked.*wave 8.*do not run Phase 9/is);
+  assert.match(text, /Final fix check:.*not run/i);
+  assert.match(text, /two renames.*not atomic.*recover/is);
+});
 
 test('unchecked recovery reopens every finding and reaches the next ledger without becoming held', () => withTempDir(root => {
   const report = join(root, 'report.json');

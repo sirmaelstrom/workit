@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Assemble a wave's fix check and turn its verdict into next-wave dispositions and ledger data.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep, win32 } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 
 const TEMPLATE = fileURLToPath(new URL('../reference/fix-check-prompt.md', import.meta.url));
 const STATUSES = new Set(['held', 'failed', 'partial']);
@@ -30,8 +31,11 @@ export function validateFindings(findings) {
 }
 
 export function specDiff(beforeDir, afterDir) {
-  const result = spawnSync('git', ['diff', '--no-index', '--no-color', '--no-ext-diff', '--no-textconv', '--', beforeDir, afterDir], {
-    encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
+  const before = resolve(beforeDir);
+  const after = resolve(afterDir);
+  if (dirname(before) !== dirname(after)) throw new Error('before and after snapshots must be siblings');
+  const result = spawnSync('git', ['diff', '--no-index', '--no-color', '--no-ext-diff', '--no-textconv', '--', basename(before), basename(after)], {
+    cwd: dirname(before), encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
   });
   if (result.error || ![0, 1].includes(result.status)) {
     throw new Error(`git diff --no-index failed: ${result.error?.message ?? result.stderr}`);
@@ -45,8 +49,11 @@ export function buildPrompt(findings, diff, afterDir, template = readFileSync(TE
     '{fixed_findings}': JSON.stringify(findings, null, 2),
     '{spec_diff}': diff,
     '{after_dir}': afterDir,
+    '{after_snapshot}': basename(resolve(afterDir)),
+    '{payload_json}': JSON.stringify({ fixed_findings: findings, spec_diff: diff,
+      after_dir: afterDir, after_snapshot: basename(resolve(afterDir)) }, null, 2),
   };
-  return template.replace(/\{fixed_findings\}|\{spec_diff\}|\{after_dir\}/g, slot => slots[slot]);
+  return template.replace(/\{fixed_findings\}|\{spec_diff\}|\{after_dir\}|\{after_snapshot\}|\{payload_json\}/g, slot => slots[slot]);
 }
 
 function quotedPostFixLine(result, afterDir) {
@@ -60,6 +67,12 @@ function quotedPostFixLine(result, afterDir) {
   if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel) || win32.isAbsolute(rel)
     || path.split(/[\\/]/).includes('..')) {
     throw new Error(`result ${result.id} path escapes post-fix spec directory`);
+  }
+  const realRoot = realpathSync(root);
+  const realFile = realpathSync(file);
+  const realRel = relative(realRoot, realFile);
+  if (!realRel || realRel === '..' || realRel.startsWith(`..${sep}`) || isAbsolute(realRel)) {
+    throw new Error(`result ${result.id} path escapes post-fix spec snapshot`);
   }
   if (!Number.isInteger(result.line) || result.line < 1) {
     throw new Error(`result ${result.id} line must be a positive integer`);
@@ -133,7 +146,7 @@ export function uncheckedCheck(findings, wave) {
   };
 }
 
-export function mergeDispositions(existing, incoming) {
+export function mergeDispositions(existing, incoming, previousReport = null) {
   if (existing == null) return incoming;
   if (existing?.wave !== incoming.wave || !Array.isArray(existing.findings)) {
     throw new Error('existing next-wave dispositions have an invalid wave or findings array');
@@ -144,7 +157,26 @@ export function mergeDispositions(existing, incoming) {
     if (merged.has(id)) throw new Error(`duplicate existing disposition id: ${id}`);
     merged.set(id, finding);
   }
-  for (const finding of incoming.findings) merged.set(finding.id, finding);
+  const ownedIds = new Set();
+  if (previousReport != null) {
+    if (previousReport.wave !== incoming.wave - 1 || !Array.isArray(previousReport.next_dispositions?.findings)) {
+      throw new Error('prior fix-check report has an invalid wave or dispositions');
+    }
+    for (const prior of previousReport.next_dispositions.findings) {
+      if (prior.reopened_from_wave !== previousReport.wave || !prior.fix_check_status) continue;
+      if (!isDeepStrictEqual(merged.get(prior.id), prior)) {
+        throw new Error(`conflicting downstream disposition for ${prior.id}`);
+      }
+      ownedIds.add(prior.id);
+      if (!incoming.findings.some(finding => finding.id === prior.id)) merged.delete(prior.id);
+    }
+  }
+  for (const finding of incoming.findings) {
+    if (merged.has(finding.id) && !ownedIds.has(finding.id)) {
+      throw new Error(`conflicting downstream disposition for ${finding.id}`);
+    }
+    merged.set(finding.id, finding);
+  }
   return { wave: incoming.wave, findings: [...merged.values()] };
 }
 
@@ -158,8 +190,9 @@ export function waveEvent(slug, wave, findings, priorCheck) {
   }
   if (wave === 1 && priorCheck != null) throw new Error('wave 1 has no prior fix check');
   if (wave > 1 && (priorCheck == null || !Number.isInteger(priorCheck.checked)
-    || !Number.isInteger(priorCheck.failed) || !Number.isInteger(priorCheck.unchecked)
-    || priorCheck.checked < 0 || priorCheck.failed < 0 || priorCheck.unchecked < 0
+    || !Number.isInteger(priorCheck.failed)
+    || (priorCheck.unchecked !== undefined && !Number.isInteger(priorCheck.unchecked))
+    || priorCheck.checked < 0 || priorCheck.failed < 0 || (priorCheck.unchecked ?? 0) < 0
     || priorCheck.checked < priorCheck.failed)) {
     throw new Error('later waves require valid prior fix_check counts');
   }
@@ -170,7 +203,7 @@ export function waveEvent(slug, wave, findings, priorCheck) {
     findings: { p1: findings.p1, p2: findings.p2, p3: findings.p3 },
   };
   if (wave > 1) stage.fix_check = {
-    checked: priorCheck.checked, failed: priorCheck.failed, unchecked: priorCheck.unchecked,
+    checked: priorCheck.checked, failed: priorCheck.failed, unchecked: priorCheck.unchecked ?? 0,
   };
   return {
     event_type: 'note',
@@ -218,7 +251,8 @@ function writeJson(path, value) {
 function writeReportPair(reportPath, nextPath, report) {
   if (resolve(reportPath) === resolve(nextPath)) throw new Error('report and next dispositions paths must differ');
   const existing = existsSync(nextPath) ? JSON.parse(readFileSync(nextPath, 'utf8')) : null;
-  const merged = mergeDispositions(existing, report.next_dispositions);
+  const previousReport = existsSync(reportPath) ? JSON.parse(readFileSync(reportPath, 'utf8')) : null;
+  const merged = mergeDispositions(existing, report.next_dispositions, previousReport);
   const complete = { ...report, next_dispositions: merged };
   // Validate and stage both artifacts before replacing either destination.
   const nextTemp = stageJson(nextPath, merged);

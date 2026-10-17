@@ -376,7 +376,7 @@ Launch an Opus sub-agent using the Agent tool (`model: opus`): the fresh-eyes ve
 
 After each wave:
 - Give each finding a stable id (`W{wave}-F{number}`). Record every finding in `{workshop_path}/reviews/refinement-wave-{N}-dispositions.json` with this shared shape: `{ "wave": N, "findings": [{ "id": "W1-F1", "finding": "original finding text", "disposition": "fixed | skipped | false_positive | noted | reopened", "claimed_fix": "what changed, when fixed" }] }`. Choose one disposition value per entry; `claimed_fix` is required for `fixed` and optional otherwise. A reopened entry also carries `reopened_from_wave`, `fix_check_status`, `reason`, and `evidence` when the checker supplied a quote. Keep these records across waves; do not rely on memory or the fresh-eyes prompt to carry dispositions. A reopened finding keeps its original id when fixed again: change its disposition to `fixed` and update `claimed_fix` in this wave's file.
-- Before changing spec files, copy the spec artifacts (`work-packages/`, `_orchestrator.md` within it, and any other spec file being changed) to `{workshop_path}/reviews/refinement-wave-{N}-before/`, preserving relative paths. After applying fixes, copy the same artifacts to `refinement-wave-{N}-after/`. These directories are the input to the fix-check diff.
+- For every check, copy the complete spec artifacts needed to verify the exported findings (`work-packages/`, `_orchestrator.md` within it, and any referenced non-WP spec files) to `{workshop_path}/reviews/refinement-wave-{N}-before/`, preserving relative paths. After applying fixes, copy the same artifacts to `refinement-wave-{N}-after/`. For a no-edit retry of an unchecked finding, create both before and after snapshots as identical copies of the current spec. These directories are the input to the fix-check diff; keep them as sibling directories.
 - **P1s:** Fix immediately. These are blockers — update the WP spec files directly.
 - **P2s:** Fix unless the fix would introduce more complexity than the ambiguity costs. Document skipped P2s.
 - **P3s:** Note but do not fix unless trivial. Accumulate across waves.
@@ -396,7 +396,9 @@ Launch a **separate Sonnet sub-agent** with that assembled prompt (`model: sonne
 node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" complete --findings "{workshop_path}/reviews/refinement-wave-{N}-fixed.json" --verdict "{workshop_path}/reviews/refinement-wave-{N}-fix-check-verdict.json" --after "{workshop_path}/reviews/refinement-wave-{N}-after" --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json" --next-dispositions "{workshop_path}/reviews/refinement-wave-{N+1}-dispositions.json"
 ```
 
-The script requires one `held | failed | partial` verdict per fixed finding and checks each quoted line against the post-fix spec. Quote validation proves the line exists at the stated path and number; Sonnet judges its relevance. A changed line is not required. `failed` and `partial` both count as failed checks. The script writes them as `reopened` entries in **the next wave's** `reviews/refinement-wave-{N+1}-dispositions.json`, with the original id, check status, reason, and evidence. A repeat `complete` merges by id, preserving unrelated entries already added to that file. At that wave, add new fresh-eyes findings and resolve reopened entries explicitly, even if the fresh-eyes reviewer does not repeat them. A `held` finding stays closed. A failed or partial check requires another wave unless the eight-wave force-convergence limit applies; report any still-open finding at that limit. If no fixes were claimed, skip Sonnet and run `node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" empty --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json"` so a subsequent wave records `checked: 0, failed: 0, unchecked: 0`.
+The script requires one `held | failed | partial` verdict per fixed finding and checks each quoted line against the post-fix spec. Quote validation proves the line exists at the stated path and number; Sonnet judges its relevance. A changed line is not required. `failed` and `partial` both count as failed checks. The script writes them as `reopened` entries in **the next wave's** `reviews/refinement-wave-{N+1}-dispositions.json`, with the original id, check status, reason, and evidence. A repeat `complete` reconciles this wave's checker-owned entries by id: a corrected `held` verdict removes its old reopening, and unrelated entries remain. If an existing checker-owned entry was edited by downstream work, the retry fails with a conflict; resolve that edit explicitly before retrying. At that wave, add new fresh-eyes findings and resolve reopened entries explicitly, even if the fresh-eyes reviewer does not repeat them. A `held` finding stays closed. A failed or partial check requires another wave unless the eight-wave force-convergence limit applies; report any still-open finding at that limit. If no fixes were claimed, skip Sonnet and run `node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" empty --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json"` so a subsequent wave records `checked: 0, failed: 0, unchecked: 0`.
+
+The report and next-wave dispositions are staged before replacement, but their two renames are not atomic together. After an I/O interruption, compare the report's `next_dispositions` with the next-wave file before using either. If they differ, stop; recover by restoring the prior checker-owned entries from the report while preserving downstream entries, resolve any conflicts, then rerun `complete` or `unchecked` with the saved inputs. Do not use mismatched artifacts for convergence.
 
 If Sonnet is unavailable, its JSON is invalid, or `complete` rejects the verdict, re-dispatch the same prompt at most **two** times (three attempts total). Reuse the same before/after snapshots and fixed-findings list. If both re-dispatches fail, record every fixed finding as `unchecked` rather than `held`:
 
@@ -404,7 +406,7 @@ If Sonnet is unavailable, its JSON is invalid, or `complete` rejects the verdict
 node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" unchecked --findings "{workshop_path}/reviews/refinement-wave-{N}-fixed.json" --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json" --next-dispositions "{workshop_path}/reviews/refinement-wave-{N+1}-dispositions.json"
 ```
 
-This records `fix_check: { checked: 0, failed: 0, unchecked: {fixed_count} }` and reopens every finding in the next wave's dispositions. At the next wave, include each unchecked finding in the `fixed` export under its original id and claimed fix even if no further edit was needed; the checker must return an actual verdict before it can close. An unchecked wave cannot count toward convergence. Run another wave even if fresh-eyes was clean. If this happens at wave 8, stop with an incomplete spec and report the unchecked findings; do not proceed to council. Missing evidence never becomes `held`.
+This records `fix_check: { checked: 0, failed: 0, unchecked: {fixed_count} }` and reopens every finding in the next wave's dispositions. At the next wave, include each unchecked finding in the `fixed` export under its original id and claimed fix even if no further edit was needed; the checker must return an actual verdict before it can close. An unchecked wave cannot count toward convergence. Run another wave even if fresh-eyes was clean. If unchecked remains at wave 8, stop with an incomplete spec and report the unchecked findings and final check counts; do not run Phase 9 or proceed to council. Missing evidence never becomes `held`.
 
 #### 7d. Convergence Check
 
@@ -417,7 +419,7 @@ After fixing, decide whether to run another wave. A failed or partial fix check 
 | Fix check returned `failed` or `partial` | Reopen each in the next wave's dispositions and run another wave |
 | Fix check is `unchecked` | Reopen every unchecked finding and run another wave; at wave 8 stop incomplete |
 | Wave returned P3s only or was clean | **Converged** — proceed to council |
-| 8 waves completed | **Force converge** — proceed to council regardless |
+| 8 waves completed | **Force converge** and proceed to council unless `fix_check.unchecked > 0`; then stop incomplete and report the unchecked findings |
 
 Track across waves: if wave N finds the same P2 that wave N-1 found and it was already evaluated and kept, that's not a new finding — it's convergence noise. Suppress it.
 
@@ -498,7 +500,7 @@ Present the completed spec summary:
 **Assumptions:** {every `[ASSUMPTION: …]` flag, one line each; required with `--preapproved`, where no gate shows them to a person}
 **Stack attack:** {with `--greenfield` only: D1's `Stack attack:` line, and `Spikes:` when they ran}
 **Review:** {review_level} — {N} fresh-eyes waves, {N} council lenses, {N} amendments applied
-**Final fix check:** {last wave's checked / failed / unchecked counts, including the terminal wave's check}
+**Final fix check:** {last wave's checked / failed / unchecked counts, including the terminal wave's check; `not run` for light or none}
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 **Cost:** {total $ and tokens, from cost-report}
 
