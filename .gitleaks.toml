@@ -12,3 +12,10 @@ description = "Synthetic placeholder values used in eval fixtures and recorded e
 regexes = [
   '''987654321098765432''',
 ]
+# The operator-proof vectors (credential ids, SPKI keys, signatures) and the JWK
+# keys in test-signer.mjs are synthetic test keys, generated for the tests and
+# trusted by no anchor outside them.
+paths = [
+  '''skills/_shared/operator-proof/operator-proof\.vectors\.json''',
+  '''skills/_shared/operator-proof/test-signer\.mjs''',
+]

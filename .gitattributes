@@ -3,3 +3,6 @@
 # says. scripts/fixtures-eol.test.mjs fails when a fixture checks out with CR.
 **/__fixtures__/** text eol=lf
 **/fixtures/** text eol=lf
+# The operator-proof module is pinned by its hash and copied byte for byte into
+# other repos; its vectors are shared the same way.
+skills/_shared/operator-proof/** text eol=lf
