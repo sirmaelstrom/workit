@@ -1,0 +1,12 @@
+[
+  {
+    "id": "W1-F1",
+    "finding": "The timeout path has no retry verification.",
+    "claimed_fix": "Add retry verification to the WP."
+  },
+  {
+    "id": "W1-F2",
+    "finding": "The session id is mutable across retries.",
+    "claimed_fix": "Require an immutable session id."
+  }
+]

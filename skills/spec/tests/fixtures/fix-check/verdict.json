@@ -1,0 +1,20 @@
+{
+  "results": [
+    {
+      "id": "W1-F1",
+      "status": "held",
+      "path": "work-packages/wp-01.md",
+      "line": 2,
+      "quote": "- Verify timeout and retry",
+      "reason": "The retry verification appears in the post-fix WP."
+    },
+    {
+      "id": "W1-F2",
+      "status": "failed",
+      "path": "work-packages/wp-01.md",
+      "line": 3,
+      "quote": "- Use mutable session id",
+      "reason": "The unchanged line still requires a mutable session id."
+    }
+  ]
+}
