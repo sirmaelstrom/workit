@@ -146,8 +146,84 @@ standing cadence: the treatment scanner is free and continuous; a fleet pull is
 justified by a semantic question (new-label emergence, a scanner anomaly, a
 model-family change), not by an unaudited-session count.
 
+## Lesson scan
+
+`lesson-scan` measures whether a memory's named mistake recurs when its situation
+arises. It reads live Claude Code transcripts and auto-memory files. It does not
+run the failure-audit fleet or change any memory.
+
+```
+node ${CLAUDE_PLUGIN_ROOT}/skills/failure-audit/scripts/lesson-scan.mjs [--memory-dir D:/Development/data/auto-memory] [--corpus-dir C:/Users/<user>/.claude/projects] [--data-repo D:/Development/data] [--out <output-prefix>]
+```
+
+Without `--out`, stdout contains JSON followed by a Markdown table. With it,
+the script writes `<output-prefix>.json` and `<output-prefix>.md`. The table
+gives exposed and mistake session counts on each side of treatment, the expected
+after mistakes, both rates, and the verdict. The JSON also lists each
+post-treatment session's delivery status.
+
+A trap memory needs both fields in YAML frontmatter:
+
+```yaml
+situation: {regex: "OPPORTUNITY_PATTERN", scope: call}
+mistake: {regex: "MISTAKE_PATTERN", scope: result}
+```
+
+Each field must use this exact one-line map, in `regex` then `scope` order.
+`regex` is a JSON-quoted JavaScript regular expression source (double backslashes
+inside the quoted string); `scope` is `call`, `result`, or `user`. A `call` tests
+the tool name and input as JSON, `result` tests tool-result text, and `user`
+tests typed user text. Invalid or duplicate fields stop the scan with a file
+and line error. A memory lacking either field is reported as `not-trap`.
+Regex authors must choose the situation independently of the mistake; the
+scanner treats a mistake hit as exposure even if the situation regex misses.
+
+The corpus is each project's main `*.jsonl` under `~/.claude/projects`, with
+`<session>/subagents/*.jsonl` rolled into that main session. Hits split by
+their own timestamps at treatment time, so one session can appear in both
+windows. Treatment is the origin session's first transcript timestamp when
+`originSessionId` resolves, or midnight UTC on the memory file's git first-add
+day. The origin session is excluded from both windows: it supplied the lesson,
+so its mistake is not a recurrence. If neither treatment time is known, that
+memory is `untested` with reason `no-treatment-time`; its window counts and
+rates are unavailable. The scan continues with other memories. Sessions with
+no timestamp are skipped.
+
+The scanner excludes council seats when any record's `cwd` has a
+`council-seats` path segment. It excludes failure-audit fleet seats when their
+first user prompt contains the fleet instruction opener or
+`fleet-instructions.md`. It excludes SessionEnd summarizers when their first
+user prompt contains `SessionEnd` near `summarize` or `summarise`. Any `Read`
+result for a `.md` or `.jsonl` file and `git diff/show` results for files or
+directories under the memory directory are quotation: the producing call and
+result cannot create an exposure or mistake hit. The same applies to `rg`,
+`grep`, `Select-String`, or a Grep tool call searching transcripts under the
+corpus directory or files under the memory directory. Such a search excludes
+the whole session, including other result hits in it. Explicit paths, bare
+relative directory names, and omitted targets resolve from the record's cwd
+after any preceding top-level `cd` or `git -C` (for git). A Grep call with no
+`path` searches the record cwd; subagent records without `cwd` inherit their
+parent session's cwd. If a preceding directory change is inside a
+pipeline, subshell, or branch, the effective cwd is ambiguous and the session
+is excluded as quotation. The JSON reports exclusion counts.
+
+Delivery is `body-read` when the session calls `Read` on that memory file,
+otherwise `index-loaded` when an `instructions` attachment has an `AutoMem`
+entry for the directory's `MEMORY.md` and that index links the memory directly
+or through a hub file, otherwise `unknown`. All sessions before
+2026-09-01 are `unknown` because the archive has no dependable index-load
+record for that period. Delivery describes observation, not proof that the
+agent used the memory.
+
+Rates divide mistake sessions by exposed sessions. Fewer than three exposed
+sessions after treatment, or fewer than two expected mistakes at the before
+rate, is `untested`. A zero before rate has zero expected mistakes and remains
+`untested` under this power rule. Otherwise the verdict is `worse` at ≥1.5×
+the before rate with ≥2 after mistakes, `reduced` at ≤0.5× with ≥2 before
+mistakes, or `no-change`. No verdict is an admission or prune gate.
+
 ## Out of scope (separate owed work — don't fold in)
 
 Codex-session distribution-diff and Dogan-substrate slicing are quest e8e289e1
-run 2. The inverse per-lesson join (zero-hit lessons as demote candidates)
-belongs to the memory-index prune quest.
+run 2. A policy that demotes zero-hit lessons belongs to the memory-index prune
+quest; this scan supplies counts, not a demotion decision.
