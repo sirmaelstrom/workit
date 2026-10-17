@@ -144,7 +144,9 @@ and the press writes an `answered` receipt that supersedes the ask (quest
 `latestReceipt.answer` (`key` / `text`), never assume it from the quest having
 returned to the frontier. A later receipt hides the answer there, so before
 concluding there is none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver with the
-quest uuid and an empty tag: it searches every receipt for the newest `answered`.
+quest uuid and your ask's question, cut before any quote mark, as the tag. It
+searches every receipt; the result is your answer only if its `question` is
+your ask's, verbatim.
 
 Work-state and attention are orthogonal: `dismissed` is not `done`, and a quest
 you finished is not closed until `workState` says so.

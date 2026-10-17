@@ -204,8 +204,10 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    `by: 'operator:dogan'` or `'operator:t3'`) IS the go, read back with a tool
    call, never inferred from the quest having left WAITING. A later receipt
    hides it there: before concluding there is none, run the
-   `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and an empty tag,
-   which searches every receipt. Otherwise an operator message in-session,
+   `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and the ask's
+   question, cut before any quote mark, as the tag. It searches every receipt;
+   the result is the go only if its `question` is the ask's, verbatim.
+   Otherwise an operator message in-session,
    or a receipt/resolution read back via a tool call. An operator answer given in
    CHAT is recorded as a conductor receipt citing it — never posted through the
    Dogan's answer route, which stamps the operator's identity.
