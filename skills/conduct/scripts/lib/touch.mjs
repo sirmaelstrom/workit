@@ -3,7 +3,7 @@
 // it, a file pair under touches/ answered by `conduct.mjs answer` from a TTY.
 import { join } from 'node:path';
 import { ConductError, appendEvent } from './state.mjs';
-import { OperatorProofError, REASONS, verifyAnswerProof } from '../../../_shared/operator-proof/operator-proof.mjs';
+import { OperatorProofError, REASONS, canonical, verifyAnswerProof } from '../../../_shared/operator-proof/operator-proof.mjs';
 
 export const READ_BACK_WAIT_MS = 300000;
 // spine_receipt refuses a question longer than this.
@@ -221,14 +221,47 @@ export function operatorAnchor(deps) {
   }
 }
 
+const sameJson = (x, y) => {
+  try {
+    return canonical(x) === canonical(y);
+  } catch {
+    return false;
+  }
+};
+
+// Is the signed question and ask exactly what this touch filed (touch.filed),
+// and are the options conduct reads the key with still the filed ones?
+function matchesFiling(touch, signed) {
+  const filed = touch.filed;
+  return filed != null && signed?.question === filed.question && sameJson(signed?.ask, filed.ask)
+    && sameJson({ options: touch.options, allowFreeText: touch.allowFreeText }, filed.ask);
+}
+
 // Did the operator's passkey sign this answer to the ask this touch filed?
 // `signed` holds the receipt's raw values; the expected ask id is the touch's
 // own filing (touch.receiptId), never the answer's unsigned askReceiptId.
+// Configured, a valid or absent proof also needs the signed question and ask
+// to be the filed ones (filed_mismatch): a proof binds the receipt's ask, and
+// conduct acts on its own options.
 function verifySigned(state, touch, signed, anchor) {
-  return verifyAnswerProof({
+  const verdict = verifyAnswerProof({
     answer: signed?.answer, question: signed?.question, ask: signed?.ask,
     questId: state.intent.anchor, askReceiptId: touch.receiptId, anchor,
   });
+  if (!anchor.configured || !(verdict.ok || verdict.reason === REASONS.proof_absent) || matchesFiling(touch, signed)) return verdict;
+  return { ...verdict, ok: false, mode: 'refused', reason: 'filed_mismatch' };
+}
+
+// An operator's typed answer with no key is option (c), when the touch has it.
+function optionKey(touch, answer) {
+  if (!answer.key && answer.text && touch.allowFreeText && touch.options.some((option) => option.key === 'c')) return 'c';
+  return answer.key;
+}
+
+function refuse(touch, refusal) {
+  touch.status = 'open';
+  touch.refusal = refusal;
+  delete touch.awaiting;
 }
 
 // Refuses (exit 3) an answer that is not the operator's: a spine answer must
@@ -247,13 +280,19 @@ export function acceptAnswer(state, touch, answer, deps) {
   }
   const anchor = operatorAnchor(deps);
   if (answer.source !== 'spine' && anchor.configured) {
-    throw new ConductError(3, 'operator:tty is not authority while an operator passkey is configured; answer on the phone');
+    throw new ConductError(3, 'operator:tty is not authority while an operator passkey is configured; this core-only run cannot be approved: restart it with --adapter spine so its touches can be signed on the phone');
   }
   const signed = answer.signed ?? null;
   const verdict = verifySigned(state, touch, signed, anchor);
   if (!verdict.ok) throw new ConductError(3, `${touch.tag}: proof ${verdict.reason}`);
+  // A verified answer is stored as signed (key and text), never from the fields beside it.
+  const key = verdict.mode === 'verified' ? optionKey(touch, signed.answer) : answer.key;
+  const text = verdict.mode === 'verified' ? signed.answer.text ?? null : answer.text ?? null;
+  if (!touch.options.some((option) => option.key === key)) {
+    throw new ConductError(3, `${touch.tag}: answer key ${key} is not one of ${touch.options.map((option) => option.key).join(', ')}`);
+  }
   touch.answer = {
-    key: answer.key, text: answer.text ?? null, by: answer.by, answeredAt: answer.answeredAt,
+    key, text, by: answer.by, answeredAt: answer.answeredAt,
     source: answer.source, receiptId: answer.receiptId ?? null,
     askReceiptId: verdict.mode === 'verified' ? touch.receiptId : answer.askReceiptId ?? null, proof: answer.proof ?? null,
     proofMode: verdict.mode, credentialId: verdict.credentialId, anchorSha256: verdict.anchorSha256, epoch: verdict.epoch, signed,
@@ -290,15 +329,22 @@ export function recordTouch(state, touch, action, result, deps) {
     const failure = spineAckFailure(action, result);
     if (failure) throw new ConductError(2, `spine_receipt did not file ${touch.tag}: ${failure}`);
     touch.receiptId = result.id;
+    // What this filing handed out, as the emitted action carried it: a
+    // configured read-back accepts a proof over exactly these.
+    touch.filed = JSON.parse(JSON.stringify({ question: action.args.question, ask: action.args.ask }));
     touch.filings += 1;
     touch.status = 'filed';
     touch.refusal = null;
+    delete touch.awaiting;
     return;
   }
   // The read-back: accept only an answered receipt to THIS run's filing. The
   // answer adapter's lookup finds it in any receipt; spine_quest shows only
   // the latest, so a later receipt on the anchor hides it there.
   const latest = action.kind === 'shell' ? answerLookup(action, result) : result?.quests?.[0]?.latestReceipt;
+  // Read before the unanswered return: an unreadable anchor stops the run
+  // whether or not an answer has landed.
+  const anchor = operatorAnchor(deps);
   const answered = latest?.outcome === 'answered' && latest.answer
     && typeof latest.question === 'string' && latest.question.startsWith(correlation(state, touch));
   if (!answered) {
@@ -308,7 +354,7 @@ export function recordTouch(state, touch, action, result, deps) {
   // The receipt's raw values, before any key mapping: the proof is checked
   // against them, and a later act re-verifies them from touch.answer.signed.
   const signed = { answer: latest.answer, question: latest.question, ask: latest.ask };
-  const verdict = verifySigned(state, touch, signed, operatorAnchor(deps));
+  const verdict = verifySigned(state, touch, signed, anchor);
   if (verdict.reason === REASONS.ask_missing) {
     throw new ConductError(2, action.kind === 'shell'
       ? 'the answer adapter must select the ask column (see conduct/SKILL.md)'
@@ -322,8 +368,7 @@ export function recordTouch(state, touch, action, result, deps) {
     return;
   }
   if (!verdict.ok) {
-    touch.status = 'open';
-    touch.refusal = `proof ${verdict.reason}`;
+    refuse(touch, `proof ${verdict.reason}`);
     return { refused: touch.refusal };
   }
   const answer = {
@@ -334,17 +379,14 @@ export function recordTouch(state, touch, action, result, deps) {
   // Not the operator's: refused as an answer (no authority), and the touch is
   // re-filed so it stays answerable. The caller exits 3 for this read.
   if (!String(answer.by ?? '').startsWith('operator:')) {
-    touch.status = 'open';
-    touch.refusal = `the answer by ${answer.by ?? 'nobody'} is not operator-attributed`;
+    refuse(touch, `the answer by ${answer.by ?? 'nobody'} is not operator-attributed`);
     return { refused: touch.refusal };
   }
-  // An operator's typed answer with no key is option (c), when the touch has it.
-  if (!answer.key && answer.text && touch.allowFreeText && touch.options.some((option) => option.key === 'c')) answer.key = 'c';
+  answer.key = optionKey(touch, answer);
   if (!touch.options.some((option) => option.key === answer.key)) {
     // The operator answered, but not with a usable option: re-file the touch
     // saying why, so it stays answerable.
-    touch.status = 'open';
-    touch.refusal = `answer ${answer.key ?? '(no key)'} is not one of ${touch.options.map((option) => option.key).join(', ')}`;
+    refuse(touch, `answer ${answer.key ?? '(no key)'} is not one of ${touch.options.map((option) => option.key).join(', ')}`);
     return;
   }
   acceptAnswer(state, touch, answer, deps);

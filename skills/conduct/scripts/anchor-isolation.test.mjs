@@ -1,9 +1,8 @@
 // No conduct test may reach the operator's real passkey anchor. Every call
 // that can read it (runConduct, recordTouch, acceptAnswer, awaitAnswer) passes
-// deps with an explicit readAnchor, checked here per call: the call's argument
-// text names `readAnchor` or `testDeps(`, or its deps argument is an
-// identifier bound in the same file to an object literal naming readAnchor or
-// to a testDeps( call.
+// deps with an explicit readAnchor, checked here per call on its deps argument
+// alone: a testDeps( call, an object literal with a readAnchor member, or an
+// identifier whose nearest binding in the same file is one of those.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -116,20 +115,23 @@ function callArgs(src, masked, open) {
   return args;
 }
 
-// The text of the object literal or call bound to `name` in this file, for each binding.
-function bindings(src, masked, name) {
-  const found = [];
-  const binding = new RegExp(`\\b(?:const|let|var)\\s+${name}\\s*=\\s*`, 'g');
-  for (const match of masked.matchAll(binding)) {
-    const start = match.index + match[0].length;
-    if (masked.startsWith('testDeps(', start)) found.push('testDeps(');
-    else if (masked[start] === '{') found.push(`{${callArgs(src, masked, start).join(',')}}`);
-  }
-  return found;
+// Does this masked expression supply a reader: a testDeps( call, or an object
+// literal with a top-level readAnchor member (key, shorthand or method)?
+function suppliesReader(expr) {
+  if (expr.startsWith('testDeps(')) return true;
+  return expr.startsWith('{') && callArgs(expr, expr, 0).some((member) => /^(?:async\s+)?readAnchor\s*(?::|\(|$)/.test(member));
 }
 
-// Every gated call in `src` that does not carry an explicit readAnchor, as
-// "line N: name(...)". `calls` counts the gated calls seen.
+// The masked expression bound to `name` by its nearest `const|let|var` before `at`, or null.
+function binding(masked, name, at) {
+  const found = [...masked.slice(0, at).matchAll(new RegExp(`\\b(?:const|let|var)\\s+${name.replaceAll('$', '\\$')}\\s*=\\s*`, 'g'))].at(-1);
+  return found ? masked.slice(found.index + found[0].length, at) : null;
+}
+
+// Every gated call in `src` whose deps argument does not supply readAnchor,
+// as "line N: name(...)". Only the deps argument counts, read from the masked
+// source (a name in a string or in another argument is no reader); an
+// identifier is followed to its nearest binding. `calls` counts the gated calls seen.
 export function violations(src) {
   const masked = mask(src);
   const bad = [];
@@ -138,13 +140,12 @@ export function violations(src) {
     if (/\bfunction\s+$/.test(masked.slice(Math.max(0, match.index - 12), match.index))) continue;
     calls += 1;
     const name = match[1];
-    const args = callArgs(src, masked, match.index + match[0].length - 1);
-    const text = args.join(', ');
-    if (text.includes('readAnchor') || text.includes('testDeps(')) continue;
-    const deps = args[GATED[name]];
+    const open = match.index + match[0].length - 1;
+    const deps = callArgs(masked, masked, open)[GATED[name]];
+    const bound = deps !== undefined && /^[A-Za-z_$][\w$]*$/.test(deps) ? binding(masked, deps, match.index) : null;
+    if (deps !== undefined && (suppliesReader(deps) || (bound !== null && suppliesReader(bound)))) continue;
+    const text = callArgs(src, masked, open).join(', ');
     const line = src.slice(0, match.index).split('\n').length;
-    if (deps !== undefined && /^[A-Za-z_$][\w$]*$/.test(deps)
-      && bindings(src, masked, deps).some((bound) => bound === 'testDeps(' || bound.includes('readAnchor'))) continue;
     bad.push(`line ${line}: ${name}(${text.length > 80 ? `${text.slice(0, 80)}…` : text})`);
   }
   return { calls, bad };

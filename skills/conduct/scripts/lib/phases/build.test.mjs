@@ -102,7 +102,8 @@ function harness(t, opts = {}) {
   };
   h.head = (id) => h.heads[id] ?? sha('a', num(id));
   h.bump = (id) => (h.heads[id] = sha('c', (h.seqSha += 1) * 100 + num(id)));
-  h.deps = {
+  // build.record reaches recordTouch with these deps, so they carry the test reader.
+  h.deps = testDeps({
     exec: (program, args, options = {}) => fakeExec(h, program, args, options),
     read: (path) => readFileSync(path, 'utf8'), write: (path, value) => writeFileSync(path, value), exists: existsSync,
     mkdir: (path) => mkdirSync(path, { recursive: true }), rename: renameSync, append: appendFileSync, list: readdirSync,
@@ -112,7 +113,7 @@ function harness(t, opts = {}) {
     resolveCodex: () => 'codex', pluginRoot,
     spawnDetached: (program, args, options) => fakeSpawn(h, options),
     pidAlive: (pid) => (h.lifeByPid.get(pid) ?? 0) > 0,
-  };
+  });
   h.overrides = () => ({ ...h.deps, importModule: (rel) => (rel === 'lib/phases/release.mjs' ? RELEASE_STUB : import(pathToFileURL(join(SCRIPTS, rel)).href)) });
   h.current = () => (h.disk ? loadState(runDir, h.deps) : h.state);
   h.wp = (id) => h.current().wps.find((wp) => wp.id === id);
