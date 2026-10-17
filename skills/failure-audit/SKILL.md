@@ -194,13 +194,18 @@ The scanner excludes council seats when any record's `cwd` has a
 first user prompt contains the fleet instruction opener or
 `fleet-instructions.md`. It excludes SessionEnd summarizers when their first
 user prompt contains `SessionEnd` near `summarize` or `summarise`. Any `Read`
-result for a `.md` or `.jsonl` file and `git diff/show` results for files under
-the memory directory are quotation: the producing call and result cannot create
-an exposure or mistake hit. The same applies to `rg`, `grep`, `Select-String`,
-or a Grep tool call searching transcripts under the corpus directory or files
-under the memory directory. Such a search excludes the whole session, including
-other result hits in it. Relative paths resolve from the record's cwd or a
-preceding `cd` in the command. The JSON reports exclusion counts.
+result for a `.md` or `.jsonl` file and `git diff/show` results for files or
+directories under the memory directory are quotation: the producing call and
+result cannot create an exposure or mistake hit. The same applies to `rg`,
+`grep`, `Select-String`, or a Grep tool call searching transcripts under the
+corpus directory or files under the memory directory. Such a search excludes
+the whole session, including other result hits in it. Explicit paths, bare
+relative directory names, and omitted targets resolve from the record's cwd
+after any preceding top-level `cd` or `git -C` (for git). A Grep call with no
+`path` searches the record cwd; subagent records without `cwd` inherit their
+parent session's cwd. If a preceding directory change is inside a
+pipeline, subshell, or branch, the effective cwd is ambiguous and the session
+is excluded as quotation. The JSON reports exclusion counts.
 
 Delivery is `body-read` when the session calls `Read` on that memory file,
 otherwise `index-loaded` when an `instructions` attachment has an `AutoMem`

@@ -298,6 +298,112 @@ test('a search after an in-command cd excludes the quotation session', (t) => {
   assert.equal(report.memories[0].sessions.some((s) => s.id === 'analysis'), false);
 });
 
+test('bare relative directory search target excludes the whole quotation session', (t) => {
+  const f = fixture(t);
+  f.memory('bare-search', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  f.session('bare', '2026-09-11', [f.call('rg ERROR auto-memory', 'search'), f.call('run', 'other')], {
+    cwd: f.root,
+    extra: [{ type: 'user', message: { content: [
+      { type: 'tool_result', tool_use_id: 'search', content: 'OPPORTUNITY ERROR' },
+      { type: 'tool_result', tool_use_id: 'other', content: 'OPPORTUNITY ERROR' },
+    ] } }],
+  });
+  const report = f.run();
+  assert.deepEqual(report.memories[0].after, { exposed: 0, mistakes: 0 });
+  assert.equal(report.skipped['quotation-search'], 1);
+});
+
+test('Grep with no path searches record cwd, including memory and transcript directories', (t) => {
+  const f = fixture(t);
+  f.memory('grep-cwd', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  for (const [id, cwd] of [['memory-cwd', f.memoryDir], ['corpus-cwd', f.corpusDir]]) {
+    f.session(id, '2026-09-11', [{ type: 'tool_use', id, name: 'Grep', input: { pattern: 'ERROR' } }], {
+      cwd,
+      extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'OPPORTUNITY ERROR' }] } }],
+    });
+  }
+  const report = f.run();
+  assert.deepEqual(report.memories[0].after, { exposed: 0, mistakes: 0 });
+  assert.equal(report.skipped['quotation-search'], 2);
+});
+
+test('top-level cd and git -C resolve git quotation targets in order', (t) => {
+  const f = fixture(t);
+  f.memory('cd-git', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  for (const [id, command] of [
+    ['cd-git', 'cd auto-memory && git diff -- cd-git.md'],
+    ['cd-git-c', 'cd projects && git -C ../auto-memory show HEAD:cd-git.md'],
+  ]) {
+    f.session(id, '2026-09-11', [f.call(command, id)], {
+      cwd: f.root,
+      extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'OPPORTUNITY ERROR' }] } }],
+    });
+  }
+  const m = f.run().memories[0];
+  assert.deepEqual(m.after, { exposed: 0, mistakes: 0 });
+});
+
+test('git directory and omitted targets resolve against effective cwd', (t) => {
+  const f = fixture(t);
+  f.memory('git-targets', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  for (const [id, command] of [
+    ['bare-directory', 'git diff -- auto-memory'],
+    ['omitted-target', 'cd auto-memory && git diff'],
+  ]) {
+    f.session(id, '2026-09-11', [f.call(command, id)], {
+      cwd: f.root,
+      extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'OPPORTUNITY ERROR' }] } }],
+    });
+  }
+  assert.deepEqual(f.run().memories[0].after, { exposed: 0, mistakes: 0 });
+});
+
+test('ambiguous cd inside a pipeline excludes the entire quotation session', (t) => {
+  const f = fixture(t);
+  f.memory('ambiguous-cd', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  f.session('pipeline', '2026-09-11', [f.call('cd auto-memory | rg ERROR ../outside.md', 'search')], {
+    cwd: f.root,
+    extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'search', content: 'OPPORTUNITY ERROR' }] } }],
+  });
+  const report = f.run();
+  assert.deepEqual(report.memories[0].after, { exposed: 0, mistakes: 0 });
+  assert.equal(report.skipped['quotation-search'], 1);
+});
+
+test('a subagent without cwd inherits its parent session cwd for search targets', (t) => {
+  const f = fixture(t);
+  f.memory('inherited-cwd', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  const dir = f.session('parent', '2026-09-11', [], { cwd: f.root });
+  const sub = path.join(dir, 'parent', 'subagents');
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(sub, 'agent-a.jsonl'), [
+    { type: 'assistant', timestamp: '2026-09-11T12:01:00Z', message: { content: [f.call('rg ERROR', 'search')] } },
+    { type: 'user', timestamp: '2026-09-11T12:02:00Z', message: { content: [{ type: 'tool_result', tool_use_id: 'search', content: 'OPPORTUNITY ERROR' }] } },
+  ].map(JSON.stringify).join('\n') + '\n');
+  const report = f.run();
+  assert.deepEqual(report.memories[0].after, { exposed: 1, mistakes: 1 });
+  assert.equal(report.skipped['quotation-search'], 0);
+});
+
+test('top-level cd stays unambiguous when a later command pipes into grep', (t) => {
+  const f = fixture(t);
+  f.memory('later-pipeline', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  f.session('pipeline', '2026-09-11', [f.call('cd project && echo x | grep ERROR unrelated.log', 'search')], {
+    cwd: f.root,
+    extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'search', content: 'OPPORTUNITY ERROR' }] } }],
+  });
+  const report = f.run();
+  assert.deepEqual(report.memories[0].after, { exposed: 1, mistakes: 1 });
+  assert.equal(report.skipped['quotation-search'], 0);
+});
+
 test('verdict boundary and power checks', () => {
   assert.equal(verdict({ exposed: 2, mistakes: 2 }, { exposed: 2, mistakes: 0 }).result, 'untested');
   assert.equal(verdict({ exposed: 10, mistakes: 1 }, { exposed: 3, mistakes: 0 }).result, 'untested');

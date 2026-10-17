@@ -137,28 +137,69 @@ function memoryPath(s, memoryDir, cwd) {
 }
 
 function shellWords(command) {
-  return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((word) => word.replace(/^['"]|['"]$/g, '')) ?? [];
+  return command.match(/"[^"]*"|'[^']*'|&&|\|\||[;|(){}]|[^\s;&|(){}]+/g)?.map((word) => word.replace(/^['"]|['"]$/g, '')) ?? [];
+}
+
+function effectiveCwd(words, commandIndex, cwd) {
+  const prefix = words.slice(0, commandIndex);
+  let current = cwd;
+  let nesting = 0;
+  let branch = 0;
+  for (let i = 0; i < prefix.length; i++) {
+    if (prefix[i] === '(' || prefix[i] === '{') nesting++;
+    if (prefix[i] === ')' || prefix[i] === '}') nesting = Math.max(0, nesting - 1);
+    if (/^(?:if|for|while|case|switch)$/i.test(prefix[i])) branch++;
+    if (/^(?:fi|done|esac)$/i.test(prefix[i])) branch = Math.max(0, branch - 1);
+    if (!/^(?:cd|Set-Location|Push-Location)$/i.test(prefix[i])) continue;
+    const dir = prefix[++i];
+    if (!dir || /^(?:&&|;)$/.test(dir) || (!path.isAbsolute(dir) && !current)) return { cwd: null, ambiguous: true };
+    // Only a directory change *inside* a pipeline, subshell, or branch is
+    // ambiguous. A top-level cd before a later pipe still changes that pipe's cwd.
+    if (nesting || branch || /^(?:\||\|\|)$/.test(prefix[i - 2] ?? '') || /^(?:\||\|\|)$/.test(prefix[i + 1] ?? '')) {
+      return { cwd: null, ambiguous: true };
+    }
+    current = path.isAbsolute(dir) ? dir : path.resolve(current, dir);
+  }
+  return { cwd: current, ambiguous: false };
+}
+
+function searchTargets(words, search, command) {
+  const args = words.slice(search + 1);
+  const targets = [];
+  let hasPattern = /^(?:rg|grep)(?:\.exe)?$/i.test(command) && args.some((word) => word === '--files');
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    if (/^(?:&&|;|\||\|\||\(|\))$/.test(word)) break;
+    if (/^(?:-e|--regexp|-g|--glob|--iglob|--type|-t|-Path|-LiteralPath|-Pattern)$/i.test(word)) {
+      const value = args[++i];
+      if (/^(?:-Path|-LiteralPath)$/i.test(word) && value) targets.push(value);
+      if (/^(?:-e|--regexp|-Pattern)$/i.test(word)) hasPattern = true;
+      continue;
+    }
+    if (word.startsWith('-') && word !== '-') continue;
+    if (/^(?:Select-String)(?:\.exe)?$/i.test(command)) {
+      if (!hasPattern) hasPattern = true;
+      else targets.push(word);
+    } else if (!hasPattern) hasPattern = true;
+    else targets.push(word);
+  }
+  return targets;
 }
 
 function searchQuoteCall(block, memoryDir, corpusDir, cwd) {
   if (block.name === 'Grep') {
-    const target = block.input?.path;
-    return target && searchTarget(target, memoryDir, corpusDir, cwd);
+    const target = block.input?.path ?? cwd;
+    return target ? searchTarget(target, memoryDir, corpusDir, cwd) : true;
   }
   if (!['Bash', 'PowerShell'].includes(block.name)) return false;
   const words = shellWords(String(block.input?.command ?? ''));
   const search = words.findIndex((word) => /^(?:rg|grep|Select-String)(?:\.exe)?$/i.test(word));
   if (search < 0) return false;
-  let searchCwd = cwd;
-  for (let i = 0; i < search; i++) {
-    if (/^(?:cd|Set-Location|Push-Location)$/i.test(words[i]) && words[i + 1]) {
-      const dir = words[++i];
-      searchCwd = path.isAbsolute(dir) ? dir : searchCwd ? path.resolve(searchCwd, dir) : null;
-    }
-  }
-  const targets = words.slice(search + 1).filter((word) => word === '.' || word === '..' || /[\\/]|\.(?:md|jsonl)$/i.test(word));
-  if (!targets.length) return Boolean(searchCwd && (within(searchCwd, memoryDir) || within(searchCwd, corpusDir)));
-  return targets.some((target) => searchTarget(target, memoryDir, corpusDir, searchCwd));
+  const context = effectiveCwd(words, search, cwd);
+  if (context.ambiguous) return true;
+  const targets = searchTargets(words, search, words[search]);
+  if (!targets.length) return !context.cwd || within(context.cwd, memoryDir) || within(context.cwd, corpusDir);
+  return targets.some((target) => !path.isAbsolute(target) && !context.cwd || searchTarget(target, memoryDir, corpusDir, context.cwd));
 }
 
 function searchTarget(target, memoryDir, corpusDir, cwd) {
@@ -168,31 +209,38 @@ function searchTarget(target, memoryDir, corpusDir, cwd) {
   return within(resolved, memoryDir) || within(resolved, corpusDir);
 }
 
-function isQuoteCall(block, memoryDir, corpusDir, cwd) {
-  if (block.type !== 'tool_use') return false;
+function classifyQuoteCall(block, memoryDir, corpusDir, cwd) {
+  if (block.type !== 'tool_use') return { quote: false, exclude: false };
   const input = block.input ?? {};
-  if (block.name === 'Read') return /\.(md|jsonl)$/i.test(String(input.file_path ?? input.path ?? '').replace(/^['"]|['"]$/g, ''));
-  if (searchQuoteCall(block, memoryDir, corpusDir, cwd)) return true;
-  if (!['Bash', 'PowerShell'].includes(block.name)) return false;
+  if (block.name === 'Read') return { quote: /\.(md|jsonl)$/i.test(String(input.file_path ?? input.path ?? '').replace(/^['"]|['"]$/g, '')), exclude: false };
+  if (searchQuoteCall(block, memoryDir, corpusDir, cwd)) return { quote: true, exclude: true };
+  if (!['Bash', 'PowerShell'].includes(block.name)) return { quote: false, exclude: false };
   const words = shellWords(String(input.command ?? ''));
   const git = words.findIndex((word) => /(?:^|[\\/])git(?:\.exe)?$/i.test(word));
-  if (git < 0) return false;
-  let gitCwd = cwd;
+  if (git < 0) return { quote: false, exclude: false };
+  const context = effectiveCwd(words, git, cwd);
+  let gitCwd = context.cwd;
   let operation = -1;
   for (let i = git + 1; i < words.length; i++) {
     if (words[i] === '-C' && words[i + 1]) {
       const dir = words[++i];
-      gitCwd = path.isAbsolute(dir) ? dir : gitCwd ? path.resolve(gitCwd, dir) : null;
+      if (!path.isAbsolute(dir) && !gitCwd) return { quote: true, exclude: true };
+      gitCwd = path.isAbsolute(dir) ? dir : path.resolve(gitCwd, dir);
     } else if (words[i] === 'diff' || words[i] === 'show') {
       operation = i;
       break;
     }
   }
-  if (operation < 0) return false;
-  return words.slice(operation + 1).some((word) => {
+  if (operation < 0) return { quote: false, exclude: false };
+  if (context.ambiguous) return { quote: true, exclude: true };
+  const targets = words.slice(operation + 1).filter((word) => !word.startsWith('-') && !/^(?:&&|;|\||\|\||\(|\))$/.test(word));
+  if (!targets.length) return { quote: Boolean(gitCwd && within(gitCwd, memoryDir)), exclude: !gitCwd };
+  const quote = targets.some((word) => {
     const file = (path.isAbsolute(word) ? word : word.replace(/^[^:]+:/, '')).replace(/[;,)]$/, '');
-    return /\.(?:md|jsonl)$/i.test(file) && Boolean(memoryPath(file, memoryDir, gitCwd));
+    return Boolean(memoryPath(file, memoryDir, gitCwd));
   });
+  if (!gitCwd && targets.some((word) => !path.isAbsolute(word))) return { quote: true, exclude: true };
+  return { quote, exclude: false };
 }
 
 function autoMemIndex(record, indexPath) {
@@ -200,9 +248,18 @@ function autoMemIndex(record, indexPath) {
   return (record.attachment.files ?? []).some((f) => f.type === 'AutoMem' && normalized(f.path ?? '') === normalized(indexPath));
 }
 
+function withCwd(rows, fallback) {
+  let current = fallback;
+  return rows.map((record) => {
+    current = record.cwd ?? current;
+    return { record, cwd: current };
+  });
+}
+
 function extractSession(descriptor, memoryDir, corpusDir, indexPath) {
   const main = records(descriptor.main);
-  const all = [...main, ...descriptor.subagents.flatMap(records)];
+  const parentCwd = main.find((r) => r.cwd)?.cwd;
+  const all = [...withCwd(main, parentCwd), ...descriptor.subagents.flatMap((file) => withCwd(records(file), parentCwd))];
   let firstTs = null;
   let excluded = null;
   let searchedCorpus = false;
@@ -214,10 +271,10 @@ function extractSession(descriptor, memoryDir, corpusDir, indexPath) {
   const firstPrompt = textOf(firstUser?.message?.content);
   if (/You are one auditor in a fleet|fleet-instructions\.md/i.test(firstPrompt)) excluded = 'failure-audit-fleet';
   if (/SessionEnd[\s\S]{0,200}summari[sz]|summari[sz][\s\S]{0,200}SessionEnd/i.test(firstPrompt)) excluded = 'summarizer';
-  for (const r of all) {
+  for (const { record: r, cwd } of all) {
     const ts = timestamp(r);
     if (ts !== null && (firstTs === null || ts < firstTs)) firstTs = ts;
-    if (/(?:^|[\\/])council-seats(?:[\\/]|$)/i.test(r.cwd ?? '')) excluded = 'council-seat';
+    if (/(?:^|[\\/])council-seats(?:[\\/]|$)/i.test(cwd ?? '')) excluded = 'council-seat';
     if (autoMemIndex(r, indexPath)) indexLoaded = true;
     if (!Array.isArray(r.message?.content)) {
       if (r.type === 'user' && typeof r.message?.content === 'string') parts.push({ ts, scope: 'user', text: r.message.content });
@@ -225,12 +282,12 @@ function extractSession(descriptor, memoryDir, corpusDir, indexPath) {
     }
     for (const b of r.message.content) {
       if (b.type === 'tool_use') {
-        const readPath = b.name === 'Read' ? memoryPath(b.input?.file_path ?? b.input?.path ?? '', memoryDir, r.cwd) : null;
+        const readPath = b.name === 'Read' ? memoryPath(b.input?.file_path ?? b.input?.path ?? '', memoryDir, cwd) : null;
         if (readPath) bodyReads.add(normalized(readPath));
-        if (searchQuoteCall(b, memoryDir, corpusDir, r.cwd)) searchedCorpus = true;
-        const quote = isQuoteCall(b, memoryDir, corpusDir, r.cwd);
-        if (quote && b.id) quotedIds.add(b.id);
-        if (!quote) parts.push({ ts, scope: 'call', text: JSON.stringify({ name: b.name, input: b.input ?? {} }) });
+        const classification = classifyQuoteCall(b, memoryDir, corpusDir, cwd);
+        if (classification.exclude) searchedCorpus = true;
+        if (classification.quote && b.id) quotedIds.add(b.id);
+        if (!classification.quote) parts.push({ ts, scope: 'call', text: JSON.stringify({ name: b.name, input: b.input ?? {} }) });
       } else if (b.type === 'tool_result') {
         if (!quotedIds.has(b.tool_use_id)) parts.push({ ts, scope: 'result', text: textOf(b.content) });
       } else if (r.type === 'user' && b.type === 'text') {
