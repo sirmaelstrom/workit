@@ -19,8 +19,8 @@ import { validateGrant } from './lib/phases/preapproval.mjs';
 import { samePath, next as specNext } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
 import { testDeps } from './test-deps.mjs';
-import { anchorFromFile } from '../../_shared/operator-proof/operator-proof.mjs';
-import { makeTestAnchor } from '../../_shared/operator-proof/test-signer.mjs';
+import { anchorFromFile, verifyAnswerProof } from '../../_shared/operator-proof/operator-proof.mjs';
+import { makeTestAnchor, signAnswer } from '../../_shared/operator-proof/test-signer.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '__fixtures__', 'intake');
@@ -746,11 +746,45 @@ test('an operator passkey refuses a core-only intake (exit 2) and a TTY answer (
   const { runDir } = out(await intake(g));
   const tty = await g.run(['answer', '--run', runDir, '--touch', '1', '--key', 'a'], { stdinIsTTY: true, readAnchor: () => anchor });
   assert.equal(tty.code, 3, tty.stdout);
-  assert.equal(out(tty).error, 'operator:tty is not authority while an operator passkey is configured; answer on the phone');
+  assert.equal(out(tty).error, 'operator:tty is not authority while an operator passkey is configured; this core-only run cannot be approved: restart it with --adapter spine so its touches can be signed on the phone');
   assert.equal(readState(runDir).touches[0].status, 'open');
   assert.equal((await answer(g, runDir, 'a')).code, 0);
   const { answer: stored } = readState(runDir).touches[0];
   assert.deepEqual([stored.key, stored.by, stored.proofMode, stored.signed], ['a', 'operator:tty', 'unconfigured', null]);
+});
+
+// Council round 1: a phone signs the full quest uuid, so a prefix --anchor
+// must be resolved before any proof is checked against it.
+test('a prefix --anchor is resolved to the full quest uuid at the anchor step, and a phone-signed read-back over the uuid is answered', async (t) => {
+  const anchor = anchorFromFile(makeTestAnchor());
+  const configured = { readAnchor: () => anchor };
+  const f = fixture(t);
+  assert.equal(ANCHOR.length, 8);
+  const first = out(await intake(f, SPINE, configured));
+  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'), configured)).action;
+  assert.equal(readState(first.runDir).intent.anchor, ANCHOR_UUID);
+  const askId = '00000000-0000-4000-8000-0000000000f1';
+  const readBack = out(await record(f, first.runDir, receipt.id, { id: askId }, configured)).action;
+  const { question, ask } = receipt.args;
+  const answer = { key: 'a', text: null, by: 'operator:dogan', answeredAt: ANSWERED_AT, askReceiptId: askId };
+  answer.proof = signAnswer({ questId: ANCHOR_UUID, askReceiptId: askId, question, ask, answerKey: 'a' });
+  // The prefix is not what the phone signed.
+  assert.equal(verifyAnswerProof({ answer, question, ask, questId: ANCHOR, askReceiptId: askId, anchor }).reason, 'statement_mismatch');
+  const done = await record(f, first.runDir, readBack.id, { quests: [{ id: ANCHOR_UUID, latestReceipt: { id: 'r-1', outcome: 'answered', question, ask, answer } }] }, configured);
+  assert.equal(done.code, 0, done.stdout);
+  const touch = readState(first.runDir).touches[0];
+  assert.deepEqual([touch.status, touch.answer.proofMode], ['answered', 'verified']);
+});
+
+test('the anchor step refuses a spine_quest id that is only a prefix (exit 2): the anchor stays unresolved and nothing is filed', async (t) => {
+  const f = fixture(t);
+  const first = out(await intake(f, SPINE));
+  const short = fixtureJson('spine-quest-answered.json');
+  short.quests[0].id = ANCHOR;
+  const refused = await record(f, first.runDir, first.action.id, short);
+  assert.equal(refused.code, 2, refused.stdout);
+  assert.match(out(refused).error, /not a full quest uuid/);
+  assert.deepEqual([readState(first.runDir).phase, readState(first.runDir).touches.length], ['intake', 0]);
 });
 
 test('record refuses unattributed answer', async (t) => {

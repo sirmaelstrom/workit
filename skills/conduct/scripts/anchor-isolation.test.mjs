@@ -164,11 +164,18 @@ test('the checker flags a gated call without readAnchor, and passes testDeps(, a
   assert.equal(violations('acceptAnswer(touch, answer);').bad.length, 1, 'no deps argument');
   assert.equal(violations('const deps = { exec };\nrecordTouch(s, t, a, r, deps);').bad.length, 1, 'bound without readAnchor');
   assert.equal(violations('recordTouch(s, t, a, r, h.deps);').bad.length, 1, 'a member expression is not checked through');
+  // Council round 1 (codex): the name in a string, or in another argument, is not a reader in deps.
+  assert.equal(violations('runConduct(argv, { note: "readAnchor" });').bad.length, 1, 'readAnchor in a string');
+  assert.equal(violations('runConduct(readAnchor, { exec });').bad.length, 1, 'readAnchor as another argument');
+  assert.equal(violations('const deps = { note: \'readAnchor\' };\nrecordTouch(s, t, a, r, deps);').bad.length, 1, 'bound to a literal naming it only in a string');
+  assert.equal(violations('acceptAnswer(s, t, { readAnchor }, { exec });').bad.length, 1, 'a reader in the answer argument');
+  assert.equal(violations('awaitAnswer(flags, { exec, nested: { readAnchor } });').bad.length, 1, 'a nested key is not a deps member');
   for (const ok of [
     'runConduct(argv, testDeps({ ...base, ...more }));',
     'awaitAnswer(flags, { ...d, readAnchor: () => anchor });',
     'const deps = testDeps({ exec });\nrecordTouch(s, t, a, r, deps);',
     'const deps = { exec, readAnchor };\nacceptAnswer(s, t, a, deps);',
+    'recordTouch(s, t, a, r, { exec, readAnchor() { return anchor; } });',
   ]) assert.deepEqual(violations(ok).bad, [], ok);
   const quoted = violations("test('runConduct(x) in a title', () => {}); // recordTouch(a)\nconst re = /awaitAnswer\\(/; const s = `acceptAnswer(${'x'})`;");
   assert.equal(quoted.calls, 0, 'names in strings, comments, regexes and template text are not calls');

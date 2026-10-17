@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { ANSWER_ENV, LOOKUP_TIMEOUT_MS, answerArgv, awaitAnswer, parseAnswerCommand, parseAnswerOutput } from './answer.mjs';
 import { execute } from './exec.mjs';
-import { correlation, handBackAction, recordTouch, touchAction } from './touch.mjs';
+import { acceptAnswer, correlation, handBackAction, recordTouch, touchAction } from './touch.mjs';
 import { detectAdapters } from './adapters.mjs';
 import { testDeps } from '../test-deps.mjs';
-import { anchorFromFile, readAnchor, verifyAnswerProof, verifyRecord } from '../../../_shared/operator-proof/operator-proof.mjs';
+import { OperatorProofError, REASONS, anchorFromFile, readAnchor, verifyAnswerProof, verifyRecord } from '../../../_shared/operator-proof/operator-proof.mjs';
 import { TEST_KEY_1, TEST_KEY_2, credentialIdOf, makeTestAnchor, signAnswer } from '../../../_shared/operator-proof/test-signer.mjs';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', '__fixtures__', 'intake');
@@ -211,18 +211,21 @@ const viaSpine = (receipt) => ({ quests: [{ latestReceipt: receipt }] });
 // [name, answer adapter on, the read-back result carrying a receipt]
 const TRANSPORTS = [['the answer adapter', true, viaAdapter], ['spine_quest', false, viaSpine]];
 
-// A touch filed on QUEST as ask receipt ASK_ID, read back over one transport.
-function filedState(answerOn, patch = {}) {
+// Touch 1 filed on QUEST as ask receipt ASK_ID through its own spine_receipt
+// action, so the touch records what it filed; then read back over one transport.
+function filedState(answerOn, patch = {}, touchPatch = {}) {
   const state = makeState({ adapters: { spine: { on: true }, answer: { on: answerOn } }, ...patch });
-  state.touches[0].receiptId = ASK_ID;
+  const touch = Object.assign(state.touches[0], { status: 'open', filings: 0, receiptId: null }, touchPatch);
+  recordTouch(state, touch, touchAction(state, touch), { id: ASK_ID, questId: state.intent.anchor, outcome: 'needs_input' }, CONFIGURED);
   return state;
 }
 
 // The answered receipt to this filing as the Spine stores it: the filed question
 // and ask, and a proof minted over them now (proof: null leaves it unsigned).
-function signedReceipt(state, { key = 'a', text = null, by = 'operator:dogan', signKey = TEST_KEY_1, askReceiptId = ASK_ID, question, proof } = {}) {
+// `question` or `ask` replaces what was filed, and the proof signs the replacement.
+function signedReceipt(state, { key = 'a', text = null, by = 'operator:dogan', signKey = TEST_KEY_1, askReceiptId = ASK_ID, question, ask: replaced, proof } = {}) {
   const touch = state.touches[0];
-  const ask = { options: touch.options, allowFreeText: touch.allowFreeText };
+  const ask = replaced ?? { options: touch.options, allowFreeText: touch.allowFreeText };
   const asked = question ?? `${correlation(state, touch)} DO: approve`;
   const answer = { key, text, by, answeredAt: '2026-10-17T00:00:00Z', askReceiptId };
   if (proof !== null) answer.proof = proof ?? signAnswer({ key: signKey, questId: state.intent.anchor, askReceiptId, question: asked, ask, answerKey: key, text });
@@ -234,7 +237,9 @@ function signedReceipt(state, { key = 'a', text = null, by = 'operator:dogan', s
 test('red test 2: with a passkey configured, the unsigned fixture answer is refused proof_absent on both transports, and an unsigned T3 answer waits for the phone', () => {
   const fixture = JSON.parse(readFileSync(join(FIXTURES, 'spine-quest-answered.json'), 'utf8'));
   const unsigned = fixture.quests[0].latestReceipt;
-  const fixtureState = (answerOn) => filedState(answerOn, { runId: 'abcd1234', intent: { anchor: fixture.quests[0].id } });
+  // The forged answer is to the filing itself: the touch filed the fixture's question and ask.
+  const filedAs = { question: unsigned.question.replace(' (run abcd1234/1)', ''), options: unsigned.ask.options, allowFreeText: unsigned.ask.allowFreeText };
+  const fixtureState = (answerOn) => filedState(answerOn, { runId: 'abcd1234', intent: { anchor: fixture.quests[0].id } }, filedAs);
   for (const [name, answerOn, wrap] of TRANSPORTS) {
     const state = fixtureState(answerOn);
     const touch = state.touches[0];
@@ -268,9 +273,8 @@ test('a signed answer is accepted on both transports: proofMode verified, the ra
 test('a keyless free-text signed answer is accepted as option (c); the signed block keeps the signed null key and still re-verifies', () => {
   const anchor = anchorFromFile(ANCHOR_FILE);
   for (const [name, answerOn, wrap] of TRANSPORTS) {
-    const state = filedState(answerOn);
+    const state = filedState(answerOn, {}, { options: [{ key: 'a', label: 'A', consequence: 'x' }, { key: 'c', label: 'Something else', consequence: 'z' }] });
     const touch = state.touches[0];
-    touch.options = [{ key: 'a', label: 'A', consequence: 'x' }, { key: 'c', label: 'Something else', consequence: 'z' }];
     const receipt = signedReceipt(state, { key: null, text: 'ship the docs only' });
     recordTouch(state, touch, touchAction(state, touch), wrap(receipt), CONFIGURED);
     assert.deepEqual([touch.status, touch.answer.key, touch.answer.text, touch.answer.proofMode, touch.answer.signed.answer.key], ['answered', 'c', 'ship the docs only', 'verified', null], name);
@@ -352,4 +356,99 @@ test('an unreadable anchor stops the read-back and the waiter at once (exit 2); 
   await assert.rejects(awaitAnswer({ run: runDir(t, state), touch: '1', 'interval-ms': '1000' }, testDeps({ ...polls.deps, readAnchor: broken.readAnchor })),
     (error) => error.code === 2 && error.message === message);
   assert.ok(polls.calls.length <= 1, `no retry loop: ${polls.calls.length} lookups`);
+});
+
+// ---- council round 1 ----
+
+// A valid proof over an ask whose meaning differs from the filed one, with the
+// filed ask receipt id and correlation prefix kept: the operator signed option
+// (a) as something else, and conduct would act on its own (a).
+const relabel = (ask, patch) => ({ ...ask, options: ask.options.map((option, i) => (i === 0 ? { ...option, ...patch } : option)) });
+const ALTERED = [
+  ['an altered label', (state, ask) => ({ ask: relabel(ask, { label: 'Decline' }) })],
+  ['an altered consequence', (state, ask) => ({ ask: relabel(ask, { consequence: 'Stop without merging' }) })],
+  ['an added prompt', (state, ask) => ({ ask: { ...ask, prompt: 'Approve deleting the production database?' } })],
+  ['an altered question body', (state) => ({ question: `${correlation(state, state.touches[0])} DO: delete the production database` })],
+];
+
+test('filing records the exact question and ask it hands out as touch.filed', () => {
+  const state = filedState(false);
+  const touch = state.touches[0];
+  assert.deepEqual(touch.filed, { question: `${correlation(state, touch)} DO: approve`, ask: { options: touch.options, allowFreeText: true } });
+});
+
+test('a valid proof over an ask or question other than the one conduct filed is refused filed_mismatch on both transports; the receipt id and correlation prefix are kept', () => {
+  for (const [name, answerOn, wrap] of TRANSPORTS) {
+    for (const [variant, alter] of ALTERED) {
+      const state = filedState(answerOn);
+      const touch = state.touches[0];
+      const receipt = signedReceipt(state, alter(state, { options: touch.options, allowFreeText: touch.allowFreeText }));
+      assert.ok(receipt.question.startsWith(correlation(state, touch)) && receipt.answer.askReceiptId === ASK_ID, `${name}, ${variant}: the control keeps the binding`);
+      assert.equal(verifyAnswerProof({ ...receipt, questId: QUEST, askReceiptId: ASK_ID, anchor: anchorFromFile(ANCHOR_FILE) }).mode, 'verified', `${name}, ${variant}: the proof itself is valid`);
+      const outcome = recordTouch(state, touch, touchAction(state, touch), wrap(receipt), CONFIGURED);
+      assert.deepEqual([touch.status, touch.refusal, outcome?.refused, touch.answer ?? null], ['open', 'proof filed_mismatch', 'proof filed_mismatch', null], `${name}, ${variant}`);
+    }
+  }
+});
+
+test('the options conduct reads the signed key with are the filed ones: options changed after filing refuse filed_mismatch', () => {
+  for (const [name, answerOn, wrap] of TRANSPORTS) {
+    const state = filedState(answerOn);
+    const touch = state.touches[0];
+    const receipt = signedReceipt(state);
+    touch.options = relabel({ options: touch.options }, { label: 'Approve deleting prod' }).options;
+    const outcome = recordTouch(state, touch, touchAction(state, touch), wrap(receipt), CONFIGURED);
+    assert.deepEqual([touch.status, outcome?.refused], ['open', 'proof filed_mismatch'], name);
+  }
+});
+
+test('unconfigured, an answer to an altered ask is accepted as before (M8)', () => {
+  for (const [name, answerOn, wrap] of TRANSPORTS) {
+    const state = filedState(answerOn);
+    const touch = state.touches[0];
+    const receipt = signedReceipt(state, { ask: relabel({ options: touch.options, allowFreeText: true }, { label: 'Decline' }) });
+    recordTouch(state, touch, touchAction(state, touch), wrap(receipt), testDeps());
+    assert.deepEqual([touch.status, touch.answer.proofMode], ['answered', 'unconfigured'], name);
+  }
+});
+
+test('an unreadable anchor stops an unanswered read-back too (exit 2) on both transports; it never hands back', () => {
+  const broken = testDeps({ readAnchor: () => { throw new OperatorProofError(REASONS.anchor_unreadable, 'unreadable'); } });
+  const unanswered = [['the answer adapter', true, { code: 0, stdout: JSON.stringify({ ok: true, answered: false, receipt: null }), stderr: '' }],
+    ['spine_quest', false, viaSpine({ outcome: 'needs_input', question: `${TAG} DO: approve`, answer: null })]];
+  for (const [name, answerOn, result] of unanswered) {
+    const state = filedState(answerOn);
+    const touch = state.touches[0];
+    assert.throws(() => recordTouch(state, touch, touchAction(state, touch), result, broken),
+      (error) => error.code === 2 && error.message === 'operator passkey anchor is unreadable: fix ~/.claude/operator-passkeys.json', name);
+    assert.deepEqual([touch.status, touch.waiting], ['filed', false], name);
+  }
+});
+
+test('acceptAnswer stores the verified signed key and text, never the outer fields beside them', () => {
+  const anchor = anchorFromFile(ANCHOR_FILE);
+  const state = filedState(false);
+  const touch = state.touches[0];
+  const receipt = signedReceipt(state, { key: 'd' });
+  const outer = { ...receipt.answer, key: 'a', text: 'approve', source: 'spine', receiptId: 'r-1', signed: { answer: receipt.answer, question: receipt.question, ask: receipt.ask } };
+  acceptAnswer(state, touch, outer, CONFIGURED);
+  assert.deepEqual([touch.answer.key, touch.answer.text, touch.answer.proofMode], ['d', null, 'verified']);
+  assert.equal(verifyRecord({ record: JSON.parse(JSON.stringify(touch)), quest: QUEST, anchor }).ok, true);
+});
+
+test('a refusal and a re-filing clear the phone-confirmation marker: the next hand-back does not tell the operator to confirm on the phone', () => {
+  const state = filedState(true);
+  const touch = state.touches[0];
+  const readBack = touchAction(state, touch);
+  recordTouch(state, touch, readBack, viaAdapter(signedReceipt(state, { by: 'operator:t3', proof: null })), CONFIGURED);
+  assert.equal(touch.awaiting, 'phone-confirmation');
+  const outcome = recordTouch(state, touch, readBack, viaAdapter(signedReceipt(state, { signKey: TEST_KEY_2 })), CONFIGURED);
+  assert.deepEqual([touch.status, outcome?.refused, touch.awaiting], ['open', 'proof unknown_credential', undefined]);
+
+  // A re-filing clears a marker left on the touch (no resume in between to clear it).
+  Object.assign(touch, { waiting: false, awaiting: 'phone-confirmation' });
+  recordTouch(state, touch, touchAction(state, touch), { id: '00000000-0000-4000-8000-0000000000a2', outcome: 'needs_input' }, CONFIGURED);
+  assert.deepEqual([touch.status, touch.filings, touch.awaiting], ['filed', 2, undefined]);
+  touch.waiting = true;
+  assert.match(handBackAction(state, touch).instruction, /has no operator-attributed answer yet/);
 });

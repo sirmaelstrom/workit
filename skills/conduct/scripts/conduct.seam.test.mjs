@@ -1062,8 +1062,9 @@ test('E6 hand-back (spine): no attributed answer → a touch-kind hand-back, nev
 
 // The passkey read-back's runtime exercise: an anchor configured through deps,
 // the spine_quest reply carrying the filed question and ask. 'unsigned' is the
-// operator-stamped answer with no proof; 'signed' is minted over this filing.
-test('passkey read-back: with an anchor configured the unsigned answer exits 3 with its refusal, and a signed one is answered, verified, its signed block in state.json', async (t) => {
+// operator-stamped answer with no proof; 'signed' is minted over this filing;
+// 'relabelled' is a valid proof over an ask whose option (a) means something else.
+test('passkey read-back: with an anchor configured a proof over a relabelled ask and an unsigned answer each exit 3 with their refusal, and a signed one is answered, verified, its signed block in state.json', async (t) => {
   const h = seam(t);
   h.deps.readAnchor = () => anchorFromFile(makeTestAnchor());
   h.custom = (action) => {
@@ -1071,17 +1072,27 @@ test('passkey read-back: with an anchor configured the unsigned answer exits 3 w
     const state = h.state();
     const touch = state.touches.find((candidate) => candidate.status === 'filed');
     const filed = h.trace.findLast((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' && a.args.question.startsWith(correlation(state, touch)));
-    const { question, ask } = filed.args;
+    const { question } = filed.args;
+    // 'relabelled': the receipt's ask says option (a) means something else, and the phone signed that.
+    const ask = h.reply === 'relabelled' ? { ...filed.args.ask, options: filed.args.ask.options.map((option) => (option.key === 'a' ? { ...option, label: 'Decline', consequence: 'Stop without merging' } : option)) } : filed.args.ask;
     const answer = { key: 'a', text: null, by: 'operator:dogan', answeredAt: new Date(h.clock).toISOString() };
-    if (h.reply === 'signed') {
-      Object.assign(answer, { askReceiptId: touch.receiptId, proof: signAnswer({ questId: state.intent.anchor, askReceiptId: touch.receiptId, question, ask, answerKey: 'a' }) });
+    if (h.reply !== 'unsigned') {
+      // The phone signs the full quest uuid; the run was started with its 8-char prefix.
+      Object.assign(answer, { askReceiptId: touch.receiptId, proof: signAnswer({ questId: ANCHOR, askReceiptId: touch.receiptId, question, ask, answerKey: 'a' }) });
     }
     return { quests: [{ id: ANCHOR, latestReceipt: { id: '00000000-0000-4000-8000-00000000a0a0', outcome: 'answered', question, ask, answer } }] };
   };
   await start(h, SPINE_ONLY);
   const read = await drive(h, { until: (a) => a.tool === 'spine_quest' && a.part === 'read-back', max: 10 });
+  assert.deepEqual([SPINE_ONLY[SPINE_ONLY.indexOf('--anchor') + 1], h.state().intent.anchor], [ANCHOR.slice(0, 8), ANCHOR]);
+  h.reply = 'relabelled';
+  const mismatched = await h.run(['record', '--run', h.runDir, '--action', read.id, '--result', JSON.stringify(await perform(h, read))]);
+  t.diagnostic(`relabelled: exit ${mismatched.code} ${JSON.stringify({ refused: out(mismatched).refused, next: out(mismatched).action?.tool, status: h.state().touches[0].status })}`);
+  assert.deepEqual([mismatched.code, out(mismatched).refused, out(mismatched).action.tool, h.state().touches[0].answer], [3, 'proof filed_mismatch', 'spine_receipt', null]);
+  h.pending = out(mismatched).action;
+  const reread = await drive(h, { until: (a) => a.tool === 'spine_quest' && a.part === 'read-back', max: 10 });
   h.reply = 'unsigned';
-  const refused = await h.run(['record', '--run', h.runDir, '--action', read.id, '--result', JSON.stringify(await perform(h, read))]);
+  const refused = await h.run(['record', '--run', h.runDir, '--action', reread.id, '--result', JSON.stringify(await perform(h, reread))]);
   t.diagnostic(`unsigned: exit ${refused.code} ${JSON.stringify({ refused: out(refused).refused, next: out(refused).action?.tool })}`);
   assert.deepEqual([refused.code, out(refused).refused, out(refused).action.tool], [3, 'proof proof_absent', 'spine_receipt']);
   h.reply = 'signed';
@@ -1089,7 +1100,7 @@ test('passkey read-back: with an anchor configured the unsigned answer exits 3 w
   const spec = await drive(h, { until: (a) => a.kind === 'skill', max: 10 });
   const { answer } = h.state().touches[0];
   t.diagnostic(`signed: ${JSON.stringify({ status: h.state().touches[0].status, proofMode: answer.proofMode, credentialId: answer.credentialId, signed: Object.keys(answer.signed ?? {}) })}`);
-  assert.deepEqual([spec.step, h.state().touches[0].status, answer.proofMode, h.state().touches[0].filings], ['spec', 'answered', 'verified', 2]);
+  assert.deepEqual([spec.step, h.state().touches[0].status, answer.proofMode, h.state().touches[0].filings], ['spec', 'answered', 'verified', 3]);
   assert.deepEqual(Object.keys(answer.signed).sort(), ['answer', 'ask', 'question']);
   assert.equal(answer.signed.answer.proof.v, 1);
 });
