@@ -24,8 +24,19 @@ function isoAt(msFromEpoch) {
   return new Date(msFromEpoch).toISOString();
 }
 
-function usageLine(id, model, usage) {
-  return JSON.stringify({ message: { id, model, usage } });
+function agentFixture(root, sessionId, agentId, timestamp, usage, meta = null) {
+  const dir = join(root, sessionId, 'subagents');
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `agent-${agentId}.jsonl`);
+  writeFileSync(file, JSON.stringify({ timestamp, message: { id: `msg-${agentId}`, model: 'claude-sonnet-5', usage: { input_tokens: usage } } }));
+  if (meta) writeFileSync(join(dir, `agent-${agentId}.meta.json`), JSON.stringify(meta));
+  return file;
+}
+
+function parentFixture(root, sessionId, calls) {
+  writeFileSync(join(root, `${sessionId}.jsonl`), calls.map(([id, timestamp]) => JSON.stringify({
+    timestamp, message: { content: [{ type: 'tool_use', id }] },
+  })).join('\n'));
 }
 
 // ---------------------------------------------------------------------------
@@ -35,8 +46,9 @@ function usageLine(id, model, usage) {
 test('markPhase: start appends a new open entry', () => {
   const state = createState('/fake/cwd');
   const t0 = isoAt(1000);
-  const { state: s1, warning } = markPhase(state, 'phase-1-setup', 'start', t0);
+  const { state: s1, warning } = markPhase(state, 'phase-1-setup', 'start', t0, 'session-abc');
   assert.equal(warning, null);
+  assert.equal(s1.sessionId, 'session-abc');
   assert.equal(s1.phases.length, 1);
   assert.deepEqual(s1.phases[0], { phase: 'phase-1-setup', startedAt: t0, endedAt: null });
 });
@@ -50,6 +62,19 @@ test('markPhase: starting a new phase auto-closes the prior open phase', () => {
   assert.equal(s2.phases.length, 2);
   assert.equal(s2.phases[0].endedAt, t1); // auto-closed
   assert.equal(s2.phases[1].endedAt, null);
+});
+
+test('markPhase: a resumed session retains ownership and rejects another session', () => {
+  const owned = markPhase(createState('/fake/cwd'), 'first', 'start', isoAt(0), 'owner').state;
+  const resumed = markPhase(owned, 'second', 'start', isoAt(1000), 'owner');
+  assert.equal(resumed.state.sessionId, 'owner');
+  assert.equal(resumed.state.phases.length, 2);
+  const foreign = markPhase(resumed.state, 'third', 'start', isoAt(2000), 'other');
+  assert.match(foreign.warning, /does not own/);
+  assert.equal(foreign.state.phases.length, 2);
+  const foreignEnd = markPhase(resumed.state, 'second', 'end', isoAt(2000), 'other');
+  assert.match(foreignEnd.warning, /does not own/);
+  assert.equal(foreignEnd.state.phases[1].endedAt, null);
 });
 
 test('markPhase: end closes the matching open phase', () => {
@@ -106,17 +131,15 @@ test('collectPhaseUsage dedupes repeated usage blocks for the same message id', 
     const file = join(sessionDir, 'agent-a1.jsonl');
     // The same message id streams twice with growing usage — last one should win.
     const lines = [
-      usageLine('msg-1', 'claude-sonnet-5', { input_tokens: 100, output_tokens: 1 }),
-      usageLine('msg-1', 'claude-sonnet-5', { input_tokens: 100, output_tokens: 50 }),
+      JSON.stringify({ timestamp: '2026-01-01T00:00:30.000Z', message: { id: 'msg-1', model: 'claude-sonnet-5', usage: { input_tokens: 100, output_tokens: 1 } } }),
+      JSON.stringify({ timestamp: '2026-01-01T00:00:31.000Z', message: { id: 'msg-1', model: 'claude-sonnet-5', usage: { input_tokens: 100, output_tokens: 50 } } }),
     ];
     writeFileSync(file, lines.join('\n'));
-    const fileTime = Date.parse('2026-01-01T00:00:30.000Z');
-    utimesSync(file, fileTime / 1000, fileTime / 1000);
 
     const phases = [
       { phase: 'phase-1-setup', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z' },
     ];
-    const { perPhase, unknownModels } = collectPhaseUsage(phases, root, new Date('2026-01-01T00:02:00.000Z'));
+    const { perPhase, unknownModels } = collectPhaseUsage(phases, root, 'session-abc', new Date('2026-01-01T00:02:00.000Z'));
     assert.equal(unknownModels.size, 0);
     const modelBucket = perPhase.get('phase-1-setup');
     assert.ok(modelBucket);
@@ -128,13 +151,13 @@ test('collectPhaseUsage dedupes repeated usage blocks for the same message id', 
   }
 });
 
-test('collectPhaseUsage attributes files to the phase whose window contains their mtime', () => {
+test('collectPhaseUsage attributes files to the phase whose window contains their first-record timestamp', () => {
   const { root, sessionDir } = makeFixtureProjectsDir();
   try {
     const inWindowFile = join(sessionDir, 'agent-in.jsonl');
     const outWindowFile = join(sessionDir, 'agent-out.jsonl');
-    writeFileSync(inWindowFile, usageLine('m1', 'claude-sonnet-5', { input_tokens: 10, output_tokens: 2 }));
-    writeFileSync(outWindowFile, usageLine('m2', 'claude-sonnet-5', { input_tokens: 999, output_tokens: 999 }));
+    writeFileSync(inWindowFile, JSON.stringify({ timestamp: '2026-01-01T00:00:30.000Z', message: { id: 'm1', model: 'claude-sonnet-5', usage: { input_tokens: 10, output_tokens: 2 } } }));
+    writeFileSync(outWindowFile, JSON.stringify({ timestamp: '2026-01-01T05:00:00.000Z', message: { id: 'm2', model: 'claude-sonnet-5', usage: { input_tokens: 999, output_tokens: 999 } } }));
 
     const inTime = Date.parse('2026-01-01T00:00:30.000Z') / 1000;
     const outTime = Date.parse('2026-01-01T05:00:00.000Z') / 1000; // well outside any phase window
@@ -144,10 +167,11 @@ test('collectPhaseUsage attributes files to the phase whose window contains thei
     const phases = [
       { phase: 'phase-1-setup', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z' },
     ];
-    const { perPhase } = collectPhaseUsage(phases, root, new Date('2026-01-01T00:02:00.000Z'));
+    const { perPhase, unassigned } = collectPhaseUsage(phases, root, 'session-abc', new Date('2026-01-01T00:02:00.000Z'));
     const counts = perPhase.get('phase-1-setup').get('claude-sonnet-5');
     assert.equal(counts.inputTokens, 10); // only the in-window file counted
     assert.equal(counts.outputTokens, 2);
+    assert.equal(unassigned.get('claude-sonnet-5').inputTokens, 999);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -157,14 +181,14 @@ test('collectPhaseUsage buckets unknown-family models separately, never as $0', 
   const { root, sessionDir } = makeFixtureProjectsDir();
   try {
     const file = join(sessionDir, 'agent-unknown.jsonl');
-    writeFileSync(file, usageLine('m1', 'gpt-5.5', { input_tokens: 500, output_tokens: 100 }));
+    writeFileSync(file, JSON.stringify({ timestamp: '2026-01-01T00:00:30.000Z', message: { id: 'm1', model: 'gpt-5.5', usage: { input_tokens: 500, output_tokens: 100 } } }));
     const t = Date.parse('2026-01-01T00:00:30.000Z') / 1000;
     utimesSync(file, t, t);
 
     const phases = [
       { phase: 'phase-1-setup', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z' },
     ];
-    const { perPhase, unknownModels } = collectPhaseUsage(phases, root, new Date('2026-01-01T00:02:00.000Z'));
+    const { perPhase, unknownModels } = collectPhaseUsage(phases, root, 'session-abc', new Date('2026-01-01T00:02:00.000Z'));
     assert.equal(perPhase.has('phase-1-setup'), false);
     assert.equal(unknownModels.get('gpt-5.5').inputTokens, 500);
   } finally {
@@ -175,9 +199,92 @@ test('collectPhaseUsage buckets unknown-family models separately, never as $0', 
 test('collectPhaseUsage on a missing projects dir returns empty maps (never throws)', () => {
   const missing = join(tmpdir(), 'spec-cost-does-not-exist-' + Date.now());
   const phases = [{ phase: 'phase-1-setup', startedAt: isoAt(0), endedAt: null }];
-  const { perPhase, unknownModels } = collectPhaseUsage(phases, missing, new Date());
+  const { perPhase, unknownModels } = collectPhaseUsage(phases, missing, 'session-abc', new Date());
   assert.equal(perPhase.size, 0);
   assert.equal(unknownModels.size, 0);
+});
+
+test('concurrent sessions in one project: only the recorded owner contributes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'spec-cost-owner-'));
+  try {
+    const start = '2026-01-01T00:00:00.000Z';
+    const end = '2026-01-01T00:01:00.000Z';
+    parentFixture(root, 'owner', [['tool-owner', start]]);
+    parentFixture(root, 'other', [['tool-other', start]]);
+    agentFixture(root, 'owner', 'a', end, 10, { toolUseId: 'tool-owner' });
+    agentFixture(root, 'other', 'b', end, 999, { toolUseId: 'tool-other' });
+    const phases = [{ phase: 'p', startedAt: start, endedAt: end }];
+    const usage = collectPhaseUsage(phases, root, 'owner', new Date(end));
+    assert.equal(usage.perPhase.get('p').get('claude-sonnet-5').inputTokens, 10);
+    assert.equal(usage.unassigned.size, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('resumed session: later tool_use maps to later phase, including nested agent', () => {
+  const root = mkdtempSync(join(tmpdir(), 'spec-cost-resume-'));
+  try {
+    const t0 = '2026-01-01T00:00:00.000Z';
+    const t1 = '2026-01-02T00:00:00.000Z';
+    const t2 = '2026-01-02T00:01:00.000Z';
+    parentFixture(root, 'owner', [['tool-a', t0], ['tool-b', t1]]);
+    agentFixture(root, 'owner', 'a', t0, 10, { toolUseId: 'tool-a' });
+    const parentFile = agentFixture(root, 'owner', 'b', t2, 20, { toolUseId: 'tool-b' });
+    writeFileSync(parentFile, [
+      JSON.stringify({ timestamp: t2, message: { content: [{ type: 'tool_use', id: 'tool-nested' }] } }),
+      JSON.stringify({ timestamp: t2, message: { id: 'msg-b', model: 'claude-sonnet-5', usage: { input_tokens: 20 } } }),
+    ].join('\n'));
+    agentFixture(root, 'owner', 'nested', t2, 30, { toolUseId: 'tool-nested', parentAgentId: 'b' });
+    const phases = [
+      { phase: 'first', startedAt: t0, endedAt: '2026-01-01T00:02:00.000Z' },
+      { phase: 'resumed', startedAt: t1, endedAt: '2026-01-02T00:02:00.000Z' },
+    ];
+    const usage = collectPhaseUsage(phases, root, 'owner', new Date(t2));
+    assert.equal(usage.perPhase.get('first').get('claude-sonnet-5').inputTokens, 10);
+    assert.equal(usage.perPhase.get('resumed').get('claude-sonnet-5').inputTokens, 50);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('mtime outside phase and copied transcript do not override parent tool_use time', () => {
+  const root = mkdtempSync(join(tmpdir(), 'spec-cost-copy-'));
+  try {
+    const launch = '2026-01-01T00:00:30.000Z';
+    parentFixture(root, 'owner', [['tool-a', launch]]);
+    const file = agentFixture(root, 'owner', 'a', '2026-01-03T00:00:00.000Z', 42, { toolUseId: 'tool-a' });
+    const later = Date.parse('2026-01-04T00:00:00.000Z') / 1000;
+    utimesSync(file, later, later);
+    const phases = [{ phase: 'p', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z' }];
+    const usage = collectPhaseUsage(phases, root, 'owner', new Date('2026-01-05T00:00:00.000Z'));
+    assert.equal(usage.perPhase.get('p').get('claude-sonnet-5').inputTokens, 42);
+    assert.equal(usage.unassigned.size, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('copied transcript without a parent link uses first-record time, not copy mtime', () => {
+  const root = mkdtempSync(join(tmpdir(), 'spec-cost-copy-fallback-'));
+  try {
+    const file = agentFixture(root, 'owner', 'copy', '2026-01-02T00:00:00.000Z', 31);
+    const inPhaseMtime = Date.parse('2026-01-01T00:00:30.000Z') / 1000;
+    utimesSync(file, inPhaseMtime, inPhaseMtime);
+    const phases = [{ phase: 'p', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z' }];
+    const usage = collectPhaseUsage(phases, root, 'owner', new Date('2026-01-03T00:00:00.000Z'));
+    assert.equal(usage.perPhase.size, 0);
+    assert.equal(usage.unassigned.get('claude-sonnet-5').inputTokens, 31);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('unassigned remainder reports files without a matching phase', () => {
+  const root = mkdtempSync(join(tmpdir(), 'spec-cost-unassigned-'));
+  try {
+    agentFixture(root, 'owner', 'a', '2026-01-02T00:00:00.000Z', 77);
+    const phases = [{ phase: 'p', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2026-01-01T00:01:00.000Z' }];
+    const usage = collectPhaseUsage(phases, root, 'owner', new Date('2026-01-03T00:00:00.000Z'));
+    const state = { ...createState('/fake/cwd'), sessionId: 'owner', phases };
+    const report = buildReport(state, usage, '2026-01-03T00:00:00.000Z', { dir: root, rule: 'flag', exists: true });
+    assert.equal(report.unassigned.totals.inputTokens, 77);
+    assert.equal(report.phases[0].totals.inputTokens, 0);
+    assert.equal(report.totals.inputTokens, 0, 'out-of-window usage is shown separately from spec totals');
+    assert.match(renderMarkdownTable(report), /\*\*unassigned\*\* \| 77/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('buildReport + renderMarkdownTable: known-model phase produces a priced row', () => {
@@ -224,8 +331,8 @@ test('buildReport: with zero phases at all, table still has header + totals row'
   // table itself must still be structurally intact underneath it.
   const lines = renderMarkdownTable(report).split('\n');
   const tableLines = lines.slice(lines.findIndex((l) => l.startsWith('| Phase')));
-  assert.equal(tableLines.length, 3); // header, separator, totals row
-  assert.match(tableLines[2], /\*\*Total\*\*/);
+  assert.equal(tableLines.length, 4); // header, separator, unassigned, totals row
+  assert.match(tableLines[3], /\*\*Total\*\*/);
 });
 
 // A zero total and an uncollected run render identically ($0.0000). The whole
@@ -336,13 +443,13 @@ test('CLI: mark start/end sequencing creates state file + parent dir on first ma
     const statePath = join(dir, 'nested', 'cost-log.json');
     const r1 = spawnSync(process.execPath, [
       CLI, 'mark', '--state', statePath, '--phase', 'phase-1-setup', '--event', 'start',
-    ], { encoding: 'utf8' });
+    ], { encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'sess-1' } });
     assert.equal(r1.status, 0, `stderr: ${r1.stderr}`);
     assert.ok(existsSync(statePath));
 
     const r2 = spawnSync(process.execPath, [
       CLI, 'mark', '--state', statePath, '--phase', 'phase-1-setup', '--event', 'end',
-    ], { encoding: 'utf8' });
+    ], { encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'sess-1' } });
     assert.equal(r2.status, 0, `stderr: ${r2.stderr}`);
 
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -351,6 +458,7 @@ test('CLI: mark start/end sequencing creates state file + parent dir on first ma
     assert.ok(state.phases[0].startedAt);
     assert.ok(state.phases[0].endedAt);
     assert.ok(state.cwd);
+    assert.equal(state.sessionId, 'sess-1');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -364,17 +472,17 @@ test('CLI: mark x3 (setup start, setup end/pipeline start via auto-close, pipeli
 
     let r = spawnSync(process.execPath, [
       CLI, 'mark', '--state', statePath, '--phase', 'phase-1-setup', '--event', 'start',
-    ], { encoding: 'utf8' });
+    ], { encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'sess-1' } });
     assert.equal(r.status, 0, r.stderr);
 
     r = spawnSync(process.execPath, [
       CLI, 'mark', '--state', statePath, '--phase', 'phase-2-pipeline', '--event', 'start',
-    ], { encoding: 'utf8' });
+    ], { encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'sess-1' } });
     assert.equal(r.status, 0, r.stderr);
 
     r = spawnSync(process.execPath, [
       CLI, 'mark', '--state', statePath, '--phase', 'phase-2-pipeline', '--event', 'end',
-    ], { encoding: 'utf8' });
+    ], { encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'sess-1' } });
     assert.equal(r.status, 0, r.stderr);
 
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -386,9 +494,11 @@ test('CLI: mark x3 (setup start, setup end/pipeline start via auto-close, pipeli
     const sessionDir = join(projectsDir, 'sess-1', 'subagents');
     mkdirSync(sessionDir, { recursive: true });
     const jsonlFile = join(sessionDir, 'agent-x.jsonl');
-    writeFileSync(jsonlFile, usageLine('m1', 'claude-sonnet-5', { input_tokens: 2000, output_tokens: 500, cache_read_input_tokens: 100 }));
     const midpoint = (Date.parse(state.phases[1].startedAt) + Date.parse(state.phases[1].endedAt)) / 2;
-    utimesSync(jsonlFile, midpoint / 1000, midpoint / 1000);
+    const timestamp = new Date(midpoint).toISOString();
+    writeFileSync(jsonlFile, JSON.stringify({ timestamp, message: { id: 'm1', model: 'claude-sonnet-5', usage: { input_tokens: 2000, output_tokens: 500, cache_read_input_tokens: 100 } } }));
+    writeFileSync(join(sessionDir, 'agent-x.meta.json'), JSON.stringify({ toolUseId: 'tool-x' }));
+    parentFixture(projectsDir, 'sess-1', [['tool-x', timestamp]]);
 
     const rr = spawnSync(process.execPath, [
       CLI, 'report', '--state', statePath, '--projects-dir', projectsDir,
