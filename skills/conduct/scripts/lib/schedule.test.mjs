@@ -56,6 +56,12 @@ test('deep Tach-shaped runtime exercise stores plain none for the lane check', (
   assert.equal(parseWorkPackages(dir)[0].runtimeExercise, 'none: no runtime surface');
 });
 
+test('deep runtime exercise preserves separate command and expected-output code spans', (t) => {
+  const exercise = '`node cli.mjs` prints `ok`';
+  const dir = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: `**Files:**\n- Create \`a.mjs\`\n\n**Runtime exercise:** ${exercise}\n` } });
+  assert.equal(parseWorkPackages(dir)[0].runtimeExercise, exercise);
+});
+
 test('filesDisjoint on the run workshop (D17, D19.29)', () => {
   const wps = parsed();
   const files = (id) => wps.get(id).files;

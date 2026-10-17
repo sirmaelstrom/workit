@@ -51,7 +51,7 @@ function fieldText(lines, field) {
 }
 
 export function stripWrappingBackticks(value) {
-  return String(value ?? '').trim().replace(/^(`+)([\s\S]*?)\1$/, '$2');
+  return String(value ?? '').trim().replace(/^(`+)((?:(?!\1)[\s\S])*)\1$/, '$2');
 }
 
 // The Files field rule: bullets under `**Files:**` that begin `- Create ` or

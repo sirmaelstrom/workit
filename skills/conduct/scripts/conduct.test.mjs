@@ -702,6 +702,17 @@ test('depth lite strips Tach-shaped wrapping backticks from the runtime exercise
   assert.equal(readState(runDir).wps[0].runtimeExercise, 'none: no runtime surface');
 });
 
+test('depth lite preserves separate command and expected-output code spans', async (t) => {
+  const f = fixture(t);
+  const { runDir, spec } = await toCoreSpec(f);
+  const state = readState(runDir);
+  const exercise = '`node cli.mjs` prints `ok`';
+  writeFileSync(join(state.workshopDir, 'spec.md'), `# Lite\n\n**Runtime exercise:** ${exercise}\n`);
+  const result = await record(f, runDir, spec.id, { depth: 'lite', workshopDir: state.workshopDir, gateCommand: 'node --test' });
+  assert.equal(result.code, 0, result.stdout);
+  assert.equal(readState(runDir).wps[0].runtimeExercise, exercise);
+});
+
 test('answer refuses non-tty', async (t) => {
   const f = fixture(t);
   const { runDir } = out(await intake(f));

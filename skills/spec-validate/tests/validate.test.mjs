@@ -136,6 +136,19 @@ test('Tach-shaped backticked runtime exercise is flagged before conduct stores i
   assert.match(out, /Runtime exercise.*backticks.*none: no runtime surface/i);
 });
 
+test('separate runtime command and result code spans validate', () => {
+  const workshop = makeTemp('spec-validate-spans-');
+  cpSync(CANONICAL, workshop, { recursive: true });
+  const wpPath = join(workshop, 'work-packages', 'wp-01-retry-loop.md');
+  writeFileSync(wpPath, readFileSync(wpPath, 'utf8').replace(
+    '**Runtime exercise:** CLI/worker',
+    '**Runtime exercise:** `node cli.mjs` prints `ok`\n\n**Runtime exercise note:** CLI/worker',
+  ));
+  const { status, out } = runValidator(workshop, { env: NO_ROOT });
+  assert.equal(status, 0, out);
+  assert.doesNotMatch(out, /value is wrapped in backticks/);
+});
+
 // Non-vacuity: the canonical fixture must actually exercise the relaxed forms,
 // so "conforming" it to validator-only conventions can't quietly pass this test.
 

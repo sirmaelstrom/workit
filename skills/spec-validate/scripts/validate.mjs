@@ -702,7 +702,7 @@ function conductorFieldProblems(content) {
   if (!runtimeLines.join('').trim()) {
     problems.push(`Missing or empty **Runtime exercise:** field (a surface and a check, or "none: <why>").${spelled('Runtime exercise')}`);
   }
-  if (/^(`+).*\1$/.test(runtimeLines[0]?.trim() ?? '')) {
+  if (/^(`+)((?:(?!\1)[\s\S])*)\1$/.test(runtimeLines[0]?.trim() ?? '')) {
     problems.push('**Runtime exercise:** value is wrapped in backticks. Write it as plain text (for example, none: no runtime surface); backticks break the conduct runtime check.');
   }
   // Only bullets on the lines after the label count, as in the scheduler: `**Files:**- Modify …` has none.
