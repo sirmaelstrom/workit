@@ -123,21 +123,41 @@ function gitFirstAdd(file, dataRepo) {
   return Date.parse(`${first.slice(0, 10)}T00:00:00Z`);
 }
 
-function isMemoryPath(s, memoryDir) {
+function memoryPath(s, memoryDir, cwd) {
   const clean = String(s).replace(/^['"]|['"]$/g, '');
-  return within(clean, memoryDir);
+  if (!clean || (!path.isAbsolute(clean) && !cwd)) return null;
+  const resolved = path.resolve(cwd ?? memoryDir, clean);
+  return within(resolved, memoryDir) ? resolved : null;
 }
 
-function isQuoteCall(block, memoryDir) {
+function shellWords(command) {
+  return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((word) => word.replace(/^['"]|['"]$/g, '')) ?? [];
+}
+
+function isQuoteCall(block, memoryDir, cwd) {
   if (block.type !== 'tool_use') return false;
   const input = block.input ?? {};
-  if (block.name === 'Read') return isMemoryPath(input.file_path ?? input.path ?? '', memoryDir) && /\.(md|jsonl)$/i.test(input.file_path ?? input.path ?? '');
+  if (block.name === 'Read') return Boolean(memoryPath(input.file_path ?? input.path ?? '', memoryDir, cwd)) && /\.(md|jsonl)$/i.test(input.file_path ?? input.path ?? '');
   if (!['Bash', 'PowerShell'].includes(block.name)) return false;
-  const cmd = String(input.command ?? '');
-  const slashCommand = cmd.replaceAll('\\', '/').toLowerCase();
-  return /\bgit\s+(?:-C\s+\S+\s+)?(?:diff|show)\b/i.test(cmd)
-    && /\.(?:md|jsonl)\b/i.test(cmd)
-    && (slashCommand.includes(normalized(memoryDir)) || slashCommand.includes(`${path.basename(memoryDir).toLowerCase()}/`));
+  const words = shellWords(String(input.command ?? ''));
+  const git = words.findIndex((word) => /(?:^|[\\/])git(?:\.exe)?$/i.test(word));
+  if (git < 0) return false;
+  let gitCwd = cwd;
+  let operation = -1;
+  for (let i = git + 1; i < words.length; i++) {
+    if (words[i] === '-C' && words[i + 1]) {
+      const dir = words[++i];
+      gitCwd = path.isAbsolute(dir) ? dir : gitCwd ? path.resolve(gitCwd, dir) : null;
+    } else if (words[i] === 'diff' || words[i] === 'show') {
+      operation = i;
+      break;
+    }
+  }
+  if (operation < 0) return false;
+  return words.slice(operation + 1).some((word) => {
+    const file = (path.isAbsolute(word) ? word : word.replace(/^[^:]+:/, '')).replace(/[;,)]$/, '');
+    return /\.(?:md|jsonl)$/i.test(file) && Boolean(memoryPath(file, memoryDir, gitCwd));
+  });
 }
 
 function autoMemIndex(record, indexPath) {
@@ -169,9 +189,11 @@ function extractSession(descriptor, memoryDir, indexPath) {
     }
     for (const b of r.message.content) {
       if (b.type === 'tool_use') {
-        if (b.name === 'Read' && isMemoryPath(b.input?.file_path ?? b.input?.path ?? '', memoryDir)) bodyReads.add(normalized(b.input?.file_path ?? b.input?.path));
-        if (isQuoteCall(b, memoryDir) && b.id) quotedIds.add(b.id);
-        if (!isQuoteCall(b, memoryDir)) parts.push({ ts, scope: 'call', text: JSON.stringify({ name: b.name, input: b.input ?? {} }) });
+        const readPath = b.name === 'Read' ? memoryPath(b.input?.file_path ?? b.input?.path ?? '', memoryDir, r.cwd) : null;
+        if (readPath) bodyReads.add(normalized(readPath));
+        const quote = isQuoteCall(b, memoryDir, r.cwd);
+        if (quote && b.id) quotedIds.add(b.id);
+        if (!quote) parts.push({ ts, scope: 'call', text: JSON.stringify({ name: b.name, input: b.input ?? {} }) });
       } else if (b.type === 'tool_result') {
         if (!quotedIds.has(b.tool_use_id)) parts.push({ ts, scope: 'result', text: textOf(b.content) });
       } else if (r.type === 'user' && b.type === 'text') {

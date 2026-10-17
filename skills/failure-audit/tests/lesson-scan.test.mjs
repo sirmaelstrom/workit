@@ -151,6 +151,27 @@ test('fleet, summarizer, and git quote results do not add hits', (t) => {
   assert.equal(report.skipped.summarizer, 1);
 });
 
+test('relative git diff and Read paths under the memory directory cannot quote hits', (t) => {
+  const f = fixture(t);
+  f.memory('relative-quote', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  f.session('relative-git', '2026-09-11', [f.call('git diff -- relative-quote.md', 'g1')], {
+    cwd: f.memoryDir,
+    extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'g1', content: 'OPPORTUNITY ERROR' }] } }],
+  });
+  f.session('relative-read', '2026-09-12', [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: 'relative-quote.md' } }], {
+    cwd: f.memoryDir,
+    extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'r1', content: 'OPPORTUNITY ERROR' }] } }],
+  });
+  f.session('git-c', '2026-09-13', [f.call('git -C auto-memory show HEAD:relative-quote.md', 'c1')], {
+    cwd: f.root,
+    extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'OPPORTUNITY ERROR' }] } }],
+  });
+  const m = f.run().memories[0];
+  assert.deepEqual(m.after, { exposed: 0, mistakes: 0 });
+  assert.equal(m.sessions.find((s) => s.id === 'relative-read').delivery, 'body-read');
+});
+
 test('one session can contribute on both sides of treatment', (t) => {
   const f = fixture(t);
   f.memory('straddle');
@@ -199,4 +220,10 @@ test('verdict boundary and power checks', () => {
   assert.equal(verdict({ exposed: 4, mistakes: 2 }, { exposed: 4, mistakes: 1 }).result, 'reduced');
   assert.equal(verdict({ exposed: 4, mistakes: 2 }, { exposed: 4, mistakes: 3 }).result, 'worse');
   assert.equal(verdict({ exposed: 4, mistakes: 2 }, { exposed: 4, mistakes: 2 }).result, 'no-change');
+  assert.equal(verdict({ exposed: 5, mistakes: 0 }, { exposed: 10, mistakes: 6 }).result, 'untested');
+});
+
+test('skill documents the zero-before-rate power result', () => {
+  const skill = fs.readFileSync(new URL('../SKILL.md', import.meta.url), 'utf8');
+  assert.match(skill, /A zero before rate has zero expected mistakes and remains\s+`untested` under this power rule\./);
 });

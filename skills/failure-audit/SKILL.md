@@ -204,9 +204,10 @@ agent used the memory.
 
 Rates divide mistake sessions by exposed sessions. Fewer than three exposed
 sessions after treatment, or fewer than two expected mistakes at the before
-rate, is `untested`. Otherwise the verdict is `worse` at ≥1.5× the before rate
-with ≥2 after mistakes (including a zero before rate), `reduced` at ≤0.5× with
-≥2 before mistakes, or `no-change`. No verdict is an admission or prune gate.
+rate, is `untested`. A zero before rate has zero expected mistakes and remains
+`untested` under this power rule. Otherwise the verdict is `worse` at ≥1.5×
+the before rate with ≥2 after mistakes, `reduced` at ≤0.5× with ≥2 before
+mistakes, or `no-change`. No verdict is an admission or prune gate.
 
 ## Out of scope (separate owed work — don't fold in)
 
