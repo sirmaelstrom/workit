@@ -6,7 +6,7 @@
 // It is a library and a CLI. The CLI verifies against readAnchor() and nothing else:
 //   node operator-proof.mjs verify-receipt --file <f> --quest <full uuid> [--state <state.json>] [--goal <file>]
 //   node operator-proof.mjs verify-record --file <f> --quest <id|none> [--goal <file>]
-// Each prints one JSON line {ok, mode, reason, credentialId, epoch, grant, scopeOk?}
+// Each prints one JSON line {ok, mode, reason, credentialId, epoch, grant, answer, scopeOk?}
 // and exits 0 only on ok (verified, or unconfigured).
 import { createHash, createPublicKey, verify as verifySignature } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -19,9 +19,9 @@ export const REASONS = Object.freeze(Object.fromEntries([
   'ask_missing', 'proof_absent', 'unsupported_version', 'malformed_proof', 'bad_timestamp',
   'unknown_credential', 'statement_mismatch', 'bad_authenticator_data', 'type_mismatch',
   'challenge_mismatch', 'origin_mismatch', 'cross_origin', 'rp_mismatch', 'alg_unsupported',
-  'up_required', 'uv_required', 'bad_key', 'bad_signature', 'credential_id_mismatch',
-  'cosign_mismatch', 'proof_stale', 'anchor_unreadable', 'grant_tag_mismatch', 'grant_expired',
-  'wrong_run', 'raise_tag_mismatch', 'quest_id_not_full', 'not_answered', 'input_unreadable',
+  'up_required', 'uv_required', 'bad_key', 'bad_signature', 'credential_id_mismatch', 'key_mismatch',
+  'cosign_mismatch', 'cosign_unconfigured', 'proof_stale', 'anchor_unreadable', 'grant_tag_mismatch', 'grant_expired',
+  'wrong_run', 'raise_tag_mismatch', 'quest_id_not_full', 'not_answered', 'input_unreadable', 'record_answer_mismatch',
 ].map((code) => [code, code])));
 
 export class OperatorProofError extends Error {
@@ -53,6 +53,8 @@ const isStr = (value) => typeof value === 'string';
 const nfc = (text) => text.normalize('NFC');
 const sha256 = (data) => createHash('sha256').update(data).digest();
 const sha256Hex = (data) => createHash('sha256').update(data).digest('hex');
+// A leading byte-order mark, written as an escape: an invisible literal is too easy to lose.
+const stripBom = (text) => text.replace(/^\u{FEFF}/u, '');
 
 // Sorted keys, no whitespace, NFC strings. Only JSON values: anything else is a
 // programmer error and throws a TypeError.
@@ -79,7 +81,9 @@ export function questionSha256(question) {
 
 // What the operator reads of an ask: its prompt (AskCard shows prompt ?? question),
 // whether free text is allowed, and every option's key, label and consequence.
-// A legacy prose ask is null and hashes canonical(null). Bad shape: null.
+// A legacy prose ask is null and hashes canonical(null). Bad shape, or two options
+// with one key (which label a key names would depend on their order): null.
+// Options sort by their NFC key.
 function askCanonical(ask) {
   if (ask === null) return canonical(null);
   if (!isObj(ask) || !Array.isArray(ask.options)) return null;
@@ -87,9 +91,13 @@ function askCanonical(ask) {
   const allowFreeText = ask.allowFreeText === undefined ? false : ask.allowFreeText;
   if ((prompt !== null && !isStr(prompt)) || typeof allowFreeText !== 'boolean') return null;
   const options = [];
+  const keys = new Set();
   for (const option of ask.options) {
     if (!isObj(option) || !isStr(option.key) || !isStr(option.label) || !isStr(option.consequence)) return null;
-    options.push({ key: option.key, label: option.label, consequence: option.consequence });
+    const key = nfc(option.key);
+    if (keys.has(key)) return null;
+    keys.add(key);
+    options.push({ key, label: option.label, consequence: option.consequence });
   }
   options.sort((x, y) => (x.key < y.key ? -1 : x.key > y.key ? 1 : 0));
   return canonical({ allowFreeText, prompt, options });
@@ -155,19 +163,35 @@ export function anchorPath() {
   return join(homedir(), '.claude', 'operator-passkeys.json');
 }
 
+const isBool = (value) => typeof value === 'boolean';
+const CREDENTIAL_FIELDS = Object.entries({
+  credentialId: isStr, publicKeySpki: isStr, alg: Number.isInteger, rpId: isStr, origin: isStr,
+  registeredAt: isStr, label: isStr, be: isBool, bs: isBool,
+});
+
 // An anchor that exists but cannot be read as the file shape throws: it must
-// never read as "not configured", which would switch verification off.
+// never read as "not configured", which would switch verification off. Every
+// credential field is checked, and the file must canonicalise (JSON.parse turns
+// 1e400 into Infinity, which canonical() refuses).
 export function anchorFromFile(file) {
   const unreadable = (why) => new OperatorProofError(REASONS.anchor_unreadable, `operator anchor: ${why}`);
   if (!isObj(file) || file.v !== 1) throw unreadable('not a v1 anchor file');
   if (!Number.isInteger(file.epoch) || file.epoch < 0) throw unreadable('epoch is not an integer >= 0');
   if (!Array.isArray(file.credentials)) throw unreadable('credentials is not an array');
   for (const credential of file.credentials) {
-    if (!isObj(credential) || !isStr(credential.credentialId) || !isStr(credential.publicKeySpki)
-      || !isStr(credential.rpId) || !isStr(credential.origin)) throw unreadable('a credential lacks credentialId, publicKeySpki, rpId or origin');
+    if (!isObj(credential)) throw unreadable('a credential is not an object');
+    for (const [field, valid] of CREDENTIAL_FIELDS) {
+      if (!valid(credential[field])) throw unreadable(`a credential's ${field} is missing or has the wrong type`);
+    }
+  }
+  let hash;
+  try {
+    hash = sha256Hex(canonical(file));
+  } catch (err) {
+    throw unreadable(err.message);
   }
   if (file.credentials.length === 0) return { configured: false, epoch: file.epoch };
-  return { configured: true, epoch: file.epoch, credentials: file.credentials, sha256: sha256Hex(canonical(file)) };
+  return { configured: true, epoch: file.epoch, credentials: file.credentials, sha256: hash };
 }
 
 export function readAnchor(path = anchorPath()) {
@@ -180,7 +204,7 @@ export function readAnchor(path = anchorPath()) {
   }
   let file;
   try {
-    file = JSON.parse(text.replace(/^﻿/, ''));
+    file = JSON.parse(stripBom(text));
   } catch (err) {
     throw new OperatorProofError(REASONS.anchor_unreadable, `operator anchor ${path}: ${err.message}`);
   }
@@ -302,14 +326,67 @@ export function verifyAnswerProof({ answer, question, ask, questId, askReceiptId
     key: answer.key, text: answer.text, signedAt: statement.signedAt,
   });
   if (rebuilt === null) return verdict(anchor, REASONS.malformed_proof, credential);
-  if (rebuilt !== parsed.text || (askReceiptId !== undefined && statement.askReceiptId !== askReceiptId)) {
+  // The ask id must agree with the caller's expectation and with the answer's own
+  // askReceiptId; only the caller's is sourced independently of the stored answer.
+  const storedReceiptId = answer.askReceiptId ?? null;
+  if (rebuilt !== parsed.text || (askReceiptId !== undefined && statement.askReceiptId !== askReceiptId)
+    || (storedReceiptId !== null && statement.askReceiptId !== storedReceiptId)) {
     return verdict(anchor, REASONS.statement_mismatch, credential);
   }
   return verdict(anchor, assertionReason(parsed, credential), credential, parsed.authData);
 }
 
+const COSE_TRUNCATED = Symbol('truncated');
+
+// The attested COSE_Key, read with a bounded CBOR reader that knows one form: a
+// definite map of exactly {1: 2 (EC2), 3: alg, -1: 1 (P-256), -2: x, -3: y}, with x
+// and y 32-byte byte strings. Running out of bytes is COSE_TRUNCATED; any other
+// form is null.
+function coseEc2Key(bytes, start) {
+  let at = start;
+  // One CBOR head: the major type and an argument held inline or in one more byte.
+  const head = () => {
+    if (at >= bytes.length) return COSE_TRUNCATED;
+    const major = bytes[at] >> 5;
+    const info = bytes[at] & 0x1f;
+    at += 1;
+    if (info < 24) return { major, value: info };
+    if (info !== 24) return null;
+    if (at >= bytes.length) return COSE_TRUNCATED;
+    at += 1;
+    return { major, value: bytes[at - 1] };
+  };
+  const int = (item) => (item.major === 0 ? item.value : item.major === 1 ? -1 - item.value : null);
+  const map = head();
+  if (map === COSE_TRUNCATED || map === null) return map;
+  if (map.major !== 5 || map.value !== 5) return null;
+  const entries = new Map();
+  for (let i = 0; i < 5; i += 1) {
+    const keyItem = head();
+    if (keyItem === COSE_TRUNCATED || keyItem === null) return keyItem;
+    const key = int(keyItem);
+    if (key === null || entries.has(key)) return null;
+    const valueItem = head();
+    if (valueItem === COSE_TRUNCATED || valueItem === null) return valueItem;
+    if (valueItem.major === 2) {
+      if (at + valueItem.value > bytes.length) return COSE_TRUNCATED;
+      entries.set(key, bytes.subarray(at, at + valueItem.value));
+      at += valueItem.value;
+    } else if (int(valueItem) !== null) {
+      entries.set(key, int(valueItem));
+    } else {
+      return null;
+    }
+  }
+  const [x, y] = [entries.get(-2), entries.get(-3)];
+  if (entries.get(1) !== 2 || entries.get(-1) !== 1 || !Number.isInteger(entries.get(3))
+    || !Buffer.isBuffer(x) || x.length !== 32 || !Buffer.isBuffer(y) || y.length !== 32) return null;
+  return { alg: entries.get(3), x, y };
+}
+
 // A create() response checked against the origin and rpId the SERVER expects. It
-// shows the bytes are well formed; it cannot show that a phone made the key.
+// shows the bytes are well formed and that the supplied SPKI is the attested key;
+// it cannot show that a phone made the key.
 export function verifyRegistration({
   clientDataJSON, authenticatorData, credentialId, publicKeySpki, alg, label, expectedOrigin, expectedRpId, signedAt, now = Date.now(),
 } = {}) {
@@ -330,11 +407,24 @@ export function verifyRegistration({
   const flags = authData[32];
   if (!(flags & FLAG_UP)) return refuse(REASONS.up_required);
   if (!(flags & FLAG_UV)) return refuse(REASONS.uv_required);
-  // Attested credential data: AAGUID at 37, a 2-byte id length at 53, the id at 55.
+  // Attested credential data: AAGUID at 37, a 2-byte id length at 53, the id at 55,
+  // then the COSE_Key.
   if (!(flags & FLAG_AT) || authData.length < 55 || authData.length < 55 + authData.readUInt16BE(53)) return refuse(REASONS.bad_authenticator_data);
-  if (!authData.subarray(55, 55 + authData.readUInt16BE(53)).equals(id)) return refuse(REASONS.credential_id_mismatch);
+  const idEnd = 55 + authData.readUInt16BE(53);
+  if (!authData.subarray(55, idEnd).equals(id)) return refuse(REASONS.credential_id_mismatch);
+  const cose = coseEc2Key(authData, idEnd);
+  if (cose === COSE_TRUNCATED) return refuse(REASONS.malformed_proof);
+  if (cose === null) return refuse(REASONS.bad_key);
   if (alg !== ES256) return refuse(REASONS.alg_unsupported);
-  if (!es256Spki(publicKeySpki)) return refuse(REASONS.bad_key);
+  const spki = es256Spki(publicKeySpki);
+  if (!spki) return refuse(REASONS.bad_key);
+  let attested;
+  try {
+    attested = createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: cose.x.toString('base64url'), y: cose.y.toString('base64url') }, format: 'jwk' });
+  } catch {
+    return refuse(REASONS.bad_key);
+  }
+  if (cose.alg !== ES256 || !attested.equals(createPublicKey({ key: spki, format: 'der', type: 'spki' }))) return refuse(REASONS.key_mismatch);
   if (!isFresh(signedAt, now)) return refuse(REASONS.proof_stale);
   return {
     ok: true, mode: 'verified', reason: null,
@@ -346,13 +436,14 @@ export function verifyRegistration({
 }
 
 // A registered credential signed registerCosignStatement for exactly the expected
-// new credential and origin, recently. An unconfigured anchor has nobody to co-sign.
+// new credential and origin, recently. An unconfigured anchor has nobody to
+// co-sign, so it is refused (cosign_unconfigured), not passed.
 export function verifyCosign({ anchor, cosign, expect, now = Date.now() } = {}) {
   requireAnchor(anchor);
   if (!isObj(expect) || !isStr(expect.credentialId) || !isStr(expect.publicKeySpki) || !isStr(expect.origin)) {
     throw new TypeError('expect {credentialId, publicKeySpki, origin} required');
   }
-  if (!anchor.configured) return { ...verdict(anchor, REASONS.unknown_credential), mode: 'unconfigured' };
+  if (!anchor.configured) return verdict(anchor, REASONS.cosign_unconfigured);
   const parsed = parseAssertion(cosign, false);
   if (parsed.reason) return verdict(anchor, parsed.reason);
   const credential = credentialFor(anchor, cosign.credentialId);
@@ -442,25 +533,33 @@ export function checkRaise(raise, askLike, key = 'a') {
 }
 
 // --- CLI commands, in process --------------------------------------------------
-// Each returns the CLI's line, {ok, mode, reason, credentialId, epoch, grant, scopeOk?}.
+// Each returns the CLI's line, {ok, mode, reason, credentialId, epoch, grant, answer, scopeOk?}.
 // The CLI passes readAnchor() and Date.now(); nothing on its argv or environment
 // can replace either.
 
 // conduct's run correlation in a filed question: `<tag> (run <runId>/<filing>)`.
 const RUN_ID = /\(run ([^/\s)]+)\//;
 
-const refusal = (anchor, reason) => ({ ok: false, mode: 'refused', reason, credentialId: null, epoch: anchor.epoch ?? null, grant: null });
+const refusal = (anchor, reason) => ({
+  ok: false, mode: 'refused', reason, credentialId: null, epoch: anchor.epoch ?? null, grant: null, answer: null,
+});
+
+const answerFields = (answer) => (isObj(answer) ? { key: answer.key ?? null, text: answer.text ?? null } : null);
 
 // grant is printed only when its tag checks against the signed ask (or, when
 // unconfigured, the record's options). Configured, it must also be unexpired and
-// for the run the signed question names. scopeOk compares the NFC hash of the
-// scope text with the grant's scopeSha256.
-function withGrant(result, { anchor, grants, askLike, key, question, now, scopeText }) {
-  const out = { ok: result.ok, mode: result.mode, reason: result.reason, credentialId: result.credentialId, epoch: result.epoch, grant: null };
+// for the run the signed question names. answer is the {key, text} the proof was
+// checked against, null on a refusal. scopeOk compares the NFC hash of the scope
+// text with the grant's scopeSha256.
+function withGrant(result, { anchor, grants, askLike, key, question, now, scopeText, answer }) {
+  const out = {
+    ok: result.ok, mode: result.mode, reason: result.reason, credentialId: result.credentialId, epoch: result.epoch, grant: null, answer: null,
+  };
   if (!out.ok) return out;
+  out.answer = answer;
   const refuse = (reason) => {
     out.reason = reason;
-    if (anchor.configured) Object.assign(out, { ok: false, mode: 'refused' });
+    if (anchor.configured) Object.assign(out, { ok: false, mode: 'refused', answer: null });
   };
   const candidate = isObj(grants) && isStr(key) && Object.hasOwn(grants, key) ? grants[key] : undefined;
   if (candidate !== undefined) {
@@ -515,13 +614,25 @@ export function verifyReceiptBody({ body, quest, state, goalText, anchor, now = 
   const askLike = !anchor.configured && Array.isArray(touch?.options) ? { options: touch.options } : receipt.ask;
   return withGrant(result, {
     anchor, grants: touch?.grants, askLike, key: answer?.key, question: receipt.question, now, scopeText: goalScope(goalText),
+    answer: answerFields(answer),
   });
+}
+
+// The record's own answer must be the signed one. The one sanctioned difference
+// is conduct's: an operator's typed answer with no key is recorded as option (c).
+function recordedIsSigned(recorded, signed) {
+  if (!isObj(signed)) return false;
+  const [key, text] = [recorded.key ?? null, recorded.text ?? null];
+  const [signedKey, signedText] = [signed.key ?? null, signed.text ?? null];
+  if (text !== signedText) return false;
+  return key === signedKey || (signedKey === null && key === 'c' && isStr(signedText) && signedText.trim() !== '');
 }
 
 // record is a conduct touch record (touches/<n>.json) or an authority record
 // (touches/<n>-authority.json). The signed block is always answer.signed; an
 // authority record with a confirm block is verified through the confirm, and its
-// scopeOk comes from the record's own scope, not the goal.
+// scopeOk comes from the record's own scope, not the goal. The holder's receiptId
+// (the touch's filed ask) is the expected askReceiptId.
 export function verifyRecord({ record, quest, goalText, anchor, now = Date.now() } = {}) {
   requireAnchor(anchor);
   if (!isObj(record)) return refusal(anchor, REASONS.input_unreadable);
@@ -539,12 +650,17 @@ export function verifyRecord({ record, quest, goalText, anchor, now = Date.now()
   const recorded = isObj(holder.answer) ? holder.answer : {};
   const signed = isObj(recorded.signed) ? recorded.signed : null;
   if (anchor.configured && !signed) return refusal(anchor, REASONS.proof_absent);
-  const result = verifyAnswerProof({ answer: signed?.answer, question: signed?.question, ask: signed ? signed.ask : null, questId, anchor });
+  const result = verifyAnswerProof({
+    answer: signed?.answer, question: signed?.question, ask: signed ? signed.ask : null, questId,
+    askReceiptId: isStr(holder.receiptId) ? holder.receiptId : undefined, anchor,
+  });
+  if (result.ok && signed && !recordedIsSigned(recorded, signed.answer)) return refusal(anchor, REASONS.record_answer_mismatch);
   const key = isObj(signed?.answer) ? signed.answer.key : recorded.key;
   const askLike = !anchor.configured && Array.isArray(holder.options) ? { options: holder.options } : signed?.ask;
   return withGrant(result, {
     anchor, grants: holder.grants, askLike, key, question: signed?.question, now,
     scopeText: confirm ? (isStr(record.scope) ? record.scope : null) : goalScope(goalText),
+    answer: signed ? answerFields(signed.answer) : null,
   });
 }
 
@@ -558,7 +674,7 @@ const USAGE = [
 function readInput(path, json) {
   let text;
   try {
-    text = readFileSync(path, 'utf8').replace(/^﻿/, '');
+    text = stripBom(readFileSync(path, 'utf8'));
     return json ? JSON.parse(text) : text;
   } catch (err) {
     throw new OperatorProofError(REASONS.input_unreadable, `${path}: ${err.message}`);
@@ -606,7 +722,7 @@ function main(argv) {
     out = command.run(flags, readAnchor());
   } catch (err) {
     if (!(err instanceof OperatorProofError)) throw err;
-    out = { ok: false, mode: 'refused', reason: err.code, credentialId: null, epoch: null, grant: null };
+    out = { ok: false, mode: 'refused', reason: err.code, credentialId: null, epoch: null, grant: null, answer: null };
   }
   process.stdout.write(`${JSON.stringify(out)}\n`);
   // exitCode, never process.exit(): exiting after I/O truncates piped output.

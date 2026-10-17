@@ -23,11 +23,19 @@ The challenge is `SHA-256(statement)`, where the statement is canonical JSON: so
 
 `answer.proof` is `{v:1, credentialId, statement, authenticatorData, clientDataJSON, signature}`. `statement` is the exact signed string; the other fields are base64url without padding.
 
+**Canonicalisation order**, which a port (the Dogan's browser copy) must reproduce:
+
+- NFC applies to string **values**. Object keys are not normalised: every key in a statement or an ask hash is a fixed ASCII field name, so they are ASCII by construction.
+- An ask's options are NFC-normalised by `key` first, then sorted by that NFC key. Two options with the same NFC key make the ask unhashable: `askSha256` returns `null`, and a verifier refuses with `malformed_proof`.
+- The answer's `text` is trimmed, then NFC, then `null` when empty.
+
+**The registration challenge carries no nonce.** `registerBeginStatement` is `{origin, signedAt}`, so its challenge is predictable. That is acceptable only because registration custody does not come from these bytes: it comes from the operator-present ceremony (WP-10). `verifyRegistration` checks that the response is well formed and internally consistent, not that it is fresh from a phone.
+
 ## The anchor
 
-The anchor is read only from `join(os.homedir(), '.claude', 'operator-passkeys.json')`. No environment variable, flag or config key names another path or turns verification off. Tests inject an anchor object as an argument, or run the process under a temp `HOME`/`USERPROFILE`.
+The anchor is read only from `join(os.homedir(), '.claude', 'operator-passkeys.json')`. The module reads no environment variable of its own, and no flag or config key names another path or turns verification off. `os.homedir()` itself follows the process environment (`HOME`, `USERPROFILE`), so the anchor path trusts the caller's environment: a process that can set those variables for the verifier can point it at another file. That is a same-user process, which the threat model's A1 already covers; it is also how tests run the process under a temp home. Tests in process inject an anchor object as an argument instead.
 
-- **File shape (on disk):** `{v:1, epoch, credentials:[{credentialId, publicKeySpki, alg:-7, rpId, origin, registeredAt, label, be, bs}]}`.
+- **File shape (on disk):** `{v:1, epoch, credentials:[{credentialId, publicKeySpki, alg:-7, rpId, origin, registeredAt, label, be, bs}]}`. Every credential field is checked for its type (`alg` an integer, `be`/`bs` booleans, the rest strings), and the file must canonicalise; a number such as `1e400`, which parses as `Infinity`, makes it unreadable.
 - **Anchor object (what verifiers take):** `{configured, epoch, credentials, sha256}`. `anchorFromFile(file)` converts one to the other; `sha256` is SHA-256 of `canonical(file)`.
 
 A missing file, or one with zero credentials, is **unconfigured**: every verifier returns `{ok:true, mode:'unconfigured'}` and callers behave as they did before passkeys. A file that exists but cannot be read as the file shape throws `anchor_unreadable`; it never reads as unconfigured. Passing a file-shape object where an anchor object belongs throws `TypeError('anchor object required')`.
@@ -36,7 +44,11 @@ A missing file, or one with zero credentials, is **unconfigured**: every verifie
 
 `verifyAnswerProof({answer, question, ask, questId, askReceiptId?, anchor})` returns `{ok, mode, reason, credentialId, anchorSha256, epoch, be, bs}`. Against a configured anchor it refuses, in this order: `ask_missing`; the proof's absence, version and shape (`proof_absent`, `unsupported_version`, `malformed_proof`, `bad_timestamp`); `unknown_credential`; `statement_mismatch`; then the WebAuthn checks (`bad_authenticator_data`, `type_mismatch`, `challenge_mismatch`, `origin_mismatch`, `cross_origin`, `rp_mismatch`, `alg_unsupported`, `up_required`, `uv_required`, `bad_key`, `bad_signature`). The signature is ES256 over `authenticatorData ‖ SHA-256(clientDataJSON)`.
 
-`verifyRegistration` checks a `create()` response against the origin and rpId the **server** supplies. It shows the bytes are well formed, not that a phone made the key. `verifyCosign` checks a co-sign names exactly the expected credential and origin and is fresh (15 minutes back, 2 minutes ahead).
+**Ask binding.** `statement_mismatch` also covers the ask id. When `answer.askReceiptId` is present it must equal the signed statement's `askReceiptId`, and when the caller passes `askReceiptId` the statement must name it too. Only the caller's value stops a replay: `answer.askReceiptId` is stored beside the proof, so whoever can swap the proof can swap it as well. The independently sourced expected id belongs to the consumer, which knows which ask it filed. WP-06 and WP-07 pass `touch.receiptId`. `verify-receipt --state` takes it from the matched touch, and `verify-record` takes it from the record's own `receiptId`.
+
+`verifyRegistration` checks a `create()` response against the origin and rpId the **server** supplies. The browser supplies the SPKI (`getPublicKey()`). The attested COSE_Key in `authenticatorData` must also be an EC2 P-256 key, in the one map form with integer keys `{1:2, 3:-7, -1:1, -2:x, -3:y}`, where x and y are 32-byte strings, and its point and alg must equal the SPKI's: `key_mismatch` otherwise. Any other COSE form is `bad_key`. Attested data that ends early is `malformed_proof`. The check shows that the bytes are well formed and consistent with each other. It does not show that a phone made the key.
+
+`verifyCosign` checks that a co-sign names exactly the expected credential and origin, and that it is fresh (15 minutes back, 2 minutes ahead). Against an unconfigured anchor it returns `{ok:false, mode:'refused', reason:'cosign_unconfigured'}`, because nobody is registered who could co-sign.
 
 Untrusted input never throws. Every refusal is a code in `REASONS`; compare codes, never message text.
 
@@ -51,7 +63,13 @@ node operator-proof.mjs verify-receipt --file <f> --quest <full uuid> [--state <
 node operator-proof.mjs verify-record --file <f> --quest <id|none> [--goal <file>]
 ```
 
-Each prints one JSON line `{ok, mode, reason, credentialId, epoch, grant, scopeOk?}` and exits 0 only on `ok`; bad usage exits 2. `verify-receipt` takes a `spine_quest` body or a bare receipt row. `verify-record` takes a conduct touch record or authority record and verifies its `answer.signed` block (the confirm's, when there is one). Importing the module never runs the CLI.
+Each prints one JSON line `{ok, mode, reason, credentialId, epoch, grant, answer, scopeOk?}`. It exits 0 only on `ok`, and bad usage exits 2. Importing the module never runs the CLI.
+
+- `verify-receipt` takes a `spine_quest` body or a bare receipt row.
+- `verify-record` takes a conduct touch record or an authority record, and verifies its `answer.signed` block (the confirm's, when there is one). The record's own `answer` must agree with `answer.signed.answer` on `key` and `text`. The one allowed difference is conduct's keyless→(c) mapping: a signed `null` key may be recorded as `c` when the texts are equal. Any other difference refuses with `record_answer_mismatch`.
+- `answer` is the `{key, text}` the proof was checked against. For a record that is the **signed** values, so a consumer acts on what was authenticated, not on the record's copy. On a refusal it is `null`, and so it is for an unconfigured record with no signed block.
+
+**Unconfigured mode confers no authority.** With no anchor, both commands exit 0 with `mode:'unconfigured'`. Any `grant` they print has passed only its tag check, against the record's own options, and is not checked for expiry or run. It is informational. A consumer must not treat it as authority. It falls back to its legacy checks (WP-07, WP-08), as it did before passkeys. Unconfigured mode still refuses malformed or unanswered input.
 
 ## Vectors
 
