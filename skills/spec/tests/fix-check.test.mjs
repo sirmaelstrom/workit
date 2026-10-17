@@ -116,6 +116,16 @@ test('prompt JSON preserves a literal closing delimiter as data', () => {
   assert.equal(payload.after_snapshot, 'after');
 });
 
+test('CRLF prompt template yields a readable JSON payload boundary', () => {
+  const template = readFileSync(promptTemplate, 'utf8').replace(/\r?\n/g, '\r\n');
+  const findings = [{ id: 'W1-F1', finding: 'CRLF case', claimed_fix: 'done' }];
+  const prompt = buildPrompt(findings, '+changed', join(fixture, 'after'), template);
+  const payload = JSON.parse(prompt.split('Input JSON:\n')[1]);
+  assert.deepEqual(payload.fixed_findings, findings);
+  assert.equal(payload.spec_diff, '+changed');
+  assert.doesNotMatch(prompt, /\r\n/);
+});
+
 test('symlink inside a snapshot cannot supply evidence from outside it', () => withTempDir(root => {
   const after = join(root, 'after');
   const outside = join(root, 'outside');

@@ -53,7 +53,9 @@ export function buildPrompt(findings, diff, afterDir, template = readFileSync(TE
     '{payload_json}': JSON.stringify({ fixed_findings: findings, spec_diff: diff,
       after_dir: afterDir, after_snapshot: basename(resolve(afterDir)) }, null, 2),
   };
-  return template.replace(/\{fixed_findings\}|\{spec_diff\}|\{after_dir\}|\{after_snapshot\}|\{payload_json\}/g, slot => slots[slot]);
+  // Git may check the template out with CRLF. Keep the prompt's JSON boundary stable.
+  return template.replace(/\r\n?/g, '\n')
+    .replace(/\{fixed_findings\}|\{spec_diff\}|\{after_dir\}|\{after_snapshot\}|\{payload_json\}/g, slot => slots[slot]);
 }
 
 function quotedPostFixLine(result, afterDir) {
