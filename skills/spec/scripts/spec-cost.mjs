@@ -3,14 +3,15 @@
  * spec-cost.mjs — /spec per-phase token/cost instrumentation CLI.
  *
  * Two subcommands:
- *   mark   --state <path> --phase <name> --event start|end
+ *   mark   --state <path> --phase <name> --event start|end [--session-id <id>]
  *   report --state <path> [--projects-dir <dir>]
  *
  * `mark` writes/updates a small JSON state file recording phase start/end
  * timestamps (phases are sequential — starting a new phase auto-closes any
  * still-open prior entry). `report` scans this machine's Claude Code
  * subagent transcripts (`~/.claude/projects/<cwd-slug>/<session>/subagents/agent-NAME.jsonl`),
- * attributes each transcript file to a phase window by file mtime, aggregates
+ * attributes each transcript file to a phase window by its parent tool_use
+ * timestamp (or first-record timestamp), aggregates
  * token usage per phase/model (message-id-deduped), prices it via pricing.mjs,
  * writes cost-report.json next to the state file, and prints a compact
  * markdown table.
@@ -25,7 +26,7 @@
  */
 
 import {
-  readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync,
+  readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync,
 } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -53,18 +54,25 @@ export function createState(cwd) {
  *        is open for that phase name, returns a warning and leaves state
  *        unchanged (no-op).
  */
-export function markPhase(state, phase, event, now) {
+export function markPhase(state, phase, event, now, sessionId = null) {
   const next = {
     ...state,
     phases: state.phases.map((p) => ({ ...p })),
   };
 
   if (event === 'start') {
+    if (sessionId && !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
+      return { state: next, warning: `invalid session id ${JSON.stringify(sessionId)}` };
+    }
+    if (sessionId && next.sessionId && sessionId !== next.sessionId) {
+      return { state: next, warning: `session ${sessionId} does not own this run (${next.sessionId})` };
+    }
+    if (sessionId && !next.sessionId) next.sessionId = sessionId;
     for (const p of next.phases) {
       if (p.endedAt === null) p.endedAt = now;
     }
     next.phases.push({ phase, startedAt: now, endedAt: null });
-    return { state: next, warning: null };
+    return { state: next, warning: next.sessionId ? null : 'no owning session id; report will be unmeasured' };
   }
 
   if (event === 'end') {
@@ -102,10 +110,8 @@ export function slugifyCwd(cwd) {
  * every phase collects zero transcripts, and the report prints a clean $0 that
  * reads as "free" instead of "not measured".
  *
- * Precedence: explicit flag > env var > cwd slug (if it exists) > evidence-based
- * recovery. Recovery scans the projects root for the ONE directory holding
- * subagent transcripts inside a recorded phase window; ambiguity resolves to
- * nothing rather than to a guess.
+ * Precedence: explicit flag > env var > cwd slug containing the owning session
+ * > recovery by the owning session directory. Ambiguity resolves to nothing.
  *
  * Returns `{ dir, rule, candidates }`. `dir` is null when nothing resolved.
  */
@@ -119,9 +125,11 @@ export function resolveProjectsDir(state, { projectsDir = null, env = process.en
 
   const root = join(homedir(), '.claude', 'projects');
   const bySlug = join(root, slugifyCwd(state.cwd));
-  if (existsSync(bySlug)) return { dir: bySlug, rule: 'cwd-slug', exists: true, candidates: [] };
+  if (state.sessionId && existsSync(join(bySlug, state.sessionId))) {
+    return { dir: bySlug, rule: 'cwd-slug', exists: true, candidates: [] };
+  }
 
-  // Recovery: which projects dir actually has transcripts in a phase window?
+  // Recovery: only a directory containing the owning session is eligible.
   let entries;
   try {
     entries = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory());
@@ -129,25 +137,14 @@ export function resolveProjectsDir(state, { projectsDir = null, env = process.en
     return { dir: null, rule: 'none', exists: false, candidates: [] };
   }
 
-  const nowMs = Date.now();
   const matches = [];
-  for (const entry of entries) {
+  if (state.sessionId) for (const entry of entries) {
     const dir = join(root, entry.name);
-    let hits = 0;
-    for (const file of findAgentJsonlFiles(dir)) {
-      let mtimeMs;
-      try {
-        mtimeMs = statSync(file).mtimeMs;
-      } catch {
-        continue;
-      }
-      if (attributePhase(state.phases, mtimeMs, nowMs) !== null) hits++;
-    }
-    if (hits > 0) matches.push({ dir, hits });
+    if (existsSync(join(dir, state.sessionId))) matches.push(dir);
   }
 
-  if (matches.length === 1) return { dir: matches[0].dir, rule: 'recovered', exists: true, candidates: [] };
-  return { dir: null, rule: 'none', exists: false, candidates: matches.map((m) => m.dir) };
+  if (matches.length === 1) return { dir: matches[0], rule: 'recovered', exists: true, candidates: [] };
+  return { dir: null, rule: 'none', exists: false, candidates: matches };
 }
 
 // ---------------------------------------------------------------------------
@@ -155,27 +152,18 @@ export function resolveProjectsDir(state, { projectsDir = null, env = process.en
 // ---------------------------------------------------------------------------
 
 /** Find `<projectsDir>/<session>/subagents/agent-NAME.jsonl` files. Missing dirs -> []. */
-function findAgentJsonlFiles(projectsDir) {
+function findAgentJsonlFiles(projectsDir, sessionId) {
   const files = [];
-  let sessionEntries;
+  if (!sessionId || !/^[a-zA-Z0-9_-]+$/.test(sessionId)) return files;
+  let subEntries;
   try {
-    sessionEntries = readdirSync(projectsDir, { withFileTypes: true });
+    subEntries = readdirSync(join(projectsDir, sessionId, 'subagents'), { withFileTypes: true });
   } catch {
     return files;
   }
-  for (const entry of sessionEntries) {
-    if (!entry.isDirectory()) continue;
-    const subagentsDir = join(projectsDir, entry.name, 'subagents');
-    let subEntries;
-    try {
-      subEntries = readdirSync(subagentsDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const f of subEntries) {
-      if (f.isFile() && /^agent-.*\.jsonl$/.test(f.name)) {
-        files.push(join(subagentsDir, f.name));
-      }
+  for (const f of subEntries) {
+    if (f.isFile() && /^agent-[a-zA-Z0-9_-]+\.jsonl$/.test(f.name)) {
+      files.push(join(projectsDir, sessionId, 'subagents', f.name));
     }
   }
   return files;
@@ -219,12 +207,12 @@ function parseUsageBlock(usage) {
   return counts;
 }
 
-/** Which phase's [startedAt, endedAt||now] window contains `mtimeMs`? null if none. */
-function attributePhase(phases, mtimeMs, nowMs) {
+/** Which phase's [startedAt, endedAt||now] window contains a transcript timestamp? */
+function attributePhase(phases, timestampMs, nowMs) {
   for (const p of phases) {
     const startMs = new Date(p.startedAt).getTime();
     const endMs = p.endedAt ? new Date(p.endedAt).getTime() : nowMs;
-    if (mtimeMs >= startMs && mtimeMs <= endMs) {
+    if (timestampMs >= startMs && timestampMs <= endMs) {
       return p.phase;
     }
   }
@@ -232,32 +220,49 @@ function attributePhase(phases, mtimeMs, nowMs) {
 }
 
 /**
- * Scan `projectsDir` for subagent transcripts, attribute each file to a
- * phase by mtime, and aggregate token usage per phase -> per model
+ * Read tool launch times from a parent transcript. A nested agent's parent
+ * transcript is another agent file, selected by parentAgentId.
+ */
+function toolUseTimes(file) {
+  const times = new Map();
+  let raw;
+  try { raw = readFileSync(file, 'utf8'); } catch { return times; }
+  for (const line of raw.split('\n')) {
+    let record;
+    try { record = JSON.parse(line); } catch { continue; }
+    const time = Date.parse(record?.timestamp);
+    if (!Number.isFinite(time)) continue;
+    const content = record?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (block?.type === 'tool_use' && typeof block.id === 'string') times.set(block.id, time);
+    }
+  }
+  return times;
+}
+
+/**
+ * Scan only the owning session's subagent transcripts, attribute each file by
+ * its parent tool_use time (falling back to its first-record timestamp), and
+ * aggregate token usage per phase -> per model
  * (message-id-deduped, last usage for an id wins). Models whose family
  * can't be resolved are bucketed globally under `unknownModels` instead of
  * a phase (their tokens are real but unpriceable — never silently priced
  * as $0).
  *
- * Returns `{ perPhase: Map<phase, Map<model, tokenCounts>>, unknownModels: Map<model, tokenCounts> }`.
+ * Returns per-phase usage, unknown model usage, and the unassigned remainder.
  */
-export function collectPhaseUsage(phases, projectsDir, now = new Date()) {
+export function collectPhaseUsage(phases, projectsDir, sessionId, now = new Date()) {
   const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
   const perPhase = new Map();
   const unknownModels = new Map();
+  const unassigned = new Map();
 
-  const files = findAgentJsonlFiles(projectsDir);
+  const files = findAgentJsonlFiles(projectsDir, sessionId);
+  const parentTimes = toolUseTimes(join(projectsDir, `${sessionId}.jsonl`));
+  const agentTimes = new Map();
 
   for (const file of files) {
-    let mtimeMs;
-    try {
-      mtimeMs = statSync(file).mtimeMs;
-    } catch {
-      continue;
-    }
-    const phase = attributePhase(phases, mtimeMs, nowMs);
-    if (phase === null) continue; // outside all phase windows — ignored
-
     let raw;
     try {
       raw = readFileSync(file, 'utf8');
@@ -265,18 +270,28 @@ export function collectPhaseUsage(phases, projectsDir, now = new Date()) {
       continue;
     }
 
+    const records = [];
+    for (const line of raw.split('\n')) {
+      try { records.push(JSON.parse(line)); } catch { /* partial JSONL record */ }
+    }
+    const firstRecordTime = Date.parse(records[0]?.timestamp);
+    let meta;
+    try { meta = JSON.parse(readFileSync(file.replace(/\.jsonl$/, '.meta.json'), 'utf8')); } catch { meta = null; }
+    let launchTimes = parentTimes;
+    if (meta?.parentAgentId && /^[a-zA-Z0-9_-]+$/.test(meta.parentAgentId)) {
+      if (!agentTimes.has(meta.parentAgentId)) {
+        agentTimes.set(meta.parentAgentId, toolUseTimes(join(projectsDir, sessionId, 'subagents', `agent-${meta.parentAgentId}.jsonl`)));
+      }
+      launchTimes = agentTimes.get(meta.parentAgentId);
+    }
+    const timestamp = launchTimes.get(meta?.toolUseId) ?? firstRecordTime;
+    const phase = attributePhase(phases, timestamp, nowMs);
+
     // Dedupe by message.id within this file — the same usage block repeats
     // across multiple streamed lines for one message; last seen wins.
     const byMessageId = new Map();
     let anonymousSeq = 0;
-    for (const line of raw.split('\n')) {
-      if (!line.trim()) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch {
-        continue;
-      }
+    for (const obj of records) {
       const message = obj?.message;
       if (!message || !message.usage) continue;
       const key = message.id != null ? message.id : `__no-id-${anonymousSeq++}`;
@@ -286,6 +301,11 @@ export function collectPhaseUsage(phases, projectsDir, now = new Date()) {
     for (const { model, usage } of byMessageId.values()) {
       const counts = parseUsageBlock(usage);
       const family = resolveAnthropicFamily(model);
+      if (phase === null) {
+        const prior = unassigned.get(model) ?? emptyTokenCounts();
+        unassigned.set(model, addTokenCounts(prior, counts));
+        continue;
+      }
       if (family === null) {
         const prior = unknownModels.get(model) ?? emptyTokenCounts();
         unknownModels.set(model, addTokenCounts(prior, counts));
@@ -298,7 +318,7 @@ export function collectPhaseUsage(phases, projectsDir, now = new Date()) {
     }
   }
 
-  return { perPhase, unknownModels };
+  return { perPhase, unknownModels, unassigned };
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +331,7 @@ function round6(n) {
 
 /** Build the cost-report.json structure from state + collected usage. */
 export function buildReport(state, collected, generatedAt, source = { dir: null, rule: 'unknown', candidates: [] }) {
-  const { perPhase, unknownModels } = collected;
+  const { perPhase, unknownModels, unassigned = new Map() } = collected;
 
   let grandTotals = { ...emptyTokenCounts(), costUsd: 0 };
 
@@ -339,15 +359,31 @@ export function buildReport(state, collected, generatedAt, source = { dir: null,
   const unknownModelsArr = [...unknownModels.entries()].map(([model, counts]) => ({
     model, ...counts, costUsd: null,
   }));
+  const unassignedModels = {};
+  let unassignedTotals = { ...emptyTokenCounts(), costUsd: 0 };
+  for (const [model, counts] of unassigned) {
+    const costUsd = computeCostUsd(model, counts);
+    unassignedModels[model] = { ...counts, costUsd };
+    unassignedTotals = {
+      ...addTokenCounts(unassignedTotals, counts),
+      costUsd: costUsd === null || unassignedTotals.costUsd === null
+        ? null : round6(unassignedTotals.costUsd + costUsd),
+    };
+  }
+  grandTotals = {
+    ...addTokenCounts(grandTotals, unassignedTotals),
+    costUsd: grandTotals.costUsd === null || unassignedTotals.costUsd === null
+      ? null : round6(grandTotals.costUsd + unassignedTotals.costUsd),
+  };
 
   // "Nothing was measured" and "the measured cost was zero" are different facts
   // that render identically as $0.0000. Carry the difference explicitly so a
   // consumer of cost-report.json can never read an unmeasured run as free.
   const sawUsage =
-    phases.some((p) => Object.keys(p.models).length > 0) || unknownModelsArr.length > 0;
+    phases.some((p) => Object.keys(p.models).length > 0) || unknownModelsArr.length > 0 || unassigned.size > 0;
 
   return {
-    schema_version: '1.1',
+    schema_version: '1.2',
     generatedAt,
     measurement: {
       measured: Boolean(source.dir) && sawUsage,
@@ -355,15 +391,15 @@ export function buildReport(state, collected, generatedAt, source = { dir: null,
       resolution: source.rule,
       exists: source.exists ?? null,
       candidates: source.candidates ?? [],
+      sessionId: state.sessionId ?? null,
       // A phase never closed keeps its window open to `now`, so every later
-      // transcript in that projects dir lands in it — including work from
-      // unrelated sessions days afterwards. The total then grows every time the
-      // report is re-run, and reads as "this phase was expensive" rather than
-      // "this phase never ended". Name them so the number is interpretable.
+      // transcript in the owning session can still land in it. Name open
+      // windows so their totals remain interpretable after a resume.
       openPhases: state.phases.filter((p) => p.endedAt === null).map((p) => p.phase),
     },
     phases,
     totals: grandTotals,
+    unassigned: { models: unassignedModels, totals: unassignedTotals },
     unknownModels: unknownModelsArr,
   };
 }
@@ -385,11 +421,13 @@ export function renderMarkdownTable(report) {
   const totalCacheW = tt.cacheCreation5mTokens + tt.cacheCreation1hTokens;
   const totalsRow = `| **Total** | ${tt.inputTokens} | ${tt.outputTokens} | ${tt.cacheReadTokens} | ${totalCacheW} | ${fmtCost(tt.costUsd)} |`;
 
-  const table = [header, sep, ...rows, totalsRow].join('\n');
+  const u = report.unassigned?.totals ?? emptyTokenCounts();
+  const unassignedRow = `| **unassigned** | ${u.inputTokens} | ${u.outputTokens} | ${u.cacheReadTokens} | ${u.cacheCreation5mTokens + u.cacheCreation1hTokens} | ${fmtCost(u.costUsd === undefined ? 0 : u.costUsd)} |`;
+  const table = [header, sep, ...rows, unassignedRow, totalsRow].join('\n');
   const m = report.measurement;
 
   if (m?.openPhases?.length) {
-    const banner = `> **OPEN PHASE — ${m.openPhases.join(', ')} never ended, so the window runs to now and absorbs every later transcript. Re-running grows the total. Close the phase (\`mark --event end\`) before trusting this number.**`;
+    const banner = `> **OPEN PHASE — ${m.openPhases.join(', ')} never ended, so the window runs to now and can absorb later transcripts from this session. Close the phase (\`mark --event end\`) before trusting this number.**`;
     return m.measured ? [banner, '', table].join('\n') : [banner, '', renderUnmeasured(m, table)].join('\n');
   }
 
@@ -411,6 +449,8 @@ function renderUnmeasured(m, table) {
     }`;
   } else if (m.exists === false) {
     why = `Projects dir not found: ${m.projectsDir} (rule: ${m.resolution}).`;
+  } else if (!m.sessionId) {
+    why = 'No owning session id was recorded at phase start. Re-run mark with --session-id.';
   } else {
     why = `Resolved ${m.projectsDir} (rule: ${m.resolution}) but no subagent transcript fell inside a phase window.`;
   }
@@ -427,21 +467,21 @@ function renderUnmeasured(m, table) {
 // ---------------------------------------------------------------------------
 
 const HELP_TEXT = `Usage:
-  node spec-cost.mjs mark --state <path> --phase <name> --event start|end
+  node spec-cost.mjs mark --state <path> --phase <name> --event start|end [--session-id <id>]
   node spec-cost.mjs report --state <path> [--projects-dir <dir>]
 
 mark    Record a phase start/end timestamp in the state file (created on
         first mark). Starting a phase auto-closes any still-open prior phase.
-report  Scan this machine's Claude Code subagent transcripts, attribute them
-        to phase windows by mtime, aggregate token usage + cost per phase,
+report  Scan the owning session's Claude Code subagent transcripts, attribute
+        them by parent tool_use time, aggregate token usage + cost per phase,
         write cost-report.json next to --state, and print a markdown table.
 
 Projects-dir resolution (report), in precedence order — the rule used is
 printed to stderr and recorded in cost-report.json:
   1. --projects-dir <dir>
   2. WORKIT_CLAUDE_PROJECTS_DIR
-  3. ~/.claude/projects/<slug of state.cwd>, if it exists
-  4. Recovery: the ONE projects dir holding transcripts inside a phase window
+  3. ~/.claude/projects/<slug of state.cwd>, if it holds the owning session
+  4. Recovery: the ONE projects dir holding the owning session
      (ambiguity resolves to nothing, listing the candidates — never a guess)
 
 The cwd slug is only correct when mark ran from the directory the session was
@@ -453,6 +493,7 @@ Options:
   --state <path>          Path to the cost-log.json state file (required)
   --phase <name>          Phase name, e.g. phase-1-setup (mark only)
   --event start|end       Phase transition (mark only)
+  --session-id <id>       Owning Claude session id (defaults to CLAUDE_CODE_SESSION_ID)
   --projects-dir <dir>    Override the Claude Code projects directory (report only)
   --help                  Print this message and exit 0
 
@@ -467,7 +508,7 @@ function parseArgs(argv) {
   const args = argv.slice(2);
   const out = {
     command: args[0] && !args[0].startsWith('--') ? args[0] : null,
-    state: null, phase: null, event: null, projectsDir: null, help: false,
+    state: null, phase: null, event: null, sessionId: null, projectsDir: null, help: false,
   };
   const start = out.command ? 1 : 0;
   for (let i = start; i < args.length; i++) {
@@ -476,6 +517,7 @@ function parseArgs(argv) {
     else if (a === '--state') out.state = args[++i] || null;
     else if (a === '--phase') out.phase = args[++i] || null;
     else if (a === '--event') out.event = args[++i] || null;
+    else if (a === '--session-id') out.sessionId = args[++i] || null;
     else if (a === '--projects-dir') out.projectsDir = args[++i] || null;
   }
   return out;
@@ -511,7 +553,8 @@ function runMark(opts) {
   }
 
   const now = new Date().toISOString();
-  const { state: next, warning } = markPhase(state, opts.phase, opts.event, now);
+  const { state: next, warning } = markPhase(state, opts.phase, opts.event, now,
+    opts.sessionId ?? process.env.CLAUDE_CODE_SESSION_ID ?? null);
   if (warning) process.stderr.write(`Warning: ${warning}\n`);
 
   try {
@@ -554,8 +597,8 @@ function runReport(opts) {
   }
 
   const collected = source.dir
-    ? collectPhaseUsage(state.phases, source.dir)
-    : { perPhase: new Map(), unknownModels: new Map() };
+    ? collectPhaseUsage(state.phases, source.dir, state.sessionId)
+    : { perPhase: new Map(), unknownModels: new Map(), unassigned: new Map() };
   const report = buildReport(state, collected, new Date().toISOString(), source);
 
   if (!report.measurement.measured) {
