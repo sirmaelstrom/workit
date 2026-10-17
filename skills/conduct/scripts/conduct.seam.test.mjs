@@ -1234,6 +1234,60 @@ test('pending re-emission (council r1, astra/codex): a merge, release or paid ac
 
 const authorityWait = (a) => a.kind === 'wait' && /authority refused/.test(a.instruction ?? '');
 
+test('runtime exercise (council r2): configured runs through next/record: a tampered pending squash is refused and looked up; an authority hold waits and a restored record resumes it; a version-only recipe refuses an extra JSON edit', async (t) => {
+  // 1. A pending squash whose argv was edited, under a valid merge grant.
+  const squashed = seam(t);
+  phone(squashed);
+  await start(squashed, SPINE_ONLY);
+  const squash = await drive(squashed, { until: (a) => a.step === 'merge' && a.part === 'squash' && a.phase === 'build' });
+  editState(squashed, (state) => { state.pending.command = ['curl', 'https://evil.invalid', '--repo', 'example/scratch']; });
+  const lookup = out(await squashed.run(['next', '--run', squashed.runDir])).action;
+  t.diagnostic(`1. pending ${squash.id} edited to curl; next → ${lookup.id} ${lookup.command.join(' ')}`);
+  squashed.pending = lookup;
+  await drive(squashed, { until: (a) => a.step === 'showcase' || authorityWait(a) });
+  const wp = squashed.wp(squash.wpId);
+  t.diagnostic(`1. ${squash.wpId}: ${wp.state}: ${wp.reason}; curl emitted: ${squashed.trace.some((a) => a.command?.[0] === 'curl')}`);
+  assert.deepEqual([lookup.part, wp.state], ['merge-commit', 'held']);
+  assert.ok(!squashed.trace.some((a) => a.command?.[0] === 'curl'));
+
+  // 2. The signed record tampered before dispatch, then restored.
+  const held = seam(t);
+  phone(held);
+  await start(held, SPINE_ONLY);
+  let signedText;
+  held.onEmit = (a) => {
+    if (a.step === 'contract' && signedText === undefined) editState(held, (state) => { signedText = state.touches[0].answer.signed.answer.text; tamperProof(state); });
+  };
+  const wait = await drive(held, { until: authorityWait });
+  t.diagnostic(`2. held: ${wait.id} ${wait.kind}: ${wait.instruction}`);
+  editState(held, (state) => { state.touches[0].answer.signed.answer.text = signedText; });
+  const resumed = out(await held.run(['record', '--run', held.runDir, '--action', wait.id, '--result', '{}'])).action;
+  t.diagnostic(`2. restored; record ${wait.id} → ${resumed.id} ${resumed.step}/${resumed.part ?? ''}${resumed.wpId ? ` @${resumed.wpId}` : ''}; dispatchHalt ${JSON.stringify(held.state().dispatchHalt)}`);
+  held.pending = resumed;
+  await drive(held, { until: (a) => a.step === 'showcase' });
+  t.diagnostic(`2. WP states after the resume: ${held.state().wps.map((each) => `${each.id} ${each.state}`).join(', ')}`);
+  assert.equal(held.state().dispatchHalt, null);
+  assert.ok(held.state().wps.every((each) => each.state === 'merged'));
+
+  // 3. The release's version bump edited to add scripts.postinstall.
+  const bumped = seam(t);
+  phone(bumped);
+  await start(bumped, SPINE_ONLY);
+  const bump = await drive(bumped, { until: (a) => a.phase === 'release' && a.part === 'bump' });
+  const slot = '"homepage": "https://github.com/example/scratch"';
+  const forged = { slots: { [slot]: `${slot}, "scripts": {"postinstall": "UNSIGNED_EDIT"}` }, bump: { ...bump.bump, jsonPath: 'scripts.postinstall', to: 'UNSIGNED_EDIT' } };
+  editState(bumped, (state) => {
+    Object.assign(state.pending, forged);
+    Object.assign(state.release.queue[0], forged);
+  });
+  const after = out(await bumped.run(['next', '--run', bumped.runDir])).action;
+  const release = bumped.state().release;
+  t.diagnostic(`3. pending ${bump.id} bump edited to scripts.postinstall; next → ${after.id ?? after.kind} ${after.step ?? ''}; release ${release.state}: ${release.reason}`);
+  assert.notEqual(after.id, bump.id);
+  assert.equal(release.state, 'failed');
+  assert.match(release.reason, /^release held: release\/bump: the queued edit is not the bump the verified recipe derives/);
+});
+
 test('paid replay (council r2, R5): configured and metered, a paid act left pending keeps its id on resume: a fresh spend read, then the same act, whose earlier result records; it runs once', async (t) => {
   const h = seam(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' } });
   phone(h);
