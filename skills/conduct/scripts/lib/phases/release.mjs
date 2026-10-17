@@ -314,8 +314,9 @@ function derivedActions(state, authority) {
   for (const stage of Object.keys(NEXT_STAGE)) {
     try {
       out.push(...stageQueue(state, stage));
-    } catch {
-      // not reached yet
+    } catch (error) {
+      // A stage not reached yet reads a field not recorded yet (r.pr, r.version).
+      if (!(error instanceof TypeError)) throw error;
     }
   }
   const wp = view(state);
