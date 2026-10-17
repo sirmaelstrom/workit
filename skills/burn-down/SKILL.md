@@ -91,8 +91,11 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    in each option label (`a — Full grant, $200`) and the receipt tag in the
    question (`[ask <receiptId>]`). Use at most four options per question; split
    or collapse a Dogan ask with five or six options. A headless lane with no
-   operator present files the Dogan ask only. For now, write a T3 answer as a
-   conductor receipt quoting it; `spine_receipt` cannot write `answered`.
+   operator present files the Dogan ask only. The T3 ask-mirror hook writes a
+   tagged single-choice answer to Spine as `answered` (`by: 'operator:t3'`)
+   while the ask is still the quest's latest receipt; write a conductor receipt
+   quoting the answer only when the hook reports the mirror refused or skipped
+   it, or its pending job did not end `answered`.
    **Refutation is a valid outcome:** an item whose note does
    not survive re-derivation is handed back *refuted* with the evidence
    receipted, not built — across runs 3–4 the note was wrong or stale more
@@ -198,8 +201,13 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    Any doubt → held. **A go must be READ, never assumed: after filing a
    `needs_input` receipt, act only on an answer you can cite — for a structured
    ask, `spine_quest`'s `latestReceipt.answer` (`key` and/or `text`, stamped
-   `by: 'operator:dogan'`) IS the go, read back with a tool call, never inferred
-   from the quest having left WAITING; otherwise an operator message in-session,
+   `by: 'operator:dogan'` or `'operator:t3'`) IS the go when that receipt's
+   `question` is the ask's, verbatim, read back with a tool call, never
+   inferred from the quest having left WAITING. A later receipt hides it there:
+   before concluding there is none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver
+   with the quest uuid and the ask's whole question, each `'` doubled, as the
+   tag. It searches every receipt; its result passes the same verbatim check.
+   Otherwise an operator message in-session,
    or a receipt/resolution read back via a tool call. An operator answer given in
    CHAT is recorded as a conductor receipt citing it — never posted through the
    Dogan's answer route, which stamps the operator's identity.
@@ -356,7 +364,8 @@ Decisions, secrets, external actions, and merges. Everything else auto-captures.
 A decision is summoned as a `needs_input` receipt carrying the exact question —
 and, when it is a choice, `ask.options` (letter, label, one-line consequence)
 so it renders as buttons on the WAITING card — not as a paused session waiting
-to be noticed. The answer is read from `latestReceipt.answer`, never assumed.
+to be noticed. The answer is read back (`latestReceipt.answer`, else the
+answer resolver, step 4), never assumed.
 
 ## Measure the run
 

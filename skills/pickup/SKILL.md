@@ -133,13 +133,20 @@ needs a record; a T3 answer is written back to Spine the same turn. Put the ask
 key in each option label (`a — Full grant, $200`) and the receipt tag in the
 question (`[ask <receiptId>]`). Use at most four options per question; split or
 collapse a Dogan ask with five or six options. A headless lane with no operator
-present files the Dogan ask only. For now, write a T3 answer as a conductor
-receipt quoting it; `spine_receipt` cannot write `answered`. The Dogan's WAITING
+present files the Dogan ask only. The T3 ask-mirror hook writes a tagged
+single-choice answer to Spine as `answered` (`by: 'operator:t3'`) while the ask
+is still the quest's latest receipt; write a conductor receipt quoting the
+answer only when the hook reports the mirror refused or skipped it, or its
+pending job did not end `answered`. The Dogan's WAITING
 card renders the choices as buttons the operator presses with no agent running,
 and the press writes an `answered` receipt that supersedes the ask (quest
 9a1ce903). On re-entry, read the go from `spine_quest`'s
-`latestReceipt.answer` (`key` / `text`), never assume it from the quest having
-returned to the frontier.
+`latestReceipt.answer` (`key` / `text`) when that receipt's `question` is your
+ask's, verbatim; never assume it from the quest having returned to the
+frontier. A later receipt hides the answer there, so before concluding there is
+none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and your
+ask's whole question, each `'` doubled, as the tag. It searches every receipt;
+its result passes the same verbatim check.
 
 Work-state and attention are orthogonal: `dismissed` is not `done`, and a quest
 you finished is not closed until `workState` says so.
