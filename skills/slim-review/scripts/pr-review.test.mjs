@@ -3258,7 +3258,7 @@ function pinnedSeams({
     if (args[0] === 'api' && args[1] === '--paginate' && joined.includes('/reviews')) {
       return `${reviewPages.flat().map((entry) => JSON.stringify(entry)).join('\n')}\n`;
     }
-    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(compare);
+    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(typeof compare === 'function' ? compare(args[1]) : compare);
     throw new Error(`unexpected gh call: ${joined}`);
   };
   const run = (program, args, opts = {}) => {
@@ -3766,25 +3766,29 @@ function roundsCompare({ status = 'ahead', files = 1, commits = [1], totalCommit
   };
 }
 
-function roundsSeams({ reviews = [], compare = roundsCompare(), commentsByReview = {}, fail: failNeedle = null } = {}) {
+function roundsSeams({ reviews = [], compare = roundsCompare(), commentsByReview = {}, prComments, fail: failNeedle = null } = {}) {
   const calls = [];
   const runGh = (args) => {
     calls.push(args);
     const joined = args.join(' ');
     if (failNeedle && joined.includes(failNeedle)) throw new Error('gh: server error');
     if (args[0] === 'api' && args[1] === '--paginate' && /\/reviews$/.test(args[2])) return `${reviews.map((r) => JSON.stringify(r)).join('\n')}\n`;
+    if (args[0] === 'api' && args[1] === '--paginate' && /\/pulls\/\d+\/comments$/.test(args[2])) {
+      const listed = prComments ?? Object.entries(commentsByReview).flatMap(([reviewId, items]) => items.map((item) => ({ pull_request_review_id: Number(reviewId), ...item })));
+      return listed.map((item) => JSON.stringify(item)).join('\n');
+    }
     const comments = args[0] === 'api' && args[1] === '--paginate' && /\/reviews\/(\d+)\/comments$/.exec(args[2] ?? '');
     if (comments) return (commentsByReview[comments[1]] ?? []).map((item) => JSON.stringify(item)).join('\n');
-    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(compare);
+    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(typeof compare === 'function' ? compare(args[1]) : compare);
     throw new Error(`unexpected gh call: ${joined}`);
   };
   return { runGh, calls };
 }
 
-async function runRounds({ reviews, compare, commentsByReview, head, fake, failNeedle, makeClient }) {
+async function runRounds({ reviews, compare, commentsByReview, prComments, head, fake, failNeedle, makeClient }) {
   let result;
   await withCoordinatedInstall({ fake }, async ({ home }) => {
-    const seams = roundsSeams({ reviews, compare, commentsByReview, fail: failNeedle });
+    const seams = roundsSeams({ reviews, compare, commentsByReview, prComments, fail: failNeedle });
     const out = collector();
     await cmdRounds(
       { repo: PINNED_REPO, pr: String(PINNED_PR), head },
@@ -3854,6 +3858,37 @@ test('COUNCIL COUNT: body-only delta defects count, guard and P3 do not, and a d
   assert.equal(Object.hasOwn(onlyPair.line, 'escalate'), false, 'the two inline comments are one defect');
 });
 
+test('ROUND 2 RED: a dup-of reply in its own GitHub review container counts one defect', async () => {
+  const prComments = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'delta-reply-separate-review.json'), 'utf8'));
+  const result = await runRounds({
+    reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), { ...roundsReview(20, RH2, { login: 'lane-author' }), body: '' }],
+    head: RH2,
+    commentsByReview: { 12: prComments.filter((comment) => comment.pull_request_review_id === 12), 20: prComments.filter((comment) => comment.pull_request_review_id === 20) },
+    prComments,
+  });
+  assert.equal(result.line.major_findings, 1);
+  assert.equal(Object.hasOwn(result.line, 'escalate'), false);
+  assert.equal(result.calls.some((args) => /\/pulls\/\d+\/comments$/.test(args[2] ?? '')), true);
+});
+
+test('ROUND 2 RED: a normalized review comment cannot duplicate its manifest finding', async () => {
+  const finding = { lens: 'codex', scope: 'delta', severity: 'P2', title: 'one defect', body: 'line one\nline two', path: 'a.ts', line: 2 };
+  const delta = roundsReview(12, RH2, { since: RH1 });
+  const payload = buildReviewPayload({ summary: delta.body, coverage: 'examined 1 of 1', anchored: [finding], offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: [finding] });
+  delta.body = payload.body;
+  const comment = { id: 101, pull_request_review_id: 12, in_reply_to_id: null, body: payload.comments[0].body.replace(/\n/g, '\r\n') };
+  const result = await runRounds({ reviews: [roundsReview(11, RH1), delta], head: RH2, commentsByReview: { 12: [comment] }, prComments: [comment] });
+  assert.equal(result.line.major_findings, 1);
+  assert.equal(Object.hasOwn(result.line, 'escalate'), false);
+});
+
+test('ROUND 2 RED: malformed foreign council marker cannot block rounds', async () => {
+  const foreign = { ...roundsReview(20, RH2, { login: 'foreigner' }), body: '**Council review record**: forged.\n\n<!-- workit-council-round: {bad} -->' };
+  const result = await runRounds({ reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), foreign], head: RH2 });
+  assert.equal(result.line.outcome, 'ok');
+  assert.equal(result.line.round, 'reviewed');
+});
+
 test('COUNCIL CLEAR: a posted council record for the delta clears escalation on that head', async () => {
   const comment = (id) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[P2] defect ${id}**\n\nbody` });
   const council = { ...roundsReview(13, RH2, { login: 'conductor' }), body: `**Council review record**: round 3.\n\n<!-- workit-council-round: {"id":"run/WP-01/3","delta_review_id":12,"head":"${RH2}"} -->` };
@@ -3871,6 +3906,17 @@ test('a council record on a later descendant clears escalation; an unrelated hea
   assert.equal(Object.hasOwn(descendant.line, 'escalate'), false);
   const unrelated = await runRounds({ ...options, compare: roundsCompare({ status: 'diverged' }) });
   assert.equal(unrelated.line.escalate, 't2-council');
+});
+
+test('ROUND 2 RED: a council on an abandoned later head does not clear the current delta head', async () => {
+  const comment = (id) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[P2] defect ${id}**\n\nbody` });
+  const council = { ...roundsReview(13, RH3, { login: 'conductor' }), body: `**Council review record**: round 3.\n\n<!-- workit-council-round: {"id":"run/wp-01/3","delta_review_id":12,"head":"${RH3}"} -->` };
+  const result = await runRounds({
+    reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), council], head: RH2,
+    commentsByReview: { 12: [comment(101), comment(102)] },
+    compare: (path) => path.includes(`${RH2}...${RH3}`) ? roundsCompare({ status: 'ahead' }) : roundsCompare({ status: 'behind' }),
+  });
+  assert.equal(result.line.escalate, 't2-council');
 });
 
 test('rounds: an uppercase --head on a reviewed head answers reviewed (heads compare lowercase)', async () => {

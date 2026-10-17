@@ -677,6 +677,9 @@ heads until a council round is recorded on that head or later. The count comes
 from distinct P1/P2 defects in that posted delta review's own `**scope:** delta`
 findings, including body-only findings. `escalate_reason` names the count and
 review id. Callers that do not read the new fields still receive `round: "capped"`.
+The marker is a workflow guard, not an authentication boundary; see
+`burn-down` § Per item step 3. For manual completion, use
+`reference/patterns/review-council.md` § PR delta escalation.
 
 **A rebase is mapped, not refused.** When the tail from the last reviewed head
 diverged, or is ahead with a merge in it, `rounds` matches the head's commits

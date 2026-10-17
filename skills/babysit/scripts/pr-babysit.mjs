@@ -256,7 +256,7 @@ export async function observe({ repo, pr, cwd, rebaseCache }, deps) {
   if (!coordinatorError && !identityUnset) {
     try {
       const replacedReviewIds = (status?.attempts ?? []).filter((a) => a.state === 'replaced').map((a) => a.review_id).filter((id) => id !== null && id !== undefined);
-      reviews = readScopedReviews({ repo, pr, cwd, runGh: deps.runGh, serviceLogin: identity.login, replacedReviewIds });
+      reviews = readScopedReviews({ repo, pr, head: headBefore, cwd, runGh: deps.runGh, serviceLogin: identity.login, replacedReviewIds });
       const last = reviews[reviews.length - 1];
       if (last && last.head !== headBefore) tail = readRoundTail({ repo, pr, cwd, runGh: deps.runGh, from: last.head, to: headBefore, cache: rebaseCache });
     } catch (error) {
@@ -336,8 +336,6 @@ export function decide(obs, ctx) {
   const unresolved = obs.threads.filter((t) => !t.resolved);
   const resolved = resolveRound({ reviews: obs.reviews ?? [], head: obs.head, tail: obs.tail });
   const round = resolved.answer;
-  if (round.escalate === 't2-council') return { action: 'blocked', reason: 't2-council', owed: owedFor('t2-council', c, { escalateReason: round.escalate_reason }) };
-
   if (obs.checks.fail > 0) return { action: 'blocked', reason: 'ci-failed', owed: owedFor('ci-failed', c, { names: obs.checks.names.fail }) };
   if (obs.threadsTruncated) return { action: 'blocked', reason: 'threads-truncated', owed: owedFor('threads-truncated', c) };
   if (obs.checks.unknown) {
@@ -350,6 +348,12 @@ export function decide(obs, ctx) {
     if (live) return { action: 'blocked', reason: 'reviewer-never-answered', owed: owedFor('reviewer-never-answered', c, { state: live.state }) };
     if (posted && unresolved.length > 0) return { action: 'blocked', reason: 'unresolved-threads', owed: owedFor('unresolved-threads', c, { count: unresolved.length }) };
     return { action: 'blocked', reason: 'wall-time', owed: owedFor('wall-time', c) };
+  }
+
+  if (round.escalate === 't2-council') {
+    if (unresolved.length > 0) return { action: 'adjudicate', detail: `${unresolved.length} open thread(s)`, threads: unresolved,
+      reviewId: posted?.review_id ?? round.last?.review_id };
+    return { action: 'blocked', reason: 't2-council', owed: owedFor('t2-council', c, { escalateReason: round.escalate_reason }) };
   }
 
   if (posted) {

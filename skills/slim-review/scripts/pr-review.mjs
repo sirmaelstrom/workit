@@ -522,7 +522,7 @@ function renderFinding(f) {
   return `${f.lens ? `**lens:** ${f.lens}\n\n` : ''}${f.scope === 'delta' ? '**scope:** delta\n\n' : ''}**[${f.severity}] ${f.title}**\n\n${f.body}`;
 }
 
-const findingHash = (body) => createHash('sha256').update(body).digest('hex');
+const findingHash = (body) => createHash('sha256').update(String(body).replace(/\r\n?/g, '\n').trimEnd()).digest('hex');
 const deltaManifest = (findings) => `<!-- workit-delta-findings: ${JSON.stringify(findings.map((f) => ({
   hash: findingHash(renderFinding(f)), lens: f.lens, scope: f.scope, severity: f.severity,
 })))} -->`;
@@ -2009,19 +2009,20 @@ function readDeltaManifest(body) {
 export function readCouncilMarker(body) {
   const match = /<!-- workit-council-round: (\{[^\n]*\}) -->/.exec(String(body ?? ''));
   if (!match || !String(body).startsWith('**Council review record**')) return null;
-  const marker = JSON.parse(match[1]);
-  if (!marker.id || !Number.isInteger(marker.delta_review_id) || !/^[0-9a-f]{40}$/i.test(marker.head)) return null;
-  return marker;
+  try {
+    const marker = JSON.parse(match[1]);
+    return marker.id && Number.isInteger(marker.delta_review_id) && /^[0-9a-f]{40}$/i.test(marker.head) ? marker : null;
+  } catch { return null; }
 }
 
 export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted }) {
   const reviewId = posted.review_id ?? posted.id;
   const raw = runGh(
-    ['api', '--paginate', `repos/${repo}/pulls/${pr}/reviews/${reviewId}/comments`, '--jq', '.[] | {id, body, in_reply_to_id}'],
+    ['api', '--paginate', `repos/${repo}/pulls/${pr}/comments`, '--jq', '.[] | {id, body, in_reply_to_id, pull_request_review_id}'],
     { cwd },
   );
   const comments = String(raw).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-  const originals = comments.filter((comment) => comment.in_reply_to_id == null);
+  const originals = comments.filter((comment) => comment.in_reply_to_id == null && String(comment.pull_request_review_id) === String(reviewId));
   const manifest = readDeltaManifest(posted.body);
   const entries = manifest ? manifest.map((finding) => ({ ...finding })) : originals.map((comment) => ({ ...readPostedFinding(comment), id: comment.id }));
   if (manifest) {
@@ -2031,10 +2032,6 @@ export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted }) {
       byHash.set(hash, [...(byHash.get(hash) ?? []), comment.id]);
     }
     for (const entry of entries) entry.id = byHash.get(entry.hash)?.shift();
-    const usedIds = new Set(entries.map((entry) => String(entry.id)).filter((id) => id !== 'undefined'));
-    for (const comment of originals) {
-      if (!usedIds.has(String(comment.id))) entries.push({ ...readPostedFinding(comment), id: comment.id });
-    }
   }
   for (const reply of comments.filter((comment) => comment.in_reply_to_id != null)) {
     const match = /<!-- workit-dup-of: (\d+) -->/.exec(String(reply.body ?? ''));
@@ -2046,7 +2043,7 @@ export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted }) {
 }
 
 /** Scope the posted reviews and count each delta's posted findings. */
-export function readScopedReviews({ repo, pr, cwd, runGh = gh, serviceLogin, replacedReviewIds = [] }) {
+export function readScopedReviews({ repo, pr, head, cwd, runGh = gh, serviceLogin, replacedReviewIds = [] }) {
   const listed = readReviewListing({ repo, pr, cwd, runGh });
   const reviews = listed
     .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
@@ -2062,6 +2059,10 @@ export function readScopedReviews({ repo, pr, cwd, runGh = gh, serviceLogin, rep
       if (marker.head !== review.head) {
         const comparison = JSON.parse(runGh(['api', `repos/${repo}/compare/${review.head}...${marker.head}`], { cwd }));
         if (comparison.status !== 'ahead' && comparison.status !== 'identical') continue;
+      }
+      if (head && marker.head !== head) {
+        const current = JSON.parse(runGh(['api', `repos/${repo}/compare/${marker.head}...${head}`], { cwd }));
+        if (current.status !== 'ahead' && current.status !== 'identical') continue;
       }
       councilRoundId = marker.id;
     }
@@ -2425,7 +2426,7 @@ export async function cmdRounds(opts, {
   let reviews;
   let tail = null;
   try {
-    reviews = readScopedReviews({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh, serviceLogin, replacedReviewIds });
+    reviews = readScopedReviews({ repo: opts.repo, pr: opts.pr, head: opts.head, cwd: opts.cwd, runGh, serviceLogin, replacedReviewIds });
     const last = reviews[reviews.length - 1];
     if (last && last.head !== head) tail = readRoundTail({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh, from: last.head, to: head });
   } catch (err) {

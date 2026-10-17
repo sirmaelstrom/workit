@@ -6,7 +6,7 @@ import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
-  tierFor, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
+  tierFor, tierDecision, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions, recordLandStep, runLandVerb,
   parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord, visualReadProblem,
 } from './land.mjs';
@@ -1181,6 +1181,14 @@ test('council record (da57e5ba): one COMMENT review per council round with every
   assert.match(failed.reason, /council review record not posted \(exit 1\): HTTP 422/);
 });
 
+test('ROUND 2 RED: council marker uses a run-relative id, never its local review directory', () => {
+  const reviewDir = join(RUN, 'council', 'wp-01', 'review-3');
+  const wp = makeWp({ tier: 'T2', reviews: [{ round: 3, scope: 'full', tier: 'T2', head: HEAD, reviewId: reviewDir, findings: 0, escalatedDeltaReviewId: 88 }] });
+  const record = councilRecord(makeState({ slug: 'demo' }), wp, []);
+  assert.match(record.body, /"id":"demo\/wp-01\/3"/);
+  assert.equal(record.body.includes(RUN), false);
+});
+
 test('reply bodies and council ids (D20); replies carry the run\'s measure log (C1-17)', () => {
   const rows = [
     { comment: '101', verdict: 'fixed', evidence: 'red line', commit: '1234567' },
@@ -1552,26 +1560,34 @@ test('tierFor (D19.11): raise only, on a contract path or a test file', () => {
   const contractPaths = JSON.parse(readFileSync(join(HERE, '..', '..', '..', '..', '.workit', 'conduct.json'), 'utf8')).contractPaths;
   assert.equal(tierFor({ tier: 'T2' }, ['README.md'], []), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], contractPaths), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], []), 'T1');
+  assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], [], [], { repo: 'sirmaelstrom/workit' }), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['skills/conduct/scripts/lib/x.test.mjs'], []), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['tests/fixture.md'], []), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['skills/spec/scripts/x.mjs'], []), 'T1');
   assert.equal(tierFor({ tier: 'T0' }, ['README.md'], []), 'T0');
   assert.equal(tierFor({ tier: 'weird' }, ['README.md'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T0' }, ['hooks/PreToolUse.js'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['.claude/hooks/command-parser.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['scripts/push-guard.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['scripts/shell-write-parser.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['scripts/trash-command.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['scripts/allow-agent-actions.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['scripts/pre-tool-use.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['src/hooks/useCounter.ts'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['scripts/command-gate.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['skills/x/hooks/pre.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['.claude/settings.json'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T0' }, ['hooks/PreToolUse.js'], [], [], { repo: 'sirmaelstrom/claude-config' }), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['src/hooks/useCounter.ts'], []), 'T1');
+  assert.equal(tierFor({ tier: 'T1' }, ['.claude/settings.json'], [], [], { repo: 'sirmaelstrom/claude-config', settingsHooksChanged: true }), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['hooks/README.md'], []), 'T1');
   assert.equal(tierFor({ tier: 'T1' }, ['docs/permission.md'], []), 'T1');
   assert.equal(tierFor({ tier: 'T1' }, ['src/allow-list.ts'], []), 'T1');
+});
+
+test('ROUND 2 RED: repo-scoped agent gates include registered neutral hooks and exclude app hooks', () => {
+  const base = { tier: 'T1' };
+  const claude = { repo: 'sirmaelstrom/claude-config' };
+  const workit = { repo: 'sirmaelstrom/workit' };
+  const observatory = { repo: 'heathdev-me/observatory' };
+  assert.equal(tierDecision(base, ['hooks/check-write.mjs'], [], [], claude).rule, 'claude-config-hooks');
+  assert.equal(tierDecision(base, ['scripts/check-write.mjs'], [], ['node scripts/check-write.mjs'], claude).tier, 'T2');
+  assert.equal(tierDecision(base, ['settings.json'], [], [], { ...claude, settingsHooksChanged: true }).tier, 'T2');
+  assert.equal(tierDecision(base, ['settings.json'], [], [], { ...claude, settingsHooksChanged: false }).tier, 'T1');
+  assert.equal(tierDecision(base, ['src/hooks/useCounter.ts'], [], [], workit).tier, 'T1');
+  assert.equal(tierDecision(base, ['skills/slim-review/scripts/pr-review.mjs'], [], [], workit).tier, 'T2');
+  assert.equal(tierDecision(base, ['src/bridge/allowed-origins.ts'], [], [], observatory).tier, 'T2');
+  assert.equal(tierDecision(base, ['src/bridge/routes/t3-answer-evidence.ts'], [], [], observatory).tier, 'T2');
+  assert.equal(tierDecision(base, ['src/hooks/useCounter.ts'], [], [], observatory).tier, 'T1');
 });
 
 test('COUNCIL RECOVER: externally posted qualifying delta preserves council obligation', () => {

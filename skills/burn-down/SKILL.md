@@ -135,7 +135,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      amendment, review the amended whole PR in a T2 council round. A `--dup-of`
      pair counts once; guard comments and P3s do not count. The obligation ends
      when a council round is recorded on the delta head or a later head. The
-     council cap then applies.
+     council cap then applies. This marker guards the workflow against honest
+     mistakes. It is not a security boundary against a same-user agent forging
+     a record; that boundary belongs to quest 11c2d46a.
      With fewer than two, the T1 cap stands.
    - **T2 — full council.** Fired when the change **touches a contract or an
      invariant**, **adds tests that claim to prove something**, or changes a

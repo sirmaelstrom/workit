@@ -1,0 +1,23 @@
+[
+  {
+    "id": 101,
+    "pull_request_review_id": 12,
+    "in_reply_to_id": null,
+    "body": "**lens:** codex\n\n**scope:** delta\n\n**[P2] defect A**\n\nbody",
+    "user": { "login": "reviewer" }
+  },
+  {
+    "id": 102,
+    "pull_request_review_id": 12,
+    "in_reply_to_id": null,
+    "body": "**lens:** astra\n\n**scope:** delta\n\n**[P2] defect B**\n\nbody",
+    "user": { "login": "reviewer" }
+  },
+  {
+    "id": 105,
+    "pull_request_review_id": 20,
+    "in_reply_to_id": 102,
+    "body": "Confirmed duplicate.\n\n<!-- workit-dup-of: 101 -->",
+    "user": { "login": "lane-author" }
+  }
+]

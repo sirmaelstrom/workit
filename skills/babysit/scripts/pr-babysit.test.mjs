@@ -286,6 +286,10 @@ function world(init = {}) {
       if (args[0] === 'pr' && args[1] === 'view') { if (w.headReads?.length) w.head = w.headReads.shift(); return `${w.head}\n`; }
       if (args[0] === 'pr' && args[1] === 'checks') return JSON.stringify(w.checks);
       if (args[0] === 'api' && args[1] === '--paginate' && /\/pulls\/\d+\/reviews$/.test(args[2])) return w.reviews.map((r) => JSON.stringify(r)).join('\n');
+      if (args[0] === 'api' && args[1] === '--paginate' && /\/pulls\/\d+\/comments$/.test(args[2])) {
+        if (w.failReviewComments) throw new Error('gh: review comments unavailable');
+        return Object.entries(w.reviewComments).flatMap(([reviewId, items]) => items.map((item) => JSON.stringify({ pull_request_review_id: Number(reviewId), ...item }))).join('\n');
+      }
       const comments = args[0] === 'api' && args[1] === '--paginate' && /\/reviews\/(\d+)\/comments$/.exec(args[2] ?? '');
       if (comments) {
         if (w.failReviewComments) throw new Error('gh: review comments unavailable');
@@ -548,6 +552,13 @@ test('a qualifying delta still blocks on a patch-identical rebase', () => {
   const tail = { from: H2, to: H3, status: 'diverged', rebase: { kind: 'identical', commits: 2 } };
   const out = decide(obs({ head: H3, headBefore: H3, headAfter: H3, reviews, tail }), ctx({ iterationHead: H3 }));
   assert.deepEqual([out.action, out.reason], ['blocked', 't2-council']);
+});
+
+test('ROUND 2 RED: babysit adjudicates open duplicate threads before council escalation', () => {
+  const reviews = [{ review_id: 7001, head: H1, scope: 'full' }, { review_id: 7002, head: H2, scope: 'delta', majorFindings: 2 }];
+  const out = decide(obs({ head: H2, headBefore: H2, headAfter: H2, reviews, threads: [openThread(72)] }), ctx({ iterationHead: H2 }));
+  assert.equal(out.action, 'adjudicate');
+  assert.equal(out.reviewId, 7002);
 });
 
 test('a recorded council round clears babysit on the amended head', async () => {

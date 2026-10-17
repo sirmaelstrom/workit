@@ -118,12 +118,26 @@ function registeredHookCommands(wp, deps) {
       else walk(item);
     }
   };
-  for (const path of ['.claude/settings.json', '.claude/settings.local.json', '.codex/settings.json', '.agents/settings.json']) {
+  for (const path of ['settings.json', '.claude/settings.json', '.claude/settings.local.json', '.codex/settings.json', '.agents/settings.json']) {
     const text = readText(deps, join(wp.lane.worktree, path));
     if (!text) continue;
     try { walk(JSON.parse(text).hooks); } catch { /* a changed settings file is T2 by path */ }
   }
   return commands;
+}
+
+export function hooksBlockChanged(state, wp, changed, deps) {
+  if (state.intent.repo.remote !== 'sirmaelstrom/claude-config') return false;
+  const path = changed.find((p) => p === 'settings.json' || p === '.claude/settings.json');
+  if (!path) return false;
+  const previous = deps.exec('git', ['-C', wp.lane.worktree, 'show', `origin/${state.intent.repo.defaultBranch ?? 'main'}:${path}`]);
+  const current = readText(deps, join(wp.lane.worktree, path));
+  try {
+    return JSON.stringify(previous.code === 0 ? JSON.parse(previous.stdout).hooks ?? null : null)
+      !== JSON.stringify(current ? JSON.parse(current).hooks ?? null : null);
+  } catch {
+    return true;
+  }
 }
 
 function readJsonFile(deps, path, what) {
@@ -1854,7 +1868,8 @@ function recordOwn(state, wp, action, result, deps) {
       }
       const config = repoConfig(state, deps);
       wp.changedPaths = changed;
-      const decision = tierDecision(wp, changed, Array.isArray(config.contractPaths) ? config.contractPaths : [], registeredHookCommands(wp, deps));
+      const decision = tierDecision(wp, changed, Array.isArray(config.contractPaths) ? config.contractPaths : [], registeredHookCommands(wp, deps),
+        { repo: state.intent.repo.remote, settingsHooksChanged: hooksBlockChanged(state, wp, changed, deps) });
       wp.tierDecision = decision;
       wp.tier = decision.tier;
       appendEvent(state, deps, { step: 'review', event: 'tier-classified', data: { wpId: wp.id, changedPaths: changed, ...decision } });

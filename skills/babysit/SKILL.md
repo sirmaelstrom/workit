@@ -182,7 +182,8 @@ Plan/cost stop is the coordinator's own: a claim refused `paused` or
 `ci-failed` · `head-moved-limit` · `wall-time` · `plan-paused` · `disabled` ·
 `delivery-unresolved` · `integrity-violation` · `unresolved-threads` ·
 `coordinator-unreachable` · `not-managed` · `checks-unavailable` ·
-`threads-truncated` · `amendment-not-descendant` · `identity-unset`. Each
+`threads-truncated` · `amendment-not-descendant` · `identity-unset` ·
+`reviews-unavailable` · `t2-council`. Each
 carries an `owed` sentence. `identity-unset` means the coordinator answered
 but has no posting identity pinned. The operator pins one with
 `pr-review.mjs identity --pin --reason "<why>"` (slim-review § Managed

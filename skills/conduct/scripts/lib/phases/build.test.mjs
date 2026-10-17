@@ -252,7 +252,7 @@ function shellResult(h, action) {
     case 'resolve/resolve':
       h.resolved += 1;
       return ok();
-    case 'reply/record': return ok(JSON.stringify({ html_url: 'https://github.com/o/r/pull/102#pullrequestreview-9003' }));
+    case 'reply/record': return h.recordPosts?.length ? h.recordPosts.shift() : ok(JSON.stringify({ html_url: 'https://github.com/o/r/pull/102#pullrequestreview-9003' }));
     case 'rebase/pre-head': return ok(`${h.head(id)}\n`);
     case 'rebase/post-heads': return ok(`${h.bump(id)}\n${'e'.repeat(40)}\n`);
     case 'merge/merge-commit': return ok(JSON.stringify({ mergeCommit: { oid: mergeSha(id) } }));
@@ -2407,7 +2407,7 @@ test('gate command after a rebase that moved the head: the gate fix gets a delta
 });
 
 test('tier from the recipe file (D17, D19.11): contractPaths or an added test raise T1 to T2; neither stays T1; WP-00 at depth none too', async (t) => {
-  const cases = [['scripts/lane.mjs\n', 'T2'], ['lib/x.test.mjs\n', 'T2'], ['hooks/PreToolUse.js\n', 'T2'], ['lib/x.mjs\n', 'T1']];
+  const cases = [['scripts/lane.mjs\n', 'T2'], ['lib/x.test.mjs\n', 'T2'], ['hooks/PreToolUse.js\n', 'T1'], ['lib/x.mjs\n', 'T1']];
   for (const [diff, tier] of cases) {
     const h = harness(t, { council: true, wps: [TWO[0], TWO[1]] });
     h.diff = { 'WP-02': diff };
@@ -2423,6 +2423,17 @@ test('tier from the recipe file (D17, D19.11): contractPaths or an added test ra
   const first = await drive(none, { until: (a) => a.part === 'meta' || a.part === 'managed' });
   assert.equal(first.part, 'meta');
   assert.equal(none.wp('WP-00').tier, 'T2');
+});
+
+test('settings tier signal compares only the claude-config hooks block', () => {
+  const state = { intent: { repo: { remote: 'sirmaelstrom/claude-config', defaultBranch: 'main' } } };
+  const wp = { lane: { worktree: 'repo' } };
+  const previous = { hooks: { PreToolUse: [{ command: 'node scripts/check-write.mjs' }] }, theme: 'old' };
+  const deps = { exec: () => ok(JSON.stringify(previous)), read: () => JSON.stringify({ ...previous, theme: 'new' }) };
+  assert.equal(build.hooksBlockChanged(state, wp, ['settings.json'], deps), false);
+  deps.read = () => JSON.stringify({ ...previous, hooks: { PostToolUse: [{ command: 'node scripts/check-write.mjs' }] } });
+  assert.equal(build.hooksBlockChanged(state, wp, ['settings.json'], deps), true);
+  assert.equal(build.hooksBlockChanged({ intent: { repo: { remote: 'other/repo' } } }, wp, ['settings.json'], deps), false);
 });
 
 test('two delta P1/P2 findings route the amended whole PR to a T2 council', async (t) => {
@@ -2472,6 +2483,22 @@ test('a posted delta receipt flows through amendment, checks, council, record, a
   assert.ok(delta >= 0 && amendment > delta && council > amendment && record > council && gate > record, JSON.stringify({ indexes: [delta, amendment, council, record, gate], state: h.wp('WP-02').state, reason: h.wp('WP-02').reason, trace: actions.slice(-25).map((a) => `${a.step}/${a.part ?? a.land?.scope ?? ''}`), reviews: h.wp('WP-02').reviews }));
   assert.equal(h.wp('WP-02').state, 'merged');
   assert.equal(h.wp('WP-02').reviews.some((review) => review.escalatedDeltaReviewId === 7002 && review.record?.url), true);
+});
+
+test('ROUND 2 RED: failed council record recovers at gate without a lane amendment', async (t) => {
+  for (const firstPost of [{ code: 1, stdout: '', stderr: 'HTTP 502' }, ok('{}')]) {
+    const h = harness(t, { council: true, wps: [TWO[0], TWO[1]] });
+    h.findings = { 'WP-02': [3, 2] };
+    h.deltaMajor = { 'WP-02': [2] };
+    h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md', 'report-amendment-2.md'] };
+    h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+    h.recordPosts = [firstPost, ok(JSON.stringify({ html_url: 'https://github.com/o/r/pull/102#pullrequestreview-9004' }))];
+    assert.equal(await drive(h), null);
+    const actions = of(h, 'WP-02');
+    assert.equal(actions.filter((action) => action.step === 'reply' && action.part === 'record').length, 2);
+    assert.equal(actions.filter((action) => action.step === 'brief' && action.part === 'amendment').length, 2, 'the lane is not asked to repair a GitHub post');
+    assert.equal(h.wp('WP-02').state, 'merged');
+  }
 });
 
 test('depth none: one WP-00 lane from <run>/wp-00.md; spine on → a completed receipt on the anchor and no done update; spine off → no agent-tool action', async (t) => {
