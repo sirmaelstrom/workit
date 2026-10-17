@@ -50,6 +50,10 @@ function fieldText(lines, field) {
   return body.join('\n').trim();
 }
 
+export function stripWrappingBackticks(value) {
+  return String(value ?? '').trim().replace(/^(`+)((?:(?!\1)[\s\S])*)\1$/, '$2');
+}
+
 // The Files field rule: bullets under `**Files:**` that begin `- Create ` or
 // `- Modify `, first backticked token each; the list ends at the next line
 // that begins with a field label. Each path is repository-relative, posix,
@@ -262,7 +266,7 @@ export function parseWorkPackages(workshopDir, { read = (path) => readFileSync(p
     return {
       id, name: rows.get(id)?.name || heading[2].trim(), specPath, wave: waveOf.get(id), files: parseFiles(text, id), creates: parseFiles(text, id, { verbs: ['Create'] }),
       precondition: fieldText(lines, 'Precondition') ?? '', verification: fieldText(lines, 'Verification'), tier,
-      model: rows.get(id)?.model ?? 'opus', runtimeExercise: fieldText(lines, 'Runtime exercise') ?? '',
+      model: rows.get(id)?.model ?? 'opus', runtimeExercise: stripWrappingBackticks(fieldText(lines, 'Runtime exercise')),
       visualRules: visualRules(text, design, id), skills: skillsField(text),
     };
   });

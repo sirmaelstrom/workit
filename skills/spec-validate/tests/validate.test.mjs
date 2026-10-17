@@ -16,7 +16,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, cpSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -121,6 +121,32 @@ test('canonical fixture validates with exit 0', () => {
 test('canonical fixture validates with 0 errors and 0 warnings', () => {
   const { out } = runValidator(CANONICAL, { env: NO_ROOT });
   assert.match(out, /0 errors, 0 warnings/, `expected a clean report, got:\n${out}`);
+});
+
+test('Tach-shaped backticked runtime exercise is flagged before conduct stores it', () => {
+  const workshop = makeTemp('spec-validate-runtime-');
+  cpSync(CANONICAL, workshop, { recursive: true });
+  const wpPath = join(workshop, 'work-packages', 'wp-01-retry-loop.md');
+  writeFileSync(wpPath, readFileSync(wpPath, 'utf8').replace(
+    '**Runtime exercise:** CLI/worker',
+    '**Runtime exercise:** `none: no runtime surface`\n\n**Runtime exercise note:** CLI/worker',
+  ));
+  const { status, out } = runValidator(workshop, { env: NO_ROOT });
+  assert.equal(status, 1);
+  assert.match(out, /Runtime exercise.*backticks.*none: no runtime surface/i);
+});
+
+test('separate runtime command and result code spans validate', () => {
+  const workshop = makeTemp('spec-validate-spans-');
+  cpSync(CANONICAL, workshop, { recursive: true });
+  const wpPath = join(workshop, 'work-packages', 'wp-01-retry-loop.md');
+  writeFileSync(wpPath, readFileSync(wpPath, 'utf8').replace(
+    '**Runtime exercise:** CLI/worker',
+    '**Runtime exercise:** `node cli.mjs` prints `ok`\n\n**Runtime exercise note:** CLI/worker',
+  ));
+  const { status, out } = runValidator(workshop, { env: NO_ROOT });
+  assert.equal(status, 0, out);
+  assert.doesNotMatch(out, /value is wrapped in backticks/);
 });
 
 // Non-vacuity: the canonical fixture must actually exercise the relaxed forms,
