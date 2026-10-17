@@ -152,7 +152,7 @@ const RULES = [
   [/^node \S+pr-review\.mjs threads /, () => ok()],
   [/^node \S+pr-review\.mjs inflight /, () => ok()],
   [/^node \S+pr-review\.mjs (uncertainty|lens|reply) /, () => ok()],
-  [/^gh api --method POST repos\/example\/scratch\/pulls\/(\d+)\/reviews -f event=COMMENT -F body=@(\S+)$/, (h, m) => ok(JSON.stringify({ id: 1, html_url: `https://github.com/example/scratch/pull/${m[1]}#pullrequestreview-1` }))],
+  [/^gh api --method POST repos\/example\/scratch\/pulls\/(\d+)\/reviews -f event=COMMENT -f commit_id=[0-9a-f]{40} -F body=@(\S+)$/, (h, m) => ok(JSON.stringify({ id: 1, html_url: `https://github.com/example/scratch/pull/${m[1]}#pullrequestreview-1` }))],
   [/^gh api graphql -f query=query/, () => ok(text('land', 'review-threads-145.json'))],
   [/^gh api graphql -f query=mutation/, () => ok('{}')],
   [/^git -C (\S+) rev-parse (?:HEAD|refs\/heads\/\S+)$/, (h, m) => ok(`${headOf(h, idOfWorktree(m[1]))}\n`)],

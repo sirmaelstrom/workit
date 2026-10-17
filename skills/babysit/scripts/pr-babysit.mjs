@@ -47,8 +47,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createClient, CLIENT_REASONS } from '../../slim-review/scripts/pr-review-coordinator.mjs';
 import { loadCoordinatorToken, resolveManaged, MANAGED_MODES } from '../../slim-review/scripts/pr-review-managed.mjs';
-import { postedReviewScope } from '../../slim-review/scripts/pr-review-recognise.mjs';
-import { AUTHOR_LIST, readReviewListing, reviewPairFor } from '../../slim-review/scripts/pr-review.mjs';
+import { AUTHOR_LIST, readScopedReviews, reviewPairFor } from '../../slim-review/scripts/pr-review.mjs';
 import { cappedTailProblem, readRoundTail, resolveRound, reviewRound } from '../../slim-review/scripts/pr-review-rounds.mjs';
 
 // The round cap is the writer's (`pr-review.mjs rounds` answers the beat from
@@ -84,6 +83,8 @@ export const BLOCKED_REASONS = Object.freeze([
   'checks-unavailable',
   'threads-truncated',
   'amendment-not-descendant',
+  't2-council',
+  'reviews-unavailable',
   'identity-unset',
 ]);
 
@@ -251,17 +252,20 @@ export async function observe({ repo, pr, cwd, rebaseCache }, deps) {
   // rows carry no scope, and a state file knows only this loop's own claims.
   let reviews = [];
   let tail = null;
+  let reviewReadError = null;
   if (!coordinatorError && !identityUnset) {
-    const replacedReviewIds = (status?.attempts ?? []).filter((a) => a.state === 'replaced').map((a) => a.review_id).filter((id) => id !== null && id !== undefined);
-    reviews = readReviewListing({ repo, pr, cwd, runGh: deps.runGh })
-      .map((r) => postedReviewScope(r, { serviceLogin: identity.login, replacedReviewIds }))
-      .filter(Boolean);
-    const last = reviews[reviews.length - 1];
-    if (last && last.head !== headBefore) tail = readRoundTail({ repo, pr, cwd, runGh: deps.runGh, from: last.head, to: headBefore, cache: rebaseCache });
+    try {
+      const replacedReviewIds = (status?.attempts ?? []).filter((a) => a.state === 'replaced').map((a) => a.review_id).filter((id) => id !== null && id !== undefined);
+      reviews = readScopedReviews({ repo, pr, head: headBefore, cwd, runGh: deps.runGh, serviceLogin: identity.login, replacedReviewIds });
+      const last = reviews[reviews.length - 1];
+      if (last && last.head !== headBefore) tail = readRoundTail({ repo, pr, cwd, runGh: deps.runGh, from: last.head, to: headBefore, cache: rebaseCache });
+    } catch (error) {
+      reviewReadError = error instanceof Error ? error.message : String(error);
+    }
   }
 
   const headAfter = readHead();
-  return { repo, pr, headBefore, headAfter, head: headAfter, checks, threads, threadsTruncated: truncated, status, health, coordinatorError, identityUnset, reviews, tail, at: deps.now() };
+  return { repo, pr, headBefore, headAfter, head: headAfter, checks, threads, threadsTruncated: truncated, status, health, coordinatorError, identityUnset, reviewReadError, reviews, tail, at: deps.now() };
 }
 
 // ---------------------------------------------------------------------------
@@ -285,11 +289,13 @@ function owedFor(reason, ctx, extra = {}) {
     case 'integrity-violation': return `a lens on head ${head} reported worktree-dirty — the reviewer's checkout was edited during the run; keep the canonical checkout clean and run again (one session claim allowed).`;
     case 'unresolved-threads': return `${extra.count ?? '?'} review thread(s) still open on head ${head} at the wall budget — adjudicate them (\`pr-babysit.mjs threads\` / \`adjudicate\`) and run again.`;
     case 'coordinator-unreachable': return `the coordinator could not be read (${extra.error ?? '?'}) — is Observatory up on loopback?`;
+    case 'reviews-unavailable': return `posted reviews could not be read (${extra.error ?? '?'}) — restore the GitHub read and run again; this head cannot converge on an unknown escalation count.`;
     case 'identity-unset': return `the coordinator answered but has no posting identity pinned, so this loop cannot tell which posted reviews are rounds and will not claim — the operator pins it with \`pr-review.mjs identity --pin --reason "<why>"\` (slim-review SKILL § Managed repositories), then run again.`;
     case 'not-managed': return `${ctx.repo} is not a managed repository — use slim-review's standalone loop.`;
     case 'checks-unavailable': return `the checks on head ${head} could not be read for the whole budget (gh pr checks printed nothing) — fix gh/auth and run again; a run cannot converge on checks it never saw.`;
     case 'threads-truncated': return `a review thread on this PR has ${COMMENTS_PAGE}+ comments, past this loop's page size — adjudicate from the PR page; a truncated listing is never read as "all resolved".`;
     case 'amendment-not-descendant': return `there is no amendment diff from the last reviewed head ${(extra.from ?? '').slice(0, 7)} to head ${head} (${extra.problem ?? 'refused'}) — the conductor decides how this head is reviewed; this loop never claims a second full review.${extra.attemptRefFile ? ` The delta attempt stays live for that call: run its lenses without --since (\`pr-review.mjs lens --attempt-ref ${extra.attemptRefFile}\`), or \`pr-review.mjs recover withdraw --attempt-ref ${extra.attemptRefFile} --reason "<why>"\`.` : ''}`;
+    case 't2-council': return `escalate to T2 council: ${extra.escalateReason}. Review the amended whole PR before the merge call. If the council service is unavailable, use burn-down § Per item step 3 and reference/patterns/review-council.md.`;
     default: return 'a person decides.';
   }
 }
@@ -307,6 +313,7 @@ export function decide(obs, ctx) {
 
   if (obs.coordinatorError) return { action: 'blocked', reason: 'coordinator-unreachable', owed: owedFor('coordinator-unreachable', c, { error: obs.coordinatorError }) };
   if (obs.identityUnset) return { action: 'blocked', reason: 'identity-unset', owed: owedFor('identity-unset', c) };
+  if (obs.reviewReadError) return { action: 'blocked', reason: 'reviews-unavailable', owed: owedFor('reviews-unavailable', c, { error: obs.reviewReadError }) };
   if (obs.headBefore !== obs.headAfter) return { action: 'wait', detail: 'head moved during the read' };
 
   if (obs.head !== ctx.iterationHead) {
@@ -327,7 +334,8 @@ export function decide(obs, ctx) {
   const live = onHead.find((a) => LIVE_STATES.has(a.state));
   const ended = onHead.filter((a) => ENDED_STATES.has(a.state));
   const unresolved = obs.threads.filter((t) => !t.resolved);
-
+  const resolved = resolveRound({ reviews: obs.reviews ?? [], head: obs.head, tail: obs.tail });
+  const round = resolved.answer;
   if (obs.checks.fail > 0) return { action: 'blocked', reason: 'ci-failed', owed: owedFor('ci-failed', c, { names: obs.checks.names.fail }) };
   if (obs.threadsTruncated) return { action: 'blocked', reason: 'threads-truncated', owed: owedFor('threads-truncated', c) };
   if (obs.checks.unknown) {
@@ -340,6 +348,12 @@ export function decide(obs, ctx) {
     if (live) return { action: 'blocked', reason: 'reviewer-never-answered', owed: owedFor('reviewer-never-answered', c, { state: live.state }) };
     if (posted && unresolved.length > 0) return { action: 'blocked', reason: 'unresolved-threads', owed: owedFor('unresolved-threads', c, { count: unresolved.length }) };
     return { action: 'blocked', reason: 'wall-time', owed: owedFor('wall-time', c) };
+  }
+
+  if (round.escalate === 't2-council') {
+    if (unresolved.length > 0) return { action: 'adjudicate', detail: `${unresolved.length} open thread(s)`, threads: unresolved,
+      reviewId: posted?.review_id ?? round.last?.review_id };
+    return { action: 'blocked', reason: 't2-council', owed: owedFor('t2-council', c, { escalateReason: round.escalate_reason }) };
   }
 
   if (posted) {
@@ -357,8 +371,6 @@ export function decide(obs, ctx) {
   // is owed at all, and at what scope.
   // The writer's own round (`rounds` answers the beat from the same function),
   // including its patch-id mapping of a rebased head.
-  const resolved = resolveRound({ reviews: obs.reviews ?? [], head: obs.head, tail: obs.tail });
-  const round = resolved.answer;
   if (round.round === 'reviewed' && round.rebased_from) {
     // A patch-identical rebase of the last reviewed head: no review is owed,
     // so the head converges on controls alone, like a capped empty tail.

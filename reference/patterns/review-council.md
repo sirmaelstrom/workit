@@ -8,6 +8,23 @@
 
 ---
 
+## PR delta escalation
+
+For a T1 delta with two distinct new P1/P2 defects, review the amended whole
+PR in a T2 council round. Post a COMMENT review on the council head using the
+same GitHub identity that runs the council. Its body starts with
+`**Council review record**` and includes the finding verdicts and this marker:
+
+`<!-- workit-council-round: {"id":"<run>/<wp>/<round>","delta_review_id":<posted delta review id>,"head":"<40-character council head SHA>"} -->`
+
+Post with `gh api --method POST repos/<owner>/<repo>/pulls/<pr>/reviews -f event=COMMENT -f commit_id=<head> -F body=@<file>`.
+Use a council head descended from the delta head and on the current PR head's
+lineage. Then rerun `pr-review.mjs rounds`; its escalation field must clear.
+The marker is a workflow receipt, not a security boundary (burn-down § Per
+item step 3).
+
+---
+
 ## Current Workflow (Manual)
 
 ### Step 1: Generate Reviewer Prompt

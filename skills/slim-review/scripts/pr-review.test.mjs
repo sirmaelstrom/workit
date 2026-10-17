@@ -3258,7 +3258,7 @@ function pinnedSeams({
     if (args[0] === 'api' && args[1] === '--paginate' && joined.includes('/reviews')) {
       return `${reviewPages.flat().map((entry) => JSON.stringify(entry)).join('\n')}\n`;
     }
-    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(compare);
+    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(typeof compare === 'function' ? compare(args[1]) : compare);
     throw new Error(`unexpected gh call: ${joined}`);
   };
   const run = (program, args, opts = {}) => {
@@ -3766,23 +3766,29 @@ function roundsCompare({ status = 'ahead', files = 1, commits = [1], totalCommit
   };
 }
 
-function roundsSeams({ reviews = [], compare = roundsCompare(), fail: failNeedle = null } = {}) {
+function roundsSeams({ reviews = [], compare = roundsCompare(), commentsByReview = {}, prComments, fail: failNeedle = null } = {}) {
   const calls = [];
   const runGh = (args) => {
     calls.push(args);
     const joined = args.join(' ');
     if (failNeedle && joined.includes(failNeedle)) throw new Error('gh: server error');
     if (args[0] === 'api' && args[1] === '--paginate' && /\/reviews$/.test(args[2])) return `${reviews.map((r) => JSON.stringify(r)).join('\n')}\n`;
-    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(compare);
+    if (args[0] === 'api' && args[1] === '--paginate' && /\/pulls\/\d+\/comments$/.test(args[2])) {
+      const listed = prComments ?? Object.entries(commentsByReview).flatMap(([reviewId, items]) => items.map((item) => ({ pull_request_review_id: Number(reviewId), ...item })));
+      return listed.map((item) => JSON.stringify(item)).join('\n');
+    }
+    const comments = args[0] === 'api' && args[1] === '--paginate' && /\/reviews\/(\d+)\/comments$/.exec(args[2] ?? '');
+    if (comments) return (commentsByReview[comments[1]] ?? []).map((item) => JSON.stringify(item)).join('\n');
+    if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(typeof compare === 'function' ? compare(args[1]) : compare);
     throw new Error(`unexpected gh call: ${joined}`);
   };
   return { runGh, calls };
 }
 
-async function runRounds({ reviews, compare, head, fake, failNeedle, makeClient }) {
+async function runRounds({ reviews, compare, commentsByReview, prComments, head, fake, failNeedle, makeClient }) {
   let result;
   await withCoordinatedInstall({ fake }, async ({ home }) => {
-    const seams = roundsSeams({ reviews, compare, fail: failNeedle });
+    const seams = roundsSeams({ reviews, compare, commentsByReview, prComments, fail: failNeedle });
     const out = collector();
     await cmdRounds(
       { repo: PINNED_REPO, pr: String(PINNED_PR), head },
@@ -3808,6 +3814,109 @@ test('rounds answers each round from the posted markers: full, reviewed, delta, 
   const capped = await runRounds({ reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 })], head: RH3 });
   assert.deepEqual(capped.line, { outcome: 'ok', retry: 'stop', round: 'capped', last: { head: RH2, scope: 'delta', review_id: 12 }, problem: null });
   for (const r of [full, reviewed, delta, capped]) assert.deepEqual(r.deaths, []);
+});
+
+test('rounds escalates only a capped head with two posted P1/P2 comments on its delta review', async () => {
+  const deltaComment = (severity) => ({ in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[${severity}] defect**\n\nbody` });
+  const reviews = [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 })];
+  const two = await runRounds({ reviews, head: RH3, commentsByReview: {
+    11: [deltaComment('P1')],
+    12: [deltaComment('P2'), deltaComment('P2'), deltaComment('P3'), { ...deltaComment('P1'), in_reply_to_id: 55 }],
+  } });
+  assert.equal(two.line.round, 'capped');
+  assert.equal(two.line.escalate, 't2-council');
+  assert.match(two.line.escalate_reason, /2.*review 12/);
+  assert.equal(two.calls.some((args) => args.join(' ').includes('/reviews/11/comments')), false);
+
+  const one = await runRounds({ reviews, head: RH3, commentsByReview: { 12: [deltaComment('P2'), deltaComment('P3'), { ...deltaComment('P2'), body: '**lens:** codex\n\n**scope:** full\n\n**[P2] old defect**' }] } });
+  assert.equal(one.line.round, 'capped');
+  assert.equal(Object.hasOwn(one.line, 'escalate'), false);
+  assert.equal(Object.hasOwn(one.line, 'escalate_reason'), false);
+
+  const full = await runRounds({ reviews: [roundsReview(13, RH2)], head: RH3 });
+  assert.equal(full.line.round, 'delta');
+  assert.equal(Object.hasOwn(full.line, 'escalate'), false);
+  assert.equal(full.calls.some((args) => args.join(' ').includes('/comments')), false);
+});
+
+test('COUNCIL COUNT: body-only delta defects count, guard and P3 do not, and a dup-of pair counts once', async () => {
+  const full = roundsReview(11, RH1);
+  const delta = roundsReview(12, RH2, { since: RH1 });
+  const bodyOnly = { lens: 'codex', scope: 'delta', severity: 'P2', title: 'binary change', body: 'cannot anchor', path: 'binary.dat', line: 1 };
+  const inline = [101, 102].map((id) => ({ lens: 'codex', scope: 'delta', severity: 'P2', title: `defect ${id}`, body: 'body', path: 'a.ts', line: id }));
+  const payload = buildReviewPayload({ summary: delta.body, coverage: 'examined 1 of 1', anchored: inline, offDiffChanged: [bodyOnly], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: [bodyOnly, ...inline] });
+  delta.body = payload.body;
+  const comment = (id, severity, lens = 'codex') => ({ id, in_reply_to_id: null, body: `**lens:** ${lens}\n\n**scope:** delta\n\n**[${severity}] defect ${id}**\n\nbody` });
+  const comments = [...payload.comments.map((item, index) => ({ id: 101 + index, in_reply_to_id: null, body: item.body })), comment(103, 'P3'), comment(104, 'P2', 'guard'),
+    { id: 105, in_reply_to_id: 102, body: '<!-- workit-dup-of: 101 -->' }];
+  const paired = await runRounds({ reviews: [full, delta], head: RH3, commentsByReview: { 12: comments } });
+  assert.equal(paired.line.escalate, 't2-council', 'body-only plus one distinct inline defect is two');
+  assert.match(paired.line.escalate_reason, /2 posted/);
+  const pairReview = roundsReview(12, RH2, { since: RH1 });
+  pairReview.body = buildReviewPayload({ summary: pairReview.body, coverage: 'examined 1 of 1', anchored: inline, offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: inline }).body;
+  const onlyPair = await runRounds({ reviews: [full, pairReview], head: RH3, commentsByReview: { 12: comments } });
+  assert.equal(Object.hasOwn(onlyPair.line, 'escalate'), false, 'the two inline comments are one defect');
+});
+
+test('ROUND 2 RED: a dup-of reply in its own GitHub review container counts one defect', async () => {
+  const prComments = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'delta-reply-separate-review.json'), 'utf8'));
+  const result = await runRounds({
+    reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), { ...roundsReview(20, RH2, { login: 'lane-author' }), body: '' }],
+    head: RH2,
+    commentsByReview: { 12: prComments.filter((comment) => comment.pull_request_review_id === 12), 20: prComments.filter((comment) => comment.pull_request_review_id === 20) },
+    prComments,
+  });
+  assert.equal(result.line.major_findings, 1);
+  assert.equal(Object.hasOwn(result.line, 'escalate'), false);
+  assert.equal(result.calls.some((args) => /\/pulls\/\d+\/comments$/.test(args[2] ?? '')), true);
+});
+
+test('ROUND 2 RED: a normalized review comment cannot duplicate its manifest finding', async () => {
+  const finding = { lens: 'codex', scope: 'delta', severity: 'P2', title: 'one defect', body: 'line one\nline two', path: 'a.ts', line: 2 };
+  const delta = roundsReview(12, RH2, { since: RH1 });
+  const payload = buildReviewPayload({ summary: delta.body, coverage: 'examined 1 of 1', anchored: [finding], offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: [finding] });
+  delta.body = payload.body;
+  const comment = { id: 101, pull_request_review_id: 12, in_reply_to_id: null, body: payload.comments[0].body.replace(/\n/g, '\r\n') };
+  const result = await runRounds({ reviews: [roundsReview(11, RH1), delta], head: RH2, commentsByReview: { 12: [comment] }, prComments: [comment] });
+  assert.equal(result.line.major_findings, 1);
+  assert.equal(Object.hasOwn(result.line, 'escalate'), false);
+});
+
+test('ROUND 2 RED: malformed foreign council marker cannot block rounds', async () => {
+  const foreign = { ...roundsReview(20, RH2, { login: 'foreigner' }), body: '**Council review record**: forged.\n\n<!-- workit-council-round: {bad} -->' };
+  const result = await runRounds({ reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), foreign], head: RH2 });
+  assert.equal(result.line.outcome, 'ok');
+  assert.equal(result.line.round, 'reviewed');
+});
+
+test('COUNCIL CLEAR: a posted council record for the delta clears escalation on that head', async () => {
+  const comment = (id) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[P2] defect ${id}**\n\nbody` });
+  const council = { ...roundsReview(13, RH2, { login: 'conductor' }), body: `**Council review record**: round 3.\n\n<!-- workit-council-round: {"id":"run/WP-01/3","delta_review_id":12,"head":"${RH2}"} -->` };
+  const result = await runRounds({ reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), council], head: RH3, commentsByReview: { 12: [comment(101), comment(102)] } });
+  assert.equal(result.line.round, 'capped');
+  assert.equal(Object.hasOwn(result.line, 'escalate'), false);
+});
+
+test('a council record on a later descendant clears escalation; an unrelated head does not', async () => {
+  const comment = (id) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[P2] defect ${id}**\n\nbody` });
+  const council = { ...roundsReview(13, RH3, { login: 'conductor' }), body: `**Council review record**: round 3.\n\n<!-- workit-council-round: {"id":"run/WP-01/3","delta_review_id":12,"head":"${RH3}"} -->` };
+  const reviews = [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), council];
+  const options = { reviews, head: RH3, commentsByReview: { 12: [comment(101), comment(102)] } };
+  const descendant = await runRounds({ ...options, compare: roundsCompare({ status: 'ahead' }) });
+  assert.equal(Object.hasOwn(descendant.line, 'escalate'), false);
+  const unrelated = await runRounds({ ...options, compare: roundsCompare({ status: 'diverged' }) });
+  assert.equal(unrelated.line.escalate, 't2-council');
+});
+
+test('ROUND 2 RED: a council on an abandoned later head does not clear the current delta head', async () => {
+  const comment = (id) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[P2] defect ${id}**\n\nbody` });
+  const council = { ...roundsReview(13, RH3, { login: 'conductor' }), body: `**Council review record**: round 3.\n\n<!-- workit-council-round: {"id":"run/wp-01/3","delta_review_id":12,"head":"${RH3}"} -->` };
+  const result = await runRounds({
+    reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), council], head: RH2,
+    commentsByReview: { 12: [comment(101), comment(102)] },
+    compare: (path) => path.includes(`${RH2}...${RH3}`) ? roundsCompare({ status: 'ahead' }) : roundsCompare({ status: 'behind' }),
+  });
+  assert.equal(result.line.escalate, 't2-council');
 });
 
 test('rounds: an uppercase --head on a reviewed head answers reviewed (heads compare lowercase)', async () => {
@@ -5597,6 +5706,7 @@ test('a coordinated post of two amendment checks holds coverage to the amendment
     await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
       const out = await runCoordinatedPost({ refFile, home, origin, seams: amendmentSeams(pinnedSeams({ events }), COORDINATED_AMENDMENT) });
       assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
+      assert.equal(out.line().major_findings, 2);
       const body = requests[0].body;
       assert.match(body.body, /\*\*Amendment check:\*\* this round reviewed only/);
       assert.match(body.body, /examined 1 of 1 amendment files/);
@@ -5733,6 +5843,7 @@ test('standalone post accepts two amendment checks: coverage against the amendme
   assert.match(posted[0].body, /examined 1 of 1 amendment files/);
   assert.ok(logs.some((line) => line.startsWith('scope          amendment abcdef0...2222222, 1 file(s)')));
   assert.ok(logs.includes('coverage       OK'));
+  assert.ok(logs.includes(`delta-major 2 head=${DELTA_HEAD}`));
 });
 
 /** One delta handback per lens: the in-amendment finding at src/a.ts:11 plus `outside`. */
@@ -5758,6 +5869,7 @@ for (const [name, outside] of [
     assert.match(posted[0].body, /codex: 0 P1 \/ 1 P2 \/ 0 P3/, 'an excluded finding is never counted as a delta finding');
     assert.match(posted[0].body, /1 excluded \(outside the amendment\)/);
     assert.ok(logs.includes(`  excluded     ${outside.path}:${outside.line} — outside the amendment`));
+    assert.ok(logs.includes(`delta-major 1 head=${DELTA_HEAD}`));
   });
 }
 

@@ -17,7 +17,7 @@ end up attached to the line they are about, where review and merge already happe
 
 | Reach for | When | Cost |
 |---|---|---|
-| **this skill** | Every code-diff PR boundary. Single-surface changes, burn-down items, anything you were about to merge on your own say-so. (Burn-down's T0 — docs/config/mechanical with a green build — is the one named exception) | $0 plan-covered, one spawn, ~2–5 min |
+| **this skill** | T1 code-diff PR boundaries. Use `burn-down` § Per item step 3 for T0/T2 triggers and delta escalation. | $0 plan-covered, one spawn, ~2–5 min |
 | `/review` | You want several perspectives in-session and a convergence read before opening a PR | in-session Opus subagents |
 | `council_review` (review-council MCP) | Complex multi-component PRs and spec surfaces — fan-out, synthesis, adversarial challenge | 4–6 lenses |
 
@@ -310,6 +310,9 @@ pull request.
 amendment, one delta-only pass per lens. There is no second full-PR review and
 no third round at T1.**
 
+Apply the delta escalation in `burn-down` § Per item step 3 before treating
+this cap as the merge boundary.
+
 This is the half that caught real defects three times out of three when it was
 run by hand, and it is the half no script can do.
 
@@ -473,9 +476,8 @@ answers the `--since` that reviews only the commits the rebase changed. Under
 `--attempt-ref` the same flag keeps the attempt's
 claim, base and manifest unchanged and reviews the amendment inside it.
 
-Fix the delta pass's findings with controls, and the PR goes to the merge
-call. There is no third review: a fix made after the delta pass is checked by
-its seen-failing control, and that is the amendment check at that point.
+Fix the delta pass's findings with controls. Apply the T1 cap or its T2
+escalation under `burn-down` § Per item step 3.
 
 **Who follows the cap today.** Manual T1 follows it (this skill run by a
 session or conductor), and so does `babysit`. Babysit reads the rounds from the
@@ -658,9 +660,9 @@ head's round under the cap (§ 4):
 | `round` | Meaning | Also carries |
 |---|---|---|
 | `full` | no review yet: a full paired review is owed | `problem: null` |
-| `reviewed` | the last review is on this head, or this head is a patch-identical rebase of it | `last`, `problem: null`; `rebased_from` and `rebase` for a rebase |
+| `reviewed` | the last review is on this head, or this head is a patch-identical rebase of it | `last`, `problem: null`; `rebased_from` and `rebase` for a rebase; possible escalation fields |
 | `delta` | a full review and no delta after it: round two, `lens --since <since>` | `since` (the last **full** review's head, or after a mapped rebase the last commit before the first changed patch), `last`, `rebase?`, `problem` |
-| `capped` | a delta after the last full review: no third review | `last`, `rebase?`, `problem` |
+| `capped` | a delta after the last full review: no third T1 review | `last`, `rebase?`, `problem`; possible escalation fields |
 
 `last` is `{head, scope: "full"|"delta", review_id}`. In the delta round
 `problem` is why `<since>...<head>` is no amendment diff (the rule `lens --since`
@@ -668,6 +670,16 @@ refuses by), or null. In the capped round it is why the head can't converge on
 its tail: not an ancestor, a merge from the base branch, or an incomplete commit
 list. A tail with no changed files, no merge and a complete commit list is null.
 A non-null `problem` is the conductor's call.
+`major_findings` gives the distinct count when the last review is a delta.
+The additive `escalate: "t2-council"` and `escalate_reason` fields follow
+`burn-down` § Per item step 3. They persist on reviewed, capped, and rebased
+heads until a council round is recorded on that head or later. The count comes
+from distinct P1/P2 defects in that posted delta review's own `**scope:** delta`
+findings, including body-only findings. `escalate_reason` names the count and
+review id. Callers that do not read the new fields still receive `round: "capped"`.
+The marker is a workflow guard, not an authentication boundary; see
+`burn-down` § Per item step 3. For manual completion, use
+`reference/patterns/review-council.md` § PR delta escalation.
 
 **A rebase is mapped, not refused.** When the tail from the last reviewed head
 diverged, or is ahead with a merge in it, `rounds` matches the head's commits

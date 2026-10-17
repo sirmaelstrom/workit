@@ -6,7 +6,7 @@ import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
-  tierFor, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
+  tierFor, tierDecision, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions, recordLandStep, runLandVerb,
   parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord, visualReadProblem,
 } from './land.mjs';
@@ -1165,7 +1165,7 @@ test('council record (da57e5ba): one COMMENT review per council round with every
   ];
   const record = councilRecord(makeState({ slug: 'demo' }), wp, rows);
   assert.equal(record.path, join(reviewDir, 'pr-record.md'));
-  assert.deepEqual(record.action.command, ['gh', 'api', '--method', 'POST', 'repos/sirmaelstrom/workit/pulls/7/reviews', '-f', 'event=COMMENT', '-F', `body=@${record.path}`]);
+  assert.deepEqual(record.action.command, ['gh', 'api', '--method', 'POST', 'repos/sirmaelstrom/workit/pulls/7/reviews', '-f', 'event=COMMENT', '-f', `commit_id=${HEAD}`, '-F', `body=@${record.path}`]);
   assert.deepEqual([record.action.step, record.action.part], ['reply', 'record']);
   assert.match(record.body, /^\*\*Council review record\*\*: `\/conduct` run `demo`, WP-01, round 1, seats gpt-6\.1-sol, opus\./);
   assert.ok(record.body.includes('| C1-1 | fixed | `89abcde` | control red: `not ok 4 - merge lock` |'), record.body);
@@ -1179,6 +1179,14 @@ test('council record (da57e5ba): one COMMENT review per council round with every
   const failed = recordLandStep(makeState(), wp, record.action, { code: 1, stdout: '', stderr: 'HTTP 422: Unprocessable Entity' });
   assert.deepEqual([failed.outcome, failed.patch.reviews.at(-1).record], ['continue', { failed: 'HTTP 422: Unprocessable Entity' }]);
   assert.match(failed.reason, /council review record not posted \(exit 1\): HTTP 422/);
+});
+
+test('ROUND 2 RED: council marker uses a run-relative id, never its local review directory', () => {
+  const reviewDir = join(RUN, 'council', 'wp-01', 'review-3');
+  const wp = makeWp({ tier: 'T2', reviews: [{ round: 3, scope: 'full', tier: 'T2', head: HEAD, reviewId: reviewDir, findings: 0, escalatedDeltaReviewId: 88 }] });
+  const record = councilRecord(makeState({ slug: 'demo' }), wp, []);
+  assert.match(record.body, /"id":"demo\/wp-01\/3"/);
+  assert.equal(record.body.includes(RUN), false);
 });
 
 test('reply bodies and council ids (D20); replies carry the run\'s measure log (C1-17)', () => {
@@ -1552,12 +1560,93 @@ test('tierFor (D19.11): raise only, on a contract path or a test file', () => {
   const contractPaths = JSON.parse(readFileSync(join(HERE, '..', '..', '..', '..', '.workit', 'conduct.json'), 'utf8')).contractPaths;
   assert.equal(tierFor({ tier: 'T2' }, ['README.md'], []), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], contractPaths), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], []), 'T1');
+  assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], [], [], { repo: 'sirmaelstrom/workit' }), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['skills/conduct/scripts/lib/x.test.mjs'], []), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['tests/fixture.md'], []), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['skills/spec/scripts/x.mjs'], []), 'T1');
   assert.equal(tierFor({ tier: 'T0' }, ['README.md'], []), 'T0');
   assert.equal(tierFor({ tier: 'weird' }, ['README.md'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T0' }, ['hooks/PreToolUse.js'], [], [], { repo: 'sirmaelstrom/claude-config' }), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['src/hooks/useCounter.ts'], []), 'T1');
+  assert.equal(tierFor({ tier: 'T1' }, ['.claude/settings.json'], [], [], { repo: 'sirmaelstrom/claude-config', settingsHooksChanged: true }), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['hooks/README.md'], []), 'T1');
+  assert.equal(tierFor({ tier: 'T1' }, ['docs/permission.md'], []), 'T1');
+  assert.equal(tierFor({ tier: 'T1' }, ['src/allow-list.ts'], []), 'T1');
+});
+
+test('ROUND 2 RED: repo-scoped agent gates include registered neutral hooks and exclude app hooks', () => {
+  const base = { tier: 'T1' };
+  const claude = { repo: 'sirmaelstrom/claude-config' };
+  const workit = { repo: 'sirmaelstrom/workit' };
+  const observatory = { repo: 'heathdev-me/observatory' };
+  assert.equal(tierDecision(base, ['hooks/check-write.mjs'], [], [], claude).rule, 'claude-config-hooks');
+  assert.equal(tierDecision(base, ['scripts/check-write.mjs'], [], ['node scripts/check-write.mjs'], claude).tier, 'T2');
+  assert.equal(tierDecision(base, ['settings.json'], [], [], { ...claude, settingsHooksChanged: true }).tier, 'T2');
+  assert.equal(tierDecision(base, ['settings.json'], [], [], { ...claude, settingsHooksChanged: false }).tier, 'T1');
+  assert.equal(tierDecision(base, ['src/hooks/useCounter.ts'], [], [], workit).tier, 'T1');
+  assert.equal(tierDecision(base, ['skills/slim-review/scripts/pr-review.mjs'], [], [], workit).tier, 'T2');
+  assert.equal(tierDecision(base, ['src/bridge/allowed-origins.ts'], [], [], observatory).tier, 'T2');
+  assert.equal(tierDecision(base, ['src/bridge/routes/t3-answer-evidence.ts'], [], [], observatory).tier, 'T2');
+  assert.equal(tierDecision(base, ['src/hooks/useCounter.ts'], [], [], observatory).tier, 'T1');
+});
+
+test('COUNCIL RECOVER: externally posted qualifying delta preserves council obligation', () => {
+  const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 2 }] });
+  const action = { step: 'review', part: 'recover', land: { round: 2, scope: 'delta', since: BASE, head: HEAD, lenses: ['codex', 'astra'] } };
+  const receipt = ok(JSON.stringify({ outcome: 'ok', round: 'reviewed', last: { head: HEAD, scope: 'delta', review_id: 88 }, major_findings: 2, escalate: 't2-council' }));
+  const out = recordLandStep(makeState(), wp, action, receipt, {});
+  assert.equal(out.outcome, 'continue');
+  assert.equal(out.patch.tier, 'T2');
+  assert.equal(out.patch.deltaEscalation?.reviewId, 88);
+});
+
+test('a T1 delta post escalates at two new P1/P2 findings, but one keeps the cap', () => {
+  const state = makeState();
+  for (const [major, expected] of [[0, 'T1'], [1, 'T1'], [2, 'T2']]) {
+    const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 3 }] });
+    const action = { step: 'post', part: 'post', land: { round: 2, scope: 'delta', since: BASE, head: HEAD, lenses: ['codex', 'astra'] } };
+    const out = recordLandStep(state, wp, action, ok(`findings 2\nposted-review-id 88\ndelta-major ${major} head=${HEAD}\n`), {});
+    assert.equal(out.outcome, 'continue');
+    assert.equal(out.patch.tier ?? wp.tier, expected);
+    assert.equal(out.patch.deltaEscalation?.majorFindings ?? 0, major >= 2 ? major : 0);
+  }
+  const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 3 }] });
+  const action = { step: 'post', part: 'post', land: { round: 2, scope: 'delta', since: BASE, head: HEAD, lenses: ['codex', 'astra'] } };
+  const oldProducer = recordLandStep(state, wp, action, ok('findings 2\n'), {});
+  assert.deepEqual([oldProducer.outcome, /producer version/.test(oldProducer.reason)], ['block', true]);
+  const noId = recordLandStep(state, wp, action, ok(`findings 2\ndelta-major 2 head=${HEAD}\n`), {});
+  assert.deepEqual([noId.outcome, /posted review id/.test(noId.reason)], ['block', true]);
+});
+
+test('COUNCIL RED: conduct gate cannot pass a qualifying delta without a later recorded council round', () => {
+  const wp = makeWp({
+    reviews: [
+      { round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 2 },
+      { round: 2, scope: 'delta', tier: 'T1', head: HEAD, findings: 2, majorFindings: 2 },
+    ],
+    deltaEscalation: { round: 2, head: HEAD, majorFindings: 2 },
+  });
+  const verdict = gateCheck(makeState(), wp, { exec: gateExec(), now: () => NOW });
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.causes.includes('t2-council'));
+});
+
+test('a recorded full T2 council on the delta head clears the conduct merge gate', () => {
+  const delta = { round: 2, scope: 'delta', tier: 'T1', head: HEAD, reviewId: 88, findings: 2, majorFindings: 2 };
+  const council = { round: 3, scope: 'full', tier: 'T2', head: HEAD, reviewId: 'run/council/WP-01/3', escalatedDeltaReviewId: 88, record: { url: 'https://github.com/o/r/pull/7#pullrequestreview-99' }, findings: 0 };
+  const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE }, delta, council], deltaEscalation: null });
+  assert.equal(gate(makeState(), wp).ok, true);
+  assert.equal(gate(makeState(), makeWp({ ...wp, reviews: [wp.reviews[0], delta, { ...council, record: null }] })).causes.includes('t2-council'), true);
+});
+
+test('post-adjudication dup-of recount keeps one defect at T1 and two at T2', () => {
+  const action = { step: 'review', part: 'delta-count', land: { reviewId: 88, head: HEAD } };
+  const wp = makeWp({ tier: 'T2', reviews: [{ round: 2, scope: 'delta', tier: 'T1', head: HEAD, reviewId: 88, majorFindings: 2 }], deltaEscalation: { round: 2, head: HEAD, reviewId: 88, majorFindings: 2 } });
+  const answer = (count) => ok(JSON.stringify({ outcome: 'ok', review_id: 88, head: HEAD, major_findings: count }));
+  const one = recordLandStep(makeState(), wp, action, answer(1), {});
+  assert.deepEqual([one.patch.tier, one.patch.deltaEscalation, one.patch.reviews.at(-1).majorFindings], ['T1', null, 1]);
+  const two = recordLandStep(makeState(), wp, action, answer(2), {});
+  assert.deepEqual([two.patch.tier, two.patch.deltaEscalation, two.patch.reviews.at(-1).majorFindings], [undefined, undefined, 2]);
 });
 
 test('runLandVerb I/O (D19.21): returns { code, out } and writes nothing to stdout', async (t) => {

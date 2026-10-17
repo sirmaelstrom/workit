@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { decide, runLoop, summariseChecks, normaliseThreads, adjudicate, adjudicateVerb, unwrapClientResponse, fetchAllThreads, reviewRound, DEFAULT_BOUNDS, BLOCKED_REASONS, COMMENTS_PAGE } from './pr-babysit.mjs';
 import { buildMarker } from '../../slim-review/scripts/pr-review-recognise.mjs';
-import { reviewPairFor } from '../../slim-review/scripts/pr-review.mjs';
+import { readCouncilMarker, readScopedReviews, reviewPairFor } from '../../slim-review/scripts/pr-review.mjs';
 
 const H1 = 'aaaaaaa1111111111111111111111111111111111';
 const H2 = 'bbbbbbb2222222222222222222222222222222222';
@@ -252,6 +252,7 @@ function world(init = {}) {
     threads: [],
     attempts: [],
     reviews: [], // the PR's review listing, as `gh api …/reviews --jq` projects it
+    reviewComments: {},
     history: [H1, H2, H3, H4], // a linear branch: each head descends from the ones before it
     login: 'sirmaelstrom',
     health: { enabled: true, paused: false, pauseReason: 'none' },
@@ -285,6 +286,15 @@ function world(init = {}) {
       if (args[0] === 'pr' && args[1] === 'view') { if (w.headReads?.length) w.head = w.headReads.shift(); return `${w.head}\n`; }
       if (args[0] === 'pr' && args[1] === 'checks') return JSON.stringify(w.checks);
       if (args[0] === 'api' && args[1] === '--paginate' && /\/pulls\/\d+\/reviews$/.test(args[2])) return w.reviews.map((r) => JSON.stringify(r)).join('\n');
+      if (args[0] === 'api' && args[1] === '--paginate' && /\/pulls\/\d+\/comments$/.test(args[2])) {
+        if (w.failReviewComments) throw new Error('gh: review comments unavailable');
+        return Object.entries(w.reviewComments).flatMap(([reviewId, items]) => items.map((item) => JSON.stringify({ pull_request_review_id: Number(reviewId), ...item }))).join('\n');
+      }
+      const comments = args[0] === 'api' && args[1] === '--paginate' && /\/reviews\/(\d+)\/comments$/.exec(args[2] ?? '');
+      if (comments) {
+        if (w.failReviewComments) throw new Error('gh: review comments unavailable');
+        return (w.reviewComments[comments[1]] ?? []).map((item) => JSON.stringify(item)).join('\n');
+      }
       const cmp = args[0] === 'api' && /\/compare\/([0-9a-f]+)\.\.\.([0-9a-f]+)$/.exec(args[1] ?? '');
       if (cmp) return JSON.stringify(compare(cmp[1], cmp[2]));
       if (args[0] === 'api' && args[1] === 'graphql' && args[3].includes('resolveReviewThread')) {
@@ -509,6 +519,65 @@ test('no third review: a posted delta on H2 and a new head H3, threads resolved,
   const rb = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1, claim: 'beat' } }, beat.deps);
   assert.equal(rb.outcome, 'converged');
   assert.equal(beat.w.writerCalls.length, 0);
+});
+
+test('babysit stops at an escalated cap instead of converging or claiming again', async () => {
+  const comment = { in_reply_to_id: null, body: '**lens:** codex\n\n**scope:** delta\n\n**[P2] new defect**\n\nbody' };
+  const { w, deps } = world({
+    head: H3,
+    reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: H2, since: H1 })],
+    reviewComments: { 7002: [comment, comment] },
+  });
+  const out = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  assert.deepEqual([out.outcome, out.reason], ['blocked', 't2-council']);
+  assert.match(out.owed, /escalate to T2 council.*2.*review 7002/i);
+  assert.match(out.owed, /reference\/patterns\/review-council\.md/);
+  assert.equal(w.writerCalls.length, 0);
+});
+
+test('COUNCIL RED: babysit cannot converge the reviewed delta head with two defects', async () => {
+  const comments = [71, 72].map((id) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[P2] defect ${id}**\n\nbody` }));
+  const { deps } = world({
+    head: H2,
+    reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: H2, since: H1 })],
+    reviewComments: { 7002: comments },
+    attempts: [{ head_sha: H2, attempt: 1, state: 'posted', review_id: 7002 }],
+  });
+  const out = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  assert.deepEqual([out.outcome, out.reason], ['blocked', 't2-council']);
+});
+
+test('a qualifying delta still blocks on a patch-identical rebase', () => {
+  const reviews = [{ review_id: 7001, head: H1, scope: 'full' }, { review_id: 7002, head: H2, scope: 'delta', majorFindings: 2 }];
+  const tail = { from: H2, to: H3, status: 'diverged', rebase: { kind: 'identical', commits: 2 } };
+  const out = decide(obs({ head: H3, headBefore: H3, headAfter: H3, reviews, tail }), ctx({ iterationHead: H3 }));
+  assert.deepEqual([out.action, out.reason], ['blocked', 't2-council']);
+});
+
+test('ROUND 2 RED: babysit adjudicates open duplicate threads before council escalation', () => {
+  const reviews = [{ review_id: 7001, head: H1, scope: 'full' }, { review_id: 7002, head: H2, scope: 'delta', majorFindings: 2 }];
+  const out = decide(obs({ head: H2, headBefore: H2, headAfter: H2, reviews, threads: [openThread(72)] }), ctx({ iterationHead: H2 }));
+  assert.equal(out.action, 'adjudicate');
+  assert.equal(out.reviewId, 7002);
+});
+
+test('a recorded council round clears babysit on the amended head', async () => {
+  const deltaHead = 'b'.repeat(40);
+  const comment = (id) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[P2] defect ${id}**\n\nbody` });
+  const council = listed({ id: 7003, head: deltaHead, login: 'conductor', body: `**Council review record**: round 3.\n\n<!-- workit-council-round: {"id":"run/WP-01/3","delta_review_id":7002,"head":"${deltaHead}"} -->` });
+  assert.equal(readCouncilMarker(council.body)?.delta_review_id, 7002, council.body);
+  const { deps } = world({ head: H3, history: [H1, deltaHead, H3, H4], reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: deltaHead, since: H1 }), council], reviewComments: { 7002: [comment(71), comment(72)] } });
+  const scoped = readScopedReviews({ repo: 'o/r', pr: 1, cwd: '.', runGh: deps.runGh, serviceLogin: 'sirmaelstrom' });
+  assert.equal(scoped.at(-1).councilRoundId, 'run/WP-01/3', JSON.stringify(scoped));
+  const out = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  assert.equal(out.outcome, 'converged', JSON.stringify(out));
+});
+
+test('babysit blocks when the posted delta comments cannot be read', async () => {
+  const { deps } = world({ head: H2, reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: H2, since: H1 })], failReviewComments: true });
+  const out = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  assert.deepEqual([out.outcome, out.reason], ['blocked', 'reviews-unavailable']);
+  assert.match(out.owed, /gh: review comments unavailable/);
 });
 
 test('no third review, and the tail must sit on top of what was reviewed: an open thread is your turn; a head that does not descend from the delta head blocks amendment-not-descendant', async () => {

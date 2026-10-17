@@ -72,7 +72,7 @@ The **core** runs with `git`, `gh` and one lane-agent CLI. An adapter replaces a
 
 - **Declared by you.** A script can't see your MCP tools, so declare an adapter only when **every** tool it needs is callable in your own tool list; a partial set means the adapter isn't declared. Intake records each declaration with its evidence (`declared`).
   - `spine`: `spine_quest`, `spine_update`, `spine_receipt`, `spine_author`.
-  - `council`: `council_review`, `council_synthesize`, `council_challenge`. A council round leaves no thread on the PR, so at adjudication the build posts one COMMENT review to the PR: every finding's id, the lane's verdict, commit and Evidence cell (`<review dir>/pr-record.md`). A post that fails is named under the analysis audit and never blocks the WP. The audit's judgment lines quote each item's Evidence and link its PR. The council call names `profile: 'conduct-code'`, which is the shared `code` roster minus sonnet-5-carto and is config-owned in the council's `models.json`. A server without that profile refuses the call by name. From round 2 on, the previous round's adjudication (`<review dir>/adjudication-for-next-round.md`) is the first artifact. It tells the council not to re-raise a finding the lane already ruled on, unless the round's change touches the cited code. This is a prompt instruction, not a filter. A conductor or operator ruling on a guard row carries its reason (`Ruling: …`) beside the lane's Evidence.
+  - `council`: `council_review`, `council_synthesize`, `council_challenge`. A council round leaves no thread on the PR, so at adjudication the build posts one COMMENT review to the PR: every finding's id, the lane's verdict, commit and Evidence cell (`<review dir>/pr-record.md`). A failed post is named under the analysis audit. For a delta escalation, the gate also waits for the posted, head-bound council record. The audit's judgment lines quote each item's Evidence and link its PR. The council call names `profile: 'conduct-code'`, which is the shared `code` roster minus sonnet-5-carto and is config-owned in the council's `models.json`. A server without that profile refuses the call by name. From round 2 on, the previous round's adjudication (`<review dir>/adjudication-for-next-round.md`) is the first artifact. It tells the council not to re-raise a finding the lane already ruled on, unless the round's change touches the cited code. This is a prompt instruction, not a filter. A conductor or operator ruling on a guard row carries its reason (`Ruling: …`) beside the lane's Evidence.
   - `kb`: `kb_search`, `kb_save`.
   - `verify`: the workit `verify` skill, when it covers the repo's surface.
   - `ledger`: `ledger_write` (the context ledger; a stall alarm's note).
@@ -206,7 +206,8 @@ The lane-facing text goes in the repo's `AGENTS.md`, under a `## Lane suite` hea
 
 The workspace file may carry:
 - `release`: the release recipe (`--release` overrides it).
-- `contractPaths`: globs that raise a WP to T2.
+- `contractPaths`: globs that raise a WP to T2. Conduct also raises agent-action
+  hook and command-gate paths without a repo config entry; see `burn-down` § Per item step 3.
 - `trivialExclude`: globs a tail never counts as trivial.
 - `gateEnv`: env for the conductor's gate command. `{run}` and `{wp}` become the run slug and the WP id as lowercase identifiers. Use it for a repo whose suite needs its own database per runner.
 - `gateBackground: true`: the gate command's action carries `background: true`.
@@ -239,6 +240,6 @@ Pointers, not restated rules:
 - `/pickup` (`${CLAUDE_PLUGIN_ROOT}/skills/pickup/SKILL.md`): the claim discipline the build phase's `spine_update currentPhase: build` follows.
 - `${CLAUDE_PLUGIN_ROOT}/scripts/lane.mjs`: the herdr lane lifecycle.
 - `${CLAUDE_PLUGIN_ROOT}/skills/slim-review/SKILL.md`: the paired review at a PR boundary.
-- `${CLAUDE_PLUGIN_ROOT}/skills/burn-down/SKILL.md` § Per item step 3 (review at the tier the change raises) and step 4 (Land it): the tiers and the gate, by reference.
+- `${CLAUDE_PLUGIN_ROOT}/skills/burn-down/SKILL.md` § Per item step 3 (review at the tier the change raises) and step 4 (Land it): the tiers, delta escalation, and gate, by reference.
 - `${CLAUDE_PLUGIN_ROOT}/scripts/escape-reader.mjs`: the escapes section of the run analysis.
 - `${CLAUDE_PLUGIN_ROOT}/reference/templates/lane-contract.template.md`: the lane contract the build phase instantiates.

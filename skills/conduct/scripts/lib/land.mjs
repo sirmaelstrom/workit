@@ -37,7 +37,7 @@ import { ConductError, STEP_SEAM, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
 import { pinnedConfig } from './repo-config.mjs';
 import { mergeDanger } from '../../../../scripts/lane.mjs';
-import { patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-review/scripts/pr-review-rounds.mjs';
+import { deltaEscalation, patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-review/scripts/pr-review-rounds.mjs';
 import { AUTHOR_LENS, reviewPairFor } from '../../../slim-review/scripts/pr-review.mjs';
 import { laneModel } from './adapters.mjs';
 import { gateBootstrap } from './bootstrap.mjs';
@@ -129,10 +129,62 @@ function trivialPath(path, notTrivial) {
   return p.endsWith('.md') && !isTestPath(p) && !/(^|\/)(__fixtures__|fixtures|testdata)\//.test(p) && !notTrivial.some((re) => re.test(p));
 }
 
-// Raise only: a test file or a contract path makes it T2.
-export function tierFor(wp, changedPaths = [], contractPaths = []) {
+// Keep command and review gates explicit per repository. The run records the matched rule.
+const GATE_PATHS = {
+  'sirmaelstrom/workit': new Set([
+    'scripts/lane.mjs',
+    'skills/slim-review/scripts/pr-review.mjs',
+    'skills/slim-review/scripts/pr-review-guard.mjs',
+    'skills/slim-review/scripts/pr-review-rounds.mjs',
+    'skills/slim-review/scripts/pr-review-recognise.mjs',
+    'skills/slim-review/scripts/pr-review-outcomes.mjs',
+    'skills/slim-review/scripts/pr-review-coordinator.mjs',
+    'skills/babysit/scripts/pr-babysit.mjs',
+    'skills/conduct/scripts/lib/land.mjs',
+    'skills/conduct/scripts/lib/phases/build.mjs',
+  ]),
+  'heathdev-me/observatory': new Set([
+    'src/bridge/allowed-origins.ts',
+    'src/bridge/routes/spine.ts',
+    'src/bridge/spine-answer-provenance.ts',
+    'src/bridge/routes/t3-answer-evidence.ts',
+    'src/bridge/routes/t3-answer-queue.ts',
+  ]),
+};
+
+function agentActionGateRule(path, hookCommands = [], { repo, settingsHooksChanged = false } = {}) {
+  const p = norm(path).replace(/^\.\//, '').toLowerCase();
+  if (p.endsWith('.md')) return null;
+  if (repo === 'sirmaelstrom/claude-config') {
+    if (p.startsWith('hooks/')) return 'claude-config-hooks';
+    if ((p === 'settings.json' || p === '.claude/settings.json') && settingsHooksChanged) return 'hook-registration-settings';
+  }
+  if (hookCommands.some((command) => {
+    const normalized = norm(command).toLowerCase();
+    return normalized.split(/[\s"']+/).some((token) => token === p || token.endsWith(`/${p}`));
+  })) return 'registered-hook';
+  if (GATE_PATHS[repo]?.has(p)) return `${repo.split('/')[1]}-agent-gate`;
+  return null;
+}
+
+export function isAgentActionGatePath(path, hookCommands = [], options = {}) {
+  return agentActionGateRule(path, hookCommands, options) !== null;
+}
+
+// Raise only. Keep the first matched path and rule for the run record.
+export function tierDecision(wp, changedPaths = [], contractPaths = [], hookCommands = [], options = {}) {
   const contracts = contractPaths.map(globRegex);
-  return changedPaths.some((path) => isTestPath(path) || contracts.some((re) => re.test(norm(path)))) ? 'T2' : effectiveTier(wp);
+  for (const path of changedPaths) {
+    const rule = isTestPath(path) ? 'test-path'
+      : contracts.some((re) => re.test(norm(path))) ? 'contract-path'
+        : agentActionGateRule(path, hookCommands, options);
+    if (rule) return { tier: 'T2', rule, path };
+  }
+  return { tier: effectiveTier(wp), rule: effectiveTier(wp) === 'T2' ? 'declared-t2' : 'no-match', path: null };
+}
+
+export function tierFor(wp, changedPaths = [], contractPaths = [], hookCommands = [], options = {}) {
+  return tierDecision(wp, changedPaths, contractPaths, hookCommands, options).tier;
 }
 
 // Lens availability: opus iff claude is on; codex and astra iff codex is on.
@@ -366,7 +418,7 @@ export function recordAdjudication(state, wp, verdicts) {
 export function councilRecord(state, wp, rows) {
   const review = (wp.reviews ?? []).at(-1);
   const council = rows.filter((row) => /^C\d+-\d+$/i.test(String(row.comment).trim()));
-  if (!council.length || !review?.reviewId || !wp.pr?.number) return null;
+  if ((!council.length && !review?.escalatedDeltaReviewId) || !review?.reviewId || !wp.pr?.number) return null;
   const cell = (text) => String(text ?? '').replace(/\r?\n/g, ' ').replace(/(?<!\\)\|/g, '\\|').trim();
   const body = [
     `**Council review record**: \`/conduct\` run \`${state.slug}\`, ${wp.id}, round ${review.round}${review.scope === 'delta' ? ' (delta)' : ''}${review.lenses?.length ? `, seats ${review.lenses.join(', ')}` : ''}.`,
@@ -376,9 +428,10 @@ export function councilRecord(state, wp, rows) {
     '|---|---|---|---|',
     ...council.map((row) => `| ${cell(row.comment)} | ${cell(row.verdict)} | ${row.commit ? `\`${cell(row.commit)}\`` : '—'} | ${cell(row.evidence) || '—'} |`),
     '',
+    ...(review.escalatedDeltaReviewId ? [`<!-- workit-council-round: ${JSON.stringify({ id: `${state.slug}/${wp.id.toLowerCase()}/${review.round}`, delta_review_id: review.escalatedDeltaReviewId, head: review.head })} -->`] : []),
   ].join('\n');
   const path = join(review.reviewId, 'pr-record.md');
-  const action = shell('reply', 'record', ['gh', 'api', '--method', 'POST', `repos/${repoOf(state)}/pulls/${wp.pr.number}/reviews`, '-f', 'event=COMMENT', '-F', `body=@${path}`],
+  const action = shell('reply', 'record', ['gh', 'api', '--method', 'POST', `repos/${repoOf(state)}/pulls/${wp.pr.number}/reviews`, '-f', 'event=COMMENT', '-f', `commit_id=${review.head}`, '-F', `body=@${path}`],
     { instruction: 'Post the council round\'s adjudication as a PR review (the run\'s review record). Record { code, stdout, stderr }.' });
   return { path, body, action };
 }
@@ -821,6 +874,8 @@ export function gateCheck(state, wp, { exec, now }) {
   if (config.failure) fail(config.failure, 'infra');
   const review = head ? reviewCondition(wp, head, exec, config.patterns ?? DEFAULT_NOT_TRIVIAL.map(globRegex)) : { failure: 'review coverage not read: no head', cause: 'infra' };
   if (review.failure) fail(review.failure, review.cause);
+  const council = councilObligation(wp, exec);
+  if (council) fail(council, 't2-council');
   const pendingOn = [...(ci.pending ? ['ci'] : []), ...(flight.pending ? ['review'] : [])];
   const ok = failures.length === 0 && pendingOn.length === 0;
   return {
@@ -833,8 +888,28 @@ export function gateCheck(state, wp, { exec, now }) {
   };
 }
 
+function councilObligation(wp, exec) {
+  const reviews = wp.reviews ?? [];
+  const deltas = reviews.filter((review) => review.scope === 'delta' && review.tier === 'T1' && review.majorFindings >= 2);
+  if (wp.deltaEscalation && !deltas.some((review) => review.head === wp.deltaEscalation.head)) {
+    deltas.push({ ...wp.deltaEscalation, scope: 'delta', tier: 'T1' });
+  }
+  for (const delta of deltas) {
+    const recorded = reviews.some((review) => {
+      if (review.tier !== 'T2' || review.scope !== 'full' || !review.reviewId || !review.record?.url) return false;
+      if (review.escalatedDeltaReviewId && delta.reviewId && String(review.escalatedDeltaReviewId) !== String(delta.reviewId)) return false;
+      if (review.head === delta.head) return true;
+      if (!exec) return review.escalatedDeltaReviewId != null && String(review.escalatedDeltaReviewId) === String(delta.reviewId);
+      return exec('git', ['-C', wp.lane.worktree, 'merge-base', '--is-ancestor', delta.head, review.head]).code === 0;
+    });
+    if (!recorded) return `delta review ${delta.reviewId ?? delta.round ?? '?'} on ${delta.head} requires a recorded T2 council round on that head or later`;
+  }
+  return null;
+}
+
 export function mergeActions(state, wp, head) {
   if (state.authority?.merge !== true || mergeLockFor(state, wp) !== 'mine') return [];
+  if (councilObligation(wp, null)) return [];
   // The door again, at the merge itself: a gate record from before the door
   // check (a run resumed across an upgrade) carries none.
   if (wp.id !== 'release' && wp.gate?.door !== 'two-way') return [];
@@ -861,12 +936,30 @@ function reviewEntry(wp, land, extra) {
     attemptRef: land.attemptRef ?? null, reviewId: null, findings: null, verdicts: [], resolved: [], ...extra };
 }
 
+function postedReviewId({ stdout, stderr }) {
+  for (const output of [stdout, stderr]) {
+    const parsed = parseJson(first(output));
+    if (parsed?.review_id != null) return parsed.review_id;
+    const direct = /^posted-review-id (\d+)$/m.exec(String(output ?? ''));
+    if (direct) return Number(direct[1]);
+    const match = /pullrequestreview-(\d+)/.exec(String(output ?? ''));
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
 export function findingsCount({ stdout, stderr }) {
   for (const text of [stdout, stderr]) {
     const match = /^findings\s+(\d+)/m.exec(String(text ?? ''));
     if (match) return Number(match[1]);
   }
   return null;
+}
+
+export function deltaMajorCount({ stdout, stderr }, head) {
+  const matches = [stdout, stderr].flatMap((output) => [...String(output ?? '').matchAll(/^delta-major (\d+) head=([0-9a-f]{40})$/gim)]);
+  if (matches.length !== 1 || matches[0][2].toLowerCase() !== head?.toLowerCase()) return null;
+  return Number(matches[0][1]);
 }
 
 function withLatest(wp, change) {
@@ -883,6 +976,17 @@ function retry(wp, action, reason) {
 
 function recordReview(state, wp, action, r) {
   const after = rest(wp, action);
+  if (action.part === 'delta-count') {
+    const read = parseJson(first(r.stdout));
+    const count = read?.major_findings;
+    if (r.code !== 0 || read?.outcome !== 'ok' || String(read.review_id) !== String(action.land.reviewId)
+      || read.head !== action.land.head || !Number.isInteger(count) || count < 0) {
+      return result('block', `posted delta review ${action.land.reviewId} has no head-bound distinct-defect count after adjudication: ${first(r.stderr) || first(r.stdout)}`);
+    }
+    const reviews = withLatest(wp, (review) => ({ ...review, majorFindings: count }));
+    const cleared = count < 2 && wp.deltaEscalation?.reviewId === action.land.reviewId;
+    return result('continue', null, { reviews, ...(cleared ? { tier: 'T1', deltaEscalation: null } : {}) });
+  }
   if (action.part === 'managed') {
     const mode = parseJson(r.stdout)?.mode;
     if (mode !== 'managed' && mode !== 'standalone') return result('block', `review mode unreadable: ${first(r.stdout) || first(r.stderr)}`);
@@ -911,8 +1015,15 @@ function recordReview(state, wp, action, r) {
   if (action.part === 'recover') {
     const read = parseJson(first(r.stdout));
     if (read?.outcome === 'ok' && read.round === 'reviewed' && read.last?.head === action.land.head) {
-      const entry = reviewEntry(wp, action.land, { scope: read.last.scope === 'delta' ? 'delta' : 'full', reviewId: read.last.review_id ?? null });
-      return result('continue', null, { reviews: [...(wp.reviews ?? []), entry] });
+      const delta = read.last.scope === 'delta';
+      if (delta && read.escalate === 't2-council' && (!Number.isInteger(read.major_findings) || read.major_findings < 2)) {
+        return result('held', `posted delta review ${read.last.review_id} signalled council without a readable distinct-defect count`);
+      }
+      const entry = reviewEntry(wp, action.land, { scope: delta ? 'delta' : 'full', reviewId: read.last.review_id ?? null,
+        ...(delta ? { majorFindings: read.major_findings ?? null } : {}) });
+      const escalation = delta && read.escalate === 't2-council' && effectiveTier(wp) === 'T1';
+      return result('continue', null, { reviews: [...(wp.reviews ?? []), entry],
+        ...(escalation ? { tier: 'T2', deltaEscalation: { round: action.land.round, head: action.land.head, reviewId: read.last.review_id, majorFindings: read.major_findings } } : {}) });
     }
     return result('held', `claim refused ${ALREADY_REVIEWED} and no posted review of ${action.land.head} could be verified: ${first(r.stdout) || first(r.stderr)}`);
   }
@@ -956,8 +1067,9 @@ function recordCouncil(state, wp, action, r) {
       return result('block', `council synthesis round ${land.round} is unusable: ${r.error ?? 'needs an integer findings count and seats that succeeded at review'}`);
     }
     const entry = { round: land.round, scope: stage.scope ?? 'full', since: stage.scope === 'delta' ? land.since ?? null : null, tier: 'T2', head: action.head, lenses: seats,
-      reviewId: action.args.review_dir, findings: r.findings, verdicts: [], resolved: [] };
-    return result('continue', null, { councilStage: null, reviews: [...(wp.reviews ?? []), entry] });
+      reviewId: action.args.review_dir, findings: r.findings, verdicts: [], resolved: [],
+      ...(wp.deltaEscalation ? { escalatedDeltaReviewId: wp.deltaEscalation.reviewId } : {}) };
+    return result('continue', null, { councilStage: null, reviews: [...(wp.reviews ?? []), entry], ...(wp.deltaEscalation ? { deltaEscalation: null } : {}) });
   }
   if (r.error || r.success === false || r.challenge_stub) return result('block', `council challenge round ${land.round} failed: ${r.error ?? 'stub or unsuccessful'}`);
   return result('continue');
@@ -1137,6 +1249,14 @@ function recordGate(state, wp, action, r, deps) {
 }
 
 function classifyGate(state, wp, action, gate, causes, reason, deps) {
+  if (causes.has('t2-council')) {
+    const latest = (wp.reviews ?? []).at(-1);
+    const record = latest?.escalatedDeltaReviewId && !latest.record?.url ? councilRecord(state, wp, []) : null;
+    if (!record) return result('block', reason);
+    if ((wp.councilRecordRetries ?? 0) >= 2) return result('block', `council record not posted after retries: ${reason}`);
+    return result('continue', `retry council record: ${reason}`, { councilRecordRetries: (wp.councilRecordRetries ?? 0) + 1,
+      queue: [record.action, requeue(action), ...rest(wp, action)] });
+  }
   if (gate.blocked || causes.has('pr-state') || causes.has('ci-missing-check')) return result('block', reason);
   if (causes.has('stale-base') && causes.has('head-mismatch')) return result('block', `stale base and head mismatch together: ${reason}`);
   if (causes.has('tail-out-of-bounds')) return result('held', reason);
@@ -1169,15 +1289,26 @@ function landOutcome(state, wp, action, r, deps) {
     case 'review': return recordReview(state, wp, action, r);
     case 'post':
       if (r.code !== 0) return result('block', `post failed (exit ${r.code}): ${first(r.stderr)}`);
+      if (action.land.scope === 'delta') {
+        const majorFindings = deltaMajorCount(r, action.land.head);
+        if (majorFindings === null) return result('block', `delta post for ${action.land.head} returned success without a posted P1/P2 count receipt; check the post outcome and producer version`);
+        const escalation = effectiveTier(wp) === 'T1' && deltaEscalation({ scope: 'delta', majorFindings, review_id: null });
+        const reviewId = postedReviewId(r);
+        if (escalation && reviewId === null) return result('block', `delta post for ${action.land.head} crossed the T2 threshold but has no posted review id; check the producer receipt`);
+        return result('continue', null, {
+          reviews: [...(wp.reviews ?? []), reviewEntry(wp, action.land, { findings: findingsCount(r), majorFindings, reviewId })],
+          ...(escalation ? { tier: 'T2', deltaEscalation: { round: action.land.round, head: action.land.head, reviewId, majorFindings } } : {}),
+        });
+      }
       return result('continue', null, { reviews: [...(wp.reviews ?? []), reviewEntry(wp, action.land, { findings: findingsCount(r) })] });
     case 'council': return recordCouncil(state, wp, action, r);
     case 'reply':
-      // The council record is evidence, not a gate: a failed post is kept on the review for the analysis, and the WP goes on.
+      // An escalated council record is required at the land gate.
       if (action.part === 'record') {
         const url = parseJson(r.stdout)?.html_url ?? null;
-        return r.code === 0
+        return r.code === 0 && url
           ? result('continue', null, { reviews: withLatest(wp, (review) => ({ ...review, record: { url } })) })
-          : result('continue', `council review record not posted (exit ${r.code}): ${first(r.stderr)}`, { reviews: withLatest(wp, (review) => ({ ...review, record: { failed: first(r.stderr) || `exit ${r.code}` } })) });
+          : result('continue', `council review record not posted (exit ${r.code}): ${first(r.stderr) || 'missing html_url'}`, { reviews: withLatest(wp, (review) => ({ ...review, record: { failed: first(r.stderr) || (r.code === 0 ? 'missing html_url' : `exit ${r.code}`) } })) });
       }
       return action.kind === 'author' || r.code === 0 ? result('continue') : result('block', `reply failed (exit ${r.code}): ${first(r.stderr)}`);
     case 'thread-ids': return recordThreadIds(state, wp, action, r);

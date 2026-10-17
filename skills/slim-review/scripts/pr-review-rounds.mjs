@@ -483,19 +483,27 @@ export function resolveRound({ reviews, head, tail }) {
   const r = reviewRound(reviews, head);
   if (r.round === 'full') return { answer: { round: 'full', problem: null }, tail: null, from: null };
   const last = { head: r.last.head, scope: r.last.scope, review_id: r.last.review_id };
-  if (r.round === 'reviewed') return { answer: { round: 'reviewed', last, problem: null }, tail: null, from: null };
+  const owed = [...reviews].reverse().find((review) => deltaEscalation(review));
+  const signal = deltaEscalation(owed) ?? {};
+  const count = r.last.scope === 'delta' && r.last.majorFindings > 0 ? { major_findings: r.last.majorFindings } : {};
+  if (r.round === 'reviewed') return { answer: { round: 'reviewed', last, problem: null, ...count, ...signal }, tail: null, from: null };
   const rebase = tail && tail.from === r.last.head && tail.to === head ? tail.rebase : undefined;
   const rebased = rebase ? { rebase: rebaseSummary(rebase, r.last.head) } : {};
   if (rebase?.kind === 'identical') {
-    return { answer: { round: 'reviewed', last, rebased_from: r.last.head, ...rebased, problem: null }, tail: null, from: null };
+    return { answer: { round: 'reviewed', last, rebased_from: r.last.head, ...rebased, problem: null, ...count, ...signal }, tail: null, from: null };
   }
   const mapped = rebase?.kind === 'delta';
   const from = mapped ? rebase.since : r.round === 'delta' ? r.since : r.last.head;
   const effective = mapped ? rebase.tail : tail;
   if (r.round === 'delta') {
-    return { answer: { round: 'delta', since: from, last, ...rebased, problem: deltaTailProblem(effective, from, head) }, tail: effective, from };
+    return { answer: { round: 'delta', since: from, last, ...rebased, problem: deltaTailProblem(effective, from, head), ...count, ...signal }, tail: effective, from };
   }
-  return { answer: { round: 'capped', last, ...rebased, problem: cappedTailProblem(effective, from, head) }, tail: effective, from };
+  return { answer: { round: 'capped', last, ...rebased, problem: cappedTailProblem(effective, from, head), ...count, ...signal }, tail: effective, from };
+}
+
+export function deltaEscalation(review) {
+  if (review?.scope !== 'delta' || review.councilRoundId || !Number.isInteger(review.majorFindings) || review.majorFindings < 2) return null;
+  return { escalate: 't2-council', escalate_reason: `${review.majorFindings} posted in-amendment P1/P2 defects on review ${review.review_id}` };
 }
 
 /**

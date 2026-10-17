@@ -13,7 +13,7 @@
 5. **Failure Criteria** — "If X happens, the problem is Y." Gives the agent (or reviewer) diagnostic footholds.
 6. **Boundary** — What is explicitly OUT OF SCOPE for this package. Prevents drift.
 7. **Commit** — Conventional commit message. Forces you to name what changed.
-8. **Review tier** — `T0`, `T1` or `T2`, required for every deep WP: `**Review tier:** T2 (<why>)`. The first token after the label is the value. `/conduct` reads it to pick the review (the tiers are `skills/burn-down/SKILL.md` § Per item step 3; this pattern doesn't restate them), and it may raise a tier at PR time but never lowers one. The field may share a line with another label, as in `**Execution:** review-needed · **Review tier:** T1`.
+8. **Review tier** — `T0`, `T1` or `T2`, required for every deep WP: `**Review tier:** T2 (<why>)`. The first token after the label is the value. `/conduct` reads it to pick the review (the triggers and delta escalation are in `skills/burn-down/SKILL.md` § Per item step 3; this pattern doesn't restate them), and it may raise a tier at PR time but never lowers one. The field may share a line with another label, as in `**Execution:** review-needed · **Review tier:** T1`.
 9. **Runtime exercise** — required for every deep WP: the surface the change runs on and the check that exercises it (a CLI run against a real input, a service probed, a page loaded), or `none: <why>` when no runtime behavior changes. `/conduct` hands it to the lane, which must quote the check's output under `## Runtime exercise` in its report, so a WP with no surface named gets a lane that guesses. A check that cannot fail is vacuous; say what it would show if the change were broken.
 
 Write each field as a bold label — `**Precondition:**`, `**Goal:**`, … — or as a
