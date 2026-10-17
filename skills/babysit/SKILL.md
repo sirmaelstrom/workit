@@ -18,7 +18,8 @@ The session judges; the script observes, decides, waits and reports. Contract:
 Babysit follows slim-review's cap (§ 4 Adjudicate, "Round two: the amendment
 only"): at most **two reviews per PR**, one full and one delta.
 The T2 triggers and delta escalation in `burn-down` § Per item step 3 take
-precedence. Hand an escalated PR to the council before the merge call.
+precedence. When `rounds` signals escalation, babysit stops with `t2-council`
+for the conductor to review the amended whole PR.
 
 1. **Full.** No review on the PR yet: claim the head and run both lenses over
    the whole PR.

@@ -37,7 +37,7 @@ import { ConductError, STEP_SEAM, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
 import { pinnedConfig } from './repo-config.mjs';
 import { mergeDanger } from '../../../../scripts/lane.mjs';
-import { patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-review/scripts/pr-review-rounds.mjs';
+import { deltaEscalation, patchPlace, REBASE_FILE_READ_CAP } from '../../../slim-review/scripts/pr-review-rounds.mjs';
 import { AUTHOR_LENS, reviewPairFor } from '../../../slim-review/scripts/pr-review.mjs';
 import { laneModel } from './adapters.mjs';
 import { gateBootstrap } from './bootstrap.mjs';
@@ -1190,7 +1190,7 @@ function landOutcome(state, wp, action, r, deps) {
       if (action.land.scope === 'delta') {
         const majorFindings = deltaMajorCount(r, action.land.head);
         if (majorFindings === null) return result('block', `delta post for ${action.land.head} has no matching P1/P2 count`);
-        const escalation = effectiveTier(wp) === 'T1' && majorFindings >= 2;
+        const escalation = effectiveTier(wp) === 'T1' && deltaEscalation({ scope: 'delta', majorFindings, review_id: null });
         return result('continue', null, {
           reviews: [...(wp.reviews ?? []), reviewEntry(wp, action.land, { findings: findingsCount(r), majorFindings })],
           ...(escalation ? { tier: 'T2', deltaEscalation: { round: action.land.round, head: action.land.head, majorFindings } } : {}),

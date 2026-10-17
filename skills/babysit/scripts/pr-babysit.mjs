@@ -47,8 +47,7 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createClient, CLIENT_REASONS } from '../../slim-review/scripts/pr-review-coordinator.mjs';
 import { loadCoordinatorToken, resolveManaged, MANAGED_MODES } from '../../slim-review/scripts/pr-review-managed.mjs';
-import { postedReviewScope } from '../../slim-review/scripts/pr-review-recognise.mjs';
-import { AUTHOR_LIST, readReviewListing, reviewPairFor } from '../../slim-review/scripts/pr-review.mjs';
+import { AUTHOR_LIST, readScopedReviews, reviewPairFor } from '../../slim-review/scripts/pr-review.mjs';
 import { cappedTailProblem, readRoundTail, resolveRound, reviewRound } from '../../slim-review/scripts/pr-review-rounds.mjs';
 
 // The round cap is the writer's (`pr-review.mjs rounds` answers the beat from
@@ -84,6 +83,7 @@ export const BLOCKED_REASONS = Object.freeze([
   'checks-unavailable',
   'threads-truncated',
   'amendment-not-descendant',
+  't2-council',
   'identity-unset',
 ]);
 
@@ -253,9 +253,7 @@ export async function observe({ repo, pr, cwd, rebaseCache }, deps) {
   let tail = null;
   if (!coordinatorError && !identityUnset) {
     const replacedReviewIds = (status?.attempts ?? []).filter((a) => a.state === 'replaced').map((a) => a.review_id).filter((id) => id !== null && id !== undefined);
-    reviews = readReviewListing({ repo, pr, cwd, runGh: deps.runGh })
-      .map((r) => postedReviewScope(r, { serviceLogin: identity.login, replacedReviewIds }))
-      .filter(Boolean);
+    reviews = readScopedReviews({ repo, pr, cwd, runGh: deps.runGh, serviceLogin: identity.login, replacedReviewIds });
     const last = reviews[reviews.length - 1];
     if (last && last.head !== headBefore) tail = readRoundTail({ repo, pr, cwd, runGh: deps.runGh, from: last.head, to: headBefore, cache: rebaseCache });
   }
@@ -290,6 +288,7 @@ function owedFor(reason, ctx, extra = {}) {
     case 'checks-unavailable': return `the checks on head ${head} could not be read for the whole budget (gh pr checks printed nothing) — fix gh/auth and run again; a run cannot converge on checks it never saw.`;
     case 'threads-truncated': return `a review thread on this PR has ${COMMENTS_PAGE}+ comments, past this loop's page size — adjudicate from the PR page; a truncated listing is never read as "all resolved".`;
     case 'amendment-not-descendant': return `there is no amendment diff from the last reviewed head ${(extra.from ?? '').slice(0, 7)} to head ${head} (${extra.problem ?? 'refused'}) — the conductor decides how this head is reviewed; this loop never claims a second full review.${extra.attemptRefFile ? ` The delta attempt stays live for that call: run its lenses without --since (\`pr-review.mjs lens --attempt-ref ${extra.attemptRefFile}\`), or \`pr-review.mjs recover withdraw --attempt-ref ${extra.attemptRefFile} --reason "<why>"\`.` : ''}`;
+    case 't2-council': return `escalate to T2 council: ${extra.escalateReason}. Review the amended whole PR before the merge call.`;
     default: return 'a person decides.';
   }
 }
@@ -378,6 +377,7 @@ export function decide(obs, ctx) {
     if (tailProblem) {
       return { action: 'blocked', reason: 'amendment-not-descendant', owed: owedFor('amendment-not-descendant', c, { from: resolved.from, problem: tailProblem }) };
     }
+    if (round.escalate === 't2-council') return { action: 'blocked', reason: 't2-council', owed: owedFor('t2-council', c, { escalateReason: round.escalate_reason }) };
     if (unresolved.length > 0) return { action: 'adjudicate', detail: `${unresolved.length} open thread(s)`, threads: unresolved, reviewId: round.last.review_id };
     if (obs.checks.pending > 0) return { action: 'wait', detail: `checks pending: ${obs.checks.names.pending.join(', ')}` };
     return {

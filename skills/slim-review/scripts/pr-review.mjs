@@ -1968,6 +1968,25 @@ export function readReviewListing({ repo, pr, cwd, runGh = gh }) {
   return reviews;
 }
 
+/** Scope the posted reviews, then count findings on the last delta review's own comments. */
+export function readScopedReviews({ repo, pr, cwd, runGh = gh, serviceLogin, replacedReviewIds = [] }) {
+  const reviews = readReviewListing({ repo, pr, cwd, runGh })
+    .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
+    .filter(Boolean);
+  const last = reviews.at(-1);
+  if (last?.scope !== 'delta') return reviews;
+  const raw = runGh(
+    ['api', '--paginate', `repos/${repo}/pulls/${pr}/reviews/${last.review_id}/comments`, '--jq', '.[] | {body, in_reply_to_id}'],
+    { cwd },
+  );
+  const majorFindings = String(raw).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+    .filter((comment) => comment.in_reply_to_id == null)
+    .map(readPostedFinding)
+    .filter((finding) => finding.scope === 'delta' && (finding.severity === 'P1' || finding.severity === 'P2')).length;
+  reviews[reviews.length - 1] = { ...last, majorFindings };
+  return reviews;
+}
+
 /**
  * `manifest --repo <r> --pr <n>` — the one manifest producer, as a subcommand.
  *
@@ -2304,9 +2323,7 @@ export async function cmdRounds(opts, {
   let reviews;
   let tail = null;
   try {
-    reviews = readReviewListing({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh })
-      .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
-      .filter(Boolean);
+    reviews = readScopedReviews({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh, serviceLogin, replacedReviewIds });
     const last = reviews[reviews.length - 1];
     if (last && last.head !== head) tail = readRoundTail({ repo: opts.repo, pr: opts.pr, cwd: opts.cwd, runGh, from: last.head, to: head });
   } catch (err) {

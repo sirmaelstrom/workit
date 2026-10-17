@@ -495,7 +495,13 @@ export function resolveRound({ reviews, head, tail }) {
   if (r.round === 'delta') {
     return { answer: { round: 'delta', since: from, last, ...rebased, problem: deltaTailProblem(effective, from, head) }, tail: effective, from };
   }
-  return { answer: { round: 'capped', last, ...rebased, problem: cappedTailProblem(effective, from, head) }, tail: effective, from };
+  const escalate = deltaEscalation(r.last) ?? {};
+  return { answer: { round: 'capped', last, ...rebased, problem: cappedTailProblem(effective, from, head), ...escalate }, tail: effective, from };
+}
+
+export function deltaEscalation(review) {
+  if (review?.scope !== 'delta' || !Number.isInteger(review.majorFindings) || review.majorFindings < 2) return null;
+  return { escalate: 't2-council', escalate_reason: `${review.majorFindings} posted in-amendment P1/P2 findings on review ${review.review_id}` };
 }
 
 /**

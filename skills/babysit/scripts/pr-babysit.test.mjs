@@ -252,6 +252,7 @@ function world(init = {}) {
     threads: [],
     attempts: [],
     reviews: [], // the PR's review listing, as `gh api …/reviews --jq` projects it
+    reviewComments: {},
     history: [H1, H2, H3, H4], // a linear branch: each head descends from the ones before it
     login: 'sirmaelstrom',
     health: { enabled: true, paused: false, pauseReason: 'none' },
@@ -285,6 +286,8 @@ function world(init = {}) {
       if (args[0] === 'pr' && args[1] === 'view') { if (w.headReads?.length) w.head = w.headReads.shift(); return `${w.head}\n`; }
       if (args[0] === 'pr' && args[1] === 'checks') return JSON.stringify(w.checks);
       if (args[0] === 'api' && args[1] === '--paginate' && /\/pulls\/\d+\/reviews$/.test(args[2])) return w.reviews.map((r) => JSON.stringify(r)).join('\n');
+      const comments = args[0] === 'api' && args[1] === '--paginate' && /\/reviews\/(\d+)\/comments$/.exec(args[2] ?? '');
+      if (comments) return (w.reviewComments[comments[1]] ?? []).map((item) => JSON.stringify(item)).join('\n');
       const cmp = args[0] === 'api' && /\/compare\/([0-9a-f]+)\.\.\.([0-9a-f]+)$/.exec(args[1] ?? '');
       if (cmp) return JSON.stringify(compare(cmp[1], cmp[2]));
       if (args[0] === 'api' && args[1] === 'graphql' && args[3].includes('resolveReviewThread')) {
@@ -509,6 +512,19 @@ test('no third review: a posted delta on H2 and a new head H3, threads resolved,
   const rb = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1, claim: 'beat' } }, beat.deps);
   assert.equal(rb.outcome, 'converged');
   assert.equal(beat.w.writerCalls.length, 0);
+});
+
+test('babysit stops at an escalated cap instead of converging or claiming again', async () => {
+  const comment = { in_reply_to_id: null, body: '**lens:** codex\n\n**scope:** delta\n\n**[P2] new defect**\n\nbody' };
+  const { w, deps } = world({
+    head: H3,
+    reviews: [listed({ id: 7001, head: H1 }), listed({ id: 7002, head: H2, since: H1 })],
+    reviewComments: { 7002: [comment, comment] },
+  });
+  const out = await runLoop({ repo: 'o/r', pr: 1, cwd: '.', author: 'claude', statePath: stateFile(), bounds: { pollSeconds: 1 } }, deps);
+  assert.deepEqual([out.outcome, out.reason], ['blocked', 't2-council']);
+  assert.match(out.owed, /escalate to T2 council.*2.*review 7002/i);
+  assert.equal(w.writerCalls.length, 0);
 });
 
 test('no third review, and the tail must sit on top of what was reviewed: an open thread is your turn; a head that does not descend from the delta head blocks amendment-not-descendant', async () => {

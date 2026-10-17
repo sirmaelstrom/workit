@@ -3766,23 +3766,25 @@ function roundsCompare({ status = 'ahead', files = 1, commits = [1], totalCommit
   };
 }
 
-function roundsSeams({ reviews = [], compare = roundsCompare(), fail: failNeedle = null } = {}) {
+function roundsSeams({ reviews = [], compare = roundsCompare(), commentsByReview = {}, fail: failNeedle = null } = {}) {
   const calls = [];
   const runGh = (args) => {
     calls.push(args);
     const joined = args.join(' ');
     if (failNeedle && joined.includes(failNeedle)) throw new Error('gh: server error');
     if (args[0] === 'api' && args[1] === '--paginate' && /\/reviews$/.test(args[2])) return `${reviews.map((r) => JSON.stringify(r)).join('\n')}\n`;
+    const comments = args[0] === 'api' && args[1] === '--paginate' && /\/reviews\/(\d+)\/comments$/.exec(args[2] ?? '');
+    if (comments) return (commentsByReview[comments[1]] ?? []).map((item) => JSON.stringify(item)).join('\n');
     if (args[0] === 'api' && joined.includes('/compare/')) return JSON.stringify(compare);
     throw new Error(`unexpected gh call: ${joined}`);
   };
   return { runGh, calls };
 }
 
-async function runRounds({ reviews, compare, head, fake, failNeedle, makeClient }) {
+async function runRounds({ reviews, compare, commentsByReview, head, fake, failNeedle, makeClient }) {
   let result;
   await withCoordinatedInstall({ fake }, async ({ home }) => {
-    const seams = roundsSeams({ reviews, compare, fail: failNeedle });
+    const seams = roundsSeams({ reviews, compare, commentsByReview, fail: failNeedle });
     const out = collector();
     await cmdRounds(
       { repo: PINNED_REPO, pr: String(PINNED_PR), head },
@@ -3808,6 +3810,29 @@ test('rounds answers each round from the posted markers: full, reviewed, delta, 
   const capped = await runRounds({ reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 })], head: RH3 });
   assert.deepEqual(capped.line, { outcome: 'ok', retry: 'stop', round: 'capped', last: { head: RH2, scope: 'delta', review_id: 12 }, problem: null });
   for (const r of [full, reviewed, delta, capped]) assert.deepEqual(r.deaths, []);
+});
+
+test('rounds escalates only a capped head with two posted P1/P2 comments on its delta review', async () => {
+  const deltaComment = (severity) => ({ in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[${severity}] defect**\n\nbody` });
+  const reviews = [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 })];
+  const two = await runRounds({ reviews, head: RH3, commentsByReview: {
+    11: [deltaComment('P1')],
+    12: [deltaComment('P2'), deltaComment('P2'), deltaComment('P3'), { ...deltaComment('P1'), in_reply_to_id: 55 }],
+  } });
+  assert.equal(two.line.round, 'capped');
+  assert.equal(two.line.escalate, 't2-council');
+  assert.match(two.line.escalate_reason, /2.*review 12/);
+  assert.equal(two.calls.some((args) => args.join(' ').includes('/reviews/11/comments')), false);
+
+  const one = await runRounds({ reviews, head: RH3, commentsByReview: { 12: [deltaComment('P2'), deltaComment('P3'), { ...deltaComment('P2'), body: '**lens:** codex\n\n**scope:** full\n\n**[P2] old defect**' }] } });
+  assert.equal(one.line.round, 'capped');
+  assert.equal(Object.hasOwn(one.line, 'escalate'), false);
+  assert.equal(Object.hasOwn(one.line, 'escalate_reason'), false);
+
+  const full = await runRounds({ reviews: [roundsReview(13, RH2)], head: RH3 });
+  assert.equal(full.line.round, 'delta');
+  assert.equal(Object.hasOwn(full.line, 'escalate'), false);
+  assert.equal(full.calls.some((args) => args.join(' ').includes('/comments')), false);
 });
 
 test('rounds: an uppercase --head on a reviewed head answers reviewed (heads compare lowercase)', async () => {
