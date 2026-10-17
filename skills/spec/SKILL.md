@@ -375,7 +375,7 @@ Launch an Opus sub-agent using the Agent tool (`model: opus`): the fresh-eyes ve
 #### 7b. Fix Findings
 
 After each wave:
-- Give each finding a stable id (`W{wave}-F{number}`). Record every finding and its disposition (`fixed`, `skipped`, `false_positive`, or `noted`) in `{workshop_path}/reviews/refinement-wave-{N}-dispositions.json`. For a fixed finding, record its original finding text and the claimed fix. Keep these records across waves; do not rely on memory or the fresh-eyes prompt to carry dispositions.
+- Give each finding a stable id (`W{wave}-F{number}`). Record every finding in `{workshop_path}/reviews/refinement-wave-{N}-dispositions.json` with this shared shape: `{ "wave": N, "findings": [{ "id": "W1-F1", "finding": "original finding text", "disposition": "fixed | skipped | false_positive | noted | reopened", "claimed_fix": "what changed, when fixed" }] }`. Choose one disposition value per entry; `claimed_fix` is required for `fixed` and optional otherwise. A reopened entry also carries `reopened_from_wave`, `fix_check_status`, `reason`, and `evidence` when the checker supplied a quote. Keep these records across waves; do not rely on memory or the fresh-eyes prompt to carry dispositions. A reopened finding keeps its original id when fixed again: change its disposition to `fixed` and update `claimed_fix` in this wave's file.
 - Before changing spec files, copy the spec artifacts (`work-packages/`, `_orchestrator.md` within it, and any other spec file being changed) to `{workshop_path}/reviews/refinement-wave-{N}-before/`, preserving relative paths. After applying fixes, copy the same artifacts to `refinement-wave-{N}-after/`. These directories are the input to the fix-check diff.
 - **P1s:** Fix immediately. These are blockers — update the WP spec files directly.
 - **P2s:** Fix unless the fix would introduce more complexity than the ambiguity costs. Document skipped P2s.
@@ -384,29 +384,38 @@ After each wave:
 
 #### 7c. Fix Check
 
-After applying a wave's fixes, export only that wave's `fixed` dispositions to `{workshop_path}/reviews/refinement-wave-{N}-fixed.json` as an array of `{ "id": "W{N}-F1", "finding": "original finding text", "claimed_fix": "what changed" }`. When the array is nonempty, run:
+After applying a wave's fixes, export every `fixed` disposition in this wave's file, including reopened findings fixed again under their original IDs, to `{workshop_path}/reviews/refinement-wave-{N}-fixed.json` as an array of `{ "id": "W{N}-F1", "finding": "original finding text", "claimed_fix": "what changed" }`. When the array is nonempty, run:
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" prepare --findings "{workshop_path}/reviews/refinement-wave-{N}-fixed.json" --before "{workshop_path}/reviews/refinement-wave-{N}-before" --after "{workshop_path}/reviews/refinement-wave-{N}-after" --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check-prompt.md"
 ```
 
-Launch a **separate Sonnet sub-agent** with that assembled prompt (`model: sonnet` in the same Agent tool used in 7a). Sonnet is the cheaper seat this skill can already dispatch; the fresh-eyes Opus prompt and reviewer receive no fix-check input. Save Sonnet's JSON verdict to `{workshop_path}/reviews/refinement-wave-{N}-fix-check-verdict.json`, then run:
+Launch a **separate Sonnet sub-agent** with that assembled prompt (`model: sonnet` in the same Agent tool used in 7a). Sonnet is the cheaper seat this skill can already dispatch; the fresh-eyes Opus prompt and reviewer receive no fix-check input. The prompt file is the complete text to dispatch, with no Markdown wrapper. Save Sonnet's JSON verdict to `{workshop_path}/reviews/refinement-wave-{N}-fix-check-verdict.json`, then run:
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" complete --findings "{workshop_path}/reviews/refinement-wave-{N}-fixed.json" --verdict "{workshop_path}/reviews/refinement-wave-{N}-fix-check-verdict.json" --after "{workshop_path}/reviews/refinement-wave-{N}-after" --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json" --next-dispositions "{workshop_path}/reviews/refinement-wave-{N+1}-dispositions.json"
 ```
 
-The script requires one `held | failed | partial` verdict per fixed finding and checks each quoted line against the post-fix spec. `failed` and `partial` both count as failed checks. It writes them as `reopened` entries in **the next wave's** `reviews/refinement-wave-{N+1}-dispositions.json`, with the original id, check status, and evidence. At that wave, add the new fresh-eyes findings to this file and resolve the reopened entries explicitly, even if the fresh-eyes reviewer does not repeat them. A `held` finding stays closed. A failed or partial check requires another wave unless the eight-wave force-convergence limit applies; report any still-open finding at that limit. If no fixes were claimed, skip Sonnet and run `node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" empty --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json"` so a subsequent wave records `checked: 0, failed: 0`.
+The script requires one `held | failed | partial` verdict per fixed finding and checks each quoted line against the post-fix spec. Quote validation proves the line exists at the stated path and number; Sonnet judges its relevance. A changed line is not required. `failed` and `partial` both count as failed checks. The script writes them as `reopened` entries in **the next wave's** `reviews/refinement-wave-{N+1}-dispositions.json`, with the original id, check status, reason, and evidence. A repeat `complete` merges by id, preserving unrelated entries already added to that file. At that wave, add new fresh-eyes findings and resolve reopened entries explicitly, even if the fresh-eyes reviewer does not repeat them. A `held` finding stays closed. A failed or partial check requires another wave unless the eight-wave force-convergence limit applies; report any still-open finding at that limit. If no fixes were claimed, skip Sonnet and run `node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" empty --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json"` so a subsequent wave records `checked: 0, failed: 0, unchecked: 0`.
+
+If Sonnet is unavailable, its JSON is invalid, or `complete` rejects the verdict, re-dispatch the same prompt at most **two** times (three attempts total). Reuse the same before/after snapshots and fixed-findings list. If both re-dispatches fail, record every fixed finding as `unchecked` rather than `held`:
+
+```bash
+node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" unchecked --findings "{workshop_path}/reviews/refinement-wave-{N}-fixed.json" --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json" --next-dispositions "{workshop_path}/reviews/refinement-wave-{N+1}-dispositions.json"
+```
+
+This records `fix_check: { checked: 0, failed: 0, unchecked: {fixed_count} }` and reopens every finding in the next wave's dispositions. At the next wave, include each unchecked finding in the `fixed` export under its original id and claimed fix even if no further edit was needed; the checker must return an actual verdict before it can close. An unchecked wave cannot count toward convergence. Run another wave even if fresh-eyes was clean. If this happens at wave 8, stop with an incomplete spec and report the unchecked findings; do not proceed to council. Missing evidence never becomes `held`.
 
 #### 7d. Convergence Check
 
-After fixing, decide whether to run another wave. A failed or partial fix check takes precedence over a clean/P3-only fresh-eyes verdict; the eight-wave limit still force-converges:
+After fixing, decide whether to run another wave. A failed or partial fix check takes precedence over a clean/P3-only fresh-eyes verdict. An unchecked check prevents convergence even at wave 8; otherwise the eight-wave limit still force-converges:
 
 | Condition | Action |
 |-----------|--------|
 | Wave returned P1s | Fix and run another wave (mandatory) |
 | Wave returned P2s only, fixes applied | Run one more wave to verify fixes |
 | Fix check returned `failed` or `partial` | Reopen each in the next wave's dispositions and run another wave |
+| Fix check is `unchecked` | Reopen every unchecked finding and run another wave; at wave 8 stop incomplete |
 | Wave returned P3s only or was clean | **Converged** — proceed to council |
 | 8 waves completed | **Force converge** — proceed to council regardless |
 
@@ -489,6 +498,7 @@ Present the completed spec summary:
 **Assumptions:** {every `[ASSUMPTION: …]` flag, one line each; required with `--preapproved`, where no gate shows them to a person}
 **Stack attack:** {with `--greenfield` only: D1's `Stack attack:` line, and `Spikes:` when they ran}
 **Review:** {review_level} — {N} fresh-eyes waves, {N} council lenses, {N} amendments applied
+**Final fix check:** {last wave's checked / failed / unchecked counts, including the terminal wave's check}
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 **Cost:** {total $ and tokens, from cost-report}
 
@@ -628,7 +638,7 @@ Write timing events at each stage transition (fire-and-forget, non-blocking). Th
 { "event_type": "note", "payload": { "content": "workshop_stage {slug}: {stage} completed", "workshop_stage": { "workshop_slug": "{slug}", "stage": "{stage}", "actor": "agent" } } }
 ```
 
-For the refinement loop, write one event per wave after its fresh-eyes verdict. Use `fix-check.mjs ledger` to shape the event, then send the JSON to `ledger_write`. Wave 1 has no `fix_check`: nothing from a previous wave can be checked. For wave N > 1, pass wave N-1's `refinement-wave-{N-1}-fix-check.json` as `--prior-report`; its `fix_check` counts belong to wave N. The `findings` counts are the current fresh-eyes verdict, not the reopened count.
+For the refinement loop, write one event per wave after its fresh-eyes verdict. Use `fix-check.mjs ledger` to shape the event, then send the JSON to `ledger_write`. Wave 1 has no `fix_check`: nothing from a previous wave can be checked. For wave N > 1, pass wave N-1's `refinement-wave-{N-1}-fix-check.json` as `--prior-report`; its `fix_check` counts belong to wave N. The `findings` counts are the current fresh-eyes verdict, not the reopened count. The terminal wave's own check has no next-wave ledger event, so the Phase 9 final report carries its counts; do not create an extra event.
 
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" ledger --slug "{slug}" --wave {N} --p1 {p1} --p2 {p2} --p3 {p3} --prior-report "{workshop_path}/reviews/refinement-wave-{N-1}-fix-check.json" --output "{workshop_path}/reviews/refinement-wave-{N}-ledger.json"
@@ -636,7 +646,7 @@ node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" ledger --slug "{slug}" --wave {
 
 Omit `--prior-report` for wave 1. The event payload has this shape for wave N > 1:
 ```json
-{ "event_type": "note", "payload": { "content": "workshop_stage {slug}: refinement_wave_{N} completed (p1 {p1} / p2 {p2} / p3 {p3})", "workshop_stage": { "workshop_slug": "{slug}", "stage": "refinement_wave_{N}", "actor": "agent", "findings": { "p1": 0, "p2": 0, "p3": 0 }, "fix_check": { "checked": 0, "failed": 0 } } } }
+{ "event_type": "note", "payload": { "content": "workshop_stage {slug}: refinement_wave_{N} completed (p1 {p1} / p2 {p2} / p3 {p3})", "workshop_stage": { "workshop_slug": "{slug}", "stage": "refinement_wave_{N}", "actor": "agent", "findings": { "p1": 0, "p2": 0, "p3": 0 }, "fix_check": { "checked": 0, "failed": 0, "unchecked": 0 } } } }
 ```
 
 ---

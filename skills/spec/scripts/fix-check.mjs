@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Assemble a wave's fix check and turn its verdict into next-wave dispositions and ledger data.
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const TEMPLATE = fileURLToPath(new URL('../reference/fix-check-prompt.md', import.meta.url));
@@ -29,7 +30,7 @@ export function validateFindings(findings) {
 }
 
 export function specDiff(beforeDir, afterDir) {
-  const result = spawnSync('git', ['diff', '--no-index', '--', beforeDir, afterDir], {
+  const result = spawnSync('git', ['diff', '--no-index', '--no-color', '--no-ext-diff', '--no-textconv', '--', beforeDir, afterDir], {
     encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
   });
   if (result.error || ![0, 1].includes(result.status)) {
@@ -40,18 +41,24 @@ export function specDiff(beforeDir, afterDir) {
 
 export function buildPrompt(findings, diff, afterDir, template = readFileSync(TEMPLATE, 'utf8')) {
   validateFindings(findings);
-  return template.replace('{fixed_findings}', JSON.stringify(findings, null, 2))
-    .replace('{spec_diff}', diff)
-    .replace('{after_dir}', afterDir);
+  const slots = {
+    '{fixed_findings}': JSON.stringify(findings, null, 2),
+    '{spec_diff}': diff,
+    '{after_dir}': afterDir,
+  };
+  return template.replace(/\{fixed_findings\}|\{spec_diff\}|\{after_dir\}/g, slot => slots[slot]);
 }
 
 function quotedPostFixLine(result, afterDir) {
   const path = requireText(result.path, `result ${result.id} path`);
-  if (isAbsolute(path)) throw new Error(`result ${result.id} path must be relative`);
+  if (isAbsolute(path) || win32.isAbsolute(path) || /^[A-Za-z]:/.test(path)) {
+    throw new Error(`result ${result.id} path must be relative (drive-relative paths are forbidden)`);
+  }
   const root = resolve(afterDir);
   const file = resolve(root, path);
   const rel = relative(root, file);
-  if (!rel || rel === '..' || rel.startsWith(`..${sep}`)) {
+  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel) || win32.isAbsolute(rel)
+    || path.split(/[\\/]/).includes('..')) {
     throw new Error(`result ${result.id} path escapes post-fix spec directory`);
   }
   if (!Number.isInteger(result.line) || result.line < 1) {
@@ -89,6 +96,7 @@ export function completeCheck(findings, verdict, afterDir, wave) {
       disposition: 'reopened',
       reopened_from_wave: wave,
       fix_check_status: result.status,
+      reason: result.reason,
       evidence: { path: result.path, line: result.line, quote: result.quote },
     });
   }
@@ -98,9 +106,46 @@ export function completeCheck(findings, verdict, afterDir, wave) {
     fix_check: {
       checked: verdict.results.length,
       failed: reopened.length,
+      unchecked: 0,
     },
     next_dispositions: { wave: wave + 1, findings: reopened },
   };
+}
+
+export function uncheckedCheck(findings, wave) {
+  validateFindings(findings);
+  if (!Number.isInteger(wave) || wave < 1) throw new Error('wave must be a positive integer');
+  const reason = 'Checker unavailable or invalid after two re-dispatches';
+  return {
+    wave,
+    results: findings.map(finding => ({ id: finding.id, status: 'unchecked', reason })),
+    fix_check: { checked: 0, failed: 0, unchecked: findings.length },
+    next_dispositions: {
+      wave: wave + 1,
+      findings: findings.map(finding => ({
+        ...finding,
+        disposition: 'reopened',
+        reopened_from_wave: wave,
+        fix_check_status: 'unchecked',
+        reason,
+      })),
+    },
+  };
+}
+
+export function mergeDispositions(existing, incoming) {
+  if (existing == null) return incoming;
+  if (existing?.wave !== incoming.wave || !Array.isArray(existing.findings)) {
+    throw new Error('existing next-wave dispositions have an invalid wave or findings array');
+  }
+  const merged = new Map();
+  for (const finding of existing.findings) {
+    const id = requireText(finding?.id, 'existing disposition id');
+    if (merged.has(id)) throw new Error(`duplicate existing disposition id: ${id}`);
+    merged.set(id, finding);
+  }
+  for (const finding of incoming.findings) merged.set(finding.id, finding);
+  return { wave: incoming.wave, findings: [...merged.values()] };
 }
 
 export function waveEvent(slug, wave, findings, priorCheck) {
@@ -113,7 +158,8 @@ export function waveEvent(slug, wave, findings, priorCheck) {
   }
   if (wave === 1 && priorCheck != null) throw new Error('wave 1 has no prior fix check');
   if (wave > 1 && (priorCheck == null || !Number.isInteger(priorCheck.checked)
-    || !Number.isInteger(priorCheck.failed) || priorCheck.failed < 0
+    || !Number.isInteger(priorCheck.failed) || !Number.isInteger(priorCheck.unchecked)
+    || priorCheck.checked < 0 || priorCheck.failed < 0 || priorCheck.unchecked < 0
     || priorCheck.checked < priorCheck.failed)) {
     throw new Error('later waves require valid prior fix_check counts');
   }
@@ -123,7 +169,9 @@ export function waveEvent(slug, wave, findings, priorCheck) {
     actor: 'agent',
     findings: { p1: findings.p1, p2: findings.p2, p3: findings.p3 },
   };
-  if (wave > 1) stage.fix_check = { checked: priorCheck.checked, failed: priorCheck.failed };
+  if (wave > 1) stage.fix_check = {
+    checked: priorCheck.checked, failed: priorCheck.failed, unchecked: priorCheck.unchecked,
+  };
   return {
     event_type: 'note',
     payload: {
@@ -142,45 +190,89 @@ function options(args) {
   return result;
 }
 
-function writeJson(path, value, exclusive = false) {
+function textOption(options, name) {
+  return requireText(options[name], `--${name}`);
+}
+
+function integerOption(options, name, minimum = 0) {
+  const value = options[name];
+  if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)
+    || Number(value) < minimum || !Number.isSafeInteger(Number(value))) {
+    throw new Error(`--${name} must be a ${minimum ? 'positive' : 'non-negative'} integer`);
+  }
+  return Number(value);
+}
+
+function stageJson(path, value) {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { flag: exclusive ? 'wx' : 'w' });
+  const temp = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx' });
+  return temp;
+}
+
+function writeJson(path, value) {
+  const temp = stageJson(path, value);
+  try { renameSync(temp, path); } finally { if (existsSync(temp)) unlinkSync(temp); }
+}
+
+function writeReportPair(reportPath, nextPath, report) {
+  if (resolve(reportPath) === resolve(nextPath)) throw new Error('report and next dispositions paths must differ');
+  const existing = existsSync(nextPath) ? JSON.parse(readFileSync(nextPath, 'utf8')) : null;
+  const merged = mergeDispositions(existing, report.next_dispositions);
+  const complete = { ...report, next_dispositions: merged };
+  // Validate and stage both artifacts before replacing either destination.
+  const nextTemp = stageJson(nextPath, merged);
+  let reportTemp;
+  try {
+    reportTemp = stageJson(reportPath, complete);
+    renameSync(nextTemp, nextPath);
+    renameSync(reportTemp, reportPath);
+  } finally {
+    if (existsSync(nextTemp)) unlinkSync(nextTemp);
+    if (reportTemp && existsSync(reportTemp)) unlinkSync(reportTemp);
+  }
 }
 
 export function main(args = process.argv.slice(2)) {
   const [command, ...rest] = args;
   const o = options(rest);
   if (command === 'prepare') {
-    const findings = JSON.parse(readFileSync(o.findings, 'utf8'));
-    const prompt = buildPrompt(findings, specDiff(o.before, o.after), o.after);
-    writeFileSync(o.output, prompt);
+    const findings = JSON.parse(readFileSync(textOption(o, 'findings'), 'utf8'));
+    const prompt = buildPrompt(findings, specDiff(textOption(o, 'before'), textOption(o, 'after')), o.after);
+    writeFileSync(textOption(o, 'output'), prompt);
     return;
   }
   if (command === 'complete') {
-    const findings = JSON.parse(readFileSync(o.findings, 'utf8'));
-    const verdict = JSON.parse(readFileSync(o.verdict, 'utf8'));
-    const report = completeCheck(findings, verdict, o.after, Number(o.wave));
-    writeJson(o.output, report);
-    writeJson(o['next-dispositions'], report.next_dispositions, true);
+    const findings = JSON.parse(readFileSync(textOption(o, 'findings'), 'utf8'));
+    const verdict = JSON.parse(readFileSync(textOption(o, 'verdict'), 'utf8'));
+    const report = completeCheck(findings, verdict, textOption(o, 'after'), integerOption(o, 'wave', 1));
+    writeReportPair(textOption(o, 'output'), textOption(o, 'next-dispositions'), report);
+    return;
+  }
+  if (command === 'unchecked') {
+    const findings = JSON.parse(readFileSync(textOption(o, 'findings'), 'utf8'));
+    const report = uncheckedCheck(findings, integerOption(o, 'wave', 1));
+    writeReportPair(textOption(o, 'output'), textOption(o, 'next-dispositions'), report);
     return;
   }
   if (command === 'empty') {
-    const wave = Number(o.wave);
-    if (!Number.isInteger(wave) || wave < 1) throw new Error('wave must be a positive integer');
-    writeJson(o.output, {
-      wave, results: [], fix_check: { checked: 0, failed: 0 },
+    const wave = integerOption(o, 'wave', 1);
+    writeJson(textOption(o, 'output'), {
+      wave, results: [], fix_check: { checked: 0, failed: 0, unchecked: 0 },
       next_dispositions: { wave: wave + 1, findings: [] },
     });
     return;
   }
   if (command === 'ledger') {
-    const wave = Number(o.wave);
-    const counts = { p1: Number(o.p1), p2: Number(o.p2), p3: Number(o.p3) };
-    const check = wave > 1 ? JSON.parse(readFileSync(o['prior-report'], 'utf8')).fix_check : undefined;
-    writeJson(o.output, waveEvent(o.slug, wave, counts, check));
+    const wave = integerOption(o, 'wave', 1);
+    const counts = { p1: integerOption(o, 'p1'), p2: integerOption(o, 'p2'), p3: integerOption(o, 'p3') };
+    if (wave === 1 && o['prior-report'] !== undefined) throw new Error('--prior-report is forbidden for wave 1');
+    if (wave > 1 && o['prior-report'] === undefined) throw new Error('--prior-report is required for later waves');
+    const check = wave > 1 ? JSON.parse(readFileSync(textOption(o, 'prior-report'), 'utf8')).fix_check : undefined;
+    writeJson(textOption(o, 'output'), waveEvent(textOption(o, 'slug'), wave, counts, check));
     return;
   }
-  throw new Error('usage: fix-check.mjs prepare|complete|empty|ledger --name value ...');
+  throw new Error('usage: fix-check.mjs prepare|complete|unchecked|empty|ledger --name value ...');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
