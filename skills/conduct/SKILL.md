@@ -206,7 +206,8 @@ The lane-facing text goes in the repo's `AGENTS.md`, under a `## Lane suite` hea
 
 The workspace file may carry:
 - `release`: the release recipe (`--release` overrides it).
-- `contractPaths`: globs that raise a WP to T2.
+- `contractPaths`: globs that raise a WP to T2. Conduct also raises agent-action
+  hook and command-gate paths without a repo config entry; see `burn-down` § Per item step 3.
 - `trivialExclude`: globs a tail never counts as trivial.
 - `gateEnv`: env for the conductor's gate command. `{run}` and `{wp}` become the run slug and the WP id as lowercase identifiers. Use it for a repo whose suite needs its own database per runner.
 - `gateBackground: true`: the gate command's action carries `background: true`.
@@ -239,6 +240,6 @@ Pointers, not restated rules:
 - `/pickup` (`${CLAUDE_PLUGIN_ROOT}/skills/pickup/SKILL.md`): the claim discipline the build phase's `spine_update currentPhase: build` follows.
 - `${CLAUDE_PLUGIN_ROOT}/scripts/lane.mjs`: the herdr lane lifecycle.
 - `${CLAUDE_PLUGIN_ROOT}/skills/slim-review/SKILL.md`: the paired review at a PR boundary.
-- `${CLAUDE_PLUGIN_ROOT}/skills/burn-down/SKILL.md` § Per item step 3 (review at the tier the change raises) and step 4 (Land it): the tiers and the gate, by reference.
+- `${CLAUDE_PLUGIN_ROOT}/skills/burn-down/SKILL.md` § Per item step 3 (review at the tier the change raises) and step 4 (Land it): the tiers, delta escalation, and gate, by reference.
 - `${CLAUDE_PLUGIN_ROOT}/scripts/escape-reader.mjs`: the escapes section of the run analysis.
 - `${CLAUDE_PLUGIN_ROOT}/reference/templates/lane-contract.template.md`: the lane contract the build phase instantiates.

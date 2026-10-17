@@ -131,8 +131,14 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      pass is checked by its seen-failing control. The cap binds manual T1,
      `babysit`, and Observatory's pr-review beat (observatory#765); all three
      read the rounds through the writer's `rounds`.
+     If the delta pass finds at least two new P1/P2 defects inside the amendment,
+     review the amended whole PR in a T2 council round. The council cap then applies.
+     With fewer than two, the T1 cap stands.
    - **T2 — full council.** Fired when the change **touches a contract or an
-     invariant**, or **adds tests that claim to prove something**. T1 asks
+     invariant**, **adds tests that claim to prove something**, or changes a
+     hook, guard, or parser that intercepts or gates agent actions. This includes
+     PreToolUse, PostToolUse, and permission hooks, deny/allow logic, and shell
+     or command classifiers. Size does not matter. T1 asks
      whether the diff is correct; T2 asks whether it was *permitted* — the
      class T1 structurally cannot see. Where the review-council MCP is not
      available (it is a private backend, not shipped with this plugin), the

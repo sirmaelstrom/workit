@@ -60,7 +60,7 @@ Parse the required fields: the 6 core ones, plus Review tier and Runtime exercis
 - **Verification** — The concrete check proving it works.
 - **Failure Criteria** — Diagnostic footholds if things go wrong.
 - **Boundary** — What's explicitly out of scope. Respect this.
-- **Review tier** — `T0`, `T1` or `T2`: the review the change gets at its PR. This skill does not run that review; whoever opens the PR reads the tier, and may raise it but never lower it.
+- **Review tier** — `T0`, `T1` or `T2`: the review the change gets at its PR. This skill does not run that review; whoever opens the PR applies `burn-down` § Per item step 3 and may raise the tier but never lower it.
 - **Runtime exercise** — The surface and the check that exercises the change at runtime, or `none: <why>`. Step 6 runs it.
 
 Also read any Implementation section for detailed guidance (code snippets, API shapes, component structure).

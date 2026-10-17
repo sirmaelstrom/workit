@@ -129,10 +129,22 @@ function trivialPath(path, notTrivial) {
   return p.endsWith('.md') && !isTestPath(p) && !/(^|\/)(__fixtures__|fixtures|testdata)\//.test(p) && !notTrivial.some((re) => re.test(p));
 }
 
-// Raise only: a test file or a contract path makes it T2.
+// Agent-action hooks and command gates need T2 even when the file is small.
+export function isAgentActionGatePath(path) {
+  const p = norm(path).replace(/^\.\//, '').toLowerCase();
+  const base = p.split('/').pop();
+  return /^hooks\//.test(p)
+    || /(?:^|\/)(?:\.claude|\.codex|\.agents)\/.*(?:hooks?|permissions?)\//.test(p)
+    || /(?:^|[-_.])(?:pre[-_.]?tool[-_.]?use|post[-_.]?tool[-_.]?use|permission|deny|allow)(?:[-_.]|$)/.test(base)
+    || /(?:trash[-_.]?command|shell[-_.]?write)/.test(base)
+    || /(?:command|shell|push|trash|agent[-_.]?action|tool[-_.]?use).*(?:guard|parser|classifier)/.test(base)
+    || /(?:guard|parser|classifier).*(?:command|shell|push|trash|agent[-_.]?action|tool[-_.]?use)/.test(base);
+}
+
+// Raise only: a test, contract, or agent-action gate path makes it T2.
 export function tierFor(wp, changedPaths = [], contractPaths = []) {
   const contracts = contractPaths.map(globRegex);
-  return changedPaths.some((path) => isTestPath(path) || contracts.some((re) => re.test(norm(path)))) ? 'T2' : effectiveTier(wp);
+  return changedPaths.some((path) => isTestPath(path) || isAgentActionGatePath(path) || contracts.some((re) => re.test(norm(path)))) ? 'T2' : effectiveTier(wp);
 }
 
 // Lens availability: opus iff claude is on; codex and astra iff codex is on.
@@ -869,6 +881,12 @@ export function findingsCount({ stdout, stderr }) {
   return null;
 }
 
+export function deltaMajorCount({ stdout, stderr }, head) {
+  const matches = [stdout, stderr].flatMap((output) => [...String(output ?? '').matchAll(/^delta-major (\d+) head=([0-9a-f]{40})$/gim)]);
+  if (matches.length !== 1 || matches[0][2].toLowerCase() !== head?.toLowerCase()) return null;
+  return Number(matches[0][1]);
+}
+
 function withLatest(wp, change) {
   const reviews = wp.reviews ?? [];
   return [...reviews.slice(0, -1), change(reviews.at(-1))];
@@ -1169,6 +1187,15 @@ function landOutcome(state, wp, action, r, deps) {
     case 'review': return recordReview(state, wp, action, r);
     case 'post':
       if (r.code !== 0) return result('block', `post failed (exit ${r.code}): ${first(r.stderr)}`);
+      if (action.land.scope === 'delta') {
+        const majorFindings = deltaMajorCount(r, action.land.head);
+        if (majorFindings === null) return result('block', `delta post for ${action.land.head} has no matching P1/P2 count`);
+        const escalation = effectiveTier(wp) === 'T1' && majorFindings >= 2;
+        return result('continue', null, {
+          reviews: [...(wp.reviews ?? []), reviewEntry(wp, action.land, { findings: findingsCount(r), majorFindings })],
+          ...(escalation ? { tier: 'T2', deltaEscalation: { round: action.land.round, head: action.land.head, majorFindings } } : {}),
+        });
+      }
       return result('continue', null, { reviews: [...(wp.reviews ?? []), reviewEntry(wp, action.land, { findings: findingsCount(r) })] });
     case 'council': return recordCouncil(state, wp, action, r);
     case 'reply':

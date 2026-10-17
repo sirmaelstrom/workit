@@ -1201,6 +1201,7 @@ function expand(state, wp, deps) {
       const since = recoveryBaseline(state, wp, deps);
       if (wp.state === 'blocked') return undefined;
       if (wp.fullReviewOwed) return go([prDiff(state)], null);
+      if (wp.deltaEscalation) return go([prDiff(state)], null);
       if (!since || since === wp.pr?.head || review.scope !== 'full') return go([], 'land');
       return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
     }
@@ -1828,6 +1829,7 @@ function recordOwn(state, wp, action, result, deps) {
       setState(state, wp, 'review', null, deps);
       const round = latestRound(wp) + 1;
       wp.queue = emitting(state, wp, deps, () => (wp.tier === 'T2' ? withMeta(state, wp, t2Actions(state, wp, { round, changedPaths: absolute, report })) : reviewActions(state, wp, { round, report })));
+      if (wp.state !== 'blocked') wp.deltaEscalation = null;
       return (wp.stage = wp.state === 'blocked' ? null : 'reviewed');
     }
     default:

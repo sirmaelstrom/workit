@@ -831,6 +831,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   );
   const posted = JSON.parse(res);
   log(`\nposted         ${posted.html_url}`);
+  if (since) log(`delta-major ${doc.findings.filter((finding) => finding.severity === 'P1' || finding.severity === 'P2').length} head=${reviewedHead}`);
 }
 
 // GitHub's GraphQL connections are paged, and these two page sizes are the ones
@@ -3287,8 +3288,11 @@ async function cmdPostCoordinated(opts, {
     || (state === undefined && ['posted', 'post_rejected'].includes(classified.outcome));
   if (terminal) discardAttemptRefFile(refFile, diag);
   if (classified.outcome === 'posted') diag(`posted         ${classified.html_url ?? `review ${classified.review_id}`}`);
+  const majorFindings = since ? findings.filter((finding) => finding.severity === 'P1' || finding.severity === 'P2').length : null;
+  if (classified.outcome === 'posted' && since) diag(`delta-major ${majorFindings} head=${headNow}`);
   const line = emit({
     outcome: classified.outcome,
+    ...(classified.outcome === 'posted' && since ? { major_findings: majorFindings } : {}),
     ...(classified.reason === undefined ? {} : { reason: classified.reason }),
     post_generation: postGeneration,
     ...(classified.review_id === undefined ? {} : { review_id: classified.review_id }),

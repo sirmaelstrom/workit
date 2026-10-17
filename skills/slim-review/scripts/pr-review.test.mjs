@@ -5597,6 +5597,7 @@ test('a coordinated post of two amendment checks holds coverage to the amendment
     await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
       const out = await runCoordinatedPost({ refFile, home, origin, seams: amendmentSeams(pinnedSeams({ events }), COORDINATED_AMENDMENT) });
       assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
+      assert.equal(out.line().major_findings, 2);
       const body = requests[0].body;
       assert.match(body.body, /\*\*Amendment check:\*\* this round reviewed only/);
       assert.match(body.body, /examined 1 of 1 amendment files/);
@@ -5733,6 +5734,7 @@ test('standalone post accepts two amendment checks: coverage against the amendme
   assert.match(posted[0].body, /examined 1 of 1 amendment files/);
   assert.ok(logs.some((line) => line.startsWith('scope          amendment abcdef0...2222222, 1 file(s)')));
   assert.ok(logs.includes('coverage       OK'));
+  assert.ok(logs.includes(`delta-major 2 head=${DELTA_HEAD}`));
 });
 
 /** One delta handback per lens: the in-amendment finding at src/a.ts:11 plus `outside`. */
@@ -5758,6 +5760,7 @@ for (const [name, outside] of [
     assert.match(posted[0].body, /codex: 0 P1 \/ 1 P2 \/ 0 P3/, 'an excluded finding is never counted as a delta finding');
     assert.match(posted[0].body, /1 excluded \(outside the amendment\)/);
     assert.ok(logs.includes(`  excluded     ${outside.path}:${outside.line} — outside the amendment`));
+    assert.ok(logs.includes(`delta-major 1 head=${DELTA_HEAD}`));
   });
 }
 

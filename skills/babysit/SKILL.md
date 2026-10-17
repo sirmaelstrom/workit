@@ -17,6 +17,8 @@ The session judges; the script observes, decides, waits and reports. Contract:
 
 Babysit follows slim-review's cap (§ 4 Adjudicate, "Round two: the amendment
 only"): at most **two reviews per PR**, one full and one delta.
+The T2 triggers and delta escalation in `burn-down` § Per item step 3 take
+precedence. Hand an escalated PR to the council before the merge call.
 
 1. **Full.** No review on the PR yet: claim the head and run both lenses over
    the whole PR.
@@ -167,7 +169,7 @@ you have the repo and the intent.
 | `--skip-delta` | — | `"<reason>"`: you judged this head's amendment trivial, so no delta is claimed; the head converges on the tail. It covers the current head only, and it is dropped (and logged) if the head moves during the first read. The reason goes into the state file and the receipt's `delta_skipped`. You pushed the fix, so the judgment is yours to make; babysit can't make it |
 | `--fresh` | — | ignore the state file (a new run, new bounds); `judgment` ids are kept |
 
-The review cap has no flag. Two reviews per PR is a T1 ruling, not a tunable.
+The review cap has no flag. Its T2 escalation is in `burn-down` § Per item step 3.
 
 Plan/cost stop is the coordinator's own: a claim refused `paused` or
 `disabled` is `blocked`, never a retry.

@@ -243,7 +243,8 @@ function shellResult(h, action) {
     case 'review/managed': return ok(JSON.stringify({ mode: 'standalone' }));
     case 'post/post': {
       const count = h.findings[id]?.length ? h.findings[id].shift() : 0;
-      return ok(count === null ? 'posted\n' : `findings ${count}\n`);
+      const receipt = action.land.scope === 'delta' ? `delta-major ${h.deltaMajor?.[id]?.shift() ?? 0} head=${action.land.head}\n` : '';
+      return ok(count === null ? `posted\n${receipt}` : `findings ${count}\n${receipt}`);
     }
     case 'review/amend-diff': return ok(h.amendDiff?.[id] ?? 'docs/notes.md\n');
     case 'thread-ids/lookup': return ok(fixture('land', 'review-threads-145.json'));
@@ -2404,7 +2405,7 @@ test('gate command after a rebase that moved the head: the gate fix gets a delta
 });
 
 test('tier from the recipe file (D17, D19.11): contractPaths or an added test raise T1 to T2; neither stays T1; WP-00 at depth none too', async (t) => {
-  const cases = [['scripts/lane.mjs\n', 'T2'], ['lib/x.test.mjs\n', 'T2'], ['lib/x.mjs\n', 'T1']];
+  const cases = [['scripts/lane.mjs\n', 'T2'], ['lib/x.test.mjs\n', 'T2'], ['hooks/PreToolUse.js\n', 'T2'], ['lib/x.mjs\n', 'T1']];
   for (const [diff, tier] of cases) {
     const h = harness(t, { council: true, wps: [TWO[0], TWO[1]] });
     h.diff = { 'WP-02': diff };
@@ -2417,6 +2418,32 @@ test('tier from the recipe file (D17, D19.11): contractPaths or an added test ra
   const first = await drive(none, { until: (a) => a.part === 'meta' || a.part === 'managed' });
   assert.equal(first.part, 'meta');
   assert.equal(none.wp('WP-00').tier, 'T2');
+});
+
+test('two delta P1/P2 findings route the amended whole PR to a T2 council', async (t) => {
+  const h = resetFixture(t, { council: true });
+  const wp = h.wp('WP-02');
+  const fullHead = sha('a', 2);
+  const deltaHead = sha('c', 2);
+  Object.assign(wp, {
+    state: 'pr', stage: 'delta', tier: 'T2', pr: { number: 102, head: deltaHead },
+    reviews: [
+      { round: 1, scope: 'full', tier: 'T1', head: fullHead, findings: 3 },
+      { round: 2, scope: 'delta', tier: 'T1', head: deltaHead, findings: 2, majorFindings: 2 },
+    ],
+    deltaEscalation: { round: 2, head: deltaHead, majorFindings: 2 },
+  });
+  h.diff = { 'WP-02': 'lib/x.mjs\n' };
+  const next = await drive(h, { until: (action) => action.wpId === 'WP-02' && action.part === 'meta' });
+  assert.equal(next.part, 'meta');
+  const council = of(h, 'WP-02').find((action) => action.tool === 'council_review');
+  assert.equal(council, undefined, 'the council follows the metadata step');
+  assert.equal(wp.deltaEscalation, null);
+  assert.equal(wp.tier, 'T2');
+  await recordPending(h, await perform(h, next));
+  const round = await drive(h, { until: (action) => action.tool === 'council_review' });
+  assert.equal(round.args.round, 3);
+  assert.equal(round.land.scope, 'full');
 });
 
 test('depth none: one WP-00 lane from <run>/wp-00.md; spine on → a completed receipt on the anchor and no done update; spine off → no agent-tool action', async (t) => {

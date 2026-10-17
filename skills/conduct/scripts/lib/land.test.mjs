@@ -1558,6 +1558,29 @@ test('tierFor (D19.11): raise only, on a contract path or a test file', () => {
   assert.equal(tierFor({ tier: 'T1' }, ['skills/spec/scripts/x.mjs'], []), 'T1');
   assert.equal(tierFor({ tier: 'T0' }, ['README.md'], []), 'T0');
   assert.equal(tierFor({ tier: 'weird' }, ['README.md'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T0' }, ['hooks/PreToolUse.js'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['.claude/hooks/command-parser.mjs'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['scripts/push-guard.mjs'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['scripts/shell-write-parser.mjs'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['scripts/trash-command.mjs'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['scripts/allow-agent-actions.mjs'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['scripts/pre-tool-use.mjs'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['src/hooks/useCounter.ts'], []), 'T1');
+});
+
+test('a T1 delta post escalates at two new P1/P2 findings, but one keeps the cap', () => {
+  const state = makeState();
+  for (const [major, expected] of [[0, 'T1'], [1, 'T1'], [2, 'T2']]) {
+    const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 3 }] });
+    const action = { step: 'post', part: 'post', land: { round: 2, scope: 'delta', since: BASE, head: HEAD, lenses: ['codex', 'astra'] } };
+    const out = recordLandStep(state, wp, action, ok(`findings 2\ndelta-major ${major} head=${HEAD}\n`), {});
+    assert.equal(out.outcome, 'continue');
+    assert.equal(out.patch.tier ?? wp.tier, expected);
+    assert.equal(out.patch.deltaEscalation?.majorFindings ?? 0, major >= 2 ? major : 0);
+  }
+  const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 3 }] });
+  const action = { step: 'post', part: 'post', land: { round: 2, scope: 'delta', since: BASE, head: HEAD, lenses: ['codex', 'astra'] } };
+  assert.equal(recordLandStep(state, wp, action, ok('findings 2\n'), {}).outcome, 'block');
 });
 
 test('runLandVerb I/O (D19.21): returns { code, out } and writes nothing to stdout', async (t) => {

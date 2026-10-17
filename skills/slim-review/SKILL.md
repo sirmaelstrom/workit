@@ -17,7 +17,7 @@ end up attached to the line they are about, where review and merge already happe
 
 | Reach for | When | Cost |
 |---|---|---|
-| **this skill** | Every code-diff PR boundary. Single-surface changes, burn-down items, anything you were about to merge on your own say-so. (Burn-down's T0 — docs/config/mechanical with a green build — is the one named exception) | $0 plan-covered, one spawn, ~2–5 min |
+| **this skill** | T1 code-diff PR boundaries. Use `burn-down` § Per item step 3 for T0/T2 triggers and delta escalation. | $0 plan-covered, one spawn, ~2–5 min |
 | `/review` | You want several perspectives in-session and a convergence read before opening a PR | in-session Opus subagents |
 | `council_review` (review-council MCP) | Complex multi-component PRs and spec surfaces — fan-out, synthesis, adversarial challenge | 4–6 lenses |
 
@@ -310,6 +310,9 @@ pull request.
 amendment, one delta-only pass per lens. There is no second full-PR review and
 no third round at T1.**
 
+Apply the delta escalation in `burn-down` § Per item step 3 before treating
+this cap as the merge boundary.
+
 This is the half that caught real defects three times out of three when it was
 run by hand, and it is the half no script can do.
 
@@ -473,9 +476,8 @@ answers the `--since` that reviews only the commits the rebase changed. Under
 `--attempt-ref` the same flag keeps the attempt's
 claim, base and manifest unchanged and reviews the amendment inside it.
 
-Fix the delta pass's findings with controls, and the PR goes to the merge
-call. There is no third review: a fix made after the delta pass is checked by
-its seen-failing control, and that is the amendment check at that point.
+Fix the delta pass's findings with controls. Apply the T1 cap or its T2
+escalation under `burn-down` § Per item step 3.
 
 **Who follows the cap today.** Manual T1 follows it (this skill run by a
 session or conductor), and so does `babysit`. Babysit reads the rounds from the
