@@ -28,7 +28,7 @@ import { shellArgv } from './lib/exec.mjs';
 import { correlation, shellLiteral } from './lib/touch.mjs';
 import { SEAM_ROWS } from './lib/analyze.mjs';
 import { namedSeam } from './lib/phases/showcase.mjs';
-import { testDeps } from './test-deps.mjs';
+import { testAnchor, testDeps } from './test-deps.mjs';
 import { anchorFromFile } from '../../_shared/operator-proof/operator-proof.mjs';
 import { makeTestAnchor, signAnswer } from '../../_shared/operator-proof/test-signer.mjs';
 
@@ -1103,6 +1103,83 @@ test('passkey read-back: with an anchor configured a proof over a relabelled ask
   assert.deepEqual([spec.step, h.state().touches[0].status, answer.proofMode, h.state().touches[0].filings], ['spec', 'answered', 'verified', 3]);
   assert.deepEqual(Object.keys(answer.signed).sort(), ['answer', 'ask', 'question']);
   assert.equal(answer.signed.answer.proof.v, 1);
+});
+
+// The phone, for a configured run: every filed touch is answered with
+// h.answers[its kind] (blocked for a kind with no entry), signed over exactly
+// the question and ask that filing carried.
+function phone(h) {
+  h.deps.readAnchor = testAnchor;
+  h.custom = (action) => {
+    if (action.tool !== 'spine_quest' || action.step === 'anchor') return undefined;
+    const state = h.state();
+    const touch = state.touches.find((candidate) => candidate.status === 'filed');
+    const filed = h.trace.findLast((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' && a.args.question.startsWith(correlation(state, touch)));
+    const { question, ask } = filed.args;
+    const { key, text: words = null } = h.answers[touch.kind] ?? h.answers.blocked;
+    const proof = signAnswer({ questId: ANCHOR, askReceiptId: touch.receiptId, question, ask, answerKey: key, text: words });
+    const answer = { key, text: words, by: 'operator:dogan', answeredAt: new Date(h.clock).toISOString(), askReceiptId: touch.receiptId, proof };
+    return { quests: [{ id: ANCHOR, latestReceipt: { id: '00000000-0000-4000-8000-00000000a0a1', outcome: 'answered', question, ask, answer } }] };
+  };
+}
+
+const editState = (h, edit) => {
+  const state = h.state();
+  edit(state);
+  writeFileSync(join(h.runDir, 'state.json'), JSON.stringify(state, null, 2));
+};
+
+test('V7 (D13, council F8): a signed (b) with touch.answer.key edited to a and merge edited to true still holds every merge; an edited signed key holds with authority proof invalid: statement_mismatch', async (t) => {
+  const h = seam(t, { answers: { preapproval: { key: 'b' } } });
+  phone(h);
+  await start(h, SPINE_ONLY);
+  await drive(h, { until: (a) => a.kind === 'skill' });
+  editState(h, (state) => {
+    state.touches[0].answer.key = 'a';
+    Object.assign(state.authority, { merge: true, release: true });
+  });
+  await drive(h, { until: (a) => a.step === 'showcase' });
+  assert.ok(!h.trace.some((a) => a.part === 'squash'), 'no squash was emitted');
+  assert.deepEqual([h.wp('WP-01').state, h.wp('WP-01').reason], ['held', 'gate passed; no merge authority']);
+
+  const signed = seam(t);
+  phone(signed);
+  await start(signed, SPINE_ONLY);
+  signed.onEmit = (a) => {
+    if (a.step === 'gate' && a.part === 'gate' && a.wpId === 'WP-01' && signed.wp('WP-01').reason === null) editState(signed, (state) => { state.touches[0].answer.signed.answer.key = 'b'; });
+  };
+  await drive(signed, { until: (a) => a.step === 'showcase' });
+  assert.ok(!signed.trace.some((a) => a.part === 'squash'), 'no squash was emitted');
+  assert.deepEqual([signed.wp('WP-01').state, signed.wp('WP-01').reason], ['held', 'gate passed; no merge authority (authority proof invalid: statement_mismatch)']);
+});
+
+test('runtime exercise (WP-07): a signed touch 1 (a) at $10 driven to the merge; state.json edited to $100 → verifiedAuthority $10 verified, the analysis names the proof, a $15 spend halts; an edited grant → grant_tag_mismatch', async (t) => {
+  const { verifiedAuthority } = await import('./lib/authority.mjs');
+  const build = await import('./lib/phases/build.mjs');
+  const { analyzeRun } = await import('./lib/analyze.mjs');
+  const h = seam(t);
+  phone(h);
+  await start(h, [...SPINE_ONLY, '--budget', '10']);
+  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  t.diagnostic(`at the merge: ${squash.id} ${squash.command.join(' ')}`);
+  editState(h, (state) => { state.authority.budgetUsd = 100; });
+  const deps = testDeps({ ...h.deps, readAnchor: testAnchor, read: (path) => readFileSync(path, 'utf8'), write: writeFileSync, exists: existsSync });
+  const state = h.state();
+  const authority = verifiedAuthority(state, deps);
+  t.diagnostic(`1. verifiedAuthority: ${JSON.stringify(authority)}`);
+  assert.deepEqual([authority.budgetUsd, authority.proofMode, authority.merge, authority.reason], [10, 'verified', true, null]);
+  await analyzeRun(h.runDir, { exec: deps.exec, read: deps.read, write: deps.write, exists: deps.exists });
+  const line = /^- authority: .*$/m.exec(h.analysis())[0];
+  t.diagnostic(`2. analysis: ${line}`);
+  assert.match(line, /\(proof: verified ••••[A-Za-z0-9_-]{8} epoch 0\)/);
+  build.record(state, { kind: 'shell', step: 'spend', part: 'spend', budgetFor: 'dispatch' }, { code: 0, stdout: '15\n', stderr: '' }, deps);
+  const halt = state.build.halts.find((entry) => entry.kind === 'budget');
+  t.diagnostic(`3. budget gate at $15: ${halt ? `halt: ${halt.reason}` : 'go'}`);
+  assert.match(halt.reason, /against the \$10 budget/);
+  editState(h, (edited) => { edited.touches[0].grants.a.budgetUsd = 100; });
+  const forged = verifiedAuthority(h.state(), deps);
+  t.diagnostic(`4. after editing touch.grants.a: ${JSON.stringify(forged)}`);
+  assert.deepEqual([forged.budgetUsd, forged.merge, forged.reason], [0, false, 'grant_tag_mismatch']);
 });
 
 test('E6 hand-back (spine): the showcase touch hands back the same way; the resumed read-back closes the run', async (t) => {

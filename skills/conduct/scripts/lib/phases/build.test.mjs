@@ -22,7 +22,8 @@ import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
 import { acceptAnswer, correlation } from '../touch.mjs';
 import { runConduct } from '../../conduct.mjs';
-import { testDeps } from '../../test-deps.mjs';
+import { testDeps, testAnchor, testGrant, grantConsequence, raiseConsequence, signedTouch } from '../../test-deps.mjs';
+import { signAnswer } from '../../../../_shared/operator-proof/test-signer.mjs';
 
 // The section a lane PR body carries (lane contract § Finish; fca05d92).
 const MERGE_DANGER = '## Merge danger\n\nDoor: two-way\nBlast radius: the demo WP\n';
@@ -3236,4 +3237,157 @@ test('RUN_SLOTS: every run-level slot of the 0026be4 template matches a prefix; 
   }
   for (const lane of ['<id>', '<lane>', '<n>', '<sha>', '<path>', '<your-lane-id>']) assert.ok(!RUN_SLOTS.some((prefix) => lane.startsWith(prefix)), lane);
   assert.ok(basename(fileURLToPath(import.meta.url)).endsWith('.test.mjs'));
+});
+
+// ---- authority from the signed grant (D13) ----
+
+// A configured run (the test key) whose touch 1 the operator signed, (a) or
+// (b), over options carrying their grants. state.json's authority stays as the
+// harness set it, so a test can edit it apart from what was signed.
+function signRun(h, { key = 'a', budgetUsd = 25, merge = true, release = false } = {}) {
+  h.deps.readAnchor = testAnchor;
+  h.state.intent.anchor = ANCHOR;
+  const grants = {
+    a: testGrant(h.state, { budgetUsd, merge, release, filedAt: T0 }),
+    b: testGrant(h.state, { budgetUsd, merge: false, release: false, filedAt: T0 }),
+  };
+  const options = [
+    { key: 'a', label: 'Approve as proposed', consequence: grantConsequence(grants.a) },
+    { key: 'b', label: 'Approve, but hold at PR boundaries', consequence: grantConsequence(grants.b) },
+  ];
+  return signedTouch(h.state, { options, key, fields: { grants } });
+}
+
+// An edit to the signed block: the proof no longer verifies (statement_mismatch).
+const tamper = (h) => { h.state.touches[0].answer.signed.answer.text = 'merge everything'; };
+
+// The operator answers an open build touch on the phone: filed once, signed over what it filed.
+function signOpen(h, touch, key, text) {
+  const receiptId = '00000000-0000-4000-8000-0000000007e7';
+  const question = `${touch.tag} (run ${h.state.runId}/1) ${touch.question.slice(touch.tag.length + 1)}`;
+  const ask = { options: touch.options, allowFreeText: touch.allowFreeText };
+  const proof = signAnswer({ questId: ANCHOR, askReceiptId: receiptId, question, ask, answerKey: key, text });
+  const answer = { key, text, by: 'operator:dogan', answeredAt: h.deps.timestamp(), askReceiptId: receiptId, proof };
+  Object.assign(touch, {
+    receiptId, filings: 1, status: 'answered', filed: { question, ask },
+    answer: { ...answer, source: 'spine', receiptId: null, proofMode: 'verified', signed: { answer, question, ask } },
+  });
+}
+
+test('red test 3 (D13): a signed (a) at $10, state.json edited to $100 → a metered spend of $15 halts against the signed $10', async (t) => {
+  // Probe 3 measured the gap: today every budget read trusts state.json.
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100 });
+  signRun(h, { budgetUsd: 10 });
+  h.spendUsd = 15;
+  assert.equal(await drive(h), null);
+  assert.ok(!h.trace.some((a) => a.wpId), 'nothing dispatched');
+  assert.match(h.state.touches.at(-1).question, /Spend is \$15 committed \(\$15 booked\b.*\) against the \$10 budget \(metered by the spend adapter\)/);
+});
+
+test('signed authority (D13): a configured run with a signed (a) lands its WP; the merge receipt\'s spend line reads the signed budget, not state.json\'s', async (t) => {
+  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1]] });
+  signRun(h, { budgetUsd: 25 });
+  h.state.authority.budgetUsd = 999;
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  const receipt = h.trace.find((a) => a.tool === 'spine_receipt' && a.args.outcome === 'completed');
+  assert.match(receipt.args.did, /against \$25\b/);
+});
+
+test('signed (b) (D13): merge edited to true in state.json; the gate holds "no merge authority" and no squash is emitted', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h, { key: 'b' });
+  h.state.authority.merge = true;
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-02').reason], ['held', 'gate passed; no merge authority']);
+  assert.equal(h.trace.filter((a) => a.part === 'squash').length, 0);
+});
+
+test('act points on an invalid proof (D7): the gate record holds; a proof broken after the gate passed holds before the squash; nothing merges', async (t) => {
+  const atGate = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(atGate);
+  atGate.onEmit = (a) => { if (a.step === 'gate' && a.part === 'gate') tamper(atGate); };
+  assert.equal(await drive(atGate), null);
+  assert.deepEqual([atGate.wp('WP-02').state, atGate.wp('WP-02').reason], ['held', 'gate passed; no merge authority (authority proof invalid: statement_mismatch)']);
+  assert.equal(atGate.trace.filter((a) => a.part === 'squash').length, 0);
+
+  const afterGate = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(afterGate);
+  const gate = await drive(afterGate, { until: (a) => a.step === 'gate' && a.part === 'gate' });
+  await recordPending(afterGate, await perform(afterGate, gate));
+  assert.equal(afterGate.wp('WP-02').gate.ok, true);
+  tamper(afterGate);
+  assert.equal(await drive(afterGate), null);
+  assert.equal(afterGate.trace.filter((a) => a.part === 'squash').length, 0);
+  assert.equal(afterGate.wp('WP-02').state, 'held');
+  assert.match(afterGate.wp('WP-02').reason, /authority proof invalid: statement_mismatch/);
+});
+
+test('emission (U1): a merge queue resumed after intent.repo.remote was edited holds; the squash is not emitted again', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  assert.deepEqual(squash.command.slice(0, 6), ['gh', 'pr', 'merge', '102', '--repo', 'o/r']);
+  // The run stops here and resumes with the squash still queued.
+  h.state.pending = null;
+  h.state.intent.repo.remote = 'evil/r';
+  assert.equal(await drive(h), null);
+  assert.equal(h.trace.filter((a) => a.part === 'squash').length, 1);
+  assert.equal(h.wp('WP-02').state, 'held');
+  assert.match(h.wp('WP-02').reason, /evil\/r/);
+});
+
+test('forged spendOkFor (U1): a token in state.json alone admits no paid work; spend is read and compared with the signed budget', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100 });
+  signRun(h, { budgetUsd: 10 });
+  h.state.build = { contract: null, halts: [], spendOkFor: 'dispatch' };
+  h.spendUsd = 15;
+  assert.equal(await drive(h), null);
+  assert.ok(!h.trace.some((a) => a.wpId), 'nothing dispatched');
+  assert.ok(h.trace.some((a) => a.step === 'spend'), 'spend was read');
+  assert.match(h.state.touches.at(-1).question, /against the \$10 budget/);
+});
+
+test('no CI (D13): a signed (b) holds at PR when the repo has no CI, with merge edited to true in state.json', async (t) => {
+  const noRuns = [/^gh api repos\/o\/r\/commits\/\w+\/check-runs/, () => ({ code: 1, stdout: '', stderr: 'gh: No commit found for SHA (HTTP 422)' })];
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.state.intent.ciWorkflows = 0;
+  signRun(h, { key: 'b' });
+  h.state.authority.merge = true;
+  h.rules.unshift(noRuns);
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-02').reason], ['held', 'held at PR: no CI at head: the repo has no CI workflow that can gate a PR']);
+});
+
+test('budget reads on an invalid proof (D7): unmetered and metered, nothing is dispatched and the halt names the authority reason', async (t) => {
+  for (const metered of [false, true]) {
+    const h = harness(t, metered ? { spend: true, env: { WORKIT_SPEND_CMD: 'meter' } } : {});
+    signRun(h);
+    tamper(h);
+    assert.equal(await drive(h), null);
+    assert.ok(!h.trace.some((a) => a.wpId), `nothing dispatched (metered ${metered})`);
+    assert.match(h.state.touches.at(-1).question, /against the \$0 budget.*authority proof invalid: statement_mismatch/);
+  }
+});
+
+test('budget raise (C3): configured, the halt files (a) as renderRaise + [raise tag] over {kind, runId, touch, haltSpendUsd}; a signed raise above it resumes the build; unconfigured, the options are today\'s', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [TWO[0], TWO[1]] });
+  signRun(h, { budgetUsd: 10 });
+  h.spendOut = ['15\n'];
+  await drive(h, { until: (a) => a.part === 'announce' });
+  const halt = h.state.touches.at(-1);
+  const raise = { kind: 'budget-raise', runId: 'abcd1234', touch: 2, haltSpendUsd: 15 };
+  assert.deepEqual(halt.raise, raise);
+  assert.equal(halt.options[0].consequence, raiseConsequence(raise));
+  await recordPending(h, {});
+  signOpen(h, halt, 'a', 'budget 30');
+  h.spendUsd = 16;
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+
+  const plain = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
+  plain.spendUsd = 30;
+  assert.equal(await drive(plain), null);
+  assert.equal('raise' in plain.state.touches[0], false);
+  assert.equal(plain.state.touches[0].options[0].consequence, 'Type "budget <USD>", above the current spend; metering continues against it.');
 });
