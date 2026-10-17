@@ -21,7 +21,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export function testGrant(state, { budgetUsd, merge, release, scope = state.intent.goal, filedAt, ...over }) {
   return {
     budgetUsd, merge, release, scopeSha256: sha256Hex(scope.normalize('NFC')), runId: state.runId,
-    repo: { remote: state.intent.repo.remote, defaultBranch: state.intent.repo.defaultBranch ?? 'main' },
+    repo: { remote: state.intent.repo.remote, defaultBranch: state.intent.repo.defaultBranch ?? '(unknown)' },
     releaseRecipeSha256: state.intent.release == null ? null : sha256Hex(canonical(state.intent.release)),
     notAfter: new Date(filedAt + 14 * DAY_MS).toISOString(), ...over,
   };

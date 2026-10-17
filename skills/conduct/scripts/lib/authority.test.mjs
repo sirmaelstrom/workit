@@ -299,7 +299,8 @@ test('touch 1 configured: (a) and (b) carry exactly renderGrant + [grant tag] ov
   const held = noCi.touches[0];
   assert.deepEqual(held.options.map((option) => option.key), ['b', 'c', 'd']);
   assert.deepEqual(Object.keys(held.grants), ['b']);
-  assert.match(held.options[0].consequence, /^Merge each PR to example\/scratch \(main\): no, release: no, budget \$10, valid until 2026-10-18\. \[grant [0-9a-f]{16}\]$/);
+  // A branch the repo did not report is signed as unknown (council r1), never as main.
+  assert.match(held.options[0].consequence, /^Merge each PR to example\/scratch \(\(unknown\)\): no, release: no, budget \$10, valid until 2026-10-18\. \[grant [0-9a-f]{16}\]$/);
 });
 
 test('E7: every tagged option is its own trim, one line and at most 240 chars: a 60-char remote fits; a longer one, or a remote with a newline, is refused at filing', (t) => {
@@ -543,10 +544,11 @@ test('display (council r1): configured, the handoff prints the verified authorit
   assert.match(line(handoffText(state, rotation, {})), /^- Authority: merge true, release true, budget \$100\.00 .*\(proof: verified ••••\S{8} epoch \d+\) \(cached display; acts use the signed grant\)$/);
 });
 
-test('unknown default branch (council r1): the grant carries the literal "(unknown)" and its prose says (unknown), never main', (t) => {
+test('unknown default branch (council r1): the grant carries the literal "(unknown)" and its prose names it, never main; the shared verifier renders it unchanged', (t) => {
   const state = run(t);
   state.intent.repo.defaultBranch = null;
   const touch = fileTouch(state, testAnchor);
   assert.equal(touch.grants.a.repo.defaultBranch, '(unknown)');
-  assert.match(touch.options[0].consequence, /^Merge each PR to example\/scratch \(unknown\): yes, /);
+  assert.match(touch.options[0].consequence, /^Merge each PR to example\/scratch \(\(unknown\)\): yes, /);
+  assert.doesNotMatch(touch.options[0].consequence, /main/);
 });

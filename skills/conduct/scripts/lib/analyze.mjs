@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { STEP_SEAM, TOUCH_SEAM, loadState, readEvents } from './state.mjs';
 import { firstLine } from './adapters.mjs';
 import { analysisLine as repoConfigLine } from './repo-config.mjs';
-import { proofLabel } from './authority.mjs';
+import { authorityDisplay } from './authority.mjs';
 
 const VERDICT_TEXT = { exercised: 'exercised', vacuous: 'vacuous', 'not-exercised': 'not exercised', 'no-surface': 'no runtime surface', missing: 'missing' };
 const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
@@ -213,10 +213,11 @@ function postMergeThreads(state, exec) {
   return [`post-merge threads: ${rows.length ? `${rows.length} merged PR(s) need a read` : 'none open on any merged PR'}`, ...rows];
 }
 
-function preapproval(state) {
+function preapproval(state, deps) {
   const a = state.authority ?? {};
-  // The stored authority and the authority touch's stored proof: display, never an act.
-  const out = [`- authority: merge ${a.merge ? 'yes' : 'no'}, release ${a.release ? 'yes' : 'no'}, budget ${usd(a.budgetUsd ?? 0)}, scope: ${a.scope} ${proofLabel(state)}`];
+  // Display, never an act: beside a verified proof, the verified authority.
+  const shown = authorityDisplay(state, deps);
+  const out = [`- authority: merge ${shown.merge ? 'yes' : 'no'}, release ${shown.release ? 'yes' : 'no'}, budget ${usd(shown.budgetUsd)}, scope: ${shown.scope} ${shown.label}`];
   if (a.grant) out.push(`- grant: ${a.grant}; the operator's text, verbatim: ${JSON.stringify(a.notes ?? '')}`);
   out.push(repoConfigLine(state));
   const merges = mergedPrs(state);
@@ -266,7 +267,7 @@ export async function analyzeRun(runDir, deps) {
     ['Where the time went', timeWent(state, events)],
     ['Catches by watcher position', catches(state, events)],
     ['Escapes', escapes(state, deps.exec)],
-    ['Pre-approval audit', preapproval(state)],
+    ['Pre-approval audit', preapproval(state, deps)],
     ['Recommendations', ['_The conductor replaces this line with at most five recommendations._']],
   ];
   const text = [`# Run analysis: conduct ${state.slug}`, '', `Run dir: ${runDir}. Goal: ${state.intent.goal}`, '',

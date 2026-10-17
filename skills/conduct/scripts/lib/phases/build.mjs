@@ -37,7 +37,8 @@ import {
 import {
   QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, operatorAnchor, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
 } from '../touch.mjs';
-import { assertFileable, budgetAmount, budgetNote, mergeRefusal, raiseConsequence, verifiedAuthority } from '../authority.mjs';
+import { assertFileable, budgetAmount, mergeRefusal, raiseConsequence, verifiedAuthority } from '../authority.mjs';
+import { REASONS } from '../../../../_shared/operator-proof/operator-proof.mjs';
 import { preapprovedRef } from './spec.mjs';
 
 // The lane-contract template's run-level slot prefixes (D17). `<repo A` also
@@ -1304,10 +1305,11 @@ function expand(state, wp, deps) {
     }
     case 'merge': {
       if (!wp.gate?.ok) return go([], 'gate');
-      // Authority is recomputed here, after the gate: one that no longer
-      // holds stops the WP before the squash instead of rebasing it again.
+      // Configured, authority is recomputed here, after the gate: one that no
+      // longer holds stops the WP before the squash instead of rebasing it
+      // again. Unconfigured, a refused merge goes back through land (M8).
       const authority = verifiedAuthority(state, deps);
-      const refusal = mergeRefusal(state, authority);
+      const refusal = authority.proofMode === 'unconfigured' ? null : mergeRefusal(state, authority);
       if (refusal) return holdWp(state, wp, deps, refusal);
       const actions = mergeActions(state, wp, wp.gate.head, authority);
       return actions.length ? go(actions, null) : go([], 'land');
@@ -1408,35 +1410,70 @@ function committed(state, deps, purpose, bookedUsd) {
   return { usd, detail: `${parts.join(' + ')}; lanes at $${money(projection.usd)} each, ${projection.basis}` };
 }
 
+// Configured, a refused authority (a bad proof or grant, another run's, an
+// expired one) is not an exhausted budget: no raise restores it, so none is
+// offered. Paid work holds with the reason and its recovery, and no touch is
+// filed. An unreadable anchor is a configuration error: operatorAnchor exits 2
+// before anything changes.
+const AUTHORITY_RECOVERY = 're-file the authority touch and have the operator sign it';
+function authorityHold(state, deps, authority) {
+  if (authority.reason === REASONS.anchor_unreadable) operatorAnchor(deps);
+  const reason = `authority refused (${authority.reason}): ${AUTHORITY_RECOVERY}`;
+  const halts = (state.build.halts ??= []);
+  const open = halts.find((halt) => halt.kind === 'authority');
+  if (open) open.reason = reason;
+  else halts.push({ kind: 'authority', reason });
+  syncHalt(state, deps);
+  return reason;
+}
+
+// An authority that verifies again clears its hold.
+function authorityResumed(state, deps) {
+  const halts = state.build.halts ?? [];
+  if (!halts.some((halt) => halt.kind === 'authority')) return;
+  state.build.halts = halts.filter((halt) => halt.kind !== 'authority');
+  syncHalt(state, deps);
+}
+
+// Configured, a paid act needs a spend reading recorded in this same process,
+// just before it: the record that read it emits the act. spendOkFor and
+// lastSpend live in state.json, which an agent can edit, so neither counts.
+const freshSpend = new WeakMap();
+
 function budgetGate(state, deps, purpose) {
   if (budgetEnded(state)) return 'ended';
-  if ((state.build.halts ?? []).some((entry) => entry.kind === 'budget' || entry.kind === 'meter')) return 'halted';
   const authority = verifiedAuthority(state, deps);
+  if (authority.reason) {
+    authorityHold(state, deps, authority);
+    return 'held';
+  }
+  authorityResumed(state, deps);
+  if ((state.build.halts ?? []).some((entry) => entry.kind === 'budget' || entry.kind === 'meter')) return 'halted';
   const budget = authority.budgetUsd;
   if (state.adapters?.spend?.on) {
     if (!deps.env?.WORKIT_SPEND_CMD) {
       meterHalt(state, deps, 'The spend adapter is on, but WORKIT_SPEND_CMD is not set, so spend is unknown (metered by the spend adapter)');
       return 'halted';
     }
+    if (authority.proofMode !== 'unconfigured') {
+      const fresh = freshSpend.get(state);
+      freshSpend.delete(state);
+      if (fresh?.purpose !== purpose) return spendAction(state, deps, purpose);
+      const spend = committed(state, deps, purpose, fresh.usd);
+      if (spend.usd < budget) return null;
+      haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)`, 'budget', spend.usd);
+      return 'halted';
+    }
     if (state.build.spendOkFor === purpose) {
       state.build.spendOkFor = null;
-      if (authority.proofMode === 'unconfigured') return null;
-      // Configured, the persisted token is never authority on its own: the
-      // reading it stands for is compared with the signed budget here, and a
-      // token with no reading behind it is read again.
-      const last = state.build.lastSpend;
-      if (typeof last?.usd !== 'number') return spendAction(state, deps, purpose);
-      const spend = committed(state, deps, purpose, last.usd);
-      if (spend.usd < budget) return null;
-      haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)${budgetNote(authority)}`, 'budget', spend.usd);
-      return 'halted';
+      return null;
     }
     return spendAction(state, deps, purpose);
   }
   const sum = state.wps.reduce((total, wp) => total + (Number(wp.lane?.costUsd) || 0), 0);
   const spend = committed(state, deps, purpose, sum);
   if (spend.usd < budget) return null;
-  haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (unmetered: booked is the lane-only lower bound)${budgetNote(authority)}`, 'budget', spend.usd);
+  haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (unmetered: booked is the lane-only lower bound)`, 'budget', spend.usd);
   return 'halted';
 }
 
@@ -1466,16 +1503,21 @@ function workAction(state, deps) {
         continue;
       }
       if (gate === 'halted') continue;
+      if (gate === 'held') {
+        holdWp(state, wp, deps, state.build.halts.find((halt) => halt.kind === 'authority').reason);
+        // Its lane's stop is emitted now: this pass does not come back to it.
+        if (!wp.queue.length || wp.queue[0].kind === 'wait') continue;
+        return emitHead(wp);
+      }
       if (gate) return gate;
     }
-    // A queued squash is checked again at emission (U1): a run resumed after
-    // an edit to the repo or the signed answer holds instead of merging.
+    // Configured, a queued squash is checked again at emission (U1): a run
+    // resumed after an edit to the repo or the signed answer holds instead of
+    // merging. Unconfigured, it is emitted as today (M8).
     if (wp.queue[0].step === 'merge' && wp.queue[0].part === 'squash') {
-      const { command } = wp.queue[0];
-      const refusal = mergeRefusal(state, verifiedAuthority(state, deps), command[command.indexOf('--repo') + 1]);
+      const refusal = squashRefusal(state, wp.queue[0], deps);
       if (refusal) {
         holdWp(state, wp, deps, refusal);
-        // Its lane's stop is emitted now: this pass does not come back to it.
         if (!wp.queue.length || wp.queue[0].kind === 'wait') continue;
       }
     }
@@ -1496,7 +1538,7 @@ function workAction(state, deps) {
   }
   if (state.dispatchHalt || !dispatchable(state, { now: deps.now() }).length) return null;
   const gate = budgetGate(state, deps, 'dispatch');
-  if (gate === 'halted' || gate === 'ended') return workAction(state, deps);
+  if (gate === 'halted' || gate === 'ended' || gate === 'held') return workAction(state, deps);
   if (gate) return gate;
   return dispatch(state, dispatchable(state, { now: deps.now() })[0], deps);
 }
@@ -1589,6 +1631,32 @@ function failStreak(state, wp, action, result, deps, stateBefore) {
 // A WP with work queued, or live, whose state and stage have not moved for
 // STALL_MS. A lane at work (a lane poll queued) is left to the lane deadline.
 export function observePending(state, deps) { watchStalls(state, deps); }
+
+// Configured, why a squash may not be emitted: its --repo and the signed
+// grant's merge authority. Unconfigured, none (M8).
+function squashRefusal(state, action, deps) {
+  const authority = verifiedAuthority(state, deps);
+  return authority.proofMode === 'unconfigured' ? null : mergeRefusal(state, authority, action.command[action.command.indexOf('--repo') + 1]);
+}
+
+// A merge or paid act left pending is checked again before it is emitted
+// again (conduct.mjs emit). Configured, a squash the signed grant no longer
+// covers holds its WP; a paid act is dropped when authority is refused or
+// spend is metered, so it comes back only through the budget gate, after a
+// fresh spend reading. False when the pending action was dropped.
+export function checkPending(state, deps) {
+  const action = state.pending;
+  const wp = state.wps.find((candidate) => candidate.id === action.wpId);
+  const squash = action.step === 'merge' && action.part === 'squash';
+  if (!wp || !(squash || paid(action))) return true;
+  if (squash) {
+    const refusal = squashRefusal(state, action, deps);
+    if (refusal) holdWp(state, wp, deps, refusal);
+    return !refusal;
+  }
+  const authority = verifiedAuthority(state, deps);
+  return authority.proofMode === 'unconfigured' || (!authority.reason && !state.adapters?.spend?.on);
+}
 function watchStalls(state, deps) {
   const now = deps.now();
   for (const wp of state.wps) {
@@ -1757,6 +1825,10 @@ function recordSpend(state, action, result, deps) {
   const text = String(result.stdout ?? '').trim();
   const usd = result.code === 0 && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text) ? Number(text) : NaN;
   const authority = verifiedAuthority(state, deps);
+  if (authority.reason) {
+    authorityHold(state, deps, authority);
+    return undefined;
+  }
   const budget = authority.budgetUsd;
   if (!Number.isFinite(usd)) return meterHalt(state, deps, `The spend command's output is unreadable (exit ${result.code}: ${JSON.stringify(text.slice(0, 80))}${result.stderr ? `, ${lines(result.stderr)[0]}` : ''}), so spend is unknown (metered by the spend adapter)`);
   // Only a successful read clears the meter halt; it is kept for the audit.
@@ -1765,8 +1837,9 @@ function recordSpend(state, action, result, deps) {
   syncHalt(state, deps);
   const purpose = action.budgetFor === 'meter' ? 'dispatch' : action.budgetFor ?? 'dispatch';
   const spend = committed(state, deps, purpose, usd);
-  if (spend.usd >= budget) return haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)${budgetNote(authority)}`, 'budget', spend.usd);
-  state.build.spendOkFor = action.budgetFor === 'meter' ? 'dispatch' : action.budgetFor ?? 'dispatch';
+  if (spend.usd >= budget) return haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)`, 'budget', spend.usd);
+  if (authority.proofMode === 'unconfigured') state.build.spendOkFor = purpose;
+  else freshSpend.set(state, { purpose, usd });
   return undefined;
 }
 

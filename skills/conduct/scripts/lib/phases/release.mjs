@@ -14,7 +14,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { recipeArgv } from '../recipe.mjs';
 import { bumpPlan, releaseEligible, resolvePluginRoot, selfHosted } from '../release.mjs';
-import { mergeActions, mergeLockFor, recordLandStep } from '../land.mjs';
+import { mergeActions, mergeLockFor, rebaseActions, recordLandStep } from '../land.mjs';
 import { conductScript, openTouch, recordTouch, touchAction } from '../touch.mjs';
 import { firstLine } from '../adapters.mjs';
 import { branchDeleteSteps, branchOutcome, checkedOutAt, worktreeGone } from '../lanes.mjs';
@@ -103,20 +103,59 @@ function bumpActions(state, deps, plan) {
   return { actions };
 }
 
-function expand(state, deps) {
+// The queue a stage expands to, from the run's state and recipe alone, so
+// emission can derive it again (derivedActions). The bump, merge and
+// handover stages are built in expand; null for them.
+const NEXT_STAGE = { setup: 'bump', commit: 'gate', gate: 'merge', after: 'verify', verify: 'cleanup', cleanup: 'handover' };
+function stageQueue(state, stage) {
   const r = state.release;
   const { remote, defaultBranch } = state.intent.repo;
   const base = `origin/${defaultBranch ?? 'main'}`;
   const repo = resolve(state.intent.repo.path);
   const recipe = state.intent.release;
-  const go = (queue, stage) => Object.assign(r, { queue, stage });
-  switch (r.stage) {
+  switch (stage) {
     case 'setup':
-      return go([
+      return [
         shell('fetch', ['git', '-C', repo, 'fetch', 'origin']),
         shell('base', ['git', '-C', repo, 'rev-parse', base]),
         shell('worktree', ['git', '-C', repo, 'worktree', 'add', r.worktree, '-b', r.branch, base]),
-      ], 'bump');
+      ];
+    case 'commit': {
+      const git = (part, ...args) => shell(part, ['git', '-C', r.worktree, ...args]);
+      const body = `Release ${r.version.to} by conduct ${state.slug}: the recipe's version bump. Tier T0: no review; CI and threads still gate the merge.`;
+      return [
+        git('add', 'add', '--', ...recipe.bump.map((entry) => entry.file)),
+        git('commit', 'commit', '-m', r.commit),
+        git('head', 'rev-parse', 'HEAD'),
+        git('push', 'push', '-u', 'origin', r.branch),
+        shell('pr', ['gh', 'pr', 'create', '--draft', '--repo', remote, '--base', defaultBranch ?? 'main', '--head', r.branch, '--title', r.commit, '--body', body]),
+      ];
+    }
+    case 'gate':
+      // Readied before the gate, never back to back with the merge (land.mjs rebaseActions).
+      return [
+        shell('ready', ['gh', 'pr', 'ready', String(r.pr.number), '--repo', remote]),
+        { ...shell('gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', 'release']), step: 'gate' },
+      ];
+    case 'after':
+    case 'verify':
+      return (recipe[stage] ?? []).map((command) => shell(stage, recipeArgv(command), { cwd: r.worktree, recipeCommand: command }));
+    // After verify, which runs in the worktree. The remove recorder queues the
+    // branch deletes only once the directory is gone (#206's order).
+    case 'cleanup':
+      return [shell('remove', ['git', '-C', repo, 'worktree', 'remove', r.worktree], { instruction: 'Remove the merged release\'s worktree (no --force).' })];
+    default:
+      return null;
+  }
+}
+
+function expand(state, deps) {
+  const r = state.release;
+  const recipe = state.intent.release;
+  const go = (queue, stage) => Object.assign(r, { queue, stage });
+  const queue = stageQueue(state, r.stage);
+  if (queue) return go(queue, NEXT_STAGE[r.stage]);
+  switch (r.stage) {
     case 'bump': {
       let plan;
       try {
@@ -130,23 +169,6 @@ function expand(state, deps) {
       if (bumps.failure) return finish(state, deps, 'failed', bumps.failure);
       return go(bumps.actions, 'commit');
     }
-    case 'commit': {
-      const git = (part, ...args) => shell(part, ['git', '-C', r.worktree, ...args]);
-      const body = `Release ${r.version.to} by conduct ${state.slug}: the recipe's version bump. Tier T0: no review; CI and threads still gate the merge.`;
-      return go([
-        git('add', 'add', '--', ...recipe.bump.map((entry) => entry.file)),
-        git('commit', 'commit', '-m', r.commit),
-        git('head', 'rev-parse', 'HEAD'),
-        git('push', 'push', '-u', 'origin', r.branch),
-        shell('pr', ['gh', 'pr', 'create', '--draft', '--repo', remote, '--base', defaultBranch ?? 'main', '--head', r.branch, '--title', r.commit, '--body', body]),
-      ], 'gate');
-    }
-    case 'gate':
-      // Readied before the gate, never back to back with the merge (land.mjs rebaseActions).
-      return go([
-        shell('ready', ['gh', 'pr', 'ready', String(r.pr.number), '--repo', remote]),
-        { ...shell('gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', 'release']), step: 'gate' },
-      ], 'merge');
     case 'merge': {
       if (!r.gate?.ok) return go([], 'gate');
       const actions = mergeActions(state, view(state), r.gate.head, verifiedAuthority(state, deps));
@@ -155,15 +177,6 @@ function expand(state, deps) {
       // routing instead of record's JSON check (the merge-commit lookup).
       return go(actions.map((action) => ({ ...action, seam: SEAM, expects: { type: 'none' } })), 'after');
     }
-    case 'after':
-    case 'verify': {
-      const commands = recipe[r.stage] ?? [];
-      return go(commands.map((command) => shell(r.stage, recipeArgv(command), { cwd: r.worktree, recipeCommand: command })), r.stage === 'after' ? 'verify' : 'cleanup');
-    }
-    // After verify, which runs in the worktree. The remove recorder queues the
-    // branch deletes only once the directory is gone (#206's order).
-    case 'cleanup':
-      return go([shell('remove', ['git', '-C', repo, 'worktree', 'remove', r.worktree], { instruction: 'Remove the merged release\'s worktree (no --force).' })], 'handover');
     case 'handover':
       return handover(state, deps);
     default:
@@ -184,6 +197,8 @@ function installedVersion(root, deps) {
 // released install: its plugin.json at the bump's version (an unchanged root
 // only after an in-place update), and the skill and its script present.
 function handover(state, deps) {
+  // A release held after its merge ran only its cleanup: it ends failed, held.
+  if (state.release.heldAfterMerge) return finish(state, deps, 'failed', state.release.heldAfterMerge);
   if (!selfHosted({ repoRemote: state.intent.repo.remote, pluginRoot: state.pluginRoot, read: deps.read })) return finish(state, deps, 'done', null);
   let to;
   try {
@@ -245,20 +260,106 @@ export function next(state, deps) {
     if (r.state !== 'pending') return null;
   }
   // Checked at emission, not only when queued (U1): a queue resumed after an
-  // edit to the recipe, the repo or the signed answer emits nothing.
-  const refusal = emissionRefusal(state, deps);
-  if (refusal) return finish(state, deps, 'failed', `release held: ${refusal}`);
+  // edit to the recipe, the repo, the queue or the signed answer emits nothing.
+  const refusal = emissionRefusal(state, deps, r.queue[0]);
+  if (refusal) {
+    held(state, deps, refusal);
+    return r.state === 'pending' ? next(state, deps) : null;
+  }
   return emitHead(state);
 }
 
-// Every release act (all but the merged release's cleanup) runs under release
-// authority and the granted recipe; a squash also under the granted repo.
-function emissionRefusal(state, deps) {
-  const head = state.release.queue[0];
-  if (CLEANUP_PARTS.has(head.part)) return null;
+// A release act left pending is checked again before it is emitted again
+// (conduct.mjs emit): one refused now is dropped, and the release holds as it
+// does at emission. False when the pending action was dropped.
+export function checkPending(state, deps) {
+  const action = state.pending;
+  if (action.touch || state.release.state !== 'pending' || !state.release.queue?.length) return true;
+  const refusal = emissionRefusal(state, deps, action);
+  if (!refusal) return true;
+  held(state, deps, refusal);
+  return false;
+}
+
+// A refused release act. Before the release PR merged, the release fails,
+// held. After it, only the merged release's cleanup still runs, exactly as
+// the release derives it, and the release then fails, held (handover).
+function held(state, deps, refusal) {
+  const r = state.release;
+  const reason = `release held: ${refusal}`;
+  if (!r.squashed && !r.merge?.sha) return finish(state, deps, 'failed', reason);
+  r.heldAfterMerge = reason;
+  appendEvent(state, deps, { step: 'release', event: 'release-held', data: { reason } });
+  // Once the worktree is removed, only its branch deletes are left.
+  if (r.cleanup) Object.assign(r, { queue: r.queue.filter((queued) => CLEANUP_PARTS.has(queued.part) && !derivationRefusal(state, queued, null)), stage: 'handover' });
+  else Object.assign(r, { queue: [], stage: 'cleanup' });
+  return null;
+}
+
+const repoAfter = (command) => command[command.indexOf('--repo') + 1];
+const filledArgv = (command, r) => command.map((arg) => {
+  const value = Object.hasOwn(FILL, arg) ? FILL[arg](r) : null;
+  return value === null || value === undefined ? arg : String(value);
+});
+const sameAct = (a, b, r) => a.step === b.step && a.part === b.part && (a.cwd ?? null) === (b.cwd ?? null)
+  && JSON.stringify(filledArgv(a.command, r)) === JSON.stringify(filledArgv(b.command, r));
+
+// Every command the release can emit, from the run's state and the verified
+// recipe: each stage's queue, the land steps (the merge under `authority`, a
+// rebase the gate can ask for, and its abort) and the merged release's branch
+// deletes. A stage whose inputs are not recorded yet derives nothing.
+function derivedActions(state, authority) {
+  const r = state.release;
+  const out = [];
+  for (const stage of Object.keys(NEXT_STAGE)) {
+    try {
+      out.push(...stageQueue(state, stage));
+    } catch {
+      // not reached yet
+    }
+  }
+  const wp = view(state);
+  if (r.gate?.head && authority) out.push(...mergeActions(state, wp, r.gate.head, authority));
+  if (r.gate?.head) out.push(...branchDeleteSteps(resolve(state.intent.repo.path), r.branch, r.gate.head, 'merged release').map(({ part, command }) => shell(part, command)));
+  if (r.pr?.number) out.push(...rebaseActions(state, wp), { step: 'rebase', part: 'abort', command: ['git', '-C', r.worktree, 'rebase', '--abort'] });
+  return out;
+}
+
+// Why `head` is not an act the release derives, or null: a command must be
+// one of derivedActions (argv and cwd), and a bump must edit a file the
+// verified recipe bumps. A wait or an inspection runs nothing.
+function derivationRefusal(state, head, authority) {
+  const r = state.release;
+  if (head.kind === 'author') {
+    const files = (state.intent.release?.bump ?? []).map((entry) => join(r.worktree, entry.file));
+    return head.template === head.outPath && files.includes(head.outPath) ? null : `${head.part}: ${head.outPath} is not a file the verified recipe bumps`;
+  }
+  if (!Array.isArray(head.command)) return null;
+  if (derivedActions(state, authority).some((derived) => sameAct(derived, head, r))) return null;
+  return `${head.step}/${head.part}: the queued command is not one the verified recipe derives: ${head.command.join(' ')}`;
+}
+
+// Configured, every release act runs under release authority, from the
+// verified recipe and against the granted repo: the head must be an act the
+// release derives, and every --repo it names the granted one; a squash also
+// needs merge authority. The merged release's cleanup needs no authority,
+// only the derivation. Unconfigured, emission is today's (M8).
+function emissionRefusal(state, deps, head) {
   const authority = verifiedAuthority(state, deps);
-  const repo = head.step === 'merge' && head.part === 'squash' ? head.command[head.command.indexOf('--repo') + 1] : null;
-  return releaseRefusal(state, authority) ?? (repo === null ? null : mergeRefusal(state, authority, repo));
+  if (authority.proofMode === 'unconfigured') return null;
+  if (!CLEANUP_PARTS.has(head.part)) {
+    const refusal = releaseRefusal(state, authority);
+    if (refusal) return refusal;
+    const granted = authority.grant.repo.remote;
+    const command = head.command ?? [];
+    const other = command.find((arg, i) => command[i - 1] === '--repo' && arg !== granted);
+    if (other !== undefined) return `${head.step}/${head.part}: --repo ${other} is not the granted ${granted}`;
+    if (head.step === 'merge' && head.part === 'squash') {
+      const merge = mergeRefusal(state, authority, repoAfter(command));
+      if (merge) return merge;
+    }
+  }
+  return derivationRefusal(state, head, authority);
 }
 
 function fail(state, deps, action, result) {

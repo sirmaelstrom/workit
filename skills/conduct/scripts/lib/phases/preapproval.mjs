@@ -4,7 +4,7 @@
 // signed tag (lib/authority.mjs), and a (c) grant is authority only once its
 // own confirm touch is answered (a) and signed.
 import { join } from 'node:path';
-import { ConductError } from '../state.mjs';
+import { ConductError, appendEvent } from '../state.mjs';
 import { ADAPTERS, AGENTS, laneModel } from '../adapters.mjs';
 import { QUESTION_MAX, filedLength, openTouch, operatorAnchor, touchAction, recordTouch } from '../touch.mjs';
 import { chooseBackend } from '../lanes.mjs';
@@ -255,12 +255,21 @@ function confirmTouch(state, touch, grant, text, deps) {
 }
 
 // The confirm's answer: (a) makes the (c) grant the run's authority, (d)
-// declines. applyAnswer never runs for it. The authority record gains the
+// declines, and any other key is refused: the confirm re-opens saying why
+// (exit 3). applyAnswer never runs for it. The authority record gains the
 // confirm, whose signed block /spec verifies.
 function recordConfirm(state, touch, deps) {
-  if (touch.answer.key === 'd') {
+  const { key } = touch.answer;
+  if (key === 'd') {
     state.phase = 'declined';
-    return;
+    return undefined;
+  }
+  if (key !== 'a') {
+    const refusal = `answer ${key ?? '(no key)'} is not usable here: only (a) confirms and (d) declines`;
+    Object.assign(touch, { status: 'open', answer: null, refusal, waiting: false });
+    appendEvent(state, deps, { step: 'touch', event: 'answer-refused', data: { n: touch.n, why: refusal } });
+    if (state.adapters?.spine?.on !== true) deps.write(join(state.runDir, 'touches', `${touch.n}.json`), `${JSON.stringify(touch, null, 2)}\n`);
+    return { refused: refusal };
   }
   const path = join(state.runDir, state.authority.record);
   let record;
@@ -274,6 +283,7 @@ function recordConfirm(state, touch, deps) {
   // The display cache; acts recompute it from the signed confirm.
   Object.assign(state.authority, { merge: record.merge, release: record.release, budgetUsd: record.budgetUsd, confirmTouch: touch.n });
   state.phase = 'spec';
+  return undefined;
 }
 
 function applyAnswer(state, touch) {
@@ -297,7 +307,7 @@ export function record(state, action, result, deps) {
   const outcome = recordTouch(state, touch, action, result, deps);
   if (touch.status !== 'answered') return outcome;
   // On the touch's own kind: touchStep names every kind but preapproval and showcase 'touch'.
-  if (touch.kind === 'preapproval-confirm') recordConfirm(state, touch, deps);
-  else applyAnswer(state, touch);
+  if (touch.kind === 'preapproval-confirm') return recordConfirm(state, touch, deps) ?? outcome;
+  applyAnswer(state, touch);
   return outcome;
 }

@@ -1,7 +1,7 @@
 // Phase spec: run /spec under the touch-1 pre-approval, read back the depth it
 // chose, and turn depth none|lite into the single WP-00 record.
 import { join, resolve, win32 } from 'node:path';
-import { ConductError } from '../state.mjs';
+import { ConductError, appendEvent } from '../state.mjs';
 import { parseDesignDirection, skillsField, stripWrappingBackticks, visualRules } from '../schedule.mjs';
 import { approvingTouch, verifiedAuthority } from '../authority.mjs';
 
@@ -22,10 +22,18 @@ export function samePath(a, b, platform) {
 }
 
 // /spec runs under the verified authority's scope: on zero authority the
-// phase holds with the reason (P3) and emits nothing.
+// phase holds with the reason (P3). The hold is a wait the driver records,
+// never a `done`, which would end the run.
+const HELD_WAIT_MS = 5 * 60000;
 export function next(state, deps) {
   const authority = verifiedAuthority(state, deps);
-  if (authority.reason) return { kind: 'done', held: true, reason: `spec held: ${authority.reason}` };
+  if (authority.reason) {
+    const reason = `spec held: ${authority.reason}`;
+    return {
+      kind: 'wait', step: 'spec', held: true, reason, waitMs: HELD_WAIT_MS,
+      instruction: `The run is held before /spec (${reason}): re-file the authority touch and have the operator sign it. Tell the operator. Wait ${HELD_WAIT_MS / 1000} s, then record {}.`,
+    };
+  }
   const ref = preapprovedRef(state);
   // Intake's greenfield trigger (quest 977d3efb) also puts D1, the stack
   // decision, through /spec's stack attack (quest 061b526a).
@@ -68,6 +76,8 @@ function writeWp00(state, gateCommand, scope, deps) {
 }
 
 export function record(state, action, result, deps) {
+  // A held wait records nothing; next checks the authority again.
+  if (action.kind === 'wait') return;
   const { depth, workshopDir, reviewLevel = null, gateCommand = null } = result ?? {};
   if (!['none', 'lite', 'deep'].includes(depth)) throw new ConductError(2, `spec result depth must be none, lite or deep (got ${depth})`);
   if (typeof workshopDir !== 'string' || !samePath(workshopDir, state.workshopDir, deps.platform)) {
@@ -86,9 +96,13 @@ export function record(state, action, result, deps) {
     const duplicate = ids.find((id, i) => ids.indexOf(id) !== i);
     if (duplicate) throw new ConductError(2, `the spec result lists WP id ${duplicate} twice`);
   }
-  // Zero authority holds the phase: nothing is recorded, and next names the reason.
+  // Zero authority holds the phase: the result is not recorded (an event says
+  // so), and next names the reason.
   const authority = verifiedAuthority(state, deps);
-  if (authority.reason) return;
+  if (authority.reason) {
+    appendEvent(state, deps, { step: 'spec', event: 'spec-held', data: { reason: authority.reason, depth } });
+    return;
+  }
   state.spec = { ...state.spec, depth, reviewLevel, gateCommand };
   if (depth === 'none') {
     const wp00 = writeWp00(state, gateCommand, authority.scope, deps);

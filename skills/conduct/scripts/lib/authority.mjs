@@ -16,6 +16,9 @@ import {
 
 // The Spine stores at most this many characters of an option's label or consequence.
 export const OPTION_MAX = 240;
+// A grant's base branch when the repo reported none. renderGrant puts the
+// branch in parentheses, so the prose reads "((unknown))".
+export const UNKNOWN_BRANCH = '(unknown)';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const isObj = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -33,13 +36,13 @@ export function budgetAmount(text) {
 // ---- filing: the grants and tags a configured run puts on its touches ----
 
 // What an option authorises, bound to this run, its repo, its release recipe
-// and an expiry. The base branch is land.mjs's own default when the repo
-// reported none; it is shown in the prose and never checked at a merge.
+// and an expiry. A base branch the repo did not report is signed as unknown,
+// never as a guess; it is shown in the prose and never checked at a merge.
 export function runGrant(state, { budgetUsd, merge, release, scope }, filedAt) {
   const { intent } = state;
   return {
     budgetUsd, merge, release, scopeSha256: scopeSha256(scope), runId: state.runId,
-    repo: { remote: intent.repo.remote, defaultBranch: intent.repo.defaultBranch ?? 'main' },
+    repo: { remote: intent.repo.remote, defaultBranch: intent.repo.defaultBranch ?? UNKNOWN_BRANCH },
     releaseRecipeSha256: recipeSha256(intent.release),
     notAfter: new Date(filedAt + GRANT_TTL_DAYS * DAY_MS).toISOString(),
   };
@@ -214,17 +217,16 @@ export function mergeRefusal(state, authority, repo = state.intent.repo.remote) 
 }
 
 // Why the release may not run under `authority`, or null. A signed grant
-// names its recipe by digest.
+// names its recipe by digest, and its repo: the run's must be it.
 export function releaseRefusal(state, authority) {
   if (authority.release !== true) return `no release authority${because(authority)}`;
   if (authority.grant && recipeSha256(state.intent.release) !== authority.grant.releaseRecipeSha256) {
     return 'the release recipe is not the granted one: its digest differs from the signed grant\'s';
   }
+  const granted = authority.grant?.repo?.remote;
+  if (authority.grant && state.intent.repo.remote !== granted) return `the run's repo ${state.intent.repo.remote} is not the granted ${granted}`;
   return null;
 }
-
-// A budget the operator signed is not available: said beside a budget halt.
-export const budgetNote = (authority) => (authority.reason ? `; no signed budget applies (${authority.reason})` : '');
 
 // ---- display (never read by an act) ----
 
@@ -241,4 +243,19 @@ export function proofLabel(state) {
   if (answer.proofMode !== 'verified') return '(proof: UNCONFIGURED — answers not signed)';
   const label = `(proof: verified ••••${String(answer.credentialId ?? '').slice(-8)} epoch ${answer.epoch})`;
   return isObj(touch.grants) ? label : `${label}; touch ${touch.n} carries no signed grant: re-file it to act`;
+}
+
+// The authority line's values and label. Beside a verified proof they are the
+// verified authority's, never state.authority's; a caller without
+// deps.readAnchor prints the stored values, labelled as a cached display.
+export function authorityDisplay(state, deps) {
+  const cached = state.authority ?? {};
+  const shown = { merge: cached.merge === true, release: cached.release === true, budgetUsd: cached.budgetUsd ?? 0, scope: cached.scope };
+  const label = proofLabel(state);
+  if (!label.startsWith('(proof: verified')) return { ...shown, label };
+  if (typeof deps?.readAnchor !== 'function') return { ...shown, label: `${label} (cached display; acts use the signed grant)` };
+  const verified = verifiedAuthority(state, deps);
+  if (verified.proofMode === 'unconfigured') return { ...shown, label: '(proof: UNCONFIGURED — no anchor is configured now, so the stored answer is not checked)' };
+  const { merge, release, budgetUsd, scope } = verified;
+  return { merge, release, budgetUsd, scope, label: verified.reason ? `(proof: refused, ${verified.reason}; acts hold)` : label };
 }

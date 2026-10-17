@@ -137,11 +137,16 @@ async function emit(state, deps, { custody = null } = {}) {
     if (spec) return rotation.action;
   }
   if (state.pending) {
-    if (state.phase === 'build') {
-      const build = await loadModule(deps, 'lib/phases/build.mjs', 'phase handler build');
-      if (build.observePending) { build.observePending(state, deps); saveState(state, deps); }
-    }
-    return state.pending;
+    const phase = ['build', 'release'].includes(state.phase) ? await loadModule(deps, `lib/phases/${state.phase}.mjs`, `phase handler ${state.phase}`) : null;
+    if (phase?.observePending) { phase.observePending(state, deps); saveState(state, deps); }
+    // A merge, release or paid act is checked against the signed grant again
+    // before it is emitted again; one refused now is held and dropped, and the
+    // phase's next action is emitted in its place.
+    if (!phase?.checkPending || phase.checkPending(state, deps)) return state.pending;
+    const dropped = state.pending;
+    appendEvent(state, deps, { actionId: dropped.id, step: dropped.step, seam: dropped.seam, kind: dropped.kind, event: 'dropped' });
+    state.pending = null;
+    saveState(state, deps);
   }
   for (let hop = 0; hop < 8; hop += 1) {
     if (TERMINAL_PHASES.includes(state.phase)) return { kind: 'done', phase: state.phase };
@@ -461,8 +466,9 @@ async function status(tokens, deps) {
 async function analyze(tokens, deps) {
   const { runDir } = openRun(parseFlags(tokens), deps);
   const module = await loadModule(deps, 'lib/analyze.mjs', 'module');
-  // readEvents (lib/state.mjs) needs exists and read; the analysis reads events through it.
-  return { out: await module.analyzeRun(runDir, { exec: deps.exec, read: deps.read, write: deps.write, exists: deps.exists }) };
+  // readEvents (lib/state.mjs) needs exists and read; the analysis reads events
+  // through it. readAnchor and now let it print the verified authority.
+  return { out: await module.analyzeRun(runDir, { exec: deps.exec, read: deps.read, write: deps.write, exists: deps.exists, readAnchor: deps.readAnchor, now: deps.now }) };
 }
 
 // lane/land: conduct.mjs parses --run and --wp; every other flag reaches the
