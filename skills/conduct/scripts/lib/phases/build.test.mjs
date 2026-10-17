@@ -241,9 +241,10 @@ function shellResult(h, action) {
     case 'pr-lookup': return ok(JSON.stringify([{ number: prNumber(id), headRefOid: h.head(id), state: 'OPEN' }]));
     case 'review/diff': return ok(h.diff?.[id] ?? 'src/a.mjs\n');
     case 'review/managed': return ok(JSON.stringify({ mode: 'standalone' }));
+    case 'review/delta-count': return ok(JSON.stringify({ outcome: 'ok', review_id: action.land.reviewId, head: action.land.head, major_findings: h.deltaAfterDup?.[id]?.shift() ?? 2 }));
     case 'post/post': {
       const count = h.findings[id]?.length ? h.findings[id].shift() : 0;
-      const receipt = action.land.scope === 'delta' ? `delta-major ${h.deltaMajor?.[id]?.shift() ?? 0} head=${action.land.head}\n` : '';
+      const receipt = action.land.scope === 'delta' ? `posted-review-id 7002\ndelta-major ${h.deltaMajor?.[id]?.shift() ?? 0} head=${action.land.head}\n` : '';
       return ok(count === null ? `posted\n${receipt}` : `findings ${count}\n${receipt}`);
     }
     case 'review/amend-diff': return ok(h.amendDiff?.[id] ?? 'docs/notes.md\n');
@@ -251,6 +252,7 @@ function shellResult(h, action) {
     case 'resolve/resolve':
       h.resolved += 1;
       return ok();
+    case 'reply/record': return ok(JSON.stringify({ html_url: 'https://github.com/o/r/pull/102#pullrequestreview-9003' }));
     case 'rebase/pre-head': return ok(`${h.head(id)}\n`);
     case 'rebase/post-heads': return ok(`${h.bump(id)}\n${'e'.repeat(40)}\n`);
     case 'merge/merge-commit': return ok(JSON.stringify({ mergeCommit: { oid: mergeSha(id) } }));
@@ -1800,7 +1802,7 @@ test('council meta and args (D20): meta precedes council_review; its args; a mis
   assert.deepEqual(all.filter((a) => ['reply', 'thread-ids', 'resolve'].includes(a.step)).map((a) => `${a.step}/${a.part}`), ['reply/record']);
   const record = all.find((a) => a.part === 'record');
   const recordFile = join(h.runDir, 'council', 'wp-02', 'review-1', 'pr-record.md');
-  assert.deepEqual(record.command, ['gh', 'api', '--method', 'POST', `repos/o/r/pulls/${prNumber('WP-02')}/reviews`, '-f', 'event=COMMENT', '-F', `body=@${recordFile}`]);
+  assert.deepEqual(record.command, ['gh', 'api', '--method', 'POST', `repos/o/r/pulls/${prNumber('WP-02')}/reviews`, '-f', 'event=COMMENT', '-f', `commit_id=${sha('a', 2)}`, '-F', `body=@${recordFile}`]);
   const body = readFileSync(recordFile, 'utf8');
   assert.match(body, /\*\*Council review record\*\*: `\/conduct` run `demo`, WP-02, round 1/);
   assert.match(body, /\| C1-1 \| fixed \| `2222222` \| the control's red line: `not ok 4 - merge lock` \|/);
@@ -2412,6 +2414,9 @@ test('tier from the recipe file (D17, D19.11): contractPaths or an added test ra
     const first = await drive(h, { until: (a) => a.wpId === 'WP-02' && (a.part === 'meta' || a.part === 'managed') });
     assert.equal(first.part, tier === 'T2' ? 'meta' : 'managed', diff);
     assert.equal(h.wp('WP-02').tier, tier);
+    const decision = h.events().find((event) => event.event === 'tier-classified' && event.data.wpId === 'WP-02');
+    assert.equal(decision?.data.tier, tier);
+    assert.ok(decision?.data.rule, 'the run record names the matched rule, including no-match');
   }
   const none = harness(t, { depth: 'none', council: true });
   none.diff = { 'WP-00': 'test/x.test.mjs\n' };
@@ -2438,12 +2443,35 @@ test('two delta P1/P2 findings route the amended whole PR to a T2 council', asyn
   assert.equal(next.part, 'meta');
   const council = of(h, 'WP-02').find((action) => action.tool === 'council_review');
   assert.equal(council, undefined, 'the council follows the metadata step');
-  assert.equal(wp.deltaEscalation, null);
+  assert.deepEqual(wp.deltaEscalation, { round: 2, head: deltaHead, majorFindings: 2 });
   assert.equal(wp.tier, 'T2');
   await recordPending(h, await perform(h, next));
   const round = await drive(h, { until: (action) => action.tool === 'council_review' });
   assert.equal(round.args.round, 3);
   assert.equal(round.land.scope, 'full');
+});
+
+test('a posted delta receipt flows through amendment, checks, council, record, and gate', async (t) => {
+  const h = harness(t, { council: true, wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3, 2] };
+  h.deltaMajor = { 'WP-02': [2] };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md', 'report-amendment-2.md'] };
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+  const countAction = await drive(h, { until: (a) => a.step === 'review' && a.part === 'delta-count' });
+  assert.ok(countAction, JSON.stringify(h.wp('WP-02')));
+  assert.ok(h.wp('WP-02').deltaEscalation, JSON.stringify(h.wp('WP-02')));
+  await recordPending(h, await perform(h, countAction));
+  assert.equal(h.wp('WP-02').stage, 'delta', JSON.stringify({ stage: h.wp('WP-02').stage, escalation: h.wp('WP-02').deltaEscalation, queue: h.wp('WP-02').queue }));
+  assert.equal(await drive(h), null);
+  const actions = of(h, 'WP-02');
+  const delta = actions.findIndex((action) => action.step === 'post' && action.land.scope === 'delta');
+  const amendment = actions.findIndex((action, index) => index > delta && action.step === 'brief' && action.part === 'amendment');
+  const council = actions.findIndex((action) => action.tool === 'council_review' && action.land.scope === 'full');
+  const record = actions.findIndex((action) => action.step === 'reply' && action.part === 'record');
+  const gate = actions.findIndex((action) => action.step === 'gate' && action.part === 'gate');
+  assert.ok(delta >= 0 && amendment > delta && council > amendment && record > council && gate > record, JSON.stringify({ indexes: [delta, amendment, council, record, gate], state: h.wp('WP-02').state, reason: h.wp('WP-02').reason, trace: actions.slice(-25).map((a) => `${a.step}/${a.part ?? a.land?.scope ?? ''}`), reviews: h.wp('WP-02').reviews }));
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.equal(h.wp('WP-02').reviews.some((review) => review.escalatedDeltaReviewId === 7002 && review.record?.url), true);
 });
 
 test('depth none: one WP-00 lane from <run>/wp-00.md; spine on → a completed receipt on the anchor and no done update; spine off → no agent-tool action', async (t) => {

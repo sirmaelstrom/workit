@@ -522,6 +522,29 @@ function renderFinding(f) {
   return `${f.lens ? `**lens:** ${f.lens}\n\n` : ''}${f.scope === 'delta' ? '**scope:** delta\n\n' : ''}**[${f.severity}] ${f.title}**\n\n${f.body}`;
 }
 
+const findingHash = (body) => createHash('sha256').update(body).digest('hex');
+const deltaManifest = (findings) => `<!-- workit-delta-findings: ${JSON.stringify(findings.map((f) => ({
+  hash: findingHash(renderFinding(f)), lens: f.lens, scope: f.scope, severity: f.severity,
+})))} -->`;
+
+/** Count distinct posted delta defects. A dup-of link joins two findings on this review. */
+export function countDeltaDefects(findings) {
+  const eligible = findings.filter((f) => f.scope === 'delta' && (f.severity === 'P1' || f.severity === 'P2') && f.lens !== GUARD_LENS);
+  const byId = new Map(eligible.filter((f) => f.id != null).map((f) => [String(f.id), f]));
+  const parent = new Map([...byId.keys()].map((id) => [id, id]));
+  const root = (id) => {
+    let at = id;
+    while (parent.get(at) !== at) at = parent.get(at);
+    return at;
+  };
+  for (const finding of eligible) {
+    const id = String(finding.id ?? '');
+    const duplicate = String(finding.dupOf ?? '');
+    if (parent.has(id) && parent.has(duplicate)) parent.set(root(id), root(duplicate));
+  }
+  return new Set([...parent.keys()].map(root)).size + eligible.filter((f) => f.id == null).length;
+}
+
 /**
  * Build the `POST /pulls/{n}/reviews` payload.
  *
@@ -545,6 +568,7 @@ export function buildReviewPayload({
   // The test-weakening check (`guardReview`): its threads ride the same POST
   // as the lens comments, and its section precedes the footer.
   guard,
+  deltaFindings,
 }) {
   const sections = [summary.trim()];
 
@@ -582,6 +606,7 @@ export function buildReviewPayload({
   }
 
   if (guard?.section) sections.push(guard.section);
+  if (deltaFindings) sections.push(deltaManifest(deltaFindings));
 
   const footer = [
     '',
@@ -779,6 +804,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
     lensCounts,
     excluded,
     guard,
+    deltaFindings: since ? doc.findings : undefined,
   });
   payload.commit_id = reviewedHead;
 
@@ -831,7 +857,8 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   );
   const posted = JSON.parse(res);
   log(`\nposted         ${posted.html_url}`);
-  if (since) log(`delta-major ${doc.findings.filter((finding) => finding.severity === 'P1' || finding.severity === 'P2').length} head=${reviewedHead}`);
+  if (since) log(`posted-review-id ${posted.id}`);
+  if (since) log(`delta-major ${countDeltaDefects(doc.findings)} head=${reviewedHead}`);
 }
 
 // GitHub's GraphQL connections are paged, and these two page sizes are the ones
@@ -973,6 +1000,7 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log,
     }
   }
 
+  const postedBody = opts.dupOf === undefined ? body : `${body.trimEnd()}\n\n<!-- workit-dup-of: ${opts.dupOf} -->`;
   const res = runGh(
     [
       'api',
@@ -982,7 +1010,7 @@ export function cmdReply(opts, { runGh = ghOrDie, die = fail, log = console.log,
       '--input',
       '-',
     ],
-    { input: JSON.stringify({ body }), cwd: opts.cwd },
+    { input: JSON.stringify({ body: postedBody }), cwd: opts.cwd },
   );
   log(`replied        ${JSON.parse(res).html_url}`);
   if (opts.verdict) {
@@ -1968,23 +1996,97 @@ export function readReviewListing({ repo, pr, cwd, runGh = gh }) {
   return reviews;
 }
 
-/** Scope the posted reviews, then count findings on the last delta review's own comments. */
-export function readScopedReviews({ repo, pr, cwd, runGh = gh, serviceLogin, replacedReviewIds = [] }) {
-  const reviews = readReviewListing({ repo, pr, cwd, runGh })
-    .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
-    .filter(Boolean);
-  const last = reviews.at(-1);
-  if (last?.scope !== 'delta') return reviews;
+function readDeltaManifest(body) {
+  const match = /<!-- workit-delta-findings: (\[[^\n]*\]) -->/.exec(String(body ?? ''));
+  if (!match) return null;
+  const entries = JSON.parse(match[1]);
+  if (!Array.isArray(entries) || !entries.every((f) => /^[0-9a-f]{64}$/.test(f.hash) && ['P1', 'P2', 'P3'].includes(f.severity) && f.scope === 'delta')) {
+    throw new Error('posted delta findings manifest is malformed');
+  }
+  return entries;
+}
+
+export function readCouncilMarker(body) {
+  const match = /<!-- workit-council-round: (\{[^\n]*\}) -->/.exec(String(body ?? ''));
+  if (!match || !String(body).startsWith('**Council review record**')) return null;
+  const marker = JSON.parse(match[1]);
+  if (!marker.id || !Number.isInteger(marker.delta_review_id) || !/^[0-9a-f]{40}$/i.test(marker.head)) return null;
+  return marker;
+}
+
+export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted }) {
+  const reviewId = posted.review_id ?? posted.id;
   const raw = runGh(
-    ['api', '--paginate', `repos/${repo}/pulls/${pr}/reviews/${last.review_id}/comments`, '--jq', '.[] | {body, in_reply_to_id}'],
+    ['api', '--paginate', `repos/${repo}/pulls/${pr}/reviews/${reviewId}/comments`, '--jq', '.[] | {id, body, in_reply_to_id}'],
     { cwd },
   );
-  const majorFindings = String(raw).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
-    .filter((comment) => comment.in_reply_to_id == null)
-    .map(readPostedFinding)
-    .filter((finding) => finding.scope === 'delta' && (finding.severity === 'P1' || finding.severity === 'P2')).length;
-  reviews[reviews.length - 1] = { ...last, majorFindings };
+  const comments = String(raw).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  const originals = comments.filter((comment) => comment.in_reply_to_id == null);
+  const manifest = readDeltaManifest(posted.body);
+  const entries = manifest ? manifest.map((finding) => ({ ...finding })) : originals.map((comment) => ({ ...readPostedFinding(comment), id: comment.id }));
+  if (manifest) {
+    const byHash = new Map();
+    for (const comment of originals) {
+      const hash = findingHash(comment.body);
+      byHash.set(hash, [...(byHash.get(hash) ?? []), comment.id]);
+    }
+    for (const entry of entries) entry.id = byHash.get(entry.hash)?.shift();
+    const usedIds = new Set(entries.map((entry) => String(entry.id)).filter((id) => id !== 'undefined'));
+    for (const comment of originals) {
+      if (!usedIds.has(String(comment.id))) entries.push({ ...readPostedFinding(comment), id: comment.id });
+    }
+  }
+  for (const reply of comments.filter((comment) => comment.in_reply_to_id != null)) {
+    const match = /<!-- workit-dup-of: (\d+) -->/.exec(String(reply.body ?? ''));
+    if (!match) continue;
+    const duplicate = entries.find((entry) => String(entry.id) === String(reply.in_reply_to_id));
+    if (duplicate) duplicate.dupOf = match[1];
+  }
+  return countDeltaDefects(entries);
+}
+
+/** Scope the posted reviews and count each delta's posted findings. */
+export function readScopedReviews({ repo, pr, cwd, runGh = gh, serviceLogin, replacedReviewIds = [] }) {
+  const listed = readReviewListing({ repo, pr, cwd, runGh });
+  const reviews = listed
+    .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
+    .filter(Boolean);
+  for (const [index, review] of reviews.entries()) {
+    if (review.scope !== 'delta') continue;
+    const posted = listed.find((item) => String(item.review_id) === String(review.review_id));
+    const majorFindings = readPostedDeltaCount({ repo, pr, cwd, runGh, posted });
+    let councilRoundId = null;
+    for (const candidate of listed) {
+      const marker = readCouncilMarker(candidate.body);
+      if (!marker || marker.delta_review_id !== Number(review.review_id) || marker.head !== candidate.commit_id) continue;
+      if (marker.head !== review.head) {
+        const comparison = JSON.parse(runGh(['api', `repos/${repo}/compare/${review.head}...${marker.head}`], { cwd }));
+        if (comparison.status !== 'ahead' && comparison.status !== 'identical') continue;
+      }
+      councilRoundId = marker.id;
+    }
+    reviews[index] = { ...review, majorFindings, ...(councilRoundId ? { councilRoundId } : {}) };
+  }
   return reviews;
+}
+
+/** Recount one posted delta after replies have recorded any dup-of links. */
+export function cmdDeltaCount(opts, { runGh = ghOrDie, log = console.log, die = fail } = {}) {
+  const repo = resolveRepo(opts.repo, opts.cwd);
+  try {
+    const posted = JSON.parse(runGh(['api', `repos/${repo}/pulls/${opts.pr}/reviews/${opts.reviewId}`], { cwd: opts.cwd }));
+    if (String(posted.id) !== String(opts.reviewId) || !readDeltaManifest(posted.body)) {
+      die(4, `review ${opts.reviewId} has no posted delta findings manifest`);
+      return;
+    }
+    const majorFindings = readPostedDeltaCount({ repo, pr: opts.pr, cwd: opts.cwd, runGh, posted });
+    const answer = { outcome: 'ok', review_id: posted.id, head: posted.commit_id, major_findings: majorFindings };
+    log(JSON.stringify(answer));
+    return answer;
+  } catch (error) {
+    die(4, `delta count for review ${opts.reviewId} could not be read: ${error.message}`);
+    return undefined;
+  }
 }
 
 /**
@@ -3202,6 +3304,7 @@ async function cmdPostCoordinated(opts, {
     lensCounts,
     excluded,
     guard,
+    deltaFindings: since ? findings : undefined,
   });
   payload.commit_id = attemptRef.head_sha;
   payload.body = `${payload.body}\n\n${markerFromRef}`;
@@ -3305,7 +3408,7 @@ async function cmdPostCoordinated(opts, {
     || (state === undefined && ['posted', 'post_rejected'].includes(classified.outcome));
   if (terminal) discardAttemptRefFile(refFile, diag);
   if (classified.outcome === 'posted') diag(`posted         ${classified.html_url ?? `review ${classified.review_id}`}`);
-  const majorFindings = since ? findings.filter((finding) => finding.severity === 'P1' || finding.severity === 'P2').length : null;
+  const majorFindings = since ? countDeltaDefects(findings) : null;
   if (classified.outcome === 'posted' && since) diag(`delta-major ${majorFindings} head=${headNow}`);
   const line = emit({
     outcome: classified.outcome,
@@ -3505,6 +3608,8 @@ On a managed repository (see below), the coordinated flow replaces steps 2 and 3
            {outcome:"ok", round: full|reviewed|delta|capped, since?, last?,
            rebased_from?, rebase?, problem} or {outcome:"refused", reason};
            a rebased head is mapped onto the reviewed one by patch id
+  delta-count --pr <n> --repo owner/name --review-id <n>
+           read-only: recount posted delta defects after dup-of replies
   inflight --pr <n> --repo owner/name --head <full sha>
            read-only: the review attempts on this head that have not ended —
            {outcome:"ok", mode, inflight:[{attempt, origin, state}]}; exit 9 when
@@ -3591,6 +3696,12 @@ export function parseArgs(argv) {
         const v = next();
         if (!/^\d+$/.test(v)) fail(2, '--dup-of must be a numeric comment id');
         opts.dupOf = v;
+        break;
+      }
+      case '--review-id': {
+        const v = next();
+        if (!/^\d+$/.test(v)) fail(2, '--review-id must be a numeric review id');
+        opts.reviewId = v;
         break;
       }
       case '--context-file': opts.contextFile = next(); break;
@@ -3718,6 +3829,9 @@ function main(argv) {
       // posted markers' heads: a short sha would never read as `reviewed`.
       if (!/^[0-9a-f]{40}$/i.test(String(opts.head ?? ''))) fail(2, 'rounds needs --head <full 40-character sha>');
       return cmdRounds(opts);
+    case 'delta-count':
+      if (!opts.repo || !opts.reviewId) fail(2, 'delta-count needs --repo owner/name and --review-id <n>');
+      return cmdDeltaCount(opts);
     case 'inflight':
       if (!opts.repo) fail(2, 'inflight needs --repo owner/name');
       if (!/^[0-9a-f]{40}$/i.test(String(opts.head ?? ''))) fail(2, 'inflight needs --head <full 40-character sha>');

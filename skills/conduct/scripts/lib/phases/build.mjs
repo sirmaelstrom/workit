@@ -32,7 +32,7 @@ import { briefPaths } from '../../../../../scripts/lane.mjs';
 import { bootstrapBrief } from '../bootstrap.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
-  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierFor, visualReadProblem,
+  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
   QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
@@ -106,6 +106,24 @@ function readText(deps, path) {
   } catch {
     return null;
   }
+}
+
+function registeredHookCommands(wp, deps) {
+  const commands = [];
+  const walk = (value) => {
+    if (Array.isArray(value)) return value.forEach(walk);
+    if (!value || typeof value !== 'object') return;
+    for (const [key, item] of Object.entries(value)) {
+      if (key === 'command' && typeof item === 'string') commands.push(item);
+      else walk(item);
+    }
+  };
+  for (const path of ['.claude/settings.json', '.claude/settings.local.json', '.codex/settings.json', '.agents/settings.json']) {
+    const text = readText(deps, join(wp.lane.worktree, path));
+    if (!text) continue;
+    try { walk(JSON.parse(text).hooks); } catch { /* a changed settings file is T2 by path */ }
+  }
+  return commands;
 }
 
 function readJsonFile(deps, path, what) {
@@ -1177,7 +1195,16 @@ function expand(state, wp, deps) {
       return go([], 'delta');
     }
     case 'reviewed': {
-      if ((wp.reviews ?? []).at(-1)?.findings === 0) return go([], 'land');
+      if ((wp.reviews ?? []).at(-1)?.findings === 0) {
+        const review = (wp.reviews ?? []).at(-1);
+        const record = review?.escalatedDeltaReviewId ? councilRecord(state, wp, []) : null;
+        if (record) {
+          deps.mkdir(dirname(record.path));
+          deps.write(record.path, record.body);
+          return go([record.action], 'land');
+        }
+        return go([], 'land');
+      }
       return findingsAmendment(state, wp, deps);
     }
     case 'resolve': {
@@ -1191,7 +1218,12 @@ function expand(state, wp, deps) {
         deps.write(prior, priorAdjudicationBody(record.body));
         wp.priorAdjudication = { path: prior, round: (wp.reviews ?? []).at(-1)?.round ?? null };
       }
-      return go([...(record ? [record.action] : []), ...(wp.replyIds?.length ? resolveThreadActions(state, wp, wp.replyIds) : [])], 'delta');
+      const latest = (wp.reviews ?? []).at(-1);
+      const recount = latest?.scope === 'delta' && latest.tier === 'T1' && latest.majorFindings >= 2 && latest.reviewId != null
+        ? shell('review', 'delta-count', ['node', join(state.pluginRoot, 'skills', 'slim-review', 'scripts', 'pr-review.mjs'), 'delta-count',
+          '--pr', String(wp.pr.number), '--repo', state.intent.repo.remote, '--review-id', String(latest.reviewId)],
+        { land: { reviewId: latest.reviewId, head: latest.head } }) : null;
+      return go([...(record ? [record.action] : []), ...(wp.replyIds?.length ? resolveThreadActions(state, wp, wp.replyIds) : []), ...(recount ? [recount] : [])], 'delta');
     }
     case 'delta': {
       // One delta pass per full review; a later tail is the gate's post-cap inspection.
@@ -1822,14 +1854,16 @@ function recordOwn(state, wp, action, result, deps) {
       }
       const config = repoConfig(state, deps);
       wp.changedPaths = changed;
-      wp.tier = tierFor(wp, changed, Array.isArray(config.contractPaths) ? config.contractPaths : []);
+      const decision = tierDecision(wp, changed, Array.isArray(config.contractPaths) ? config.contractPaths : [], registeredHookCommands(wp, deps));
+      wp.tierDecision = decision;
+      wp.tier = decision.tier;
+      appendEvent(state, deps, { step: 'review', event: 'tier-classified', data: { wpId: wp.id, changedPaths: changed, ...decision } });
       if (wp.fullReviewOwed && effectiveTier(wp) === 'T0') wp.tier = 'T1';
       wp.fullReviewOwed = null;
       if (effectiveTier(wp) === 'T0') return (wp.stage = 'land');
       setState(state, wp, 'review', null, deps);
       const round = latestRound(wp) + 1;
       wp.queue = emitting(state, wp, deps, () => (wp.tier === 'T2' ? withMeta(state, wp, t2Actions(state, wp, { round, changedPaths: absolute, report })) : reviewActions(state, wp, { round, report })));
-      if (wp.state !== 'blocked') wp.deltaEscalation = null;
       return (wp.stage = wp.state === 'blocked' ? null : 'reviewed');
     }
     default:
@@ -1923,14 +1957,19 @@ function route(state, wp, action, out, deps) {
       if (action.step === 'fallback' && patch.lane?.fallback) wp.agent = patch.lane.fallback;
       // A land patch that replaces the queue moves the stage with it.
       if (patch.queue?.some((a) => a.step === 'rebase' && a.part === 'fetch')) wp.stage = 'gate';
-      else if (patch.queue?.some((a) => ['review', 'post'].includes(a.step) || (a.step === 'council' && a.part === 'review'))) {
+      else if (patch.queue?.some((a) => (a.step === 'review' && a.part !== 'delta-count') || a.step === 'post' || (a.step === 'council' && a.part === 'review'))) {
         wp.queue = withMeta(state, wp, wp.queue);
         wp.stage = 'reviewed';
       }
       const added = (wp.reviews ?? []).length > before ? wp.reviews.at(-1) : null;
       // Zero findings (D20): no amendment, adjudication or resolve; the rest of the review array is dropped.
       if (added?.findings === 0) {
-        wp.queue = [];
+        const record = added.escalatedDeltaReviewId ? councilRecord(state, wp, []) : null;
+        if (record) {
+          deps.mkdir(dirname(record.path));
+          deps.write(record.path, record.body);
+        }
+        wp.queue = record ? [record.action] : [];
         wp.stage = 'land';
       }
       return;

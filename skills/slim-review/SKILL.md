@@ -660,9 +660,9 @@ head's round under the cap (§ 4):
 | `round` | Meaning | Also carries |
 |---|---|---|
 | `full` | no review yet: a full paired review is owed | `problem: null` |
-| `reviewed` | the last review is on this head, or this head is a patch-identical rebase of it | `last`, `problem: null`; `rebased_from` and `rebase` for a rebase |
+| `reviewed` | the last review is on this head, or this head is a patch-identical rebase of it | `last`, `problem: null`; `rebased_from` and `rebase` for a rebase; possible escalation fields |
 | `delta` | a full review and no delta after it: round two, `lens --since <since>` | `since` (the last **full** review's head, or after a mapped rebase the last commit before the first changed patch), `last`, `rebase?`, `problem` |
-| `capped` | a delta after the last full review: no third T1 review | `last`, `rebase?`, `problem`; optionally `escalate: "t2-council"` and `escalate_reason` |
+| `capped` | a delta after the last full review: no third T1 review | `last`, `rebase?`, `problem`; possible escalation fields |
 
 `last` is `{head, scope: "full"|"delta", review_id}`. In the delta round
 `problem` is why `<since>...<head>` is no amendment diff (the rule `lens --since`
@@ -670,10 +670,13 @@ refuses by), or null. In the capped round it is why the head can't converge on
 its tail: not an ancestor, a merge from the base branch, or an incomplete commit
 list. A tail with no changed files, no merge and a complete commit list is null.
 A non-null `problem` is the conductor's call.
-The additive `escalate` fields follow `burn-down` § Per item step 3. The count
-comes from P1/P2 findings in the posted delta review's own `**scope:** delta`
-comments; `escalate_reason` names the count and review id. Callers that do not
-read the new fields still receive `round: "capped"`.
+`major_findings` gives the distinct count when the last review is a delta.
+The additive `escalate: "t2-council"` and `escalate_reason` fields follow
+`burn-down` § Per item step 3. They persist on reviewed, capped, and rebased
+heads until a council round is recorded on that head or later. The count comes
+from distinct P1/P2 defects in that posted delta review's own `**scope:** delta`
+findings, including body-only findings. `escalate_reason` names the count and
+review id. Callers that do not read the new fields still receive `round: "capped"`.
 
 **A rebase is mapped, not refused.** When the tail from the last reviewed head
 diverged, or is ahead with a merge in it, `rounds` matches the head's commits

@@ -19,7 +19,8 @@ Babysit follows slim-review's cap (§ 4 Adjudicate, "Round two: the amendment
 only"): at most **two reviews per PR**, one full and one delta.
 The T2 triggers and delta escalation in `burn-down` § Per item step 3 take
 precedence. When `rounds` signals escalation, babysit stops with `t2-council`
-for the conductor to review the amended whole PR.
+for the conductor to review the amended whole PR. It resumes only after a
+head-bound council round is recorded, as defined there.
 
 1. **Full.** No review on the PR yet: claim the head and run both lenses over
    the whole PR.

@@ -161,6 +161,7 @@ export function isDedupeHit(review, { head, serviceLogin, replacedReviewIds = []
  */
 export function postedReviewScope(review, { serviceLogin, replacedReviewIds = [] }) {
   const item = normalizeReview(review);
+  if (String(item.body ?? '').startsWith('**Council review record**')) return null;
   if (item.author_login !== serviceLogin) return null;
   if (replacedReviewIds.some((id) => String(id) === String(item.review_id))) return null;
   if (isReplyContainer(item)) return null;

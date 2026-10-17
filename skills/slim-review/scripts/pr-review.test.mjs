@@ -3835,6 +3835,44 @@ test('rounds escalates only a capped head with two posted P1/P2 comments on its 
   assert.equal(full.calls.some((args) => args.join(' ').includes('/comments')), false);
 });
 
+test('COUNCIL COUNT: body-only delta defects count, guard and P3 do not, and a dup-of pair counts once', async () => {
+  const full = roundsReview(11, RH1);
+  const delta = roundsReview(12, RH2, { since: RH1 });
+  const bodyOnly = { lens: 'codex', scope: 'delta', severity: 'P2', title: 'binary change', body: 'cannot anchor', path: 'binary.dat', line: 1 };
+  const inline = [101, 102].map((id) => ({ lens: 'codex', scope: 'delta', severity: 'P2', title: `defect ${id}`, body: 'body', path: 'a.ts', line: id }));
+  const payload = buildReviewPayload({ summary: delta.body, coverage: 'examined 1 of 1', anchored: inline, offDiffChanged: [bodyOnly], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: [bodyOnly, ...inline] });
+  delta.body = payload.body;
+  const comment = (id, severity, lens = 'codex') => ({ id, in_reply_to_id: null, body: `**lens:** ${lens}\n\n**scope:** delta\n\n**[${severity}] defect ${id}**\n\nbody` });
+  const comments = [...payload.comments.map((item, index) => ({ id: 101 + index, in_reply_to_id: null, body: item.body })), comment(103, 'P3'), comment(104, 'P2', 'guard'),
+    { id: 105, in_reply_to_id: 102, body: '<!-- workit-dup-of: 101 -->' }];
+  const paired = await runRounds({ reviews: [full, delta], head: RH3, commentsByReview: { 12: comments } });
+  assert.equal(paired.line.escalate, 't2-council', 'body-only plus one distinct inline defect is two');
+  assert.match(paired.line.escalate_reason, /2 posted/);
+  const pairReview = roundsReview(12, RH2, { since: RH1 });
+  pairReview.body = buildReviewPayload({ summary: pairReview.body, coverage: 'examined 1 of 1', anchored: inline, offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: inline }).body;
+  const onlyPair = await runRounds({ reviews: [full, pairReview], head: RH3, commentsByReview: { 12: comments } });
+  assert.equal(Object.hasOwn(onlyPair.line, 'escalate'), false, 'the two inline comments are one defect');
+});
+
+test('COUNCIL CLEAR: a posted council record for the delta clears escalation on that head', async () => {
+  const comment = (id) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[P2] defect ${id}**\n\nbody` });
+  const council = { ...roundsReview(13, RH2, { login: 'conductor' }), body: `**Council review record**: round 3.\n\n<!-- workit-council-round: {"id":"run/WP-01/3","delta_review_id":12,"head":"${RH2}"} -->` };
+  const result = await runRounds({ reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), council], head: RH3, commentsByReview: { 12: [comment(101), comment(102)] } });
+  assert.equal(result.line.round, 'capped');
+  assert.equal(Object.hasOwn(result.line, 'escalate'), false);
+});
+
+test('a council record on a later descendant clears escalation; an unrelated head does not', async () => {
+  const comment = (id) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[P2] defect ${id}**\n\nbody` });
+  const council = { ...roundsReview(13, RH3, { login: 'conductor' }), body: `**Council review record**: round 3.\n\n<!-- workit-council-round: {"id":"run/WP-01/3","delta_review_id":12,"head":"${RH3}"} -->` };
+  const reviews = [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 }), council];
+  const options = { reviews, head: RH3, commentsByReview: { 12: [comment(101), comment(102)] } };
+  const descendant = await runRounds({ ...options, compare: roundsCompare({ status: 'ahead' }) });
+  assert.equal(Object.hasOwn(descendant.line, 'escalate'), false);
+  const unrelated = await runRounds({ ...options, compare: roundsCompare({ status: 'diverged' }) });
+  assert.equal(unrelated.line.escalate, 't2-council');
+});
+
 test('rounds: an uppercase --head on a reviewed head answers reviewed (heads compare lowercase)', async () => {
   const head = 'abcdef0123456789abcdef0123456789abcdef01';
   const r = await runRounds({ reviews: [roundsReview(11, head)], head: head.toUpperCase() });
