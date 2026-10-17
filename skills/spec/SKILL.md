@@ -320,9 +320,11 @@ record; a T3 answer is written back to Spine the same turn. Put the ask key in
 each option label (`a — Full grant, $200`) and the receipt tag in the question
 (`[ask <receiptId>]`) when a Spine ask exists. Use at most four options per
 question; split or collapse a Dogan ask with five or six options. A headless
-lane with no operator present files the Dogan ask only. For now, write a T3
-answer as a conductor receipt quoting it; `spine_receipt` cannot write
-`answered`.
+lane with no operator present files the Dogan ask only. The T3 ask-mirror hook
+writes a tagged single-choice answer to Spine as `answered` (`by:
+'operator:t3'`) while the ask is still the quest's latest receipt; write a
+conductor receipt quoting the answer only when the hook reports the mirror
+refused or skipped it, or its pending job did not end `answered`.
 
 ### Phase 5: Revision (if needed)
 

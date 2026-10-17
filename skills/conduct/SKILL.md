@@ -43,9 +43,11 @@ so each invocation follows the run's recorded plugin root after an upgrade.
      (`a — Full grant, $200`) and the receipt tag in the question
      (`[ask <receiptId>]`). Use at most four options per question; split or
      collapse a Dogan ask with five or six options. A headless lane with no
-     operator present files the Dogan ask only. Today, write a T3 answer as a
-     conductor receipt quoting it: `spine_receipt` cannot write `answered`. A
-     conduct touch still needs the Dogan press until the H12 mirror lands.
+     operator present files the Dogan ask only. The T3 ask-mirror hook writes a
+     tagged single-choice answer to Spine as `answered` (`by: 'operator:t3'`)
+     while the ask is the anchor's latest receipt, and a touch's read-back
+     accepts it. When the hook reports the mirror refused or skipped it, or its
+     pending job did not end `answered`, the touch waits for the Dogan press.
      - **Core path:** record `{}` after they have answered. An unanswered touch returns the same action with `answered: false`.
      - **Spine path:** a touch is receipt → read-back → hand-back. The hand-back (`handBack: true`) comes when a read-back finds no answer to this run's filing, including another run's answer to the same tag. An answer to this filing that can't be used is handled differently:
        - An answer that isn't stamped `operator:` is refused: `record` exits 3, and the touch is re-filed (`filing + 1`).
