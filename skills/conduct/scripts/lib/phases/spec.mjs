@@ -3,13 +3,7 @@
 import { join, resolve, win32 } from 'node:path';
 import { ConductError } from '../state.mjs';
 import { parseDesignDirection, skillsField, stripWrappingBackticks, visualRules } from '../schedule.mjs';
-
-// The touch whose answer set the authority: touch 1, or its blocked re-ask.
-// A touch the build opened (budget, a re-plan, a halt) or the showcase sets
-// no authority, though it too has no WP (council on e830d835).
-function approvingTouch(state) {
-  return state.touches.filter((touch) => touch.status === 'answered' && touch.wpId === null && !touch.build && touch.kind !== 'showcase').at(-1);
-}
+import { approvingTouch, verifiedAuthority } from '../authority.mjs';
 
 // The record that carries the run's authority: a (c) answer's validated grant
 // (scope included), else the answering touch (scope = the goal verbatim).
@@ -27,7 +21,11 @@ export function samePath(a, b, platform) {
   return normalize(a) === normalize(b);
 }
 
-export function next(state) {
+// /spec runs under the verified authority's scope: on zero authority the
+// phase holds with the reason (P3) and emits nothing.
+export function next(state, deps) {
+  const authority = verifiedAuthority(state, deps);
+  if (authority.reason) return { kind: 'done', held: true, reason: `spec held: ${authority.reason}` };
   const ref = preapprovedRef(state);
   // Intake's greenfield trigger (quest 977d3efb) also puts D1, the stack
   // decision, through /spec's stack attack (quest 061b526a).
@@ -58,12 +56,12 @@ function runtimeExerciseField(text) {
   return stripWrappingBackticks(value);
 }
 
-function writeWp00(state, gateCommand, deps) {
+function writeWp00(state, gateCommand, scope, deps) {
   const path = join(state.runDir, 'wp-00.md');
   const exercise = 'name the surface this change alters at runtime and the check that exercises it (the command and what it prints), or `none: <why>`.';
   deps.write(path, [
     '# WP-00', '', '**Goal (verbatim):**', '', state.intent.goal, '',
-    `**Approved scope:** ${state.authority.scope}`, '',
+    `**Approved scope:** ${scope}`, '',
     `**Gate command:** \`${gateCommand}\``, '', `**Runtime exercise:** ${exercise}`, '',
   ].join('\n'));
   return { path, runtimeExercise: exercise };
@@ -88,9 +86,12 @@ export function record(state, action, result, deps) {
     const duplicate = ids.find((id, i) => ids.indexOf(id) !== i);
     if (duplicate) throw new ConductError(2, `the spec result lists WP id ${duplicate} twice`);
   }
+  // Zero authority holds the phase: nothing is recorded, and next names the reason.
+  const authority = verifiedAuthority(state, deps);
+  if (authority.reason) return;
   state.spec = { ...state.spec, depth, reviewLevel, gateCommand };
   if (depth === 'none') {
-    const wp00 = writeWp00(state, gateCommand, deps);
+    const wp00 = writeWp00(state, gateCommand, authority.scope, deps);
     state.wps = [wpRecord({ id: 'WP-00', name: state.intent.goal, specPath: wp00.path, runtimeExercise: wp00.runtimeExercise })];
   } else if (depth === 'lite') {
     const specPath = join(state.workshopDir, 'spec.md');

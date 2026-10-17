@@ -444,7 +444,7 @@ test('spec scope: /spec is held on zero authority, and WP-00\'s approved scope i
   const held = spec.next(tampered, CONFIGURED);
   assert.equal(held.kind, 'done');
   assert.match(held.reason, /authority proof invalid: statement_mismatch/);
-  spec.record(tampered, action, result, CONFIGURED);
+  spec.record(tampered, action, { ...result, workshopDir: tampered.workshopDir }, CONFIGURED);
   assert.deepEqual([tampered.phase, existsSync(join(tampered.runDir, 'wp-00.md'))], ['spec', false]);
 });
 

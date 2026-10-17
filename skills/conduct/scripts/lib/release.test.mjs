@@ -88,13 +88,15 @@ test('C2-9 a scope-less (legacy) entry is user scope; project paths compare case
 
 const wp = (state) => ({ id: 'WP', state });
 const run = (over = {}) => ({ intent: { release: CONFIG.release }, authority: { release: true }, wps: [wp('merged'), wp('merged')], ...over });
+// The authority the release phase passes with no operator passkey configured: the state's own.
+const eligible = (state) => releaseEligible(state, { merge: true, release: state.authority.release === true, budgetUsd: 0, proofMode: 'unconfigured', reason: null, grant: null });
 
 test('releaseEligible (D19.10): complete build + recipe + authority; otherwise the first reason in order', () => {
-  assert.deepEqual(releaseEligible(run()), { ok: true, reason: null });
-  assert.deepEqual(releaseEligible(run({ wps: [wp('merged'), wp('blocked')] })), { ok: false, reason: 'incomplete build' });
-  assert.deepEqual(releaseEligible(run({ wps: [wp('merged'), wp('held')] })), { ok: false, reason: 'held' });
-  assert.deepEqual(releaseEligible(run({ intent: { release: null } })), { ok: false, reason: 'no recipe' });
-  assert.deepEqual(releaseEligible(run({ authority: { release: false } })), { ok: false, reason: 'no release authority' });
-  assert.deepEqual(releaseEligible(run({ wps: [wp('merged'), wp('gate')] })), { ok: false, reason: 'incomplete build' });
-  assert.deepEqual(releaseEligible(run({ wps: [wp('held'), wp('blocked')], authority: { release: false } })), { ok: false, reason: 'held' });
+  assert.deepEqual(eligible(run()), { ok: true, reason: null });
+  assert.deepEqual(eligible(run({ wps: [wp('merged'), wp('blocked')] })), { ok: false, reason: 'incomplete build' });
+  assert.deepEqual(eligible(run({ wps: [wp('merged'), wp('held')] })), { ok: false, reason: 'held' });
+  assert.deepEqual(eligible(run({ intent: { release: null } })), { ok: false, reason: 'no recipe' });
+  assert.deepEqual(eligible(run({ authority: { release: false } })), { ok: false, reason: 'no release authority' });
+  assert.deepEqual(eligible(run({ wps: [wp('merged'), wp('gate')] })), { ok: false, reason: 'incomplete build' });
+  assert.deepEqual(eligible(run({ wps: [wp('held'), wp('blocked')], authority: { release: false } })), { ok: false, reason: 'held' });
 });

@@ -7,12 +7,21 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import {
   tierFor, tierDecision, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
-  resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions, recordLandStep, runLandVerb,
+  resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions as mergeActionsWith, recordLandStep as recordLandStepWith, runLandVerb,
   parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord, visualReadProblem,
 } from './land.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
 import { runConduct } from '../conduct.mjs';
 import { testDeps } from '../test-deps.mjs';
+
+// The authority a phase passes with no operator passkey configured: the
+// state's own (verifiedAuthority's unconfigured path). A test passes another.
+const unsignedAuthority = (state) => ({
+  merge: state.authority?.merge === true, release: state.authority?.release === true, budgetUsd: state.authority?.budgetUsd ?? 0,
+  scope: state.authority?.scope, proofMode: 'unconfigured', reason: null, ignored: [], grant: null,
+});
+const mergeActions = (state, wp, head, authority = unsignedAuthority(state)) => mergeActionsWith(state, wp, head, authority);
+const recordLandStep = (state, wp, action, r, deps = {}, authority = unsignedAuthority(state)) => recordLandStepWith(state, wp, action, r, deps, authority);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '..', '__fixtures__', 'land');

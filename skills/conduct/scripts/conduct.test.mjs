@@ -389,7 +389,7 @@ test('showcase briefing: the conductor writes it before the touch; the question 
     wps: [{ id: 'WP-01', state: 'merged', pr: { number: 7 } }, { id: 'WP-02', state: 'blocked', pr: { number: 8 }, reason: 'check failed again after an amendment' }],
     intent: { anchor: ANCHOR, repo: { path: 'X:/fixture/repo', remote: 'o/r', defaultBranch: 'main' } }, release: { state: 'not-exercised', reason: 'no recipe' },
   };
-  const deps = { append: () => {}, timestamp: () => '2026-10-08T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: existsSync, read: (path) => readFileSync(path, 'utf8') };
+  const deps = testDeps({ append: () => {}, timestamp: () => '2026-10-08T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: existsSync, read: (path) => readFileSync(path, 'utf8') });
   const author = showcase.next(state, deps);
   assert.deepEqual([author.kind, author.step, author.outPath], ['author', 'showcase-brief', join(dir, 'showcase-brief.json')]);
   assert.match(author.instruction, /name every one of WP-02/);
@@ -1540,12 +1540,12 @@ test('the /spec action carries --greenfield exactly when intent.greenfield is on
     intent: { goal: GOAL, ...(greenfield === undefined ? {} : { greenfield }) }, workshopDir: join('/', 'ws'), runDir: join('/', 'ws', 'run'),
     authority: { record: 'touches/1-authority.json' }, adapters: { spine: { on: false } }, touches: [],
   });
-  const on = specNext(state({ on: true, why: ['no CI workflow can gate a PR'] }));
+  const on = specNext(state({ on: true, why: ['no CI workflow can gate a PR'] }), testDeps());
   assert.equal(on.skillArgv.at(-1), '--greenfield');
   assert.equal(on.skillArgv.filter((arg) => arg === '--greenfield').length, 1);
   assert.match(on.skillArgs, / --greenfield$/);
   for (const off of [undefined, { on: false, why: [] }]) {
-    const action = specNext(state(off));
+    const action = specNext(state(off), testDeps());
     assert.ok(!action.skillArgv.includes('--greenfield') && !action.skillArgs.includes('--greenfield'));
   }
 });

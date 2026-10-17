@@ -35,8 +35,9 @@ import {
   priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
-  QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
+  QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, operatorAnchor, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
 } from '../touch.mjs';
+import { assertFileable, budgetAmount, budgetNote, mergeRefusal, raiseConsequence, verifiedAuthority } from '../authority.mjs';
 import { preapprovedRef } from './spec.mjs';
 
 // The lane-contract template's run-level slot prefixes (D17). `<repo A` also
@@ -732,16 +733,28 @@ function haltTouch(state, deps, reason, why, spendUsd = null) {
   const halts = (state.build.halts ??= []);
   if (why === 'budget' && halts.some((halt) => halt.kind === 'budget')) return;
   const budget = why === 'budget';
+  // With an operator passkey configured, a raise is signed: (a) carries the
+  // raise's tag over this touch and the spend at its filing (C3).
+  const raise = budget && operatorAnchor(deps).configured
+    ? { kind: 'budget-raise', runId: state.runId, touch: state.touches.length + 1, haltSpendUsd: spendUsd ?? 0 } : null;
+  const options = budget
+    ? [raise ? { key: 'a', label: 'Raise the budget', consequence: raiseConsequence(raise) } : option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; metering continues against it.'),
+      option('b', 'Stop new paid lane work', 'No dispatch, start, prompt or fallback; PRs already up may still land.')]
+    : [option('a', 'Resume dispatch', 'This halt is cleared.'), option('b', 'End the build', 'Live lanes finish; nothing new is dispatched.')];
+  if (raise) assertFileable(options, `budget touch ${raise.touch}`);
   const touch = buildTouch(state, deps, why, {
     question: budget
       ? `DO: decide whether conduct ${state.slug} spends more. ${reason}. EXPECT: (a) answered with the text "budget <USD>" above the current spend raises the ceiling to it, and metering continues; (b) no new paid lane work (no dispatch, lane start, prompt or fallback); work already at a PR boundary may still be reviewed and landed, and the build ends.`
       : `DO: decide whether conduct ${state.slug} dispatches more lanes. ${reason}. EXPECT: (a) this halt is cleared; dispatch resumes once no other halt is open; (b) no new lane starts, the live ones finish, and the build ends.`,
-    options: budget
-      ? [option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; metering continues against it.'), option('b', 'Stop new paid lane work', 'No dispatch, start, prompt or fallback; PRs already up may still land.')]
-      : [option('a', 'Resume dispatch', 'This halt is cleared.'), option('b', 'End the build', 'Live lanes finish; nothing new is dispatched.')],
+    options,
     allowFreeText: budget,
   });
   touch.spendUsd = spendUsd;
+  // The halt entry is deleted on answer; touch.raise is the record that survives.
+  if (raise) {
+    touch.raise = raise;
+    if (!spineOn(state)) writeTouchFiles(state, touch, deps);
+  }
   halts.push({ kind: why, reason, touch: touch.n });
   syncHalt(state, deps);
 }
@@ -937,7 +950,9 @@ function refuse(state, touch, why, deps) {
 }
 
 // A run touch's (a) clears its own halt: for the budget only with "budget
-// <USD>" above the spend at the halt, which becomes authority.budgetUsd.
+// <USD>" above the spend at the halt, which becomes authority.budgetUsd: the
+// display mirror. Configured, the acts count the raise only from its signed
+// touch (verifiedAuthority).
 function answerRunTouch(state, touch, deps) {
   if (touch.build === 'replan') return answerReplan(state, touch, deps);
   const { key, text } = touch.answer;
@@ -947,8 +962,7 @@ function answerRunTouch(state, touch, deps) {
     return;
   }
   if (touch.build === 'budget') {
-    // `budget <USD>`: digits with optional thousands commas, `$` and decimals ("budget $1,500" → 1500).
-    const usd = Number(/\bbudget\s+\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)(?![\w.,])/i.exec(text ?? '')?.[1]?.replaceAll(',', ''));
+    const usd = budgetAmount(text);
     if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, `(a) needs the text "budget <USD>" above the current spend of $${touch.spendUsd ?? 'unknown'}`, deps);
     state.authority.budgetUsd = usd;
     state.authority.budgetSource = { touch: touch.n, by: touch.answer.by, answeredAt: touch.answer.answeredAt, text };
@@ -1064,6 +1078,15 @@ function block(state, wp, deps, reason) {
   wp.queue = (wp.queue ?? []).filter((action) => action.step === 'stop');
 }
 
+// A WP held at an act its authority does not cover: the lock it holds is
+// released, its lane is stopped, and the PR stays open for the operator.
+function holdWp(state, wp, deps, reason) {
+  if (mergeLockFor(state, wp) === 'mine') state.mergeLock = null;
+  setState(state, wp, 'held', reason, deps);
+  wp.stage = null;
+  wp.queue = backendOf(state, wp, deps).stop(wp);
+}
+
 function merged(state, wp, deps) {
   setState(state, wp, 'merged', null, deps);
   wp.stage = null;
@@ -1091,7 +1114,7 @@ function merged(state, wp, deps) {
   const left = state.wps.filter(unbooked).length;
   const per = laneProjection(state, deps);
   const projected = Math.round((booked + left * per.usd) * 100) / 100;
-  const budget = state.authority?.budgetUsd ?? 0;
+  const budget = verifiedAuthority(state, deps).budgetUsd;
   appendEvent(state, deps, { event: 'spend-projection', data: { wpId: wp.id, bookedUsd: booked, wpsLeft: left, perWpUsd: per.usd, projectedUsd: projected, budgetUsd: budget } });
   const spendLine = ` Spend: $${Math.round(booked * 100) / 100} booked; ~$${projected} projected with ${left} WP(s) not yet booked at $${Math.round(per.usd * 100) / 100} each (${per.basis}), against $${budget}${projected >= budget ? ': the projection crosses the budget' : ''}.`;
   if (spineOn(state) && wp.questId) {
@@ -1281,7 +1304,12 @@ function expand(state, wp, deps) {
     }
     case 'merge': {
       if (!wp.gate?.ok) return go([], 'gate');
-      const actions = mergeActions(state, wp, wp.gate.head);
+      // Authority is recomputed here, after the gate: one that no longer
+      // holds stops the WP before the squash instead of rebasing it again.
+      const authority = verifiedAuthority(state, deps);
+      const refusal = mergeRefusal(state, authority);
+      if (refusal) return holdWp(state, wp, deps, refusal);
+      const actions = mergeActions(state, wp, wp.gate.head, authority);
       return actions.length ? go(actions, null) : go([], 'land');
     }
     default:
@@ -1383,7 +1411,8 @@ function committed(state, deps, purpose, bookedUsd) {
 function budgetGate(state, deps, purpose) {
   if (budgetEnded(state)) return 'ended';
   if ((state.build.halts ?? []).some((entry) => entry.kind === 'budget' || entry.kind === 'meter')) return 'halted';
-  const budget = state.authority?.budgetUsd ?? 0;
+  const authority = verifiedAuthority(state, deps);
+  const budget = authority.budgetUsd;
   if (state.adapters?.spend?.on) {
     if (!deps.env?.WORKIT_SPEND_CMD) {
       meterHalt(state, deps, 'The spend adapter is on, but WORKIT_SPEND_CMD is not set, so spend is unknown (metered by the spend adapter)');
@@ -1391,14 +1420,23 @@ function budgetGate(state, deps, purpose) {
     }
     if (state.build.spendOkFor === purpose) {
       state.build.spendOkFor = null;
-      return null;
+      if (authority.proofMode === 'unconfigured') return null;
+      // Configured, the persisted token is never authority on its own: the
+      // reading it stands for is compared with the signed budget here, and a
+      // token with no reading behind it is read again.
+      const last = state.build.lastSpend;
+      if (typeof last?.usd !== 'number') return spendAction(state, deps, purpose);
+      const spend = committed(state, deps, purpose, last.usd);
+      if (spend.usd < budget) return null;
+      haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)${budgetNote(authority)}`, 'budget', spend.usd);
+      return 'halted';
     }
     return spendAction(state, deps, purpose);
   }
   const sum = state.wps.reduce((total, wp) => total + (Number(wp.lane?.costUsd) || 0), 0);
   const spend = committed(state, deps, purpose, sum);
   if (spend.usd < budget) return null;
-  haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (unmetered: booked is the lane-only lower bound)`, 'budget', spend.usd);
+  haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (unmetered: booked is the lane-only lower bound)${budgetNote(authority)}`, 'budget', spend.usd);
   return 'halted';
 }
 
@@ -1429,6 +1467,17 @@ function workAction(state, deps) {
       }
       if (gate === 'halted') continue;
       if (gate) return gate;
+    }
+    // A queued squash is checked again at emission (U1): a run resumed after
+    // an edit to the repo or the signed answer holds instead of merging.
+    if (wp.queue[0].step === 'merge' && wp.queue[0].part === 'squash') {
+      const { command } = wp.queue[0];
+      const refusal = mergeRefusal(state, verifiedAuthority(state, deps), command[command.indexOf('--repo') + 1]);
+      if (refusal) {
+        holdWp(state, wp, deps, refusal);
+        // Its lane's stop is emitted now: this pass does not come back to it.
+        if (!wp.queue.length || wp.queue[0].kind === 'wait') continue;
+      }
     }
     return emitHead(wp);
   }
@@ -1707,7 +1756,8 @@ function recordYield(state, action) {
 function recordSpend(state, action, result, deps) {
   const text = String(result.stdout ?? '').trim();
   const usd = result.code === 0 && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text) ? Number(text) : NaN;
-  const budget = state.authority?.budgetUsd ?? 0;
+  const authority = verifiedAuthority(state, deps);
+  const budget = authority.budgetUsd;
   if (!Number.isFinite(usd)) return meterHalt(state, deps, `The spend command's output is unreadable (exit ${result.code}: ${JSON.stringify(text.slice(0, 80))}${result.stderr ? `, ${lines(result.stderr)[0]}` : ''}), so spend is unknown (metered by the spend adapter)`);
   // Only a successful read clears the meter halt; it is kept for the audit.
   state.build.lastSpend = { usd, at: deps.timestamp() };
@@ -1715,7 +1765,7 @@ function recordSpend(state, action, result, deps) {
   syncHalt(state, deps);
   const purpose = action.budgetFor === 'meter' ? 'dispatch' : action.budgetFor ?? 'dispatch';
   const spend = committed(state, deps, purpose, usd);
-  if (spend.usd >= budget) return haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)`, 'budget', spend.usd);
+  if (spend.usd >= budget) return haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)${budgetNote(authority)}`, 'budget', spend.usd);
   state.build.spendOkFor = action.budgetFor === 'meter' ? 'dispatch' : action.budgetFor ?? 'dispatch';
   return undefined;
 }
@@ -1939,7 +1989,7 @@ function noCi(state, wp, action, out, deps) {
   if (out.outcome !== 'amend' || action.step !== 'gate' || action.part !== 'gate') return out;
   const gate = out.patch?.gate;
   if (!gate?.failures?.includes('no CI at head') || (gate.causes ?? []).some((cause) => cause !== 'ci')) return out;
-  const hold = state.authority?.merge !== true;
+  const hold = verifiedAuthority(state, deps).merge !== true;
   const stop = (reason) => ({ ...out, outcome: hold ? 'held' : 'block', reason: hold ? `held at PR: ${reason}` : reason, patch: { ...out.patch, noCi: null } });
   const count = state.intent.ciWorkflows;
   if (count === 0) return stop('no CI at head: the repo has no CI workflow that can gate a PR');
@@ -2063,6 +2113,9 @@ function recordStep(state, wp, action, result, deps) {
     if (liveness(state, wp, action, result, deps) === 'polling') return undefined;
     return route(state, wp, action, recordLaneStep(state, wp, action, result, recorderDeps), deps);
   }
-  if (LAND_STEPS.has(action.step)) return route(state, wp, action, noCi(state, wp, action, recordLandStep(state, wp, action, result, recorderDeps), deps), deps);
+  if (LAND_STEPS.has(action.step)) {
+    const out = recordLandStep(state, wp, action, result, recorderDeps, verifiedAuthority(state, deps));
+    return route(state, wp, action, noCi(state, wp, action, out, deps), deps);
+  }
   throw new ConductError(2, `the build has no route for step ${action.step}`);
 }

@@ -57,6 +57,14 @@ test('rotate (d3ce5461): refused at the showcase and in a terminal phase; the ha
   const text = handoffText(s, s.rotations[0]);
   assert.match(text, /^- Approved scope \(binding; it can be narrower than the goal\): only WP-01 and WP-02 \(grant `.+1-grant\.json`\); operator notes: no release$/m);
   assert.match(text, /next --run .+ --custody 1`/);
+  // The authority line names the authority touch's stored proof (display only).
+  assert.match(text, /^- Authority: merge true, release false, budget \$50\.00 \(unmetered\); lanes booked \$0\.00 \(the lane-only lower bound\) \(proof: no authority answer yet\)$/m);
+  const unsigned = state({ touches: [{ n: 1, kind: 'preapproval', status: 'answered', wpId: null, answer: { key: 'a', proofMode: 'unconfigured' } }] });
+  rotate(unsigned, { why: 'context' }, deps());
+  assert.match(handoffText(unsigned, unsigned.rotations[0]), /^- Authority: .* \(proof: UNCONFIGURED — answers not signed\)$/m);
+  const signed = state({ touches: [{ n: 1, kind: 'preapproval', status: 'answered', wpId: null, grants: {}, answer: { key: 'a', proofMode: 'verified', credentialId: 'AAAAbbbbCCCCdddd', epoch: 2 } }] });
+  rotate(signed, { why: 'context' }, deps());
+  assert.match(handoffText(signed, signed.rotations[0]), /^- Authority: .* \(proof: verified ••••CCCCdddd epoch 2\)$/m);
 });
 
 test('custody retire (d3ce5461): with no chain row naming r1\'s session for this handoff and pane, custody asks for confirmation instead of retiring a bare pane id; with one, the retire carries --expect-session', () => {

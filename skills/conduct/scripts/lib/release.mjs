@@ -5,6 +5,7 @@
 import { join } from 'node:path';
 import { ConductError } from './state.mjs';
 import { validateRecipe } from './recipe.mjs';
+import { releaseRefusal } from './authority.mjs';
 
 const BUMP = { patch: 2, minor: 1, major: 0 };
 
@@ -100,13 +101,16 @@ export function resolvePluginRoot({ installedPluginsPath, pluginKey = 'workit@wo
   return best?.installPath ?? null;
 }
 
-// A release runs only after a complete build, with a recipe and the authority.
-export function releaseEligible(state) {
+// A release runs only after a complete build, with a recipe and the
+// authority: the phase's verifiedAuthority, computed just before the act.
+export function releaseEligible(state, authority) {
+  if (!authority) throw new ConductError(2, 'authority not passed');
   const wps = state.wps ?? [];
   if (!state.intent?.release) return { ok: false, reason: 'no recipe' };
   if (wps.some((wp) => wp.state === 'held')) return { ok: false, reason: 'held' };
   if (wps.some((wp) => ['blocked', 'deferred', 'refuted', 'dropped'].includes(wp.state))) return { ok: false, reason: 'incomplete build' };
-  if (state.authority?.release !== true) return { ok: false, reason: 'no release authority' };
+  const refusal = releaseRefusal(state, authority);
+  if (refusal) return { ok: false, reason: refusal };
   if (wps.length === 0 || !wps.every((wp) => wp.state === 'merged')) return { ok: false, reason: 'incomplete build' };
   return { ok: true, reason: null };
 }

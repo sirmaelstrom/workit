@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { ConductError, TERMINAL_PHASES, appendEvent } from './state.mjs';
 import { LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { conductScript, shellLiteral, spineAckFailure } from './touch.mjs';
+import { proofLabel } from './authority.mjs';
 
 export const SESSION_LOG = 'session-chain.jsonl';
 
@@ -136,7 +137,7 @@ export function handoffText(state, rotation) {
     `- Goal: ${line(intent.goal).slice(0, 200)} (in full: \`${join(state.runDir, 'goal.md')}\`)`,
     `- Repo: \`${intent.repo?.path ?? ''}\` (${intent.repo?.remote ?? 'no remote'}, default branch ${intent.repo?.defaultBranch ?? 'unknown'})`,
     `- Phase: ${state.phase}; anchor: ${anchor ?? 'none'}; adapters on: ${on.join(', ') || 'none'}`,
-    `- Authority: merge ${Boolean(state.authority?.merge)}, release ${Boolean(state.authority?.release)}, budget ${money(state.authority?.budgetUsd ?? 0)} (${state.authority?.metered ? 'metered by the spend adapter' : 'unmetered'}); ${spend}`,
+    `- Authority: merge ${Boolean(state.authority?.merge)}, release ${Boolean(state.authority?.release)}, budget ${money(state.authority?.budgetUsd ?? 0)} (${state.authority?.metered ? 'metered by the spend adapter' : 'unmetered'}); ${spend} ${proofLabel(state)}`,
     `- Approved scope (binding; it can be narrower than the goal): ${line(state.authority?.scope ?? intent.goal)}${typeof state.authority?.grant === 'string' ? ` (grant \`${join(state.runDir, state.authority.grant)}\`)` : ''}${state.authority?.notes ? `; operator notes: ${line(state.authority.notes)}` : ''}`,
     '',
     '## Pending action',

@@ -19,6 +19,7 @@ import { conductScript, openTouch, recordTouch, touchAction } from '../touch.mjs
 import { firstLine } from '../adapters.mjs';
 import { branchDeleteSteps, branchOutcome, checkedOutAt, worktreeGone } from '../lanes.mjs';
 import { samePath } from './spec.mjs';
+import { mergeRefusal, releaseRefusal, verifiedAuthority } from '../authority.mjs';
 
 const SEAM = 'release';
 const WAIT_MS = 60000;
@@ -148,7 +149,7 @@ function expand(state, deps) {
       ], 'merge');
     case 'merge': {
       if (!r.gate?.ok) return go([], 'gate');
-      const actions = mergeActions(state, view(state), r.gate.head);
+      const actions = mergeActions(state, view(state), r.gate.head, verifiedAuthority(state, deps));
       if (!actions.length) return finish(state, deps, 'failed', 'merge: no merge authority, or the release does not hold the merge lock');
       // `expects: none`: a failed merge step reaches the release's failure
       // routing instead of record's JSON check (the merge-commit lookup).
@@ -234,7 +235,7 @@ export function next(state, deps) {
     return finish(state, deps, 'failed', `${r.anomaly.reason}; operator answer (${touch.answer.key})${touch.answer.text ? `: ${touch.answer.text}` : ''}`);
   }
   if (!r.stage) {
-    const eligible = releaseEligible(state);
+    const eligible = releaseEligible(state, verifiedAuthority(state, deps));
     if (!eligible.ok) return finish(state, deps, 'not-exercised', eligible.reason);
     const repo = resolve(state.intent.repo.path);
     Object.assign(r, { stage: 'setup', queue: [], worktree: join(dirname(repo), `${basename(repo)}-wt-${state.slug}-release`), branch: `conduct/${state.slug}/release` });
@@ -243,7 +244,21 @@ export function next(state, deps) {
     expand(state, deps);
     if (r.state !== 'pending') return null;
   }
+  // Checked at emission, not only when queued (U1): a queue resumed after an
+  // edit to the recipe, the repo or the signed answer emits nothing.
+  const refusal = emissionRefusal(state, deps);
+  if (refusal) return finish(state, deps, 'failed', `release held: ${refusal}`);
   return emitHead(state);
+}
+
+// Every release act (all but the merged release's cleanup) runs under release
+// authority and the granted recipe; a squash also under the granted repo.
+function emissionRefusal(state, deps) {
+  const head = state.release.queue[0];
+  if (CLEANUP_PARTS.has(head.part)) return null;
+  const authority = verifiedAuthority(state, deps);
+  const repo = head.step === 'merge' && head.part === 'squash' ? head.command[head.command.indexOf('--repo') + 1] : null;
+  return releaseRefusal(state, authority) ?? (repo === null ? null : mergeRefusal(state, authority, repo));
 }
 
 function fail(state, deps, action, result) {
@@ -285,7 +300,7 @@ function noCi(state, action, out, deps) {
 
 function recordLand(state, action, result, deps) {
   const r = state.release;
-  const out = noCi(state, action, recordLandStep(state, view(state), action, result, { exec: deps.exec, read: deps.read, now: deps.now }), deps);
+  const out = noCi(state, action, recordLandStep(state, view(state), action, result, { exec: deps.exec, read: deps.read, now: deps.now }, verifiedAuthority(state, deps)), deps);
   const patch = out.patch ?? {};
   for (const [key, value] of Object.entries(patch)) {
     if (key === 'queue') r.queue = [...value];

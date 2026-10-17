@@ -41,6 +41,7 @@ import { deltaEscalation, patchPlace, REBASE_FILE_READ_CAP } from '../../../slim
 import { AUTHOR_LENS, reviewPairFor } from '../../../slim-review/scripts/pr-review.mjs';
 import { laneModel } from './adapters.mjs';
 import { gateBootstrap } from './bootstrap.mjs';
+import { mergeRefusal } from './authority.mjs';
 
 const WAIT_MS = 60000;
 const PENDING_BLOCK_MS = 30 * 60000;
@@ -907,8 +908,10 @@ function councilObligation(wp, exec) {
   return null;
 }
 
-export function mergeActions(state, wp, head) {
-  if (state.authority?.merge !== true || mergeLockFor(state, wp) !== 'mine') return [];
+// `authority` is the phase's verifiedAuthority, computed just before the act.
+export function mergeActions(state, wp, head, authority) {
+  if (!authority) throw new ConductError(2, 'authority not passed');
+  if (mergeRefusal(state, authority) || mergeLockFor(state, wp) !== 'mine') return [];
   if (councilObligation(wp, null)) return [];
   // The door again, at the merge itself: a gate record from before the door
   // check (a run resumed across an upgrade) carries none.
@@ -1189,7 +1192,7 @@ function gateRecord(wp, gate, deps) {
 
 // Failures are classified: infrastructure retries, lock contention re-acquires,
 // limits hold, coverage gaps block, and only what a lane can fix is an amendment.
-function recordGate(state, wp, action, r, deps) {
+function recordGate(state, wp, action, r, deps, authority) {
   if (action.part === 'inspect') {
     if (!INSPECTION.includes(r.verdict) || r.tail !== action.land.tail || r.head !== action.land.head) {
       return result('block', `the inspection must name ${action.land.tail} at ${action.land.head} with a verdict of ${INSPECTION.join(' or ')}`);
@@ -1232,7 +1235,8 @@ function recordGate(state, wp, action, r, deps) {
         : `the PR body declares no valid door (${(gate.doorProblems ?? []).join('; ') || 'the gate reported none'}), so whether one revert undoes it is unknown`;
       return result('held', `gate passed; ${why}: the merge is the operator's`, { ...recorded, retries: 0 });
     }
-    return state.authority?.merge === true ? result('continue', null, { ...recorded, retries: 0 }) : result('held', 'gate passed; no merge authority', { ...recorded, retries: 0 });
+    const refusal = mergeRefusal(state, authority);
+    return refusal ? result('held', `gate passed; ${refusal}`, { ...recorded, retries: 0 }) : result('continue', null, { ...recorded, retries: 0 });
   }
   if (r.code === 6) {
     const reason = (gate.pendingOn ?? ['ci']).map((on) => (on === 'review' ? 'a pipeline review of head is in flight' : 'CI is still running at head')).join('; ');
@@ -1284,7 +1288,7 @@ function classifyGate(state, wp, action, gate, causes, reason, deps) {
   return result('amend', reason);
 }
 
-function landOutcome(state, wp, action, r, deps) {
+function landOutcome(state, wp, action, r, deps, authority) {
   switch (action.step) {
     case 'review': return recordReview(state, wp, action, r);
     case 'post':
@@ -1316,7 +1320,7 @@ function landOutcome(state, wp, action, r, deps) {
       if (r.code !== 0) return result('block', `resolve failed: ${first(r.stderr)}`);
       return result('continue', null, { reviews: withLatest(wp, (review) => ({ ...review, resolved: [...(review.resolved ?? []), action.land.threadId] })) });
     case 'rebase': return recordRebaseStep(state, wp, action, r, deps);
-    case 'gate': return recordGate(state, wp, action, r, deps);
+    case 'gate': return recordGate(state, wp, action, r, deps, authority);
     case 'merge': {
       // gh's exit on the squash is advisory: `gh pr merge` can exit non-zero
       // after the merge landed (a post-merge local step failing). The
@@ -1352,11 +1356,12 @@ function landOutcome(state, wp, action, r, deps) {
 // the rebase and merged, and merged itself, releases the lock its WP holds.
 // A ConductError (an impossible lens selection, an unknown step) becomes
 // `block`; only a programming error escapes. A terminal outcome leaves only
-// the cleanup it owes queued.
-export function recordLandStep(state, wp, action, r, deps = {}) {
+// the cleanup it owes queued. `authority` is the phase's verifiedAuthority.
+export function recordLandStep(state, wp, action, r, deps = {}, authority = undefined) {
+  if (!authority) throw new ConductError(2, 'authority not passed');
   let out;
   try {
-    out = landOutcome(state, wp, action, r ?? {}, deps);
+    out = landOutcome(state, wp, action, r ?? {}, deps, authority);
   } catch (error) {
     if (!(error instanceof ConductError)) throw error;
     out = result('block', error.message);

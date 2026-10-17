@@ -1,11 +1,15 @@
 // Phase preapproval: touch 1. Its answer is the run's only source of merge,
-// release and budget authority; a (c) answer becomes a checked grant.
+// release and budget authority; a (c) answer becomes a checked grant. With an
+// operator passkey configured, each granting option carries its grant as a
+// signed tag (lib/authority.mjs), and a (c) grant is authority only once its
+// own confirm touch is answered (a) and signed.
 import { join } from 'node:path';
 import { ConductError } from '../state.mjs';
 import { ADAPTERS, AGENTS, laneModel } from '../adapters.mjs';
-import { QUESTION_MAX, filedLength, openTouch, touchAction, recordTouch } from '../touch.mjs';
+import { QUESTION_MAX, filedLength, openTouch, operatorAnchor, touchAction, recordTouch } from '../touch.mjs';
 import { chooseBackend } from '../lanes.mjs';
 import { configLine } from '../repo-config.mjs';
+import { assertFileable, filingTime, grantConsequence, runGrant } from '../authority.mjs';
 
 const GRANT_KEYS = ['merge', 'release', 'budgetUsd', 'scope'];
 
@@ -120,8 +124,41 @@ function grantPath(state, touch) {
   return join(state.runDir, 'touches', `${touch.n}-grant.json`);
 }
 
+const DECLINE = 'The run closes with no writes to the repo.';
+
+// openTouch copies a fixed field list, so the grants land on the touch after
+// it; a core run's touch record is written again to carry them.
+function attachGrants(state, touch, grants, deps) {
+  touch.grants = grants;
+  if (state.adapters?.spine?.on !== true) deps.write(join(state.runDir, 'touches', `${touch.n}.json`), `${JSON.stringify(touch, null, 2)}\n`);
+}
+
+// Touch 1 with an operator passkey configured: (a) and (b), each with the
+// grant it confers, rendered and tagged. Unconfigured, the spec is today's.
+function grantedTouchOne(state, spec, deps) {
+  if (!operatorAnchor(deps).configured) return { spec, grants: null };
+  const proposed = proposal(state);
+  const confers = { a: { merge: proposed.merge, release: proposed.release }, b: { merge: false, release: false } };
+  const filedAt = filingTime(deps);
+  const grants = {};
+  const options = spec.options.map((option) => {
+    if (!Object.hasOwn(confers, option.key)) return option;
+    grants[option.key] = runGrant(state, { ...confers[option.key], budgetUsd: proposed.budgetUsd, scope: state.intent.goal }, filedAt);
+    return { ...option, consequence: grantConsequence(grants[option.key]) };
+  });
+  assertFileable(options, 'touch 1');
+  return { spec: { ...spec, options }, grants };
+}
+
+function openTouchOne(state, deps) {
+  const { spec, grants } = grantedTouchOne(state, touchOne(state, deps), deps);
+  const touch = openTouch(state, spec, deps);
+  if (grants) attachGrants(state, touch, grants, deps);
+  return touch;
+}
+
 export function next(state, deps) {
-  const touch = state.touches.at(-1) ?? openTouch(state, touchOne(state, deps), deps);
+  const touch = state.touches.at(-1) ?? openTouchOne(state, deps);
   if (touch.status === 'answered' && touch.answer.key === 'c') {
     const outPath = grantPath(state, touch);
     return {
@@ -146,17 +183,24 @@ function recordGrant(state, touch, deps) {
   const grant = readGrant(path, deps);
   const text = touch.answer.text ?? '';
   if (grant?.ambiguous === true) {
-    openTouch(state, {
+    const one = state.touches[0];
+    // Touch 1's options are copied whole, their tags included, and so are their grants.
+    const options = one.options.filter((option) => option.key !== 'c');
+    const reask = openTouch(state, {
       kind: 'blocked',
       question: `The (c) answer to touch ${touch.n} does not settle a grant field (${grant.why ?? 'no reason given'}). The operator's text: "${text}". DO: pick one of touch ${touch.n}'s other options. EXPECT: the run continues with that authority, or closes on (d).`,
-      options: state.touches[0].options.filter((option) => option.key !== 'c'),
+      options,
       allowFreeText: false,
       did: `conduct ${state.slug}: touch ${touch.n} answered (c), but the grant was ambiguous`,
     }, deps);
+    if (one.grants) attachGrants(state, reask, Object.fromEntries(options.filter((option) => Object.hasOwn(one.grants, option.key)).map((option) => [option.key, one.grants[option.key]])), deps);
     return;
   }
   const checked = validateGrant(grant, proposal(state), state.intent.goal);
   if (!checked.ok) throw new ConductError(2, `grant ${path}: ${checked.problems.join('; ')}`);
+  // Configured, the grant must be confirmed on the phone: built (and checked
+  // against E7) before anything is written, so a refusal leaves no trace.
+  const confirm = operatorAnchor(deps).configured ? confirmTouch(state, touch, grant, text, deps) : null;
   // The authored grant stays as written, so a retry after a failed save
   // re-validates the same input. The record /spec --preapproved names is a
   // separate file, a copy of the authority this record commits; state.json's
@@ -164,10 +208,71 @@ function recordGrant(state, touch, deps) {
   const { merge, release, budgetUsd, scope } = grant;
   const published = `touches/${touch.n}-authority.json`;
   deps.write(join(state.runDir, published), `${JSON.stringify({ merge, release, budgetUsd, scope, validated: true, touch: touch.n, grant: `touches/${touch.n}-grant.json`, answer: touch.answer }, null, 2)}\n`);
+  if (confirm) {
+    // Zero until the signed confirm lands; the pointers /spec and
+    // verifiedAuthority follow exist from the start.
+    state.authority = {
+      merge: false, release: false, budgetUsd: 0, scope,
+      metered: state.authority.metered, notes: text, grant: `touches/${touch.n}-grant.json`, record: published, confirmTouch: null,
+    };
+    attachGrants(state, openTouch(state, confirm.spec, deps), { a: confirm.grant }, deps);
+    return;
+  }
   state.authority = {
     merge, release, budgetUsd, scope,
     metered: state.authority.metered, notes: text, grant: `touches/${touch.n}-grant.json`, record: published,
   };
+  state.phase = 'spec';
+}
+
+// The (c) grant as the operator confirms it: the scope and their text in the
+// question, the grant tagged on (a). A scope too long for the question is cut,
+// naming the file that holds it whole; its hash is in the tagged grant.
+function confirmTouch(state, touch, grant, text, deps) {
+  const filed = runGrant(state, { budgetUsd: grant.budgetUsd, merge: grant.merge, release: grant.release, scope: grant.scope }, filingTime(deps));
+  const options = [
+    { key: 'a', label: 'Confirm', consequence: grantConsequence(filed) },
+    { key: 'd', label: 'Decline', consequence: DECLINE },
+  ];
+  assertFileable(options, 'the confirm touch');
+  const n = state.touches.length + 1;
+  const head = `Confirm grant for run ${state.runId}:`;
+  const quoted = `The operator's text: "${text}"`;
+  const lines = (scope) => [head, `Scope: ${scope}`, quoted].join('\n');
+  let question = lines(grant.scope);
+  if (filedLength(state, n, question) > QUESTION_MAX) {
+    const cut = `… (full text: touches/${touch.n}-grant.json)`;
+    const room = QUESTION_MAX - filedLength(state, n, lines(cut));
+    if (room < 1) {
+      throw new ConductError(2, `E7: the confirm question is ${filedLength(state, n, question)} chars filed, and ${filedLength(state, n, lines(cut))} with its Scope: line cut, over spine_receipt's ${QUESTION_MAX}-char cap (the operator's text is ${text.length} chars)`);
+    }
+    question = lines(`${grant.scope.slice(0, room)}${cut}`);
+  }
+  return {
+    spec: { kind: 'preapproval-confirm', question, options, allowFreeText: false, did: `conduct ${state.slug}: touch ${touch.n} answered (c); its grant waits on the operator's signed confirm` },
+    grant: filed,
+  };
+}
+
+// The confirm's answer: (a) makes the (c) grant the run's authority, (d)
+// declines. applyAnswer never runs for it. The authority record gains the
+// confirm, whose signed block /spec verifies.
+function recordConfirm(state, touch, deps) {
+  if (touch.answer.key === 'd') {
+    state.phase = 'declined';
+    return;
+  }
+  const path = join(state.runDir, state.authority.record);
+  let record;
+  try {
+    record = JSON.parse(deps.read(path));
+  } catch (error) {
+    throw new ConductError(2, `authority record ${path} cannot be read: ${error.message}`);
+  }
+  record.confirm = { touch: touch.n, receiptId: touch.receiptId, answer: touch.answer, options: touch.options, grants: touch.grants };
+  deps.write(path, `${JSON.stringify(record, null, 2)}\n`);
+  // The display cache; acts recompute it from the signed confirm.
+  Object.assign(state.authority, { merge: record.merge, release: record.release, budgetUsd: record.budgetUsd, confirmTouch: touch.n });
   state.phase = 'spec';
 }
 
@@ -190,6 +295,9 @@ export function record(state, action, result, deps) {
   const touch = state.touches[action.touch.n - 1];
   if (action.step === 'grant') return recordGrant(state, touch, deps);
   const outcome = recordTouch(state, touch, action, result, deps);
-  if (touch.status === 'answered') applyAnswer(state, touch);
+  if (touch.status !== 'answered') return outcome;
+  // On the touch's own kind: touchStep names every kind but preapproval and showcase 'touch'.
+  if (touch.kind === 'preapproval-confirm') recordConfirm(state, touch, deps);
+  else applyAnswer(state, touch);
   return outcome;
 }
