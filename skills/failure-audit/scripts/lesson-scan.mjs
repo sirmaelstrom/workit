@@ -116,11 +116,17 @@ function firstTimestamp(file) {
 
 function gitFirstAdd(file, dataRepo) {
   const rel = path.relative(dataRepo, file);
-  if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error(`${file}: outside data repo ${dataRepo}; pass --data-repo`);
-  const output = execFileSync('git', ['-C', dataRepo, 'log', '--follow', '--diff-filter=A', '--format=%aI', '--', rel], { encoding: 'utf8' }).trim();
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  let output;
+  try {
+    output = execFileSync('git', ['-C', dataRepo, 'log', '--follow', '--diff-filter=A', '--format=%aI', '--', rel], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch {
+    return null;
+  }
   const first = output.split(/\r?\n/).filter(Boolean).at(-1);
-  if (!first) throw new Error(`${file}: no git first-add day in ${dataRepo}`);
-  return Date.parse(`${first.slice(0, 10)}T00:00:00Z`);
+  if (!first) return null;
+  const day = Date.parse(`${first.slice(0, 10)}T00:00:00Z`);
+  return Number.isFinite(day) ? day : null;
 }
 
 function memoryPath(s, memoryDir, cwd) {
@@ -134,10 +140,39 @@ function shellWords(command) {
   return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((word) => word.replace(/^['"]|['"]$/g, '')) ?? [];
 }
 
-function isQuoteCall(block, memoryDir, cwd) {
+function searchQuoteCall(block, memoryDir, corpusDir, cwd) {
+  if (block.name === 'Grep') {
+    const target = block.input?.path;
+    return target && searchTarget(target, memoryDir, corpusDir, cwd);
+  }
+  if (!['Bash', 'PowerShell'].includes(block.name)) return false;
+  const words = shellWords(String(block.input?.command ?? ''));
+  const search = words.findIndex((word) => /^(?:rg|grep|Select-String)(?:\.exe)?$/i.test(word));
+  if (search < 0) return false;
+  let searchCwd = cwd;
+  for (let i = 0; i < search; i++) {
+    if (/^(?:cd|Set-Location|Push-Location)$/i.test(words[i]) && words[i + 1]) {
+      const dir = words[++i];
+      searchCwd = path.isAbsolute(dir) ? dir : searchCwd ? path.resolve(searchCwd, dir) : null;
+    }
+  }
+  const targets = words.slice(search + 1).filter((word) => word === '.' || word === '..' || /[\\/]|\.(?:md|jsonl)$/i.test(word));
+  if (!targets.length) return Boolean(searchCwd && (within(searchCwd, memoryDir) || within(searchCwd, corpusDir)));
+  return targets.some((target) => searchTarget(target, memoryDir, corpusDir, searchCwd));
+}
+
+function searchTarget(target, memoryDir, corpusDir, cwd) {
+  const expanded = target.startsWith('~/') || target.startsWith('~\\') ? path.join(os.homedir(), target.slice(2)) : target;
+  if (!path.isAbsolute(expanded) && !cwd) return false;
+  const resolved = path.resolve(cwd ?? memoryDir, expanded);
+  return within(resolved, memoryDir) || within(resolved, corpusDir);
+}
+
+function isQuoteCall(block, memoryDir, corpusDir, cwd) {
   if (block.type !== 'tool_use') return false;
   const input = block.input ?? {};
-  if (block.name === 'Read') return Boolean(memoryPath(input.file_path ?? input.path ?? '', memoryDir, cwd)) && /\.(md|jsonl)$/i.test(input.file_path ?? input.path ?? '');
+  if (block.name === 'Read') return /\.(md|jsonl)$/i.test(String(input.file_path ?? input.path ?? '').replace(/^['"]|['"]$/g, ''));
+  if (searchQuoteCall(block, memoryDir, corpusDir, cwd)) return true;
   if (!['Bash', 'PowerShell'].includes(block.name)) return false;
   const words = shellWords(String(input.command ?? ''));
   const git = words.findIndex((word) => /(?:^|[\\/])git(?:\.exe)?$/i.test(word));
@@ -165,11 +200,12 @@ function autoMemIndex(record, indexPath) {
   return (record.attachment.files ?? []).some((f) => f.type === 'AutoMem' && normalized(f.path ?? '') === normalized(indexPath));
 }
 
-function extractSession(descriptor, memoryDir, indexPath) {
+function extractSession(descriptor, memoryDir, corpusDir, indexPath) {
   const main = records(descriptor.main);
   const all = [...main, ...descriptor.subagents.flatMap(records)];
   let firstTs = null;
   let excluded = null;
+  let searchedCorpus = false;
   let indexLoaded = false;
   const bodyReads = new Set();
   const parts = [];
@@ -191,7 +227,8 @@ function extractSession(descriptor, memoryDir, indexPath) {
       if (b.type === 'tool_use') {
         const readPath = b.name === 'Read' ? memoryPath(b.input?.file_path ?? b.input?.path ?? '', memoryDir, r.cwd) : null;
         if (readPath) bodyReads.add(normalized(readPath));
-        const quote = isQuoteCall(b, memoryDir, r.cwd);
+        if (searchQuoteCall(b, memoryDir, corpusDir, r.cwd)) searchedCorpus = true;
+        const quote = isQuoteCall(b, memoryDir, corpusDir, r.cwd);
         if (quote && b.id) quotedIds.add(b.id);
         if (!quote) parts.push({ ts, scope: 'call', text: JSON.stringify({ name: b.name, input: b.input ?? {} }) });
       } else if (b.type === 'tool_result') {
@@ -201,6 +238,7 @@ function extractSession(descriptor, memoryDir, indexPath) {
       }
     }
   }
+  if (!excluded && searchedCorpus) excluded = 'quotation-search';
   return { id: descriptor.id, project: descriptor.project, firstTs, excluded, indexLoaded, bodyReads, parts };
 }
 
@@ -230,14 +268,15 @@ export function runLessonScan({ memoryDir = DEFAULT_MEMORY_DIR, corpusDir = DEFA
   const traps = memories.filter((m) => m.status === 'trap').map((m) => {
     const origin = m.originSessionId && firstById.get(m.originSessionId);
     const treatmentMs = origin ?? gitFirstAdd(m.file, dataRepo);
-    return { ...m, treatmentMs, treatmentSource: origin ? 'origin-session' : 'git-first-add-day', before: { exposed: 0, mistakes: 0 }, after: { exposed: 0, mistakes: 0 }, sessions: [] };
+    return { ...m, treatmentMs, treatmentSource: origin ? 'origin-session' : treatmentMs === null ? 'unknown' : 'git-first-add-day', before: { exposed: 0, mistakes: 0 }, after: { exposed: 0, mistakes: 0 }, sessions: [] };
   });
-  const skipped = { 'not-trap': memories.length - traps.length, 'failure-audit-fleet': 0, 'council-seat': 0, summarizer: 0, 'no-timestamp': 0 };
+  const skipped = { 'not-trap': memories.length - traps.length, 'no-treatment-time': traps.filter((m) => m.treatmentMs === null).length, 'failure-audit-fleet': 0, 'council-seat': 0, 'quotation-search': 0, summarizer: 0, 'no-timestamp': 0 };
   for (const d of descriptors) {
-    const s = extractSession(d, memoryDir, indexPath);
+    const s = extractSession(d, memoryDir, corpusDir, indexPath);
     if (s.excluded) { skipped[s.excluded]++; continue; }
     if (s.firstTs === null) { skipped['no-timestamp']++; continue; }
     for (const m of traps) {
+      if (m.treatmentMs === null || (m.treatmentSource === 'origin-session' && s.id === m.originSessionId)) continue;
       const situations = hitTimes(s, m.situation);
       const mistakes = hitTimes(s, m.mistake);
       for (const [period, predicate] of [['before', (ts) => ts < m.treatmentMs], ['after', (ts) => ts >= m.treatmentMs]]) {
@@ -250,16 +289,19 @@ export function runLessonScan({ memoryDir = DEFAULT_MEMORY_DIR, corpusDir = DEFA
     }
   }
   return { corpusDir, memoryDir, sessionsScanned: descriptors.length, skipped, memories: [
-    ...traps.map((m) => ({ file: m.file, status: 'trap', treatment: new Date(m.treatmentMs).toISOString(), treatmentSource: m.treatmentSource, before: m.before, after: m.after, ...verdict(m.before, m.after), sessions: m.sessions })),
+    ...traps.map((m) => m.treatmentMs === null
+      ? { file: m.file, status: 'trap', treatment: null, treatmentSource: 'unknown', before: null, after: null, result: 'untested', reason: 'no-treatment-time', expectedMistakes: null, beforeRate: null, afterRate: null, sessions: [] }
+      : { file: m.file, status: 'trap', treatment: new Date(m.treatmentMs).toISOString(), treatmentSource: m.treatmentSource, before: m.before, after: m.after, ...verdict(m.before, m.after), sessions: m.sessions }),
     ...memories.filter((m) => m.status === 'not-trap').map((m) => ({ file: m.file, status: 'not-trap' })),
   ] };
 }
 
 export function markdownTable(report) {
-  const lines = ['| Memory | Before exposed | Before mistakes | After exposed | After mistakes | Expected mistakes | Before rate | After rate | Verdict |', '|---|---:|---:|---:|---:|---:|---:|---:|---|'];
+  const lines = ['| Memory | Before exposed | Before mistakes | After exposed | After mistakes | Expected mistakes | Before rate | After rate | Verdict | Reason |', '|---|---:|---:|---:|---:|---:|---:|---:|---|---|'];
   for (const m of report.memories) {
-    if (m.status !== 'trap') { lines.push(`| ${path.basename(m.file)} | — | — | — | — | — | — | — | not-trap |`); continue; }
-    lines.push(`| ${path.basename(m.file)} | ${m.before.exposed} | ${m.before.mistakes} | ${m.after.exposed} | ${m.after.mistakes} | ${m.expectedMistakes.toFixed(2)} | ${m.beforeRate.toFixed(3)} | ${m.afterRate.toFixed(3)} | ${m.result} |`);
+    if (m.status !== 'trap') { lines.push(`| ${path.basename(m.file)} | — | — | — | — | — | — | — | not-trap | — |`); continue; }
+    if (m.reason === 'no-treatment-time') { lines.push(`| ${path.basename(m.file)} | — | — | — | — | — | — | — | untested | no-treatment-time |`); continue; }
+    lines.push(`| ${path.basename(m.file)} | ${m.before.exposed} | ${m.before.mistakes} | ${m.after.exposed} | ${m.after.mistakes} | ${m.expectedMistakes.toFixed(2)} | ${m.beforeRate.toFixed(3)} | ${m.afterRate.toFixed(3)} | ${m.result} | — |`);
   }
   return `${lines.join('\n')}\n`;
 }

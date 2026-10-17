@@ -183,16 +183,24 @@ The corpus is each project's main `*.jsonl` under `~/.claude/projects`, with
 their own timestamps at treatment time, so one session can appear in both
 windows. Treatment is the origin session's first transcript timestamp when
 `originSessionId` resolves, or midnight UTC on the memory file's git first-add
-day. Missing both is an error. Sessions with no timestamp are skipped.
+day. The origin session is excluded from both windows: it supplied the lesson,
+so its mistake is not a recurrence. If neither treatment time is known, that
+memory is `untested` with reason `no-treatment-time`; its window counts and
+rates are unavailable. The scan continues with other memories. Sessions with
+no timestamp are skipped.
 
 The scanner excludes council seats when any record's `cwd` has a
 `council-seats` path segment. It excludes failure-audit fleet seats when their
 first user prompt contains the fleet instruction opener or
 `fleet-instructions.md`. It excludes SessionEnd summarizers when their first
-user prompt contains `SessionEnd` near `summarize` or `summarise`. `Read` results
-for `.md` or `.jsonl` under the memory directory and `git diff/show` results
-for those files are quotation: the producing call and its result cannot create
-an exposure or mistake hit. The JSON reports exclusion counts.
+user prompt contains `SessionEnd` near `summarize` or `summarise`. Any `Read`
+result for a `.md` or `.jsonl` file and `git diff/show` results for files under
+the memory directory are quotation: the producing call and result cannot create
+an exposure or mistake hit. The same applies to `rg`, `grep`, `Select-String`,
+or a Grep tool call searching transcripts under the corpus directory or files
+under the memory directory. Such a search excludes the whole session, including
+other result hits in it. Relative paths resolve from the record's cwd or a
+preceding `cd` in the command. The JSON reports exclusion counts.
 
 Delivery is `body-read` when the session calls `Read` on that memory file,
 otherwise `index-loaded` when an `instructions` attachment has an `AutoMem`

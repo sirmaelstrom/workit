@@ -214,6 +214,90 @@ test('git first-add day is fallback when origin session is absent', (t) => {
   assert.deepEqual(m.after, { exposed: 1, mistakes: 1 });
 });
 
+test('unknown treatment isolates an untracked memory and keeps other results', (t) => {
+  const f = fixture(t);
+  f.memory('untracked', 'UNTRACKED_OPPORTUNITY', 'UNTRACKED_ERROR', 'call', 'missing-origin');
+  f.memory('dated', 'DATED_OPPORTUNITY', 'DATED_ERROR');
+  f.session('origin', '2026-09-10', []);
+  f.session('after', '2026-09-11', [f.call('DATED_OPPORTUNITY DATED_ERROR')]);
+  const report = f.run();
+  const missing = report.memories.find((m) => m.file.endsWith('untracked.md'));
+  assert.equal(missing.result, 'untested');
+  assert.equal(missing.reason, 'no-treatment-time');
+  assert.equal(missing.treatment, null);
+  assert.equal(missing.before, null);
+  assert.equal(missing.after, null);
+  assert.deepEqual(report.memories.find((m) => m.file.endsWith('dated.md')).after, { exposed: 1, mistakes: 1 });
+});
+
+test('origin session teaches the lesson and is excluded from both windows', (t) => {
+  const f = fixture(t);
+  f.memory('source');
+  f.session('before', '2026-09-09', [f.call('OPPORTUNITY ERROR')]);
+  f.session('origin', '2026-09-10', [f.call('OPPORTUNITY ERROR')]);
+  f.session('after', '2026-09-11', [f.call('OPPORTUNITY')]);
+  const m = f.run().memories[0];
+  assert.deepEqual(m.before, { exposed: 1, mistakes: 1 });
+  assert.deepEqual(m.after, { exposed: 1, mistakes: 0 });
+  assert.equal(m.sessions.some((s) => s.id === 'origin'), false);
+});
+
+test('transcript and memory search results are quotation, not recurrence', (t) => {
+  const f = fixture(t);
+  f.memory('search-quote', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  const cases = [
+    ['rg-corpus', `rg -n ERROR ${f.corpusDir}`, f.root],
+    ['grep-relative', 'grep -n ERROR after.jsonl', path.join(f.corpusDir, 'project')],
+    ['select-memory', 'Select-String -Pattern ERROR -Path search-quote.md', f.memoryDir],
+  ];
+  for (const [id, command, cwd] of cases) f.session(id, '2026-09-11', [f.call(command, id)], {
+    cwd,
+    extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'OPPORTUNITY ERROR' }] } }],
+  });
+  f.session('real', '2026-09-12', [f.call('run', 'real')], {
+    extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'real', content: 'OPPORTUNITY ERROR' }] } }],
+  });
+  const m = f.run().memories[0];
+  assert.deepEqual(m.after, { exposed: 1, mistakes: 1 });
+  for (const [id] of cases) assert.equal(m.sessions.some((s) => s.id === id), false);
+});
+
+test('a Read of another Markdown document cannot supply result-scope recurrence', (t) => {
+  const f = fixture(t);
+  f.memory('quoted-spec', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  f.session('spec', '2026-09-11', [{ type: 'tool_use', id: 'read-spec', name: 'Read', input: { file_path: path.join(f.root, 'QUEST-SPEC.md') } }], {
+    extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'read-spec', content: 'OPPORTUNITY ERROR' }] } }],
+  });
+  f.session('real', '2026-09-12', [f.call('run', 'real')], {
+    extra: [{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'real', content: 'OPPORTUNITY ERROR' }] } }],
+  });
+  const m = f.run().memories[0];
+  assert.deepEqual(m.after, { exposed: 1, mistakes: 1 });
+  assert.equal(m.sessions.find((s) => s.id === 'spec').delivery, 'unknown');
+});
+
+test('a search after an in-command cd excludes the quotation session', (t) => {
+  const f = fixture(t);
+  f.memory('cd-search', 'OPPORTUNITY', 'ERROR', 'result');
+  f.session('origin', '2026-09-10', []);
+  f.session('analysis', '2026-09-11', [
+    f.call(`cd "${f.corpusDir}" && rg -n ERROR --glob '*.jsonl' .`, 'search'),
+    f.call('run', 'other'),
+  ], {
+    cwd: f.root,
+    extra: [{ type: 'user', message: { content: [
+      { type: 'tool_result', tool_use_id: 'search', content: 'OPPORTUNITY ERROR' },
+      { type: 'tool_result', tool_use_id: 'other', content: 'OPPORTUNITY ERROR' },
+    ] } }],
+  });
+  const report = f.run();
+  assert.deepEqual(report.memories[0].after, { exposed: 0, mistakes: 0 });
+  assert.equal(report.skipped['quotation-search'], 1);
+  assert.equal(report.memories[0].sessions.some((s) => s.id === 'analysis'), false);
+});
+
 test('verdict boundary and power checks', () => {
   assert.equal(verdict({ exposed: 2, mistakes: 2 }, { exposed: 2, mistakes: 0 }).result, 'untested');
   assert.equal(verdict({ exposed: 10, mistakes: 1 }, { exposed: 3, mistakes: 0 }).result, 'untested');
