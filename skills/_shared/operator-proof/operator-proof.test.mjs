@@ -141,6 +141,7 @@ test('the pin is the hash of the module text after CRLF -> LF', () => {
 
 test('the module reads no environment variable and never touches the test signer', () => {
   const text = readFileSync(MODULE, 'utf8');
+  assert.ok(!text.includes(String.fromCharCode(0xfeff)), 'no literal BOM character in the source');
   assert.doesNotMatch(text, /process\.env/);
   assert.doesNotMatch(text, /test-signer/);
   for (const key of [TEST_KEY_1, TEST_KEY_2]) {
@@ -173,7 +174,7 @@ test('readAnchor: the fixed path, missing and empty files are unconfigured, bad 
   writeAnchorFile(home, JSON.stringify(makeTestAnchor({ keys: [], epoch: 4 })));
   assert.deepEqual(readAnchor(path), { configured: false, epoch: 4 });
   const file = makeTestAnchor();
-  writeAnchorFile(home, `﻿${JSON.stringify(file, null, 2)}`);
+  writeAnchorFile(home, `${String.fromCharCode(0xfeff)}${JSON.stringify(file, null, 2)}`);
   const anchor = readAnchor(path);
   assert.equal(anchor.configured, true);
   assert.equal(anchor.sha256, anchorFromFile(file).sha256);
@@ -196,7 +197,8 @@ test('a file-shape anchor passed to a verifier throws TypeError', () => {
 });
 
 const JUNK = [undefined, null, 0, 1.5, NaN, true, '', 'x', [], [1], {}, { options: 'x' }, { options: [null] }, { options: [{ key: 1 }] },
-  { options: [{ key: 'a', label: 'A' }] }, { options: [], prompt: 7 }, { options: [], allowFreeText: 'yes' }, Object.create(null)];
+  { options: [{ key: 'a', label: 'A' }] }, { options: [], prompt: 7 }, { options: [], allowFreeText: 'yes' }, Object.create(null),
+  { options: [{ key: 'a', label: 'A', consequence: 'x' }, { key: 'a', label: 'B', consequence: 'y' }] }];
 
 test('helpers are total: bad shapes give null or false, never a throw', () => {
   for (const junk of JUNK) {
@@ -270,6 +272,12 @@ test('the verifiers never throw on untrusted input', () => {
       assert.ok(codes.has(result.reason));
     }
   }
+  // Every cut of the attested data after the credential id is malformed, never a throw.
+  const authData = Buffer.from(registration.authenticatorData, 'base64url');
+  for (let end = 55 + authData.readUInt16BE(53); end < authData.length; end += 1) {
+    const result = verifyRegistration({ ...registration, authenticatorData: authData.subarray(0, end).toString('base64url') });
+    assert.equal(result.reason, 'malformed_proof', `attested data cut at ${end}`);
+  }
   const cosign = byName('cosign').input;
   for (const junk of JUNK) {
     const result = verifyCosign({ anchor, cosign: junk, expect: cosign.expect, now: cosign.now });
@@ -278,14 +286,17 @@ test('the verifiers never throw on untrusted input', () => {
   }
 });
 
-test('unconfigured: a verifier passes everything, and a co-sign never verifies', () => {
+test('unconfigured: a verifier passes everything, and a co-sign is refused', () => {
   const empty = anchorFromFile(makeTestAnchor({ keys: [] }));
   assert.deepEqual(
     { ...verifyAnswerProof({ answer: null, anchor: empty }) },
     { ok: true, mode: 'unconfigured', reason: null, credentialId: null, anchorSha256: null, epoch: 0, be: null, bs: null },
   );
   const cosign = byName('cosign').input;
-  assert.equal(verifyCosign({ anchor: empty, cosign: cosign.cosign, expect: cosign.expect, now: cosign.now }).ok, false);
+  assert.deepEqual(
+    verifyCosign({ anchor: empty, cosign: cosign.cosign, expect: cosign.expect, now: cosign.now }),
+    { ok: false, mode: 'refused', reason: 'cosign_unconfigured', credentialId: null, anchorSha256: null, epoch: 0, be: null, bs: null },
+  );
 });
 
 test('a verified answer reports the credential, the anchor hash, the epoch and the custody flags', () => {
@@ -331,8 +342,9 @@ test('CLI verify-receipt: verified, a flipped signature byte, an edited conseque
   const quest = vector.input.questId;
   const verified = cli(['verify-receipt', '--file', spineQuestFile(home, vector), '--quest', quest], home);
   assert.equal(verified.status, 0, verified.stderr);
-  assert.deepEqual(Object.keys(lastLine(verified)), ['ok', 'mode', 'reason', 'credentialId', 'epoch', 'grant']);
+  assert.deepEqual(Object.keys(lastLine(verified)), ['ok', 'mode', 'reason', 'credentialId', 'epoch', 'grant', 'answer']);
   assert.equal(lastLine(verified).mode, 'verified');
+  assert.deepEqual(lastLine(verified).answer, { key: 'a', text: null });
   const flipped = cli(['verify-receipt', '--file', spineQuestFile(home, vector, (receipt) => {
     const signature = Buffer.from(receipt.answer.proof.signature, 'base64url');
     signature[signature.length - 1] ^= 0x01;
@@ -368,6 +380,7 @@ test('CLI: there is no --anchor flag, and bad usage exits 2 without a verdict', 
   writeFileSync(file, '{}');
   for (const args of [
     ['verify-receipt', '--file', file, '--quest', 'q', '--anchor', file],
+    ['verify-record', '--file', file, '--quest', 'none', '--now', '2026-10-18T00:00:00Z'],
     ['verify-receipt', '--file', file],
     ['verify-record', '--file', file, '--quest', 'none', '--state', file],
     ['verify-everything'],
@@ -390,15 +403,45 @@ test('CLI: a quest prefix, a missing input file and a goal file', () => {
   const missing = cli(['verify-receipt', '--file', join(home, 'absent.json'), '--quest', answer.input.questId], home);
   assert.equal(missing.status, 1);
   assert.equal(lastLine(missing).reason, 'input_unreadable');
-  const record = byName('record-touch-goal-trailing-newline');
+  // The CLI reads the real clock, so this grant is minted now and expires tomorrow;
+  // a committed vector's grant would expire under a later run.
+  const goal = 'Ship the CLI test with a fresh grant.';
+  const runId = 'r-cli-test';
+  const grant = {
+    budgetUsd: 5, merge: true, release: false, scopeSha256: createHash('sha256').update(goal).digest('hex'), runId,
+    repo: { remote: 'example/demo', defaultBranch: 'main' }, releaseRecipeSha256: null, notAfter: new Date(Date.now() + 24 * 3600 * 1000).toISOString(),
+  };
+  const ask = {
+    options: [{ key: 'a', label: 'Approve', consequence: `${renderGrant(grant)} [grant ${grantTag(grant)}]` }, { key: 'd', label: 'Decline', consequence: 'The run stops here.' }],
+    allowFreeText: false,
+  };
+  const question = `[conduct cli touch 1] (run ${runId}/1) Approve the plan for: ${goal}`;
+  const askReceiptId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+  const proof = signAnswer({ questId: answer.input.questId, askReceiptId, question, ask, answerKey: 'a' });
+  const record = {
+    n: 1, kind: 'preapproval', tag: '[conduct cli touch 1]', question, receiptId: askReceiptId, options: ask.options, grants: { a: grant },
+    answer: { key: 'a', text: null, by: 'operator:dogan', signed: { answer: { key: 'a', text: null, by: 'operator:dogan', askReceiptId, proof }, question, ask } },
+  };
   const recordFile = join(home, 'touch-1.json');
-  writeFileSync(recordFile, JSON.stringify(record.input.record));
+  writeFileSync(recordFile, JSON.stringify(record));
   const goalFile = join(home, 'goal.md');
-  writeFileSync(goalFile, record.input.goalText);
-  const verified = cli(['verify-record', '--file', recordFile, '--quest', record.input.quest, '--goal', goalFile], home);
+  writeFileSync(goalFile, `${goal}\n`);
+  const verified = cli(['verify-record', '--file', recordFile, '--quest', answer.input.questId, '--goal', goalFile], home);
   assert.equal(verified.status, 0, verified.stdout + verified.stderr);
-  assert.deepEqual(lastLine(verified).grant, record.expect.grant);
+  assert.deepEqual(lastLine(verified).grant, grant);
+  assert.deepEqual(lastLine(verified).answer, { key: 'a', text: null });
   assert.equal(lastLine(verified).scopeOk, true);
+  // The same record with its grant past notAfter is refused by the real clock.
+  const expired = { ...grant, notAfter: new Date(Date.now() - 1000).toISOString() };
+  const expiredAsk = { ...ask, options: [{ ...ask.options[0], consequence: `${renderGrant(expired)} [grant ${grantTag(expired)}]` }, ask.options[1]] };
+  const expiredProof = signAnswer({ questId: answer.input.questId, askReceiptId, question, ask: expiredAsk, answerKey: 'a' });
+  writeFileSync(recordFile, JSON.stringify({
+    ...record, options: expiredAsk.options, grants: { a: expired },
+    answer: { ...record.answer, signed: { ...record.answer.signed, answer: { ...record.answer.signed.answer, proof: expiredProof }, ask: expiredAsk } },
+  }));
+  const refusedExpired = cli(['verify-record', '--file', recordFile, '--quest', answer.input.questId], home);
+  assert.equal(refusedExpired.status, 1);
+  assert.equal(lastLine(refusedExpired).reason, 'grant_expired');
 });
 
 // --- make-vectors --append -----------------------------------------------------------

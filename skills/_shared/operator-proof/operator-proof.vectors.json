@@ -15,7 +15,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -76,7 +76,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":null,\"label\":null,\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":\"Fix the findings, but skip the re-review.\",\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZ20tbF9yQXB2U012bzk5bTc4VkV6cXhwZUw0SlVaNkM5LTVDOHBVRHhOWSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEQCIDuFERpqXgRhqKomtHUp4UtDiuTeg6nO5ydqsyPmZ63UAiA-vkAgdgl1geHpNwTdPU_6uA55LFFABdijm8vND-Umxw"
+          "signature": "MEYCIQCF9SL8jw3Vdt8RpF9n8ztOLKsMzmxvBy8vNUAbzyvmvgIhALoAgD30K_wgXwrOMM68EBkFtWXR1SAR0pmHxoHD7oY-"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -137,7 +137,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywdAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEQCIAbPESJ-vhMjYzBnXqsFAwgb3uRJznv3668vEbODp2zAAiBKWT2Acjp508nGzDMLEEkiBWGxLCzIGeJWvidWFpDd2w"
+          "signature": "MEUCIQCVRi37dDUKUTMgORkzSkqVbEf-cLkJOFhb4obKoShkcgIgX-BbYTbkdzDuTg8qEj1pHOVFIjLTZNJenBd5LyHjhVc"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -200,7 +200,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b\",\"key\":null,\"label\":null,\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":\"Yes.\",\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiRG8zZExtWFpuZ2RVTlpBUXQ4UVUzTEtiY1kwa2VfTHhqZjc0RWZfRl9QTSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCICO3camzKu5oNxbZWZkD0KYcZ8iHOoKDpq9y42Q1x1exAiEAqkzTcqtRBfyr7LW6vd6ibgshrUkwGQp222qBjyB_VGg"
+          "signature": "MEYCIQDxrlMPsz8AI5Irb6PtrmCNDUQAvAH6qx988qqtudKFMQIhAMnjTq9f5-3-d7QThM65PGwkSmr7ZRyvOzagvGbeuVXy"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -246,7 +246,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -349,7 +349,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -671,7 +671,7 @@
           "statement": "not json",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -732,7 +732,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "bm90IGpzb24",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -793,7 +793,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "ab+/cd==",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -854,7 +854,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -900,6 +900,72 @@
     }
   },
   {
+    "name": "malformed-proof-duplicate-option-keys",
+    "kind": "answer",
+    "input": {
+      "answer": {
+        "key": "a",
+        "text": null,
+        "by": "operator:dogan",
+        "answeredAt": "2026-10-17T12:00:00Z",
+        "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "proof": {
+          "v": 1,
+          "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+          "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+          "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
+        }
+      },
+      "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
+      "ask": {
+        "prompt": "Which way should the review go?",
+        "options": [
+          {
+            "key": "a",
+            "label": "Fix and re-review",
+            "consequence": "The lane fixes the findings and the council reviews again."
+          },
+          {
+            "key": "b",
+            "label": "Ship as is",
+            "consequence": "The PR merges and the findings are filed as follow-ups."
+          },
+          {
+            "key": "a",
+            "label": "Ship as is",
+            "consequence": "The PR merges."
+          }
+        ],
+        "allowFreeText": true
+      },
+      "questId": "11111111-2222-4333-8444-555555555555",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      }
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "malformed_proof"
+    }
+  },
+  {
     "name": "bad-timestamp",
     "kind": "answer",
     "input": {
@@ -915,7 +981,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"not a time\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiOV9aT1k5ZFVfYjNJcjVDQ1BhNUd2S204MnFZbEpFb1VGTEkweHFrSlo3OCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEQCIB5Kk78U5t24XD6C15MwTf5IKCm7Bz2wz8y6hIHv7D4uAiBbf3wk_Svpg31FDq911_LuzZbj9OtJYzhtrVWAzH5vQg"
+          "signature": "MEUCIQDvp9UTcI8GxcTX1tkakag49YNTZWzCPrTejY5Hgt7jJQIgXG48tWtAf1dIQaD4CK0bmeiBiBzH178BK0MQfUseQEc"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -976,7 +1042,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIQDR8xMecdW6B88s03_C6SSqVTyk9ub_jKQdceZion2WPgIgcfQkCZ91ILakHadm0_kGjcAnbLZ-bHJ1XGGIZ-cmWjc"
+          "signature": "MEYCIQCueyWtCBIjZ0YaolXJi4bV8rqYNy6GVWS9FaMPemKrNwIhAP3AF10qLZvvFY2DgteK5L0dos6vXI8aM98VVpjxeP50"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1037,7 +1103,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1098,7 +1164,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1159,7 +1225,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1220,7 +1286,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go? Also release.",
@@ -1281,7 +1347,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1342,7 +1408,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1389,6 +1455,67 @@
     }
   },
   {
+    "name": "statement-mismatch-answer-ask-receipt",
+    "kind": "answer",
+    "input": {
+      "answer": {
+        "key": "a",
+        "text": null,
+        "by": "operator:dogan",
+        "answeredAt": "2026-10-17T12:00:00Z",
+        "askReceiptId": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "proof": {
+          "v": 1,
+          "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+          "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+          "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
+        }
+      },
+      "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
+      "ask": {
+        "prompt": "Which way should the review go?",
+        "options": [
+          {
+            "key": "a",
+            "label": "Fix and re-review",
+            "consequence": "The lane fixes the findings and the council reviews again."
+          },
+          {
+            "key": "b",
+            "label": "Ship as is",
+            "consequence": "The PR merges and the findings are filed as follow-ups."
+          }
+        ],
+        "allowFreeText": true
+      },
+      "questId": "11111111-2222-4333-8444-555555555555",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      }
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "statement_mismatch"
+    }
+  },
+  {
     "name": "bad-authenticator-data",
     "kind": "answer",
     "input": {
@@ -1404,7 +1531,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAA",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1465,7 +1592,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIQCs2QGs7VJJEuTA_xTjMtJnyZWGb8xf8qLQoj9yuc6g6gIgdu0qCmNyeSlcpKI0tqlI_w5Dgw8hNffs8sJHYb2fg_M"
+          "signature": "MEQCIAVaJqUWqiyQTwaPQnPJ28xUs5A4qWU9YnztUGsGfUMoAiBC-NAmHjeFrWWjhV4Kz0kL9FFunPCkJFmo1GwpDVWyKQ"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1526,7 +1653,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiWVc1dmRHaGxjaUJqYUdGc2JHVnVaMlUiLCJvcmlnaW4iOiJodHRwczovL2V4YW1wbGUudGVzdDo4NDQzIiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
-          "signature": "MEUCIHp3Gt2VnudfiG_7M3Cfo_zcOjtPdjrFt5YpDRg20A5sAiEA-IiXb1FYDIXjIZECEp7g59Z4YG07NnHA5ulQ4ytYcnM"
+          "signature": "MEUCIQCbG4HvtQTbIwOByqzLZNK8H4kVX-zYnSGiy3nDFm5kKwIgcC0bgQhWJGtQpmHCr0VDu8Ziv5kl4H96nUqLb3FJVhs"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1587,7 +1714,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vb3RoZXIuZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIDIp_RLFFlKu6RNkuUpl0nuqfMxxheXaaOtPsu-R9_jZAiEAkrLOkMAxzhpb3nIn2eq__yBzPOvNhRVqAjA02tKaV6w"
+          "signature": "MEUCIGvpcXjibAX5sIXt2QgQmMN7W5azhTVTnZWGg2lPnb8fAiEAq4axk4macnO803wVioG-0YUHH26dFGL4ErFtkzvwxQE"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1648,7 +1775,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://other.example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicE1YVk40SUhpVnBsNmNJZXZjMGJSUnM1UXZxaF81TEhBVkticnQwME94cyIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCICysMMmAc3IwKjrxyd45b1_WgiHBGycPcDrzfACzgDAmAiEAuC2uwimv5DwDBFxhzFevXfQCEO8VPfpvWhlzoo8uV8s"
+          "signature": "MEYCIQCCOsNVQo2YiTz-LM9V2-yclJHmvsIkHBTyCshdkD2peQIhANpK5tkXGYu6-lhBXJRB1pI2pMEZG7ZKfkr5O-hpN2G-"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1709,7 +1836,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6dHJ1ZX0",
-          "signature": "MEUCIEeFkyn6vgSFNV7wb9BS6t6McPOty-daSqZ-2UMYoLALAiEAxL2i8RQcSiViN2HtZZ82L_c07GsKVFNPPnYOxGmByho"
+          "signature": "MEUCIQClHvNpjV7PqV8nH2dDbu1JfEOR0hrGJkduBqTodFFBhgIgPjrpAmI11LEfJlxPFmQvvuWjLOgqmSlvr713ww3fr_o"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1770,7 +1897,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "2UQj1qG2EDfEZSCCierQaYsa_1EUA3pkpHj-DzYAUi4FAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIQDWsK9-kSn5soJw0OTwt04RQEghMElrYGtZGb4eqbj2XAIgKcimbe0q19UiS7lQfpaE0xBDzdumZdgktiu40YypOi4"
+          "signature": "MEUCIDoxOXUYSgyO_eyy6vLIr_SCWoKpoIGNb-szB3pJZZDSAiEA7f7M_r6upKP_YLUCY2a2LFCgxDLjiLipnWqnlUYL440"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1831,7 +1958,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1892,7 +2019,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywEAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIAYVcw4GNhw5zj-6ZE91xPJGXwsYSYyJWQLWb0WIedzpAiEA57gr5vCzyx4q9fgSB6f3wxK72tfbASI4NGxvU_dzOg4"
+          "signature": "MEUCID1ehbe_tkpsVZlSpXuECzy0fSKXtNpQ0aYwm_jVpyUEAiEAuVzSyNjIL3aYh1-fFGq1lVVGLR7yOn37hKaJf38IUew"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -1953,7 +2080,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywBAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEYCIQCTbD-XiB6Lk_7fvYzFRkQlgRNJFqlhUdU6mKYPFqhowgIhAJdsoGfWFSPeMHDjXiz2xZzU0dIPHE4d6aTyj0CeE471"
+          "signature": "MEUCIAapoUj78waY6nJbIkZPhpfXjGDwpP70UHGU4_-ISpp5AiEA0mMqRQhFVh4wzRmSn-uH5O0EsUfKCWR5GQilQ1MXn3A"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -2014,7 +2141,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -2075,7 +2202,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AM"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZN"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -2136,7 +2263,7 @@
           "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
           "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
           "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-          "signature": "MEUCIGqLBnrhQMXBe_OOsSN9-ZTFBWbK-Yvul9LEnqBa7xPhAiEArb0jmLbNAO15Fv6R8sN2zFC-_E7F5eILejY6yIYT5AI"
+          "signature": "MEYCIQC1avcRzawKpwTJevpG--hUojWAVJoiu-Cu8lOT8OCFLwIhAMEaEQQXyl9sE83vLng3Oq21s5AKe8op0aTZEKf9XxZM"
         }
       },
       "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
@@ -2487,6 +2614,132 @@
     }
   },
   {
+    "name": "registration-key-mismatch-spki",
+    "kind": "registration",
+    "input": {
+      "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiN19Ncnd1SkpuTVRGUGhPS0FtSnQ4eXUyaUpyOWxKYVphZW9xN0JKMk0wVSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+      "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRyxFAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEAbrzFLfOCWShmi5wKRO6SlAQIDJiABIVgg4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AUiWCBVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+      "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+      "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyyZbcY51oWq3EkhEi9xuXJqHSTq1Ln5bJDN67mkChGi3oOw8RDqK_1UWKi_njspuFXFCe8Qck-QyFIKO2s0Hpw",
+      "alg": -7,
+      "label": "test key",
+      "signedAt": "2026-10-17T12:00:00Z",
+      "expectedOrigin": "https://example.test:8443",
+      "expectedRpId": "example.test",
+      "now": 1792238460000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "key_mismatch"
+    }
+  },
+  {
+    "name": "registration-key-mismatch-cose-alg",
+    "kind": "registration",
+    "input": {
+      "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiN19Ncnd1SkpuTVRGUGhPS0FtSnQ4eXUyaUpyOWxKYVphZW9xN0JKMk0wVSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+      "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRyxFAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEAbrzFLfOCWShmi5wKRO6SlAQIDJyABIVgg4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AUiWCBVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+      "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+      "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+      "alg": -7,
+      "label": "test key",
+      "signedAt": "2026-10-17T12:00:00Z",
+      "expectedOrigin": "https://example.test:8443",
+      "expectedRpId": "example.test",
+      "now": 1792238460000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "key_mismatch"
+    }
+  },
+  {
+    "name": "registration-cose-bad-kty",
+    "kind": "registration",
+    "input": {
+      "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiN19Ncnd1SkpuTVRGUGhPS0FtSnQ4eXUyaUpyOWxKYVphZW9xN0JKMk0wVSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+      "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRyxFAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEAbrzFLfOCWShmi5wKRO6SlAQMDJiABIVgg4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AUiWCBVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+      "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+      "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+      "alg": -7,
+      "label": "test key",
+      "signedAt": "2026-10-17T12:00:00Z",
+      "expectedOrigin": "https://example.test:8443",
+      "expectedRpId": "example.test",
+      "now": 1792238460000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "bad_key"
+    }
+  },
+  {
+    "name": "registration-cose-not-a-map",
+    "kind": "registration",
+    "input": {
+      "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiN19Ncnd1SkpuTVRGUGhPS0FtSnQ4eXUyaUpyOWxKYVphZW9xN0JKMk0wVSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+      "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRyxFAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEAbrzFLfOCWShmi5wKRO6SFAQIDJiABIVgg4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AUiWCBVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+      "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+      "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+      "alg": -7,
+      "label": "test key",
+      "signedAt": "2026-10-17T12:00:00Z",
+      "expectedOrigin": "https://example.test:8443",
+      "expectedRpId": "example.test",
+      "now": 1792238460000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "bad_key"
+    }
+  },
+  {
+    "name": "registration-truncated-after-credential-id",
+    "kind": "registration",
+    "input": {
+      "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiN19Ncnd1SkpuTVRGUGhPS0FtSnQ4eXUyaUpyOWxKYVphZW9xN0JKMk0wVSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+      "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRyxFAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEAbrzFLfOCWShmi5wKRO6Q",
+      "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+      "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+      "alg": -7,
+      "label": "test key",
+      "signedAt": "2026-10-17T12:00:00Z",
+      "expectedOrigin": "https://example.test:8443",
+      "expectedRpId": "example.test",
+      "now": 1792238460000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "malformed_proof"
+    }
+  },
+  {
+    "name": "registration-truncated-cose-key",
+    "kind": "registration",
+    "input": {
+      "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiN19Ncnd1SkpuTVRGUGhPS0FtSnQ4eXUyaUpyOWxKYVphZW9xN0JKMk0wVSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+      "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRyxFAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEAbrzFLfOCWShmi5wKRO6SlAQIDJiABIVgg4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AUiWCBVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSx",
+      "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+      "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+      "alg": -7,
+      "label": "test key",
+      "signedAt": "2026-10-17T12:00:00Z",
+      "expectedOrigin": "https://example.test:8443",
+      "expectedRpId": "example.test",
+      "now": 1792238460000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "malformed_proof"
+    }
+  },
+  {
     "name": "registration-stale",
     "kind": "registration",
     "input": {
@@ -2554,7 +2807,7 @@
         "statement": "{\"credentialId\":\"BleQwYieEmEcdZpdozvDhg\",\"op\":\"register\",\"origin\":\"https://example.test:8443\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyyZbcY51oWq3EkhEi9xuXJqHSTq1Ln5bJDN67mkChGi3oOw8RDqK_1UWKi_njspuFXFCe8Qck-QyFIKO2s0Hpw\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"v\":1}",
         "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
         "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicmV3M21wZXNmVXVEMlFYNWtXM0MwOXZxZF9wZUt0S2hhTWtlb2x0UF9YMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-        "signature": "MEUCIBNw_ka7UYjUZzcVp0v9AV__MMO8Jl2gwYBBewe8e1rYAiEAkmZ6N9kYbS1Izk6kzVEXWXVhHSxE-pVKnRPZh5nxefo"
+        "signature": "MEYCIQD7vywDI8x-ZoLP3JuZomI0nJpM6M8XC8hHBattQ4fzpgIhALkmaA9NeGnx1m3MeAceeapEx8Y-KtoS6QtWPIYVVZfh"
       },
       "expect": {
         "credentialId": "BleQwYieEmEcdZpdozvDhg",
@@ -2595,7 +2848,7 @@
         "statement": "{\"credentialId\":\"BleQwYieEmEcdZpdozvDhg\",\"op\":\"register\",\"origin\":\"https://example.test:8443\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyyZbcY51oWq3EkhEi9xuXJqHSTq1Ln5bJDN67mkChGi3oOw8RDqK_1UWKi_njspuFXFCe8Qck-QyFIKO2s0Hpw\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"v\":1}",
         "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
         "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicmV3M21wZXNmVXVEMlFYNWtXM0MwOXZxZF9wZUt0S2hhTWtlb2x0UF9YMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-        "signature": "MEUCIBNw_ka7UYjUZzcVp0v9AV__MMO8Jl2gwYBBewe8e1rYAiEAkmZ6N9kYbS1Izk6kzVEXWXVhHSxE-pVKnRPZh5nxefo"
+        "signature": "MEYCIQD7vywDI8x-ZoLP3JuZomI0nJpM6M8XC8hHBattQ4fzpgIhALkmaA9NeGnx1m3MeAceeapEx8Y-KtoS6QtWPIYVVZfh"
       },
       "expect": {
         "credentialId": "QBuvMUt84JZKGaLnApE7pA",
@@ -2636,7 +2889,7 @@
         "statement": "{\"credentialId\":\"BleQwYieEmEcdZpdozvDhg\",\"op\":\"register\",\"origin\":\"https://example.test:8443\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyyZbcY51oWq3EkhEi9xuXJqHSTq1Ln5bJDN67mkChGi3oOw8RDqK_1UWKi_njspuFXFCe8Qck-QyFIKO2s0Hpw\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"v\":1}",
         "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
         "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicmV3M21wZXNmVXVEMlFYNWtXM0MwOXZxZF9wZUt0S2hhTWtlb2x0UF9YMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-        "signature": "MEUCIBNw_ka7UYjUZzcVp0v9AV__MMO8Jl2gwYBBewe8e1rYAiEAkmZ6N9kYbS1Izk6kzVEXWXVhHSxE-pVKnRPZh5nxefo"
+        "signature": "MEYCIQD7vywDI8x-ZoLP3JuZomI0nJpM6M8XC8hHBattQ4fzpgIhALkmaA9NeGnx1m3MeAceeapEx8Y-KtoS6QtWPIYVVZfh"
       },
       "expect": {
         "credentialId": "BleQwYieEmEcdZpdozvDhg",
@@ -2677,7 +2930,7 @@
         "statement": "{\"credentialId\":\"BleQwYieEmEcdZpdozvDhg\",\"op\":\"register\",\"origin\":\"https://example.test:8443\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyyZbcY51oWq3EkhEi9xuXJqHSTq1Ln5bJDN67mkChGi3oOw8RDqK_1UWKi_njspuFXFCe8Qck-QyFIKO2s0Hpw\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"v\":1}",
         "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
         "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicmV3M21wZXNmVXVEMlFYNWtXM0MwOXZxZF9wZUt0S2hhTWtlb2x0UF9YMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-        "signature": "MEUCIBNw_ka7UYjUZzcVp0v9AV__MMO8Jl2gwYBBewe8e1rYAiEAkmZ6N9kYbS1Izk6kzVEXWXVhHSxE-pVKnRPZh5nxefo"
+        "signature": "MEYCIQD7vywDI8x-ZoLP3JuZomI0nJpM6M8XC8hHBattQ4fzpgIhALkmaA9NeGnx1m3MeAceeapEx8Y-KtoS6QtWPIYVVZfh"
       },
       "expect": {
         "credentialId": "BleQwYieEmEcdZpdozvDhg",
@@ -2718,7 +2971,7 @@
         "statement": "{\"credentialId\":\"BleQwYieEmEcdZpdozvDhg\",\"op\":\"register\",\"origin\":\"https://example.test:8443\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyyZbcY51oWq3EkhEi9xuXJqHSTq1Ln5bJDN67mkChGi3oOw8RDqK_1UWKi_njspuFXFCe8Qck-QyFIKO2s0Hpw\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"v\":1}",
         "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
         "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicmV3M21wZXNmVXVEMlFYNWtXM0MwOXZxZF9wZUt0S2hhTWtlb2x0UF9YMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-        "signature": "MEUCIQCMwvt_yrrAQJf1CyPvukSlIASInL4aIqCQb3zBy64y9gIgBita3CangRzNLGp4weD_X5t-rd6atNYv1c3v0hS_nIw"
+        "signature": "MEYCIQDRlRqg03hcqaeSqLLTmM_8JIC-tFBSM_eeSM1IqRgq2AIhAPCsWoEglhnodGAGMc9iesudTtvBnVA8hTYRGBO2AuP5"
       },
       "expect": {
         "credentialId": "BleQwYieEmEcdZpdozvDhg",
@@ -2759,7 +3012,7 @@
         "statement": "{\"credentialId\":\"BleQwYieEmEcdZpdozvDhg\",\"op\":\"register\",\"origin\":\"https://example.test:8443\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyyZbcY51oWq3EkhEi9xuXJqHSTq1Ln5bJDN67mkChGi3oOw8RDqK_1UWKi_njspuFXFCe8Qck-QyFIKO2s0Hpw\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"v\":1}",
         "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
         "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicmV3M21wZXNmVXVEMlFYNWtXM0MwOXZxZF9wZUt0S2hhTWtlb2x0UF9YMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-        "signature": "MEUCIBNw_ka7UYjUZzcVp0v9AV__MMO8Jl2gwYBBewe8e1rYAiEAkmZ6N9kYbS1Izk6kzVEXWXVhHSxE-pVKnRPZh5nxefs"
+        "signature": "MEYCIQD7vywDI8x-ZoLP3JuZomI0nJpM6M8XC8hHBattQ4fzpgIhALkmaA9NeGnx1m3MeAceeapEx8Y-KtoS6QtWPIYVVZfg"
       },
       "expect": {
         "credentialId": "BleQwYieEmEcdZpdozvDhg",
@@ -2807,6 +3060,35 @@
       "ok": false,
       "mode": "refused",
       "reason": "proof_absent"
+    }
+  },
+  {
+    "name": "cosign-unconfigured",
+    "kind": "cosign",
+    "input": {
+      "anchorFile": {
+        "v": 1,
+        "epoch": 2,
+        "credentials": []
+      },
+      "cosign": {
+        "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+        "statement": "{\"credentialId\":\"BleQwYieEmEcdZpdozvDhg\",\"op\":\"register\",\"origin\":\"https://example.test:8443\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyyZbcY51oWq3EkhEi9xuXJqHSTq1Ln5bJDN67mkChGi3oOw8RDqK_1UWKi_njspuFXFCe8Qck-QyFIKO2s0Hpw\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"v\":1}",
+        "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+        "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicmV3M21wZXNmVXVEMlFYNWtXM0MwOXZxZF9wZUt0S2hhTWtlb2x0UF9YMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+        "signature": "MEYCIQD7vywDI8x-ZoLP3JuZomI0nJpM6M8XC8hHBattQ4fzpgIhALkmaA9NeGnx1m3MeAceeapEx8Y-KtoS6QtWPIYVVZfh"
+      },
+      "expect": {
+        "credentialId": "BleQwYieEmEcdZpdozvDhg",
+        "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEyyZbcY51oWq3EkhEi9xuXJqHSTq1Ln5bJDN67mkChGi3oOw8RDqK_1UWKi_njspuFXFCe8Qck-QyFIKO2s0Hpw",
+        "origin": "https://example.test:8443"
+      },
+      "now": 1792238460000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "cosign_unconfigured"
     }
   },
   {
@@ -2960,6 +3242,35 @@
     },
     "expect": {
       "hash": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+    }
+  },
+  {
+    "name": "hash-ask-duplicate-keys",
+    "kind": "hash",
+    "input": {
+      "fn": "askSha256",
+      "value": {
+        "options": [
+          {
+            "key": "b",
+            "label": "Tea",
+            "consequence": "Tea is made."
+          },
+          {
+            "key": "a",
+            "label": "Café",
+            "consequence": "Coffee is made."
+          },
+          {
+            "key": "a",
+            "label": "Tea",
+            "consequence": "Tea is made."
+          }
+        ]
+      }
+    },
+    "expect": {
+      "hash": null
     }
   },
   {
@@ -3266,6 +3577,36 @@
     }
   },
   {
+    "name": "anchor-unreadable-alg-overflow",
+    "kind": "anchor",
+    "input": {
+      "text": "{\"v\":1,\"epoch\":0,\"credentials\":[{\"credentialId\":\"QBuvMUt84JZKGaLnApE7pA\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg\",\"alg\":1e400,\"rpId\":\"example.test\",\"origin\":\"https://example.test:8443\",\"registeredAt\":\"2026-10-17T00:00:00Z\",\"label\":\"test key 1\",\"be\":false,\"bs\":false}]}"
+    },
+    "expect": {
+      "throws": "anchor_unreadable"
+    }
+  },
+  {
+    "name": "anchor-unreadable-extra-overflow",
+    "kind": "anchor",
+    "input": {
+      "text": "{\"v\":1,\"note\":1e400,\"epoch\":0,\"credentials\":[{\"credentialId\":\"QBuvMUt84JZKGaLnApE7pA\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg\",\"alg\":-7,\"rpId\":\"example.test\",\"origin\":\"https://example.test:8443\",\"registeredAt\":\"2026-10-17T00:00:00Z\",\"label\":\"test key 1\",\"be\":false,\"bs\":false}]}"
+    },
+    "expect": {
+      "throws": "anchor_unreadable"
+    }
+  },
+  {
+    "name": "anchor-unreadable-field-type",
+    "kind": "anchor",
+    "input": {
+      "text": "{\"v\":1,\"epoch\":0,\"credentials\":[{\"credentialId\":\"QBuvMUt84JZKGaLnApE7pA\",\"publicKeySpki\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg\",\"alg\":-7,\"rpId\":\"example.test\",\"origin\":\"https://example.test:8443\",\"registeredAt\":\"2026-10-17T00:00:00Z\",\"label\":\"test key 1\",\"be\":\"no\",\"bs\":false}]}"
+    },
+    "expect": {
+      "throws": "anchor_unreadable"
+    }
+  },
+  {
     "name": "receipt-spine-quest",
     "kind": "receipt",
     "input": {
@@ -3305,7 +3646,7 @@
                   "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                   "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                  "signature": "MEUCIH5UIlagLPLV3HPKdzCdiVkIR28HCAClIenE8tYuPEoHAiEA5NhiAUotpQM34LMNoSFHfMb1ZVoZz2G7jAes3htif8E"
+                  "signature": "MEYCIQDdvH2GYekk2P0nDEq-SlVl7aKA82WCBEJrmLpMyjlvmwIhANsrRau6Nie8a3cd7n3HhOdbyICQca4Y076Mk_w5mTHt"
                 }
               }
             }
@@ -3387,6 +3728,10 @@
         "releaseRecipeSha256": null,
         "notAfter": "2026-10-31T12:00:00Z"
       },
+      "answer": {
+        "key": "a",
+        "text": null
+      },
       "scopeOk": true
     }
   },
@@ -3425,7 +3770,7 @@
             "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
             "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
             "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-            "signature": "MEUCIH5UIlagLPLV3HPKdzCdiVkIR28HCAClIenE8tYuPEoHAiEA5NhiAUotpQM34LMNoSFHfMb1ZVoZz2G7jAes3htif8E"
+            "signature": "MEYCIQDdvH2GYekk2P0nDEq-SlVl7aKA82WCBEJrmLpMyjlvmwIhANsrRau6Nie8a3cd7n3HhOdbyICQca4Y076Mk_w5mTHt"
           }
         }
       },
@@ -3453,7 +3798,78 @@
       "ok": true,
       "mode": "verified",
       "reason": null,
-      "grant": null
+      "grant": null,
+      "answer": {
+        "key": "a",
+        "text": null
+      }
+    }
+  },
+  {
+    "name": "receipt-bare-row-ask-receipt-mismatch",
+    "kind": "receipt",
+    "input": {
+      "body": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "outcome": "answered",
+        "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "ask": {
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve",
+              "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+            },
+            {
+              "key": "d",
+              "label": "Decline",
+              "consequence": "The run stops here."
+            }
+          ],
+          "allowFreeText": false
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEYCIQDdvH2GYekk2P0nDEq-SlVl7aKA82WCBEJrmLpMyjlvmwIhANsrRau6Nie8a3cd7n3HhOdbyICQca4Y076Mk_w5mTHt"
+          }
+        }
+      },
+      "quest": "11111111-2222-4333-8444-555555555555",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792281600000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "statement_mismatch",
+      "grant": null,
+      "answer": null
     }
   },
   {
@@ -3495,7 +3911,7 @@
                   "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                   "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                  "signature": "MEUCIH5UIlagLPLV3HPKdzCdiVkIR28HCAClIenE8tYuPEoHAiEA5NhiAUotpQM34LMNoSFHfMb1ZVoZz2G7jAes3htif8E"
+                  "signature": "MEYCIQDdvH2GYekk2P0nDEq-SlVl7aKA82WCBEJrmLpMyjlvmwIhANsrRau6Nie8a3cd7n3HhOdbyICQca4Y076Mk_w5mTHt"
                 }
               }
             }
@@ -3618,7 +4034,7 @@
                   "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                   "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                  "signature": "MEUCIH5UIlagLPLV3HPKdzCdiVkIR28HCAClIenE8tYuPEoHAiEA5NhiAUotpQM34LMNoSFHfMb1ZVoZz2G7jAes3htif8E"
+                  "signature": "MEYCIQDdvH2GYekk2P0nDEq-SlVl7aKA82WCBEJrmLpMyjlvmwIhANsrRau6Nie8a3cd7n3HhOdbyICQca4Y076Mk_w5mTHt"
                 }
               }
             }
@@ -3692,7 +4108,7 @@
                   "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                   "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                  "signature": "MEUCIH5UIlagLPLV3HPKdzCdiVkIR28HCAClIenE8tYuPEoHAiEA5NhiAUotpQM34LMNoSFHfMb1ZVoZz2G7jAes3htif8E"
+                  "signature": "MEYCIQDdvH2GYekk2P0nDEq-SlVl7aKA82WCBEJrmLpMyjlvmwIhANsrRau6Nie8a3cd7n3HhOdbyICQca4Y076Mk_w5mTHt"
                 }
               }
             }
@@ -3924,7 +4340,7 @@
                   "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                   "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                  "signature": "MEUCIH5UIlagLPLV3HPKdzCdiVkIR28HCAClIenE8tYuPEoHAiEA5NhiAUotpQM34LMNoSFHfMb1ZVoZz2G7jAes3htif8E"
+                  "signature": "MEYCIQDdvH2GYekk2P0nDEq-SlVl7aKA82WCBEJrmLpMyjlvmwIhANsrRau6Nie8a3cd7n3HhOdbyICQca4Y076Mk_w5mTHt"
                 }
               }
             }
@@ -4035,7 +4451,7 @@
                   "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"054851a66aa775350cbbf17387e830eeda7c1f4a5d027feb78798599831eb97e\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                   "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiSlZyaFFkN1JQcXBjN1BUSWoxaTl6R0FnbGhpOHpubFhRWWM4aXdlcFlwSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                  "signature": "MEUCICa2QwJsfqsZuDc25RPqEaY3X7zyoNQn66anN9e1aXXsAiEA0B09SXcVsGFCLm2tlJEqPKzQdgVYp4QIfItw0mqJOTc"
+                  "signature": "MEQCIDiZVzvmIsFMd8mJ60ll974e8FprJy1MbcqlxqJ-QvRnAiBNDpXhEA5EmiRNbDdHCWNnckV9AmQlQTRxRDDooUCsVQ"
                 }
               }
             }
@@ -4146,7 +4562,7 @@
                   "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"510ca66eb4861af008d9af6902c37198f729e1b1a413e668e708821b29bbdb5a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                   "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiVDZOeUwxbHp4TjI4MGktRDZPWFdtM0FLdHFVdVl3Mnl1SF9ZZHZhdFJEbyIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                  "signature": "MEUCIQCC8KQ1tnK69X49Lj3Iiae5zFJjk_MQbONvaL3jvQzBmwIgV3h7d6NizCmyxDxQ5kM9H33tSfjvzFk6LHHn_BkPaaY"
+                  "signature": "MEUCIC-4ncuoNX9DQEKpANp0EOv2Nbsh_YWgyWtKP0q_CeaWAiEAkUGrHXyvl9bgiBqyOt39-DTr5clACq7oZP_ceeUjHqQ"
                 }
               }
             }
@@ -4317,6 +4733,10 @@
         },
         "releaseRecipeSha256": null,
         "notAfter": "2026-10-31T12:00:00Z"
+      },
+      "answer": {
+        "key": "a",
+        "text": null
       }
     }
   },
@@ -4329,6 +4749,7 @@
         "kind": "preapproval",
         "tag": "[conduct demo touch 1]",
         "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         "options": [
           {
             "key": "a",
@@ -4374,7 +4795,7 @@
                 "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                 "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                 "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                "signature": "MEUCIQC9XIJyCSiYyedIIlB5iAMphQLuGpPuIOq7nH0ADrv84AIgIVgOMR_TEX9qLh2W8wz8q1XHKZBAHl3JSxg07hly4k8"
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
               }
             },
             "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
@@ -4432,6 +4853,10 @@
         },
         "releaseRecipeSha256": null,
         "notAfter": "2026-10-31T12:00:00Z"
+      },
+      "answer": {
+        "key": "a",
+        "text": null
       }
     }
   },
@@ -4444,6 +4869,7 @@
         "kind": "preapproval",
         "tag": "[conduct demo touch 1]",
         "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         "options": [
           {
             "key": "a",
@@ -4489,7 +4915,7 @@
                 "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                 "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                 "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                "signature": "MEUCIQC9XIJyCSiYyedIIlB5iAMphQLuGpPuIOq7nH0ADrv84AIgIVgOMR_TEX9qLh2W8wz8q1XHKZBAHl3JSxg07hly4k8"
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
               }
             },
             "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
@@ -4561,6 +4987,7 @@
         "kind": "preapproval",
         "tag": "[conduct demo touch 1]",
         "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         "options": [
           {
             "key": "a",
@@ -4606,7 +5033,7 @@
                 "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                 "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                 "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                "signature": "MEUCIQC9XIJyCSiYyedIIlB5iAMphQLuGpPuIOq7nH0ADrv84AIgIVgOMR_TEX9qLh2W8wz8q1XHKZBAHl3JSxg07hly4k8"
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
               }
             },
             "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
@@ -4692,7 +5119,7 @@
                 "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":null,\"label\":null,\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":\"Only the README and the vectors.\",\"v\":1}",
                 "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                 "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoibFJidGdTdHFUZnNyaGcyd0lTZG5tbEZzU2ZfNlIwNC1sY1pEUGZsbXRYSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                "signature": "MEUCIH7h-VWWtiDkHTqHNAC1oQPSVX6aLJvs8SzROiUJ0XG4AiEAx904BYCFGLuq40o1kQx9Rt6JTJ6v5593kh0zqH4djXs"
+                "signature": "MEYCIQD2LoLZYdoGk6v_S2WmGer0ajdKrgFjbf2f5zhq3LsOqAIhANTbzzZ_QLYcMT2TBjqRhbVTaEqfPt8rk10IAxRGTF4H"
               }
             },
             "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
@@ -4715,6 +5142,7 @@
         },
         "confirm": {
           "question": "[conduct demo touch 2] (run r20261017-demo/1) Confirm the narrowed scope. Scope: Only the README and the vectors.",
+          "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
           "options": [
             {
               "key": "a",
@@ -4758,7 +5186,7 @@
                   "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"ffcd20440d2cf0567cec220374de879ef2fdc23165b57b0eefeaa482a43bb8c7\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"b70b606a31429d02bb583dccd96cce8b244eec90c57ef28a8e88348fb911c2cf\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                   "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiaEEwMWs0WUU4OE4xYXJlR21VS3p2ZmlDNE5Ec0ctNmlOV1JnYXNoTUVCQSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                  "signature": "MEQCID7nCL9d8QgLj_POjg0C8dz6ch8OYBAq4bb02AgOwGqUAiBgCFgMvDfybCKo3UUMPP2JKiftRGYp7SRzHEyTnaiHrA"
+                  "signature": "MEQCIFKdOMDewBT7-r2LnxV0wXzx7jF31nHjwKkYCRsNjcTOAiBiN_9hbkVmRwEUkjYQNry7OPVnF4XB4-AbJAfMyVJBfA"
                 }
               },
               "question": "[conduct demo touch 2] (run r20261017-demo/1) Confirm the narrowed scope. Scope: Only the README and the vectors.",
@@ -4819,7 +5247,559 @@
         "releaseRecipeSha256": null,
         "notAfter": "2026-10-31T12:00:00Z"
       },
+      "answer": {
+        "key": "a",
+        "text": null
+      },
       "scopeOk": true
+    }
+  },
+  {
+    "name": "record-answer-mismatch-key",
+    "kind": "record",
+    "input": {
+      "record": {
+        "n": 1,
+        "kind": "preapproval",
+        "tag": "[conduct demo touch 1]",
+        "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "options": [
+          {
+            "key": "a",
+            "label": "Approve",
+            "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+          },
+          {
+            "key": "d",
+            "label": "Decline",
+            "consequence": "The run stops here."
+          }
+        ],
+        "grants": {
+          "a": {
+            "budgetUsd": 10,
+            "merge": true,
+            "release": false,
+            "scopeSha256": "d27ffb611ec33b09f591a92d90a8621da827c94f4fa0e5ee6f56fe05f9476cc0",
+            "runId": "r20261017-demo",
+            "repo": {
+              "remote": "example/demo",
+              "defaultBranch": "main"
+            },
+            "releaseRecipeSha256": null,
+            "notAfter": "2026-10-31T12:00:00Z"
+          }
+        },
+        "answer": {
+          "key": "d",
+          "text": null,
+          "by": "operator:dogan",
+          "proofMode": "verified",
+          "signed": {
+            "answer": {
+              "key": "a",
+              "text": null,
+              "by": "operator:dogan",
+              "answeredAt": "2026-10-17T12:00:00Z",
+              "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              "proof": {
+                "v": 1,
+                "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+                "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+                "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+                "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
+              }
+            },
+            "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+            "ask": {
+              "options": [
+                {
+                  "key": "a",
+                  "label": "Approve",
+                  "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+                },
+                {
+                  "key": "d",
+                  "label": "Decline",
+                  "consequence": "The run stops here."
+                }
+              ],
+              "allowFreeText": false
+            }
+          }
+        }
+      },
+      "quest": "11111111-2222-4333-8444-555555555555",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792281600000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "record_answer_mismatch",
+      "grant": null,
+      "answer": null
+    }
+  },
+  {
+    "name": "record-answer-mismatch-text",
+    "kind": "record",
+    "input": {
+      "record": {
+        "n": 1,
+        "kind": "preapproval",
+        "tag": "[conduct demo touch 1]",
+        "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "options": [
+          {
+            "key": "a",
+            "label": "Approve",
+            "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+          },
+          {
+            "key": "d",
+            "label": "Decline",
+            "consequence": "The run stops here."
+          }
+        ],
+        "grants": {
+          "a": {
+            "budgetUsd": 10,
+            "merge": true,
+            "release": false,
+            "scopeSha256": "d27ffb611ec33b09f591a92d90a8621da827c94f4fa0e5ee6f56fe05f9476cc0",
+            "runId": "r20261017-demo",
+            "repo": {
+              "remote": "example/demo",
+              "defaultBranch": "main"
+            },
+            "releaseRecipeSha256": null,
+            "notAfter": "2026-10-31T12:00:00Z"
+          }
+        },
+        "answer": {
+          "key": "a",
+          "text": "and release it",
+          "by": "operator:dogan",
+          "proofMode": "verified",
+          "signed": {
+            "answer": {
+              "key": "a",
+              "text": null,
+              "by": "operator:dogan",
+              "answeredAt": "2026-10-17T12:00:00Z",
+              "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              "proof": {
+                "v": 1,
+                "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+                "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+                "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+                "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
+              }
+            },
+            "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+            "ask": {
+              "options": [
+                {
+                  "key": "a",
+                  "label": "Approve",
+                  "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+                },
+                {
+                  "key": "d",
+                  "label": "Decline",
+                  "consequence": "The run stops here."
+                }
+              ],
+              "allowFreeText": false
+            }
+          }
+        }
+      },
+      "quest": "11111111-2222-4333-8444-555555555555",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792281600000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "record_answer_mismatch",
+      "grant": null,
+      "answer": null
+    }
+  },
+  {
+    "name": "record-answer-typed-as-c",
+    "kind": "record",
+    "input": {
+      "record": {
+        "n": 1,
+        "kind": "preapproval",
+        "tag": "[conduct demo touch 1]",
+        "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "options": [
+          {
+            "key": "a",
+            "label": "Approve",
+            "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+          },
+          {
+            "key": "c",
+            "label": "Narrow the scope",
+            "consequence": "Type the narrowed scope."
+          },
+          {
+            "key": "d",
+            "label": "Decline",
+            "consequence": "The run stops here."
+          }
+        ],
+        "grants": {
+          "a": {
+            "budgetUsd": 10,
+            "merge": true,
+            "release": false,
+            "scopeSha256": "d27ffb611ec33b09f591a92d90a8621da827c94f4fa0e5ee6f56fe05f9476cc0",
+            "runId": "r20261017-demo",
+            "repo": {
+              "remote": "example/demo",
+              "defaultBranch": "main"
+            },
+            "releaseRecipeSha256": null,
+            "notAfter": "2026-10-31T12:00:00Z"
+          }
+        },
+        "answer": {
+          "key": "c",
+          "text": "Narrow it to the README.",
+          "by": "operator:dogan",
+          "proofMode": "verified",
+          "signed": {
+            "answer": {
+              "key": null,
+              "text": "Narrow it to the README.",
+              "by": "operator:dogan",
+              "answeredAt": "2026-10-17T12:00:00Z",
+              "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              "proof": {
+                "v": 1,
+                "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+                "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3580b719e1d2b23cadcf896860d0c40d31d3bb0d2401e52390b4ae8d37163fe2\",\"key\":null,\"label\":null,\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":\"Narrow it to the README.\",\"v\":1}",
+                "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+                "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiOE50WjVCZ2JadlV5dEt5cWNUOU5NR0pJNWw1WWg1bE9sR2ZHV2ZiYnRrcyIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+                "signature": "MEUCIQDkJV-QkWpcpvgmAU6qdNia6mAz4L0VXNxIYXCV5UKESAIgSQAdvGez7x7wM_hZwbSfYPEMgJNDPzLWPSjRzfSf1eI"
+              }
+            },
+            "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+            "ask": {
+              "options": [
+                {
+                  "key": "a",
+                  "label": "Approve",
+                  "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+                },
+                {
+                  "key": "c",
+                  "label": "Narrow the scope",
+                  "consequence": "Type the narrowed scope."
+                },
+                {
+                  "key": "d",
+                  "label": "Decline",
+                  "consequence": "The run stops here."
+                }
+              ],
+              "allowFreeText": true
+            }
+          }
+        }
+      },
+      "quest": "11111111-2222-4333-8444-555555555555",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792281600000
+    },
+    "expect": {
+      "ok": true,
+      "mode": "verified",
+      "reason": null,
+      "grant": null,
+      "answer": {
+        "key": null,
+        "text": "Narrow it to the README."
+      }
+    }
+  },
+  {
+    "name": "record-answer-typed-as-c-text-differs",
+    "kind": "record",
+    "input": {
+      "record": {
+        "n": 1,
+        "kind": "preapproval",
+        "tag": "[conduct demo touch 1]",
+        "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "options": [
+          {
+            "key": "a",
+            "label": "Approve",
+            "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+          },
+          {
+            "key": "c",
+            "label": "Narrow the scope",
+            "consequence": "Type the narrowed scope."
+          },
+          {
+            "key": "d",
+            "label": "Decline",
+            "consequence": "The run stops here."
+          }
+        ],
+        "grants": {
+          "a": {
+            "budgetUsd": 10,
+            "merge": true,
+            "release": false,
+            "scopeSha256": "d27ffb611ec33b09f591a92d90a8621da827c94f4fa0e5ee6f56fe05f9476cc0",
+            "runId": "r20261017-demo",
+            "repo": {
+              "remote": "example/demo",
+              "defaultBranch": "main"
+            },
+            "releaseRecipeSha256": null,
+            "notAfter": "2026-10-31T12:00:00Z"
+          }
+        },
+        "answer": {
+          "key": "c",
+          "text": "Release it too.",
+          "by": "operator:dogan",
+          "proofMode": "verified",
+          "signed": {
+            "answer": {
+              "key": null,
+              "text": "Narrow it to the README.",
+              "by": "operator:dogan",
+              "answeredAt": "2026-10-17T12:00:00Z",
+              "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              "proof": {
+                "v": 1,
+                "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+                "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3580b719e1d2b23cadcf896860d0c40d31d3bb0d2401e52390b4ae8d37163fe2\",\"key\":null,\"label\":null,\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":\"Narrow it to the README.\",\"v\":1}",
+                "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+                "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiOE50WjVCZ2JadlV5dEt5cWNUOU5NR0pJNWw1WWg1bE9sR2ZHV2ZiYnRrcyIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+                "signature": "MEUCIQDkJV-QkWpcpvgmAU6qdNia6mAz4L0VXNxIYXCV5UKESAIgSQAdvGez7x7wM_hZwbSfYPEMgJNDPzLWPSjRzfSf1eI"
+              }
+            },
+            "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+            "ask": {
+              "options": [
+                {
+                  "key": "a",
+                  "label": "Approve",
+                  "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+                },
+                {
+                  "key": "c",
+                  "label": "Narrow the scope",
+                  "consequence": "Type the narrowed scope."
+                },
+                {
+                  "key": "d",
+                  "label": "Decline",
+                  "consequence": "The run stops here."
+                }
+              ],
+              "allowFreeText": true
+            }
+          }
+        }
+      },
+      "quest": "11111111-2222-4333-8444-555555555555",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792281600000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "record_answer_mismatch",
+      "grant": null,
+      "answer": null
+    }
+  },
+  {
+    "name": "record-receipt-id-mismatch",
+    "kind": "record",
+    "input": {
+      "record": {
+        "n": 1,
+        "kind": "preapproval",
+        "tag": "[conduct demo touch 1]",
+        "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "options": [
+          {
+            "key": "a",
+            "label": "Approve",
+            "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+          },
+          {
+            "key": "d",
+            "label": "Decline",
+            "consequence": "The run stops here."
+          }
+        ],
+        "grants": {
+          "a": {
+            "budgetUsd": 10,
+            "merge": true,
+            "release": false,
+            "scopeSha256": "d27ffb611ec33b09f591a92d90a8621da827c94f4fa0e5ee6f56fe05f9476cc0",
+            "runId": "r20261017-demo",
+            "repo": {
+              "remote": "example/demo",
+              "defaultBranch": "main"
+            },
+            "releaseRecipeSha256": null,
+            "notAfter": "2026-10-31T12:00:00Z"
+          }
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "proofMode": "verified",
+          "signed": {
+            "answer": {
+              "key": "a",
+              "text": null,
+              "by": "operator:dogan",
+              "answeredAt": "2026-10-17T12:00:00Z",
+              "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+              "proof": {
+                "v": 1,
+                "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+                "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+                "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+                "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
+              }
+            },
+            "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+            "ask": {
+              "options": [
+                {
+                  "key": "a",
+                  "label": "Approve",
+                  "consequence": "Merge each PR to example/demo (main): yes, release: no, budget $10, valid until 2026-10-31. [grant 13b51e3dd0494d0e]"
+                },
+                {
+                  "key": "d",
+                  "label": "Decline",
+                  "consequence": "The run stops here."
+                }
+              ],
+              "allowFreeText": false
+            }
+          }
+        }
+      },
+      "quest": "11111111-2222-4333-8444-555555555555",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792281600000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "statement_mismatch",
+      "grant": null,
+      "answer": null
     }
   },
   {
@@ -4846,7 +5826,7 @@
                 "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                 "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                 "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                "signature": "MEUCIQC9XIJyCSiYyedIIlB5iAMphQLuGpPuIOq7nH0ADrv84AIgIVgOMR_TEX9qLh2W8wz8q1XHKZBAHl3JSxg07hly4k8"
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
               }
             },
             "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
@@ -4931,6 +5911,7 @@
         "kind": "preapproval",
         "tag": "[conduct demo touch 1]",
         "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         "options": [
           {
             "key": "a",
@@ -4976,7 +5957,7 @@
                 "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                 "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                 "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                "signature": "MEUCIQC9XIJyCSiYyedIIlB5iAMphQLuGpPuIOq7nH0ADrv84AIgIVgOMR_TEX9qLh2W8wz8q1XHKZBAHl3JSxg07hly4k8"
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
               }
             },
             "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
@@ -5034,6 +6015,7 @@
         "kind": "preapproval",
         "tag": "[conduct demo touch 1]",
         "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         "options": [
           {
             "key": "a",
@@ -5079,7 +6061,7 @@
                 "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                 "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                 "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                "signature": "MEUCIQC9XIJyCSiYyedIIlB5iAMphQLuGpPuIOq7nH0ADrv84AIgIVgOMR_TEX9qLh2W8wz8q1XHKZBAHl3JSxg07hly4k8"
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
               }
             },
             "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
@@ -5137,6 +6119,7 @@
         "kind": "preapproval",
         "tag": "[conduct demo touch 1]",
         "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         "options": [
           {
             "key": "a",
@@ -5195,7 +6178,8 @@
         },
         "releaseRecipeSha256": null,
         "notAfter": "2026-10-31T12:00:00Z"
-      }
+      },
+      "answer": null
     }
   },
   {
@@ -5207,6 +6191,7 @@
         "kind": "preapproval",
         "tag": "[conduct demo touch 1]",
         "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         "options": [
           {
             "key": "a",
@@ -5252,7 +6237,7 @@
                 "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"1e1766c3131df7d93afa6587dd98b35f992fe3f221c83aa1fa237df0036fc87a\",\"key\":\"a\",\"label\":\"Approve\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"30e34375ef67c085438f2d80c903f9a74693d5409f434d2762ddae7ac0a2d7e0\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
                 "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
                 "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidVkzLWhUTTVyVU9zYTBSb3Jud3lkTlhVN0ZwWVF4UE9yMXhCRkVEY0xuSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
-                "signature": "MEUCIQC9XIJyCSiYyedIIlB5iAMphQLuGpPuIOq7nH0ADrv84AIgIVgOMR_TEX9qLh2W8wz8q1XHKZBAHl3JSxg07hly4k8"
+                "signature": "MEQCIAXea2NEg9D8PmFqSxI5AX5fNELbviED74otefTlklmYAiA_zFb6PDX_i7ePrlNkL2ZS33gY8jQxJ6fo8Uh4C1SAZQ"
               }
             },
             "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
@@ -5298,6 +6283,7 @@
         "kind": "preapproval",
         "tag": "[conduct demo touch 1]",
         "question": "[conduct demo touch 1] (run r20261017-demo/1) Approve the plan for: Ship the operator-proof verifier with its vectors.",
+        "receiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         "options": [
           {
             "key": "a",

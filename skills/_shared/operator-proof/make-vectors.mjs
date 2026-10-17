@@ -104,6 +104,8 @@ function answerVectors() {
   const noSignature = { ...proof };
   delete noSignature.signature;
   const shortData = Buffer.from(proof.authenticatorData, 'base64url').subarray(0, 36).toString('base64url');
+  // A second option 'a': which label the key names would depend on option order.
+  const duplicateKeyAsk = { ...clone(ASK), options: [...clone(ASK.options), { key: 'a', label: 'Ship as is', consequence: 'The PR merges.' }] };
   return [
     vector('answer-key', 'answer', answerInput(answer), VERIFIED),
     vector('answer-free-text', 'answer', answerInput(answerOf(sign({ answerKey: null, text: freeText }), { key: null, text: freeText })), VERIFIED),
@@ -121,6 +123,7 @@ function answerVectors() {
     vector('malformed-proof-client-data-not-json', 'answer', answerInput(withProof({ clientDataJSON: b64('not json') })), refused('malformed_proof')),
     vector('malformed-proof-bad-base64url', 'answer', answerInput(withProof({ authenticatorData: 'ab+/cd==' })), refused('malformed_proof')),
     vector('malformed-proof-key-not-in-ask', 'answer', answerInput(answerOf(proof, { key: 'z' })), refused('malformed_proof')),
+    vector('malformed-proof-duplicate-option-keys', 'answer', answerInput(answer, { ask: duplicateKeyAsk }), refused('malformed_proof')),
     vector('bad-timestamp', 'answer', answerInput(answerOf(sign({ signedAt: 'not a time' }))), refused('bad_timestamp')),
     vector('unknown-credential', 'answer', answerInput(answerOf(sign({ key: TEST_KEY_2 }))), refused('unknown_credential')),
     vector('statement-mismatch-key', 'answer', answerInput(answerOf(proof, { key: 'b' })), refused('statement_mismatch')),
@@ -129,6 +132,7 @@ function answerVectors() {
     vector('statement-mismatch-question', 'answer', answerInput(answer, { question: `${QUESTION} Also release.` }), refused('statement_mismatch')),
     vector('statement-mismatch-quest', 'answer', answerInput(answer, { questId: OTHER_QUEST }), refused('statement_mismatch')),
     vector('statement-mismatch-ask-receipt', 'answer', answerInput(answer, { askReceiptId: ANSWER_RECEIPT }), refused('statement_mismatch')),
+    vector('statement-mismatch-answer-ask-receipt', 'answer', answerInput(answerOf(proof, { askReceiptId: ANSWER_RECEIPT })), refused('statement_mismatch')),
     vector('bad-authenticator-data', 'answer', answerInput(withProof({ authenticatorData: shortData })), refused('bad_authenticator_data')),
     vector('type-mismatch', 'answer', answerInput(answerOf(sign({ clientData: { type: 'webauthn.create' } }))), refused('type_mismatch')),
     vector('challenge-mismatch', 'answer', answerInput(answerOf(sign({ clientData: { challenge: b64('another challenge') } }))), refused('challenge_mismatch')),
@@ -153,6 +157,17 @@ function registrationVectors() {
     origin: TEST_ORIGIN, registeredAt: new Date(SIGNED_MS + MINUTE).toISOString(), label: 'test key', be: false, bs: false,
   };
   const make = (overrides) => signRegistration({ signedAt: SIGNED_AT, ...overrides });
+  // The attested COSE_Key starts after the 16-byte credential id, at 55 + 16:
+  // a5 | 01 02 (kty 2) | 03 26 (alg -7) | 20 01 (crv 1) | 21 58 20 x | 22 58 20 y.
+  const COSE_AT = 55 + 16;
+  const withAuthData = (edit) => {
+    const bytes = Buffer.from(registration.authenticatorData, 'base64url');
+    return { ...registration, authenticatorData: edit(bytes).toString('base64url') };
+  };
+  const setByte = (offset, value) => (bytes) => {
+    bytes[offset] = value;
+    return bytes;
+  };
   return [
     vector('registration', 'registration', input(registration), { ...VERIFIED, credential }),
     vector('registration-malformed', 'registration', input({ ...registration, clientDataJSON: '***' }), refused('malformed_proof')),
@@ -168,6 +183,12 @@ function registrationVectors() {
     vector('registration-credential-id-mismatch', 'registration', input(make({ attestedCredentialId: credentialIdOf(TEST_KEY_2) })), refused('credential_id_mismatch')),
     vector('registration-alg-unsupported', 'registration', input({ ...registration, alg: -257 }), refused('alg_unsupported')),
     vector('registration-bad-key', 'registration', input({ ...registration, publicKeySpki: 'AAAA' }), refused('bad_key')),
+    vector('registration-key-mismatch-spki', 'registration', input({ ...registration, publicKeySpki: publicKeySpkiOf(TEST_KEY_2) }), refused('key_mismatch')),
+    vector('registration-key-mismatch-cose-alg', 'registration', input(withAuthData(setByte(COSE_AT + 4, 0x27))), refused('key_mismatch')),
+    vector('registration-cose-bad-kty', 'registration', input(withAuthData(setByte(COSE_AT + 2, 0x03))), refused('bad_key')),
+    vector('registration-cose-not-a-map', 'registration', input(withAuthData(setByte(COSE_AT, 0x85))), refused('bad_key')),
+    vector('registration-truncated-after-credential-id', 'registration', input(withAuthData((bytes) => bytes.subarray(0, COSE_AT))), refused('malformed_proof')),
+    vector('registration-truncated-cose-key', 'registration', input(withAuthData((bytes) => bytes.subarray(0, bytes.length - 1))), refused('malformed_proof')),
     vector('registration-stale', 'registration', input(registration, { now: SIGNED_MS + 16 * MINUTE }), refused('proof_stale')),
     vector('registration-future', 'registration', input(registration, { now: SIGNED_MS - 3 * MINUTE }), refused('proof_stale')),
   ];
@@ -185,6 +206,7 @@ function cosignVectors() {
     vector('cosign-unknown-credential', 'cosign', input({ cosign: signCosign({ ...admitted, key: TEST_KEY_2, signedAt: SIGNED_AT }) }), refused('unknown_credential')),
     vector('cosign-bad-signature', 'cosign', input({ cosign: { ...cosign, signature: flipLastByte(cosign.signature) } }), refused('bad_signature')),
     vector('cosign-absent', 'cosign', input({ cosign: null }), refused('proof_absent')),
+    vector('cosign-unconfigured', 'cosign', input({ anchorFile: EMPTY_ANCHOR }), refused('cosign_unconfigured')),
   ];
 }
 
@@ -208,6 +230,7 @@ function canonicalVectors() {
     hash('hash-ask-defaults', 'askSha256', answerArgs.ask, askSha256(answerArgs.ask)),
     hash('hash-ask', 'askSha256', ASK, askSha256(ASK)),
     hash('hash-ask-legacy-null', 'askSha256', null, askSha256(null)),
+    hash('hash-ask-duplicate-keys', 'askSha256', { options: [...answerArgs.ask.options, { key: 'a', label: 'Tea', consequence: 'Tea is made.' }] }, null),
   ];
 }
 
@@ -239,6 +262,10 @@ function anchorVectors() {
     vector('anchor-empty', 'anchor', { text: JSON.stringify(EMPTY_ANCHOR) }, { configured: false, epoch: 2 }),
     vector('anchor-unreadable-json', 'anchor', { text: '{"v":1,' }, { throws: 'anchor_unreadable' }),
     vector('anchor-unreadable-shape', 'anchor', { text: '[]' }, { throws: 'anchor_unreadable' }),
+    // 1e400 parses as Infinity, which canonical() cannot encode.
+    vector('anchor-unreadable-alg-overflow', 'anchor', { text: JSON.stringify(ANCHOR).replace('"alg":-7', '"alg":1e400') }, { throws: 'anchor_unreadable' }),
+    vector('anchor-unreadable-extra-overflow', 'anchor', { text: JSON.stringify(ANCHOR).replace('"v":1', '"v":1,"note":1e400') }, { throws: 'anchor_unreadable' }),
+    vector('anchor-unreadable-field-type', 'anchor', { text: JSON.stringify(ANCHOR).replace('"be":false', '"be":"no"') }, { throws: 'anchor_unreadable' }),
   ];
 }
 
@@ -260,9 +287,12 @@ function receiptVectors() {
   const expiredGrant = { ...GRANT, notAfter: '2026-10-17T13:00:00Z' };
   const otherRunGrant = { ...GRANT, runId: 'r20261001-other' };
   const { askReceiptId: _id, ...unboundAnswer } = answerOf(proof);
+  const signedA = { key: 'a', text: null };
   return [
-    vector('receipt-spine-quest', 'receipt', input({ state: state(), goalText: `${GOAL}\n` }), { ...VERIFIED, grant: GRANT, scopeOk: true }),
-    vector('receipt-bare-row', 'receipt', input({ body: row }), { ...VERIFIED, grant: null }),
+    vector('receipt-spine-quest', 'receipt', input({ state: state(), goalText: `${GOAL}\n` }), { ...VERIFIED, grant: GRANT, answer: signedA, scopeOk: true }),
+    vector('receipt-bare-row', 'receipt', input({ body: row }), { ...VERIFIED, grant: null, answer: signedA }),
+    // The row's askReceiptId metadata must name the ask the operator signed for.
+    vector('receipt-bare-row-ask-receipt-mismatch', 'receipt', input({ body: receipt(answerOf(proof, { askReceiptId: ANSWER_RECEIPT })) }), { ...refused('statement_mismatch'), grant: null, answer: null }),
     vector('receipt-state-by-tag', 'receipt', input({ body: body(receipt(unboundAnswer)), state: state() }), { ...VERIFIED, grant: GRANT }),
     vector('receipt-quest-id-not-full', 'receipt', input({ quest: QUEST.slice(0, 8) }), { ...refused('quest_id_not_full'), grant: null }),
     vector('receipt-quest-id-not-full-body', 'receipt', input({ body: body(row, QUEST.slice(0, 8)) }), { ...refused('quest_id_not_full'), grant: null }),
@@ -272,7 +302,7 @@ function receiptVectors() {
     vector('receipt-grant-tag-mismatch', 'receipt', input({ state: state({ ...GRANT, budgetUsd: 100 }) }), { ...refused('grant_tag_mismatch'), grant: null }),
     vector('receipt-grant-expired', 'receipt', input(signedWith(expiredGrant)), { ...refused('grant_expired'), grant: null }),
     vector('receipt-wrong-run', 'receipt', input(signedWith(otherRunGrant)), { ...refused('wrong_run'), grant: null }),
-    vector('receipt-unconfigured', 'receipt', input({ body: body(receipt(answerOf(undefined, { by: 'operator:t3' }))), state: state(), anchorFile: EMPTY_ANCHOR }), { ok: true, mode: 'unconfigured', reason: null, grant: GRANT }),
+    vector('receipt-unconfigured', 'receipt', input({ body: body(receipt(answerOf(undefined, { by: 'operator:t3' }))), state: state(), anchorFile: EMPTY_ANCHOR }), { ok: true, mode: 'unconfigured', reason: null, grant: GRANT, answer: signedA }),
   ];
 }
 
@@ -281,8 +311,23 @@ function recordVectors() {
   const proof = signAnswer({ questId: QUEST, askReceiptId: ASK_RECEIPT, question: TOUCH1_QUESTION, ask, answerKey: 'a', signedAt: SIGNED_AT });
   const signedBlock = { answer: answerOf(proof), question: TOUCH1_QUESTION, ask };
   const touchRecord = (overrides = {}) => ({
-    n: 1, kind: 'preapproval', tag: TOUCH1_TAG, question: TOUCH1_QUESTION, options: ask.options, grants: { a: GRANT },
+    n: 1, kind: 'preapproval', tag: TOUCH1_TAG, question: TOUCH1_QUESTION, receiptId: ASK_RECEIPT, options: ask.options, grants: { a: GRANT },
     answer: { key: 'a', text: null, by: 'operator:dogan', proofMode: 'verified', signed: signedBlock }, ...overrides,
+  });
+  const withOuter = (patch) => touchRecord({ answer: { ...touchRecord().answer, ...patch } });
+  // A typed answer with no key: conduct records it as option (c).
+  const typed = 'Narrow it to the README.';
+  const askFree = {
+    options: [...ask.options.slice(0, 1), { key: 'c', label: 'Narrow the scope', consequence: 'Type the narrowed scope.' }, ...ask.options.slice(1)],
+    allowFreeText: true,
+  };
+  const typedProof = signAnswer({ questId: QUEST, askReceiptId: ASK_RECEIPT, question: TOUCH1_QUESTION, ask: askFree, answerKey: null, text: typed, signedAt: SIGNED_AT });
+  const typedRecord = (outerText) => touchRecord({
+    options: askFree.options,
+    answer: {
+      key: 'c', text: outerText, by: 'operator:dogan', proofMode: 'verified',
+      signed: { answer: answerOf(typedProof, { key: null, text: typed }), question: TOUCH1_QUESTION, ask: askFree },
+    },
   });
   // A (c) answer and the confirm touch that turns it into authority.
   const grantC = { ...GRANT, scopeSha256: sha256Hex(SCOPE_C) };
@@ -294,21 +339,29 @@ function recordVectors() {
     kind: 'authority', scope: SCOPE_C,
     answer: { key: null, text: SCOPE_C, signed: { answer: answerOf(freeProof, { key: null, text: SCOPE_C }), question: TOUCH1_QUESTION, ask } },
     confirm: {
-      question: confirmQuestion, options: askC.options, grants: { a: grantC },
+      question: confirmQuestion, receiptId: ASK_RECEIPT, options: askC.options, grants: { a: grantC },
       answer: { key: 'a', text: null, signed: { answer: answerOf(proofC), question: confirmQuestion, ask: askC } },
     },
   };
   const unsignedRecord = touchRecord({ answer: { key: 'a', text: null, by: 'operator:tty', proofMode: 'unconfigured' } });
   const input = (record, overrides = {}) => ({ record, quest: QUEST, anchorFile: ANCHOR, now: NOW, ...overrides });
+  const signedA = { key: 'a', text: null };
   return [
-    vector('record-touch', 'record', input(touchRecord()), { ...VERIFIED, grant: GRANT }),
+    vector('record-touch', 'record', input(touchRecord()), { ...VERIFIED, grant: GRANT, answer: signedA }),
     vector('record-touch-goal-trailing-newline', 'record', input(touchRecord(), { goalText: `${GOAL}\n` }), { ...VERIFIED, grant: GRANT, scopeOk: true }),
     vector('record-touch-goal-two-newlines', 'record', input(touchRecord(), { goalText: `${GOAL}\n\n` }), { ...VERIFIED, grant: GRANT, scopeOk: false }),
-    vector('record-authority-confirm-scope', 'record', input(authorityRecord, { goalText: `${GOAL}\n` }), { ...VERIFIED, grant: grantC, scopeOk: true }),
+    vector('record-authority-confirm-scope', 'record', input(authorityRecord, { goalText: `${GOAL}\n` }), { ...VERIFIED, grant: grantC, answer: signedA, scopeOk: true }),
+    // The record's own answer must be the one the operator signed.
+    vector('record-answer-mismatch-key', 'record', input(withOuter({ key: 'd' })), { ...refused('record_answer_mismatch'), grant: null, answer: null }),
+    vector('record-answer-mismatch-text', 'record', input(withOuter({ text: 'and release it' })), { ...refused('record_answer_mismatch'), grant: null, answer: null }),
+    vector('record-answer-typed-as-c', 'record', input(typedRecord(typed)), { ...VERIFIED, grant: null, answer: { key: null, text: typed } }),
+    vector('record-answer-typed-as-c-text-differs', 'record', input(typedRecord('Release it too.')), { ...refused('record_answer_mismatch'), grant: null, answer: null }),
+    // The touch's filed ask id must be the one the statement names.
+    vector('record-receipt-id-mismatch', 'record', input(touchRecord({ receiptId: ANSWER_RECEIPT })), { ...refused('statement_mismatch'), grant: null, answer: null }),
     vector('record-authority-plain', 'record', input({ kind: 'authority', answer: touchRecord().answer, grants: { a: GRANT } }), { ...VERIFIED, grant: GRANT }),
     vector('record-grant-tag-mismatch', 'record', input(touchRecord({ grants: { a: { ...GRANT, merge: false } } })), { ...refused('grant_tag_mismatch'), grant: null }),
     vector('record-quest-none-configured', 'record', input(touchRecord(), { quest: 'none' }), { ...refused('quest_id_not_full'), grant: null }),
-    vector('record-quest-none-unconfigured', 'record', input(unsignedRecord, { quest: 'none', anchorFile: EMPTY_ANCHOR }), { ok: true, mode: 'unconfigured', reason: null, grant: GRANT }),
+    vector('record-quest-none-unconfigured', 'record', input(unsignedRecord, { quest: 'none', anchorFile: EMPTY_ANCHOR }), { ok: true, mode: 'unconfigured', reason: null, grant: GRANT, answer: null }),
     vector('record-unconfigured-grant-mismatch', 'record', input(touchRecord({ grants: { a: { ...GRANT, merge: false } } }), { anchorFile: EMPTY_ANCHOR }), { ok: true, mode: 'unconfigured', reason: 'grant_tag_mismatch', grant: null }),
     vector('record-unsigned-configured', 'record', input(unsignedRecord), { ...refused('proof_absent'), grant: null }),
   ];
