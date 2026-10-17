@@ -168,6 +168,15 @@ test('the read-back takes the answer from the lookup even when a later receipt i
   assert.deepEqual([hidden.status, hidden.waiting], ['filed', true]);
 });
 
+test('a T3 operator answer resumes the filed touch through the Spine read-back', () => {
+  const state = makeState();
+  const touch = state.touches[0];
+  const action = touchAction(state, touch);
+  const receipt = answered({ answer: { key: 'a', text: 'Approve', by: 'operator:t3', answeredAt: '2026-10-17T00:00:00Z' } });
+  recordTouch(state, touch, action, { code: 0, stdout: JSON.stringify({ ok: true, answered: true, receipt }), stderr: '' });
+  assert.deepEqual([touch.status, touch.answer.key, touch.answer.by], ['answered', 'a', 'operator:t3']);
+});
+
 test('a failed or unanswered lookup is not an answer: the first is refused (the read-back stays pending), the second waits', () => {
   const state = makeState();
   const touch = state.touches[0];
