@@ -72,6 +72,9 @@ test('markPhase: a resumed session retains ownership and rejects another session
   const foreign = markPhase(resumed.state, 'third', 'start', isoAt(2000), 'other');
   assert.match(foreign.warning, /does not own/);
   assert.equal(foreign.state.phases.length, 2);
+  const foreignEnd = markPhase(resumed.state, 'second', 'end', isoAt(2000), 'other');
+  assert.match(foreignEnd.warning, /does not own/);
+  assert.equal(foreignEnd.state.phases[1].endedAt, null);
 });
 
 test('markPhase: end closes the matching open phase', () => {
@@ -279,7 +282,7 @@ test('unassigned remainder reports files without a matching phase', () => {
     const report = buildReport(state, usage, '2026-01-03T00:00:00.000Z', { dir: root, rule: 'flag', exists: true });
     assert.equal(report.unassigned.totals.inputTokens, 77);
     assert.equal(report.phases[0].totals.inputTokens, 0);
-    assert.equal(report.totals.inputTokens, 77);
+    assert.equal(report.totals.inputTokens, 0, 'out-of-window usage is shown separately from spec totals');
     assert.match(renderMarkdownTable(report), /\*\*unassigned\*\* \| 77/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -446,7 +449,7 @@ test('CLI: mark start/end sequencing creates state file + parent dir on first ma
 
     const r2 = spawnSync(process.execPath, [
       CLI, 'mark', '--state', statePath, '--phase', 'phase-1-setup', '--event', 'end',
-    ], { encoding: 'utf8' });
+    ], { encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'sess-1' } });
     assert.equal(r2.status, 0, `stderr: ${r2.stderr}`);
 
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -479,7 +482,7 @@ test('CLI: mark x3 (setup start, setup end/pipeline start via auto-close, pipeli
 
     r = spawnSync(process.execPath, [
       CLI, 'mark', '--state', statePath, '--phase', 'phase-2-pipeline', '--event', 'end',
-    ], { encoding: 'utf8' });
+    ], { encoding: 'utf8', env: { ...process.env, CLAUDE_CODE_SESSION_ID: 'sess-1' } });
     assert.equal(r.status, 0, r.stderr);
 
     const state = JSON.parse(readFileSync(statePath, 'utf8'));

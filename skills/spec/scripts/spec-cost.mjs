@@ -59,13 +59,13 @@ export function markPhase(state, phase, event, now, sessionId = null) {
     ...state,
     phases: state.phases.map((p) => ({ ...p })),
   };
+  if (next.sessionId && sessionId !== next.sessionId) {
+    return { state: next, warning: `session ${sessionId ?? '(missing)'} does not own this run (${next.sessionId})` };
+  }
 
   if (event === 'start') {
     if (sessionId && !/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
       return { state: next, warning: `invalid session id ${JSON.stringify(sessionId)}` };
-    }
-    if (sessionId && next.sessionId && sessionId !== next.sessionId) {
-      return { state: next, warning: `session ${sessionId} does not own this run (${next.sessionId})` };
     }
     if (sessionId && !next.sessionId) next.sessionId = sessionId;
     for (const p of next.phases) {
@@ -370,11 +370,6 @@ export function buildReport(state, collected, generatedAt, source = { dir: null,
         ? null : round6(unassignedTotals.costUsd + costUsd),
     };
   }
-  grandTotals = {
-    ...addTokenCounts(grandTotals, unassignedTotals),
-    costUsd: grandTotals.costUsd === null || unassignedTotals.costUsd === null
-      ? null : round6(grandTotals.costUsd + unassignedTotals.costUsd),
-  };
 
   // "Nothing was measured" and "the measured cost was zero" are different facts
   // that render identically as $0.0000. Carry the difference explicitly so a
