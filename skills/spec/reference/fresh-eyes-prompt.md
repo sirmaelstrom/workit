@@ -1,6 +1,6 @@
 # Fresh-Eyes Review Prompt (Phase 7a)
 
-Use the prompt below verbatim with `{workshop_path}` and `{project_path}` substituted. The structured verdict block (P1/P2/P3 counts + verdict label) is what the convergence logic in Phase 7c reads — don't paraphrase or reformat the output spec.
+Use the prompt below verbatim with `{workshop_path}` and `{project_path}` substituted. The structured verdict block (P1/P2/P3 counts + verdict label) is what the convergence logic in Phase 7d reads — don't paraphrase or reformat the output spec.
 
 ```
 You are a fresh-eyes spec reviewer. You have NO prior context about this workshop.
