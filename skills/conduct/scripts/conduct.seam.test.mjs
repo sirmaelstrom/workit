@@ -1216,12 +1216,17 @@ test('pending re-emission (council r1, astra/codex): a merge, release or paid ac
       assert.match(h.state().dispatchHalt.reason, /authority proof invalid: statement_mismatch/, name);
       assert.notEqual(h.wp(pending.wpId).state, 'held', name);
     } else {
-      assert.equal(h.wp(pending.wpId).state, 'held', name);
-      assert.match(h.wp(pending.wpId).reason, /authority proof invalid: statement_mismatch/, name);
+      // The squash may have run before the crash: the merge-commit lookup decides first (council r2, R4).
+      assert.deepEqual([action.step, action.part], ['merge', 'merge-commit'], name);
     }
     h.pending = action;
     // Paid work then waits on the authority hold (council r2, R3) instead of ending.
     await drive(h, { until: (a) => a.step === 'showcase' || authorityWait(a) });
+    if (name === 'squash') {
+      // The squash never ran, so the PR has no merge commit, and the WP holds.
+      assert.equal(h.wp(pending.wpId).state, 'held', name);
+      assert.match(h.wp(pending.wpId).reason, /authority proof invalid: statement_mismatch/, name);
+    }
     const again = h.trace.filter((a) => a.id !== pending.id && a.step === pending.step && a.part === pending.part && a.phase === pending.phase);
     assert.deepEqual(again.map((a) => a.id), [], `${name}: zero emission of the dropped act`);
   }

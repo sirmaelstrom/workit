@@ -20,6 +20,7 @@ import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, filedLength, operatorAnchor, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
 import { readAnchor } from '../../_shared/operator-proof/operator-proof.mjs';
+import { verifiedAuthority } from './lib/authority.mjs';
 import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -126,6 +127,9 @@ function stamp(state, spec) {
 // rotation's custody steps (lib/rotate.mjs) come before either; the pending
 // action stays where it is and is emitted again once custody is taken.
 async function emit(state, deps, { custody = null } = {}) {
+  // An unreadable anchor exits 2 here, before anything below saves state or
+  // events; a missing one reads as unconfigured and changes nothing.
+  operatorAnchor(deps);
   const rotation = openRotation(state);
   if (rotation) {
     const spec = custodyNext(state, rotation, deps, { custody });
@@ -141,8 +145,11 @@ async function emit(state, deps, { custody = null } = {}) {
     if (phase?.observePending) { phase.observePending(state, deps); saveState(state, deps); }
     // A merge, release or paid act is checked against the signed grant again
     // before it is emitted again; one refused now is held and dropped, and the
-    // phase's next action is emitted in its place.
-    if (!phase?.checkPending || phase.checkPending(state, deps)) return state.pending;
+    // phase's next action is emitted in its place. Configured, an act stamped
+    // in another phase than the run's (an edit to state.json) is dropped
+    // unchecked: no phase derives it now.
+    const foreign = state.pending.phase !== state.phase && verifiedAuthority(state, deps).proofMode !== 'unconfigured';
+    if (!foreign && (!phase?.checkPending || phase.checkPending(state, deps))) return state.pending;
     const dropped = state.pending;
     appendEvent(state, deps, { actionId: dropped.id, step: dropped.step, seam: dropped.seam, kind: dropped.kind, event: 'dropped' });
     state.pending = null;
@@ -160,7 +167,8 @@ async function emit(state, deps, { custody = null } = {}) {
     if (spec) {
       const action = stamp(state, spec);
       state.pending = action;
-      appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'emitted' });
+      // A held wait (configured: an authority refused) is marked, so the analysis never counts it as a seam crossed.
+      appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'emitted', ...(action.held ? { data: { held: true } } : {}) });
       saveState(state, deps);
       return action;
     }
@@ -420,7 +428,7 @@ async function record(tokens, deps) {
     appendEvent(state, deps, {
       actionId: id, step: action.step, seam: action.seam, kind: action.kind, event: 'recorded',
       source: flags.manual === true ? 'manual' : 'next', phase: action.phase,
-      data: state.phase === action.phase ? {} : { phase: state.phase },
+      data: { ...(action.held ? { held: true } : {}), ...(state.phase === action.phase ? {} : { phase: state.phase }) },
     });
     saveState(state, deps);
     const next = await emitAfterRecord(state, deps, id);

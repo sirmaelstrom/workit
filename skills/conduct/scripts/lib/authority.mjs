@@ -16,6 +16,9 @@ import {
 
 // The Spine stores at most this many characters of an option's label or consequence.
 export const OPTION_MAX = 240;
+// What an authority hold asks of the operator. Nothing re-files an authority
+// touch mid-run, so a record that cannot be restored ends the run's authority.
+export const AUTHORITY_RECOVERY = 'restore the signed record, or start a new run and sign its touch 1';
 // A grant's base branch when the repo reported none. renderGrant puts the
 // branch in parentheses, so the prose reads "((unknown))".
 export const UNKNOWN_BRANCH = '(unknown)';
@@ -228,6 +231,19 @@ export function releaseRefusal(state, authority) {
   return null;
 }
 
+// What emission stamps or a wait counts down: never part of what an act does.
+const STAMPED = new Set(['id', 'phase', 'seam', 'wpId', 'dueAt', 'remainingMs']);
+const sorted = (value) => (Array.isArray(value) ? value.map(sorted)
+  : isObj(value) ? Object.fromEntries(Object.keys(value).filter((key) => value[key] !== undefined).sort().map((key) => [key, sorted(value[key])])) : value);
+const actKey = (action) => JSON.stringify(sorted(Object.fromEntries(Object.entries(action).filter(([key]) => !STAMPED.has(key)))));
+
+// True when two actions are the same act: every field (kind, argv, cwd, env,
+// tool and args, an edit's file, slots and JSON path, the instruction) equal,
+// apart from the stamped ones.
+export function sameAction(a, b) {
+  return isObj(a) && isObj(b) && actKey(a) === actKey(b);
+}
+
 // ---- display (never read by an act) ----
 
 // The authority touch's stored proof, for the run report and the handoff.
@@ -242,19 +258,27 @@ export function proofLabel(state) {
   if (!answer) return '(proof: no authority answer yet)';
   if (answer.proofMode !== 'verified') return '(proof: UNCONFIGURED — answers not signed)';
   const label = `(proof: verified ••••${String(answer.credentialId ?? '').slice(-8)} epoch ${answer.epoch})`;
-  return isObj(touch.grants) ? label : `${label}; touch ${touch.n} carries no signed grant: re-file it to act`;
+  return isObj(touch.grants) ? label : `${label}; touch ${touch.n} carries no signed grant: start a new run and sign its touch 1 to act`;
 }
 
 // The authority line's values and label. Beside a verified proof they are the
 // verified authority's, never state.authority's; a caller without
-// deps.readAnchor prints the stored values, labelled as a cached display.
+// deps.readAnchor prints the stored values, labelled as a cached display, and
+// an anchor that cannot be read for any reason labels them unverified.
 export function authorityDisplay(state, deps) {
   const cached = state.authority ?? {};
   const shown = { merge: cached.merge === true, release: cached.release === true, budgetUsd: cached.budgetUsd ?? 0, scope: cached.scope };
   const label = proofLabel(state);
   if (!label.startsWith('(proof: verified')) return { ...shown, label };
   if (typeof deps?.readAnchor !== 'function') return { ...shown, label: `${label} (cached display; acts use the signed grant)` };
-  const verified = verifiedAuthority(state, deps);
+  const unverified = { ...shown, label: '(proof: unverified (anchor unreadable); cached display, acts hold)' };
+  let verified;
+  try {
+    verified = verifiedAuthority(state, deps);
+  } catch {
+    return unverified;
+  }
+  if (verified.reason === REASONS.anchor_unreadable) return unverified;
   if (verified.proofMode === 'unconfigured') return { ...shown, label: '(proof: UNCONFIGURED — no anchor is configured now, so the stored answer is not checked)' };
   const { merge, release, budgetUsd, scope } = verified;
   return { merge, release, budgetUsd, scope, label: verified.reason ? `(proof: refused, ${verified.reason}; acts hold)` : label };

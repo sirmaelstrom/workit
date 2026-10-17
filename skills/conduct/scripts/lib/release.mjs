@@ -21,8 +21,16 @@ function compareVersions(a, b) {
 }
 
 // A dot path whose numeric segments index arrays: `plugins.0.version`.
-function atPath(object, jsonPath) {
+export function atPath(object, jsonPath) {
   return jsonPath.split('.').reduce((value, key) => (value == null ? undefined : value[/^\d+$/.test(key) ? Number(key) : key]), object);
+}
+
+// The version a recipe's level bumps `from` to, or null when `from` is not a version.
+export function bumpVersion(from, level) {
+  const parts = parseVersion(from);
+  const at = BUMP[level];
+  if (!parts || at === undefined) return null;
+  return parts.map((n, i) => (i < at ? n : i === at ? n + 1 : 0)).join('.');
 }
 
 export function bumpPlan(recipe, { read, repoPath = null }) {
@@ -47,9 +55,7 @@ export function bumpPlan(recipe, { read, repoPath = null }) {
   if (bad) throw new ConductError(2, `${bad.file} ${bad.jsonPath} is not a version: ${bad.from}`);
   const versions = [...new Set(current.map((entry) => entry.from))];
   if (versions.length !== 1) throw new ConductError(2, `the bump files disagree: ${current.map((entry) => `${entry.file} ${entry.jsonPath}=${entry.from}`).join(', ')}`);
-  const parts = parseVersion(versions[0]);
-  const at = BUMP[recipe.level];
-  const to = parts.map((n, i) => (i < at ? n : i === at ? n + 1 : 0)).join('.');
+  const to = bumpVersion(versions[0], recipe.level);
   return { from: versions[0], to, edits: current.map((entry) => ({ ...entry, to })) };
 }
 

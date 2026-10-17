@@ -3,7 +3,7 @@
 import { join, resolve, win32 } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { parseDesignDirection, skillsField, stripWrappingBackticks, visualRules } from '../schedule.mjs';
-import { approvingTouch, verifiedAuthority } from '../authority.mjs';
+import { AUTHORITY_RECOVERY, approvingTouch, verifiedAuthority } from '../authority.mjs';
 
 // The record that carries the run's authority: a (c) answer's validated grant
 // (scope included), else the answering touch (scope = the goal verbatim).
@@ -31,7 +31,7 @@ export function next(state, deps) {
     const reason = `spec held: ${authority.reason}`;
     return {
       kind: 'wait', step: 'spec', held: true, reason, waitMs: HELD_WAIT_MS,
-      instruction: `The run is held before /spec (${reason}): re-file the authority touch and have the operator sign it. Tell the operator. Wait ${HELD_WAIT_MS / 1000} s, then record {}.`,
+      instruction: `The run is held before /spec (${reason}): ${AUTHORITY_RECOVERY}. Tell the operator. Wait ${HELD_WAIT_MS / 1000} s, then record {}.`,
     };
   }
   const ref = preapprovedRef(state);

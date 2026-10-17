@@ -15,8 +15,10 @@ const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
 // section) and null are not seam rows.
 export const SEAM_ROWS = Object.freeze([...new Set(Object.values(STEP_SEAM))].filter((seam) => seam && seam !== TOUCH_SEAM)
   .flatMap((seam) => (seam === 'spec' ? SPEC_ROWS : [seam])).concat('runtime-exercise'));
-// A phase hand-over and a skipped step are not a seam crossed.
-const NOT_EVIDENCE = new Set(['phase', 'not-exercised']);
+// A phase hand-over and a skipped step are not a seam crossed, nor is a
+// refusal: a held or dropped act, a held wait, or a release that ended held.
+const NOT_EVIDENCE = new Set(['phase', 'not-exercised', 'dropped', 'spec-held', 'release-held']);
+const refusal = (e) => NOT_EVIDENCE.has(e.event) || e.data?.held === true || (e.event === 'release' && /^release held: /.test(e.data?.reason ?? ''));
 
 const usd = (n) => `$${Number(n).toFixed(2)}`;
 
@@ -105,7 +107,7 @@ function runtimeEvidence(state, events) {
 function seamCoverage(state, events) {
   return SEAM_ROWS.flatMap((row) => {
     const seam = SPEC_ROWS.includes(row) ? 'spec' : row;
-    const evidence = row === 'runtime-exercise' ? runtimeEvidence(state, events) : events.filter((e) => e.seam === seam && !NOT_EVIDENCE.has(e.event));
+    const evidence = row === 'runtime-exercise' ? runtimeEvidence(state, events) : events.filter((e) => e.seam === seam && !refusal(e));
     const cite = [...new Set(evidence.map((e) => e.actionId ?? e.event))].join(', ');
     const status = !evidence.length ? 'not exercised' : evidence.some((e) => e.source === 'manual') ? 'by hand' : 'owned';
     const skipped = events.filter((e) => e.event === 'not-exercised' && e.seam === seam)

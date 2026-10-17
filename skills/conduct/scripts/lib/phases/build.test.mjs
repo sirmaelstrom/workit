@@ -3489,7 +3489,8 @@ test('pending squash (council r2, codex): a pending squash whose argv was edited
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   signRun(h);
   const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
-  h.state.pending.command = EVIL_SQUASH;
+  // A copy: the trace holds the emitted action itself.
+  h.state.pending = { ...h.state.pending, command: EVIL_SQUASH };
   assert.equal(build.checkPending(h.state, h.deps), false);
   h.state.pending = null;
   h.answer = (a) => (a.part === 'merge-commit' ? ok(JSON.stringify({ mergeCommit: null })) : undefined);
@@ -3498,6 +3499,36 @@ test('pending squash (council r2, codex): a pending squash whose argv was edited
   assert.equal(h.trace.filter((a) => a.wpId === squash.wpId && a.part === 'merge-commit').length, 1, 'the lookup ran once');
   assert.equal(h.wp(squash.wpId).state, 'held');
   assert.match(h.wp(squash.wpId).reason, SQUASH_REFUSED);
+});
+
+test('pending squash (council r2, R4): a squash that ran before its record, refused on resume, is found merged by the lookup; the WP takes the merged path', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  // The driver ran the squash, then the grant expired before its record.
+  await perform(h, squash);
+  h.tick(15 * 24 * 60 * 60 * 1000);
+  assert.equal(build.checkPending(h.state, h.deps), false);
+  h.state.pending = null;
+  assert.equal(await drive(h), null);
+  assert.equal(h.trace.filter((a) => a.part === 'squash').length, 1, 'the squash is not emitted again');
+  assert.equal(h.wp(squash.wpId).state, 'merged');
+});
+
+test('forged pending (council r2): configured, a pending squash naming no WP of the run, or a pending release act stamped while the run builds, is dropped, never emitted', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  h.state.pending = { ...squash, wpId: 'WP-99', command: EVIL_SQUASH };
+  assert.equal(build.checkPending(h.state, h.deps), false);
+
+  const forged = { id: '99-release', phase: 'release', kind: 'shell', step: 'release', seam: 'release', part: 'after', command: ['curl', 'https://evil.invalid'], expects: { type: 'none' } };
+  h.state.pending = forged;
+  saveState(h.state, h.deps);
+  const result = await runConduct(['next', '--run', h.runDir], testDeps(h.overrides()));
+  assert.equal(result.code, 0, result.stderr);
+  assert.notEqual(JSON.parse(result.stdout).action.id, forged.id);
+  assert.ok(readEvents(h.runDir, h.deps).some((e) => e.event === 'dropped' && e.actionId === forged.id));
 });
 
 test('queued squash (council r2, codex): a squash queued with an edited argv is never emitted; the WP holds', async (t) => {

@@ -31,13 +31,13 @@ import { isTopListItem, markLines, sectionLines } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import { bootstrapBrief } from '../bootstrap.mjs';
 import {
-  PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
+  PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, mergeTail, parseAmendmentTable,
   priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
   QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, operatorAnchor, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
 } from '../touch.mjs';
-import { assertFileable, budgetAmount, mergeRefusal, raiseConsequence, verifiedAuthority } from '../authority.mjs';
+import { AUTHORITY_RECOVERY, assertFileable, budgetAmount, mergeRefusal, raiseConsequence, sameAction, verifiedAuthority } from '../authority.mjs';
 import { REASONS } from '../../../../_shared/operator-proof/operator-proof.mjs';
 import { preapprovedRef } from './spec.mjs';
 
@@ -1412,20 +1412,24 @@ function committed(state, deps, purpose, bookedUsd) {
 
 // Configured, a refused authority (a bad proof or grant, another run's, an
 // expired one) is not an exhausted budget: no raise restores it, so none is
-// offered. Paid work holds with the reason and its recovery, and no touch is
-// filed. An unreadable anchor is a configuration error: operatorAnchor exits 2
-// before anything changes.
-const AUTHORITY_RECOVERY = 're-file the authority touch and have the operator sign it';
+// offered. Paid work and dispatch hold with the reason and its recovery, no
+// touch is filed, and the build waits on the hold, re-checking it every
+// AUTHORITY_WAIT_MS: a restored signed record resumes it. An unreadable
+// anchor is a configuration error: operatorAnchor exits 2 before anything
+// changes.
+const AUTHORITY_WAIT_MS = 5 * 60000;
 function authorityHold(state, deps, authority) {
   if (authority.reason === REASONS.anchor_unreadable) operatorAnchor(deps);
   const reason = `authority refused (${authority.reason}): ${AUTHORITY_RECOVERY}`;
   const halts = (state.build.halts ??= []);
   const open = halts.find((halt) => halt.kind === 'authority');
   if (open) open.reason = reason;
-  else halts.push({ kind: 'authority', reason });
+  else halts.push({ kind: 'authority', reason, waitLeftMs: AUTHORITY_WAIT_MS, dueAt: null });
   syncHalt(state, deps);
   return reason;
 }
+
+const authorityHalt = (state) => (state.build.halts ?? []).find((halt) => halt.kind === 'authority');
 
 // An authority that verifies again clears its hold.
 function authorityResumed(state, deps) {
@@ -1502,20 +1506,17 @@ function workAction(state, deps) {
         block(state, wp, deps, 'the budget was reached and the operator stopped new paid lane work');
         continue;
       }
-      if (gate === 'halted') continue;
-      if (gate === 'held') {
-        holdWp(state, wp, deps, state.build.halts.find((halt) => halt.kind === 'authority').reason);
-        // Its lane's stop is emitted now: this pass does not come back to it.
-        if (!wp.queue.length || wp.queue[0].kind === 'wait') continue;
-        return emitHead(wp);
-      }
+      // Held on a refused authority, the WP keeps its act and waits with the
+      // build (authorityHold): a restored record emits it.
+      if (gate === 'halted' || gate === 'held') continue;
       if (gate) return gate;
+      return replayed(state, wp, emitHead(wp));
     }
     // Configured, a queued squash is checked again at emission (U1): a run
-    // resumed after an edit to the repo or the signed answer holds instead of
-    // merging. Unconfigured, it is emitted as today (M8).
+    // resumed after an edit to the repo, the squash or the signed answer holds
+    // instead of merging. Unconfigured, it is emitted as today (M8).
     if (wp.queue[0].step === 'merge' && wp.queue[0].part === 'squash') {
-      const refusal = squashRefusal(state, wp.queue[0], deps);
+      const refusal = squashRefusal(state, wp, wp.queue[0], deps);
       if (refusal) {
         holdWp(state, wp, deps, refusal);
         if (!wp.queue.length || wp.queue[0].kind === 'wait') continue;
@@ -1536,6 +1537,8 @@ function workAction(state, deps) {
     Object.assign(meter, { waitLeftMs: READ_BACK_WAIT_MS, dueAt: null });
     if (deps.env?.WORKIT_SPEND_CMD) return spendAction(state, deps, 'meter');
   }
+  // A refused authority is checked again before dispatch: restored, its hold clears.
+  if (authorityHalt(state) && !verifiedAuthority(state, deps).reason) authorityResumed(state, deps);
   if (state.dispatchHalt || !dispatchable(state, { now: deps.now() }).length) return null;
   const gate = budgetGate(state, deps, 'dispatch');
   if (gate === 'halted' || gate === 'ended' || gate === 'held') return workAction(state, deps);
@@ -1564,6 +1567,8 @@ function stampWaits(state, deps) {
   }
   const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
   if (meter && !meter.dueAt) meter.dueAt = due(meter.waitLeftMs);
+  const authority = authorityHalt(state);
+  if (authority && !authority.dueAt) authority.dueAt = due(authority.waitLeftMs ?? AUTHORITY_WAIT_MS);
 }
 
 // A stall is an alarm, not a touch: nothing waits for an answer and the build
@@ -1632,30 +1637,59 @@ function failStreak(state, wp, action, result, deps, stateBefore) {
 // STALL_MS. A lane at work (a lane poll queued) is left to the lane deadline.
 export function observePending(state, deps) { watchStalls(state, deps); }
 
-// Configured, why a squash may not be emitted: its --repo and the signed
-// grant's merge authority. Unconfigured, none (M8).
-function squashRefusal(state, action, deps) {
+// Configured, why a squash may not be emitted: the signed grant's merge
+// authority and repo, and the squash itself, which must be the one the gate
+// derives (mergeActions), whole. Unconfigured, none (M8).
+function squashRefusal(state, wp, action, deps) {
   const authority = verifiedAuthority(state, deps);
-  return authority.proofMode === 'unconfigured' ? null : mergeRefusal(state, authority, action.command[action.command.indexOf('--repo') + 1]);
+  if (authority.proofMode === 'unconfigured') return null;
+  const command = Array.isArray(action.command) ? action.command : [];
+  const merge = mergeRefusal(state, authority, command.includes('--repo') ? command[command.indexOf('--repo') + 1] : undefined);
+  if (merge) return merge;
+  const derived = wp.gate?.head ? mergeActions(state, wp, wp.gate.head, authority)[0] : undefined;
+  return derived?.part === 'squash' && sameAction(derived, action) ? null : `merge/squash: the queued squash is not the one the gate derives: ${command.join(' ')}`;
 }
 
 // A merge or paid act left pending is checked again before it is emitted
-// again (conduct.mjs emit). Configured, a squash the signed grant no longer
-// covers holds its WP; a paid act is dropped when authority is refused or
-// spend is metered, so it comes back only through the budget gate, after a
-// fresh spend reading. False when the pending action was dropped.
+// again (conduct.mjs emit). Configured:
+// - a refused squash may have run before its record (a crash), so the
+//   merge-commit lookup that follows every squash decides: merged, the WP
+//   goes on to its merged check; not merged, it holds (recordStep).
+// - a paid act is dropped when authority is refused, or when it is not its
+//   WP's queue head. Metered, it is emitted again after a fresh spend
+//   reading, under its own id (replayed), so a driver holding its result can
+//   still record it.
+// False when the pending action was dropped.
 export function checkPending(state, deps) {
   const action = state.pending;
   const wp = state.wps.find((candidate) => candidate.id === action.wpId);
   const squash = action.step === 'merge' && action.part === 'squash';
-  if (!wp || !(squash || paid(action))) return true;
+  if (!(squash || paid(action))) return true;
+  // Configured, a merge or paid act that names no WP of this run is dropped.
+  if (!wp) return verifiedAuthority(state, deps).proofMode === 'unconfigured';
   if (squash) {
-    const refusal = squashRefusal(state, action, deps);
-    if (refusal) holdWp(state, wp, deps, refusal);
-    return !refusal;
+    const refusal = squashRefusal(state, wp, action, deps);
+    if (!refusal) return true;
+    if (wp.pr?.number) Object.assign(wp, { squashRefused: refusal, queue: mergeTail(state, wp) });
+    else holdWp(state, wp, deps, refusal);
+    return false;
   }
   const authority = verifiedAuthority(state, deps);
-  return authority.proofMode === 'unconfigured' || (!authority.reason && !state.adapters?.spend?.on);
+  if (authority.proofMode === 'unconfigured') return true;
+  if (authority.reason || !sameAction(action, wp.queue?.[0])) return false;
+  if (!state.adapters?.spend?.on) return true;
+  state.build.replay = { id: action.id, wpId: wp.id };
+  return false;
+}
+
+// The paid act checkPending dropped for a fresh spend reading, emitted again
+// under the id it was first emitted with.
+function replayed(state, wp, action) {
+  const replay = state.build.replay;
+  if (replay?.wpId !== wp.id) return action;
+  state.build.replay = null;
+  const same = typeof replay.id === 'string' && replay.id.endsWith(`-${action.step}`) && replay.id !== state.lastRecorded;
+  return same ? { ...action, id: replay.id } : action;
 }
 function watchStalls(state, deps) {
   const now = deps.now();
@@ -1706,6 +1740,11 @@ function yielders(state, deps) {
   }
   const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
   if (meter && !budgetEnded(state)) out.push({ ms: meterLeft(meter, now), meter, step: 'spend', note: `the spend meter is re-read: ${meter.reason}` });
+  const authority = authorityHalt(state);
+  if (authority) {
+    out.push({ ms: leftMs(authority.waitLeftMs ?? AUTHORITY_WAIT_MS, authority.dueAt, now), authority, step: 'spend',
+      note: `paid work and dispatch hold, ${authority.reason}; tell the operator, and the hold is checked again when this wait is over` });
+  }
   return out;
 }
 
@@ -1717,6 +1756,8 @@ function release(y) {
     y.touch.waiting = false;
   }
   if (y.meter) Object.assign(y.meter, { waitLeftMs: 0, dueAt: null });
+  // The next pass checks the authority again (workAction); still refused, it waits another round.
+  if (y.authority) Object.assign(y.authority, { waitLeftMs: AUTHORITY_WAIT_MS, dueAt: null });
 }
 
 // A core touch is announced before any other work, once per opening.
@@ -1737,7 +1778,9 @@ function settled(state, deps) {
   const metering = (state.build.halts ?? []).some((entry) => entry.kind === 'meter') && !budgetEnded(state);
   // A re-plan's touch halts the run until it is answered: the build waits on it.
   const replanning = openBuildTouches(state).some((touch) => touch.wpId || touch.build === 'replan');
-  return !busy && !metering && !replanning && !dispatchable(state, { now }).length;
+  // So does an authority hold while a WP is still to dispatch.
+  const authorityHeld = Boolean(authorityHalt(state)) && state.wps.some((wp) => wp.state === 'pending');
+  return !busy && !metering && !replanning && !authorityHeld && !dispatchable(state, { now }).length;
 }
 
 export function next(state, deps) {
@@ -1817,6 +1860,8 @@ function recordYield(state, action) {
   }
   const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
   if (meter) meter.waitLeftMs = Math.max(0, meter.waitLeftMs - action.waitMs);
+  const authority = authorityHalt(state);
+  if (authority) authority.waitLeftMs = Math.max(0, (authority.waitLeftMs ?? AUTHORITY_WAIT_MS) - action.waitMs);
 }
 
 // Only a non-empty, finite, non-negative number is a spend; anything else
@@ -2188,6 +2233,12 @@ function recordStep(state, wp, action, result, deps) {
   }
   if (LAND_STEPS.has(action.step)) {
     const out = recordLandStep(state, wp, action, result, recorderDeps, verifiedAuthority(state, deps));
+    // The lookup after a squash refused on resume (checkPending): not merged, the WP holds.
+    if (wp.squashRefused && action.part === 'merge-commit') {
+      const refusal = wp.squashRefused;
+      wp.squashRefused = null;
+      if (out.outcome !== 'continue') return holdWp(state, wp, deps, refusal);
+    }
     return route(state, wp, action, noCi(state, wp, action, out, deps), deps);
   }
   throw new ConductError(2, `the build has no route for step ${action.step}`);

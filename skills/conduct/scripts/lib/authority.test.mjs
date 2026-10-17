@@ -563,16 +563,18 @@ const EXPIRED = testDeps({ ...IO, readAnchor: testAnchor, now: () => T0 + 15 * D
 const PLUGIN_JSON = '{\n  "name": "widget",\n  "version": "0.1.0",\n  "scripts": {}\n}\n';
 
 // A configured release before its merge, with `queue` at `stage`.
-function openRelease(t, { stage, queue = [], release = {} } = {}) {
+function openRelease(t, { stage, queue = [], release = {}, recipe = RECIPE } = {}) {
   const state = run(t, { phase: 'release', wps: [{ id: 'WP-01', state: 'merged' }] });
+  state.intent.release = recipe;
   approved(state, { release: true });
   Object.assign(state.release, { stage, queue, worktree: '/w', branch: 'conduct/auth-run/release', base: 'b'.repeat(40), ...release });
   return state;
 }
 
-// A configured release at its bump: a real worktree holding the recipe's bump file.
+// A configured release at its bump: a real worktree holding the recipe's bump
+// file, under a recipe bumpPlan accepts.
 function bumpRelease(t, { stage = 'bump' } = {}) {
-  const state = openRelease(t, { stage });
+  const state = openRelease(t, { stage, recipe: { ...RECIPE, pr: true } });
   state.release.worktree = join(dirname(state.runDir), 'wt');
   mkdirSync(join(state.release.worktree, '.claude-plugin'), { recursive: true });
   writeFileSync(join(state.release.worktree, '.claude-plugin', 'plugin.json'), PLUGIN_JSON);

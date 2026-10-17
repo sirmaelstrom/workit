@@ -917,15 +917,26 @@ export function mergeActions(state, wp, head, authority) {
   // check (a run resumed across an upgrade) carries none.
   if (wp.id !== 'release' && wp.gate?.door !== 'two-way') return [];
   const pr = String(wp.pr.number);
-  const repo = repoOf(state);
   return [
-    shell('merge', 'squash', ['gh', 'pr', 'merge', pr, '--repo', repo, '--squash', '--match-head-commit', head,
+    shell('merge', 'squash', ['gh', 'pr', 'merge', pr, '--repo', repoOf(state), '--squash', '--match-head-commit', head,
       ...(wp.commit ? ['--subject', `${wp.commit} (#${pr})`] : [])]),
-    shell('merge', 'merge-commit', ['gh', 'pr', 'view', pr, '--repo', repo, '--json', 'mergeCommit'], { expects: { type: 'json' } }),
+    ...mergeTail(state, wp),
+  ];
+}
+
+// What follows a squash: the merge-commit lookup, which decides whether the
+// PR merged, and the merged check. Neither merges anything.
+export function mergeTail(state, wp) {
+  const pr = String(wp.pr.number);
+  return [
+    shell('merge', 'merge-commit', ['gh', 'pr', 'view', pr, '--repo', repoOf(state), '--json', 'mergeCommit'], { expects: { type: 'json' } }),
     shell('merged', 'merged', ['node', join(state.pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'land', 'merged',
       '--run', state.runDir, '--wp', wp.id, '--merge-sha', '{merge.sha}']),
   ];
 }
+
+// The abort a conflicted rebase queues; its record is the amendment.
+export const rebaseAbort = (wp, conflict) => shell('rebase', 'abort', ['git', '-C', wp.lane.worktree, 'rebase', '--abort'], { land: { conflict } });
 
 // The queue after this action: a leading copy of the recorded action is dropped.
 function rest(wp, action) {
@@ -1106,7 +1117,7 @@ function recordRebaseStep(state, wp, action, r, deps) {
   if (action.part === 'rebase' && r.code !== 0) {
     // The abort runs first; its record is the amendment.
     const conflict = `rebase onto origin/${defaultOf(state)} conflicted: ${first(r.stdout) || first(r.stderr)}`;
-    return result('continue', conflict, { queue: [shell('rebase', 'abort', ['git', '-C', wp.lane.worktree, 'rebase', '--abort'], { land: { conflict } })] });
+    return result('continue', conflict, { queue: [rebaseAbort(wp, conflict)] });
   }
   if (r.code !== 0) return result('block', `${action.part} failed (exit ${r.code}): ${first(r.stderr)}`);
   if (action.part === 'abort') return result('amend', action.land.conflict);

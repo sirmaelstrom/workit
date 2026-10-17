@@ -13,13 +13,13 @@
 import { basename, dirname, join, resolve } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { recipeArgv } from '../recipe.mjs';
-import { bumpPlan, releaseEligible, resolvePluginRoot, selfHosted } from '../release.mjs';
-import { mergeActions, mergeLockFor, rebaseActions, recordLandStep } from '../land.mjs';
+import { atPath, bumpPlan, bumpVersion, releaseEligible, resolvePluginRoot, selfHosted } from '../release.mjs';
+import { mergeActions, mergeLockFor, mergeTail, rebaseAbort, rebaseActions, recordLandStep } from '../land.mjs';
 import { conductScript, openTouch, recordTouch, touchAction } from '../touch.mjs';
 import { firstLine } from '../adapters.mjs';
 import { branchDeleteSteps, branchOutcome, checkedOutAt, worktreeGone } from '../lanes.mjs';
 import { samePath } from './spec.mjs';
-import { mergeRefusal, releaseRefusal, verifiedAuthority } from '../authority.mjs';
+import { mergeRefusal, releaseRefusal, sameAction, verifiedAuthority } from '../authority.mjs';
 
 const SEAM = 'release';
 const WAIT_MS = 60000;
@@ -32,6 +32,10 @@ const FILL = { '{pr.number}': (r) => r.pr?.number, '{pr.head}': (r) => r.pr?.hea
 const shell = (part, command, extra = {}) => ({ kind: 'shell', step: 'release', seam: SEAM, part, command, expects: { type: 'none' },
   instruction: 'Run this exact argv (no shell), and record its { code, stdout, stderr }.', ...extra });
 const wait = (step, waitMs, instruction) => ({ kind: 'wait', step, seam: SEAM, waitMs, instruction: `${instruction} Wait ${waitMs / 1000} s, then record {}.` });
+// A merge step as the release queues it. `expects: none`: a failed merge step
+// reaches the release's failure routing instead of record's JSON check (the
+// merge-commit lookup).
+const mergeStep = (action) => ({ ...action, seam: SEAM, expects: { type: 'none' } });
 
 // The release PR as a WP of tier T0, the shape land.mjs records against.
 function view(state) {
@@ -83,30 +87,72 @@ function editsOnly(original, text, jsonPath, to) {
   }
 }
 
+// One edit's slot-form action over `original`, or why there is none: the slot
+// present exactly once, and the replacement editing exactly jsonPath.
+function slottedBump(state, edit, original) {
+  const key = edit.jsonPath.split('.').at(-1);
+  const slotted = { ...edit, slot: `"${key}": "${edit.from}"`, value: `"${key}": "${edit.to}"` };
+  const n = occurrences(original, slotted.slot);
+  if (n !== 1) return { failure: `bump: ${edit.file}: slot occurs ${n} times` };
+  if (!editsOnly(original, original.replace(slotted.slot, () => slotted.value), edit.jsonPath, edit.to)) return { failure: `bump: ${edit.file}: slot does not edit ${edit.jsonPath}` };
+  return { action: bumpAction(state, slotted, original) };
+}
+
 // The plan's edits, each one checkable before it is emitted: each file once
-// (by canonical destination), its slot present exactly once in the file's
-// current text, and the replacement editing exactly jsonPath.
+// (by canonical destination), over the file's current text.
 function bumpActions(state, deps, plan) {
   const wt = state.release.worktree;
   const twice = plan.edits.find((edit, i) => plan.edits.slice(0, i).some((prior) => samePath(resolve(wt, prior.file), resolve(wt, edit.file), deps.platform)));
   if (twice) return { failure: `bump plan edits ${twice.file} twice` };
   const actions = [];
   for (const edit of plan.edits) {
-    const key = edit.jsonPath.split('.').at(-1);
-    const slotted = { ...edit, slot: `"${key}": "${edit.from}"`, value: `"${key}": "${edit.to}"` };
-    const original = deps.read(join(wt, edit.file));
-    const n = occurrences(original, slotted.slot);
-    if (n !== 1) return { failure: `bump: ${edit.file}: slot occurs ${n} times` };
-    if (!editsOnly(original, original.replace(slotted.slot, () => slotted.value), edit.jsonPath, edit.to)) return { failure: `bump: ${edit.file}: slot does not edit ${edit.jsonPath}` };
-    actions.push(bumpAction(state, slotted, original));
+    const bump = slottedBump(state, edit, deps.read(join(wt, edit.file)));
+    if (bump.failure) return bump;
+    actions.push(bump.action);
   }
   return { actions };
+}
+
+// The bump the verified recipe derives for the file `action` edits, from the
+// text it was emitted against: the recipe's JSON path for that file, the
+// version found there, and the recipe's level. Null when there is none.
+function derivedBump(state, action) {
+  const recipe = state.intent.release;
+  const entry = (recipe?.bump ?? []).find((candidate) => candidate.file === action.bump?.file);
+  const original = action.bump?.original;
+  if (!entry || typeof original !== 'string') return null;
+  let from;
+  try {
+    from = atPath(JSON.parse(original), entry.jsonPath);
+  } catch {
+    return null;
+  }
+  const to = bumpVersion(from, recipe.level);
+  return to ? slottedBump(state, { file: entry.file, jsonPath: entry.jsonPath, from, to }, original).action ?? null : null;
+}
+
+// Why `head` is not the bump to emit now: it must be the derived bump, and the
+// file must still be the text it was derived from, or (a replay) exactly
+// that text bumped.
+function bumpRefusal(state, deps, head) {
+  const what = `${head.step}/${head.part}`;
+  if (!sameAction(derivedBump(state, head), head)) return `${what}: the queued edit is not the bump the verified recipe derives for ${head.bump?.file ?? head.outPath}`;
+  let text = null;
+  try {
+    text = deps.read(head.outPath);
+  } catch { /* An unreadable file is neither text below. */ }
+  const [[slot, value]] = Object.entries(head.slots);
+  if (text !== head.bump.original && text !== head.bump.original.replace(slot, () => value)) return `${what}: ${head.outPath} is neither the text the bump was derived from nor that text bumped`;
+  return null;
 }
 
 // The queue a stage expands to, from the run's state and recipe alone, so
 // emission can derive it again (derivedActions). The bump, merge and
 // handover stages are built in expand; null for them.
 const NEXT_STAGE = { setup: 'bump', commit: 'gate', gate: 'merge', after: 'verify', verify: 'cleanup', cleanup: 'handover' };
+// The stage whose queue is emitted while r.stage is the key: expand queues a
+// stage and moves r.stage on to the next one in the same step.
+const QUEUED = { bump: 'setup', commit: 'bump', gate: 'commit', merge: 'gate', after: 'merge', verify: 'after', cleanup: 'verify', handover: 'cleanup' };
 function stageQueue(state, stage) {
   const r = state.release;
   const { remote, defaultBranch } = state.intent.repo;
@@ -173,9 +219,7 @@ function expand(state, deps) {
       if (!r.gate?.ok) return go([], 'gate');
       const actions = mergeActions(state, view(state), r.gate.head, verifiedAuthority(state, deps));
       if (!actions.length) return finish(state, deps, 'failed', 'merge: no merge authority, or the release does not hold the merge lock');
-      // `expects: none`: a failed merge step reaches the release's failure
-      // routing instead of record's JSON check (the merge-commit lookup).
-      return go(actions.map((action) => ({ ...action, seam: SEAM, expects: { type: 'none' } })), 'after');
+      return go(actions.map(mergeStep), 'after');
     }
     case 'handover':
       return handover(state, deps);
@@ -270,89 +314,137 @@ export function next(state, deps) {
 }
 
 // A release act left pending is checked again before it is emitted again
-// (conduct.mjs emit): one refused now is dropped, and the release holds as it
-// does at emission. False when the pending action was dropped.
+// (conduct.mjs emit). Configured, it must still be the head of a pending
+// release's queue and pass emission's checks; one refused now is dropped,
+// and the release holds as it does at emission. A refused squash may have run
+// before its record, so the merge-commit lookup decides how the release
+// holds (held). An operator touch runs no repo command; its answer is checked
+// at its read-back. False when the pending action was dropped.
 export function checkPending(state, deps) {
   const action = state.pending;
-  if (action.touch || state.release.state !== 'pending' || !state.release.queue?.length) return true;
-  const refusal = emissionRefusal(state, deps, action);
+  const r = state.release;
+  if (action.touch || verifiedAuthority(state, deps).proofMode === 'unconfigured') return true;
+  const inconsistent = r.state !== 'pending' ? 'the release is not pending'
+    : !r.queue?.length ? 'the release queue is empty'
+      : !sameAct(r.queue[0], action, r) ? 'it is not the head of the release queue' : null;
+  const refusal = inconsistent ? `${action.step}/${action.part}: the pending act cannot be checked: ${inconsistent}` : emissionRefusal(state, deps, action);
   if (!refusal) return true;
-  held(state, deps, refusal);
+  if (r.state === 'pending') held(state, deps, refusal, { observe: action.step === 'merge' && action.part === 'squash' });
   return false;
 }
 
 // A refused release act. Before the release PR merged, the release fails,
-// held. After it, only the merged release's cleanup still runs, exactly as
-// the release derives it, and the release then fails, held (handover).
-function held(state, deps, refusal) {
+// held; a squash refused when it may already have run (`observe`) is first
+// looked up (recordLand). After the merge, only the merged release's cleanup
+// still runs, exactly as the release derives it, and the release then fails,
+// held (handover).
+function held(state, deps, refusal, { observe = false } = {}) {
   const r = state.release;
   const reason = `release held: ${refusal}`;
-  if (!r.squashed && !r.merge?.sha) return finish(state, deps, 'failed', reason);
-  r.heldAfterMerge = reason;
+  if (r.squashed || r.merge?.sha) return heldAfterMerge(state, deps, reason);
+  if (!observe || !r.pr?.number) return finish(state, deps, 'failed', reason);
+  r.heldObserving = reason;
   appendEvent(state, deps, { step: 'release', event: 'release-held', data: { reason } });
-  // Once the worktree is removed, only its branch deletes are left.
-  if (r.cleanup) Object.assign(r, { queue: r.queue.filter((queued) => CLEANUP_PARTS.has(queued.part) && !derivationRefusal(state, queued, null)), stage: 'handover' });
-  else Object.assign(r, { queue: [], stage: 'cleanup' });
+  Object.assign(r, { queue: [mergeStep(mergeTail(state, view(state))[0])], stage: 'after' });
   return null;
 }
 
-const repoAfter = (command) => command[command.indexOf('--repo') + 1];
+function heldAfterMerge(state, deps, reason) {
+  const r = state.release;
+  r.heldAfterMerge = reason;
+  appendEvent(state, deps, { step: 'release', event: 'release-held', data: { reason } });
+  // Once the worktree is removed, only its branch deletes are left.
+  if (r.cleanup) {
+    const derived = stageActions(state, null, 'cleanup', null);
+    Object.assign(r, { queue: r.queue.filter((queued) => CLEANUP_PARTS.has(queued.part) && derived.some((act) => sameAct(act, queued, r))), stage: 'handover' });
+  } else Object.assign(r, { queue: [], stage: 'cleanup' });
+  return null;
+}
+
+const repoAfter = (command) => (command.includes('--repo') ? command[command.indexOf('--repo') + 1] : undefined);
 const filledArgv = (command, r) => command.map((arg) => {
   const value = Object.hasOwn(FILL, arg) ? FILL[arg](r) : null;
   return value === null || value === undefined ? arg : String(value);
 });
-const sameAct = (a, b, r) => a.step === b.step && a.part === b.part && (a.cwd ?? null) === (b.cwd ?? null)
-  && JSON.stringify(filledArgv(a.command, r)) === JSON.stringify(filledArgv(b.command, r));
+const filled = (action, r) => (Array.isArray(action.command) ? { ...action, command: filledArgv(action.command, r) } : action);
+const sameAct = (a, b, r) => sameAction(filled(a, r), filled(b, r));
 
-// Every command the release can emit, from the run's state and the verified
-// recipe: each stage's queue, the land steps (the merge under `authority`, a
-// rebase the gate can ask for, and its abort) and the merged release's branch
-// deletes. A stage whose inputs are not recorded yet derives nothing.
-function derivedActions(state, authority) {
+// Every act the release can emit while its queue is `queued`'s, from the
+// run's state and the verified recipe, exactly as that stage queues it: the
+// stage's own queue; at the gate, the rebase the gate can ask for and its
+// abort; at the merge, the merge under `authority`, or only the merge-commit
+// lookup while a refused squash is looked up; at the cleanup, the removal,
+// and the branch deletes once the worktree is gone. A stage whose inputs are
+// not recorded yet derives nothing.
+function stageActions(state, authority, queued, head) {
   const r = state.release;
-  const out = [];
-  for (const stage of Object.keys(NEXT_STAGE)) {
-    try {
-      out.push(...stageQueue(state, stage));
-    } catch (error) {
-      // A stage not reached yet reads a field not recorded yet (r.pr, r.version).
-      if (!(error instanceof TypeError)) throw error;
-    }
-  }
   const wp = view(state);
-  if (r.gate?.head && authority) out.push(...mergeActions(state, wp, r.gate.head, authority));
-  if (r.gate?.head) out.push(...branchDeleteSteps(resolve(state.intent.repo.path), r.branch, r.gate.head, 'merged release').map(({ part, command }) => shell(part, command)));
-  if (r.pr?.number) out.push(...rebaseActions(state, wp), { step: 'rebase', part: 'abort', command: ['git', '-C', r.worktree, 'rebase', '--abort'] });
-  return out;
+  try {
+    switch (queued) {
+      case 'setup':
+      case 'commit':
+      case 'after':
+      case 'verify':
+        return stageQueue(state, queued);
+      case 'gate':
+        return [...stageQueue(state, 'gate'), ...rebaseActions(state, wp), rebaseAbort(wp, head?.land?.conflict)];
+      case 'merge':
+        if (r.heldObserving) return [mergeStep(mergeTail(state, wp)[0])];
+        return r.gate?.head && authority ? mergeActions(state, wp, r.gate.head, authority).map(mergeStep) : [];
+      case 'cleanup': {
+        const deletes = r.cleanup?.removed && r.gate?.head ? branchDeleteSteps(resolve(state.intent.repo.path), r.branch, r.gate.head, 'merged release') : [];
+        return [...stageQueue(state, 'cleanup'), ...deletes.map(({ part, command, instruction }) => shell(part, command, { instruction }))];
+      }
+      default:
+        return [];
+    }
+  } catch (error) {
+    // A stage not reached yet reads a field not recorded yet (r.pr, r.version).
+    if (!(error instanceof TypeError)) throw error;
+    return [];
+  }
 }
 
-// Why `head` is not an act the release derives, or null: a command must be
-// one of derivedActions (argv and cwd), and a bump must edit a file the
-// verified recipe bumps. A wait or an inspection runs nothing.
-function derivationRefusal(state, head, authority) {
+// Why `head` is not an act the release derives at its stage, or null: the
+// whole action (kind, argv, cwd, payload) must equal one stageActions derives,
+// and a bump must be the recipe's bump (bumpRefusal). A wait runs nothing, so
+// it may carry nothing that runs.
+const WAIT_FIELDS = new Set(['kind', 'step', 'seam', 'part', 'waitMs', 'instruction', 'yield', 'remainingMs', 'dueAt', 'id', 'phase']);
+function derivationRefusal(state, deps, head, authority, queued) {
   const r = state.release;
-  if (head.kind === 'author') {
-    const files = (state.intent.release?.bump ?? []).map((entry) => join(r.worktree, entry.file));
-    return head.template === head.outPath && files.includes(head.outPath) ? null : `${head.part}: ${head.outPath} is not a file the verified recipe bumps`;
+  const what = `${head.step}/${head.part ?? head.kind}`;
+  if (head.kind === 'wait') {
+    const extra = Object.keys(head).filter((key) => !WAIT_FIELDS.has(key));
+    return extra.length ? `${what}: a wait carrying ${extra.join(', ')} is not one the release derives` : null;
   }
-  if (!Array.isArray(head.command)) return null;
-  if (derivedActions(state, authority).some((derived) => sameAct(derived, head, r))) return null;
-  return `${head.step}/${head.part}: the queued command is not one the verified recipe derives: ${head.command.join(' ')}`;
+  if (head.kind === 'author') return queued === 'bump' ? bumpRefusal(state, deps, head) : `${what}: an edit is emitted only at the bump stage, not at ${queued ?? r.stage}`;
+  if (stageActions(state, authority, queued, head).some((derived) => sameAct(derived, head, r))) return null;
+  return `${what}: the queued ${head.kind} action is not one the release derives at its ${queued ?? r.stage} stage${Array.isArray(head.command) ? `: ${head.command.join(' ')}` : ''}`;
+}
+
+// Acts that run without release authority, each only where the stage machine
+// puts it: the merged release's cleanup, with its merge recorded, and the
+// merge-commit lookup that decides a refused squash.
+function exempt(state, queued, head) {
+  const r = state.release;
+  if (queued === 'cleanup' && CLEANUP_PARTS.has(head.part)) return Boolean(r.squashed || r.merge?.sha);
+  return queued === 'merge' && Boolean(r.heldObserving) && head.part === 'merge-commit';
 }
 
 // Configured, every release act runs under release authority, from the
-// verified recipe and against the granted repo: the head must be an act the
-// release derives, and every --repo it names the granted one; a squash also
-// needs merge authority. The merged release's cleanup needs no authority,
-// only the derivation. Unconfigured, emission is today's (M8).
+// verified recipe and against the granted repo: the head must be the act the
+// release derives at its current stage, and every --repo it names the granted
+// one; a squash also needs merge authority. The exempt acts need only their
+// derivation. Unconfigured, emission is today's (M8).
 function emissionRefusal(state, deps, head) {
   const authority = verifiedAuthority(state, deps);
   if (authority.proofMode === 'unconfigured') return null;
-  if (!CLEANUP_PARTS.has(head.part)) {
+  const queued = QUEUED[state.release.stage] ?? null;
+  if (!exempt(state, queued, head)) {
     const refusal = releaseRefusal(state, authority);
     if (refusal) return refusal;
     const granted = authority.grant.repo.remote;
-    const command = head.command ?? [];
+    const command = Array.isArray(head.command) ? head.command : [];
     const other = command.find((arg, i) => command[i - 1] === '--repo' && arg !== granted);
     if (other !== undefined) return `${head.step}/${head.part}: --repo ${other} is not the granted ${granted}`;
     if (head.step === 'merge' && head.part === 'squash') {
@@ -360,7 +452,7 @@ function emissionRefusal(state, deps, head) {
       if (merge) return merge;
     }
   }
-  return derivationRefusal(state, head, authority);
+  return derivationRefusal(state, deps, head, authority, queued);
 }
 
 function fail(state, deps, action, result) {
@@ -413,6 +505,13 @@ function recordLand(state, action, result, deps) {
   // The squash landed even if the merge-commit lookup after it fails; a squash
   // that exited non-zero is confirmed only by that lookup (land.mjs).
   if (action.part === 'squash' && out.outcome === 'continue' && !patch.squashExit) r.squashed = true;
+  // The lookup after a refused squash: merged, the merged release's cleanup
+  // runs; not merged, the release fails, held.
+  if (r.heldObserving && action.part === 'merge-commit') {
+    const reason = r.heldObserving;
+    r.heldObserving = null;
+    return r.merge?.sha ? heldAfterMerge(state, deps, reason) : finish(state, deps, 'failed', reason);
+  }
   if (out.outcome === 'continue' || out.outcome === 'done') return;
   if (out.outcome === 'wait') {
     if (r.queue[0]?.kind !== 'wait') r.queue.unshift(wait(action.step, out.waitMs ?? WAIT_MS, out.reason ?? ''));
@@ -424,7 +523,14 @@ function recordLand(state, action, result, deps) {
 
 // The edit is textual: the file is the original with exactly the slot
 // replaced, byte for byte elsewhere, and it parses with only jsonPath changed.
-function recordBump(action, deps) {
+// Configured, the recorded action must also be the bump the verified recipe
+// derives, so its jsonPath, value and slot come from the recipe, never from
+// state; one that is not holds the release. False when it held.
+function recordBump(state, action, deps) {
+  if (verifiedAuthority(state, deps).proofMode !== 'unconfigured' && !sameAction(derivedBump(state, action), action)) {
+    held(state, deps, `${action.step}/${action.part}: the recorded edit is not the bump the verified recipe derives for ${action.bump?.file ?? action.outPath}`);
+    return false;
+  }
   const { file, jsonPath, to, original } = action.bump;
   const [[slot, value]] = Object.entries(action.slots);
   const count = occurrences(original, slot);
@@ -432,6 +538,7 @@ function recordBump(action, deps) {
   const text = deps.read(action.outPath);
   if (text !== original.replace(slot, () => value)) throw new ConductError(2, `bump ${file}: the file must be the original with only ${slot} replaced by ${value}`);
   if (!editsOnly(original, text, jsonPath, to)) throw new ConductError(2, `bump ${file}: the edit must parse and change only ${jsonPath}, to ${to}`);
+  return true;
 }
 
 // The merged release's worktree and branch, cleaned up as a merged WP's are
@@ -471,7 +578,7 @@ export function record(state, action, result = {}, deps) {
   if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result, deps);
   if (LAND_STEPS.has(action.step) && action.kind !== 'wait') return recordLand(state, action, result, deps);
   if (action.kind === 'shell' && CLEANUP_PARTS.has(action.part)) return recordCleanup(state, action, result, deps);
-  if (action.part === 'bump') recordBump(action, deps);
+  if (action.part === 'bump' && !recordBump(state, action, deps)) return undefined;
   const head = r.queue[0];
   const sameHead = head && head.step === action.step && head.part === action.part;
   if (action.kind === 'wait' || action.kind === 'author') {
