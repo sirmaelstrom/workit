@@ -8,7 +8,7 @@
 // ({ id, outcome, question, answer: { key, text, by, answeredAt } }), or
 // `null` / nothing when there is none; a non-zero exit is a failure.
 import { ConductError, loadState } from './state.mjs';
-import { correlation } from './touch.mjs';
+import { correlation, operatorAnchor } from './touch.mjs';
 
 export const ANSWER_ENV = 'WORKIT_TOUCH_ANSWER_CMD';
 export const AWAIT_INTERVAL_MS = 60000;
@@ -91,7 +91,9 @@ function intFlag(flags, name, fallback) {
 // read-back that follows decides whether the answer is usable. --once is the
 // read-back itself (exit 0 either way); without it the verb polls until an
 // answer appears (exit 0), the timeout passes (exit 4), or the command fails
-// AWAIT_MAX_FAILURES times in a row (exit 1).
+// AWAIT_MAX_FAILURES times in a row (exit 1). With a passkey configured, an
+// unsigned T3 answer does not end the wait: the operator's confirmation on
+// the phone supersedes it. An unreadable anchor exits 2 at once.
 export async function awaitAnswer(flags, deps) {
   const runDir = typeof flags.run === 'string' ? flags.run : null;
   if (!runDir) throw new ConductError(2, '--run <dir> is required');
@@ -112,9 +114,12 @@ export async function awaitAnswer(flags, deps) {
     const left = deadline - deps.now();
     if (left <= 0) return { code: 4, out: { ok: false, answered: false, timeout: true, touch: touch.n } };
     try {
+      // operatorAnchor turns an unreadable anchor into exit 2, which the catch rethrows.
+      const signing = operatorAnchor(deps).configured;
       const { tag, receipt } = lookupAnswer(state, touch, deps, left);
       failures = 0;
-      if (receipt) return { out: { ok: true, answered: true, receipt, tag, touch: touch.n } };
+      const unsigned = signing && receipt?.answer?.by === 'operator:t3' && receipt.answer.proof == null;
+      if (receipt && !unsigned) return { out: { ok: true, answered: true, receipt, tag, touch: touch.n } };
     } catch (error) {
       if (error.code === 2) throw error;
       failures += 1;

@@ -176,7 +176,7 @@ export function record(state, action, result, deps) {
     return undefined;
   }
   const touch = state.touches[action.touch.n - 1];
-  const outcome = recordTouch(state, touch, action, result);
+  const outcome = recordTouch(state, touch, action, result, deps);
   if (touch.kind === 'showcase' && touch.status === 'answered') apply(state, touch, deps);
   return outcome;
 }

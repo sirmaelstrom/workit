@@ -9,6 +9,7 @@ import {
   repoTemplates, runBootstrapVerb,
 } from './bootstrap.mjs';
 import { runConduct } from '../conduct.mjs';
+import { testDeps } from '../test-deps.mjs';
 
 const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const REPO_TEMPLATES = repoTemplates(PLUGIN_ROOT);
@@ -157,10 +158,10 @@ test('the verb: exit 3 with gaps, 0 once complete, 2 without --repo', async (t) 
   const d = deps();
   assert.equal(runBootstrapVerb({ repo }, d).code, 3);
   assert.equal(runBootstrapVerb({ repo, write: true }, d).code, 0);
-  const viaCli = await runConduct(['bootstrap', '--repo', repo, '--offline'], { ...d, importModule: (rel) => import(new URL(`../${rel}`, import.meta.url)) });
+  const viaCli = await runConduct(['bootstrap', '--repo', repo, '--offline'], testDeps({ ...d, importModule: (rel) => import(new URL(`../${rel}`, import.meta.url)) }));
   assert.equal(viaCli.code, 0);
   assert.equal(JSON.parse(viaCli.stdout).ok, true);
-  const usage = await runConduct(['bootstrap'], { ...d, importModule: (rel) => import(new URL(`../${rel}`, import.meta.url)) });
+  const usage = await runConduct(['bootstrap'], testDeps({ ...d, importModule: (rel) => import(new URL(`../${rel}`, import.meta.url)) }));
   assert.equal(usage.code, 2);
 });
 

@@ -22,6 +22,7 @@ import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
 import { acceptAnswer, correlation } from '../touch.mjs';
 import { runConduct } from '../../conduct.mjs';
+import { testDeps } from '../../test-deps.mjs';
 
 // The section a lane PR body carries (lane contract § Finish; fca05d92).
 const MERGE_DANGER = '## Merge danger\n\nDoor: two-way\nBlast radius: the demo WP\n';
@@ -197,7 +198,7 @@ async function conductVerb(h, action) {
   const wpId = flagOf(argv, 'wp');
   let reply;
   if (h.disk) {
-    const result = await runConduct(argv, h.overrides());
+    const result = await runConduct(argv, testDeps(h.overrides()));
     reply = { code: result.code, out: result.stdout };
   } else if (verb === 'lane') {
     const flags = sub === 'spawn' ? (flagOf(argv, 'amend') ? { amend: flagOf(argv, 'amend') } : {})
@@ -318,7 +319,7 @@ async function perform(h, action) {
 // Emit as conduct.mjs does: stamp `<seq>-<step>` and the seam, keep pending.
 async function step(h) {
   if (h.disk) {
-    const result = await runConduct(['next', '--run', h.runDir], h.overrides());
+    const result = await runConduct(['next', '--run', h.runDir], testDeps(h.overrides()));
     assert.equal(result.code, 0, result.stderr);
     const { action } = JSON.parse(result.stdout);
     return action.kind === 'done' ? null : action;
@@ -340,7 +341,7 @@ async function step(h) {
 async function recordPending(h, result) {
   if (h.disk) {
     const action = loadState(h.runDir, h.deps).pending;
-    const out = await runConduct(['record', '--run', h.runDir, '--action', action.id, '--result', JSON.stringify(result)], h.overrides());
+    const out = await runConduct(['record', '--run', h.runDir, '--action', action.id, '--result', JSON.stringify(result)], testDeps(h.overrides()));
     assert.ok([0, 3].includes(out.code), out.stderr);
     return;
   }
@@ -516,13 +517,13 @@ test('replan (e830d835): the verb reads the plan file under the run lock; an unr
   await drive(h, { until: (a) => a.kind === 'wait' });
   const bad = join(h.dir, 'bad-plan.json');
   writeFileSync(bad, '{ not json');
-  const refused = await runConduct(['replan', '--run', h.runDir, '--plan', bad], h.overrides());
+  const refused = await runConduct(['replan', '--run', h.runDir, '--plan', bad], testDeps(h.overrides()));
   assert.equal(refused.code, 2);
   assert.match(JSON.parse(refused.stdout).error, /is not a readable JSON file/);
   assert.equal(loadState(h.runDir, h.deps).replans, undefined, 'nothing written');
   const plan = join(h.dir, 'plan.json');
   writeFileSync(plan, JSON.stringify({ why: REPLAN_WHY, delta: [{ change: 'fold WP-03 into a test on WP-02', door: 'two-way', inScope: true }] }));
-  const done = await runConduct(['replan', '--run', h.runDir, '--plan', plan], h.overrides());
+  const done = await runConduct(['replan', '--run', h.runDir, '--plan', plan], testDeps(h.overrides()));
   assert.equal(done.code, 0, done.stderr);
   const out = JSON.parse(done.stdout);
   assert.deepEqual([out.ok, out.n, out.mode], [true, 1, 'autonomous']);
@@ -702,7 +703,7 @@ test('a progressing 35-minute review avoids a stall; a reviewer with no progress
   const pending = h.state.pending.id;
   const next = async () => {
     saveState(h.state, h.deps);
-    const out = await runConduct(['next', '--run', h.runDir], h.overrides());
+    const out = await runConduct(['next', '--run', h.runDir], testDeps(h.overrides()));
     h.state = loadState(h.runDir, h.deps);
     assert.equal(JSON.parse(out.stdout).action.id, pending);
   };
@@ -782,7 +783,7 @@ test('a Rust seat starting after capacity wait gets its own deadline, while hear
   const publish = (status, startedAt = null) => writeFileSync(path, JSON.stringify({ updatedAt: h.deps.timestamp(), seats: { sol: { status, startedAt } } }));
   const poll = async () => {
     saveState(h.state, h.deps);
-    const out = await runConduct(['next', '--run', h.runDir], h.overrides());
+    const out = await runConduct(['next', '--run', h.runDir], testDeps(h.overrides()));
     h.state = loadState(h.runDir, h.deps);
     assert.equal(JSON.parse(out.stdout).action.id, action.id);
   };
@@ -1009,7 +1010,7 @@ test('ratify verb (c58b3a51): extends a live WP\'s Files with the ruling; refuse
   await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'wait' });
   h.state.pending = null;
   saveState(h.state, h.deps);
-  const run = (...args) => runConduct(['ratify', '--run', h.runDir, ...args], h.overrides());
+  const run = (...args) => runConduct(['ratify', '--run', h.runDir, ...args], testDeps(h.overrides()));
   const ok = await run('--wp', 'WP-02', '--paths', 'src/ui/SidePanel.svelte, docs/x.md', '--why', 'the lane\'s ask (a) needs the panel');
   assert.equal(ok.code, 0, ok.stdout);
   assert.deepEqual(JSON.parse(ok.stdout).readmitted, false);
@@ -1053,7 +1054,7 @@ test('reset-wp verb (61d817db): a WP blocked at its gate ends the build; reset -
   assert.deepEqual(ended.at(-1).data.wps.find((wp) => wp.id === 'WP-03')?.state, 'deferred', 'the build-ended row records it deferred too');
   writeFileSync(join(h.repo, '.workit', 'conduct.json'), fixture('build', 'conduct.json'));
   const before = readFileSync(join(h.runDir, 'state.json'), 'utf8');
-  const run = (...args) => runConduct(['reset-wp', '--run', h.runDir, ...args], h.overrides());
+  const run = (...args) => runConduct(['reset-wp', '--run', h.runDir, ...args], testDeps(h.overrides()));
 
   // Held by another writer: refused, nothing written.
   writeFileSync(join(h.runDir, 'state.lock'), JSON.stringify({ pid: 1, host: 'elsewhere', at: h.deps.timestamp(), token: 'x' }));
@@ -1116,7 +1117,7 @@ test('reset-wp --to delta: snapshots, reviews a report-only tail, then restarts 
   wp.gate = { ok: false, head, failures: ['review does not cover head'], causes: ['review-uncovered'] };
   saveState(h.state, h.deps);
   const before = readFileSync(join(h.runDir, 'state.json'), 'utf8');
-  const reset = await runConduct(['reset-wp', '--run', h.runDir, '--wp', wp.id, '--to', 'delta', '--baseline', reviewed, '--why', 'review the uncovered fixes'], h.overrides());
+  const reset = await runConduct(['reset-wp', '--run', h.runDir, '--wp', wp.id, '--to', 'delta', '--baseline', reviewed, '--why', 'review the uncovered fixes'], testDeps(h.overrides()));
   assert.equal(reset.code, 0, reset.stdout);
   const result = JSON.parse(reset.stdout);
   assert.equal(readFileSync(result.snapshot, 'utf8'), before);
@@ -1483,7 +1484,7 @@ test('exec cleanup (5c93c8cb, db7fde36): each exec lane exit is reaped, and ever
   }
   // The action's argv runs through the CLI, whose sub-verb list must name reap.
   const reap = of(h, 'WP-02').find((a) => a.part === 'reap');
-  const cli = await runConduct(reap.command.slice(2), h.overrides());
+  const cli = await runConduct(reap.command.slice(2), testDeps(h.overrides()));
   assert.deepEqual([cli.code, JSON.parse(cli.stdout).state], [0, 'reaped'], cli.stderr);
   const herdr = harness(t, { herdr: true, wps: TWO });
   assert.equal(await drive(herdr), null);
@@ -1627,7 +1628,7 @@ test('rulings before escalation (D19.3): an escalation opens one blocked touch w
 function answerCore(h, n, key, text = null) {
   const touch = h.state.touches[n - 1];
   touch.tty = true;
-  acceptAnswer(touch, { key, text, by: 'operator:tty', answeredAt: h.deps.timestamp(), source: 'tty' });
+  acceptAnswer(h.state, touch, { key, text, by: 'operator:tty', answeredAt: h.deps.timestamp(), source: 'tty' }, testDeps(h.deps));
 }
 
 test('Needs conductor (d9d4d664): a stopped report\'s two questions get one ruling each and one amendment; a ruling held when a later question escalates reaches the lane with the operator\'s answer', async (t) => {
@@ -1665,7 +1666,7 @@ test('blocked recovery (D19.4): an answer amends the blocked lane verbatim; its 
   h.state.pending = null;
   answerCore(h, 1, 'b', 'use --since');
   saveState(h.state, h.deps);
-  const fresh = JSON.parse((await runConduct(['next', '--run', h.runDir], h.overrides())).stdout).action;
+  const fresh = JSON.parse((await runConduct(['next', '--run', h.runDir], testDeps(h.overrides()))).stdout).action;
   h.state = loadState(h.runDir, h.deps);
   const brief = h.state.pending;
   assert.deepEqual(fresh, brief);

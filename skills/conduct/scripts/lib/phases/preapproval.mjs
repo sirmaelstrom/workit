@@ -189,7 +189,7 @@ function applyAnswer(state, touch) {
 export function record(state, action, result, deps) {
   const touch = state.touches[action.touch.n - 1];
   if (action.step === 'grant') return recordGrant(state, touch, deps);
-  const outcome = recordTouch(state, touch, action, result);
+  const outcome = recordTouch(state, touch, action, result, deps);
   if (touch.status === 'answered') applyAnswer(state, touch);
   return outcome;
 }

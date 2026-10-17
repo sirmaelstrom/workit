@@ -83,7 +83,7 @@ function fixture(t, deps = {}) {
     resolveCodex: () => 'codex', now: () => clock, timestamp: () => new Date((clock += 1000)).toISOString(),
     newRunId: () => RUN_ID, lockWaitMs: 0, importModule: testLoader, ...deps,
   };
-  return { dir, repo, runs, calls, table, deps: base, run: (argv, more = {}) => runConduct(argv, { ...base, ...more }) };
+  return { dir, repo, runs, calls, table, deps: base, run: (argv, more = {}) => runConduct(argv, testDeps({ ...base, ...more })) };
 }
 
 const out = (result) => JSON.parse(result.stdout);
@@ -1022,10 +1022,10 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   const second = openTouch(state, { kind: 'blocked', question: 'Q2', options }, deps);
   const filing = touchAction(state, first);
   assert.equal(filing.tool, 'spine_receipt');
-  recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' });
+  recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' }, testDeps(deps));
   assert.equal(touchAction(state, second), null);
   assert.equal(second.status, 'open');
-  recordTouch(state, first, touchAction(state, first), fixtureJson('spine-quest-answered.json'));
+  recordTouch(state, first, touchAction(state, first), fixtureJson('spine-quest-answered.json'), testDeps(deps));
   assert.equal(first.status, 'answered');
   const secondFiling = touchAction(state, second);
   assert.equal(secondFiling.tool, 'spine_receipt');
@@ -1175,7 +1175,7 @@ test('shell result shape (D18)', async (t) => {
 });
 
 test('no verb: usage on stderr, exit 2', async () => {
-  const result = await runConduct([]);
+  const result = await runConduct([], testDeps());
   assert.equal(result.code, 2);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /^usage: conduct\.mjs/);
@@ -1198,7 +1198,7 @@ test('terminal phases (D19.5): done with no handler loaded', async (t) => {
 test('resume: a fresh runConduct continues from the run dir alone', async (t) => {
   const f = fixture(t);
   const { runDir, spec } = await toCoreSpec(f);
-  const resumed = await runConduct(['--resume', runDir], { importModule: testLoader, pluginRoot: f.deps.pluginRoot });
+  const resumed = await runConduct(['--resume', runDir], testDeps({ importModule: testLoader, pluginRoot: f.deps.pluginRoot }));
   assert.deepEqual(out(resumed).action, spec);
 });
 

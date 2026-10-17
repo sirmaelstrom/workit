@@ -351,7 +351,7 @@ function recordCleanup(state, action, result, deps) {
 
 export function record(state, action, result = {}, deps) {
   const r = state.release;
-  if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result);
+  if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result, deps);
   if (LAND_STEPS.has(action.step) && action.kind !== 'wait') return recordLand(state, action, result, deps);
   if (action.kind === 'shell' && CLEANUP_PARTS.has(action.part)) return recordCleanup(state, action, result, deps);
   if (action.part === 'bump') recordBump(action, deps);

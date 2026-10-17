@@ -87,7 +87,7 @@ function seam(t, opts = {}) {
     sleep: async () => {}, resolveCodex: () => 'codex', spawnDetached: (program, args, options) => fakeSpawn(h, options),
     pidAlive: (pid) => (h.life[`WP-${String(pid - 4200).padStart(2, '0')}`] ?? 0) > 0,
   };
-  h.run = (argv, more = {}) => runConduct(argv, { ...h.deps, ...more });
+  h.run = (argv, more = {}) => runConduct(argv, testDeps({ ...h.deps, ...more }));
   h.state = () => JSON.parse(readFileSync(join(h.runDir, 'state.json'), 'utf8'));
   h.events = () => readEvents(h.runDir, { exists: existsSync, read: (path) => readFileSync(path, 'utf8') }, h.state());
   h.wp = (id) => h.state().wps.find((wp) => wp.id === id);
@@ -235,7 +235,7 @@ function herdrVerb(h, action) {
 async function conductVerb(h, action) {
   const root = resolve(dirname(action.command[1]), '..', '..', '..');
   const argv = action.command.slice(2);
-  const result = await runConduct(argv, { ...h.deps, pluginRoot: root });
+  const result = await runConduct(argv, testDeps({ ...h.deps, pluginRoot: root }));
   if (argv[0] === 'lane' && argv[1] === 'alive') {
     const id = argv[argv.indexOf('--wp') + 1];
     h.life[id] = Math.max(0, (h.life[id] ?? 0) - 1);
@@ -918,7 +918,7 @@ test('resume (M5): stopped after the release PR merges, `--resume` from the run 
   await start(h, OFF);
   await drive(h, { until: () => merged });
   const stoppedAt = h.trace.length - 1;
-  const resumed = await runConduct(['--resume', h.runDir], { ...h.deps });
+  const resumed = await runConduct(['--resume', h.runDir], testDeps({ ...h.deps }));
   assert.equal(resumed.code, 0);
   h.pending = out(resumed).action;
   assert.equal((await drive(h)).kind, 'done');

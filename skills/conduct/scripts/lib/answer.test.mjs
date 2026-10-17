@@ -97,38 +97,38 @@ function verbDeps(outputs, { now = 0 } = {}) {
 test('await-answer --once is the lookup: exit 0 either way, the receipt when it is there, the tag and quest passed to the command', async (t) => {
   const dir = runDir(t, makeState());
   const hit = verbDeps([{ code: 0, stdout: JSON.stringify(answered()) }]);
-  const found = await awaitAnswer({ run: dir, touch: '1', once: true }, hit.deps);
+  const found = await awaitAnswer({ run: dir, touch: '1', once: true }, testDeps(hit.deps));
   assert.deepEqual([found.code, found.out.answered, found.out.receipt.id], [undefined, true, 'r-1']);
   assert.deepEqual(hit.calls, [['resolve', QUEST, TAG]]);
-  const miss = await awaitAnswer({ run: dir, touch: '1', once: true }, verbDeps([{ code: 0, stdout: 'null' }]).deps);
+  const miss = await awaitAnswer({ run: dir, touch: '1', once: true }, testDeps(verbDeps([{ code: 0, stdout: 'null' }]).deps));
   assert.deepEqual([miss.code, miss.out.answered, miss.out.receipt], [undefined, false, null]);
-  await assert.rejects(awaitAnswer({ run: dir, touch: '1', once: true }, verbDeps([{ code: 3, stdout: '', stderr: 'docker: not running' }]).deps), (error) => error.code === 1);
+  await assert.rejects(awaitAnswer({ run: dir, touch: '1', once: true }, testDeps(verbDeps([{ code: 3, stdout: '', stderr: 'docker: not running' }]).deps)), (error) => error.code === 1);
 });
 
 test('await-answer polls until the answer lands (exit 0), stops at the timeout (exit 4), and gives up after three failed lookups in a row (exit 1)', async (t) => {
   const dir = runDir(t, makeState());
   const late = verbDeps([{ code: 0, stdout: '' }, { code: 0, stdout: 'null' }, { code: 1, stderr: 'blip' }, { code: 0, stdout: JSON.stringify(answered()) }]);
-  const landed = await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '1000' }, late.deps);
+  const landed = await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '1000' }, testDeps(late.deps));
   assert.deepEqual([landed.code, landed.out.answered, late.calls.length], [undefined, true, 4]);
   const never = verbDeps([{ code: 0, stdout: 'null' }]);
-  const timedOut = await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '1000', 'timeout-ms': '3500' }, never.deps);
+  const timedOut = await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '1000', 'timeout-ms': '3500' }, testDeps(never.deps));
   assert.deepEqual([timedOut.code, timedOut.out.timeout, never.calls.length], [4, true, 4]);
   const broken = verbDeps([{ code: 1, stderr: 'down' }]);
-  await assert.rejects(awaitAnswer({ run: dir, touch: '1', 'interval-ms': '1000' }, broken.deps), (error) => error.code === 1);
+  await assert.rejects(awaitAnswer({ run: dir, touch: '1', 'interval-ms': '1000' }, testDeps(broken.deps)), (error) => error.code === 1);
   assert.equal(broken.calls.length, 3);
 });
 
 test('every lookup is bounded: 30 s at most, never past the waiter deadline, and the real executor kills a child that outlives it', { timeout: 20000 }, async (t) => {
   const dir = runDir(t, makeState());
   const once = verbDeps([{ code: 0, stdout: 'null' }]);
-  await awaitAnswer({ run: dir, touch: '1', once: true }, once.deps);
+  await awaitAnswer({ run: dir, touch: '1', once: true }, testDeps(once.deps));
   assert.deepEqual(once.timeouts, [LOOKUP_TIMEOUT_MS]);
   const near = verbDeps([{ code: 0, stdout: 'null' }]);
-  await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '2000', 'timeout-ms': '5000' }, near.deps);
+  await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '2000', 'timeout-ms': '5000' }, testDeps(near.deps));
   assert.ok(near.timeouts.every((ms) => ms >= 1 && ms <= 5000), JSON.stringify(near.timeouts));
   // Less than a second left: the lookup gets only what is left, never past the deadline.
   const tight = verbDeps([{ code: 0, stdout: 'null' }]);
-  await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '50', 'timeout-ms': '200' }, tight.deps);
+  await awaitAnswer({ run: dir, touch: '1', 'interval-ms': '50', 'timeout-ms': '200' }, testDeps(tight.deps));
   assert.ok(tight.timeouts.length > 0 && tight.timeouts.every((ms) => ms >= 1 && ms <= 200), JSON.stringify(tight.timeouts));
   const started = Date.now();
   const killed = execute(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { timeout: 500 });
@@ -139,12 +139,12 @@ test('every lookup is bounded: 30 s at most, never past the waiter deadline, and
 test('await-answer refuses a touch that is not filed and reports one already answered without a lookup', async (t) => {
   const open = makeState();
   open.touches[0].status = 'open';
-  await assert.rejects(awaitAnswer({ run: runDir(t, open), touch: '1', once: true }, verbDeps([]).deps), (error) => error.code === 5);
-  await assert.rejects(awaitAnswer({ run: runDir(t, makeState()), touch: '2', once: true }, verbDeps([]).deps), (error) => error.code === 2);
+  await assert.rejects(awaitAnswer({ run: runDir(t, open), touch: '1', once: true }, testDeps(verbDeps([]).deps)), (error) => error.code === 5);
+  await assert.rejects(awaitAnswer({ run: runDir(t, makeState()), touch: '2', once: true }, testDeps(verbDeps([]).deps)), (error) => error.code === 2);
   const done = makeState();
   done.touches[0].status = 'answered';
   const quiet = verbDeps([]);
-  assert.equal((await awaitAnswer({ run: runDir(t, done), touch: '1' }, quiet.deps)).out.answered, true);
+  assert.equal((await awaitAnswer({ run: runDir(t, done), touch: '1' }, testDeps(quiet.deps))).out.answered, true);
   assert.equal(quiet.calls.length, 0);
 });
 
@@ -165,12 +165,12 @@ test('the read-back takes the answer from the lookup even when a later receipt i
   const state = makeState();
   const touch = state.touches[0];
   const action = touchAction(state, touch);
-  recordTouch(state, touch, action, { code: 0, stdout: JSON.stringify({ ok: true, answered: true, receipt: answered() }), stderr: '' });
+  recordTouch(state, touch, action, { code: 0, stdout: JSON.stringify({ ok: true, answered: true, receipt: answered() }), stderr: '' }, testDeps());
   assert.deepEqual([touch.status, touch.answer.key, touch.answer.receiptId], ['answered', 'a', 'r-1']);
   // spine_quest's view of the same anchor: a later completed receipt is the latest, so the answer is hidden there.
   const viaSpine = makeState({ adapters: { spine: { on: true }, answer: { on: false } } });
   const hidden = viaSpine.touches[0];
-  recordTouch(viaSpine, hidden, touchAction(viaSpine, hidden), { quests: [{ latestReceipt: { id: 'r-2', outcome: 'completed', question: null, answer: null } }] });
+  recordTouch(viaSpine, hidden, touchAction(viaSpine, hidden), { quests: [{ latestReceipt: { id: 'r-2', outcome: 'completed', question: null, answer: null } }] }, testDeps());
   assert.deepEqual([hidden.status, hidden.waiting], ['filed', true]);
 });
 
@@ -179,12 +179,12 @@ test('a T3 operator answer resumes the filed touch through the Spine read-back',
   const touch = state.touches[0];
   const action = touchAction(state, touch);
   const receipt = answered({ answer: { key: 'a', text: 'Approve', by: 'operator:t3', answeredAt: '2026-10-17T00:00:00Z' } });
-  recordTouch(state, touch, action, { code: 0, stdout: JSON.stringify({ ok: true, answered: true, receipt }), stderr: '' });
+  recordTouch(state, touch, action, { code: 0, stdout: JSON.stringify({ ok: true, answered: true, receipt }), stderr: '' }, testDeps());
   assert.deepEqual([touch.status, touch.answer.key, touch.answer.by], ['answered', 'a', 'operator:t3']);
 
   const viaSpine = makeState({ adapters: { spine: { on: true }, answer: { on: false } } });
   const spineTouch = viaSpine.touches[0];
-  recordTouch(viaSpine, spineTouch, touchAction(viaSpine, spineTouch), { quests: [{ latestReceipt: receipt }] });
+  recordTouch(viaSpine, spineTouch, touchAction(viaSpine, spineTouch), { quests: [{ latestReceipt: receipt }] }, testDeps());
   assert.deepEqual([spineTouch.status, spineTouch.answer.key, spineTouch.answer.by], ['answered', 'a', 'operator:t3']);
 });
 
@@ -192,12 +192,12 @@ test('a failed or unanswered lookup is not an answer: the first is refused (the 
   const state = makeState();
   const touch = state.touches[0];
   const action = touchAction(state, touch);
-  assert.throws(() => recordTouch(state, touch, action, { code: 1, stdout: JSON.stringify({ ok: false, error: 'WORKIT_TOUCH_ANSWER_CMD exited 1' }), stderr: '' }), (error) => error.code === 1);
+  assert.throws(() => recordTouch(state, touch, action, { code: 1, stdout: JSON.stringify({ ok: false, error: 'WORKIT_TOUCH_ANSWER_CMD exited 1' }), stderr: '' }, testDeps()), (error) => error.code === 1);
   assert.equal(touch.status, 'filed');
-  recordTouch(state, touch, action, { code: 0, stdout: JSON.stringify({ ok: true, answered: false, receipt: null }), stderr: '' });
+  recordTouch(state, touch, action, { code: 0, stdout: JSON.stringify({ ok: true, answered: false, receipt: null }), stderr: '' }, testDeps());
   assert.deepEqual([touch.status, touch.waiting], ['filed', true]);
   const notOperator = makeState();
-  recordTouch(notOperator, notOperator.touches[0], action, { code: 0, stdout: JSON.stringify({ ok: true, answered: true, receipt: answered({ answer: { key: 'a', by: 'agent:claude' } }) }), stderr: '' });
+  recordTouch(notOperator, notOperator.touches[0], action, { code: 0, stdout: JSON.stringify({ ok: true, answered: true, receipt: answered({ answer: { key: 'a', by: 'agent:claude' } }) }), stderr: '' }, testDeps());
   assert.equal(notOperator.touches[0].status, 'open');
 });
 

@@ -18,7 +18,8 @@ import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from '
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
-import { QUESTION_MAX, acceptAnswer, filedLength, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
+import { QUESTION_MAX, acceptAnswer, filedLength, operatorAnchor, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
+import { readAnchor } from '../../_shared/operator-proof/operator-proof.mjs';
 import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -239,6 +240,11 @@ async function intake(tokens, deps) {
   if (options.spine && !/^[0-9a-f]{8}[0-9a-f-]*$/i.test(typeof flags.anchor === 'string' ? flags.anchor : '')) {
     refuse(7, '--adapter spine needs --anchor <quest id> (a uuid or a prefix of at least 8 hex characters): the touches need a quest to carry them');
   }
+  // A core touch is answered only from the TTY, which is no authority once a
+  // passkey is registered: a core-only run would have no way to be approved.
+  if (!options.spine && operatorAnchor(deps).configured) {
+    throw new ConductError(2, 'an operator passkey is configured (~/.claude/operator-passkeys.json); run conduct with the Spine adapter so touches can be signed on the phone');
+  }
   // The raw origin URL, before any insteadOf rewrite.
   const origin = deps.exec('git', ['-C', repoPath, 'config', '--get', 'remote.origin.url']);
   if (origin.code !== 0 || !origin.stdout.trim()) refuse(2, `${repoPath} has no origin remote`);
@@ -422,7 +428,8 @@ async function record(tokens, deps) {
 
 // An operator's answer to a core touch. stdinIsTTY comes from isatty(0) and
 // no flag or env var sets it: a procedural approval boundary, not proof of
-// the operator's identity (MN5).
+// the operator's identity (MN5). With a passkey configured it is refused
+// (exit 3, acceptAnswer).
 async function answer(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
@@ -430,7 +437,7 @@ async function answer(tokens, deps) {
     const touch = state.touches.find((candidate) => String(candidate.n) === String(flags.touch));
     if (!touch || touch.status !== 'open' || state.adapters.spine?.on) throw new ConductError(5, `no open core touch ${flags.touch}`);
     touch.tty = true;
-    acceptAnswer(touch, { key: flags.key, text: typeof flags.text === 'string' ? flags.text : null, by: 'operator:tty', answeredAt: deps.timestamp(), source: 'tty' });
+    acceptAnswer(state, touch, { key: flags.key, text: typeof flags.text === 'string' ? flags.text : null, by: 'operator:tty', answeredAt: deps.timestamp(), source: 'tty' }, deps);
     writeTouchFiles(state, touch, deps);
     appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'answered', source: 'tty', data: { n: touch.n, key: touch.answer.key } });
     saveState(state, deps);
@@ -656,6 +663,8 @@ export async function runConduct(argv, overrides = {}) {
     resolveCodex: defaultCodexExe,
     pluginRoot: PLUGIN_ROOT,
     importModule: (relPath) => import(pathToFileURL(join(SCRIPTS_DIR, relPath)).href),
+    // The operator's passkey anchor, from its one fixed path (no flag or env var names another).
+    readAnchor: () => readAnchor(),
     ...overrides,
   };
   let [verb, ...tokens] = argv;
