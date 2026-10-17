@@ -485,8 +485,9 @@ deployed 2026-09-28): it asks `rounds` (under Managed repositories) before it
 claims, runs round two as a delta pass, and records a later head as `capped`
 without claiming it. All three callers read the rounds from the same code.
 
-When every thread has a verdict and CI is green, the PR is ready for the
-operator's merge call.
+When every thread has a verdict and CI is green, the PR is ready to merge. Inside
+a pre-approved run, the conductor merges; outside one, merging is the operator's
+call.
 
 ---
 
@@ -733,8 +734,9 @@ skill build the manifest with one implementation rather than two.
 
 - **Not a council.** Two lenses, no synthesis, no challenge pass. If the two
   disagree in an interesting way, that PR wants `council_review`, not this.
-- **Not a merge gate.** It posts findings and adjudications; merging stays the
-  operator's call.
+- **Not a merge gate.** It posts findings and adjudications. Inside a
+  pre-approved run, the conductor merges; outside one, merging is the operator's
+  call.
 - **Not a linter.** Style findings are explicitly excluded — CI already owns
   those, and a review that lists them trains you to skim.
 

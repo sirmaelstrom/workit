@@ -127,11 +127,19 @@ dropping the needle. Stopped because you are blocked rather than done? Use
 surfaces blocked-waiting instead of looking abandoned. When the question is a
 CHOICE, pass `ask.options` too — one entry per choice with a letter key
 (`a`..`f`), a short label, and a ONE-LINE consequence, plus `allowFreeText`
-when a typed answer is also acceptable; the Dogan's WAITING card renders those
-as buttons the operator presses with no agent running, and the press writes an
-`answered` receipt that supersedes the ask (quest 9a1ce903). On re-entry, the
-go is read from `spine_quest`'s `latestReceipt.answer` (`key` / `text`), never
-assumed from the quest having returned to the frontier.
+when a typed answer is also acceptable. Pose any ask or list of choices as
+selectable options (AskUserQuestion in T3), with the Dogan ask filed too when it
+needs a record; a T3 answer is written back to Spine the same turn. Put the ask
+key in each option label (`a — Full grant, $200`) and the receipt tag in the
+question (`[ask <receiptId>]`). Use at most four options per question; split or
+collapse a Dogan ask with five or six options. A headless lane with no operator
+present files the Dogan ask only. For now, write a T3 answer as a conductor
+receipt quoting it; `spine_receipt` cannot write `answered`. The Dogan's WAITING
+card renders the choices as buttons the operator presses with no agent running,
+and the press writes an `answered` receipt that supersedes the ask (quest
+9a1ce903). On re-entry, read the go from `spine_quest`'s
+`latestReceipt.answer` (`key` / `text`), never assume it from the quest having
+returned to the frontier.
 
 Work-state and attention are orthogonal: `dismissed` is not `done`, and a quest
 you finished is not closed until `workState` says so.

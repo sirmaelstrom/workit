@@ -85,7 +85,15 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    agent running; the press writes an `answered` receipt that supersedes the
    ask and puts the quest back on the frontier by itself (quest 9a1ce903,
    2026-09-21). Options buried in the question prose are a wall of text the
-   card cannot render as buttons. **Refutation is a valid outcome:** an item whose note does
+   card cannot render as buttons. Pose any ask or list of choices as selectable
+   options (AskUserQuestion in T3), with the Dogan ask filed too when it needs a
+   record; a T3 answer is written back to Spine the same turn. Put the ask key
+   in each option label (`a — Full grant, $200`) and the receipt tag in the
+   question (`[ask <receiptId>]`). Use at most four options per question; split
+   or collapse a Dogan ask with five or six options. A headless lane with no
+   operator present files the Dogan ask only. For now, write a T3 answer as a
+   conductor receipt quoting it; `spine_receipt` cannot write `answered`.
+   **Refutation is a valid outcome:** an item whose note does
    not survive re-derivation is handed back *refuted* with the evidence
    receipted, not built — across runs 3–4 the note was wrong or stale more
    often than it was right. A refuted item still gets its board closeout
