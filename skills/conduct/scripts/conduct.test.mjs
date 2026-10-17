@@ -692,6 +692,16 @@ test('depth lite (1b3dec9f): spec.md\'s ## Design direction and **Visual rules:*
     [[1, 4], ['frontend-design:frontend-design'], [1, 2, 3, 4], specPath]);
 });
 
+test('depth lite strips Tach-shaped wrapping backticks from the runtime exercise', async (t) => {
+  const f = fixture(t);
+  const { runDir, spec } = await toCoreSpec(f);
+  const state = readState(runDir);
+  writeFileSync(join(state.workshopDir, 'spec.md'), '# Lite\n\n**Runtime exercise:** `none: no runtime surface`\n');
+  const result = await record(f, runDir, spec.id, { depth: 'lite', workshopDir: state.workshopDir, gateCommand: 'node --test' });
+  assert.equal(result.code, 0, result.stdout);
+  assert.equal(readState(runDir).wps[0].runtimeExercise, 'none: no runtime surface');
+});
+
 test('answer refuses non-tty', async (t) => {
   const f = fixture(t);
   const { runDir } = out(await intake(f));

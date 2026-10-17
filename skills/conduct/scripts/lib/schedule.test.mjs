@@ -51,6 +51,11 @@ test('parseWorkPackages: wave, model, dependsOn, tier and runtimeExercise', () =
   assert.doesNotMatch(parsed().get('WP-02').runtimeExercise, /Negative controls/);
 });
 
+test('deep Tach-shaped runtime exercise stores plain none for the lane check', (t) => {
+  const dir = workshop(t, { 'WP-01': { wave: 1, model: 'opus', body: '**Files:**\n- Create `a.mjs`\n\n**Runtime exercise:** `none: no runtime surface`\n' } });
+  assert.equal(parseWorkPackages(dir)[0].runtimeExercise, 'none: no runtime surface');
+});
+
 test('filesDisjoint on the run workshop (D17, D19.29)', () => {
   const wps = parsed();
   const files = (id) => wps.get(id).files;

@@ -2,7 +2,7 @@
 // chose, and turn depth none|lite into the single WP-00 record.
 import { join, resolve, win32 } from 'node:path';
 import { ConductError } from '../state.mjs';
-import { parseDesignDirection, skillsField, visualRules } from '../schedule.mjs';
+import { parseDesignDirection, skillsField, stripWrappingBackticks, visualRules } from '../schedule.mjs';
 
 // The touch whose answer set the authority: touch 1, or its blocked re-ask.
 // A touch the build opened (budget, a re-plan, a halt) or the showcase sets
@@ -54,7 +54,8 @@ export function wpRecord(fields) {
 }
 
 function runtimeExerciseField(text) {
-  return /^\*\*Runtime exercise:\*\*[ \t]*(.*)$/m.exec(text)?.[1].trim() ?? '';
+  const value = /^\*\*Runtime exercise:\*\*[ \t]*(.*)$/m.exec(text)?.[1].trim() ?? '';
+  return stripWrappingBackticks(value);
 }
 
 function writeWp00(state, gateCommand, deps) {
