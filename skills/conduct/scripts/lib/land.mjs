@@ -227,7 +227,7 @@ export function reviewActions(state, wp, { round = 1, report = null, since = nul
   return reviewSteps(state, wp, wp.reviewMode, meta);
 }
 
-function reviewSteps(state, wp, mode, meta) {
+export function reviewSteps(state, wp, mode, meta) {
   const pick = pickReviewers(state, authorOf(state, wp), { mode, author: authorModelOf(state, wp) });
   if (pick.impossible) throw new ConductError(5, `${wp.id}: review impossible: ${pick.impossible}`);
   // The no-council T2 fallback runs every available lens but the author's own
@@ -444,7 +444,7 @@ export function resolveThreadActions(state, wp, commentIds) {
     { expects: { type: 'json' }, land: { commentIds: commentIds.map(String) } })];
 }
 
-function resolveAction(threadId) {
+export function resolveAction(threadId) {
   return shell('resolve', 'resolve', ['gh', 'api', 'graphql', '-f', `query=${RESOLVE_MUTATION}`, '-f', `threadId=${threadId}`], { land: { threadId } });
 }
 
@@ -988,6 +988,10 @@ function retry(wp, action, reason) {
   return { ...result('wait', `${reason} (retry ${n} of ${MAX_RETRIES})`, { retries: n, queue: [requeue(action), ...rest(wp, action)] }), waitMs: WAIT_MS };
 }
 
+// The read of the posted review of the claim's head, after a refused claim.
+export const recoverAction = (state, wp, land) => shell('review', 'recover', ['node', prReview(state), 'rounds', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--head', land.head],
+  { land });
+
 function recordReview(state, wp, action, r) {
   const after = rest(wp, action);
   if (action.part === 'delta-count') {
@@ -1021,10 +1025,8 @@ function recordReview(state, wp, action, r) {
     const reason = parseJson(first(r.stdout))?.reason ?? first(r.stderr);
     if (reason !== ALREADY_REVIEWED) return result('block', `claim refused: ${reason}`);
     // The refusal is not a review: recover the posted review of this exact head, or hold.
-    const recover = shell('review', 'recover', ['node', prReview(state), 'rounds', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--head', action.land.head],
-      { land: action.land });
     return result('continue', `claim refused ${ALREADY_REVIEWED}: reading the posted review of this head`,
-      { queue: [recover, ...after.filter((a) => a.land?.attemptRef !== action.land.attemptRef)] });
+      { queue: [recoverAction(state, wp, action.land), ...after.filter((a) => a.land?.attemptRef !== action.land.attemptRef)] });
   }
   if (action.part === 'recover') {
     const read = parseJson(first(r.stdout));
@@ -1145,7 +1147,7 @@ const validInspect = (inspect) => inspect && typeof inspect === 'object' && /^[0
   && typeof inspect.head === 'string' && Array.isArray(inspect.files) && inspect.files.length > 0 && inspect.files.every((file) => typeof file === 'string' && file)
   && inspect.review && typeof inspect.findingsHash === 'string';
 
-function inspectAction(state, wp, inspect, gate) {
+export function inspectAction(state, wp, inspect, gate) {
   const [from, to] = inspect.tail.split('..');
   return { kind: 'inspect', step: 'gate', seam: STEP_SEAM.gate, part: 'inspect',
     instruction: inspect.gateFailures?.length
@@ -1247,6 +1249,10 @@ function recordGate(state, wp, action, r, deps, authority) {
       return result('held', `gate passed; ${why}: the merge is the operator's`, { ...recorded, retries: 0 });
     }
     const refusal = mergeRefusal(state, authority);
+    // A WP's refused signed record (authority.reason) is its merge stage's to
+    // wait on, so a restored record resumes it to the squash; a grant that
+    // holds but gives no merge is the operator's merge. The release holds.
+    if (refusal && authority.reason && wp.id !== 'release') return result('continue', null, { ...recorded, retries: 0 });
     return refusal ? result('held', `gate passed; ${refusal}`, { ...recorded, retries: 0 }) : result('continue', null, { ...recorded, retries: 0 });
   }
   if (r.code === 6) {

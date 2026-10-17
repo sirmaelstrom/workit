@@ -19,6 +19,13 @@ export const OPTION_MAX = 240;
 // What an authority hold asks of the operator. Nothing re-files an authority
 // touch mid-run, so a record that cannot be restored ends the run's authority.
 export const AUTHORITY_RECOVERY = 'restore the signed record, or start a new run and sign its touch 1';
+// The split every hold names. A refusal whose cause is a missing or edited
+// record (a proof, a grant, the goal, a touch) waits and is checked again: a
+// restored record resumes the run. One whose signed content itself no longer
+// authorizes (the grant expired, it is another run's) is terminal at once.
+export const AUTHORITY_WAITING = 'waiting: restore the signed record and the build resumes on its own, checked again every 5 minutes';
+export const AUTHORITY_TERMINAL = 'terminal: restoring the record cannot help; start a new run and sign its touch 1';
+export const terminalRefusal = (reason) => reason === REASONS.grant_expired || reason === 'wrong run';
 // A grant's base branch when the repo reported none. renderGrant puts the
 // branch in parentheses, so the prose reads "((unknown))".
 export const UNKNOWN_BRANCH = '(unknown)';

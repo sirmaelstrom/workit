@@ -214,6 +214,16 @@ function receiptAction(state, rotation) {
   };
 }
 
+// Every custody step the rotation can emit now: a stored rotation.action is
+// emitted again only as one of these, whole (conduct.mjs emit).
+export function custodyActs(state, rotation) {
+  const acts = [];
+  if (rotation.caller?.pane && rotation.callerSession) acts.push(retireAction(state, rotation, 'close'), retireAction(state, rotation, 'exit+close'));
+  acts.push(confirmAction(state, rotation));
+  if (state.adapters?.spine?.on && state.intent?.anchor) acts.push(receiptAction(state, rotation));
+  return acts;
+}
+
 // The next custody step's spec, or null once custody is taken (or the rotation
 // was cancelled). Throws when the conductor that rotated asks after its
 // successor has started custody, and when custody would start without

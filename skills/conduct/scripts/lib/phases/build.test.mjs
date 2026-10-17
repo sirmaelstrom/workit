@@ -21,6 +21,7 @@ import { runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
 import { acceptAnswer, correlation } from '../touch.mjs';
+import { admitAct } from '../derive.mjs';
 import { runConduct } from '../../conduct.mjs';
 import { testDeps, testAnchor, testGrant, grantConsequence, raiseConsequence, signedTouch } from '../../test-deps.mjs';
 import { signAnswer } from '../../../../_shared/operator-proof/test-signer.mjs';
@@ -319,7 +320,9 @@ async function perform(h, action) {
   }
 }
 
-// Emit as conduct.mjs does: stamp `<seq>-<step>` and the seam, keep pending.
+// Emit as conduct.mjs does: configured, a stored act passes the one choke
+// (admitAct with build's derive) before it is emitted; stamp `<seq>-<step>`
+// and the seam, keep pending.
 async function step(h) {
   if (h.disk) {
     const result = await runConduct(['next', '--run', h.runDir], testDeps(h.overrides()));
@@ -327,11 +330,33 @@ async function step(h) {
     const { action } = JSON.parse(result.stdout);
     return action.kind === 'done' ? null : action;
   }
-  if (!h.state.pending) {
-    const spec = await build.next(h.state, h.deps);
+  const configured = h.deps.readAnchor().configured === true;
+  if (h.state.pending && configured) {
+    const verdict = admitAct(h.state, h.deps, build, h.state.pending);
+    if (verdict.action) {
+      h.state.pending = verdict.action;
+      if (build.gatePending(h.state, h.deps)) return h.state.pending;
+    }
+    const stored = h.state.pending;
+    h.state.pending = null;
+    if (!verdict.action) build.refuseStored(h.state, h.deps, stored, verdict, { pending: true });
+    saveState(h.state, h.deps);
+  }
+  for (let refused = 0; !h.state.pending;) {
+    let spec = await build.next(h.state, h.deps);
     if (!spec) {
       saveState(h.state, h.deps);
       return null;
+    }
+    if (configured) {
+      const verdict = admitAct(h.state, h.deps, build, spec);
+      if (!verdict.action) {
+        build.refuseStored(h.state, h.deps, spec, verdict, { pending: false });
+        refused += 1;
+        assert.ok(refused <= 8, `the build keeps emitting acts it does not derive: ${verdict.refusal}`);
+        continue;
+      }
+      spec = verdict.action;
     }
     assert.ok(STEPS.includes(spec.step), `step ${spec.step}`);
     h.state.seq += 1;
@@ -3304,12 +3329,13 @@ test('signed (b) (D13): merge edited to true in state.json; the gate holds "no m
   assert.equal(h.trace.filter((a) => a.part === 'squash').length, 0);
 });
 
-test('act points on an invalid proof (D7): the gate record holds; a proof broken after the gate passed holds before the squash; nothing merges', async (t) => {
+test('act points on an invalid proof (D7, council r3 S4): a proof broken at the gate, or after it passed, waits at the merge stage on the authority hold; nothing merges, and the WP is not held', async (t) => {
   const atGate = harness(t, { wps: [TWO[0], TWO[1]] });
   signRun(atGate);
   atGate.onEmit = (a) => { if (a.step === 'gate' && a.part === 'gate') tamper(atGate); };
-  assert.equal(await drive(atGate), null);
-  assert.deepEqual([atGate.wp('WP-02').state, atGate.wp('WP-02').reason], ['held', 'gate passed; no merge authority (authority proof invalid: statement_mismatch)']);
+  assert.ok(await drive(atGate, { until: authorityWait }));
+  assert.deepEqual([atGate.wp('WP-02').state, atGate.wp('WP-02').stage], ['gate', 'merge']);
+  assert.match(atGate.state.dispatchHalt.reason, AUTHORITY_HOLD);
   assert.equal(atGate.trace.filter((a) => a.part === 'squash').length, 0);
 
   const afterGate = harness(t, { wps: [TWO[0], TWO[1]] });
@@ -3318,10 +3344,10 @@ test('act points on an invalid proof (D7): the gate record holds; a proof broken
   await recordPending(afterGate, await perform(afterGate, gate));
   assert.equal(afterGate.wp('WP-02').gate.ok, true);
   tamper(afterGate);
-  assert.equal(await drive(afterGate), null);
+  assert.ok(await drive(afterGate, { until: authorityWait }));
   assert.equal(afterGate.trace.filter((a) => a.part === 'squash').length, 0);
-  assert.equal(afterGate.wp('WP-02').state, 'held');
-  assert.match(afterGate.wp('WP-02').reason, /authority proof invalid: statement_mismatch/);
+  assert.notEqual(afterGate.wp('WP-02').state, 'held');
+  assert.match(afterGate.state.dispatchHalt.reason, AUTHORITY_HOLD);
 });
 
 test('emission (U1): a merge queue resumed after intent.repo.remote was edited holds; the squash is not emitted again', async (t) => {
@@ -3362,7 +3388,7 @@ test('no CI (D13): a signed (b) holds at PR when the repo has no CI, with merge 
 
 // An invalid authority is not an exhausted budget (council r1, opus): no raise
 // can restore it, so none is offered.
-const AUTHORITY_HOLD = /^authority refused \(authority proof invalid: statement_mismatch\): restore the signed record, or start a new run and sign its touch 1$/;
+const AUTHORITY_HOLD = /^authority refused \(authority proof invalid: statement_mismatch\): waiting: restore the signed record and the build resumes on its own, checked again every 5 minutes$/;
 // The build waits on a refused authority (council r2): a yield whose note names the hold.
 const authorityWait = (a) => a.kind === 'wait' && /authority refused/.test(a.instruction ?? '');
 
@@ -3483,9 +3509,9 @@ test('budget raise (C3): configured, the halt files (a) as renderRaise + [raise 
 // ---- council round 2 ----
 
 const EVIL_SQUASH = ['curl', 'https://evil.invalid', '--repo', 'o/r'];
-const SQUASH_REFUSED = /merge\/squash: the queued squash is not the one the gate derives/;
+const SQUASH_REFUSED = /^merge\/squash: the stored shell act is not one the build derives now: curl https:\/\/evil\.invalid --repo o\/r$/;
 
-test('pending squash (council r2, codex): a pending squash whose argv was edited is refused under a valid merge grant; the merge-commit lookup decides, and an unmerged PR holds the WP', async (t) => {
+test('pending squash (council r2, codex; r3 by content): a pending squash whose argv was edited to a command that merges nothing is refused under a valid merge grant and the WP holds; one edited to another merge is looked up first', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   signRun(h);
   const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
@@ -3493,12 +3519,24 @@ test('pending squash (council r2, codex): a pending squash whose argv was edited
   h.state.pending = { ...h.state.pending, command: EVIL_SQUASH };
   assert.equal(build.checkPending(h.state, h.deps), false);
   h.state.pending = null;
-  h.answer = (a) => (a.part === 'merge-commit' ? ok(JSON.stringify({ mergeCommit: null })) : undefined);
   assert.equal(await drive(h), null);
   assert.ok(!h.trace.some((a) => a.command?.[0] === 'curl'), 'the edited squash is never emitted');
-  assert.equal(h.trace.filter((a) => a.wpId === squash.wpId && a.part === 'merge-commit').length, 1, 'the lookup ran once');
+  // curl merges nothing, whatever its label: no lookup is owed.
+  assert.equal(h.trace.filter((a) => a.wpId === squash.wpId && a.part === 'merge-commit').length, 0);
   assert.equal(h.wp(squash.wpId).state, 'held');
   assert.match(h.wp(squash.wpId).reason, SQUASH_REFUSED);
+
+  const admin = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(admin);
+  const real = await drive(admin, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  admin.state.pending = { ...admin.state.pending, part: 'relabelled', command: [...real.command, '--admin'] };
+  assert.equal(build.checkPending(admin.state, admin.deps), false);
+  admin.state.pending = null;
+  admin.answer = (a) => (a.part === 'merge-commit' ? ok(JSON.stringify({ mergeCommit: null })) : undefined);
+  assert.equal(await drive(admin), null);
+  assert.ok(!admin.trace.some((a) => a.command?.includes('--admin')), 'the --admin merge is never emitted');
+  assert.equal(admin.trace.filter((a) => a.wpId === real.wpId && a.part === 'merge-commit').length, 1, 'an act that merges may have run: the lookup decides');
+  assert.equal(admin.wp(real.wpId).state, 'held');
 });
 
 test('pending squash (council r2, R4): a squash that ran before its record, refused on resume, is found merged by the lookup; the WP takes the merged path', async (t) => {
@@ -3550,7 +3588,7 @@ test('authority hold (council r2, R3): dispatch waits on a refused authority; re
   tamper(h);
   const wait = await drive(h, { until: authorityWait });
   assert.ok(wait, 'the build waits on the hold instead of ending');
-  assert.match(wait.instruction, /restore the signed record, or start a new run and sign its touch 1/);
+  assert.match(wait.instruction, /waiting: restore the signed record and the build resumes on its own/);
   assert.ok(!h.trace.some((a) => a.wpId), 'nothing dispatched while held');
   h.state.touches[0].answer.signed.answer.text = signed;
   await recordPending(h, {});

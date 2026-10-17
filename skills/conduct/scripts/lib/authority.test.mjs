@@ -710,3 +710,34 @@ test('analysis (council r2, sonnet): held, dropped and refused events are not se
   const coverage = readFileSync(join(state.runDir, 'run-analysis.md'), 'utf8').split(/^## /m).find((part) => part.startsWith('Seam coverage\n'));
   for (const row of ['spec-depth', 'workshop-scaffold', 'spec-review', 'release', 'merge-gate']) assert.match(coverage, new RegExp(`^- ${row}: not exercised`, 'm'), coverage);
 });
+
+test('spec hold (council r3, S4b): an expired grant is terminal at /spec: done with the reason, no wait; an edited record still waits, naming its recovery', (t) => {
+  const expired = run(t, { phase: 'spec' });
+  approved(expired);
+  const done = spec.next(expired, EXPIRED);
+  assert.deepEqual(done, { kind: 'done', reason: 'spec held: grant_expired: terminal: restoring the record cannot help; start a new run and sign its touch 1' });
+  const tampered = run(t, { phase: 'spec' });
+  approved(tampered).answer.signed.answer.text = 'merge everything';
+  const held = spec.next(tampered, CONFIGURED);
+  assert.deepEqual([held.kind, held.held], ['wait', true]);
+  assert.match(held.instruction, /: waiting: restore the signed record, or start a new run and sign its touch 1; a restored record resumes \/spec on its own\./);
+});
+
+test('analysis (council r3, S5): seam evidence is exercised behaviour, not success: a release that ran its setup, then ended held, counts the setup under its row while its outcome reads failed, held', async (t) => {
+  const state = run(t, { phase: 'analyze' });
+  state.release = { ...state.release, state: 'failed', reason: 'release held: no release authority (grant_expired)' };
+  const deps = testDeps({ ...IO, append: appendFileSync, rename: renameSync, remove: (path) => rmSync(path, { force: true }), pid: process.pid,
+    exec: () => ({ code: 1, stdout: '', stderr: 'not a repo' }) });
+  for (const event of [
+    { actionId: '20-release', step: 'release', seam: 'release', kind: 'shell', event: 'emitted' },
+    { actionId: '20-release', step: 'release', seam: 'release', kind: 'shell', event: 'recorded', phase: 'release' },
+    { step: 'release', event: 'release-held', data: { reason: 'release held: no release authority (grant_expired)' } },
+    { step: 'release', event: 'release', data: { state: 'failed', reason: 'release held: no release authority (grant_expired)' } },
+  ]) appendEvent(state, deps, event);
+  saveState(state, deps);
+  await analyzeRun(state.runDir, deps);
+  const analysis = readFileSync(join(state.runDir, 'run-analysis.md'), 'utf8');
+  const coverage = analysis.split(/^## /m).find((part) => part.startsWith('Seam coverage\n'));
+  assert.doesNotMatch(coverage, /^- release: not exercised/m, coverage);
+  assert.match(analysis, /^- release: failed: release held: no release authority \(grant_expired\)/m);
+});

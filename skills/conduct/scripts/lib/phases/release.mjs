@@ -20,6 +20,7 @@ import { firstLine } from '../adapters.mjs';
 import { branchDeleteSteps, branchOutcome, checkedOutAt, worktreeGone } from '../lanes.mjs';
 import { samePath } from './spec.mjs';
 import { mergeRefusal, releaseRefusal, sameAction, verifiedAuthority } from '../authority.mjs';
+import { admitAct } from '../derive.mjs';
 
 const SEAM = 'release';
 const WAIT_MS = 60000;
@@ -313,23 +314,49 @@ export function next(state, deps) {
   return emitHead(state);
 }
 
-// A release act left pending is checked again before it is emitted again
-// (conduct.mjs emit). Configured, it must still be the head of a pending
-// release's queue and pass emission's checks; one refused now is dropped,
-// and the release holds as it does at emission. A refused squash may have run
-// before its record, so the merge-commit lookup decides how the release
-// holds (held). An operator touch runs no repo command; its answer is checked
-// at its read-back. False when the pending action was dropped.
-export function checkPending(state, deps) {
-  const action = state.pending;
+// What the release emits of a stored act (lib/derive.mjs admitAct), decided
+// by its content: the anomaly's touch when it is the act touchSpec derives
+// for it, whole; otherwise the head of a pending release's queue that passes
+// emission's checks (the act stageActions derives at its stage, under release
+// authority). A wait is left to admitAct's shape check, emitted with its
+// canonical text. No label (touch, step, part) admits an act by itself.
+export function derive(state, deps, action) {
   const r = state.release;
-  if (action.touch || verifiedAuthority(state, deps).proofMode === 'unconfigured') return true;
+  const what = `${action.step}/${action.part ?? action.kind}`;
+  if (r.anomaly) {
+    let spec = null;
+    try {
+      spec = touchSpec(state, state.touches[r.anomaly.touch - 1]);
+    } catch (error) {
+      if (!(error instanceof ConductError) && !(error instanceof TypeError)) throw error;
+    }
+    return spec && sameAction(spec, action) ? { action } : { refusal: `${what}: not the touch the release's anomaly files now` };
+  }
+  if (action.kind === 'wait') return { refusal: `${what}: a wait is checked by its shape` };
   const inconsistent = r.state !== 'pending' ? 'the release is not pending'
     : !r.queue?.length ? 'the release queue is empty'
       : !sameAct(r.queue[0], action, r) ? 'it is not the head of the release queue' : null;
-  const refusal = inconsistent ? `${action.step}/${action.part}: the pending act cannot be checked: ${inconsistent}` : emissionRefusal(state, deps, action);
-  if (!refusal) return true;
-  if (r.state === 'pending') held(state, deps, refusal, { observe: action.step === 'merge' && action.part === 'squash' });
+  const refusal = inconsistent ? `${what}: the stored act cannot be checked: ${inconsistent}` : emissionRefusal(state, deps, action);
+  return refusal ? { refusal } : { action };
+}
+
+// A stored act derive refused holds the release as emission does. One left
+// pending that merges (read from its argv) may have run before its record, so
+// the merge-commit lookup decides how the release holds (held).
+export function refuseStored(state, deps, action, { refusal }, { pending = false } = {}) {
+  const command = Array.isArray(action.command) ? action.command : [];
+  const merges = command[0] === 'gh' && command[1] === 'pr' && command[2] === 'merge';
+  if (state.release.state === 'pending') held(state, deps, refusal, { observe: pending && merges });
+}
+
+// A release act left pending, checked again before it is emitted again: the
+// one choke (admitAct) every stored act passes. Unconfigured, it is emitted
+// as today (M8). False when the pending act was dropped and the release held.
+export function checkPending(state, deps) {
+  if (verifiedAuthority(state, deps).proofMode === 'unconfigured') return true;
+  const verdict = admitAct(state, deps, { derive }, state.pending);
+  if (verdict.action) return true;
+  refuseStored(state, deps, state.pending, verdict, { pending: true });
   return false;
 }
 
@@ -578,7 +605,7 @@ export function record(state, action, result = {}, deps) {
   if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result, deps);
   if (LAND_STEPS.has(action.step) && action.kind !== 'wait') return recordLand(state, action, result, deps);
   if (action.kind === 'shell' && CLEANUP_PARTS.has(action.part)) return recordCleanup(state, action, result, deps);
-  if (action.part === 'bump' && !recordBump(state, action, deps)) return undefined;
+  if (action.part === 'bump' && action.kind === 'author' && !recordBump(state, action, deps)) return undefined;
   const head = r.queue[0];
   const sameHead = head && head.step === action.step && head.part === action.part;
   if (action.kind === 'wait' || action.kind === 'author') {

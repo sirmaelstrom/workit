@@ -3,7 +3,7 @@
 import { join, resolve, win32 } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { parseDesignDirection, skillsField, stripWrappingBackticks, visualRules } from '../schedule.mjs';
-import { AUTHORITY_RECOVERY, approvingTouch, verifiedAuthority } from '../authority.mjs';
+import { AUTHORITY_RECOVERY, AUTHORITY_TERMINAL, approvingTouch, terminalRefusal, verifiedAuthority } from '../authority.mjs';
 
 // The record that carries the run's authority: a (c) answer's validated grant
 // (scope included), else the answering touch (scope = the goal verbatim).
@@ -22,16 +22,19 @@ export function samePath(a, b, platform) {
 }
 
 // /spec runs under the verified authority's scope: on zero authority the
-// phase holds with the reason (P3). The hold is a wait the driver records,
-// never a `done`, which would end the run.
+// phase holds with the reason (P3). A record that can be restored holds as a
+// wait the driver records, never a `done`, which would end the run. One that
+// cannot (an expired grant, another run's) is terminal at once: `done`,
+// handing the run back with the reason, and no wait loop.
 const HELD_WAIT_MS = 5 * 60000;
 export function next(state, deps) {
   const authority = verifiedAuthority(state, deps);
+  if (authority.reason && terminalRefusal(authority.reason)) return { kind: 'done', reason: `spec held: ${authority.reason}: ${AUTHORITY_TERMINAL}` };
   if (authority.reason) {
     const reason = `spec held: ${authority.reason}`;
     return {
       kind: 'wait', step: 'spec', held: true, reason, waitMs: HELD_WAIT_MS,
-      instruction: `The run is held before /spec (${reason}): ${AUTHORITY_RECOVERY}. Tell the operator. Wait ${HELD_WAIT_MS / 1000} s, then record {}.`,
+      instruction: `The run is held before /spec (${reason}): waiting: ${AUTHORITY_RECOVERY}; a restored record resumes /spec on its own. Tell the operator. Wait ${HELD_WAIT_MS / 1000} s, then record {}.`,
     };
   }
   const ref = preapprovedRef(state);

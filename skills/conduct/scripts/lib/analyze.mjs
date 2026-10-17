@@ -17,6 +17,9 @@ export const SEAM_ROWS = Object.freeze([...new Set(Object.values(STEP_SEAM))].fi
   .flatMap((seam) => (seam === 'spec' ? SPEC_ROWS : [seam])).concat('runtime-exercise'));
 // A phase hand-over and a skipped step are not a seam crossed, nor is a
 // refusal: a held or dropped act, a held wait, or a release that ended held.
+// Seam evidence shows behaviour that was exercised, never that it succeeded:
+// a release that ran its setup and bump and then ended held still counts
+// those acts under its seam row, and its outcome is the queue-accounting line.
 const NOT_EVIDENCE = new Set(['phase', 'not-exercised', 'dropped', 'spec-held', 'release-held']);
 const refusal = (e) => NOT_EVIDENCE.has(e.event) || e.data?.held === true || (e.event === 'release' && /^release held: /.test(e.data?.reason ?? ''));
 
