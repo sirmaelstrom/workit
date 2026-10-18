@@ -90,14 +90,50 @@ for (const id of ['burn-down', 'pickup']) {
 // What /burn-down and /pickup accept: exit 0, and unconfigured the operator stamp.
 const manualGo = ({ exit, out }, row) => exit === 0 && (out.mode === 'verified' || String(row.answer.by).startsWith('operator:'));
 
+for (const id of ['burn-down', 'pickup']) {
+  for (const [name, questionText, touches] of [
+    ['one-word question', 'Proceed?', [{ tag: 'Proceed?', receiptId: 'rcpt-current' }]],
+    ['mistyped tag', question, [{ tag: 'Mrege', receiptId: 'rcpt-current' }]],
+    ['empty tag', question, [{ tag: '', receiptId: 'rcpt-current' }]],
+    ['unmatched touch', question, [{ tag: 'Other', receiptId: 'rcpt-unrelated' }]],
+  ]) {
+    test(`/${id}: ${name}: old filing exits 0 but is refused by filing-id equality`, () => {
+      const dir = home(true);
+      const row = {
+        id: 'rcpt-answer', outcome: 'answered', question: questionText, ask,
+        answer: { key: 'a', text: null, by: 'operator:dogan', askReceiptId: 'rcpt-old',
+          proof: signAnswer({ questId: QUEST, askReceiptId: 'rcpt-old', question: questionText, ask, answerKey: 'a' }) },
+      };
+      const file = put(dir, 'row.json', row);
+      const state = put(dir, 'state.json', { touches });
+      const result = cli(dir, ['verify-receipt', '--file', file, '--quest', QUEST, '--state', state]);
+      assert.deepEqual([result.exit, result.out.mode], [0, 'verified']);
+      const replayGo = manualGo(result, row, 'rcpt-current');
+      const ownGo = manualGo(result, row, 'RCPT-OLD');
+      console.log(`${id}, ${name}: verifier exit ${result.exit}, mode ${result.out.mode}; old filing ${replayGo ? 'ACCEPTED' : 'REFUSED'}; same filing ${ownGo ? 'ACCEPTED' : 'REFUSED'}`);
+      assert.equal(replayGo, false, 'old filing must be refused even when the verifier touch lookup misses');
+      assert.equal(ownGo, true, 'same filing must be accepted after lowercasing both ids');
+    });
+  }
+}
+
+test('manual go: missing filing id is refused in either mode', () => {
+  for (const mode of ['verified', 'unconfigured']) {
+    const result = { exit: 0, out: { mode } };
+    assert.equal(manualGo(result, { answer: { by: 'operator:dogan' } }, 'rcpt-current'), false);
+    assert.equal(manualGo(result, { answer: { by: 'operator:dogan', askReceiptId: 'rcpt-current' } }, undefined), false);
+  }
+});
+
 test('unconfigured: a by: conductor row exits 0 and the operator stamp refuses it', () => {
   const dir = home(false);
   const state = put(dir, 'state.json', stateFor(stateTemplate('burn-down'), 'rcpt-filing'));
   for (const [by, accepted] of [['conductor', false], ['operator:dogan', true]]) {
-    const row = { id: 'rcpt-answer', outcome: 'answered', question, ask, answer: { key: 'a', text: null, by } };
+    const row = { id: 'rcpt-answer', outcome: 'answered', question, ask, answer: { key: 'a', text: null, by, askReceiptId: 'rcpt-filing' } };
     const result = cli(dir, ['verify-receipt', '--file', put(dir, `row-${by.replace(':', '-')}.json`, row), '--quest', QUEST, '--state', state]);
     assert.deepEqual([result.exit, result.out.mode], [0, 'unconfigured'], by);
-    assert.equal(manualGo(result, row), accepted, by);
+    assert.equal(manualGo(result, row, 'RCPT-FILING'), accepted, by);
+    assert.equal(manualGo(result, row, 'rcpt-other'), false, 'unconfigured filing mismatch');
   }
 });
 
@@ -129,6 +165,22 @@ function authorityRecord(runId, receiptId) {
 // /spec step 2, configured: exit 0, scopeOk true, and the printed grant.runId
 // equal to state.json's runId.
 const coreRef = ({ exit, out }, state) => exit === 0 && out.mode === 'verified' && out.scopeOk === true && out.grant?.runId === state.runId;
+
+test('/spec core: pending confirm retains the signed (c) answer but is not a go', () => {
+  const dir = home(true);
+  const state = { runId: 'current-run' };
+  const pendingQuestion = '[conduct fixture touch 1] (run current-run/1) Approve the run?';
+  const pendingAsk = { ...ask, options: [...ask.options, { key: 'c', label: 'Change it', consequence: 'Narrow the scope.' }] };
+  const answer = { key: 'c', text: 'widget only', by: 'operator:dogan', askReceiptId: 'rcpt-change',
+    proof: signAnswer({ questId: ANCHOR, askReceiptId: 'rcpt-change', question: pendingQuestion, ask: pendingAsk, answerKey: 'c', text: 'widget only' }) };
+  const record = authorityRecord(state.runId, 'rcpt-confirm');
+  delete record.confirm;
+  record.answer = { key: 'c', text: answer.text, by: answer.by, signed: { answer, question: pendingQuestion, ask: pendingAsk } };
+  const result = cli(dir, ['verify-record', '--file', put(dir, '1-authority.json', record), '--quest', ANCHOR,
+    '--goal', put(dir, 'goal.md', 'Fix the widget and the gadget.\n')]);
+  assert.deepEqual([result.exit, result.out.mode, result.out.grant, result.out.answer.key, result.out.scopeOk], [0, 'verified', null, 'c', false]);
+  assert.equal(coreRef(result, state), false);
+});
 
 test('/spec core: the current run\'s confirm is accepted; another run\'s valid confirm on the same anchor is refused', () => {
   assert.match(text('spec'), /the printed `grant\.runId` equal to `state\.json`'s `runId`/);

@@ -23,6 +23,7 @@ const sentences = (body) => body
   .flatMap((block) => block.split(/(?<=[.!?]\**)\s+(?=[A-Z*`(])/));
 
 const UNCONFIGURED = [/\bunconfigured\b/i, /`answer\.by`/, /\bbegin(?:s|ning)? `operator:`/];
+const FILING = [/`answer\.askReceiptId` is present/, /equals the ask receipt id retained from `spine_receipt` at filing after lowercasing both/];
 
 // Where each skill accepts a go, how many paths it has (primary and resolver,
 // or spine: and core:), and what each path must say.
@@ -33,11 +34,11 @@ const GATES = {
   },
   'burn-down': {
     accepts: /\bIS the go\b/, paths: 2,
-    configured: [/verify-receipt/, /exits 0/, /--state\b/],
+    configured: [/verify-receipt/, /exits 0/, /--state\b/, /`mode` is `verified`/, ...FILING],
   },
   pickup: {
     accepts: /\bIS the go\b/, paths: 2,
-    configured: [/verify-receipt/, /exits 0/, /--state\b/],
+    configured: [/verify-receipt/, /exits 0/, /--state\b/, /`mode` is `verified`/, ...FILING],
   },
 };
 
@@ -86,6 +87,8 @@ test('/burn-down and /pickup take the ask id from their own filing', () => {
     assert.match(body, /`statement_mismatch`/, id);
     // A lost id is not recovered from the answer: the go is not verified.
     assert.match(body, /the go is not verified/, id);
+    assert.match(body, /`statement_mismatch` binding applies only when a passkey is configured/, id);
+    assert.match(body, /operator stamp plus the filing-id equality/, id);
   }
 });
 
@@ -101,7 +104,8 @@ test('/spec separates the record\'s (c) from the confirm\'s signed (a), and expl
   assert.match(spec, /its own `answer\.key` is `c`/);
   assert.match(spec, /the confirm's signed key, which must be `a`/);
   assert.match(spec, /before the operator confirms it/);
-  assert.match(spec, /`proof_absent`/);
+  assert.match(spec, /no verified confirming grant, or `scopeOk: false`, means not a go/);
+  assert.doesNotMatch(spec, /refuses it with `proof_absent`/);
 });
 
 test('/spec defines the meta.json gate value once and every write site references it', () => {
@@ -121,9 +125,14 @@ test('/conduct: the read-back names the configured proof and the unconfigured st
   // Rule 6: the read-back's two sentences about "that filing".
   const found = sentences(text('conduct')).filter((sentence) => sentence.includes('that filing'));
   assert.ok(found.length > 0);
-  const required = [/stamped `operator:`/, /proof that verifies against that filing's ask/];
-  assert.deepEqual(missing([found.join(' ')], required), []);
-  assertMutationsFail('conduct', [found.join(' ')], required);
+  assert.equal(found.length, 2);
+  for (const sentence of found) {
+    const required = sentence.includes('read-back accepts')
+      ? [/only an answered receipt to that filing/, /stamped `operator:`/]
+      : [/With a passkey configured/, /proof that verifies against that filing's ask/];
+    assert.deepEqual(missing([sentence], required), []);
+    assertMutationsFail('conduct', [sentence], required);
+  }
 });
 
 test('/conduct: (d) declines the confirm, it does not re-open it', () => {
