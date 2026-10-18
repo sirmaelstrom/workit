@@ -1,6 +1,9 @@
 // The pre-approval gates in /spec, /burn-down and /pickup run the
 // operator-proof verifier on the signed bytes; `answer.by` is the go only in
 // unconfigured mode. conduct's prose quotes what a configured run shows.
+// Every acceptance sentence is checked for each requirement on its own, and a
+// mutation control strips each requirement from an in-memory copy of the
+// sentences to show the check then fails.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -11,26 +14,124 @@ import { AUTHORITY_TERMINAL, AUTHORITY_WAITING } from '../../conduct/scripts/lib
 const skills = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const text = (id) => readFileSync(join(skills, id, 'SKILL.md'), 'utf8');
 
-// Paragraphs on blank (or whitespace-only) lines, then sentences.
-const sentences = (body) => body.split(/\n\s*\n/).flatMap((paragraph) => paragraph.split(/(?<=[.!?])\s+(?=[A-Z*`(])/));
+// Blocks on blank lines and list-item starts; whitespace inside a block
+// collapses to one space (a hard wrap never splits a phrase); then sentences,
+// including one that ends inside bold (`.**`).
+const sentences = (body) => body
+  .split(/\n\s*\n|\n(?=\s*(?:[-*]|\d+\.) )/)
+  .map((block) => block.replace(/\s+/g, ' ').trim())
+  .flatMap((block) => block.split(/(?<=[.!?]\**)\s+(?=[A-Z*`(])/));
 
-test('/spec names both verifier commands', () => {
-  const spec = text('spec');
+const UNCONFIGURED = [/\bunconfigured\b/i, /`answer\.by`/, /\bbegin(?:s|ning)? `operator:`/];
+
+// Where each skill accepts a go, how many paths it has (primary and resolver,
+// or spine: and core:), and what each path must say.
+const GATES = {
+  spec: {
+    accepts: /valid only on exit 0/, paths: 2,
+    configured: [/`scopeOk: true`/, /the printed `grant\.runId` equal to `state\.json`'s `runId`/],
+  },
+  'burn-down': {
+    accepts: /\bIS the go\b/, paths: 2,
+    configured: [/verify-receipt/, /exits 0/, /--state\b/],
+  },
+  pickup: {
+    accepts: /\bIS the go\b/, paths: 2,
+    configured: [/verify-receipt/, /exits 0/, /--state\b/],
+  },
+};
+
+const acceptance = (id) => sentences(text(id)).filter((sentence) => GATES[id].accepts.test(sentence));
+
+const missing = (found, required) => found.flatMap((sentence) => required
+  .filter((pattern) => !pattern.test(sentence))
+  .map((pattern) => `${pattern} not in: ${sentence}`));
+
+// Strip each requirement from each sentence in turn: the check must then fail.
+function assertMutationsFail(id, found, required) {
+  for (const [i, sentence] of found.entries()) {
+    for (const pattern of required) {
+      const copy = [...found];
+      copy[i] = sentence.replace(new RegExp(pattern.source, `${pattern.flags.replace('g', '')}g`), '');
+      assert.notDeepEqual(missing(copy, required), [], `${id}: removing ${pattern} from sentence ${i} went unnoticed`);
+    }
+  }
+}
+
+for (const id of Object.keys(GATES)) {
+  test(`/${id} has a sentence for each acceptance path`, () => {
+    assert.ok(acceptance(id).length >= GATES[id].paths, `${id}: ${acceptance(id).length} acceptance sentences, want ${GATES[id].paths}`);
+  });
+
+  test(`/${id} configured: every acceptance path names what the verifier must print`, () => {
+    const found = acceptance(id);
+    assert.ok(found.length > 0, id);
+    assert.deepEqual(missing(found, GATES[id].configured), [], id);
+    assertMutationsFail(id, found, GATES[id].configured);
+  });
+
+  test(`/${id} unconfigured: every acceptance path keeps the operator stamp`, () => {
+    const found = acceptance(id);
+    assert.ok(found.length > 0, id);
+    assert.deepEqual(missing(found, UNCONFIGURED), [], id);
+    assertMutationsFail(id, found, UNCONFIGURED);
+  });
+}
+
+test('/burn-down and /pickup take the ask id from their own filing', () => {
+  for (const id of ['burn-down', 'pickup']) {
+    const body = sentences(text(id)).join(' ');
+    assert.match(body, /keep the `id` that `spine_receipt` returns/, id);
+    assert.match(body, /never from the answer/, id);
+    assert.match(body, /`statement_mismatch`/, id);
+    // A lost id is not recovered from the answer: the go is not verified.
+    assert.match(body, /the go is not verified/, id);
+  }
+});
+
+test('/spec names both verifier commands, and the run-prefix check stays', () => {
+  const spec = sentences(text('spec')).join(' ');
   assert.match(spec, /verify-receipt/);
   assert.match(spec, /verify-record/);
+  assert.match(spec, /does not replace this prefix check/);
 });
 
-test('/burn-down and /pickup read the go through verify-receipt', () => {
-  for (const id of ['burn-down', 'pickup']) assert.match(text(id), /verify-receipt/, id);
+test('/spec separates the record\'s (c) from the confirm\'s signed (a), and explains the unconfirmed record', () => {
+  const spec = sentences(text('spec')).join(' ');
+  assert.match(spec, /its own `answer\.key` is `c`/);
+  assert.match(spec, /the confirm's signed key, which must be `a`/);
+  assert.match(spec, /before the operator confirms it/);
+  assert.match(spec, /`proof_absent`/);
 });
 
-test('every `begins operator:` or `IS the go` sentence names the verifier or the unconfigured fallback', () => {
-  for (const id of ['spec', 'burn-down']) {
-    const offenders = sentences(text(id))
-      .filter((sentence) => sentence.includes('begins `operator:`') || sentence.includes('IS the go'))
-      .filter((sentence) => !/unconfigured/i.test(sentence) && !sentence.includes('verify-receipt'));
-    assert.deepEqual(offenders, [], id);
-  }
+test('/spec defines the meta.json gate value once and every write site references it', () => {
+  const spec = text('spec');
+  assert.doesNotMatch(spec, /`gate` to `"preapproved <ref>"`/);
+  assert.equal(spec.split('**The gate value.**').length - 1, 1);
+  assert.ok(spec.split('the gate value (§').length - 1 >= 3, 'fewer than 3 write sites reference the gate value');
+});
+
+test('/burn-down: the operator confirms on the phone, and the agent waits', () => {
+  const body = sentences(text('burn-down')).join(' ');
+  assert.match(body, /until the operator confirms it on the phone/);
+  assert.match(body, /wait for that signed answer/);
+});
+
+test('/conduct: the read-back names the configured proof and the unconfigured stamp', () => {
+  // Rule 6: the read-back's two sentences about "that filing".
+  const found = sentences(text('conduct')).filter((sentence) => sentence.includes('that filing'));
+  assert.ok(found.length > 0);
+  const required = [/stamped `operator:`/, /proof that verifies against that filing's ask/];
+  assert.deepEqual(missing([found.join(' ')], required), []);
+  assertMutationsFail('conduct', [found.join(' ')], required);
+});
+
+test('/conduct: (d) declines the confirm, it does not re-open it', () => {
+  const conduct = sentences(text('conduct'));
+  const confirm = conduct.filter((sentence) => sentence.includes('re-opens the confirm'));
+  assert.ok(confirm.length > 0);
+  for (const sentence of confirm) assert.doesNotMatch(sentence, /any other key re-opens/, sentence);
+  assert.match(conduct.join(' '), /\(d\) declines: the run ends with `phase = 'declined'`/);
 });
 
 test('the documented answer adapter selects the ask column', () => {
@@ -41,7 +142,10 @@ test('the documented answer adapter selects the ask column', () => {
 
 test('conduct quotes what a configured run shows the operator', () => {
   const conduct = text('conduct');
-  for (const shown of ['[grant <tag>]', '[raise <tag>]', 'UNCONFIGURED — answers not signed', AUTHORITY_WAITING, AUTHORITY_TERMINAL]) {
+  for (const shown of [
+    '[grant <tag>]', '[raise <tag>]', 'UNCONFIGURED — answers not signed',
+    'UNCONFIGURED — no anchor is configured now, so the stored answer is not checked', AUTHORITY_WAITING, AUTHORITY_TERMINAL,
+  ]) {
     assert.ok(conduct.includes(shown), shown);
   }
 });
