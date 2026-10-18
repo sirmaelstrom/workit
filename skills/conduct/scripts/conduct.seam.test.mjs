@@ -2067,6 +2067,27 @@ test('M3 revision (council r4, astra): a council delta whose land.since and diff
   }
 });
 
+test('runtime exercise (council r4): configured runs, plain and with a two-round council, and an unconfigured run each merge every WP through next and record, with no stored act dropped', async (t) => {
+  const runs = [
+    ['configured', {}, SPINE_ONLY, true],
+    ['configured, council', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } }, [...SPINE_ONLY, '--adapter', 'council'], true],
+    ['unconfigured (M8)', {}, OFF, false],
+  ];
+  for (const [name, opts, flags, signed] of runs) {
+    const h = seam(t, opts);
+    if (signed) phone(h);
+    await start(h, flags);
+    await drive(h, { until: (a) => a.step === 'showcase' });
+    const wps = h.state().wps;
+    const council = h.trace.filter((a) => a.step === 'council').map((a) => a.part);
+    const squashes = merges(h).filter((a) => a.phase === 'build');
+    t.diagnostic(`${name}: ${wps.map((wp) => `${wp.id} ${wp.state}`).join(', ')}; build squashes ${squashes.length}; release ${h.state().release.state}; council acts ${council.join(' ') || 'none'}; dropped ${droppedActs(h).length}`);
+    assert.ok(wps.every((wp) => wp.state === 'merged'), name);
+    assert.equal(squashes.length, wps.length, name);
+    assert.deepEqual(droppedActs(h), [], name);
+  }
+});
+
 test('fixture paths: no file under __fixtures__/seam matches either Must 8 regex', () => {
   const files = [];
   const walk = (dir) => {
