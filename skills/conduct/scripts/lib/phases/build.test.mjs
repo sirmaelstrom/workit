@@ -2448,8 +2448,8 @@ test('gate command after a rebase that moved the head: the gate fix gets a delta
   assert.equal(wp.deltaFrom, null, 'land clears the delta boundary');
 });
 
-test('tier from the recipe file (D17, D19.11): contractPaths or an added test raise T1 to T2; neither stays T1; WP-00 at depth none too', async (t) => {
-  const cases = [['scripts/lane.mjs\n', 'T2'], ['lib/x.test.mjs\n', 'T2'], ['hooks/PreToolUse.js\n', 'T1'], ['lib/x.mjs\n', 'T1']];
+test('tier from the recipe file (D17): contractPaths raise T1 to T2; a test file alone stays T1; WP-00 at depth none too', async (t) => {
+  const cases = [['scripts/lane.mjs\n', 'T2'], ['lib/x.test.mjs\n', 'T1'], ['hooks/PreToolUse.js\n', 'T1'], ['lib/x.mjs\n', 'T1']];
   for (const [diff, tier] of cases) {
     const h = harness(t, { council: true, wps: [TWO[0], TWO[1]] });
     h.diff = { 'WP-02': diff };
@@ -2461,10 +2461,15 @@ test('tier from the recipe file (D17, D19.11): contractPaths or an added test ra
     assert.ok(decision?.data.rule, 'the run record names the matched rule, including no-match');
   }
   const none = harness(t, { depth: 'none', council: true });
-  none.diff = { 'WP-00': 'test/x.test.mjs\n' };
+  none.diff = { 'WP-00': 'test/x.test.mjs\nscripts/lane.mjs\n' };
   const first = await drive(none, { until: (a) => a.part === 'meta' || a.part === 'managed' });
   assert.equal(first.part, 'meta');
   assert.equal(none.wp('WP-00').tier, 'T2');
+  const testOnly = harness(t, { depth: 'none', council: true });
+  testOnly.diff = { 'WP-00': 'test/x.test.mjs\n' };
+  const slim = await drive(testOnly, { until: (a) => a.part === 'meta' || a.part === 'managed' });
+  assert.equal(slim.part, 'managed', 'a test-only WP-00 takes the slim review');
+  assert.equal(testOnly.wp('WP-00').tier, 'T1');
 });
 
 test('settings tier signal compares only the claude-config hooks block', () => {
