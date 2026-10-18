@@ -121,6 +121,21 @@ test('/burn-down: the operator confirms on the phone, and the agent waits', () =
   assert.match(body, /wait for that signed answer/);
 });
 
+// Decision D5 (spine-answer-passkey): only an authority-acting go needs the
+// signed answer; any other ask may proceed on the unsigned T3 answer.
+test('/burn-down and /pickup scope the phone confirm to authority, as D5 rules', () => {
+  for (const id of ['burn-down', 'pickup']) {
+    const [sentence, ...rest] = sentences(text(id)).filter((s) => s.includes('carries no authority'));
+    assert.equal(rest.length, 0, id);
+    assert.match(sentence, /merge, release, spend or pre-approve/, id);
+    assert.match(sentence, /until the operator confirms it on the phone/, id);
+    const exception = sentences(text(id)).filter((s) => s.includes('grants none of these'));
+    assert.equal(exception.length, 1, id);
+    assert.match(exception[0], /question and filing-id checks pass/, id);
+    assert.doesNotMatch(text(id), /answer is not a go until/, id);
+  }
+});
+
 test('/conduct: the read-back names the configured proof and the unconfigured stamp', () => {
   // Rule 6: the read-back's two sentences about "that filing".
   const found = sentences(text('conduct')).filter((sentence) => sentence.includes('that filing'));

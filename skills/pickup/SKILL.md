@@ -158,8 +158,11 @@ passkey is configured and the verifier finds that touch; the caller-side
 filing-id equality is required even when the lookup misses.
 Never assume the go from the quest having returned to the
 frontier. With an operator passkey configured, an unsigned `operator:t3` answer
-is not a go until the operator confirms it on the phone: wait for that signed
-answer. Unconfigured (the CLI prints `"mode":"unconfigured"`), the CLI checks no
+carries no authority: a go to merge, release, spend or pre-approve waits until
+the operator confirms it on the phone, so wait for that signed answer. An ask
+that grants none of these may proceed on the T3 answer once the question and
+filing-id checks pass, though `verify-receipt` refuses it with `proof_absent`.
+Unconfigured (the CLI prints `"mode":"unconfigured"`), the CLI checks no
 signature, so the gate is the operator stamp plus the filing-id equality. A
 later receipt hides the answer there, so before concluding there is none, run
 the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and your ask's whole

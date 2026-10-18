@@ -103,6 +103,7 @@ For complex specs, maintain a decision log section:
 - **State storage:** Client-side reactive store, not server-persisted.
   Reason: no persistence requirement, simpler implementation.
   Pragmatist: ✅ agreed — server persistence would force migration + API changes for no user-facing benefit.
+  Limits: L1: does not establish that state survives a page reload.
 
 - **Event handling:** New event bus, not extending existing handler.
   Reason: existing handler is at capacity, mixing concerns.
