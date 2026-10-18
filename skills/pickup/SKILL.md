@@ -142,11 +142,17 @@ card renders the choices as buttons the operator presses with no agent running,
 and the press writes an `answered` receipt that supersedes the ask (quest
 9a1ce903). On re-entry, read the go from `spine_quest`'s
 `latestReceipt.answer` (`key` / `text`) when that receipt's `question` is your
-ask's, verbatim; never assume it from the quest having returned to the
-frontier. A later receipt hides the answer there, so before concluding there is
-none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and your
-ask's whole question, each `'` doubled, as the tag. It searches every receipt;
-its result passes the same verbatim check.
+ask's, verbatim, and `verify-receipt` exits 0 on it: write the result body to a
+temp file and run `node "${CLAUDE_PLUGIN_ROOT}/skills/_shared/operator-proof/operator-proof.mjs" verify-receipt --file <it> --quest <full quest uuid>`.
+Never assume the go from the quest having returned to the frontier. With an
+operator passkey configured, an unsigned `operator:t3` answer is not a go until
+it is confirmed on the phone; unconfigured (the CLI prints
+`"mode":"unconfigured"`), the `operator:` stamp is the go, as before. A later
+receipt hides the answer there, so before concluding there is none, run the
+`WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and your ask's whole
+question, each `'` doubled, as the tag. It searches every receipt. Save the row
+it prints and run `verify-receipt --file <row> --quest <full quest uuid>` on it
+(the CLI accepts a bare row); exit 0 plus the same verbatim check is the go.
 
 Work-state and attention are orthogonal: `dismissed` is not `done`, and a quest
 you finished is not closed until `workState` says so.
