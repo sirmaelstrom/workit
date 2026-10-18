@@ -33,6 +33,7 @@ import {
   validateFindingsShape,
   buildReviewPayload,
   REVIEW_BODY_MAX_CHARS,
+  guardDiagnostic,
   parseArgs,
   cmdPost,
   cmdThreads,
@@ -716,6 +717,11 @@ test('buildReviewPayload: with less room than the guard\'s fixed text, the guard
   const none = build('x'.repeat(64_400));
   assert.ok(none.body.length <= REVIEW_BODY_MAX_CHARS - 1_000, `review body is ${none.body.length} chars`);
   assert.equal(/Test files whose assertions changed/.test(none.body), false);
+  // The post log says what the body carries, never "listed" when it is not.
+  const guard = guardReview({ sourceFiles });
+  assert.match(guardDiagnostic(guard, build('short').body), /listed in the review body/);
+  assert.match(guardDiagnostic(guard, tight.body), /counted in one line, not listed/);
+  assert.match(guardDiagnostic(guard, none.body), /NOT in the review body/);
 });
 
 test('buildReviewPayload surfaces an off-diff finding in the body, not silently', () => {

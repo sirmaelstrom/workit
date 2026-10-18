@@ -549,6 +549,15 @@ export function countDeltaDefects(findings) {
 export const REVIEW_BODY_MAX_CHARS = 65_536;
 // Room for the coordinated post's marker, appended after the payload is built.
 const REVIEW_BODY_RESERVE = 1_000;
+const GUARD_NOT_LISTED = 'not listed: this review body had no room';
+
+/** The post log's guard line: what the body actually carries, never more. */
+export function guardDiagnostic(guard, body) {
+  const head = `guard          ${guard.entries.length} test file(s) with test or assertion changes → `;
+  if (body.includes('### Test files whose assertions changed')) return `${head}listed in the review body (non-blocking)`;
+  if (body.includes(GUARD_NOT_LISTED)) return `${head}counted in one line, not listed: the review body had no room`;
+  return `${head}NOT in the review body: it had no room left. Read the PR diff's test files`;
+}
 
 /**
  * Build the `POST /pulls/{n}/reviews` payload.
@@ -633,7 +642,7 @@ export function buildReviewPayload({
   if (guard?.section) {
     const room = REVIEW_BODY_MAX_CHARS - REVIEW_BODY_RESERVE - sections.join('\n').length - 1;
     const shrunk = guard.section.length <= room ? guard.section : guard.render?.(Math.max(room, 0));
-    const line = `\n_Test files whose assertions changed: ${guard.entries.length} file(s), not listed: this review body had no room. Read the PR diff._`;
+    const line = `\n_Test files whose assertions changed: ${guard.entries.length} file(s), ${GUARD_NOT_LISTED}. Read the PR diff._`;
     const section = [shrunk, line].find((text) => text != null && text.length <= room);
     if (section) sections.splice(guardAt, 0, section);
   }
@@ -843,7 +852,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   for (const f of excluded ?? []) {
     log(`  excluded     ${f.path}:${f.line} — outside the amendment`);
   }
-  if (guard.entries.length > 0) log(`guard          ${guard.entries.length} test file(s) with test or assertion changes → listed in the review body (non-blocking)`);
+  if (guard.entries.length > 0) log(guardDiagnostic(guard, payload.body));
 
   if (!coverageCheck.ok && !opts.forcePost) {
     die(5, `coverage check failed; review was not posted: ${coverageCheck.reason}\nRe-run the reviewer or pass --force-post to post the stamped mismatch.`);
@@ -3326,7 +3335,7 @@ async function cmdPostCoordinated(opts, {
   diag(`changed files  ${manifestPaths.length} from the pinned manifest (${diffFiles.size} with commentable lines)`);
   diag(`findings       ${findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff`);
   for (const f of excluded ?? []) diag(`  excluded     ${f.path}:${f.line} — outside the amendment`);
-  if (guard.entries.length > 0) diag(`guard          ${guard.entries.length} test file(s) with test or assertion changes → listed in the review body (non-blocking)`);
+  if (guard.entries.length > 0) diag(guardDiagnostic(guard, payload.body));
 
   if (opts.dryRun) {
     diag('--dry-run: nothing posted, nothing reserved.');
