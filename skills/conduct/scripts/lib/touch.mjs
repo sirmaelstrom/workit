@@ -3,7 +3,6 @@
 // it, a file pair under touches/ answered by `conduct.mjs answer` from a TTY.
 import { join } from 'node:path';
 import { ConductError, appendEvent } from './state.mjs';
-import { OperatorProofError, REASONS, canonical, verifyAnswerProof } from '../../../_shared/operator-proof/operator-proof.mjs';
 
 export const READ_BACK_WAIT_MS = 300000;
 // spine_receipt refuses a question longer than this.
@@ -28,16 +27,6 @@ export function touchStep(touch) {
 
 function spineOn(state) {
   return state.adapters?.spine?.on === true;
-}
-
-// The answer adapter (lib/answer.mjs) reads every receipt on the anchor, so
-// with it on the read-back and the hand-back's waiter go through it.
-function answerOn(state) {
-  return state.adapters?.answer?.on === true;
-}
-
-export function awaitAnswerCommand(state, touch, { once = false } = {}) {
-  return ['node', conductScript(state), 'await-answer', '--run', state.runDir, '--touch', String(touch.n), ...(once ? ['--once'] : [])];
 }
 
 export function conductScript(state) {
@@ -95,12 +84,6 @@ export function touchAction(state, touch) {
     };
   }
   if (touch.waiting) return handBackAction(state, touch);
-  if (touch.status === 'filed' && answerOn(state)) {
-    return {
-      ...base, kind: 'shell', part: 'read-back', command: awaitAnswerCommand(state, touch, { once: true }),
-      expects: { type: 'json' }, instruction: 'Run this exact argv (no shell), and record its { code, stdout, stderr }.',
-    };
-  }
   if (touch.status === 'filed') {
     return {
       ...base, kind: 'agent-tool', part: 'read-back', tool: 'spine_quest', args: { ids: [state.intent.anchor] },
@@ -129,22 +112,12 @@ export function resumeCommand(state) {
 // The spine hand-back: the read-back found no attributed answer, so the
 // conductor's turn ends here. It is never recorded (`record` returns it with
 // `answered: false`); `next` consumes it on resume and emits the read-back.
-// With the answer adapter it carries a waiter: a background process that
-// exits when the answer lands, so the resume needs no operator command.
 export function handBackAction(state, touch) {
   const base = {
     step: touchStep(touch), kind: 'touch', part: 'hand-back', handBack: true,
     touch: { n: touch.n, question: touch.question, options: touch.options }, expects: { type: 'none' },
   };
-  const why = touch.awaiting === 'phone-confirmation' ? 'was answered in T3; confirm it on the phone (Dogan → Confirm on phone)' : 'has no operator-attributed answer yet';
-  const waiting = `${touch.tag} is filed on quest ${state.intent.anchor} and ${why}. Do not record this action and do not poll.`;
-  if (answerOn(state)) {
-    const command = awaitAnswerCommand(state, touch);
-    return {
-      ...base, waiter: { command, background: true },
-      instruction: `${waiting} Start the waiter argv (no shell) in the background: ${JSON.stringify(command)}. Tell the operator it waits for their answer in the Dogan, then end your turn. When the waiter exits, whatever its exit code, resume with: ${resumeCommand(state)} (its first action reads the answer back; an unanswered read hands back again with a new waiter).`,
-    };
-  }
+  const waiting = `${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action and do not poll.`;
   return {
     ...base,
     instruction: `Stop and end your turn: ${waiting} Tell the operator it waits for their answer in the Dogan. When they have answered, resume with: ${resumeCommand(state)} (its first action reads the answer back).`,
@@ -160,7 +133,6 @@ export function resumeHandBack(state, deps) {
   touch.waiting = false;
   touch.waitLeftMs = null;
   touch.waitDueAt = null;
-  delete touch.awaiting;
   state.pending = null;
   appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'resumed', phase: action.phase, data: { n: touch.n } });
 }
@@ -207,51 +179,6 @@ export function spineAckFailure(action, result) {
   return null;
 }
 
-// The operator's passkey anchor (deps.readAnchor). One that exists but cannot
-// be read stops the run (exit 2): it is a configuration error, never "not
-// configured", and waiting on it would only loop.
-export function operatorAnchor(deps) {
-  try {
-    return deps.readAnchor();
-  } catch (error) {
-    if (error instanceof OperatorProofError && error.code === REASONS.anchor_unreadable) {
-      throw new ConductError(2, 'operator passkey anchor is unreadable: fix ~/.claude/operator-passkeys.json');
-    }
-    throw error;
-  }
-}
-
-const sameJson = (x, y) => {
-  try {
-    return canonical(x) === canonical(y);
-  } catch {
-    return false;
-  }
-};
-
-// Is the signed question and ask exactly what this touch filed (touch.filed),
-// and are the options conduct reads the key with still the filed ones?
-function matchesFiling(touch, signed) {
-  const filed = touch.filed;
-  return filed != null && signed?.question === filed.question && sameJson(signed?.ask, filed.ask)
-    && sameJson({ options: touch.options, allowFreeText: touch.allowFreeText }, filed.ask);
-}
-
-// Did the operator's passkey sign this answer to the ask this touch filed?
-// `signed` holds the receipt's raw values; the expected ask id is the touch's
-// own filing (touch.receiptId), never the answer's unsigned askReceiptId.
-// Configured, a valid or absent proof also needs the signed question and ask
-// to be the filed ones (filed_mismatch): a proof binds the receipt's ask, and
-// conduct acts on its own options.
-function verifySigned(state, touch, signed, anchor) {
-  const verdict = verifyAnswerProof({
-    answer: signed?.answer, question: signed?.question, ask: signed?.ask,
-    questId: state.intent.anchor, askReceiptId: touch.receiptId, anchor,
-  });
-  if (!anchor.configured || !(verdict.ok || verdict.reason === REASONS.proof_absent) || matchesFiling(touch, signed)) return verdict;
-  return { ...verdict, ok: false, mode: 'refused', reason: 'filed_mismatch' };
-}
-
 // An operator's typed answer with no key is option (c), when the touch has it.
 function optionKey(touch, answer) {
   if (!answer.key && answer.text && touch.allowFreeText && touch.options.some((option) => option.key === 'c')) return 'c';
@@ -261,14 +188,11 @@ function optionKey(touch, answer) {
 function refuse(touch, refusal) {
   touch.status = 'open';
   touch.refusal = refusal;
-  delete touch.awaiting;
 }
 
 // Refuses (exit 3) an answer that is not the operator's: a spine answer must
 // be stamped operator:…, a core answer needs the TTY-attested touch record.
-// With a passkey configured a TTY answer is no authority, and a spine answer
-// is verified again from answer.signed: a passed-in result is never trusted.
-export function acceptAnswer(state, touch, answer, deps) {
+export function acceptAnswer(state, touch, answer) {
   const attributed = answer.source === 'spine'
     ? String(answer.by ?? '').startsWith('operator:')
     : touch.tty === true;
@@ -278,103 +202,44 @@ export function acceptAnswer(state, touch, answer, deps) {
   if (!touch.options.some((option) => option.key === answer.key)) {
     throw new ConductError(3, `${touch.tag}: answer key ${answer.key} is not one of ${touch.options.map((option) => option.key).join(', ')}`);
   }
-  const anchor = operatorAnchor(deps);
-  if (answer.source !== 'spine' && anchor.configured) {
-    throw new ConductError(3, 'operator:tty is not authority while an operator passkey is configured; this core-only run cannot be approved: restart it with --adapter spine so its touches can be signed on the phone');
-  }
-  const signed = answer.signed ?? null;
-  const verdict = verifySigned(state, touch, signed, anchor);
-  if (!verdict.ok) throw new ConductError(3, `${touch.tag}: proof ${verdict.reason}`);
-  // A verified answer is stored as signed (key and text), never from the fields beside it.
-  const key = verdict.mode === 'verified' ? optionKey(touch, signed.answer) : answer.key;
-  const text = verdict.mode === 'verified' ? signed.answer.text ?? null : answer.text ?? null;
-  if (!touch.options.some((option) => option.key === key)) {
-    throw new ConductError(3, `${touch.tag}: answer key ${key} is not one of ${touch.options.map((option) => option.key).join(', ')}`);
-  }
   touch.answer = {
-    key, text, by: answer.by, answeredAt: answer.answeredAt,
+    key: answer.key, text: answer.text ?? null, by: answer.by, answeredAt: answer.answeredAt,
     source: answer.source, receiptId: answer.receiptId ?? null,
-    askReceiptId: verdict.mode === 'verified' ? touch.receiptId : answer.askReceiptId ?? null, proof: answer.proof ?? null,
-    proofMode: verdict.mode, credentialId: verdict.credentialId, anchorSha256: verdict.anchorSha256, epoch: verdict.epoch, signed,
   };
   touch.status = 'answered';
   touch.waiting = false;
-  delete touch.awaiting;
 }
 
-// `await-answer --once` prints { ok, answered, receipt }; a failed lookup is
-// refused, so the read-back stays pending and is run again.
-function answerLookup(action, result) {
-  let out;
-  try {
-    out = JSON.parse(result?.stdout ?? '');
-  } catch {
-    out = null;
-  }
-  if (result?.code !== 0 || out?.ok !== true) {
-    throw new ConductError(1, `the answer lookup failed (exit ${result?.code}): ${out?.error ?? String(result?.stderr ?? '').trim().split(/\r?\n/)[0] ?? ''}`);
-  }
-  return out.receipt ?? null;
-}
-
-export function recordTouch(state, touch, action, result, deps) {
+export function recordTouch(state, touch, action, result) {
   if (action.kind === 'wait') {
     touch.waiting = false;
     return;
   }
-  if (action.kind !== 'agent-tool' && !(action.kind === 'shell' && action.part === 'read-back')) return;
+  if (action.kind !== 'agent-tool') return;
   if (action.part === 'receipt') {
     // A failed or unbound acknowledgement is refused: the touch stays open and
     // the filing action stays pending, so it is re-emitted and never filed.
     const failure = spineAckFailure(action, result);
     if (failure) throw new ConductError(2, `spine_receipt did not file ${touch.tag}: ${failure}`);
     touch.receiptId = result.id;
-    // What this filing handed out, as the emitted action carried it: a
-    // configured read-back accepts a proof over exactly these.
-    touch.filed = JSON.parse(JSON.stringify({ question: action.args.question, ask: action.args.ask }));
     touch.filings += 1;
     touch.status = 'filed';
     touch.refusal = null;
-    delete touch.awaiting;
     return;
   }
-  // The read-back: accept only an answered receipt to THIS run's filing. The
-  // answer adapter's lookup finds it in any receipt; spine_quest shows only
-  // the latest, so a later receipt on the anchor hides it there.
-  const latest = action.kind === 'shell' ? answerLookup(action, result) : result?.quests?.[0]?.latestReceipt;
-  // Read before the unanswered return: an unreadable anchor stops the run
-  // whether or not an answer has landed.
-  const anchor = operatorAnchor(deps);
+  // The read-back: accept only an answered receipt to THIS run's filing.
+  // spine_quest shows only the latest receipt, so a later receipt on the
+  // anchor hides it there.
+  const latest = result?.quests?.[0]?.latestReceipt;
   const answered = latest?.outcome === 'answered' && latest.answer
     && typeof latest.question === 'string' && latest.question.startsWith(correlation(state, touch));
   if (!answered) {
     touch.waiting = true;
     return;
   }
-  // The receipt's raw values, before any key mapping: the proof is checked
-  // against them, and a later act re-verifies them from touch.answer.signed.
-  const signed = { answer: latest.answer, question: latest.question, ask: latest.ask };
-  const verdict = verifySigned(state, touch, signed, anchor);
-  if (verdict.reason === REASONS.ask_missing) {
-    throw new ConductError(2, action.kind === 'shell'
-      ? 'the answer adapter must select the ask column (see conduct/SKILL.md)'
-      : `spine_quest returned ${touch.tag}'s answer without its ask, so its passkey proof cannot be checked`);
-  }
-  // Answered in T3 and not yet signed: the operator confirms it on the phone,
-  // which supersedes it with a signed answer. Not refused and not re-filed.
-  if (verdict.reason === REASONS.proof_absent && latest.answer.by === 'operator:t3') {
-    touch.waiting = true;
-    touch.awaiting = 'phone-confirmation';
-    return;
-  }
-  if (!verdict.ok) {
-    refuse(touch, `proof ${verdict.reason}`);
-    return { refused: touch.refusal };
-  }
   const answer = {
     key: latest.answer.key, text: latest.answer.text, by: latest.answer.by, answeredAt: latest.answer.answeredAt,
     source: 'spine', receiptId: typeof latest.id === 'string' ? latest.id : null,
-    askReceiptId: latest.answer.askReceiptId ?? null, proof: latest.answer.proof ?? null, signed,
   };
   // Not the operator's: refused as an answer (no authority), and the touch is
   // re-filed so it stays answerable. The caller exits 3 for this read.
@@ -389,5 +254,5 @@ export function recordTouch(state, touch, action, result, deps) {
     refuse(touch, `answer ${answer.key ?? '(no key)'} is not one of ${touch.options.map((option) => option.key).join(', ')}`);
     return;
   }
-  acceptAnswer(state, touch, answer, deps);
+  acceptAnswer(state, touch, answer);
 }

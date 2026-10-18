@@ -102,6 +102,9 @@ Design tradeoffs. Human decides.
 ## Unique Findings (Only 1 model caught)
 Worth investigating — could be noise or a genuine blind spot.
 
+## Limits
+What the reviews say they did not establish, one ID each (`L1: does not establish …`), with the models that stated it. Keep a limit even when you drop the finding it qualified.
+
 ## Overall Assessment
 [Go/no-go recommendation with conditions]
 ```

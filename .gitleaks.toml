@@ -14,7 +14,8 @@ regexes = [
 ]
 # The operator-proof vectors (credential ids, SPKI keys, signatures) and the JWK
 # keys in test-signer.mjs are synthetic test keys, generated for the tests and
-# trusted by no anchor outside them.
+# trusted by no anchor outside them. The files are deleted; the scan reads full
+# history, so the paths stay allowlisted.
 paths = [
   '''skills/_shared/operator-proof/operator-proof\.vectors\.json''',
   '''skills/_shared/operator-proof/test-signer\.mjs''',

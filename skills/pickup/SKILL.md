@@ -127,53 +127,22 @@ dropping the needle. Stopped because you are blocked rather than done? Use
 surfaces blocked-waiting instead of looking abandoned. When the question is a
 CHOICE, pass `ask.options` too — one entry per choice with a letter key
 (`a`..`f`), a short label, and a ONE-LINE consequence, plus `allowFreeText`
-when a typed answer is also acceptable. Pose any ask or list of choices as
-selectable options (AskUserQuestion in T3), with the Dogan ask filed too when it
-needs a record; a T3 answer is written back to Spine the same turn. Put the ask
-key in each option label (`a — Full grant, $200`) and the receipt tag in the
-question (`[ask <receiptId>]`). Use at most four options per question; split or
-collapse a Dogan ask with five or six options. A headless lane with no operator
-present files the Dogan ask only. The T3 ask-mirror hook writes a tagged
-single-choice answer to Spine as `answered` (`by: 'operator:t3'`) while the ask
-is still the quest's latest receipt; write a conductor receipt quoting the
-answer only when the hook reports the mirror refused or skipped it, or its
-pending job did not end `answered`. The Dogan's WAITING
-card renders the choices as buttons the operator presses with no agent running,
-and the press writes an `answered` receipt that supersedes the ask (quest
-9a1ce903). When you file the ask, keep the `id` that `spine_receipt` returns,
-with the ask in your notes (and in the handoff if the session rotates): it is
-the ask receipt id, and the go check takes it from you, never from the answer.
-Write a state file holding
-`{"touches":[{"tag":"<question up to its first space>","receiptId":"<ask receipt id>"}]}`
-for it. On re-entry, `spine_quest`'s `latestReceipt.answer` (`key` / `text`)
-IS the go when that receipt's `question` is your ask's, verbatim,
-`verify-receipt` with `--state` exits 0 on it, `answer.askReceiptId` is present
-and equals the ask receipt id retained from `spine_receipt` at filing after
-lowercasing both, and either `mode` is `verified` or, unconfigured, `answer.by`
-begins `operator:`. Write the result body to a temp file and run
-`node "${CLAUDE_PLUGIN_ROOT}/skills/_shared/operator-proof/operator-proof.mjs" verify-receipt --file <it> --quest <full quest uuid> --state <the state file>`;
-keep the state touch so the verifier also binds the signature to the filing
-when its lookup matches. The `statement_mismatch` binding applies only when a
-passkey is configured and the verifier finds that touch; the caller-side
-filing-id equality is required even when the lookup misses.
-Never assume the go from the quest having returned to the
-frontier. With an operator passkey configured, an unsigned `operator:t3` answer
-is not a go until the operator confirms it on the phone: wait for that signed
-answer. Unconfigured (the CLI prints `"mode":"unconfigured"`), the CLI checks no
-signature, so the gate is the operator stamp plus the filing-id equality. A
-later receipt hides the answer there, so before concluding there is none, run
-the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and your ask's whole
-question, exactly as written, as the tag. It searches every receipt. Save the row
-it prints; it IS the go when `verify-receipt --file <row> --quest <full quest
-uuid> --state <the state file>` exits 0 on it (the CLI accepts a bare row), its
-`question` passes the same verbatim check, `answer.askReceiptId` is present and
-equals the ask receipt id retained from `spine_receipt` at filing after
-lowercasing both, and either `mode` is `verified` or, unconfigured, its `answer.by`
-begins `operator:`. A missing or unequal filing id means not a go: re-file the ask.
-If the ask receipt id is lost, don't take it from the row:
-the answer's `askReceiptId` sits beside the proof, so whoever swaps the proof
-swaps it too. Without the id from your own filing the go is not verified;
-re-file the ask and read the answer to the new filing.
+when a typed answer is also acceptable. That Spine ask is for unattended runs:
+for now the Dogan's WAITING card renders the choices as buttons the operator
+presses with no agent running, and the press writes an `answered` receipt that
+supersedes the ask (quest 9a1ce903). In session, pose any ask or list of choices
+as a plain AskUserQuestion with the recommendation first: the recommended option
+listed first, its label ending "(Recommended)". Use at most four options per
+question. Record the ruling in your next Spine receipt: the chosen label
+verbatim, plus the session id. In session, the operator's message is the go.
+Unattended, on re-entry, `spine_quest`'s `latestReceipt.answer` (`key` / `text`)
+IS the go when that receipt is `answered`, its `question` is your ask's,
+verbatim, and its `answer.by` begins `operator:`. Never assume the go from the
+quest having returned to the frontier. A later receipt hides the answer there,
+so before concluding there is none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver
+with the quest uuid and your ask's whole question, exactly as written, as the
+tag. It searches every receipt. The row it prints IS the go when its `question`
+passes the same verbatim check and its `answer.by` begins `operator:`.
 
 Work-state and attention are orthogonal: `dismissed` is not `done`, and a quest
 you finished is not closed until `workState` says so.

@@ -16,6 +16,17 @@ test('council contract covers every concrete deep-stage output declared by the s
   assert.deepEqual(contract.lite, ['spec.md', 'spec-lite.md']);
 });
 
+test('synthesis template keeps the reviewers\' Limits under their own heading, with IDs', () => {
+  const synthesis = readFileSync(new URL('./synthesis.md', import.meta.url), 'utf8');
+  const contract = synthesis.split('## Output contract')[1] ?? '';
+  const headings = contract.split('```')[1]?.trim().split(/\r?\n/) ?? [];
+  assert.deepEqual(headings, ['## Consensus Issues', '## Majority Issues', '## Split Opinions', '## Unique Findings', '## Limits']);
+  assert.match(contract, /these five markdown headings/);
+  assert.match(synthesis, /Give each an ID \(`L1: does not establish …`\) and name the models that stated it/);
+  assert.match(synthesis, /Keep a limit even when you drop the finding it qualified/);
+  for (const placeholder of ['{{workshop_title}}', '{{round}}', '{{prior_findings}}']) assert.ok(synthesis.includes(placeholder), placeholder);
+});
+
 const challengeTemplate = () => readFileSync(new URL('./challenge.md', import.meta.url), 'utf8');
 
 const challengeMutations = {

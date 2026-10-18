@@ -916,7 +916,7 @@ function councilObligation(wp, exec) {
   return null;
 }
 
-// `authority` is the phase's verifiedAuthority, computed just before the act.
+// `authority` is the run's authority (lib/authority.mjs runAuthority).
 export function mergeActions(state, wp, head, authority) {
   if (!authority) throw new ConductError(2, 'authority not passed');
   if (mergeRefusal(state, authority) || mergeLockFor(state, wp) !== 'mine') return [];
@@ -1258,11 +1258,8 @@ function recordGate(state, wp, action, r, deps, authority) {
         : `the PR body declares no valid door (${(gate.doorProblems ?? []).join('; ') || 'the gate reported none'}), so whether one revert undoes it is unknown`;
       return result('held', `gate passed; ${why}: the merge is the operator's`, { ...recorded, retries: 0 });
     }
+    // An authority that gives no merge makes the merge the operator's.
     const refusal = mergeRefusal(state, authority);
-    // A WP's refused signed record (authority.reason) is its merge stage's to
-    // wait on, so a restored record resumes it to the squash; a grant that
-    // holds but gives no merge is the operator's merge. The release holds.
-    if (refusal && authority.reason && wp.id !== 'release') return result('continue', null, { ...recorded, retries: 0 });
     return refusal ? result('held', `gate passed; ${refusal}`, { ...recorded, retries: 0 }) : result('continue', null, { ...recorded, retries: 0 });
   }
   if (r.code === 6) {
@@ -1383,7 +1380,7 @@ function landOutcome(state, wp, action, r, deps, authority) {
 // the rebase and merged, and merged itself, releases the lock its WP holds.
 // A ConductError (an impossible lens selection, an unknown step) becomes
 // `block`; only a programming error escapes. A terminal outcome leaves only
-// the cleanup it owes queued. `authority` is the phase's verifiedAuthority.
+// the cleanup it owes queued. `authority` is the run's (runAuthority).
 export function recordLandStep(state, wp, action, r, deps = {}, authority = undefined) {
   if (!authority) throw new ConductError(2, 'authority not passed');
   let out;

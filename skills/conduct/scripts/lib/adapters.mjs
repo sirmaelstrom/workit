@@ -1,13 +1,12 @@
 // Agent CLIs and adapters. Agents (claude, codex) are probed into
-// state.agents; adapters replace a core mechanism when present. herdr, notify,
-// spend and answer are probed; spine, council, kb, verify and ledger are
-// declared by the agent, because a script cannot see MCP tools.
+// state.agents; adapters replace a core mechanism when present. herdr and
+// notify are probed; spine, council, kb, verify and ledger are declared by the
+// agent, because a script cannot see MCP tools.
 import { isAbsolute } from 'node:path';
 import { resolveProgram } from './exec.mjs';
-import { ANSWER_ENV, parseAnswerCommand } from './answer.mjs';
 
 export const AGENTS = Object.freeze(['claude', 'codex']);
-export const PROBED_ADAPTERS = Object.freeze(['herdr', 'notify', 'spend', 'answer']);
+export const PROBED_ADAPTERS = Object.freeze(['herdr', 'notify']);
 export const DECLARED_ADAPTERS = Object.freeze(['spine', 'council', 'kb', 'verify', 'ledger']);
 export const ADAPTERS = Object.freeze([...PROBED_ADAPTERS, ...DECLARED_ADAPTERS]);
 
@@ -72,14 +71,6 @@ function probeCommand(env, name, probe) {
   return { on: found.ok, evidence: 'probed', detail: `${name} is set; ${program} ${found.how}` };
 }
 
-// An argv adapter command (no shell): on when it parses and its program resolves.
-function probeArgv(env, probe) {
-  const { argv, problem } = parseAnswerCommand(env[ANSWER_ENV]);
-  if (!argv) return { on: false, evidence: 'probed', detail: problem };
-  const found = resolves(argv[0], probe);
-  return { on: found.ok, evidence: 'probed', detail: `${ANSWER_ENV} is set; ${argv[0]} ${found.how}` };
-}
-
 export function detectAdapters({ env = {}, exec, exists = () => false, declared = [], forcedOff = [], platform, resolveCodex }) {
   const agents = probeAgents({ exec, platform, resolveCodex });
   const adapters = {};
@@ -95,10 +86,6 @@ export function detectAdapters({ env = {}, exec, exists = () => false, declared 
       adapters.herdr = { on: result.code === 0, evidence: 'probed', detail: `herdr agent list exit ${result.code} (${where})` };
     } else if (name === 'notify') {
       adapters.notify = probeCommand(env, 'WORKIT_NOTIFY_CMD', { exec, exists, platform });
-    } else if (name === 'spend') {
-      adapters.spend = probeCommand(env, 'WORKIT_SPEND_CMD', { exec, exists, platform });
-    } else if (name === 'answer') {
-      adapters.answer = probeArgv(env, { exec, exists, platform });
     } else {
       adapters[name] = declared.includes(name)
         ? { on: true, evidence: 'declared', detail: `--adapter ${name}` }

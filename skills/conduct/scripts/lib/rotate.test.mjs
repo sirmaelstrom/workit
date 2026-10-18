@@ -12,7 +12,7 @@ function state(extra = {}) {
     slug: 'demo', runId: 'abcd1234', runDir: '/runs/demo/run', pluginRoot: '/plugin', phase: 'build', seq: 10,
     intent: { goal: 'the whole goal, wider than the grant', anchor: ANCHOR, repo: { path: '/projects/repo', remote: 'o/r', defaultBranch: 'main' } },
     adapters: { spine: { on: true } },
-    authority: { merge: true, release: false, budgetUsd: 50, metered: false, scope: 'the goal', notes: null, grant: null },
+    authority: { merge: true, release: false, budgetUsd: 50, scope: 'the goal', notes: null, grant: null },
     pending: { id: '9-wait', kind: 'shell', step: 'wait', wpId: 'WP-01', command: ['node', 'lane.mjs', 'wait'], instruction: 'Poll the lane once.' },
     wps: [], touches: [], ...extra,
   };
@@ -52,20 +52,12 @@ test('rotate (d3ce5461): refused at the showcase and in a terminal phase; the ha
   for (const phase of ['showcase', 'closed', 'sent-back']) {
     assert.throws(() => rotate(state({ phase }), { why: 'x' }, deps()), { code: 5 }, phase);
   }
-  const s = state({ authority: { merge: true, release: false, budgetUsd: 50, metered: false, scope: 'only WP-01 and WP-02', notes: 'no release', grant: 'touches/1-grant.json' } });
+  const s = state({ authority: { merge: true, release: false, budgetUsd: 50, scope: 'only WP-01 and WP-02', notes: 'no release', grant: 'touches/1-grant.json' } });
   rotate(s, { why: 'context' }, deps());
   const text = handoffText(s, s.rotations[0]);
   assert.match(text, /^- Approved scope \(binding; it can be narrower than the goal\): only WP-01 and WP-02 \(grant `.+1-grant\.json`\); operator notes: no release$/m);
   assert.match(text, /next --run .+ --custody 1`/);
-  // The authority line names the authority touch's stored proof (display only).
-  assert.match(text, /^- Authority: merge true, release false, budget \$50\.00 \(unmetered\); lanes booked \$0\.00 \(the lane-only lower bound\) \(proof: no authority answer yet\)$/m);
-  const unsigned = state({ touches: [{ n: 1, kind: 'preapproval', status: 'answered', wpId: null, answer: { key: 'a', proofMode: 'unconfigured' } }] });
-  rotate(unsigned, { why: 'context' }, deps());
-  assert.match(handoffText(unsigned, unsigned.rotations[0]), /^- Authority: .* \(proof: UNCONFIGURED — answers not signed\)$/m);
-  const signed = state({ touches: [{ n: 1, kind: 'preapproval', status: 'answered', wpId: null, grants: {}, answer: { key: 'a', proofMode: 'verified', credentialId: 'AAAAbbbbCCCCdddd', epoch: 2 } }] });
-  rotate(signed, { why: 'context' }, deps());
-  // Without the anchor reader the stored values are labelled a cached display (council r1).
-  assert.match(handoffText(signed, signed.rotations[0]), /^- Authority: .* \(proof: verified ••••CCCCdddd epoch 2\) \(cached display; acts use the signed grant\)$/m);
+  assert.match(text, /^- Authority: merge true, release false, budget \$50\.00 \(unmetered\); lanes booked \$0\.00 \(the lane-only lower bound\)$/m);
 });
 
 test('custody retire (d3ce5461): with no chain row naming r1\'s session for this handoff and pane, custody asks for confirmation instead of retiring a bare pane id; with one, the retire carries --expect-session', () => {
@@ -90,7 +82,7 @@ test('custody retire (d3ce5461): with no chain row naming r1\'s session for this
 
 test('rotate (d3ce5461): a scope longer than 600 characters reaches the handoff whole', () => {
   const scope = `${'only WP-01 and WP-02; '.repeat(40)}RESTRICTION_SENTINEL_DO_NOT_DEPLOY`;
-  const s = state({ authority: { merge: true, release: false, budgetUsd: 50, metered: false, scope, notes: null, grant: null } });
+  const s = state({ authority: { merge: true, release: false, budgetUsd: 50, scope, notes: null, grant: null } });
   rotate(s, { why: 'context' }, deps());
   assert.ok(scope.length > 600);
   assert.ok(handoffText(s, s.rotations[0]).includes('RESTRICTION_SENTINEL_DO_NOT_DEPLOY'));
