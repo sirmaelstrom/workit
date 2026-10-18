@@ -627,10 +627,15 @@ export function buildReviewPayload({
   }
   sections.push(footer.join('\n'));
 
-  // The guard section gets what the rest of the body leaves, up to its own cap.
+  // The guard section gets what the rest of the body leaves, up to its own cap. Its
+  // heading and notice are fixed text, so with less room than that it shrinks to one
+  // line, and with less than that it is left out: it never pushes the body over.
   if (guard?.section) {
     const room = REVIEW_BODY_MAX_CHARS - REVIEW_BODY_RESERVE - sections.join('\n').length - 1;
-    sections.splice(guardAt, 0, guard.section.length <= room ? guard.section : (guard.render?.(Math.max(room, 0)) ?? guard.section));
+    const shrunk = guard.section.length <= room ? guard.section : guard.render?.(Math.max(room, 0));
+    const line = `\n_Test files whose assertions changed: ${guard.entries.length} file(s), not listed: this review body had no room. Read the PR diff._`;
+    const section = [shrunk, line].find((text) => text != null && text.length <= room);
+    if (section) sections.splice(guardAt, 0, section);
   }
 
   return {

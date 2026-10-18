@@ -698,6 +698,26 @@ test('buildReviewPayload: a long summary shrinks the guard section to the room l
   assert.match(p.body, /_Slim review · /, 'the footer survives');
 });
 
+test('buildReviewPayload: with less room than the guard\'s fixed text, the guard shrinks to one line or is left out; the body never goes over', () => {
+  const sourceFiles = [{ filename: 'tests/gone.test.mjs', status: 'modified', patch: '@@ -1,1 +1,0 @@\n-  assert.equal(a, 1);' }];
+  const build = (summary) => buildReviewPayload({
+    summary,
+    coverage: 'examined 1 of 1 changed files',
+    anchored: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
+    offLine: [],
+    coverageCheck: { ok: true },
+    guard: guardReview({ sourceFiles }),
+  });
+  const tight = build('x'.repeat(64_000));
+  assert.ok(tight.body.length <= REVIEW_BODY_MAX_CHARS - 1_000, `review body is ${tight.body.length} chars`);
+  assert.match(tight.body, /Test files whose assertions changed: 1 file\(s\), not listed: this review body had no room/);
+  const none = build('x'.repeat(64_400));
+  assert.ok(none.body.length <= REVIEW_BODY_MAX_CHARS - 1_000, `review body is ${none.body.length} chars`);
+  assert.equal(/Test files whose assertions changed/.test(none.body), false);
+});
+
 test('buildReviewPayload surfaces an off-diff finding in the body, not silently', () => {
   const p = buildReviewPayload({
     summary: 's',
