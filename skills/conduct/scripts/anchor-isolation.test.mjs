@@ -1,5 +1,7 @@
 // No conduct test may reach the operator's real passkey anchor. Every call
-// that can read it (runConduct, recordTouch, acceptAnswer, awaitAnswer) passes
+// that can read it (runConduct, recordTouch, acceptAnswer, awaitAnswer,
+// verifiedAuthority, the build phase's next and record, and any phase's
+// next(state…) or record(state…) in a file that imports a phase module) passes
 // deps with an explicit readAnchor, checked here per call on its deps argument
 // alone: a testDeps( call, an object literal with a readAnchor member, or an
 // identifier whose nearest binding in the same file is one of those.
@@ -12,7 +14,10 @@ import { fileURLToPath } from 'node:url';
 const SELF = fileURLToPath(import.meta.url);
 const HERE = dirname(SELF);
 // Each gated call, and the 0-based position of its deps argument.
-const GATED = { runConduct: 1, recordTouch: 4, acceptAnswer: 3, awaitAnswer: 1 };
+const GATED = { runConduct: 1, recordTouch: 4, acceptAnswer: 3, awaitAnswer: 1, verifiedAuthority: 1, buildNext: 1, buildRecord: 3, next: 1, record: 3 };
+// A phase module's next(state, deps) and record(state, action, result, deps),
+// matched only when the first argument is `state` in a file importing one.
+const PHASE_IMPORT = /\bfrom\s+['"][^'"]*\/phases\/[^'"]+['"]|\bimport\(\s*['"][^'"]*\/phases\/[^'"]+['"]\s*\)/;
 const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'case', 'in', 'of', 'void', 'delete', 'throw', 'else', 'yield', 'await']);
 
 // The source with the contents of strings, template text, comments and regex
@@ -136,7 +141,9 @@ export function violations(src) {
   const masked = mask(src);
   const bad = [];
   let calls = 0;
-  for (const match of masked.matchAll(/\b(runConduct|recordTouch|acceptAnswer|awaitAnswer)\s*\(/g)) {
+  // The import test runs on the source: a module path is string text, blanked in `masked`.
+  const phases = PHASE_IMPORT.test(src) ? '|(?:next|record)(?=\\s*\\(\\s*state\\b)' : '';
+  for (const match of masked.matchAll(new RegExp(`\\b(runConduct|recordTouch|acceptAnswer|awaitAnswer|verifiedAuthority|buildNext|buildRecord${phases})\\s*\\(`, 'g'))) {
     if (/\bfunction\s+$/.test(masked.slice(Math.max(0, match.index - 12), match.index))) continue;
     calls += 1;
     const name = match[1];
@@ -180,6 +187,22 @@ test('the checker flags a gated call without readAnchor, and passes testDeps(, a
   ]) assert.deepEqual(violations(ok).bad, [], ok);
   const quoted = violations("test('runConduct(x) in a title', () => {}); // recordTouch(a)\nconst re = /awaitAnswer\\(/; const s = `acceptAnswer(${'x'})`;");
   assert.equal(quoted.calls, 0, 'names in strings, comments, regexes and template text are not calls');
+  // The authority helper and the phases (WP-07): verifiedAuthority, buildNext/buildRecord,
+  // and next(state…)/record(state…) where the file imports a phase module.
+  assert.equal(violations('verifiedAuthority(state, { now });').bad.length, 1, 'verifiedAuthority without a reader');
+  assert.equal(violations('buildNext(state, { exec, env: {} });').bad.length, 1, 'buildNext without a reader');
+  assert.equal(violations('buildRecord(state, action, result, deps);').bad.length, 1, 'buildRecord with an unbound deps');
+  const phase = "import * as release from './phases/release.mjs';\n";
+  assert.equal(violations(`${phase}release.next(state, { exec });`).bad.length, 1, 'a phase next without a reader');
+  assert.equal(violations(`${phase}release.record(state, action, {}, { exec });`).bad.length, 1, 'a phase record without a reader');
+  assert.equal(violations(`const m = await import('./lib/phases/showcase.mjs');\nm.next(state, deps);`).bad.length, 1, 'a dynamic phase import counts');
+  assert.equal(violations('release.next(state, { exec });').calls, 0, 'next(state…) is gated only where a phase module is imported');
+  assert.equal(violations(`${phase}h.next(h.state, h.deps);`).calls, 0, 'only next(state…) is matched');
+  for (const ok of [
+    'verifiedAuthority(state, testDeps({ readAnchor }));',
+    'buildNext(state, { ...deps, readAnchor: () => anchor });',
+    `${phase}const deps = testDeps({ exec });\nrelease.next(state, deps);\nrelease.record(state, action, {}, deps);`,
+  ]) assert.deepEqual(violations(ok).bad, [], ok);
 });
 
 test('every conduct test passes an explicit readAnchor to each call that can read the operator anchor', () => {

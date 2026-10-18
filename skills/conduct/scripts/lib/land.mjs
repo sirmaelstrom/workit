@@ -41,6 +41,7 @@ import { deltaEscalation, patchPlace, REBASE_FILE_READ_CAP } from '../../../slim
 import { AUTHOR_LENS, reviewPairFor } from '../../../slim-review/scripts/pr-review.mjs';
 import { laneModel } from './adapters.mjs';
 import { gateBootstrap } from './bootstrap.mjs';
+import { mergeRefusal } from './authority.mjs';
 
 const WAIT_MS = 60000;
 const PENDING_BLOCK_MS = 30 * 60000;
@@ -226,7 +227,7 @@ export function reviewActions(state, wp, { round = 1, report = null, since = nul
   return reviewSteps(state, wp, wp.reviewMode, meta);
 }
 
-function reviewSteps(state, wp, mode, meta) {
+export function reviewSteps(state, wp, mode, meta) {
   const pick = pickReviewers(state, authorOf(state, wp), { mode, author: authorModelOf(state, wp) });
   if (pick.impossible) throw new ConductError(5, `${wp.id}: review impossible: ${pick.impossible}`);
   // The no-council T2 fallback runs every available lens but the author's own
@@ -313,6 +314,8 @@ export function priorAdjudicationBody(recordBody) {
 // { path, round }, set at `resolve`) goes in too, as context only.
 export function t2Actions(state, wp, { round = 1, changedPaths = [], report = null, scope = 'full', since = null } = {}) {
   if (!state.adapters?.council?.on) return reviewActions(state, wp, { round, report, all: true, since: scope === 'delta' ? since : null });
+  // A delta's `since` goes into git's argv: only a commit sha, after --end-of-options.
+  if (scope === 'delta' && !/^[0-9a-f]{7,40}$/i.test(since ?? '')) throw new ConductError(2, `${wp.id}: a council delta needs a commit sha to diff from, not ${JSON.stringify(since)}`);
   const workshop = `${join(state.runDir, 'council', lower(wp))}${sep}`;
   const outDir = `${join(state.runDir, 'council', lower(wp), `review-${round}`)}${sep}`;
   const deltaDiff = scope === 'delta' ? join(state.runDir, 'council', lower(wp), `delta-r${round}.diff`) : null;
@@ -325,7 +328,7 @@ export function t2Actions(state, wp, { round = 1, changedPaths = [], report = nu
   const tool = (part, name, args, extra = {}) => ({ kind: 'agent-tool', step: 'council', seam: STEP_SEAM.council, part, tool: name,
     instruction: `Call ${name} with these args and record its result.`, args, expects: { type: 'json' }, land, ...extra });
   return [
-    ...(deltaDiff ? [shell('council', 'delta-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', `--output=${deltaDiff}`, since, wp.pr.head], { land })] : []),
+    ...(deltaDiff ? [shell('council', 'delta-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', `--output=${deltaDiff}`, '--end-of-options', since, wp.pr.head], { land })] : []),
     tool('review', 'council_review', { workshop_path: workshop, output_dir: outDir, surface: 'code', code_root: wp.lane.worktree,
       artifact_paths: [...prior, ...(deltaDiff ? [deltaDiff] : []), ...changedPaths], round, profile: CONDUCT_COUNCIL_PROFILE }),
     tool('synthesize', 'council_synthesize', { review_dir: outDir, workshop_path: workshop }, {
@@ -443,7 +446,7 @@ export function resolveThreadActions(state, wp, commentIds) {
     { expects: { type: 'json' }, land: { commentIds: commentIds.map(String) } })];
 }
 
-function resolveAction(threadId) {
+export function resolveAction(threadId) {
   return shell('resolve', 'resolve', ['gh', 'api', 'graphql', '-f', `query=${RESOLVE_MUTATION}`, '-f', `threadId=${threadId}`], { land: { threadId } });
 }
 
@@ -907,22 +910,35 @@ function councilObligation(wp, exec) {
   return null;
 }
 
-export function mergeActions(state, wp, head) {
-  if (state.authority?.merge !== true || mergeLockFor(state, wp) !== 'mine') return [];
+// `authority` is the phase's verifiedAuthority, computed just before the act.
+export function mergeActions(state, wp, head, authority) {
+  if (!authority) throw new ConductError(2, 'authority not passed');
+  if (mergeRefusal(state, authority) || mergeLockFor(state, wp) !== 'mine') return [];
   if (councilObligation(wp, null)) return [];
   // The door again, at the merge itself: a gate record from before the door
   // check (a run resumed across an upgrade) carries none.
   if (wp.id !== 'release' && wp.gate?.door !== 'two-way') return [];
   const pr = String(wp.pr.number);
-  const repo = repoOf(state);
   return [
-    shell('merge', 'squash', ['gh', 'pr', 'merge', pr, '--repo', repo, '--squash', '--match-head-commit', head,
+    shell('merge', 'squash', ['gh', 'pr', 'merge', pr, '--repo', repoOf(state), '--squash', '--match-head-commit', head,
       ...(wp.commit ? ['--subject', `${wp.commit} (#${pr})`] : [])]),
-    shell('merge', 'merge-commit', ['gh', 'pr', 'view', pr, '--repo', repo, '--json', 'mergeCommit'], { expects: { type: 'json' } }),
+    ...mergeTail(state, wp),
+  ];
+}
+
+// What follows a squash: the merge-commit lookup, which decides whether the
+// PR merged, and the merged check. Neither merges anything.
+export function mergeTail(state, wp) {
+  const pr = String(wp.pr.number);
+  return [
+    shell('merge', 'merge-commit', ['gh', 'pr', 'view', pr, '--repo', repoOf(state), '--json', 'mergeCommit'], { expects: { type: 'json' } }),
     shell('merged', 'merged', ['node', join(state.pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'land', 'merged',
       '--run', state.runDir, '--wp', wp.id, '--merge-sha', '{merge.sha}']),
   ];
 }
+
+// The abort a conflicted rebase queues; its record is the amendment.
+export const rebaseAbort = (wp, conflict) => shell('rebase', 'abort', ['git', '-C', wp.lane.worktree, 'rebase', '--abort'], { land: { conflict } });
 
 // The queue after this action: a leading copy of the recorded action is dropped.
 function rest(wp, action) {
@@ -974,6 +990,10 @@ function retry(wp, action, reason) {
   return { ...result('wait', `${reason} (retry ${n} of ${MAX_RETRIES})`, { retries: n, queue: [requeue(action), ...rest(wp, action)] }), waitMs: WAIT_MS };
 }
 
+// The read of the posted review of the claim's head, after a refused claim.
+export const recoverAction = (state, wp, land) => shell('review', 'recover', ['node', prReview(state), 'rounds', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--head', land.head],
+  { land });
+
 function recordReview(state, wp, action, r) {
   const after = rest(wp, action);
   if (action.part === 'delta-count') {
@@ -1007,10 +1027,8 @@ function recordReview(state, wp, action, r) {
     const reason = parseJson(first(r.stdout))?.reason ?? first(r.stderr);
     if (reason !== ALREADY_REVIEWED) return result('block', `claim refused: ${reason}`);
     // The refusal is not a review: recover the posted review of this exact head, or hold.
-    const recover = shell('review', 'recover', ['node', prReview(state), 'rounds', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--head', action.land.head],
-      { land: action.land });
     return result('continue', `claim refused ${ALREADY_REVIEWED}: reading the posted review of this head`,
-      { queue: [recover, ...after.filter((a) => a.land?.attemptRef !== action.land.attemptRef)] });
+      { queue: [recoverAction(state, wp, action.land), ...after.filter((a) => a.land?.attemptRef !== action.land.attemptRef)] });
   }
   if (action.part === 'recover') {
     const read = parseJson(first(r.stdout));
@@ -1103,7 +1121,7 @@ function recordRebaseStep(state, wp, action, r, deps) {
   if (action.part === 'rebase' && r.code !== 0) {
     // The abort runs first; its record is the amendment.
     const conflict = `rebase onto origin/${defaultOf(state)} conflicted: ${first(r.stdout) || first(r.stderr)}`;
-    return result('continue', conflict, { queue: [shell('rebase', 'abort', ['git', '-C', wp.lane.worktree, 'rebase', '--abort'], { land: { conflict } })] });
+    return result('continue', conflict, { queue: [rebaseAbort(wp, conflict)] });
   }
   if (r.code !== 0) return result('block', `${action.part} failed (exit ${r.code}): ${first(r.stderr)}`);
   if (action.part === 'abort') return result('amend', action.land.conflict);
@@ -1124,14 +1142,16 @@ function fullReview(state, wp, deps) {
   if (effectiveTier(wp) !== 'T2') return { queue: reviewActions(state, wp, { round }) };
   const diff = deps.exec('git', ['-C', wp.lane.worktree, 'diff', '--name-only', '--no-renames', `origin/${defaultOf(state)}...HEAD`]);
   if (diff.code !== 0) return { failure: `changed files unreadable: ${first(diff.stderr)}` };
-  return { queue: t2Actions(state, wp, { round, changedPaths: lines(diff.stdout).map((path) => join(wp.lane.worktree, path)) }) };
+  const paths = lines(diff.stdout);
+  // The round as queued, which emission derives its acts from (build.mjs councilActs).
+  return { queue: t2Actions(state, wp, { round, changedPaths: paths.map((path) => join(wp.lane.worktree, path)) }), councilScope: { round, scope: 'full', since: null, paths } };
 }
 
 const validInspect = (inspect) => inspect && typeof inspect === 'object' && /^[0-9a-f]{7,40}\.\.[0-9a-f]{7,40}$/i.test(inspect.tail ?? '')
   && typeof inspect.head === 'string' && Array.isArray(inspect.files) && inspect.files.length > 0 && inspect.files.every((file) => typeof file === 'string' && file)
   && inspect.review && typeof inspect.findingsHash === 'string';
 
-function inspectAction(state, wp, inspect, gate) {
+export function inspectAction(state, wp, inspect, gate) {
   const [from, to] = inspect.tail.split('..');
   return { kind: 'inspect', step: 'gate', seam: STEP_SEAM.gate, part: 'inspect',
     instruction: inspect.gateFailures?.length
@@ -1189,7 +1209,7 @@ function gateRecord(wp, gate, deps) {
 
 // Failures are classified: infrastructure retries, lock contention re-acquires,
 // limits hold, coverage gaps block, and only what a lane can fix is an amendment.
-function recordGate(state, wp, action, r, deps) {
+function recordGate(state, wp, action, r, deps, authority) {
   if (action.part === 'inspect') {
     if (!INSPECTION.includes(r.verdict) || r.tail !== action.land.tail || r.head !== action.land.head) {
       return result('block', `the inspection must name ${action.land.tail} at ${action.land.head} with a verdict of ${INSPECTION.join(' or ')}`);
@@ -1232,7 +1252,12 @@ function recordGate(state, wp, action, r, deps) {
         : `the PR body declares no valid door (${(gate.doorProblems ?? []).join('; ') || 'the gate reported none'}), so whether one revert undoes it is unknown`;
       return result('held', `gate passed; ${why}: the merge is the operator's`, { ...recorded, retries: 0 });
     }
-    return state.authority?.merge === true ? result('continue', null, { ...recorded, retries: 0 }) : result('held', 'gate passed; no merge authority', { ...recorded, retries: 0 });
+    const refusal = mergeRefusal(state, authority);
+    // A WP's refused signed record (authority.reason) is its merge stage's to
+    // wait on, so a restored record resumes it to the squash; a grant that
+    // holds but gives no merge is the operator's merge. The release holds.
+    if (refusal && authority.reason && wp.id !== 'release') return result('continue', null, { ...recorded, retries: 0 });
+    return refusal ? result('held', `gate passed; ${refusal}`, { ...recorded, retries: 0 }) : result('continue', null, { ...recorded, retries: 0 });
   }
   if (r.code === 6) {
     const reason = (gate.pendingOn ?? ['ci']).map((on) => (on === 'review' ? 'a pipeline review of head is in flight' : 'CI is still running at head')).join('; ');
@@ -1275,7 +1300,7 @@ function classifyGate(state, wp, action, gate, causes, reason, deps) {
   if (causes.has('full-review')) {
     const review = fullReview(state, wp, deps);
     if (review.failure) return result('block', review.failure);
-    return result('continue', reason, { ...(mergeLockFor(state, wp) === 'mine' ? { mergeLock: null } : {}), queue: review.queue });
+    return result('continue', reason, { ...(mergeLockFor(state, wp) === 'mine' ? { mergeLock: null } : {}), queue: review.queue, ...(review.councilScope ? { councilScope: review.councilScope } : {}) });
   }
   if (causes.size === 1 && causes.has('inspect')) {
     if (!validInspect(gate.inspect)) return result('block', `the gate asked for an inspection with an unusable payload: ${JSON.stringify(gate.inspect)}`);
@@ -1284,7 +1309,7 @@ function classifyGate(state, wp, action, gate, causes, reason, deps) {
   return result('amend', reason);
 }
 
-function landOutcome(state, wp, action, r, deps) {
+function landOutcome(state, wp, action, r, deps, authority) {
   switch (action.step) {
     case 'review': return recordReview(state, wp, action, r);
     case 'post':
@@ -1316,7 +1341,7 @@ function landOutcome(state, wp, action, r, deps) {
       if (r.code !== 0) return result('block', `resolve failed: ${first(r.stderr)}`);
       return result('continue', null, { reviews: withLatest(wp, (review) => ({ ...review, resolved: [...(review.resolved ?? []), action.land.threadId] })) });
     case 'rebase': return recordRebaseStep(state, wp, action, r, deps);
-    case 'gate': return recordGate(state, wp, action, r, deps);
+    case 'gate': return recordGate(state, wp, action, r, deps, authority);
     case 'merge': {
       // gh's exit on the squash is advisory: `gh pr merge` can exit non-zero
       // after the merge landed (a post-merge local step failing). The
@@ -1352,11 +1377,12 @@ function landOutcome(state, wp, action, r, deps) {
 // the rebase and merged, and merged itself, releases the lock its WP holds.
 // A ConductError (an impossible lens selection, an unknown step) becomes
 // `block`; only a programming error escapes. A terminal outcome leaves only
-// the cleanup it owes queued.
-export function recordLandStep(state, wp, action, r, deps = {}) {
+// the cleanup it owes queued. `authority` is the phase's verifiedAuthority.
+export function recordLandStep(state, wp, action, r, deps = {}, authority = undefined) {
+  if (!authority) throw new ConductError(2, 'authority not passed');
   let out;
   try {
-    out = landOutcome(state, wp, action, r ?? {}, deps);
+    out = landOutcome(state, wp, action, r ?? {}, deps, authority);
   } catch (error) {
     if (!(error instanceof ConductError)) throw error;
     out = result('block', error.message);

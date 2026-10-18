@@ -20,7 +20,9 @@ import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, filedLength, operatorAnchor, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
 import { readAnchor } from '../../_shared/operator-proof/operator-proof.mjs';
-import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
+import { sameAction } from './lib/authority.mjs';
+import { admitAct } from './lib/derive.mjs';
+import { custodyActs, custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -121,14 +123,38 @@ function stamp(state, spec) {
   return { id: `${state.seq}-${spec.step}`, phase: state.phase, ...spec, seam: spec.seam !== undefined ? spec.seam : STEP_SEAM[spec.step] };
 }
 
+// A stored act refused at the choke: never emitted, recorded as dropped.
+function dropped(state, deps, action, reason, extra = {}) {
+  appendEvent(state, deps, {
+    actionId: action.id ?? null, step: STEPS.includes(action.step) ? action.step : null, seam: STEPS.includes(action.step) ? action.seam : null, kind: action.kind ?? null,
+    event: 'dropped', data: { reason, ...extra },
+  });
+}
+
 // The pending action, or the current phase's next one. A handler that changes
 // the phase without an action hands over to the next phase's handler. An open
 // rotation's custody steps (lib/rotate.mjs) come before either; the pending
 // action stays where it is and is emitted again once custody is taken.
+// Configured, every stored act emitted here (a custody step, the pending act,
+// and whatever a phase's next returns, a queue head included) passes one
+// choke, admitAct (lib/derive.mjs): its content must be what its phase
+// derives now. One refused is dropped, the phase holds it (refuseStored), and
+// the phase's next act is emitted instead.
 async function emit(state, deps, { custody = null } = {}) {
+  // An unreadable anchor exits 2 here, before anything below saves state or
+  // events; a missing one reads as unconfigured and changes nothing.
+  const configured = operatorAnchor(deps).configured === true;
   const rotation = openRotation(state);
   if (rotation) {
-    const spec = custodyNext(state, rotation, deps, { custody });
+    let spec = custodyNext(state, rotation, deps, { custody });
+    if (configured && spec && spec === rotation.action) {
+      const verdict = admitAct(state, deps, { derive: (s, d, a) => (custodyActs(s, rotation).some((act) => sameAction(act, a)) ? { action: a } : { refusal: 'not a custody step the rotation derives now' }) }, spec);
+      if (!verdict.action) {
+        dropped(state, deps, spec, verdict.refusal);
+        rotation.action = null;
+        spec = custodyNext(state, rotation, deps, { custody });
+      }
+    }
     if (spec && spec !== rotation.action) {
       rotation.action = stamp(state, spec);
       appendEvent(state, deps, { actionId: rotation.action.id, step: spec.step, seam: rotation.action.seam, kind: spec.kind, event: 'emitted' });
@@ -136,26 +162,59 @@ async function emit(state, deps, { custody = null } = {}) {
     saveState(state, deps);
     if (spec) return rotation.action;
   }
-  if (state.pending) {
-    if (state.phase === 'build') {
-      const build = await loadModule(deps, 'lib/phases/build.mjs', 'phase handler build');
-      if (build.observePending) { build.observePending(state, deps); saveState(state, deps); }
+  if (state.pending && configured) {
+    const phase = TERMINAL_PHASES.includes(state.phase) ? null : await loadModule(deps, `lib/phases/${state.phase}.mjs`, `phase handler ${state.phase}`);
+    if (phase?.observePending) { phase.observePending(state, deps); saveState(state, deps); }
+    const verdict = phase ? admitAct(state, deps, phase, state.pending) : { refusal: `the run is ${state.phase}` };
+    if (verdict.action) {
+      const canonical = verdict.action !== state.pending;
+      state.pending = verdict.action;
+      // What a pending act spends is gated again after its content passes (build: paid acts).
+      if (!phase.gatePending || phase.gatePending(state, deps)) {
+        if (canonical) saveState(state, deps);
+        return state.pending;
+      }
     }
-    return state.pending;
+    const stored = state.pending;
+    dropped(state, deps, stored, verdict.refusal ?? 'dropped for a fresh check of what it spends');
+    state.pending = null;
+    if (!verdict.action) phase?.refuseStored?.(state, deps, stored, verdict, { pending: true });
+    saveState(state, deps);
+  } else if (state.pending) {
+    const phase = ['build', 'release'].includes(state.phase) ? await loadModule(deps, `lib/phases/${state.phase}.mjs`, `phase handler ${state.phase}`) : null;
+    if (phase?.observePending) { phase.observePending(state, deps); saveState(state, deps); }
+    if (!phase?.checkPending || phase.checkPending(state, deps)) return state.pending;
+    const stored = state.pending;
+    appendEvent(state, deps, { actionId: stored.id, step: stored.step, seam: stored.seam, kind: stored.kind, event: 'dropped' });
+    state.pending = null;
+    saveState(state, deps);
   }
-  for (let hop = 0; hop < 8; hop += 1) {
+  for (let hop = 0, refused = 0; hop < 8; hop += 1) {
     if (TERMINAL_PHASES.includes(state.phase)) return { kind: 'done', phase: state.phase };
     const handler = await loadModule(deps, `lib/phases/${state.phase}.mjs`, `phase handler ${state.phase}`);
     const before = state.phase;
-    const spec = await handler.next(state, deps);
+    let spec = await handler.next(state, deps);
     if (spec?.kind === 'done') {
       saveState(state, deps);
       return { ...spec, phase: state.phase };
     }
+    if (spec && configured) {
+      const verdict = admitAct(state, deps, handler, spec);
+      if (!verdict.action) {
+        dropped(state, deps, spec, verdict.refusal, { queued: true });
+        handler.refuseStored?.(state, deps, spec, verdict, { pending: false });
+        refused += 1;
+        if (refused > 8) throw new ConductError(2, `phase ${state.phase} keeps emitting acts it does not derive: ${verdict.refusal}`);
+        hop -= 1;
+        continue;
+      }
+      spec = verdict.action;
+    }
     if (spec) {
       const action = stamp(state, spec);
       state.pending = action;
-      appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'emitted' });
+      // A held wait (configured: an authority refused) is marked, so the analysis never counts it as a seam crossed.
+      appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'emitted', ...(action.held ? { data: { held: true } } : {}) });
       saveState(state, deps);
       return action;
     }
@@ -404,7 +463,14 @@ async function record(tokens, deps) {
     const result = readResult(flags, deps);
     if (action.kind === 'shell') checkShellResult(action, result);
     // A core touch the operator has not answered yet, or a spine hand-back,
-    // stays pending: recording it does not mint a new action.
+    // stays pending: recording it does not mint a new action. Configured, the
+    // stored act it returns passes the same choke as emit's: one its phase
+    // does not derive now is not returned, and next drops it.
+    if (action.kind === 'touch' && operatorAnchor(deps).configured) {
+      const phase = TERMINAL_PHASES.includes(state.phase) ? null : await loadModule(deps, `lib/phases/${state.phase}.mjs`, `phase handler ${state.phase}`);
+      const verdict = phase ? admitAct(state, deps, phase, action) : { refusal: `the run is ${state.phase}` };
+      if (!verdict.action) throw new ConductError(5, `action ${id} is not an act this run derives now (${verdict.refusal}); run next`);
+    }
     if (action.kind === 'touch' && state.touches[action.touch.n - 1]?.status !== 'answered') {
       return { out: { ok: true, phase: state.phase, action, answered: false } };
     }
@@ -415,7 +481,7 @@ async function record(tokens, deps) {
     appendEvent(state, deps, {
       actionId: id, step: action.step, seam: action.seam, kind: action.kind, event: 'recorded',
       source: flags.manual === true ? 'manual' : 'next', phase: action.phase,
-      data: state.phase === action.phase ? {} : { phase: state.phase },
+      data: { ...(action.held ? { held: true } : {}), ...(state.phase === action.phase ? {} : { phase: state.phase }) },
     });
     saveState(state, deps);
     const next = await emitAfterRecord(state, deps, id);
@@ -461,8 +527,9 @@ async function status(tokens, deps) {
 async function analyze(tokens, deps) {
   const { runDir } = openRun(parseFlags(tokens), deps);
   const module = await loadModule(deps, 'lib/analyze.mjs', 'module');
-  // readEvents (lib/state.mjs) needs exists and read; the analysis reads events through it.
-  return { out: await module.analyzeRun(runDir, { exec: deps.exec, read: deps.read, write: deps.write, exists: deps.exists }) };
+  // readEvents (lib/state.mjs) needs exists and read; the analysis reads events
+  // through it. readAnchor and now let it print the verified authority.
+  return { out: await module.analyzeRun(runDir, { exec: deps.exec, read: deps.read, write: deps.write, exists: deps.exists, readAnchor: deps.readAnchor, now: deps.now }) };
 }
 
 // lane/land: conduct.mjs parses --run and --wp; every other flag reaches the

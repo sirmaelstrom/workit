@@ -13,15 +13,15 @@
 // Fields this phase adds (optional; every reader tolerates their absence):
 // state.build { contract, halts, spendOkFor }; authority.budgetSource; wps[]
 // stage, amendment, checkAmends, gateAmends, owed, asks, replyIds, rulingSeq,
-// deferredBy, changedPaths, gateCmd, noCi, cleanup, lane.uncertain,
+// deferredBy, changedPaths, councilScope, gateCmd, noCi, cleanup, lane.uncertain,
 // lane.livenessHeld; halts[] kinds budget | meter | merged | replan, a meter's dueAt;
 // state.replans[] (n, why, delta, rests, file, mode, touch, receipt, answer);
 // touches[] build (why the build opened it), applied, announced, waitLeftMs,
 // waitDueAt, guard, spendUsd; a queued wait's remainingMs and dueAt; an
 // emitted action's wpId and, on a yielding wait, `yield: true`; a spend
 // action's budgetFor.
-import { basename, dirname, join } from 'node:path';
-import { ConductError, appendEvent } from '../state.mjs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { ConductError, STEP_SEAM, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
@@ -31,12 +31,18 @@ import { isTopListItem, markLines, sectionLines } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import { bootstrapBrief } from '../bootstrap.mjs';
 import {
-  PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
-  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, t2Actions, tierDecision, visualReadProblem,
+  PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, inspectAction, isTestPath, mergeActions, mergeLockFor, mergeTail, parseAmendmentTable,
+  priorAdjudicationBody, rebaseAbort, rebaseActions, recordAdjudication, recordLandStep, recoverAction, resolveAction, resolveThreadActions, reviewActions, reviewSteps,
+  t2Actions, tierDecision, visualAction, visualReadProblem,
 } from '../land.mjs';
 import {
-  QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
+  QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, operatorAnchor, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
 } from '../touch.mjs';
+import {
+  AUTHORITY_TERMINAL, AUTHORITY_WAITING, assertFileable, budgetAmount, mergeRefusal, raiseConsequence, sameAction, terminalRefusal, verifiedAuthority,
+} from '../authority.mjs';
+import { admitAct, canonicalWaitText, dryDeps, waitVerdict } from '../derive.mjs';
+import { REASONS } from '../../../../_shared/operator-proof/operator-proof.mjs';
 import { preapprovedRef } from './spec.mjs';
 
 // The lane-contract template's run-level slot prefixes (D17). `<repo A` also
@@ -377,9 +383,13 @@ export const askId = (ask) => `${ask.question ?? ''}\n${ask.text}`.split('\n').m
 const askRuled = (wp, ask) => (wp.ruledAsks ?? []).some((id) => askId({ text: id }) === askId(ask));
 
 // A ruling on a lane's asks (part ask) or on a guard row (part guard, D20).
-function rulingAction(state, wp, { asks = null, row = null }) {
+function rulingAction(state, wp, fields) {
   wp.rulingSeq = Math.max(wp.rulingSeq ?? 0, (wp.rulings ?? []).length) + 1;
-  const n = wp.rulingSeq;
+  return rulingAct(state, wp, fields, wp.rulingSeq);
+}
+
+// Ruling n's act, as rulingAction queues it and emission derives it again.
+function rulingAct(state, wp, { asks = null, row = null }, n) {
   const file = `rulings/${lower(wp)}-${n}.json`;
   const keys = row ? GUARD_VERDICTS : (asks ?? []).map((ask) => ask.key);
   const outPath = join(state.runDir, file);
@@ -654,6 +664,7 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   setState(state, wp, target.state(wp), reason, deps);
   wp.stage = target.stage;
   wp.queue = nextQueue;
+  dropReplay(state, wp);
   wp.failStreak = null;
   wp.stall = null;
   if (recovery) {
@@ -732,16 +743,28 @@ function haltTouch(state, deps, reason, why, spendUsd = null) {
   const halts = (state.build.halts ??= []);
   if (why === 'budget' && halts.some((halt) => halt.kind === 'budget')) return;
   const budget = why === 'budget';
+  // With an operator passkey configured, a raise is signed: (a) carries the
+  // raise's tag over this touch and the spend at its filing (C3).
+  const raise = budget && operatorAnchor(deps).configured
+    ? { kind: 'budget-raise', runId: state.runId, touch: state.touches.length + 1, haltSpendUsd: spendUsd ?? 0 } : null;
+  const options = budget
+    ? [raise ? { key: 'a', label: 'Raise the budget', consequence: raiseConsequence(raise) } : option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; metering continues against it.'),
+      option('b', 'Stop new paid lane work', 'No dispatch, start, prompt or fallback; PRs already up may still land.')]
+    : [option('a', 'Resume dispatch', 'This halt is cleared.'), option('b', 'End the build', 'Live lanes finish; nothing new is dispatched.')];
+  if (raise) assertFileable(options, `budget touch ${raise.touch}`);
   const touch = buildTouch(state, deps, why, {
     question: budget
       ? `DO: decide whether conduct ${state.slug} spends more. ${reason}. EXPECT: (a) answered with the text "budget <USD>" above the current spend raises the ceiling to it, and metering continues; (b) no new paid lane work (no dispatch, lane start, prompt or fallback); work already at a PR boundary may still be reviewed and landed, and the build ends.`
       : `DO: decide whether conduct ${state.slug} dispatches more lanes. ${reason}. EXPECT: (a) this halt is cleared; dispatch resumes once no other halt is open; (b) no new lane starts, the live ones finish, and the build ends.`,
-    options: budget
-      ? [option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; metering continues against it.'), option('b', 'Stop new paid lane work', 'No dispatch, start, prompt or fallback; PRs already up may still land.')]
-      : [option('a', 'Resume dispatch', 'This halt is cleared.'), option('b', 'End the build', 'Live lanes finish; nothing new is dispatched.')],
+    options,
     allowFreeText: budget,
   });
   touch.spendUsd = spendUsd;
+  // The halt entry is deleted on answer; touch.raise is the record that survives.
+  if (raise) {
+    touch.raise = raise;
+    if (!spineOn(state)) writeTouchFiles(state, touch, deps);
+  }
   halts.push({ kind: why, reason, touch: touch.n });
   syncHalt(state, deps);
 }
@@ -937,7 +960,9 @@ function refuse(state, touch, why, deps) {
 }
 
 // A run touch's (a) clears its own halt: for the budget only with "budget
-// <USD>" above the spend at the halt, which becomes authority.budgetUsd.
+// <USD>" above the spend at the halt, which becomes authority.budgetUsd: the
+// display mirror. Configured, the acts count the raise only from its signed
+// touch (verifiedAuthority).
 function answerRunTouch(state, touch, deps) {
   if (touch.build === 'replan') return answerReplan(state, touch, deps);
   const { key, text } = touch.answer;
@@ -947,8 +972,7 @@ function answerRunTouch(state, touch, deps) {
     return;
   }
   if (touch.build === 'budget') {
-    // `budget <USD>`: digits with optional thousands commas, `$` and decimals ("budget $1,500" → 1500).
-    const usd = Number(/\bbudget\s+\$?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)(?![\w.,])/i.exec(text ?? '')?.[1]?.replaceAll(',', ''));
+    const usd = budgetAmount(text);
     if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, `(a) needs the text "budget <USD>" above the current spend of $${touch.spendUsd ?? 'unknown'}`, deps);
     state.authority.budgetUsd = usd;
     state.authority.budgetSource = { touch: touch.n, by: touch.answer.by, answeredAt: touch.answer.answeredAt, text };
@@ -1062,18 +1086,22 @@ function block(state, wp, deps, reason) {
   setState(state, wp, 'blocked', reason, deps);
   wp.stage = null;
   wp.queue = (wp.queue ?? []).filter((action) => action.step === 'stop');
+  dropReplay(state, wp);
+}
+
+// A WP held at an act its authority does not cover: the lock it holds is
+// released, its lane is stopped, and the PR stays open for the operator.
+function holdWp(state, wp, deps, reason) {
+  dropReplay(state, wp);
+  if (mergeLockFor(state, wp) === 'mine') state.mergeLock = null;
+  setState(state, wp, 'held', reason, deps);
+  wp.stage = null;
+  wp.queue = backendOf(state, wp, deps).stop(wp);
 }
 
 function merged(state, wp, deps) {
   setState(state, wp, 'merged', null, deps);
   wp.stage = null;
-  const after = [];
-  const { number } = wp.pr;
-  const sha = wp.merge?.sha;
-  const notify = deps.env?.WORKIT_NOTIFY_CMD;
-  if (state.adapters?.notify?.on && notify) {
-    after.push(shell('notify', 'notify', shellArgv(notify, deps.platform), { env: { WORKIT_NOTIFY_PR: String(number), WORKIT_NOTIFY_SHA: sha, WORKIT_NOTIFY_REVERT: `git revert ${sha}` } }));
-  }
   // The projected crossing, at every merge: booked spend (the last meter
   // reading plus the lanes that closed after it, which it cannot include; with
   // no reading, the closed lanes' sum) plus every WP whose lane cost is not
@@ -1091,19 +1119,39 @@ function merged(state, wp, deps) {
   const left = state.wps.filter(unbooked).length;
   const per = laneProjection(state, deps);
   const projected = Math.round((booked + left * per.usd) * 100) / 100;
-  const budget = state.authority?.budgetUsd ?? 0;
-  appendEvent(state, deps, { event: 'spend-projection', data: { wpId: wp.id, bookedUsd: booked, wpsLeft: left, perWpUsd: per.usd, projectedUsd: projected, budgetUsd: budget } });
-  const spendLine = ` Spend: $${Math.round(booked * 100) / 100} booked; ~$${projected} projected with ${left} WP(s) not yet booked at $${Math.round(per.usd * 100) / 100} each (${per.basis}), against $${budget}${projected >= budget ? ': the projection crosses the budget' : ''}.`;
+  const authority = verifiedAuthority(state, deps);
+  const spend = { bookedUsd: booked, wpsLeft: left, perWpUsd: per.usd, basis: per.basis, projectedUsd: projected, budgetUsd: authority.budgetUsd };
+  appendEvent(state, deps, { event: 'spend-projection', data: { wpId: wp.id, bookedUsd: booked, wpsLeft: left, perWpUsd: per.usd, projectedUsd: projected, budgetUsd: spend.budgetUsd } });
+  // Configured, the reading the receipt quotes is kept, so emission can derive the receipt again.
+  if (authority.proofMode !== 'unconfigured') wp.mergedSpend = spend;
+  const backend = backendOf(state, wp, deps);
+  // The lane's removal queues its branch deletes once the worktree is gone.
+  wp.queue = [...(wp.queue ?? []), ...mergedAfter(state, wp, deps, spend), ...backend.stop(wp), ...backend.remove(wp)];
+}
+
+// What a merge queues before the lane's cleanup: the notify command, and with
+// the spine on the WP quest's receipt (its spend line from `spend`) and its done.
+const SPEND_BASIS = /^(?:the mean of \d+ closed lane\(s\)|the repo config laneEstimateUsd|the default estimate)$/;
+const quotableSpend = (spend) => [spend?.bookedUsd, spend?.projectedUsd, spend?.wpsLeft, spend?.perWpUsd, spend?.budgetUsd].every(Number.isFinite) && SPEND_BASIS.test(spend?.basis ?? '');
+function mergedAfter(state, wp, deps, spend) {
+  const after = [];
+  const { number } = wp.pr;
+  const sha = wp.merge?.sha;
+  const notify = deps.env?.WORKIT_NOTIFY_CMD;
+  if (state.adapters?.notify?.on && notify) {
+    after.push(shell('notify', 'notify', shellArgv(notify, deps.platform), { env: { WORKIT_NOTIFY_PR: String(number), WORKIT_NOTIFY_SHA: sha, WORKIT_NOTIFY_REVERT: `git revert ${sha}` } }));
+  }
   if (spineOn(state) && wp.questId) {
+    const money = (usd) => Math.round(usd * 100) / 100;
+    const { bookedUsd, projectedUsd, wpsLeft, perWpUsd, basis, budgetUsd } = spend;
+    const spendLine = ` Spend: $${money(bookedUsd)} booked; ~$${projectedUsd} projected with ${wpsLeft} WP(s) not yet booked at $${money(perWpUsd)} each (${basis}), against $${budgetUsd}${projectedUsd >= budgetUsd ? ': the projection crosses the budget' : ''}.`;
     const tool = (part, name, args) => ({ kind: 'agent-tool', step: 'receipt', part, tool: name, args, expects: { type: 'json' }, instruction: `Call ${name} with these args and record its raw result.` });
     after.push(tool('completed', 'spine_receipt', { questId: wp.questId, outcome: 'completed', did: `${wp.id} (${wp.name}) merged as PR #${number} at ${sha}.${spendLine}`,
       stoppedAt: `merged by conduct ${state.slug}`, producedArtifacts: [{ type: 'pr', locator: `https://github.com/${state.intent.repo.remote}/pull/${number}`, rel: 'remedy' }] }));
     // The anchor (depth none/lite) stays open until the showcase answer (D18).
     if (wp.questId !== state.intent.anchor) after.push(tool('done', 'spine_update', { questId: wp.questId, workState: 'done', horizon: 'landed' }));
   }
-  const backend = backendOf(state, wp, deps);
-  // The lane's removal queues its branch deletes once the worktree is gone.
-  wp.queue = [...(wp.queue ?? []), ...after, ...backend.stop(wp), ...backend.remove(wp)];
+  return after;
 }
 
 // A library emitter that cannot emit (no lens can run, a delta after a
@@ -1175,6 +1223,35 @@ function adjudicate(state, wp, deps) {
 
 // ---- stage expansion ----
 
+// The producers expand and emission's derivation (wpActs) share.
+const flipActs = (state, wp) => (spineOn(state) && wp.questId ? [{ kind: 'agent-tool', step: 'flip', tool: 'spine_update', args: { questId: wp.questId, currentPhase: 'build' },
+  expects: { type: 'json' }, instruction: 'Call spine_update with these args (the pickup flip) and record its raw result.' }] : []);
+
+// The gate command (when it can run as written) and the land gate. An
+// unusable gateEnv throws ConductError: expand blocks the WP on it.
+function gateActs(state, wp, deps) {
+  const command = gateCommandFor(state, wp, deps);
+  const gate = shell('gate', 'gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', wp.id]);
+  if (notRunnable(command, deps.platform)) return [gate];
+  const config = repoConfig(state, deps);
+  const env = gateEnvFor(state, wp, config);
+  // A suite longer than a foreground shell allows runs in the background (gateBackground).
+  const extra = { cwd: wp.lane.worktree, ...(Object.keys(env).length ? { env } : {}), ...(config.gateBackground === true ? { background: true } : {}) };
+  return [shell('gate-cmd', 'gate-cmd', shellArgv(command, deps.platform), extra), gate];
+}
+
+// The files an amendment changed since the delta baseline, a commit sha.
+const amendDiff = (wp, since) => shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', '--end-of-options', since, '{pr.head}']);
+
+// A T1 delta review with two or more majors is counted again after adjudication.
+function deltaCountActs(state, wp) {
+  const latest = (wp.reviews ?? []).at(-1);
+  if (!(latest?.scope === 'delta' && latest.tier === 'T1' && latest.majorFindings >= 2 && latest.reviewId != null)) return [];
+  return [shell('review', 'delta-count', ['node', join(state.pluginRoot, 'skills', 'slim-review', 'scripts', 'pr-review.mjs'), 'delta-count',
+    '--pr', String(wp.pr.number), '--repo', state.intent.repo.remote, '--review-id', String(latest.reviewId)],
+  { land: { reviewId: latest.reviewId, head: latest.head } })];
+}
+
 function expand(state, wp, deps) {
   const backend = backendOf(state, wp, deps);
   const go = (actions, stage) => {
@@ -1183,8 +1260,7 @@ function expand(state, wp, deps) {
   };
   switch (wp.stage) {
     case 'admit': return go(backend.admit(wp), 'flip');
-    case 'flip': return go(spineOn(state) && wp.questId ? [{ kind: 'agent-tool', step: 'flip', tool: 'spine_update', args: { questId: wp.questId, currentPhase: 'build' },
-      expects: { type: 'json' }, instruction: 'Call spine_update with these args (the pickup flip) and record its raw result.' }] : [], 'create');
+    case 'flip': return go(flipActs(state, wp), 'create');
     case 'create': return go(backend.create(wp), 'brief');
     case 'brief': return go([briefAction(state, wp, deps)], 'start');
     case 'start': return go(backend.start(wp), 'prompt');
@@ -1232,12 +1308,7 @@ function expand(state, wp, deps) {
         deps.write(prior, priorAdjudicationBody(record.body));
         wp.priorAdjudication = { path: prior, round: (wp.reviews ?? []).at(-1)?.round ?? null };
       }
-      const latest = (wp.reviews ?? []).at(-1);
-      const recount = latest?.scope === 'delta' && latest.tier === 'T1' && latest.majorFindings >= 2 && latest.reviewId != null
-        ? shell('review', 'delta-count', ['node', join(state.pluginRoot, 'skills', 'slim-review', 'scripts', 'pr-review.mjs'), 'delta-count',
-          '--pr', String(wp.pr.number), '--repo', state.intent.repo.remote, '--review-id', String(latest.reviewId)],
-        { land: { reviewId: latest.reviewId, head: latest.head } }) : null;
-      return go([...(record ? [record.action] : []), ...(wp.replyIds?.length ? resolveThreadActions(state, wp, wp.replyIds) : []), ...(recount ? [recount] : [])], 'delta');
+      return go([...(record ? [record.action] : []), ...(wp.replyIds?.length ? resolveThreadActions(state, wp, wp.replyIds) : []), ...deltaCountActs(state, wp)], 'delta');
     }
     case 'delta': {
       // One delta pass per full review; a later tail is the gate's post-cap inspection.
@@ -1249,7 +1320,8 @@ function expand(state, wp, deps) {
       if (wp.fullReviewOwed) return go([prDiff(state)], null);
       if (wp.deltaEscalation) return go([prDiff(state)], null);
       if (!since || since === wp.pr?.head || review.scope !== 'full') return go([], 'land');
-      return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
+      if (!SHA.test(since)) return block(state, wp, deps, `the delta baseline ${JSON.stringify(since)} is not a commit sha`);
+      return go([amendDiff(wp, since)], null);
     }
     case 'land':
       // A gate amendment's lane work ends here: its gate-fix range is closed at the head it pushed.
@@ -1264,24 +1336,34 @@ function expand(state, wp, deps) {
       const why = notRunnable(command, deps.platform);
       if (why && wp.gateCmd?.reason !== why) appendEvent(state, deps, { step: 'gate-cmd', event: 'not-exercised', data: { wpId: wp.id, reason: why } });
       wp.gateCmd = why ? { state: 'not-exercised', reason: why } : { state: 'run', command };
-      const gate = shell('gate', 'gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', wp.id]);
-      if (why) return go([gate], 'merge');
-      const config = repoConfig(state, deps);
-      let env;
+      if (why) return go(gateActs(state, wp, deps), 'merge');
+      repoConfig(state, deps);
+      let acts;
       try {
-        env = gateEnvFor(state, wp, config);
+        acts = gateActs(state, wp, deps);
       } catch (error) {
         if (!(error instanceof ConductError)) throw error;
         if (mergeLockFor(state, wp) === 'mine') state.mergeLock = null;
         return block(state, wp, deps, error.message);
       }
-      // A suite longer than a foreground shell allows runs in the background (gateBackground).
-      const extra = { cwd: wp.lane.worktree, ...(Object.keys(env).length ? { env } : {}), ...(config.gateBackground === true ? { background: true } : {}) };
-      return go([shell('gate-cmd', 'gate-cmd', shellArgv(command, deps.platform), extra), gate], 'merge');
+      return go(acts, 'merge');
     }
     case 'merge': {
       if (!wp.gate?.ok) return go([], 'gate');
-      const actions = mergeActions(state, wp, wp.gate.head);
+      // Configured, authority is recomputed here, after the gate. One refused
+      // (a bad or edited record) waits at this stage with the build, and a
+      // restored record resumes it to the squash; a terminal one ends the
+      // build (authorityHold). One that holds but grants no merge stops the WP
+      // before the squash. Unconfigured, a refused merge goes back through land (M8).
+      const authority = verifiedAuthority(state, deps);
+      if (authority.reason) {
+        authorityHold(state, deps, authority);
+        return undefined;
+      }
+      const refusal = authority.proofMode === 'unconfigured' ? null : mergeRefusal(state, authority);
+      if (refusal) return holdWp(state, wp, deps, refusal);
+      authorityResumed(state, deps);
+      const actions = mergeActions(state, wp, wp.gate.head, authority);
       return actions.length ? go(actions, null) : go([], 'land');
     }
     default:
@@ -1296,6 +1378,7 @@ function expand(state, wp, deps) {
 function fill(state, wp, deps) {
   if (wp.queue?.length) return;
   wp.queue = [];
+  dropReplay(state, wp);
   if (!LIVE_STATES.includes(wp.state) && laneOccupied(wp) && !wp.stage && !openBuildTouches(state).some((t) => t.wpId === wp.id)) {
     wp.queue = backendOf(state, wp, deps).stop(wp);
     return;
@@ -1380,13 +1463,88 @@ function committed(state, deps, purpose, bookedUsd) {
   return { usd, detail: `${parts.join(' + ')}; lanes at $${money(projection.usd)} each, ${projection.basis}` };
 }
 
+// Configured, a refused authority (a bad proof or grant, another run's, an
+// expired one) is not an exhausted budget: no raise restores it, so none is
+// offered, and no touch is filed. A record that can be restored (a proof, a
+// grant, the goal edited or missing) holds paid work, dispatch and merges
+// with the reason, and the build waits on the hold, re-checking it every
+// AUTHORITY_WAIT_MS: a restored signed record resumes it, its WPs where they
+// stopped. One that cannot (terminalRefusal) ends the build at once
+// (authorityEnds). An unreadable anchor is a configuration error:
+// operatorAnchor exits 2 before anything changes.
+const AUTHORITY_WAIT_MS = 5 * 60000;
+const holdText = (authority) => `authority refused (${authority.reason}): ${terminalRefusal(authority.reason) ? AUTHORITY_TERMINAL : AUTHORITY_WAITING}`;
+function authorityHold(state, deps, authority) {
+  if (authority.reason === REASONS.anchor_unreadable) operatorAnchor(deps);
+  if (terminalRefusal(authority.reason)) return authorityEnds(state, deps, authority);
+  const reason = holdText(authority);
+  const halts = (state.build.halts ??= []);
+  const open = halts.find((halt) => halt.kind === 'authority');
+  if (open) open.reason = reason;
+  else halts.push({ kind: 'authority', reason, waitLeftMs: AUTHORITY_WAIT_MS, dueAt: null });
+  syncHalt(state, deps);
+  return reason;
+}
+
+// A terminal refusal hands the run back: every WP not finished is held with
+// the reason (a live lane is stopped; one never dispatched just holds), the
+// wait is replaced by a halt that never waits, and dispatch stays shut, so
+// the build ends and the release, analysis and showcase name why.
+function authorityEnds(state, deps, authority) {
+  const reason = holdText(authority);
+  const halts = (state.build.halts ?? []).filter((halt) => halt.kind !== 'authority');
+  if (!halts.some((halt) => halt.kind === 'authority-ended')) {
+    halts.push({ kind: 'authority-ended', reason });
+    appendEvent(state, deps, { event: 'authority-ended', data: { reason } });
+  }
+  state.build.halts = halts;
+  for (const wp of state.wps) {
+    if (wp.state === 'pending') {
+      setState(state, wp, 'held', reason, deps);
+      Object.assign(wp, { stage: null, queue: [] });
+    } else if (LIVE_STATES.includes(wp.state)) holdWp(state, wp, deps, reason);
+  }
+  syncHalt(state, deps);
+  return reason;
+}
+
+const authorityHalt = (state) => (state.build.halts ?? []).find((halt) => halt.kind === 'authority');
+
+// An authority that verifies again clears its hold.
+function authorityResumed(state, deps) {
+  const halts = state.build.halts ?? [];
+  if (!halts.some((halt) => halt.kind === 'authority')) return;
+  state.build.halts = halts.filter((halt) => halt.kind !== 'authority');
+  syncHalt(state, deps);
+}
+
+// Configured, a paid act needs a spend reading recorded in this same process,
+// just before it: the record that read it emits the act. spendOkFor and
+// lastSpend live in state.json, which an agent can edit, so neither counts.
+const freshSpend = new WeakMap();
+
 function budgetGate(state, deps, purpose) {
   if (budgetEnded(state)) return 'ended';
+  const authority = verifiedAuthority(state, deps);
+  if (authority.reason) {
+    authorityHold(state, deps, authority);
+    return 'held';
+  }
+  authorityResumed(state, deps);
   if ((state.build.halts ?? []).some((entry) => entry.kind === 'budget' || entry.kind === 'meter')) return 'halted';
-  const budget = state.authority?.budgetUsd ?? 0;
+  const budget = authority.budgetUsd;
   if (state.adapters?.spend?.on) {
     if (!deps.env?.WORKIT_SPEND_CMD) {
       meterHalt(state, deps, 'The spend adapter is on, but WORKIT_SPEND_CMD is not set, so spend is unknown (metered by the spend adapter)');
+      return 'halted';
+    }
+    if (authority.proofMode !== 'unconfigured') {
+      const fresh = freshSpend.get(state);
+      freshSpend.delete(state);
+      if (fresh?.purpose !== purpose) return spendAction(state, deps, purpose);
+      const spend = committed(state, deps, purpose, fresh.usd);
+      if (spend.usd < budget) return null;
+      haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)`, 'budget', spend.usd);
       return 'halted';
     }
     if (state.build.spendOkFor === purpose) {
@@ -1427,8 +1585,23 @@ function workAction(state, deps) {
         block(state, wp, deps, 'the budget was reached and the operator stopped new paid lane work');
         continue;
       }
-      if (gate === 'halted') continue;
+      // Held on a refused authority, the WP keeps its act and waits with the
+      // build (authorityHold): a restored record emits it.
+      if (gate === 'halted' || gate === 'held') continue;
       if (gate) return gate;
+      return replayed(state, wp, emitHead(wp));
+    }
+    // Configured, a head that merges (read from its argv) waits on a refused
+    // authority with its queue kept (S4): a restored record emits it, a
+    // terminal refusal ends the build. Every emitted act is checked whole at
+    // emission (conduct.mjs, derive), so a relabelled head gains nothing here.
+    // Unconfigured, authority is never refused, and it is emitted as today (M8).
+    if (mergesContent(wp.queue[0])) {
+      const authority = verifiedAuthority(state, deps);
+      if (authority.reason) {
+        authorityHold(state, deps, authority);
+        continue;
+      }
     }
     return emitHead(wp);
   }
@@ -1445,9 +1618,11 @@ function workAction(state, deps) {
     Object.assign(meter, { waitLeftMs: READ_BACK_WAIT_MS, dueAt: null });
     if (deps.env?.WORKIT_SPEND_CMD) return spendAction(state, deps, 'meter');
   }
+  // A refused authority is checked again before dispatch: restored, its hold clears.
+  if (authorityHalt(state) && !verifiedAuthority(state, deps).reason) authorityResumed(state, deps);
   if (state.dispatchHalt || !dispatchable(state, { now: deps.now() }).length) return null;
   const gate = budgetGate(state, deps, 'dispatch');
-  if (gate === 'halted' || gate === 'ended') return workAction(state, deps);
+  if (gate === 'halted' || gate === 'ended' || gate === 'held') return workAction(state, deps);
   if (gate) return gate;
   return dispatch(state, dispatchable(state, { now: deps.now() })[0], deps);
 }
@@ -1473,6 +1648,8 @@ function stampWaits(state, deps) {
   }
   const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
   if (meter && !meter.dueAt) meter.dueAt = due(meter.waitLeftMs);
+  const authority = authorityHalt(state);
+  if (authority && !authority.dueAt) authority.dueAt = due(authority.waitLeftMs ?? AUTHORITY_WAIT_MS);
 }
 
 // A stall is an alarm, not a touch: nothing waits for an answer and the build
@@ -1482,7 +1659,18 @@ function stampWaits(state, deps) {
 function alarm(state, wp, deps, why) {
   if (wp.stall) return;
   wp.stall = { at: deps.timestamp(), why };
+  // Configured, the stall the queued alarm reports outlives wp.stall, so emission can derive it again.
+  if (operatorAnchor(deps).configured) wp.alarmed = why;
   appendEvent(state, deps, { event: 'stalled', data: { wpId: wp.id, why } });
+  const out = alarmActs(state, wp, deps, why);
+  const queue = wp.queue ?? [];
+  // A pending action must remain at the head until its result is recorded.
+  // Polling it can enqueue alarms, but cannot displace or replay that work.
+  const at = state.pending?.wpId === wp.id ? Math.min(1, queue.length) : 0;
+  wp.queue = [...queue.slice(0, at), ...out, ...queue.slice(at)];
+}
+
+function alarmActs(state, wp, deps, why) {
   const text = `conduct ${state.slug}: ${wp.id} has stalled: ${why}. Nothing is asked of you; the run continues, and the alarm re-arms when ${wp.id} moves.`;
   const out = [];
   const notify = deps.env?.WORKIT_NOTIFY_CMD;
@@ -1494,11 +1682,7 @@ function alarm(state, wp, deps, why) {
       args: { event_type: 'note', source: 'cli', user_id: deps.env?.WORKIT_LEDGER_USER || 'conduct', payload: { content: text } },
       instruction: 'Call ledger_write with these args and record its raw result.' });
   }
-  const queue = wp.queue ?? [];
-  // A pending action must remain at the head until its result is recorded.
-  // Polling it can enqueue alarms, but cannot displace or replay that work.
-  const at = state.pending?.wpId === wp.id ? Math.min(1, queue.length) : 0;
-  wp.queue = [...queue.slice(0, at), ...out, ...queue.slice(at)];
+  return out;
 }
 
 // A non-zero exit is a failure unless it printed a verdict: JSON with no
@@ -1540,6 +1724,271 @@ function failStreak(state, wp, action, result, deps, stateBefore) {
 // A WP with work queued, or live, whose state and stage have not moved for
 // STALL_MS. A lane at work (a lane poll queued) is left to the lane deadline.
 export function observePending(state, deps) { watchStalls(state, deps); }
+
+// ---- what the build derives now (S1: content, never labels) ----
+
+// Whether an act merges, read from its argv: what it does, never what it is called.
+const mergesContent = (action) => Array.isArray(action?.command) && action.command[0] === 'gh' && action.command[1] === 'pr' && action.command[2] === 'merge';
+const repoArg = (command) => (command.includes('--repo') ? command[command.indexOf('--repo') + 1] : undefined);
+const filledAct = (action, wp) => (Array.isArray(action?.command) && wp
+  ? { ...action, command: action.command.map((arg) => (Object.hasOwn(FILL, arg) && FILL[arg](wp) != null ? String(FILL[arg](wp)) : arg)) } : action);
+const sameAct = (a, b, wp) => sameAction(filledAct(a, wp), filledAct(b, wp));
+// A path inside `root` once both are resolved, and never one naming `..`.
+const inside = (path, root) => {
+  if (typeof path !== 'string' || typeof root !== 'string' || path.split(/[\\/]/).includes('..')) return false;
+  const rel = relative(resolve(root), resolve(path));
+  return rel !== '' && !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
+};
+const SHA = /^[0-9a-f]{7,40}$/i;
+
+// The review steps a stored act's `land` names (round, scope, since, report,
+// all), each checked against the WP's state: then exactly what reviewActions
+// and reviewSteps queue for it, the lenses without the uncertainty context
+// (exit 3), and the recovery a refused claim queues.
+function reviewActs(state, wp, land) {
+  if (!land || typeof land !== 'object') return [];
+  const meta = { round: land.round, scope: land.scope, since: land.since ?? null, report: land.report ?? null, all: land.all === true };
+  if (!Number.isInteger(meta.round) || meta.round < 1 || meta.round > latestRound(wp) + 1) return [];
+  if (meta.report !== null && meta.report !== laneLayout(state, wp).reportPath) return [];
+  if (meta.since !== null && !/^[0-9a-f]{7,40}$/i.test(meta.since)) return [];
+  if (meta.scope !== (meta.since ? 'delta' : 'full')) return [];
+  const probe = reviewActions(state, { ...wp, reviewMode: null }, meta);
+  const steps = wp.reviewMode ? reviewSteps(state, wp, wp.reviewMode, meta) : [];
+  const strip = (a) => {
+    const at = a.part === 'lens' ? a.command.indexOf('--context-file') : -1;
+    return at < 0 ? [] : [{ ...a, command: [...a.command.slice(0, at), ...a.command.slice(at + 2)] }];
+  };
+  const recover = steps.filter((a) => a.part === 'claim').map((a) => recoverAction(state, wp, a.land));
+  return [...probe, ...steps, ...steps.flatMap(strip), ...recover];
+}
+
+// The council round recorded when it was queued (wp.councilScope: its round,
+// scope, since, and the changed paths the diff read): its review, synthesis
+// and challenge as t2Actions queues them, and a retry only for the seats the
+// round still lacks. Of the stored act, only the retry number is read. A
+// recorded path that is absolute or resolves outside the lane worktree, an
+// artifact outside the worktree and the WP's council dir, or a delta since
+// that is not a commit sha, derives nothing (council r4, M2/M3).
+function councilActs(state, wp, action) {
+  const land = action.land;
+  const scope = wp.councilScope;
+  const worktree = wp.lane?.worktree;
+  if (!land || typeof land !== 'object' || !scope || typeof scope !== 'object' || !Number.isInteger(scope.round) || !Array.isArray(scope.paths)) return [];
+  if (scope.scope === 'delta' ? !SHA.test(scope.since ?? '') : scope.scope !== 'full' || scope.since !== null) return [];
+  if (!scope.paths.every((path) => typeof path === 'string' && !isAbsolute(path) && inside(join(worktree, path), worktree))) return [];
+  const acts = t2Actions(state, wp, { round: scope.round, changedPaths: scope.paths.map((path) => join(worktree, path)), scope: scope.scope, since: scope.since });
+  const review = acts.find((a) => a.part === 'review');
+  const own = join(state.runDir, 'council', wp.id.toLowerCase());
+  if (!(review?.args.artifact_paths ?? []).every((path) => inside(path, worktree) || inside(path, own))) return [];
+  const missing = wp.councilStage?.missing ?? [];
+  const models = action.args?.models;
+  if (review && Number.isInteger(land.retry) && land.retry >= 1 && land.retry <= 2 && Array.isArray(models) && models.length === missing.length && models.every((seat, i) => seat === missing[i])) {
+    acts.push({ ...review, args: { ...review.args, models: [...missing] }, land: { ...review.land, retry: land.retry } });
+  }
+  return acts;
+}
+
+// The replies an adjudication queues, from the rows the latest review holds:
+// the lane's (recordAdjudication over the rows the act names) and the
+// conductor's guard replies (one per verdict it can rule).
+function replyActs(state, wp, action) {
+  const rows = (wp.reviews ?? []).at(-1)?.verdicts ?? [];
+  const named = [...(action.files ?? []).map((file) => file?.comment), ...(Array.isArray(action.command) ? [action.command[action.command.indexOf('--comment-id') + 1]] : [])];
+  const own = rows.filter((row) => named.includes(row.comment));
+  const guards = rows.filter((row) => row.verdict === 'conductor' && /^\d+$/.test(row.comment));
+  return [...(own.length ? recordAdjudication(state, wp, own).actions : []), ...guards.flatMap((row) => GUARD_VERDICTS.flatMap((ruled) => guardReply(state, wp, row, ruled)))];
+}
+
+// A ruling the act numbers (no higher than the WP's ruling sequence) on one
+// open question's asks, or on a guard row of the latest review.
+function rulingActs(state, wp, action) {
+  const n = action.ruling?.n;
+  if (!Number.isInteger(n) || n < 1 || n > (wp.rulingSeq ?? 0)) return [];
+  const open = (wp.asks ?? []).filter((ask) => !askRuled(wp, ask));
+  const questions = [...new Set(open.map((ask) => ask.question ?? null))];
+  const rows = ((wp.reviews ?? []).at(-1)?.verdicts ?? []).filter((row) => row.verdict === 'conductor');
+  return [...questions.map((question) => rulingAct(state, wp, { asks: open.filter((ask) => (ask.question ?? null) === question) }, n)), ...rows.map((row) => rulingAct(state, wp, { row }, n))];
+}
+
+// The stage an act that merges, deletes, pushes or removes is queued at (S1,
+// council r4): membership in the union of a WP's producers is not enough.
+// - the rebase (its push) and its abort: the WP at its gate, the lock not another's;
+// - the squash: that, with the gate recorded passed at the PR's current head
+//   and the merge stage reached (expand 'merge'): every review the stage
+//   machine owes is behind the gate, and mergeActions checks the rest;
+// - the lane's worktree removal: the WP merged and out of the live states;
+//   its branch deletes, only once that removal removed the worktree.
+const atGate = (state, wp) => wp.state === 'gate' && mergeLockFor(state, wp) !== 'other';
+const squashStage = (state, wp) => atGate(state, wp) && wp.gate?.ok === true && Boolean(wp.gate.head) && wp.gate.head === wp.pr?.head && [null, undefined, 'merge'].includes(wp.stage);
+const CLEANUP_PARTS = new Set(['remove', 'branch-holder', 'branch', 'branch-remote']);
+const cleanupStage = (wp, act) => !(act.step === 'stop' && CLEANUP_PARTS.has(act.part))
+  || (Boolean(wp.merge?.sha) && !LIVE_STATES.includes(wp.state) && (act.part === 'remove' || wp.lane?.removed === true));
+
+// Every act `wp`'s queue can hold now, from the run's state and `authority`.
+// A producer whose inputs are not recorded yet derives nothing.
+function wpActs(state, wp, deps, authority, action) {
+  const acts = [];
+  const add = (produce) => {
+    try {
+      acts.push(...[].concat(produce() ?? []));
+    } catch (error) {
+      if (!(error instanceof ConductError) && !(error instanceof TypeError)) throw error;
+    }
+  };
+  const gate = { ...shell('gate', 'gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', wp.id]), seam: STEP_SEAM.gate, wpId: wp.id };
+  add(() => backendOf(state, wp, deps).acts(wp).filter((act) => cleanupStage(wp, act)));
+  add(() => flipActs(state, wp));
+  add(() => briefAction(state, wp, deps));
+  if (wp.amendment) add(() => amendmentBrief(state, wp, wp.amendment));
+  add(() => gateActs(state, wp, deps));
+  add(() => prDiff(state));
+  add(() => (SHA.test(deltaBaseline(wp) ?? '') ? amendDiff(wp, deltaBaseline(wp)) : []));
+  add(() => deltaCountActs(state, wp));
+  add(() => reviewActs(state, wp, action.land));
+  add(() => councilActs(state, wp, action));
+  add(() => metaAction(state, wp));
+  add(() => replyActs(state, wp, action));
+  add(() => (councilRecord(state, wp, [{ comment: 'C1-1' }])?.action ?? []));
+  add(() => resolveThreadActions(state, wp, wp.replyIds ?? []));
+  add(() => Object.values(wp.threadIds ?? {}).map(resolveAction));
+  if (atGate(state, wp)) add(() => rebaseActions(state, wp));
+  const conflict = action.land?.conflict;
+  if (atGate(state, wp) && typeof conflict === 'string' && conflict.startsWith(`rebase onto origin/${state.intent.repo.defaultBranch ?? 'main'} conflicted: `)) add(() => rebaseAbort(wp, conflict));
+  if (squashStage(state, wp)) add(() => mergeActions(state, wp, wp.gate.head, authority));
+  add(() => mergeTail(state, wp));
+  if (wp.gate?.inspect) add(() => inspectAction(state, wp, wp.gate.inspect, gate));
+  if (wp.gate?.head && wp.visualRules?.length) add(() => visualAction(state, wp, wp.gate.head, gate));
+  if (wp.merge?.sha && quotableSpend(wp.mergedSpend)) add(() => mergedAfter(state, wp, deps, wp.mergedSpend));
+  for (const why of new Set([wp.alarmed, wp.stall?.why].filter((text) => typeof text === 'string'))) add(() => alarmActs(state, wp, deps, why));
+  if (wp.heldOutside?.length) add(() => ratifyAction(state, wp));
+  if (wp.heldUncited?.length) add(() => citeAction(state, wp));
+  add(() => rulingActs(state, wp, action));
+  return acts;
+}
+
+// The acts no WP's queue holds: the lane contract, a re-plan's steps, a spend
+// reading for each purpose, each open build touch's read and hand-back.
+function runActs(state, deps) {
+  const acts = [];
+  const add = (produce) => {
+    try {
+      acts.push(...[].concat(produce() ?? []));
+    } catch (error) {
+      if (!(error instanceof ConductError) && !(error instanceof TypeError)) throw error;
+    }
+  };
+  if (!state.build?.contract) add(() => contractAction(state, deps));
+  add(() => replanApply(state));
+  if (spineOn(state)) add(() => replanReceipt(state));
+  if (state.adapters?.spend?.on && deps.env?.WORKIT_SPEND_CMD) for (const purpose of ['dispatch', 'meter', ...state.wps.map((wp) => wp.id)]) add(() => spendAction(state, deps, purpose));
+  for (const touch of openBuildTouches(state)) {
+    add(() => touchAction(state, touch));
+    add(() => handBackAction(state, touch));
+  }
+  return acts;
+}
+
+// What the build emits of a stored act (lib/derive.mjs admitAct): the act,
+// when it equals one the build derives now, whole; a yield wait with the text
+// the run's waits give it now. Otherwise a refusal, and `authorityHeld` when
+// the act is the squash the gate derives but the signed record is refused
+// (refuseStored then waits instead of holding the WP).
+export function derive(state, deps, action) {
+  const authority = verifiedAuthority(state, deps);
+  const wp = action.wpId === undefined ? null : state.wps.find((candidate) => candidate.id === action.wpId);
+  const what = `${action.step}/${action.part ?? action.kind}`;
+  if (action.wpId !== undefined && !wp) return { refusal: `${what}: the stored act names ${action.wpId}, which is no WP of this run`, final: true };
+  // The build emits a wait only as a yield (chooseAction, announce): its text
+  // is what the run waits on now. A queued wait is never emitted.
+  if (action.kind === 'wait') {
+    const wait = waitVerdict(action);
+    if (!wait.action || action.yield !== true) return { refusal: `${action.step}/${action.part ?? 'wait'}: ${wait.refusal ?? 'a wait that does not yield is never one the build emits'}`, final: true };
+    return { action: { ...action, instruction: yieldText(state, deps, action.waitMs) } };
+  }
+  const copy = structuredClone(state);
+  const twin = wp ? copy.wps.find((candidate) => candidate.id === wp.id) : null;
+  const acts = twin ? wpActs(copy, twin, dryDeps(deps), authority, action) : runActs(copy, dryDeps(deps));
+  if (acts.some((act) => sameAct(act, action, wp))) return { action };
+  const argv = Array.isArray(action.command) ? `: ${action.command.join(' ')}` : '';
+  if (wp && mergesContent(action)) {
+    // The squash the gate derives under a grant that holds: only the authority is refused.
+    const granted = { ...authority, merge: true, reason: null, grant: null };
+    const squash = squashStage(copy, twin) ? mergeActions(copy, twin, wp.gate.head, granted)[0] : undefined;
+    if (squash && sameAct(squash, action, wp)) return { refusal: mergeRefusal(state, authority) ?? 'no merge authority', authorityHeld: Boolean(authority.reason) };
+    const merge = mergeRefusal(state, authority, repoArg(action.command));
+    if (merge) return { refusal: `${what}: ${merge}${argv}` };
+  }
+  return { refusal: `${what}: the stored ${action.kind ?? 'unknown'} act is not one the build derives now${argv}` };
+}
+
+// A stored act derive refused. `pending`: it was emitted and may have run.
+// - the squash, only its authority refused: it waits on the hold with its
+//   queue kept (S4); pending, the merge-commit lookup decides first;
+// - any other act that merges, pending: the lookup decides, and an unmerged
+//   PR holds the WP (recordStep);
+// - any other act of a WP: the WP holds. A run-level act is only dropped.
+export function refuseStored(state, deps, action, { refusal, authorityHeld = false }, { pending = false } = {}) {
+  state.build ??= { contract: null, halts: [] };
+  const wp = state.wps.find((candidate) => candidate.id === action.wpId);
+  if (!wp) return;
+  dropReplay(state, wp);
+  if (authorityHeld && !(pending && wp.pr?.number)) {
+    const authority = verifiedAuthority(state, deps);
+    if (authority.reason) authorityHold(state, deps, authority);
+    return;
+  }
+  if (pending && wp.pr?.number && mergesContent(action)) {
+    Object.assign(wp, { squashRefused: authorityHeld ? { reason: refusal, authority: true } : refusal, queue: mergeTail(state, wp) });
+    return;
+  }
+  holdWp(state, wp, deps, refusal);
+}
+
+// A pending act its derivation admitted, checked again for what it spends
+// (conduct.mjs emit, after admitAct). Configured, a paid act is dropped when
+// authority is refused, or when it is not its WP's queue head; metered, it is
+// dropped for a fresh spend reading. A dropped paid act keeps its id for that
+// very act (replayed), so a driver holding its result can still record it.
+// False when the pending act was dropped.
+export function gatePending(state, deps) {
+  const action = state.pending;
+  if (!paid(action)) return true;
+  const wp = state.wps.find((candidate) => candidate.id === action.wpId);
+  const authority = verifiedAuthority(state, deps);
+  if (authority.proofMode === 'unconfigured') return true;
+  if (!wp || !sameAction(action, wp.queue?.[0])) return false;
+  if (!authority.reason && !state.adapters?.spend?.on) return true;
+  state.build.replay = { id: action.id, wpId: wp.id, act: Object.fromEntries(Object.entries(action).filter(([key]) => !['id', 'phase'].includes(key))) };
+  return false;
+}
+
+// The whole pending check (configured): admitAct, then gatePending; a
+// refusal is held as refuseStored holds it. Unconfigured, every pending act
+// is emitted again as today (M8). False when the pending act was dropped.
+export function checkPending(state, deps) {
+  if (verifiedAuthority(state, deps).proofMode === 'unconfigured') return true;
+  const verdict = admitAct(state, deps, { derive }, state.pending);
+  if (!verdict.action) {
+    refuseStored(state, deps, state.pending, verdict, { pending: true });
+    return false;
+  }
+  return gatePending(state, deps);
+}
+
+// The paid act gatePending dropped, emitted again under the id it was first
+// emitted with: only when it is that act, whole. Any other act gets its own.
+function replayed(state, wp, action) {
+  const replay = state.build.replay;
+  if (replay?.wpId !== wp.id) return action;
+  state.build.replay = null;
+  const same = typeof replay.id === 'string' && replay.id !== state.lastRecorded && sameAction(replay.act, action);
+  return same ? { ...action, id: replay.id } : action;
+}
+
+// A replay belongs to the queue it was dropped from: rebuilt, it is gone.
+function dropReplay(state, wp) {
+  if (state.build?.replay?.wpId === wp.id) state.build.replay = null;
+}
 function watchStalls(state, deps) {
   const now = deps.now();
   for (const wp of state.wps) {
@@ -1569,13 +2018,16 @@ function watchStalls(state, deps) {
   }
 }
 
-// Everything that is waiting, with what is left of its wait.
+// Everything that is waiting, with what is left of its wait. Configured, a
+// note never quotes text stored in state.json (a queued wait's instruction, a
+// halt's reason): it says what waits, from the run's own derivation.
 function yielders(state, deps) {
   const now = deps.now();
   const out = [];
+  const configured = operatorAnchor(deps).configured;
   for (const wp of state.wps) {
     const head = wp.queue?.[0];
-    if (head?.kind === 'wait') out.push({ ms: leftMs(head.remainingMs ?? head.waitMs ?? 0, head.dueAt, now), wp, step: head.step, note: `${wp.id}: ${head.instruction}` });
+    if (head?.kind === 'wait') out.push({ ms: leftMs(head.remainingMs ?? head.waitMs ?? 0, head.dueAt, now), wp, step: head.step, note: `${wp.id}: ${configured ? `its ${head.step} wait` : head.instruction}` });
     const until = wp.state === 'pending' && wp.notBefore ? Date.parse(wp.notBefore) - now : 0;
     if (until > 0) out.push({ ms: until, step: 'admit', note: `${wp.id} may be dispatched again at ${wp.notBefore}` });
   }
@@ -1588,8 +2040,26 @@ function yielders(state, deps) {
     }
   }
   const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
-  if (meter && !budgetEnded(state)) out.push({ ms: meterLeft(meter, now), meter, step: 'spend', note: `the spend meter is re-read: ${meter.reason}` });
+  if (meter && !budgetEnded(state)) out.push({ ms: meterLeft(meter, now), meter, step: 'spend', note: configured ? 'the spend meter is re-read' : `the spend meter is re-read: ${meter.reason}` });
+  const authority = authorityHalt(state);
+  if (authority) {
+    const current = configured ? verifiedAuthority(state, deps) : null;
+    const held = !configured ? authority.reason : current.reason ? holdText(current) : 'the signed record verifies again; the hold clears at the next pass';
+    out.push({ ms: leftMs(authority.waitLeftMs ?? AUTHORITY_WAIT_MS, authority.dueAt, now), authority, step: 'spend',
+      note: `paid work, dispatch and merges hold, ${held}; tell the operator, and the hold is checked again when this wait is over` });
+  }
   return out;
+}
+
+function yieldWait(waiting) {
+  const least = waiting.reduce((a, b) => (b.ms < a.ms ? b : a));
+  return { kind: 'wait', step: least.step, part: 'yield', yield: true, waitMs: least.ms, instruction: `${canonicalWaitText(least.ms)} Waiting: ${waiting.map((y) => y.note).join('; ')}` };
+}
+
+// The text a stored yield is emitted with: its wait, and what the run waits on now.
+function yieldText(state, deps, waitMs) {
+  const waiting = yielders(state, deps);
+  return waiting.length ? `${canonicalWaitText(waitMs)} Waiting: ${waiting.map((y) => y.note).join('; ')}` : canonicalWaitText(waitMs);
 }
 
 function release(y) {
@@ -1600,6 +2070,8 @@ function release(y) {
     y.touch.waiting = false;
   }
   if (y.meter) Object.assign(y.meter, { waitLeftMs: 0, dueAt: null });
+  // The next pass checks the authority again (workAction); still refused, it waits another round.
+  if (y.authority) Object.assign(y.authority, { waitLeftMs: AUTHORITY_WAIT_MS, dueAt: null });
 }
 
 // A core touch is announced before any other work, once per opening.
@@ -1620,7 +2092,9 @@ function settled(state, deps) {
   const metering = (state.build.halts ?? []).some((entry) => entry.kind === 'meter') && !budgetEnded(state);
   // A re-plan's touch halts the run until it is answered: the build waits on it.
   const replanning = openBuildTouches(state).some((touch) => touch.wpId || touch.build === 'replan');
-  return !busy && !metering && !replanning && !dispatchable(state, { now }).length;
+  // So does an authority hold while a WP is still to dispatch.
+  const authorityHeld = Boolean(authorityHalt(state)) && state.wps.some((wp) => wp.state === 'pending');
+  return !busy && !metering && !replanning && !authorityHeld && !dispatchable(state, { now }).length;
 }
 
 export function next(state, deps) {
@@ -1666,11 +2140,7 @@ function chooseAction(state, deps) {
     const touchYield = waiting.find((y) => y.touch);
     const operatorOnly = (y) => y.touch || (y.meter && !deps.env?.WORKIT_SPEND_CMD);
     if (spineOn(state) && touchYield && waiting.every(operatorOnly)) return handBackAction(state, touchYield.touch);
-    if (waiting.length) {
-      const least = waiting.reduce((a, b) => (b.ms < a.ms ? b : a));
-      return { kind: 'wait', step: least.step, part: 'yield', yield: true, waitMs: least.ms,
-        instruction: `Wait ${least.ms / 1000} s, then record {}. Waiting: ${waiting.map((y) => y.note).join('; ')}` };
-    }
+    if (waiting.length) return yieldWait(waiting);
     break;
   }
   if (!settled(state, deps)) {
@@ -1700,6 +2170,8 @@ function recordYield(state, action) {
   }
   const meter = (state.build.halts ?? []).find((entry) => entry.kind === 'meter');
   if (meter) meter.waitLeftMs = Math.max(0, meter.waitLeftMs - action.waitMs);
+  const authority = authorityHalt(state);
+  if (authority) authority.waitLeftMs = Math.max(0, (authority.waitLeftMs ?? AUTHORITY_WAIT_MS) - action.waitMs);
 }
 
 // Only a non-empty, finite, non-negative number is a spend; anything else
@@ -1707,7 +2179,12 @@ function recordYield(state, action) {
 function recordSpend(state, action, result, deps) {
   const text = String(result.stdout ?? '').trim();
   const usd = result.code === 0 && /^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text) ? Number(text) : NaN;
-  const budget = state.authority?.budgetUsd ?? 0;
+  const authority = verifiedAuthority(state, deps);
+  if (authority.reason) {
+    authorityHold(state, deps, authority);
+    return undefined;
+  }
+  const budget = authority.budgetUsd;
   if (!Number.isFinite(usd)) return meterHalt(state, deps, `The spend command's output is unreadable (exit ${result.code}: ${JSON.stringify(text.slice(0, 80))}${result.stderr ? `, ${lines(result.stderr)[0]}` : ''}), so spend is unknown (metered by the spend adapter)`);
   // Only a successful read clears the meter halt; it is kept for the audit.
   state.build.lastSpend = { usd, at: deps.timestamp() };
@@ -1716,7 +2193,8 @@ function recordSpend(state, action, result, deps) {
   const purpose = action.budgetFor === 'meter' ? 'dispatch' : action.budgetFor ?? 'dispatch';
   const spend = committed(state, deps, purpose, usd);
   if (spend.usd >= budget) return haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (metered by the spend adapter)`, 'budget', spend.usd);
-  state.build.spendOkFor = action.budgetFor === 'meter' ? 'dispatch' : action.budgetFor ?? 'dispatch';
+  if (authority.proofMode === 'unconfigured') state.build.spendOkFor = purpose;
+  else freshSpend.set(state, { purpose, usd });
   return undefined;
 }
 
@@ -1863,6 +2341,7 @@ function recordOwn(state, wp, action, result, deps) {
           if (!changed.some((path) => !path.toLowerCase().endsWith('.md') || isTestPath(path))) return (wp.stage = 'land');
         }
         setState(state, wp, 'review', null, deps);
+        wp.councilScope = { round: latestRound(wp) + 1, scope: 'delta', since, paths: changed };
         wp.queue = emitting(state, wp, deps, () => withMeta(state, wp, deltaReviewActions(state, wp, since, { report, changedPaths: absolute })));
         return (wp.stage = wp.state === 'blocked' ? null : 'reviewed');
       }
@@ -1878,6 +2357,7 @@ function recordOwn(state, wp, action, result, deps) {
       if (effectiveTier(wp) === 'T0') return (wp.stage = 'land');
       setState(state, wp, 'review', null, deps);
       const round = latestRound(wp) + 1;
+      wp.councilScope = { round, scope: 'full', since: null, paths: changed };
       wp.queue = emitting(state, wp, deps, () => (wp.tier === 'T2' ? withMeta(state, wp, t2Actions(state, wp, { round, changedPaths: absolute, report })) : reviewActions(state, wp, { round, report })));
       return (wp.stage = wp.state === 'blocked' ? null : 'reviewed');
     }
@@ -1939,7 +2419,7 @@ function noCi(state, wp, action, out, deps) {
   if (out.outcome !== 'amend' || action.step !== 'gate' || action.part !== 'gate') return out;
   const gate = out.patch?.gate;
   if (!gate?.failures?.includes('no CI at head') || (gate.causes ?? []).some((cause) => cause !== 'ci')) return out;
-  const hold = state.authority?.merge !== true;
+  const hold = verifiedAuthority(state, deps).merge !== true;
   const stop = (reason) => ({ ...out, outcome: hold ? 'held' : 'block', reason: hold ? `held at PR: ${reason}` : reason, patch: { ...out.patch, noCi: null } });
   const count = state.intent.ciWorkflows;
   if (count === 0) return stop('no CI at head: the repo has no CI workflow that can gate a PR');
@@ -2063,6 +2543,23 @@ function recordStep(state, wp, action, result, deps) {
     if (liveness(state, wp, action, result, deps) === 'polling') return undefined;
     return route(state, wp, action, recordLaneStep(state, wp, action, result, recorderDeps), deps);
   }
-  if (LAND_STEPS.has(action.step)) return route(state, wp, action, noCi(state, wp, action, recordLandStep(state, wp, action, result, recorderDeps), deps), deps);
+  if (LAND_STEPS.has(action.step)) {
+    const out = recordLandStep(state, wp, action, result, recorderDeps, verifiedAuthority(state, deps));
+    // The lookup after a squash refused on resume (refuseStored): not merged,
+    // the WP holds; or, when only its authority was refused, it waits at its
+    // merge stage on the hold, and a restored record derives the squash again (S4).
+    if (wp.squashRefused && action.part === 'merge-commit') {
+      const refusal = wp.squashRefused;
+      wp.squashRefused = null;
+      if (out.outcome !== 'continue' && refusal?.authority) {
+        Object.assign(wp, { queue: [], stage: 'merge' });
+        const authority = verifiedAuthority(state, deps);
+        if (authority.reason) authorityHold(state, deps, authority);
+        return undefined;
+      }
+      if (out.outcome !== 'continue') return holdWp(state, wp, deps, typeof refusal === 'string' ? refusal : refusal.reason);
+    }
+    return route(state, wp, action, noCi(state, wp, action, out, deps), deps);
+  }
   throw new ConductError(2, `the build has no route for step ${action.step}`);
 }

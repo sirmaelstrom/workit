@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { STEP_SEAM, TOUCH_SEAM, loadState, readEvents } from './state.mjs';
 import { firstLine } from './adapters.mjs';
 import { analysisLine as repoConfigLine } from './repo-config.mjs';
+import { authorityDisplay } from './authority.mjs';
 
 const VERDICT_TEXT = { exercised: 'exercised', vacuous: 'vacuous', 'not-exercised': 'not exercised', 'no-surface': 'no runtime surface', missing: 'missing' };
 const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
@@ -14,8 +15,13 @@ const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
 // section) and null are not seam rows.
 export const SEAM_ROWS = Object.freeze([...new Set(Object.values(STEP_SEAM))].filter((seam) => seam && seam !== TOUCH_SEAM)
   .flatMap((seam) => (seam === 'spec' ? SPEC_ROWS : [seam])).concat('runtime-exercise'));
-// A phase hand-over and a skipped step are not a seam crossed.
-const NOT_EVIDENCE = new Set(['phase', 'not-exercised']);
+// A phase hand-over and a skipped step are not a seam crossed, nor is a
+// refusal: a held or dropped act, a held wait, or a release that ended held.
+// Seam evidence shows behaviour that was exercised, never that it succeeded:
+// a release that ran its setup and bump and then ended held still counts
+// those acts under its seam row, and its outcome is the queue-accounting line.
+const NOT_EVIDENCE = new Set(['phase', 'not-exercised', 'dropped', 'spec-held', 'release-held']);
+const refusal = (e) => NOT_EVIDENCE.has(e.event) || e.data?.held === true || (e.event === 'release' && /^release held: /.test(e.data?.reason ?? ''));
 
 const usd = (n) => `$${Number(n).toFixed(2)}`;
 
@@ -104,7 +110,7 @@ function runtimeEvidence(state, events) {
 function seamCoverage(state, events) {
   return SEAM_ROWS.flatMap((row) => {
     const seam = SPEC_ROWS.includes(row) ? 'spec' : row;
-    const evidence = row === 'runtime-exercise' ? runtimeEvidence(state, events) : events.filter((e) => e.seam === seam && !NOT_EVIDENCE.has(e.event));
+    const evidence = row === 'runtime-exercise' ? runtimeEvidence(state, events) : events.filter((e) => e.seam === seam && !refusal(e));
     const cite = [...new Set(evidence.map((e) => e.actionId ?? e.event))].join(', ');
     const status = !evidence.length ? 'not exercised' : evidence.some((e) => e.source === 'manual') ? 'by hand' : 'owned';
     const skipped = events.filter((e) => e.event === 'not-exercised' && e.seam === seam)
@@ -212,9 +218,11 @@ function postMergeThreads(state, exec) {
   return [`post-merge threads: ${rows.length ? `${rows.length} merged PR(s) need a read` : 'none open on any merged PR'}`, ...rows];
 }
 
-function preapproval(state) {
+function preapproval(state, deps) {
   const a = state.authority ?? {};
-  const out = [`- authority: merge ${a.merge ? 'yes' : 'no'}, release ${a.release ? 'yes' : 'no'}, budget ${usd(a.budgetUsd ?? 0)}, scope: ${a.scope}`];
+  // Display, never an act: beside a verified proof, the verified authority.
+  const shown = authorityDisplay(state, deps);
+  const out = [`- authority: merge ${shown.merge ? 'yes' : 'no'}, release ${shown.release ? 'yes' : 'no'}, budget ${usd(shown.budgetUsd)}, scope: ${shown.scope} ${shown.label}`];
   if (a.grant) out.push(`- grant: ${a.grant}; the operator's text, verbatim: ${JSON.stringify(a.notes ?? '')}`);
   out.push(repoConfigLine(state));
   const merges = mergedPrs(state);
@@ -264,7 +272,7 @@ export async function analyzeRun(runDir, deps) {
     ['Where the time went', timeWent(state, events)],
     ['Catches by watcher position', catches(state, events)],
     ['Escapes', escapes(state, deps.exec)],
-    ['Pre-approval audit', preapproval(state)],
+    ['Pre-approval audit', preapproval(state, deps)],
     ['Recommendations', ['_The conductor replaces this line with at most five recommendations._']],
   ];
   const text = [`# Run analysis: conduct ${state.slug}`, '', `Run dir: ${runDir}. Goal: ${state.intent.goal}`, '',

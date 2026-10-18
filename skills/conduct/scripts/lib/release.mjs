@@ -5,6 +5,7 @@
 import { join } from 'node:path';
 import { ConductError } from './state.mjs';
 import { validateRecipe } from './recipe.mjs';
+import { releaseRefusal } from './authority.mjs';
 
 const BUMP = { patch: 2, minor: 1, major: 0 };
 
@@ -20,8 +21,16 @@ function compareVersions(a, b) {
 }
 
 // A dot path whose numeric segments index arrays: `plugins.0.version`.
-function atPath(object, jsonPath) {
+export function atPath(object, jsonPath) {
   return jsonPath.split('.').reduce((value, key) => (value == null ? undefined : value[/^\d+$/.test(key) ? Number(key) : key]), object);
+}
+
+// The version a recipe's level bumps `from` to, or null when `from` is not a version.
+export function bumpVersion(from, level) {
+  const parts = parseVersion(from);
+  const at = BUMP[level];
+  if (!parts || at === undefined) return null;
+  return parts.map((n, i) => (i < at ? n : i === at ? n + 1 : 0)).join('.');
 }
 
 export function bumpPlan(recipe, { read, repoPath = null }) {
@@ -46,9 +55,7 @@ export function bumpPlan(recipe, { read, repoPath = null }) {
   if (bad) throw new ConductError(2, `${bad.file} ${bad.jsonPath} is not a version: ${bad.from}`);
   const versions = [...new Set(current.map((entry) => entry.from))];
   if (versions.length !== 1) throw new ConductError(2, `the bump files disagree: ${current.map((entry) => `${entry.file} ${entry.jsonPath}=${entry.from}`).join(', ')}`);
-  const parts = parseVersion(versions[0]);
-  const at = BUMP[recipe.level];
-  const to = parts.map((n, i) => (i < at ? n : i === at ? n + 1 : 0)).join('.');
+  const to = bumpVersion(versions[0], recipe.level);
   return { from: versions[0], to, edits: current.map((entry) => ({ ...entry, to })) };
 }
 
@@ -100,13 +107,16 @@ export function resolvePluginRoot({ installedPluginsPath, pluginKey = 'workit@wo
   return best?.installPath ?? null;
 }
 
-// A release runs only after a complete build, with a recipe and the authority.
-export function releaseEligible(state) {
+// A release runs only after a complete build, with a recipe and the
+// authority: the phase's verifiedAuthority, computed just before the act.
+export function releaseEligible(state, authority) {
+  if (!authority) throw new ConductError(2, 'authority not passed');
   const wps = state.wps ?? [];
   if (!state.intent?.release) return { ok: false, reason: 'no recipe' };
   if (wps.some((wp) => wp.state === 'held')) return { ok: false, reason: 'held' };
   if (wps.some((wp) => ['blocked', 'deferred', 'refuted', 'dropped'].includes(wp.state))) return { ok: false, reason: 'incomplete build' };
-  if (state.authority?.release !== true) return { ok: false, reason: 'no release authority' };
+  const refusal = releaseRefusal(state, authority);
+  if (refusal) return { ok: false, reason: refusal };
   if (wps.length === 0 || !wps.every((wp) => wp.state === 'merged')) return { ok: false, reason: 'incomplete build' };
   return { ok: true, reason: null };
 }

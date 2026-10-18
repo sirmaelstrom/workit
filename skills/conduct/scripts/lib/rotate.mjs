@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { ConductError, TERMINAL_PHASES, appendEvent } from './state.mjs';
 import { LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { conductScript, shellLiteral, spineAckFailure } from './touch.mjs';
+import { authorityDisplay } from './authority.mjs';
 
 export const SESSION_LOG = 'session-chain.jsonl';
 
@@ -69,7 +70,7 @@ export function rotate(state, { why, model = null, effort = null, name = null },
     callerSession: null, retire: null, receipt: null, action: null, custodyAt: null,
   };
   (state.rotations ??= []).push(rotation);
-  deps.write(rotation.handoff, handoffText(state, rotation));
+  deps.write(rotation.handoff, handoffText(state, rotation, deps));
   const chain = pane ? ['node', sessionScript(state), 'chain', '--handoff', rotation.handoff, '--model', model, '--effort', effort,
     '--name', rotation.successor.name, '--log', sessionLog(state)] : null;
   state.seq += 1;
@@ -101,8 +102,11 @@ function wpLine(wp) {
 }
 
 // The successor's brief, from state alone: what is live and what to run first.
-export function handoffText(state, rotation) {
+// `deps` (optional) carries readAnchor, so the authority line can print the
+// verified authority beside a verified proof.
+export function handoffText(state, rotation, deps = {}) {
   const intent = state.intent ?? {};
+  const shown = authorityDisplay(state, deps);
   const script = conductScript(state);
   const anchor = state.adapters?.spine?.on && intent.anchor ? intent.anchor : null;
   const on = Object.entries(state.adapters ?? {}).filter(([, adapter]) => adapter?.on).map(([name]) => name);
@@ -136,7 +140,7 @@ export function handoffText(state, rotation) {
     `- Goal: ${line(intent.goal).slice(0, 200)} (in full: \`${join(state.runDir, 'goal.md')}\`)`,
     `- Repo: \`${intent.repo?.path ?? ''}\` (${intent.repo?.remote ?? 'no remote'}, default branch ${intent.repo?.defaultBranch ?? 'unknown'})`,
     `- Phase: ${state.phase}; anchor: ${anchor ?? 'none'}; adapters on: ${on.join(', ') || 'none'}`,
-    `- Authority: merge ${Boolean(state.authority?.merge)}, release ${Boolean(state.authority?.release)}, budget ${money(state.authority?.budgetUsd ?? 0)} (${state.authority?.metered ? 'metered by the spend adapter' : 'unmetered'}); ${spend}`,
+    `- Authority: merge ${shown.merge}, release ${shown.release}, budget ${money(shown.budgetUsd)} (${state.authority?.metered ? 'metered by the spend adapter' : 'unmetered'}); ${spend} ${shown.label}`,
     `- Approved scope (binding; it can be narrower than the goal): ${line(state.authority?.scope ?? intent.goal)}${typeof state.authority?.grant === 'string' ? ` (grant \`${join(state.runDir, state.authority.grant)}\`)` : ''}${state.authority?.notes ? `; operator notes: ${line(state.authority.notes)}` : ''}`,
     '',
     '## Pending action',
@@ -208,6 +212,16 @@ function receiptAction(state, rotation) {
       stoppedAt: `custody of conduct ${state.slug} taken by r${rotation.to}; the run resumes at ${state.pending?.id ? `its pending action ${state.pending.id}` : 'its next action'}`,
     },
   };
+}
+
+// Every custody step the rotation can emit now: a stored rotation.action is
+// emitted again only as one of these, whole (conduct.mjs emit).
+export function custodyActs(state, rotation) {
+  const acts = [];
+  if (rotation.caller?.pane && rotation.callerSession) acts.push(retireAction(state, rotation, 'close'), retireAction(state, rotation, 'exit+close'));
+  acts.push(confirmAction(state, rotation));
+  if (state.adapters?.spine?.on && state.intent?.anchor) acts.push(receiptAction(state, rotation));
+  return acts;
 }
 
 // The next custody step's spec, or null once custody is taken (or the rotation

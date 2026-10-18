@@ -180,8 +180,32 @@ export function laneBackend(state, deps, backend) {
   // What an exec lane left running in its worktree (a runtime exercise's dev
   // server) does not end with the agent; herdr's `lane.mjs stop` reaps its own.
   const execReap = (wp) => [shellAction('stop', { part: 'reap', instruction: 'Kill what the lane left running in its worktree.', command: conduct('reap', wp) })];
+  // Every act this backend can queue for a WP, each variant whatever the
+  // lane's state reads now: the build's emission compares a stored lane act
+  // with this list (S1). A step whose inputs are not recorded derives nothing.
+  const actsOf = (self, wp, variants) => variants.flatMap((produce) => {
+    try {
+      return produce(self);
+    } catch (error) {
+      if (!(error instanceof ConductError) && !(error instanceof TypeError)) throw error;
+      return [];
+    }
+  });
+  const answers = (wp) => (state.touches ?? []).filter((touch) => touch.wpId === wp.id && touch.answer).map((touch) => touch.answer);
+  const deletes = (wp) => [...new Set([wp.gate?.head, wp.merge?.sha, wp.pr?.head].filter(Boolean))].flatMap((head) => branchDeletes(state, wp, head));
   if (backend === 'herdr') {
     return {
+      acts(wp) {
+        const running = { ...wp, lane: { ...wp.lane, exitedAt: null } };
+        const fallback = () => [shellAction('fallback', {
+          instruction: 'Hand the lane to claude.',
+          command: ['node', join(pluginRoot, 'scripts', 'lane.mjs'), 'fallback', laneLayout(state, wp).name, '--to', 'claude',
+            '--model', LANE_MODELS.claude.opus, '--reasoning', 'high', '--log', laneLayout(state, wp).runnerLog],
+        })];
+        return actsOf(this, wp, [(b) => b.admit(wp), (b) => b.create(wp), (b) => b.start(wp), (b) => b.prompt(wp), (b) => b.prompt(wp, { amendment: true }),
+          (b) => b.prompt(wp, { amendment: true, resend: true }), ...answers(wp).map((answer) => (b) => b.prompt(wp, { amendment: true, answer })),
+          (b) => b.wait(wp), (b) => b.check(wp), (b) => b.stop(running), (b) => b.remove(wp), () => deletes(wp), fallback]);
+      },
       name: 'herdr',
       admit: () => [admitAction()],
       create: (wp) => {
@@ -240,6 +264,11 @@ export function laneBackend(state, deps, backend) {
     };
   }
   return {
+    acts(wp) {
+      const running = { ...wp, lane: { ...wp.lane, exitedAt: null } };
+      return actsOf(this, wp, [() => [admitAction(['--require-reading'])], (b) => b.create(wp), (b) => b.start(wp), (b) => b.prompt(wp, { amendment: true }),
+        (b) => b.wait(wp), (b) => b.check(wp), (b) => b.stop(running), (b) => b.reap(wp), (b) => b.kill(wp), (b) => b.remove(wp), () => deletes(wp)]);
+    },
     name: 'exec',
     // A 3rd or 4th live lane is admitted on measured free commit memory: room is
     // the gate's whole point, so a host that cannot measure it does not get one.

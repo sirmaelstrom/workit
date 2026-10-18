@@ -21,8 +21,11 @@ import { runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
 import { acceptAnswer, correlation } from '../touch.mjs';
+import { admitAct } from '../derive.mjs';
 import { runConduct } from '../../conduct.mjs';
-import { testDeps } from '../../test-deps.mjs';
+import { testDeps, testAnchor, testGrant, grantConsequence, raiseConsequence, signedTouch } from '../../test-deps.mjs';
+import { signAnswer } from '../../../../_shared/operator-proof/test-signer.mjs';
+import { OperatorProofError } from '../../../../_shared/operator-proof/operator-proof.mjs';
 
 // The section a lane PR body carries (lane contract § Finish; fca05d92).
 const MERGE_DANGER = '## Merge danger\n\nDoor: two-way\nBlast radius: the demo WP\n';
@@ -317,7 +320,9 @@ async function perform(h, action) {
   }
 }
 
-// Emit as conduct.mjs does: stamp `<seq>-<step>` and the seam, keep pending.
+// Emit as conduct.mjs does: configured, a stored act passes the one choke
+// (admitAct with build's derive) before it is emitted; stamp `<seq>-<step>`
+// and the seam, keep pending.
 async function step(h) {
   if (h.disk) {
     const result = await runConduct(['next', '--run', h.runDir], testDeps(h.overrides()));
@@ -325,11 +330,33 @@ async function step(h) {
     const { action } = JSON.parse(result.stdout);
     return action.kind === 'done' ? null : action;
   }
-  if (!h.state.pending) {
-    const spec = await build.next(h.state, h.deps);
+  const configured = h.deps.readAnchor().configured === true;
+  if (h.state.pending && configured) {
+    const verdict = admitAct(h.state, h.deps, build, h.state.pending);
+    if (verdict.action) {
+      h.state.pending = verdict.action;
+      if (build.gatePending(h.state, h.deps)) return h.state.pending;
+    }
+    const stored = h.state.pending;
+    h.state.pending = null;
+    if (!verdict.action) build.refuseStored(h.state, h.deps, stored, verdict, { pending: true });
+    saveState(h.state, h.deps);
+  }
+  for (let refused = 0; !h.state.pending;) {
+    let spec = await build.next(h.state, h.deps);
     if (!spec) {
       saveState(h.state, h.deps);
       return null;
+    }
+    if (configured) {
+      const verdict = admitAct(h.state, h.deps, build, spec);
+      if (!verdict.action) {
+        build.refuseStored(h.state, h.deps, spec, verdict, { pending: false });
+        refused += 1;
+        assert.ok(refused <= 8, `the build keeps emitting acts it does not derive: ${verdict.refusal}`);
+        continue;
+      }
+      spec = verdict.action;
     }
     assert.ok(STEPS.includes(spec.step), `step ${spec.step}`);
     h.state.seq += 1;
@@ -3236,4 +3263,428 @@ test('RUN_SLOTS: every run-level slot of the 0026be4 template matches a prefix; 
   }
   for (const lane of ['<id>', '<lane>', '<n>', '<sha>', '<path>', '<your-lane-id>']) assert.ok(!RUN_SLOTS.some((prefix) => lane.startsWith(prefix)), lane);
   assert.ok(basename(fileURLToPath(import.meta.url)).endsWith('.test.mjs'));
+});
+
+// ---- authority from the signed grant (D13) ----
+
+// A configured run (the test key) whose touch 1 the operator signed, (a) or
+// (b), over options carrying their grants. state.json's authority stays as the
+// harness set it, so a test can edit it apart from what was signed.
+function signRun(h, { key = 'a', budgetUsd = 25, merge = true, release = false } = {}) {
+  h.deps.readAnchor = testAnchor;
+  h.state.intent.anchor = ANCHOR;
+  const grants = {
+    a: testGrant(h.state, { budgetUsd, merge, release, filedAt: T0 }),
+    b: testGrant(h.state, { budgetUsd, merge: false, release: false, filedAt: T0 }),
+  };
+  const options = [
+    { key: 'a', label: 'Approve as proposed', consequence: grantConsequence(grants.a) },
+    { key: 'b', label: 'Approve, but hold at PR boundaries', consequence: grantConsequence(grants.b) },
+  ];
+  return signedTouch(h.state, { options, key, fields: { grants } });
+}
+
+// An edit to the signed block: the proof no longer verifies (statement_mismatch).
+const tamper = (h) => { h.state.touches[0].answer.signed.answer.text = 'merge everything'; };
+
+// The operator answers an open build touch on the phone: filed once, signed over what it filed.
+function signOpen(h, touch, key, text) {
+  const receiptId = '00000000-0000-4000-8000-0000000007e7';
+  const question = `${touch.tag} (run ${h.state.runId}/1) ${touch.question.slice(touch.tag.length + 1)}`;
+  const ask = { options: touch.options, allowFreeText: touch.allowFreeText };
+  const proof = signAnswer({ questId: ANCHOR, askReceiptId: receiptId, question, ask, answerKey: key, text });
+  const answer = { key, text, by: 'operator:dogan', answeredAt: h.deps.timestamp(), askReceiptId: receiptId, proof };
+  Object.assign(touch, {
+    receiptId, filings: 1, status: 'answered', filed: { question, ask },
+    answer: { ...answer, source: 'spine', receiptId: null, proofMode: 'verified', signed: { answer, question, ask } },
+  });
+}
+
+test('red test 3 (D13): a signed (a) at $10, state.json edited to $100 → a metered spend of $15 halts against the signed $10', async (t) => {
+  // Probe 3 measured the gap: today every budget read trusts state.json.
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100 });
+  signRun(h, { budgetUsd: 10 });
+  h.spendUsd = 15;
+  assert.equal(await drive(h), null);
+  assert.ok(!h.trace.some((a) => a.wpId), 'nothing dispatched');
+  assert.match(h.state.touches.at(-1).question, /Spend is \$15 committed \(\$15 booked\b.*\) against the \$10 budget \(metered by the spend adapter\)/);
+});
+
+test('signed authority (D13): a configured run with a signed (a) lands its WP; the merge receipt\'s spend line reads the signed budget, not state.json\'s', async (t) => {
+  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1]] });
+  signRun(h, { budgetUsd: 25 });
+  h.state.authority.budgetUsd = 999;
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  const receipt = h.trace.find((a) => a.tool === 'spine_receipt' && a.args.outcome === 'completed');
+  assert.match(receipt.args.did, /against \$25\b/);
+});
+
+test('signed (b) (D13): merge edited to true in state.json; the gate holds "no merge authority" and no squash is emitted', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h, { key: 'b' });
+  h.state.authority.merge = true;
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-02').reason], ['held', 'gate passed; no merge authority']);
+  assert.equal(h.trace.filter((a) => a.part === 'squash').length, 0);
+});
+
+test('act points on an invalid proof (D7, council r3 S4): a proof broken at the gate, or after it passed, waits at the merge stage on the authority hold; nothing merges, and the WP is not held', async (t) => {
+  const atGate = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(atGate);
+  atGate.onEmit = (a) => { if (a.step === 'gate' && a.part === 'gate') tamper(atGate); };
+  assert.ok(await drive(atGate, { until: authorityWait }));
+  assert.deepEqual([atGate.wp('WP-02').state, atGate.wp('WP-02').stage], ['gate', 'merge']);
+  assert.match(atGate.state.dispatchHalt.reason, AUTHORITY_HOLD);
+  assert.equal(atGate.trace.filter((a) => a.part === 'squash').length, 0);
+
+  const afterGate = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(afterGate);
+  const gate = await drive(afterGate, { until: (a) => a.step === 'gate' && a.part === 'gate' });
+  await recordPending(afterGate, await perform(afterGate, gate));
+  assert.equal(afterGate.wp('WP-02').gate.ok, true);
+  tamper(afterGate);
+  assert.ok(await drive(afterGate, { until: authorityWait }));
+  assert.equal(afterGate.trace.filter((a) => a.part === 'squash').length, 0);
+  assert.notEqual(afterGate.wp('WP-02').state, 'held');
+  assert.match(afterGate.state.dispatchHalt.reason, AUTHORITY_HOLD);
+});
+
+test('emission (U1): a merge queue resumed after intent.repo.remote was edited holds; the squash is not emitted again', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  assert.deepEqual(squash.command.slice(0, 6), ['gh', 'pr', 'merge', '102', '--repo', 'o/r']);
+  // The run stops here and resumes with the squash still queued.
+  h.state.pending = null;
+  h.state.intent.repo.remote = 'evil/r';
+  assert.equal(await drive(h), null);
+  assert.equal(h.trace.filter((a) => a.part === 'squash').length, 1);
+  assert.equal(h.wp('WP-02').state, 'held');
+  assert.match(h.wp('WP-02').reason, /evil\/r/);
+});
+
+test('forged spendOkFor (U1): a token in state.json alone admits no paid work; spend is read and compared with the signed budget', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100 });
+  signRun(h, { budgetUsd: 10 });
+  h.state.build = { contract: null, halts: [], spendOkFor: 'dispatch' };
+  h.spendUsd = 15;
+  assert.equal(await drive(h), null);
+  assert.ok(!h.trace.some((a) => a.wpId), 'nothing dispatched');
+  assert.ok(h.trace.some((a) => a.step === 'spend'), 'spend was read');
+  assert.match(h.state.touches.at(-1).question, /against the \$10 budget/);
+});
+
+test('no CI (D13): a signed (b) holds at PR when the repo has no CI, with merge edited to true in state.json', async (t) => {
+  const noRuns = [/^gh api repos\/o\/r\/commits\/\w+\/check-runs/, () => ({ code: 1, stdout: '', stderr: 'gh: No commit found for SHA (HTTP 422)' })];
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.state.intent.ciWorkflows = 0;
+  signRun(h, { key: 'b' });
+  h.state.authority.merge = true;
+  h.rules.unshift(noRuns);
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-02').reason], ['held', 'held at PR: no CI at head: the repo has no CI workflow that can gate a PR']);
+});
+
+// An invalid authority is not an exhausted budget (council r1, opus): no raise
+// can restore it, so none is offered.
+const AUTHORITY_HOLD = /^authority refused \(authority proof invalid: statement_mismatch\): waiting: restore the signed record and the build resumes on its own, checked again every 5 minutes$/;
+// The build waits on a refused authority (council r2): a yield whose note names the hold.
+const authorityWait = (a) => a.kind === 'wait' && /authority refused/.test(a.instruction ?? '');
+
+test('budget reads on an invalid proof (D7, council r1): unmetered and metered, nothing is dispatched, no budget raise is offered, and dispatch holds with the authority reason and its recovery', async (t) => {
+  for (const metered of [false, true]) {
+    const h = harness(t, metered ? { spend: true, env: { WORKIT_SPEND_CMD: 'meter' } } : {});
+    signRun(h);
+    tamper(h);
+    assert.ok(await drive(h, { until: authorityWait }), `the build waits on the hold (metered ${metered})`);
+    assert.ok(!h.trace.some((a) => a.wpId), `nothing dispatched (metered ${metered})`);
+    assert.equal(h.state.touches.length, 1, `no touch filed, so no raise offered (metered ${metered})`);
+    assert.match(h.state.dispatchHalt.reason, AUTHORITY_HOLD);
+  }
+});
+
+test('paid act on an invalid proof (council r1, r2): a live WP\'s next paid act waits on the authority hold; no raise is offered, the act is not emitted, and the WP is not ended', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  h.onEmit = (a) => { if (a.wpId === 'WP-02' && a.step === 'brief') tamper(h); };
+  assert.ok(await drive(h, { until: authorityWait }));
+  assert.ok(h.trace.some((a) => a.wpId === 'WP-02' && a.step === 'brief'), 'the lane reached its brief');
+  assert.ok(!h.trace.some((a) => a.wpId === 'WP-02' && a.step === 'start'), 'no start');
+  assert.notEqual(h.wp('WP-02').state, 'held');
+  assert.match(h.state.dispatchHalt.reason, AUTHORITY_HOLD);
+  assert.equal(h.state.touches.length, 1, 'no raise touch');
+});
+
+test('unreadable anchor (council r1, opus; r2): the budget gate files no touch, next exits 2 naming the anchor, and state.json and events.jsonl are unchanged', async (t) => {
+  const h = harness(t);
+  signRun(h);
+  const contract = await drive(h, { until: (a) => a.step === 'contract' });
+  await recordPending(h, await perform(h, contract));
+  h.deps.readAnchor = () => { throw new OperatorProofError('anchor_unreadable'); };
+  const events = join(h.runDir, 'events.jsonl');
+  const read = () => [readFileSync(join(h.runDir, 'state.json'), 'utf8'), existsSync(events) ? readFileSync(events, 'utf8') : null];
+  const before = read();
+  const result = await runConduct(['next', '--run', h.runDir], testDeps(h.overrides()));
+  assert.equal(result.code, 2, result.stdout);
+  assert.match(result.stderr, /operator passkey anchor is unreadable/);
+  assert.deepEqual(read(), before);
+
+  // A paid act left pending: its re-check reads the anchor after the pending
+  // poll, which saves; nothing may be written before the exit either.
+  const paid = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(paid);
+  await drive(paid, { until: (a) => a.step === 'start' });
+  paid.deps.readAnchor = () => { throw new OperatorProofError('anchor_unreadable'); };
+  const files = () => [readFileSync(join(paid.runDir, 'state.json'), 'utf8'), readFileSync(join(paid.runDir, 'events.jsonl'), 'utf8')];
+  const pendingBefore = files();
+  const again = await runConduct(['next', '--run', paid.runDir], testDeps(paid.overrides()));
+  assert.equal(again.code, 2, again.stdout);
+  assert.deepEqual(files(), pendingBefore);
+});
+
+test('forged spend reading (council r1, codex): spendOkFor and lastSpend.usd forged together admit no paid work; spend is read in the same cycle and compared with the signed budget', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, budget: 100 });
+  signRun(h, { budgetUsd: 20 });
+  h.state.build = { contract: null, halts: [], spendOkFor: 'dispatch', lastSpend: { usd: 0, at: new Date(T0).toISOString() } };
+  h.spendUsd = 25;
+  assert.equal(await drive(h), null);
+  assert.ok(!h.trace.some((a) => a.wpId), 'nothing dispatched');
+  assert.ok(h.trace.some((a) => a.step === 'spend'), 'spend was read');
+  assert.match(h.state.touches.at(-1).question, /against the \$20 budget/);
+});
+
+test('fresh spend (council r1): configured and metered, every dispatch and every paid lane act comes straight after a spend read for it', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [TWO[0], TWO[1]] });
+  signRun(h, { budgetUsd: 100 });
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  const paid = h.trace.map((a, i) => [a, i]).filter(([a]) => a.kind === 'shell' && ['start', 'prompt', 'fallback'].includes(a.step));
+  assert.ok(paid.length > 0);
+  for (const [a, i] of paid) assert.deepEqual([h.trace[i - 1].step, h.trace[i - 1].budgetFor], ['spend', a.wpId], `${a.id} ${a.step}`);
+  const first = h.trace.findIndex((a) => a.wpId === 'WP-02');
+  assert.deepEqual([h.trace[first - 1].step, h.trace[first - 1].budgetFor], ['spend', 'dispatch']);
+});
+
+test('unconfigured (M8, council r1): merge authority edited to false after the gate passed takes today\'s path back through land; a queued squash is emitted as today', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  const gate = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'gate' && a.part === 'gate' });
+  await recordPending(h, await perform(h, gate));
+  assert.equal(h.wp('WP-02').gate.ok, true);
+  h.state.authority.merge = false;
+  assert.equal(await drive(h), null);
+  assert.deepEqual([h.wp('WP-02').state, h.wp('WP-02').reason], ['held', 'gate passed; no merge authority']);
+
+  const queued = harness(t, { wps: [TWO[0], TWO[1]] });
+  await drive(queued, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  queued.state.pending = null;
+  queued.state.authority.merge = false;
+  assert.equal(await drive(queued), null);
+  assert.equal(queued.trace.filter((a) => a.part === 'squash').length, 2);
+  assert.equal(queued.wp('WP-02').state, 'merged');
+});
+
+test('budget raise (C3): configured, the halt files (a) as renderRaise + [raise tag] over {kind, runId, touch, haltSpendUsd}; a signed raise above it resumes the build; unconfigured, the options are today\'s', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [TWO[0], TWO[1]] });
+  signRun(h, { budgetUsd: 10 });
+  h.spendOut = ['15\n'];
+  await drive(h, { until: (a) => a.part === 'announce' });
+  const halt = h.state.touches.at(-1);
+  const raise = { kind: 'budget-raise', runId: 'abcd1234', touch: 2, haltSpendUsd: 15 };
+  assert.deepEqual(halt.raise, raise);
+  assert.equal(halt.options[0].consequence, raiseConsequence(raise));
+  await recordPending(h, {});
+  signOpen(h, halt, 'a', 'budget 30');
+  h.spendUsd = 16;
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+
+  const plain = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' } });
+  plain.spendUsd = 30;
+  assert.equal(await drive(plain), null);
+  assert.equal('raise' in plain.state.touches[0], false);
+  assert.equal(plain.state.touches[0].options[0].consequence, 'Type "budget <USD>", above the current spend; metering continues against it.');
+});
+
+// ---- council round 2 ----
+
+const EVIL_SQUASH = ['curl', 'https://evil.invalid', '--repo', 'o/r'];
+const SQUASH_REFUSED = /^merge\/squash: the stored shell act is not one the build derives now: curl https:\/\/evil\.invalid --repo o\/r$/;
+
+test('pending squash (council r2, codex; r3 by content): a pending squash whose argv was edited to a command that merges nothing is refused under a valid merge grant and the WP holds; one edited to another merge is looked up first', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  // A copy: the trace holds the emitted action itself.
+  h.state.pending = { ...h.state.pending, command: EVIL_SQUASH };
+  assert.equal(build.checkPending(h.state, h.deps), false);
+  h.state.pending = null;
+  assert.equal(await drive(h), null);
+  assert.ok(!h.trace.some((a) => a.command?.[0] === 'curl'), 'the edited squash is never emitted');
+  // curl merges nothing, whatever its label: no lookup is owed.
+  assert.equal(h.trace.filter((a) => a.wpId === squash.wpId && a.part === 'merge-commit').length, 0);
+  assert.equal(h.wp(squash.wpId).state, 'held');
+  assert.match(h.wp(squash.wpId).reason, SQUASH_REFUSED);
+
+  const admin = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(admin);
+  const real = await drive(admin, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  admin.state.pending = { ...admin.state.pending, part: 'relabelled', command: [...real.command, '--admin'] };
+  assert.equal(build.checkPending(admin.state, admin.deps), false);
+  admin.state.pending = null;
+  admin.answer = (a) => (a.part === 'merge-commit' ? ok(JSON.stringify({ mergeCommit: null })) : undefined);
+  assert.equal(await drive(admin), null);
+  assert.ok(!admin.trace.some((a) => a.command?.includes('--admin')), 'the --admin merge is never emitted');
+  assert.equal(admin.trace.filter((a) => a.wpId === real.wpId && a.part === 'merge-commit').length, 1, 'an act that merges may have run: the lookup decides');
+  assert.equal(admin.wp(real.wpId).state, 'held');
+});
+
+test('pending squash (council r2, R4): a squash that ran before its record, refused on resume, is found merged by the lookup; the WP takes the merged path', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  // The driver ran the squash, then the grant expired before its record.
+  await perform(h, squash);
+  h.tick(15 * 24 * 60 * 60 * 1000);
+  assert.equal(build.checkPending(h.state, h.deps), false);
+  h.state.pending = null;
+  assert.equal(await drive(h), null);
+  assert.equal(h.trace.filter((a) => a.part === 'squash').length, 1, 'the squash is not emitted again');
+  assert.equal(h.wp(squash.wpId).state, 'merged');
+});
+
+test('forged pending (council r2): configured, a pending squash naming no WP of the run, or a pending release act stamped while the run builds, is dropped, never emitted', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  h.state.pending = { ...squash, wpId: 'WP-99', command: EVIL_SQUASH };
+  assert.equal(build.checkPending(h.state, h.deps), false);
+
+  const forged = { id: '99-release', phase: 'release', kind: 'shell', step: 'release', seam: 'release', part: 'after', command: ['curl', 'https://evil.invalid'], expects: { type: 'none' } };
+  h.state.pending = forged;
+  saveState(h.state, h.deps);
+  const result = await runConduct(['next', '--run', h.runDir], testDeps(h.overrides()));
+  assert.equal(result.code, 0, result.stderr);
+  assert.notEqual(JSON.parse(result.stdout).action.id, forged.id);
+  assert.ok(readEvents(h.runDir, h.deps).some((e) => e.event === 'dropped' && e.actionId === forged.id));
+});
+
+test('queued squash (council r2, codex): a squash queued with an edited argv is never emitted; the WP holds', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  h.state.pending = null;
+  h.wp(squash.wpId).queue[0].command = EVIL_SQUASH;
+  assert.equal(await drive(h), null);
+  assert.ok(!h.trace.some((a) => a.command?.[0] === 'curl'), 'the edited squash is never emitted');
+  assert.equal(h.wp(squash.wpId).state, 'held');
+  assert.match(h.wp(squash.wpId).reason, SQUASH_REFUSED);
+});
+
+test('authority hold (council r2, R3): dispatch waits on a refused authority; restoring the signed record resumes dispatch, and the hold names that recovery or a new run', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const signed = h.state.touches[0].answer.signed.answer.text;
+  tamper(h);
+  const wait = await drive(h, { until: authorityWait });
+  assert.ok(wait, 'the build waits on the hold instead of ending');
+  assert.match(wait.instruction, /waiting: restore the signed record and the build resumes on its own/);
+  assert.ok(!h.trace.some((a) => a.wpId), 'nothing dispatched while held');
+  h.state.touches[0].answer.signed.answer.text = signed;
+  await recordPending(h, {});
+  assert.equal(await drive(h), null);
+  assert.ok(h.trace.some((a) => a.wpId), 'dispatch resumed');
+  assert.equal(h.state.dispatchHalt, null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+// ---- council round 3 ----
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const isStart = (a) => a.wpId === 'WP-02' && a.step === 'start';
+
+test('S3 replay identity (council r3, opus): a dropped paid act\'s id is reused only for that very act; another act at the same step gets a fresh id', async (t) => {
+  for (const same of [true, false]) {
+    const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [TWO[0], TWO[1]] });
+    signRun(h, { budgetUsd: 100 });
+    const start = await drive(h, { until: isStart });
+    assert.equal(build.checkPending(h.state, h.deps), false, 'dropped for a fresh spend reading');
+    h.state.pending = null;
+    // The replay is bound to the act it dropped; an edit that names another act is not it.
+    if (!same) h.state.build.replay = { ...h.state.build.replay, act: { ...start, id: undefined, command: [...start.command, '--other'] } };
+    const again = await drive(h, { until: isStart });
+    assert.equal(again.id === start.id, same, `same ${same}: ${again.id} vs ${start.id}`);
+  }
+});
+
+test('S3 replay identity (council r3, opus): a queue rebuilt after the drop clears the replay; the rebuilt act is emitted under a fresh id', async (t) => {
+  const h = harness(t, { spend: true, env: { WORKIT_SPEND_CMD: 'meter' }, wps: [TWO[0], TWO[1]] });
+  signRun(h, { budgetUsd: 100 });
+  const start = await drive(h, { until: isStart });
+  assert.equal(build.checkPending(h.state, h.deps), false);
+  h.state.pending = null;
+  Object.assign(h.wp('WP-02'), { queue: [], stage: 'start' });
+  const again = await drive(h, { until: isStart });
+  assert.notEqual(again.id, start.id);
+});
+
+test('S3 replay identity (council r3, opus note 5): a paid act dropped under a refused authority keeps its id; restored, it is emitted again under that id', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const start = await drive(h, { until: isStart });
+  const signed = h.state.touches[0].answer.signed.answer.text;
+  tamper(h);
+  assert.equal(build.checkPending(h.state, h.deps), false);
+  h.state.pending = null;
+  h.state.touches[0].answer.signed.answer.text = signed;
+  const again = await drive(h, { until: isStart });
+  assert.deepEqual([again.id, again.command], [start.id, start.command]);
+});
+
+test('S4(a) recovery (council r3, opus): an authority refused at the merge stage waits with its queue kept; restoring the signed record resumes the WP to the merge', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  const gate = await drive(h, { until: (a) => a.step === 'gate' && a.part === 'gate' });
+  await recordPending(h, await perform(h, gate));
+  assert.equal(h.wp('WP-02').gate.ok, true);
+  const signed = h.state.touches[0].answer.signed.answer.text;
+  tamper(h);
+  const wait = await drive(h, { until: (a) => authorityWait(a) || a.part === 'squash' });
+  assert.ok(wait && authorityWait(wait), `${JSON.stringify(wait)}; WP-02 ${h.wp('WP-02').state}: ${h.wp('WP-02').reason}`);
+  assert.notEqual(h.wp('WP-02').state, 'held');
+  assert.match(wait.instruction, /waiting: restore the signed record and the build resumes on its own/);
+  h.state.touches[0].answer.signed.answer.text = signed;
+  await recordPending(h, {});
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.equal(h.trace.filter((a) => a.part === 'squash').length, 1);
+});
+
+test('S4(a) recovery (council r3, opus): a queued squash refused for its authority, nothing pending, waits; restored, it merges', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
+  h.state.pending = null;
+  const signed = h.state.touches[0].answer.signed.answer.text;
+  tamper(h);
+  const wait = await drive(h, { until: (a) => authorityWait(a) || a.part === 'squash' });
+  assert.ok(wait && authorityWait(wait), `${JSON.stringify(wait)}; WP-02 ${h.wp('WP-02').state}: ${h.wp('WP-02').reason}`);
+  assert.notEqual(h.wp('WP-02').state, 'held');
+  h.state.touches[0].answer.signed.answer.text = signed;
+  await recordPending(h, {});
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+test('S4(b) terminal (council r3, sonnet): a grant_expired hold is terminal at once: no 5-minute wait, the live WP is held naming the split, and the build ends', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  signRun(h);
+  await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'brief' });
+  h.tick(15 * DAY_MS);
+  const from = h.trace.length;
+  assert.equal(await drive(h, { max: 60 }), null);
+  assert.deepEqual(h.trace.slice(from).filter(authorityWait).map((a) => a.id), []);
+  assert.equal(h.wp('WP-02').state, 'held');
+  assert.match(h.wp('WP-02').reason, /^authority refused \(grant_expired\): terminal: restoring the record cannot help; start a new run and sign its touch 1$/);
+  assert.ok(!h.trace.slice(from).some((a) => ['start', 'prompt', 'fallback'].includes(a.step) && a.kind === 'shell'), 'no paid act after the expiry');
 });
