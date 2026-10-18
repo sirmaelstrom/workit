@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   detectTestWeakening,
   filesFromDiff,
+  GUARD_SECTION_MAX_CHARS,
   guardReview,
   isTestFile,
 } from './pr-review-guard.mjs';
@@ -224,6 +225,32 @@ test('reporting: every matched file is a body-section entry naming its lines; no
   assert.match(result.section, /- `src\/old\.test\.mjs`: deleted\. It held \d+ test declaration line\(s\) and \d+ assertion line\(s\)\./);
   assert.match(result.section, /- `tests\/total\.mjs`\n  - `-` old line 21, assertion removed or changed: `/);
   assert.match(result.section, /- `src\/a\.test\.ts`\n  - `\+` line 4, skip or focus added: `/);
+});
+
+/** `files` test files, each removing `lines` assertion lines of about 150 characters. */
+function manyRemovals(files, lines) {
+  return Array.from({ length: files }, (_, f) => ({
+    filename: `tests/suite-${String(f).padStart(2, '0')}.test.mjs`,
+    status: 'modified',
+    patch: [`@@ -1,${lines} +1,0 @@`, ...Array.from({ length: lines }, (_, i) => `-  assert.deepEqual(computeTheValueUnderTest(${f}, ${i}, { mode: 'strict', retries: 3 }), expectedValueFor(${f}, ${i}, 'with a long descriptive label'));`)].join('\n'),
+  }));
+}
+
+test('reporting: the section is capped in total size, and says how much it left out', () => {
+  const result = guardReview({ sourceFiles: manyRemovals(25, 20) });
+  assert.equal(result.entries.length, 25);
+  assert.ok(result.section.length <= GUARD_SECTION_MAX_CHARS, `section is ${result.section.length} chars, cap ${GUARD_SECTION_MAX_CHARS}`);
+  assert.ok(GUARD_SECTION_MAX_CHARS <= 65536 / 4, 'the cap leaves most of the 65,536-char body for findings, summary, footer and marker');
+  const notice = /… (\d+) more matched line\(s\) in (\d+) file\(s\) omitted/.exec(result.section);
+  assert.ok(notice, 'the omission is stated, never silent');
+  const shown = (result.section.match(/^ {2}- `-` old line /gm) ?? []).length;
+  assert.equal(shown + Number(notice[1]), 500, 'shown plus omitted is every matched line');
+});
+
+test('reporting: under the cap every matched line is listed, with no per-file limit', () => {
+  const result = guardReview({ sourceFiles: manyRemovals(1, 30) });
+  assert.equal((result.section.match(/^ {2}- `-` old line /gm) ?? []).length, 30);
+  assert.equal(/omitted|more in this file/.test(result.section), false);
 });
 
 test('reporting: an amendment removal is listed at the amendment\'s own line, whatever the PR diff holds', () => {

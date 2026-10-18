@@ -90,7 +90,7 @@ import {
   deliveryKind,
   postedReviewScope,
 } from './pr-review-recognise.mjs';
-import { GUARD_ADJUDICATORS, LANE_MARKER_ENV } from './pr-review-guard.mjs';
+import { GUARD_ADJUDICATORS, LANE_MARKER_ENV, guardReview } from './pr-review-guard.mjs';
 import { LANE_MARKER_ENV as LANE_MJS_MARKER } from '../../../scripts/lane.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
@@ -654,6 +654,26 @@ test('buildReviewPayload emits COMMENT with line-anchored comments', () => {
   );
   assert.match(p.comments[0].body, /\*\*\[P2\] t\*\*/);
   assert.match(p.body, /1 anchored · 0 off-line · 0 not-anchorable · 0 off-diff/);
+});
+
+test('buildReviewPayload: 25 test files x 20 removed ~150-char assertions keep the review body under GitHub\'s 65,536-char limit', () => {
+  const sourceFiles = Array.from({ length: 25 }, (_, f) => ({
+    filename: `tests/suite-${String(f).padStart(2, '0')}.test.mjs`,
+    status: 'modified',
+    patch: ['@@ -1,20 +1,0 @@', ...Array.from({ length: 20 }, (_, i) => `-  assert.deepEqual(computeTheValueUnderTest(${f}, ${i}, { mode: 'strict', retries: 3 }), expectedValueFor(${f}, ${i}, 'with a long descriptive label'));`)].join('\n'),
+  }));
+  const p = buildReviewPayload({
+    summary: 'Looks mostly fine.',
+    coverage: 'examined 25 of 25 changed files',
+    anchored: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
+    offLine: [],
+    coverageCheck: { ok: true },
+    guard: guardReview({ sourceFiles }),
+  });
+  assert.ok(p.body.length < 65536, `review body is ${p.body.length} chars`);
+  assert.match(p.body, /more matched line\(s\) in \d+ file\(s\) omitted/);
 });
 
 test('buildReviewPayload surfaces an off-diff finding in the body, not silently', () => {

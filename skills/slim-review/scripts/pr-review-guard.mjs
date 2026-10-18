@@ -440,42 +440,50 @@ export const GUARD_ADJUDICATORS = Object.freeze(['conductor', 'operator']);
  */
 export const LANE_MARKER_ENV = 'WORKIT_LANE';
 
-const MAX_LISTED = 20;
+/**
+ * The section's total size, notice included. GitHub refuses a review body
+ * over 65,536 characters, and the whole POST fails with it, so the section
+ * keeps to a quarter of that and leaves the rest to the findings, summary,
+ * footer and marker.
+ */
+export const GUARD_SECTION_MAX_CHARS = 16_000;
+const NOTICE_RESERVE = 300;
 
 function quote(text) {
   const clipped = text.trim().length > 160 ? `${text.trim().slice(0, 157)}...` : text.trim();
   return clipped.includes('`') ? `\`\` ${clipped} \`\`` : `\`${clipped}\``;
 }
 
-/** One entry's lines in the body section: the file, then what matched in it. */
+/** One entry in the body section: the file's line, then one line per match. */
 function renderEntry(entry) {
   if (entry.deleted) {
-    return [`- \`${entry.path}\`: deleted. ${entry.patchMissing
+    return { head: `- \`${entry.path}\`: deleted. ${entry.patchMissing
       ? 'GitHub sent no patch for it, so its tests and assertions were not counted.'
-      : `It held ${entry.removedTests} test declaration line(s) and ${entry.removedAssertions} assertion line(s).`}`];
+      : `It held ${entry.removedTests} test declaration line(s) and ${entry.removedAssertions} assertion line(s).`}`, items: [] };
   }
   const notes = [
     ...(entry.renamedOut ? [`renamed out of the test paths from \`${entry.previousPath}\`, so no test runner picks it up`] : []),
     ...(entry.unchecked ? [`not checked: no patch (${entry.status}; a large diff or a binary file)`] : []),
   ];
-  const lines = [`- \`${entry.path}\`${notes.length > 0 ? `: ${notes.join('; ')}` : ''}`];
-  for (const item of entry.items.slice(0, MAX_LISTED)) {
-    lines.push(`  - ${item.side === 'LEFT' ? `\`-\` old line ${item.line}` : `\`+\` line ${item.line}`}, ${item.label}: ${quote(item.text)}`);
-  }
-  if (entry.items.length > MAX_LISTED) lines.push(`  - ... and ${entry.items.length - MAX_LISTED} more in this file`);
-  return lines;
+  return {
+    head: `- \`${entry.path}\`${notes.length > 0 ? `: ${notes.join('; ')}` : ''}`,
+    items: entry.items.map((item) => `  - ${item.side === 'LEFT' ? `\`-\` old line ${item.line}` : `\`+\` line ${item.line}`}, ${item.label}: ${quote(item.text)}`),
+  };
 }
 
 /**
  * The whole check as `post` runs it: detect over `sourceFiles` and render one
  * review-body section. It opens no thread, so nothing in it needs a verdict
- * before merge: a reviewer can read the listed lines, and that is all. An
- * empty result changes nothing in the review.
+ * before merge: a reviewer can read the listed lines, and that is all. Every
+ * matched line is listed until the section reaches GUARD_SECTION_MAX_CHARS;
+ * from there on nothing more is listed, and a closing notice counts the
+ * matched lines and files left out. An empty result changes nothing in the
+ * review.
  */
 export function guardReview({ sourceFiles, delta = false }) {
   const entries = detectTestWeakening(sourceFiles);
   if (entries.length === 0) return { entries, section: null };
-  const section = [
+  const lines = [
     '',
     '---',
     '',
@@ -483,7 +491,37 @@ export function guardReview({ sourceFiles, delta = false }) {
     '',
     `Not blocking: nothing here needs a verdict to merge. ${entries.length} test file(s) in ${delta ? 'this amendment' : 'this PR'} lost or changed a test or an assertion, gained a skip, a focus or a disabling wrapper, left the test paths, or changed with no patch to check. The match is textual, so a strengthened or renamed assertion matches too; look if the lines below surprise you.`,
     '',
-    ...entries.flatMap(renderEntry),
-  ].join('\n');
-  return { entries, section };
+  ];
+  const budget = GUARD_SECTION_MAX_CHARS - NOTICE_RESERVE;
+  let size = lines.join('\n').length;
+  let full = false;
+  let omittedLines = 0;
+  const omittedFiles = new Set();
+  // Appends while the budget holds; once a line does not fit, nothing after it is listed.
+  const fits = (line) => {
+    if (!full && size + 1 + line.length <= budget) {
+      lines.push(line);
+      size += 1 + line.length;
+      return true;
+    }
+    full = true;
+    return false;
+  };
+  for (const entry of entries) {
+    const { head, items } = renderEntry(entry);
+    if (!fits(head)) {
+      omittedLines += Math.max(items.length, 1);
+      omittedFiles.add(entry.path);
+      continue;
+    }
+    const shown = items.findIndex((line) => !fits(line));
+    if (shown !== -1) {
+      omittedLines += items.length - shown;
+      omittedFiles.add(entry.path);
+    }
+  }
+  if (omittedLines > 0) {
+    lines.push('', `… ${omittedLines} more matched line(s) in ${omittedFiles.size} file(s) omitted: this section is capped at ${GUARD_SECTION_MAX_CHARS} characters so the review stays under GitHub's body limit. Read the PR diff for the rest.`);
+  }
+  return { entries, section: lines.join('\n') };
 }

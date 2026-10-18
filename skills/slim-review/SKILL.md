@@ -271,7 +271,11 @@ as **not checked: no patch**, since nothing in it could be read.
   amendment removed.
 - **Where it lands:** a **Test files whose assertions changed** section in the
   review body, naming each matched file and each matched line (old line
-  number for a removal, new for an addition, with the text). It is not a
+  number for a removal, new for an addition, with the text). There is no
+  per-file limit; the whole section is capped at 16,000 characters
+  (`GUARD_SECTION_MAX_CHARS`) so the review body stays under GitHub's
+  65,536. Past the cap nothing more is listed, and a closing
+  "… N more matched line(s) in M file(s) omitted" line counts the rest. It is not a
   thread and blocks nothing: no verdict is owed and `threads --unresolved`
   never sees it. A reviewer reads it if a listed line surprises them. The
   receipt prints a `guard` line when anything was found.
