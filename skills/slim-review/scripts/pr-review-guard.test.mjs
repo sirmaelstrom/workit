@@ -2,13 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  anchorEntry,
   detectTestWeakening,
   filesFromDiff,
   guardReview,
-  indexForAnchoring,
   isTestFile,
-  renderGuardComment,
 } from './pr-review-guard.mjs';
 
 const diff = (...lines) => lines.join('\n');
@@ -217,48 +214,32 @@ test('filesFromDiff reads status, names and patch from a gh pr diff', () => {
   assert.equal(files[1].patch, '@@ -1,1 +1,1 @@\n-a\n+b');
 });
 
-test('anchoring: a full review anchors each entry on its own line; a deleted file on LEFT 1', () => {
+test('reporting: every matched file is a body-section entry naming its lines; nothing is an inline thread', () => {
   const files = filesFromDiff(`${DELETED_TEST_FILE}\n${LOOSENED_ASSERTION}\n${ADDED_ONLY}`);
-  const index = indexForAnchoring(files);
-  const anchors = detectTestWeakening(files).map((entry) => anchorEntry(entry, index));
-  assert.deepEqual(anchors, [
-    { path: 'src/old.test.mjs', side: 'LEFT', line: 1, exact: true },
-    { path: 'tests/total.mjs', side: 'LEFT', line: 21, exact: true },
-    { path: 'src/a.test.ts', side: 'RIGHT', line: 4, exact: true },
-  ]);
+  const result = guardReview({ sourceFiles: files });
+  assert.equal(result.entries.length, 3);
+  assert.equal('comments' in result, false, 'the check posts no thread of its own');
+  assert.match(result.section, /^\n---\n\n### Test files whose assertions changed\n/);
+  assert.match(result.section, /Not blocking/);
+  assert.match(result.section, /- `src\/old\.test\.mjs`: deleted\. It held \d+ test declaration line\(s\) and \d+ assertion line\(s\)\./);
+  assert.match(result.section, /- `tests\/total\.mjs`\n  - `-` old line 21, assertion removed or changed: `/);
+  assert.match(result.section, /- `src\/a\.test\.ts`\n  - `\+` line 4, skip or focus added: `/);
 });
 
-test('anchoring: an amendment removal finds its text on the PR diff; a file the PR diff lacks falls back to a named line', () => {
-  // The amendment removed `assert.equal(b, 2);` at its line 7; the PR diff shows
-  // the same removal at base line 9.
+test('reporting: an amendment removal is listed at the amendment\'s own line, whatever the PR diff holds', () => {
   const amendment = [{ filename: 'src/a.test.mjs', status: 'modified', patch: '@@ -6,3 +6,2 @@\n ctx\n-  assert.equal(b, 2);\n ctx' }];
-  const prDiff = [{ filename: 'src/a.test.mjs', status: 'modified', patch: '@@ -8,3 +8,2 @@\n ctx\n-  assert.equal(b, 2);\n ctx' }];
-  const [entry] = detectTestWeakening(amendment);
-  assert.deepEqual(anchorEntry(entry, indexForAnchoring(prDiff)), { path: 'src/a.test.mjs', side: 'LEFT', line: 9, exact: true });
-  // A test file an earlier round added and the amendment deleted is not in the
-  // PR diff at all: the first commentable line anywhere carries it.
-  const gone = [{ filename: 'src/b.test.mjs', status: 'removed', patch: "@@ -1,2 +0,0 @@\n-test('b', () => {\n-});" }];
-  const [goneEntry] = detectTestWeakening(gone);
-  const anchor = anchorEntry(goneEntry, indexForAnchoring(prDiff));
-  assert.deepEqual(anchor, { path: 'src/a.test.mjs', side: 'RIGHT', line: 8, exact: false });
-  assert.match(renderGuardComment(goneEntry, anchor), /nearest line GitHub accepts .*the change is in `src\/b\.test\.mjs`/);
-  assert.equal(anchorEntry(goneEntry, indexForAnchoring([])), null);
+  const result = guardReview({ sourceFiles: amendment, delta: true });
+  assert.match(result.section, /in this amendment/);
+  assert.match(result.section, /- `src\/a\.test\.mjs`\n  - `-` old line 7, assertion removed or changed: `assert\.equal\(b, 2\);`/);
 });
 
 // --- no patch: GitHub omits it on a large diff, and a binary has none -------
 
-/** A PR diff with one commentable file, so a no-patch entry has somewhere to fall back to. */
-const ELSEWHERE = [{ filename: 'src/a.ts', status: 'modified', patch: '@@ -1,1 +1,1 @@\n-a\n+b' }];
-
-test('no patch: a modified test file with no patch is one "not checked" entry and a guard thread', () => {
+test('no patch: a modified test file with no patch is one "not checked" entry in the body section', () => {
   const big = { filename: 'src/big.test.mjs', status: 'modified', changes: 4000 };
   assert.deepEqual(detectTestWeakening([big]), [{ path: 'src/big.test.mjs', status: 'modified', deleted: false, unchecked: true, items: [] }]);
-  const result = guardReview({ sourceFiles: [big], prDiffFiles: [...ELSEWHERE, big] });
-  assert.equal(result.comments.length, 1);
-  assert.deepEqual({ path: result.comments[0].path, side: result.comments[0].side, line: result.comments[0].line }, { path: 'src/a.ts', side: 'RIGHT', line: 1 });
-  assert.match(result.comments[0].body, /^\*\*lens:\*\* guard\n\n\*\*Test-weakening check: `src\/big\.test\.mjs` not checked: no patch\*\*/);
-  assert.match(result.comments[0].body, /the change is in `src\/big\.test\.mjs`/);
-  assert.match(result.section, /`src\/big\.test\.mjs`: not checked: no patch/);
+  const result = guardReview({ sourceFiles: [big] });
+  assert.match(result.section, /- `src\/big\.test\.mjs`: not checked: no patch \(modified; a large diff or a binary file\)/);
 });
 
 test('no patch: a deleted test file with no patch is reported as deleted, and says its contents were not counted', () => {
@@ -266,10 +247,9 @@ test('no patch: a deleted test file with no patch is reported as deleted, and sa
   const [entry, ...rest] = detectTestWeakening([gone]);
   assert.deepEqual(rest, []);
   assert.deepEqual({ deleted: entry.deleted, patchMissing: entry.patchMissing }, { deleted: true, patchMissing: true });
-  const result = guardReview({ sourceFiles: [gone], prDiffFiles: [...ELSEWHERE, gone] });
-  assert.equal(result.comments.length, 1);
-  assert.match(result.comments[0].body, /`src\/big\.test\.mjs` was deleted\*\*\n\nGitHub sent no patch for it/);
-  assert.equal(result.comments[0].body.includes('held 0 test declaration'), false, 'no count is claimed for a file nobody read');
+  const result = guardReview({ sourceFiles: [gone] });
+  assert.match(result.section, /- `src\/big\.test\.mjs`: deleted\. GitHub sent no patch for it/);
+  assert.equal(result.section.includes('held 0 test declaration'), false, 'no count is claimed for a file nobody read');
 });
 
 test('no patch: a non-test file, an added test file, and a pure rename are not reported', () => {
@@ -420,19 +400,19 @@ test('4117560938: a test file renamed out of the test paths is reported, pure re
   assert.deepEqual(fromDiff.map((entry) => [entry.path, entry.renamedOut]), [['src/a.mjs', true]]);
   const edited = detectTestWeakening([{ filename: 'src/a.mjs', previous_filename: 'src/a.test.mjs', status: 'renamed', changes: 2, patch: '@@ -1,1 +1,1 @@\n-// old\n+// new' }]);
   assert.deepEqual(edited.map((entry) => entry.renamedOut), [true]);
-  const result = guardReview({ sourceFiles: [pureRename], prDiffFiles: ELSEWHERE });
-  assert.match(result.comments[0].body, /renamed out of the test paths: `src\/a\.test\.mjs` → `src\/a\.mjs`/);
-  assert.match(result.section, /`src\/a\.mjs`: renamed out of the test paths from `src\/a\.test\.mjs`/);
+  const result = guardReview({ sourceFiles: [pureRename] });
+  assert.match(result.section, /- `src\/a\.mjs`: renamed out of the test paths from `src\/a\.test\.mjs`, so no test runner picks it up/);
   // Renamed within the test paths stays silent.
   assert.deepEqual(detectTestWeakening([{ filename: 'tests/b.mjs', previous_filename: 'tests/a.mjs', status: 'renamed', changes: 0 }]), []);
 });
 
-test('guardReview renders tagged threads and a body section, and nothing at all when no test was weakened', () => {
+test('guardReview renders a non-blocking body section, and nothing at all when no test was weakened', () => {
   const files = filesFromDiff(LOOSENED_ASSERTION);
-  const result = guardReview({ sourceFiles: files, prDiffFiles: files, delta: true });
-  assert.equal(result.comments.length, 1);
-  assert.match(result.comments[0].body, /^\*\*lens:\*\* guard\n\n\*\*scope:\*\* delta\n\n\*\*Test-weakening check: `tests\/total\.mjs`\*\*/);
-  assert.match(result.section, /### Test-weakening check/);
-  const quiet = guardReview({ sourceFiles: filesFromDiff(REMOVED_IT.replace(/a\.spec\.ts/g, 'a.ts')), prDiffFiles: [] });
-  assert.deepEqual(quiet, { entries: [], comments: [], unanchored: [], section: null });
+  const result = guardReview({ sourceFiles: files, delta: true });
+  assert.deepEqual(Object.keys(result).sort(), ['entries', 'section']);
+  assert.match(result.section, /### Test files whose assertions changed/);
+  assert.match(result.section, /nothing here needs a verdict to merge/);
+  assert.equal(/\*\*lens:\*\* guard/.test(result.section), false, 'the section carries no lens tag a reply could read as a thread');
+  const quiet = guardReview({ sourceFiles: filesFromDiff(REMOVED_IT.replace(/a\.spec\.ts/g, 'a.ts')) });
+  assert.deepEqual(quiet, { entries: [], section: null });
 });

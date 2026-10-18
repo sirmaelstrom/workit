@@ -143,9 +143,10 @@ record, and the receipt lists it. A relative `--body-file` is resolved against
 your working directory, not the checkout. A missing one exits 4 before anything
 is replied.
 
-**A guard thread is never the lane's to judge.** A comment tagged
-`**lens:** guard` is the writer's test-weakening check (slim-review § 3): the PR
-deleted, skipped or loosened a test. Its verdict needs `--adjudicator
+**A guard thread is never the lane's to judge.** slim-review's test-weakening
+check now lists test-file changes in the review body and opens no thread, so
+there is nothing there to adjudicate. An older review may still carry a comment
+tagged `**lens:** guard` (the check's former inline form). Its verdict needs `--adjudicator
 conductor` or `operator`. `adjudicate --adjudicator lane`, or no
 `--adjudicator`, fails: the writer's `reply` exits 2, nothing is replied, and
 the thread stays open, so the PR cannot converge past it. Inside a lane that

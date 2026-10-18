@@ -6068,26 +6068,28 @@ function runGuardPost({ since } = {}) {
 
 const guardComments = (payload) => payload.comments.filter((comment) => /^\*\*lens:\*\* guard\n/.test(comment.body));
 
-test('guard, standalone full post: a removed assertion becomes one inline guard thread, tagged, on the old side', () => {
+/** The review body's test-file section, up to the next section rule. */
+const guardSection = (payload) => /### Test files whose assertions changed[\s\S]*?(?=\n---\n|$)/.exec(payload.body)?.[0] ?? '';
+
+test('guard, standalone full post: a removed assertion is listed in the review body, never as an inline thread', () => {
   const { logs, posted } = runGuardPost();
   assert.equal(posted.length, 1);
-  const guard = guardComments(posted[0]);
-  assert.equal(guard.length, 1, 'one thread per weakened file');
-  assert.deepEqual({ path: guard[0].path, side: guard[0].side, line: guard[0].line }, { path: 'src/a.test.mjs', side: 'LEFT', line: 2 });
-  assert.ok(guard[0].body.includes('assert.equal(a, 1);') && guard[0].body.includes('assert.equal(b, 2);'), 'a full review lists every removal in the file');
-  assert.equal(guard[0].body.includes('**scope:** delta'), false);
-  assert.match(posted[0].body, /### Test-weakening check/);
-  assert.ok(logs.includes('guard          1 test file(s) weakened → 1 thread(s) for the conductor'));
+  assert.deepEqual(guardComments(posted[0]), [], 'the check posts no thread, so nothing waits on a verdict');
+  assert.deepEqual(posted[0].comments, [], 'zero findings and the guard together post no inline comment');
+  const section = guardSection(posted[0]);
+  assert.match(section, /Not blocking/);
+  assert.ok(section.includes('`src/a.test.mjs`'));
+  assert.ok(section.includes('assert.equal(a, 1);') && section.includes('assert.equal(b, 2);'), 'a full review lists every removal in the file');
+  assert.ok(logs.includes('guard          1 test file(s) with test or assertion changes → listed in the review body (non-blocking)'));
 });
 
-test('guard, standalone delta post: only the amendment\'s removal is reported, anchored by its text on the PR diff', () => {
+test('guard, standalone delta post: only the amendment\'s removal is listed', () => {
   const { posted } = runGuardPost({ since: SINCE });
-  const guard = guardComments(posted[0]);
-  assert.equal(guard.length, 1);
-  assert.deepEqual({ path: guard[0].path, side: guard[0].side, line: guard[0].line }, { path: 'src/a.test.mjs', side: 'LEFT', line: 9 });
-  assert.ok(guard[0].body.includes('assert.equal(b, 2);'));
-  assert.equal(guard[0].body.includes('assert.equal(a, 1);'), false, 'an earlier round\'s removal is not the amendment\'s');
-  assert.match(guard[0].body, /^\*\*lens:\*\* guard\n\n\*\*scope:\*\* delta\n/);
+  assert.deepEqual(guardComments(posted[0]), []);
+  const section = guardSection(posted[0]);
+  assert.match(section, /in this amendment/);
+  assert.ok(section.includes('assert.equal(b, 2);'));
+  assert.equal(section.includes('assert.equal(a, 1);'), false, 'an earlier round\'s removal is not the amendment\'s');
 });
 
 /** The pinned compare with its test-file patch now removing an assertion at base line 3. */
@@ -6098,7 +6100,7 @@ function weakenedCompare() {
   return payload;
 }
 
-test('guard, coordinated full post: the removed assertion rides the same single POST as a guard thread; the lens set is untouched', async () => {
+test('guard, coordinated full post: the removed assertion rides the same single POST in the review body; the lens set is untouched', async () => {
   const events = [];
   const fake = coordinatorFake({ events });
   await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
@@ -6107,11 +6109,10 @@ test('guard, coordinated full post: the removed assertion rides the same single 
       const out = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events, compare: weakenedCompare() }) });
       assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
       assert.equal(requests.length, 1);
-      const guard = guardComments(requests[0].body);
-      assert.equal(guard.length, 1);
-      assert.deepEqual({ path: guard[0].path, side: guard[0].side, line: guard[0].line }, { path: 'skills/slim-review/scripts/pr-review.test.mjs', side: 'LEFT', line: 3 });
+      assert.deepEqual(guardComments(requests[0].body), []);
+      assert.match(guardSection(requests[0].body), /- `skills\/slim-review\/scripts\/pr-review\.test\.mjs`\n {2}- `-` old line 3, assertion removed or changed: `assert\.equal\(result\.exit, 2\);`/);
       assert.deepEqual(parseMarker(requests[0].body.body).lenses, REQUIRED_LENSES, 'the marker names the lenses, never the guard');
-      assert.ok(out.diagnostics.includes('guard          1 test file(s) weakened → 1 thread(s) for the conductor'));
+      assert.ok(out.diagnostics.includes('guard          1 test file(s) with test or assertion changes → listed in the review body (non-blocking)'));
     });
   });
 });
@@ -6144,11 +6145,11 @@ test('guard, coordinated delta post: only the amendment\'s removal is reported, 
     await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
       const out = await runCoordinatedPost({ refFile, home, origin, seams: amendmentSeams(pinnedSeams({ events, compare: pinned }), amendment) });
       assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
-      const guard = guardComments(requests[0].body);
-      assert.equal(guard.length, 1);
-      assert.deepEqual({ side: guard[0].side, line: guard[0].line }, { side: 'LEFT', line: 3 }, 'anchored by text on the pinned PR diff');
-      assert.match(guard[0].body, /\*\*scope:\*\* delta/);
-      assert.equal(guard[0].body.includes('assert.equal(other, 1);'), false, 'a PR-diff removal the amendment did not make is not reported');
+      assert.deepEqual(guardComments(requests[0].body), []);
+      const section = guardSection(requests[0].body);
+      assert.match(section, /in this amendment/);
+      assert.ok(section.includes('assert.equal(result.exit, 2);'));
+      assert.equal(section.includes('assert.equal(other, 1);'), false, 'a PR-diff removal the amendment did not make is not reported');
     });
   });
 });

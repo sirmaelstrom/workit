@@ -263,18 +263,18 @@ one table in `scripts/pr-review-guard.mjs`. It matches text and does not judge
 it: a condition that needs evaluating is past it. A line moved within the same
 file is not reported, and neither is a renamed test declaration while every
 other removed line in the file came back unchanged. A changed test file with
-no patch (GitHub omits it on a large diff; a binary file has none) gets a
-**not checked: no patch** thread of its own, since nothing in it could be read.
+no patch (GitHub omits it on a large diff; a binary file has none) is listed
+as **not checked: no patch**, since nothing in it could be read.
 
 - **Which patches:** the PR diff on a full review, and the `<since>...<head>`
   compare on an amendment check, so a delta round reports only what the
   amendment removed.
-- **Where it lands:** one inline thread per weakened file, tagged
-  `**lens:** guard`, in the same review POST as the lens comments. A removed
-  line is anchored on the diff's left side, at its old line number. When the
-  PR diff has no such line (the amendment removed something an earlier round
-  added), the thread sits on the nearest commentable line and names the real
-  place. The receipt prints a `guard` line when anything was found.
+- **Where it lands:** a **Test files whose assertions changed** section in the
+  review body, naming each matched file and each matched line (old line
+  number for a removal, new for an addition, with the text). It is not a
+  thread and blocks nothing: no verdict is owed and `threads --unresolved`
+  never sees it. A reviewer reads it if a listed line surprises them. The
+  receipt prints a `guard` line when anything was found.
 - **Not a lens:** the guard has no findings document and never appears in the
   marker's `lenses=`. The two-lens rule, the coordinated lens-set check, and
   coverage are all computed over the lens documents alone.
@@ -390,8 +390,9 @@ owed elsewhere or answered by the conductor. With this mapping the log counts
 lane refutations and conductor overturns separately.
 
 **A guard thread (`**lens:** guard`) is judged by the conductor or the
-operator, never the lane.** It flags the author's own change, so the author
-cannot clear it. `reply --verdict` on a guard comment exits 2, posting and
+operator, never the lane.** `post` no longer opens one (§ Test-weakening check
+reports into the body), but a review posted before that change may still
+carry one. It flags the author's own change, so the author cannot clear it. `reply --verdict` on a guard comment exits 2, posting and
 logging nothing, unless `--adjudicator` is `conductor` or `operator`. Those two
 are refused in turn (exit 2, before anything is read) while `WORKIT_LANE` is
 set, which `lane.mjs start` does in every lane's tool environment. This
