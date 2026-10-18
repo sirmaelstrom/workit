@@ -971,7 +971,9 @@ test('C1-4/C2-10 a delta council round writes the delta diff and hands it to the
   const delta = deltaReviewActions(state, wp, sha('f'), { changedPaths: changed });
   const diffFile = join(RUN, 'council', 'wp-01', 'delta-r2.diff');
   assert.deepEqual(delta.map((a) => a.tool ?? a.part), ['delta-diff', 'council_review', 'council_synthesize', 'council_challenge']);
-  assert.deepEqual(delta[0].command, ['git', '-C', WT, 'diff', '--no-color', `--output=${diffFile}`, sha('f'), HEAD]);
+  assert.deepEqual(delta[0].command, ['git', '-C', WT, 'diff', '--no-color', `--output=${diffFile}`, '--end-of-options', sha('f'), HEAD]);
+  // A since that is not a commit sha never reaches git's argv (council r4, M3).
+  assert.throws(() => deltaReviewActions(state, wp, '--output=/elsewhere', { changedPaths: changed }), /needs a commit sha/);
   const full = t2Actions(state, wp, { round: 2, changedPaths: changed });
   assert.deepEqual(delta[1].args.artifact_paths, [diffFile, ...changed]);
   assert.notDeepEqual(delta[1].args, full[0].args, 'the payloads differ at the tool-input boundary');

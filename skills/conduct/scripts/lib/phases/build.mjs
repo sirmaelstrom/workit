@@ -13,14 +13,14 @@
 // Fields this phase adds (optional; every reader tolerates their absence):
 // state.build { contract, halts, spendOkFor }; authority.budgetSource; wps[]
 // stage, amendment, checkAmends, gateAmends, owed, asks, replyIds, rulingSeq,
-// deferredBy, changedPaths, gateCmd, noCi, cleanup, lane.uncertain,
+// deferredBy, changedPaths, councilScope, gateCmd, noCi, cleanup, lane.uncertain,
 // lane.livenessHeld; halts[] kinds budget | meter | merged | replan, a meter's dueAt;
 // state.replans[] (n, why, delta, rests, file, mode, touch, receipt, answer);
 // touches[] build (why the build opened it), applied, announced, waitLeftMs,
 // waitDueAt, guard, spendUsd; a queued wait's remainingMs and dueAt; an
 // emitted action's wpId and, on a yielding wait, `yield: true`; a spend
 // action's budgetFor.
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { ConductError, STEP_SEAM, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
@@ -1240,6 +1240,9 @@ function gateActs(state, wp, deps) {
   return [shell('gate-cmd', 'gate-cmd', shellArgv(command, deps.platform), extra), gate];
 }
 
+// The files an amendment changed since the delta baseline, a commit sha.
+const amendDiff = (wp, since) => shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', '--end-of-options', since, '{pr.head}']);
+
 // A T1 delta review with two or more majors is counted again after adjudication.
 function deltaCountActs(state, wp) {
   const latest = (wp.reviews ?? []).at(-1);
@@ -1317,7 +1320,8 @@ function expand(state, wp, deps) {
       if (wp.fullReviewOwed) return go([prDiff(state)], null);
       if (wp.deltaEscalation) return go([prDiff(state)], null);
       if (!since || since === wp.pr?.head || review.scope !== 'full') return go([], 'land');
-      return go([shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', since, '{pr.head}'])], null);
+      if (!SHA.test(since)) return block(state, wp, deps, `the delta baseline ${JSON.stringify(since)} is not a commit sha`);
+      return go([amendDiff(wp, since)], null);
     }
     case 'land':
       // A gate amendment's lane work ends here: its gate-fix range is closed at the head it pushed.
@@ -1729,7 +1733,13 @@ const repoArg = (command) => (command.includes('--repo') ? command[command.index
 const filledAct = (action, wp) => (Array.isArray(action?.command) && wp
   ? { ...action, command: action.command.map((arg) => (Object.hasOwn(FILL, arg) && FILL[arg](wp) != null ? String(FILL[arg](wp)) : arg)) } : action);
 const sameAct = (a, b, wp) => sameAction(filledAct(a, wp), filledAct(b, wp));
-const under = (path, root) => typeof path === 'string' && typeof root === 'string' && path.startsWith(root) && /^[\\/]/.test(path.slice(root.length));
+// A path inside `root` once both are resolved, and never one naming `..`.
+const inside = (path, root) => {
+  if (typeof path !== 'string' || typeof root !== 'string' || path.split(/[\\/]/).includes('..')) return false;
+  const rel = relative(resolve(root), resolve(path));
+  return rel !== '' && !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
+};
+const SHA = /^[0-9a-f]{7,40}$/i;
 
 // The review steps a stored act's `land` names (round, scope, since, report,
 // all), each checked against the WP's state: then exactly what reviewActions
@@ -1752,17 +1762,24 @@ function reviewActs(state, wp, land) {
   return [...probe, ...steps, ...steps.flatMap(strip), ...recover];
 }
 
-// A council round a stored act's `land` names: its review, synthesis and
-// challenge as t2Actions queues them, the changed paths (from the PR diff the
-// record read) only paths in the lane's worktree, and a retry only for the
-// seats the round still lacks.
+// The council round recorded when it was queued (wp.councilScope: its round,
+// scope, since, and the changed paths the diff read): its review, synthesis
+// and challenge as t2Actions queues them, and a retry only for the seats the
+// round still lacks. Of the stored act, only the retry number is read. A
+// recorded path that is absolute or resolves outside the lane worktree, an
+// artifact outside the worktree and the WP's council dir, or a delta since
+// that is not a commit sha, derives nothing (council r4, M2/M3).
 function councilActs(state, wp, action) {
   const land = action.land;
-  if (!land || typeof land !== 'object' || !Number.isInteger(land.round)) return [];
-  const paths = (action.args?.artifact_paths ?? []).filter((path) => path !== land.prior && path !== land.deltaDiff);
-  if (!paths.every((path) => under(path, wp.lane?.worktree))) return [];
-  const acts = t2Actions(state, wp, { round: land.round, changedPaths: paths, scope: land.scope, since: land.since ?? null });
+  const scope = wp.councilScope;
+  const worktree = wp.lane?.worktree;
+  if (!land || typeof land !== 'object' || !scope || typeof scope !== 'object' || !Number.isInteger(scope.round) || !Array.isArray(scope.paths)) return [];
+  if (scope.scope === 'delta' ? !SHA.test(scope.since ?? '') : scope.scope !== 'full' || scope.since !== null) return [];
+  if (!scope.paths.every((path) => typeof path === 'string' && !isAbsolute(path) && inside(join(worktree, path), worktree))) return [];
+  const acts = t2Actions(state, wp, { round: scope.round, changedPaths: scope.paths.map((path) => join(worktree, path)), scope: scope.scope, since: scope.since });
   const review = acts.find((a) => a.part === 'review');
+  const own = join(state.runDir, 'council', wp.id.toLowerCase());
+  if (!(review?.args.artifact_paths ?? []).every((path) => inside(path, worktree) || inside(path, own))) return [];
   const missing = wp.councilStage?.missing ?? [];
   const models = action.args?.models;
   if (review && Number.isInteger(land.retry) && land.retry >= 1 && land.retry <= 2 && Array.isArray(models) && models.length === missing.length && models.every((seat, i) => seat === missing[i])) {
@@ -1825,7 +1842,7 @@ function wpActs(state, wp, deps, authority, action) {
   if (wp.amendment) add(() => amendmentBrief(state, wp, wp.amendment));
   add(() => gateActs(state, wp, deps));
   add(() => prDiff(state));
-  add(() => shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', deltaBaseline(wp), '{pr.head}']));
+  add(() => (SHA.test(deltaBaseline(wp) ?? '') ? amendDiff(wp, deltaBaseline(wp)) : []));
   add(() => deltaCountActs(state, wp));
   add(() => reviewActs(state, wp, action.land));
   add(() => councilActs(state, wp, action));
@@ -2324,6 +2341,7 @@ function recordOwn(state, wp, action, result, deps) {
           if (!changed.some((path) => !path.toLowerCase().endsWith('.md') || isTestPath(path))) return (wp.stage = 'land');
         }
         setState(state, wp, 'review', null, deps);
+        wp.councilScope = { round: latestRound(wp) + 1, scope: 'delta', since, paths: changed };
         wp.queue = emitting(state, wp, deps, () => withMeta(state, wp, deltaReviewActions(state, wp, since, { report, changedPaths: absolute })));
         return (wp.stage = wp.state === 'blocked' ? null : 'reviewed');
       }
@@ -2339,6 +2357,7 @@ function recordOwn(state, wp, action, result, deps) {
       if (effectiveTier(wp) === 'T0') return (wp.stage = 'land');
       setState(state, wp, 'review', null, deps);
       const round = latestRound(wp) + 1;
+      wp.councilScope = { round, scope: 'full', since: null, paths: changed };
       wp.queue = emitting(state, wp, deps, () => (wp.tier === 'T2' ? withMeta(state, wp, t2Actions(state, wp, { round, changedPaths: absolute, report })) : reviewActions(state, wp, { round, report })));
       return (wp.stage = wp.state === 'blocked' ? null : 'reviewed');
     }

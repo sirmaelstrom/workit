@@ -169,7 +169,7 @@ const RULES = [
   [/^git -C \S+ diff --no-color --no-ext-diff --no-textconv --no-renames --full-index (\w+) (\w+)$/, () => ok(PROOF_PATCH)],
   [/^git -C \S+ patch-id --verbatim$/, () => ok(`${'f'.repeat(40)} x\n`)],
   [/^git -C \S+ diff --quiet (?:--no-renames )?(\w+) (\w+)$/, (h, m) => ({ code: h.treeMismatch === m[2] ? 1 : 0, stdout: '', stderr: '' })],
-  [/^git -C \S+ diff --name-only \S+ \S+$/, (h) => ok(h.amendDiff ?? 'src/x.mjs\n')],
+  [/^git -C \S+ diff --name-only --end-of-options \S+ \S+$/, (h) => ok(h.amendDiff ?? 'src/x.mjs\n')],
   [/^git -C \S+ diff --no-color --output=/, () => ok()],
   [/^git -C \S+ show origin\/main:\.workit\/conduct\.json$/, () => ({ code: 128, stdout: '', stderr: "fatal: path '.workit/conduct.json' does not exist in 'origin/main'" })],
   [/^gh api repos\/example\/scratch\/commits\/(\w+)\/check-runs\?per_page=100 --paginate$/, (h, m) => (h.checkRuns ? h.checkRuns(m[1]) : ok(text('land', 'check-runs-green.json')))],
@@ -2037,8 +2037,9 @@ test('M2 containment (council r4, astra/codex): a council review whose artifact 
   const probes = [
     ['traversal', traversal, () => {}],
     ['unrelated worktree file', join(worktree, 'unrelated.txt'), () => {}],
-    // The recorded set itself naming a traversal derives nothing.
-    ['recorded traversal', traversal, (wp) => wp.councilScope?.paths.push(`..${sep}secret.txt`)],
+    // The recorded set itself naming a traversal derives nothing, though the
+    // act carries exactly the path t2Actions would join from it.
+    ['recorded traversal', join(worktree, '..', 'secret.txt'), (wp) => wp.councilScope?.paths.push(`..${sep}secret.txt`)],
   ];
   for (const [name, extra, tamper] of probes) {
     const { emitted, after } = await trial(h, (state) => {

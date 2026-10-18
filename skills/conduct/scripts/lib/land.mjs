@@ -314,6 +314,8 @@ export function priorAdjudicationBody(recordBody) {
 // { path, round }, set at `resolve`) goes in too, as context only.
 export function t2Actions(state, wp, { round = 1, changedPaths = [], report = null, scope = 'full', since = null } = {}) {
   if (!state.adapters?.council?.on) return reviewActions(state, wp, { round, report, all: true, since: scope === 'delta' ? since : null });
+  // A delta's `since` goes into git's argv: only a commit sha, after --end-of-options.
+  if (scope === 'delta' && !/^[0-9a-f]{7,40}$/i.test(since ?? '')) throw new ConductError(2, `${wp.id}: a council delta needs a commit sha to diff from, not ${JSON.stringify(since)}`);
   const workshop = `${join(state.runDir, 'council', lower(wp))}${sep}`;
   const outDir = `${join(state.runDir, 'council', lower(wp), `review-${round}`)}${sep}`;
   const deltaDiff = scope === 'delta' ? join(state.runDir, 'council', lower(wp), `delta-r${round}.diff`) : null;
@@ -326,7 +328,7 @@ export function t2Actions(state, wp, { round = 1, changedPaths = [], report = nu
   const tool = (part, name, args, extra = {}) => ({ kind: 'agent-tool', step: 'council', seam: STEP_SEAM.council, part, tool: name,
     instruction: `Call ${name} with these args and record its result.`, args, expects: { type: 'json' }, land, ...extra });
   return [
-    ...(deltaDiff ? [shell('council', 'delta-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', `--output=${deltaDiff}`, since, wp.pr.head], { land })] : []),
+    ...(deltaDiff ? [shell('council', 'delta-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', `--output=${deltaDiff}`, '--end-of-options', since, wp.pr.head], { land })] : []),
     tool('review', 'council_review', { workshop_path: workshop, output_dir: outDir, surface: 'code', code_root: wp.lane.worktree,
       artifact_paths: [...prior, ...(deltaDiff ? [deltaDiff] : []), ...changedPaths], round, profile: CONDUCT_COUNCIL_PROFILE }),
     tool('synthesize', 'council_synthesize', { review_dir: outDir, workshop_path: workshop }, {
@@ -1140,7 +1142,9 @@ function fullReview(state, wp, deps) {
   if (effectiveTier(wp) !== 'T2') return { queue: reviewActions(state, wp, { round }) };
   const diff = deps.exec('git', ['-C', wp.lane.worktree, 'diff', '--name-only', '--no-renames', `origin/${defaultOf(state)}...HEAD`]);
   if (diff.code !== 0) return { failure: `changed files unreadable: ${first(diff.stderr)}` };
-  return { queue: t2Actions(state, wp, { round, changedPaths: lines(diff.stdout).map((path) => join(wp.lane.worktree, path)) }) };
+  const paths = lines(diff.stdout);
+  // The round as queued, which emission derives its acts from (build.mjs councilActs).
+  return { queue: t2Actions(state, wp, { round, changedPaths: paths.map((path) => join(wp.lane.worktree, path)) }), councilScope: { round, scope: 'full', since: null, paths } };
 }
 
 const validInspect = (inspect) => inspect && typeof inspect === 'object' && /^[0-9a-f]{7,40}\.\.[0-9a-f]{7,40}$/i.test(inspect.tail ?? '')
@@ -1296,7 +1300,7 @@ function classifyGate(state, wp, action, gate, causes, reason, deps) {
   if (causes.has('full-review')) {
     const review = fullReview(state, wp, deps);
     if (review.failure) return result('block', review.failure);
-    return result('continue', reason, { ...(mergeLockFor(state, wp) === 'mine' ? { mergeLock: null } : {}), queue: review.queue });
+    return result('continue', reason, { ...(mergeLockFor(state, wp) === 'mine' ? { mergeLock: null } : {}), queue: review.queue, ...(review.councilScope ? { councilScope: review.councilScope } : {}) });
   }
   if (causes.size === 1 && causes.has('inspect')) {
     if (!validInspect(gate.inspect)) return result('block', `the gate asked for an inspection with an unusable payload: ${JSON.stringify(gate.inspect)}`);
