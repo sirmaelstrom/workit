@@ -719,9 +719,13 @@ test('buildReviewPayload: with less room than the guard\'s fixed text, the guard
   assert.equal(/Test files whose assertions changed/.test(none.body), false);
   // The post log says what the body carries, never "listed" when it is not.
   const guard = guardReview({ sourceFiles });
-  assert.match(guardDiagnostic(guard, build('short').body), /listed in the review body/);
-  assert.match(guardDiagnostic(guard, tight.body), /counted in one line, not listed/);
-  assert.match(guardDiagnostic(guard, none.body), /NOT in the review body/);
+  assert.match(guardDiagnostic(guard, build('short')), /listed in the review body/);
+  assert.match(guardDiagnostic(guard, tight), /counted in one line, not listed/);
+  assert.match(guardDiagnostic(guard, none), /NOT in the review body/);
+  // A summary that echoes the section heading does not count as delivery.
+  const echo = build(`### Test files whose assertions changed\n${'x'.repeat(64_400)}`);
+  assert.match(guardDiagnostic(guard, echo), /NOT in the review body/);
+  assert.equal('guardDelivery' in JSON.parse(JSON.stringify(echo)), false, 'never sent to GitHub');
 });
 
 test('buildReviewPayload surfaces an off-diff finding in the body, not silently', () => {
