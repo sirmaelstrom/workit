@@ -6,8 +6,11 @@
 // It is a library and a CLI. The CLI verifies against readAnchor() and nothing else:
 //   node operator-proof.mjs verify-receipt --file <f> --quest <full uuid> [--state <state.json>] [--goal <file>]
 //   node operator-proof.mjs verify-record --file <f> --quest <id|none> [--goal <file>]
-// Each prints one JSON line {ok, mode, reason, credentialId, epoch, grant, answer, scopeOk?}
-// and exits 0 only on ok (verified, or unconfigured).
+//   node operator-proof.mjs verify-sitting --file <rows.json> --repo <owner/name> --branch <base> --act <merge|deploy:service>
+// verify-receipt and verify-record print one JSON line {ok, mode, reason, credentialId, epoch,
+// grant, answer, scopeOk?} and exit 0 only on ok (verified, or unconfigured). verify-sitting
+// prints {ok, mode, reason, sittingId?, receiptId?, credentialId?, notAfter?, candidates} and
+// exits 0 only when verified: an unconfigured anchor refuses it.
 import { createHash, createPublicKey, verify as verifySignature } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -22,6 +25,7 @@ export const REASONS = Object.freeze(Object.fromEntries([
   'up_required', 'uv_required', 'bad_key', 'bad_signature', 'credential_id_mismatch', 'key_mismatch',
   'cosign_mismatch', 'cosign_unconfigured', 'proof_stale', 'anchor_unreadable', 'grant_tag_mismatch', 'grant_expired',
   'wrong_run', 'raise_tag_mismatch', 'quest_id_not_full', 'not_answered', 'input_unreadable', 'record_answer_mismatch',
+  'sitting_unconfigured', 'sitting_malformed', 'sitting_declined', 'sitting_too_long', 'sitting_bad_time', 'sitting_out_of_scope',
 ].map((code) => [code, code])));
 
 export class OperatorProofError extends Error {
@@ -532,6 +536,110 @@ export function checkRaise(raise, askLike, key = 'a') {
   return nfc(consequence) === nfc(`${rendered} [raise ${raiseTag(raise)}]`);
 }
 
+// --- Sitting grants --------------------------------------------------------------
+// One signed answer authorizes a sitting's merges and deploys. The
+// grant JSON rides in the ask's prompt as one ```json fenced block (the prompt is in
+// askSha256, so it is signed); option (a)'s consequence is exactly
+// renderSitting(grant) + ' [sitting ' + sittingTag(grant) + ']'.
+
+export const SITTING_MAX_MS = 72 * 60 * 60 * 1000;
+// The services a sitting may name. A deploy of anything else asks on its own.
+export const SITTING_SERVICES = Object.freeze(['cantina', 'dogan', 'forge', 'observatory', 'synthesis-worker']);
+const SITTING_KEYS = 'deploy,filedAt,kind,merge,notAfter,repos,runBudgetUsd,sittingId,v';
+const ISO_SECONDS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+const strictlySorted = (items) => items.every((item, i) => i === 0 || items[i - 1] < item);
+
+function isSitting(grant) {
+  if (!isObj(grant) || !sameKeys(grant, SITTING_KEYS) || grant.v !== 1 || grant.kind !== 'sitting') return false;
+  if (!isStr(grant.sittingId) || !UUID.test(grant.sittingId)) return false;
+  if (![grant.filedAt, grant.notAfter].every((t) => isStr(t) && ISO_SECONDS.test(t) && !Number.isNaN(Date.parse(t)))) return false;
+  if (!Array.isArray(grant.repos) || grant.repos.length < 1 || grant.repos.length > 8) return false;
+  if (!grant.repos.every((r) => isObj(r) && sameKeys(r, 'branch,remote') && isStr(r.remote) && r.remote !== '' && isStr(r.branch) && r.branch !== '')) return false;
+  if (!strictlySorted(grant.repos.map((r) => r.remote))) return false;
+  if (typeof grant.merge !== 'boolean' || !isAmount(grant.runBudgetUsd)) return false;
+  if (!Array.isArray(grant.deploy) || !grant.deploy.every((s) => SITTING_SERVICES.includes(s)) || !strictlySorted(grant.deploy)) return false;
+  return true;
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+export function renderSitting(grant) {
+  if (!isSitting(grant)) return null;
+  const until = new Date(Date.parse(grant.notAfter)).toISOString().slice(0, 16);
+  return `Sitting ${grant.sittingId.slice(0, 8)}: merges ${yesNo(grant.merge)}, ${plural(grant.repos.length, 'repo')}, `
+    + `${plural(grant.deploy.length, 'deploy')}, $${grant.runBudgetUsd}/run, until ${until}Z.`;
+}
+
+export function sittingTag(grant) {
+  return isSitting(grant) ? sha256Hex(canonical(grant)).slice(0, 16) : null;
+}
+
+export function checkSitting(grant, askLike, key = 'a') {
+  const consequence = consequenceFor(askLike, key);
+  const rendered = renderSitting(grant);
+  if (consequence === null || rendered === null) return false;
+  return nfc(consequence) === nfc(`${rendered} [sitting ${sittingTag(grant)}]`);
+}
+
+// The one ```json fenced block in a prompt, parsed, when it is a sitting grant.
+export function parseSittingPrompt(prompt) {
+  if (!isStr(prompt)) return null;
+  const blocks = [...prompt.matchAll(/```json\r?\n([\s\S]*?)\r?\n```/g)];
+  if (blocks.length !== 1) return null;
+  try {
+    const grant = JSON.parse(blocks[0][1]);
+    return isSitting(grant) ? grant : null;
+  } catch {
+    return null;
+  }
+}
+
+// One answered row ({questId, question, ask, answer}) against an act. Configured
+// anchors only: with no passkey there are no sitting grants.
+function sittingVerdict(row, { repo, branch, act, anchor, now }) {
+  const out = (reason, extra = {}) => ({ ok: reason === null, mode: reason === null ? 'verified' : 'refused', reason, ...extra });
+  if (!anchor.configured) return out(REASONS.sitting_unconfigured);
+  if (!isObj(row) || row.outcome !== 'answered' || !isObj(row.answer)) return out(REASONS.not_answered);
+  if (row.answer.key !== 'a') return out(REASONS.sitting_declined);
+  const grant = parseSittingPrompt(row.ask?.prompt);
+  if (grant === null || !isStr(row.question) || !row.question.startsWith(`[sitting ${grant.sittingId}]`)) return out(REASONS.sitting_malformed);
+  if (!isStr(row.questId) || !UUID.test(row.questId)) return out(REASONS.quest_id_not_full);
+  // The stored ask link is required and bound, so a row cannot shed it to dodge the check.
+  const askReceiptId = row.answer.askReceiptId;
+  if (!isStr(askReceiptId) || !UUID.test(askReceiptId)) return out(REASONS.sitting_malformed);
+  const proof = verifyAnswerProof({ answer: row.answer, question: row.question, ask: row.ask, questId: row.questId, askReceiptId, anchor });
+  if (!proof.ok || proof.mode !== 'verified') return out(proof.reason ?? REASONS.proof_absent);
+  if (!checkSitting(grant, row.ask, 'a')) return out(REASONS.grant_tag_mismatch);
+  const signedAt = Date.parse(JSON.parse(row.answer.proof.statement).signedAt);
+  const [filedAt, notAfter] = [Date.parse(grant.filedAt), Date.parse(grant.notAfter)];
+  if (!(notAfter > filedAt) || notAfter - filedAt > SITTING_MAX_MS) return out(REASONS.sitting_too_long);
+  if (signedAt < filedAt - FRESH_FUTURE_MS || signedAt > notAfter) return out(REASONS.sitting_bad_time);
+  if (now > notAfter) return out(REASONS.grant_expired);
+  const covered = grant.repos.some((r) => r.remote === repo && r.branch === branch);
+  const allowed = act === 'merge' ? grant.merge === true
+    : isStr(act) && act.startsWith('deploy:') && grant.deploy.includes(act.slice('deploy:'.length));
+  if (!covered || !allowed) return out(REASONS.sitting_out_of_scope);
+  return out(null, { sittingId: grant.sittingId, receiptId: row.id ?? null, credentialId: proof.credentialId, notAfter: grant.notAfter });
+}
+
+// rows: candidate answered rows, newest first (Observatory's sitting route), or one
+// row. The first that verifies and covers the act wins; otherwise the newest
+// candidate's refusal, with every candidate's reason beside it.
+export function verifySitting({ rows, repo, branch, act, anchor, now = Date.now() } = {}) {
+  requireAnchor(anchor);
+  const list = Array.isArray(rows) ? rows : [rows];
+  const reasons = [];
+  for (const row of list) {
+    const verdict = sittingVerdict(row, { repo, branch, act, anchor, now });
+    if (verdict.ok) return { ...verdict, candidates: list.length };
+    reasons.push(verdict.reason);
+  }
+  return {
+    ok: false, mode: 'refused', reason: anchor.configured ? (reasons[0] ?? REASONS.not_answered) : REASONS.sitting_unconfigured,
+    candidates: list.length, reasons,
+  };
+}
+
 // --- CLI commands, in process --------------------------------------------------
 // Each returns the CLI's line, {ok, mode, reason, credentialId, epoch, grant, answer, scopeOk?}.
 // The CLI passes readAnchor() and Date.now(); nothing on its argv or environment
@@ -669,6 +777,7 @@ export function verifyRecord({ record, quest, goalText, anchor, now = Date.now()
 const USAGE = [
   'usage: node operator-proof.mjs verify-receipt --file <f> --quest <full uuid> [--state <state.json>] [--goal <file>]',
   '       node operator-proof.mjs verify-record --file <f> --quest <id|none> [--goal <file>]',
+  '       node operator-proof.mjs verify-sitting --file <rows.json> --repo <owner/name> --branch <base> --act <merge|deploy:service>',
 ].join('\n');
 
 function readInput(path, json) {
@@ -684,6 +793,13 @@ function readInput(path, json) {
 const optional = (path, json) => (path === undefined ? undefined : readInput(path, json));
 
 const COMMANDS = {
+  'verify-sitting': {
+    flags: ['--file', '--repo', '--branch', '--act'],
+    required: ['--file', '--repo', '--branch', '--act'],
+    run: (flags, anchor) => verifySitting({
+      rows: readInput(flags['--file'], true), repo: flags['--repo'], branch: flags['--branch'], act: flags['--act'], anchor,
+    }),
+  },
   'verify-receipt': {
     flags: ['--file', '--quest', '--state', '--goal'],
     run: (flags, anchor) => verifyReceiptBody({
@@ -699,19 +815,19 @@ const COMMANDS = {
   },
 };
 
-function parseFlags(argv, allowed) {
+function parseFlags(argv, allowed, required = ['--file', '--quest']) {
   const flags = {};
   for (let i = 0; i < argv.length; i += 2) {
     const [name, value] = [argv[i], argv[i + 1]];
     if (!allowed.includes(name) || value === undefined || Object.hasOwn(flags, name)) return null;
     flags[name] = value;
   }
-  return flags['--file'] !== undefined && flags['--quest'] !== undefined ? flags : null;
+  return required.every((name) => flags[name] !== undefined) ? flags : null;
 }
 
 function main(argv) {
   const command = Object.hasOwn(COMMANDS, argv[0]) ? COMMANDS[argv[0]] : null;
-  const flags = command && parseFlags(argv.slice(1), command.flags);
+  const flags = command && parseFlags(argv.slice(1), command.flags, command.required);
   if (!flags) {
     process.stderr.write(`${USAGE}\n`);
     process.exitCode = 2;
