@@ -545,6 +545,24 @@ export function countDeltaDefects(findings) {
   return new Set([...parent.keys()].map(root)).size + eligible.filter((f) => f.id == null).length;
 }
 
+/** GitHub refuses a review body over this many characters, and the whole POST with it. */
+export const REVIEW_BODY_MAX_CHARS = 65_536;
+// Room for the coordinated post's marker, appended after the payload is built.
+const REVIEW_BODY_RESERVE = 1_000;
+const GUARD_NOT_LISTED = 'not listed: this review body had no room';
+
+/**
+ * The post log's guard line: what `buildReviewPayload` put in the body, never more.
+ * It reads the payload's non-enumerable `guardDelivery` (absent from the POST JSON),
+ * not the body text, which a summary can echo.
+ */
+export function guardDiagnostic(guard, payload) {
+  const head = `guard          ${guard.entries.length} test file(s) with test or assertion changes → `;
+  if (payload.guardDelivery === 'listed') return `${head}listed in the review body (non-blocking)`;
+  if (payload.guardDelivery === 'counted') return `${head}counted in one line, not listed: the review body had no room`;
+  return `${head}NOT in the review body: it had no room left. Read the PR diff's test files`;
+}
+
 /**
  * Build the `POST /pulls/{n}/reviews` payload.
  *
@@ -565,8 +583,8 @@ export function buildReviewPayload({
   // Present only on an amendment check: findings outside the amendment's lines.
   // Listed once so the sample is not lost, never posted inline, never counted.
   excluded,
-  // The test-weakening check (`guardReview`): its threads ride the same POST
-  // as the lens comments, and its section precedes the footer.
+  // The test-weakening check (`guardReview`): a non-blocking body section that
+  // precedes the footer. It adds no inline comment.
   guard,
   deltaFindings,
 }) {
@@ -605,7 +623,7 @@ export function buildReviewPayload({
     sections.push(lines.join('\n'));
   }
 
-  if (guard?.section) sections.push(guard.section);
+  const guardAt = sections.length;
   if (deltaFindings) sections.push(deltaManifest(deltaFindings));
 
   const footer = [
@@ -622,7 +640,20 @@ export function buildReviewPayload({
   }
   sections.push(footer.join('\n'));
 
-  return {
+  // The guard section gets what the rest of the body leaves, up to its own cap. Its
+  // heading and notice are fixed text, so with less room than that it shrinks to one
+  // line, and with less than that it is left out: it never pushes the body over.
+  let guardDelivery = null;
+  if (guard?.section) {
+    const room = REVIEW_BODY_MAX_CHARS - REVIEW_BODY_RESERVE - sections.join('\n').length - 1;
+    const shrunk = guard.section.length <= room ? guard.section : guard.render?.(Math.max(room, 0));
+    const line = `\n_Test files whose assertions changed: ${guard.entries.length} file(s), ${GUARD_NOT_LISTED}. Read the PR diff._`;
+    const section = [shrunk, line].find((text) => text != null && text.length <= room);
+    if (section) sections.splice(guardAt, 0, section);
+    guardDelivery = section === undefined ? 'omitted' : section === line ? 'counted' : 'listed';
+  }
+
+  const payload = {
     event: 'COMMENT',
     body: sections.join('\n'),
     comments: [
@@ -632,9 +663,11 @@ export function buildReviewPayload({
         side: 'RIGHT',
         body: renderFinding(f),
       })),
-      ...(guard?.comments ?? []),
     ],
   };
+  // Non-enumerable: the post log reads it, the POST JSON never carries it.
+  Object.defineProperty(payload, 'guardDelivery', { value: guardDelivery });
+  return payload;
 }
 
 // ---------------------------------------------------------------------------
@@ -788,9 +821,8 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
     );
   }
   // The test-weakening check reads the diff this round covers (the amendment
-  // compare on a delta round) and anchors on the PR diff, like the findings.
-  const prDiffFiles = filesFromDiff(diffText);
-  const guard = guardReview({ sourceFiles: since ? compare.files : prDiffFiles, prDiffFiles, delta: Boolean(since) });
+  // compare on a delta round) and reports into the review body.
+  const guard = guardReview({ sourceFiles: since ? compare.files : filesFromDiff(diffText), delta: Boolean(since) });
 
   const payload = buildReviewPayload({
     summary: doc.summary,
@@ -829,10 +861,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   for (const f of excluded ?? []) {
     log(`  excluded     ${f.path}:${f.line} — outside the amendment`);
   }
-  if (guard.entries.length > 0) log(`guard          ${guard.entries.length} test file(s) weakened → ${guard.comments.length} thread(s) for the conductor`);
-  for (const entry of guard.unanchored) {
-    log(`  guard        ${entry.path} — no line in the PR diff can carry its thread; it is in the review body only`);
-  }
+  if (guard.entries.length > 0) log(guardDiagnostic(guard, payload));
 
   if (!coverageCheck.ok && !opts.forcePost) {
     die(5, `coverage check failed; review was not posted: ${coverageCheck.reason}\nRe-run the reviewer or pass --force-post to post the stamped mismatch.`);
@@ -3290,7 +3319,7 @@ async function cmdPostCoordinated(opts, {
   const summary = documents.map((item) => item.doc.summary).join('\n\n');
   // The test-weakening check is computed here, from the patches in hand, and is
   // not a lens: it has no document, so step 4's lens-set check never sees it.
-  const guard = guardReview({ sourceFiles: since ? amendmentPayload.files : comparePayload?.files, prDiffFiles: comparePayload?.files, delta: Boolean(since) });
+  const guard = guardReview({ sourceFiles: since ? amendmentPayload.files : comparePayload?.files, delta: Boolean(since) });
   const payload = buildReviewPayload({
     summary: since
       ? `**Amendment check:** this round reviewed only \`${since.slice(0, 7)}...${attemptRef.head_sha.slice(0, 7)}\` (${coveragePaths.length} file${coveragePaths.length === 1 ? '' : 's'}); the rest of the PR was reviewed in an earlier round.\n\n${summary}`
@@ -3315,8 +3344,7 @@ async function cmdPostCoordinated(opts, {
   diag(`changed files  ${manifestPaths.length} from the pinned manifest (${diffFiles.size} with commentable lines)`);
   diag(`findings       ${findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff`);
   for (const f of excluded ?? []) diag(`  excluded     ${f.path}:${f.line} — outside the amendment`);
-  if (guard.entries.length > 0) diag(`guard          ${guard.entries.length} test file(s) weakened → ${guard.comments.length} thread(s) for the conductor`);
-  for (const entry of guard.unanchored) diag(`  guard        ${entry.path} — no line in the PR diff can carry its thread; it is in the review body only`);
+  if (guard.entries.length > 0) diag(guardDiagnostic(guard, payload));
 
   if (opts.dryRun) {
     diag('--dry-run: nothing posted, nothing reserved.');
@@ -3570,7 +3598,7 @@ const USAGE = `pr-review.mjs — mechanical half of the slim PR-review loop
            [--verdict confirmed|refuted|note|judgment] [--adjudicator lane|conductor|operator]
            [--dup-of <comment id>] [--measure-log <path>]
            judgment = cannot be settled by running anything; left as a PR note
-           a guard comment (**lens:** guard) needs --adjudicator conductor|operator: exit 2 otherwise
+           a guard comment (**lens:** guard, from an earlier review) needs --adjudicator conductor|operator: exit 2 otherwise
            with WORKIT_LANE set (lane.mjs sets it in every lane), --adjudicator conductor|operator: exit 2
   managed  --repo owner/name
            read-only: prints how this installation resolves that repository —

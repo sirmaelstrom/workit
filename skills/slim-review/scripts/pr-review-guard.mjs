@@ -4,9 +4,9 @@
  *
  * A lane can go green by deleting, skipping or loosening the test that
  * reported the failure. This module finds the textual signs of that in a diff
- * and nothing more: it does not judge whether a removal was legitimate. A false
- * positive costs one adjudication row; a missed deletion is the failure the
- * check exists for, so the patterns lean wide.
+ * and nothing more: it does not judge whether a removal was legitimate. It
+ * reports into the review body and blocks nothing, so a false positive costs a
+ * reader one look; the patterns lean wide.
  *
  * Pure: no I/O. `post` feeds it the PR diff on a full review and the
  * `<since>...<head>` compare on an amendment check, so a delta round sees only
@@ -344,8 +344,8 @@ function commentedOutTests(added, context) {
  * and `renamedOut: true, previousPath` on either of the last two when a test
  * file was renamed to a path no runner discovers.
  *
- * `side` is GitHub's review-comment side: `LEFT` for a removed line (numbered
- * in the pre-change file), `RIGHT` for an added one. A line removed and re-added
+ * `side` is `LEFT` for a removed line (numbered in the pre-change file),
+ * `RIGHT` for an added one. A line removed and re-added
  * unchanged elsewhere in the same file (compared trimmed) is a move and is not
  * reported. A removed test declaration whose rename-key reappears among the
  * added lines is a rename and is not reported either, but only while every
@@ -353,7 +353,7 @@ function commentedOutTests(added, context) {
  * assumed.
  *
  * A changed test file with no patch (GitHub omits it on a large diff, and a
- * binary file has none) cannot be read, so it is reported `unchecked`: a thread
+ * binary file has none) cannot be read, so it is reported `unchecked`: an entry
  * that says nothing was checked, rather than silence. An added file and one
  * with `changes: 0` (content shown identical) have nothing to remove.
  */
@@ -426,87 +426,10 @@ export function detectTestWeakening(files) {
 }
 
 /**
- * Index the PR diff for anchoring: per path, the lines GitHub accepts a comment
- * on for each side, and the text there. Measured on a scratch PR
- * (sirmaelstrom/workit#118): a `LEFT` comment on a removed line, on a line of a
- * deleted file and on a context line all post as review threads; a line
- * outside every hunk fails the whole review with 422 "Line could not be
- * resolved"; `subject_type: file` is not accepted inside a review.
+ * The comment tag of a guard thread. `post` no longer opens one (the check is a
+ * body section), but threads opened by earlier reviews carry it, and `reply`
+ * still reads it back on them.
  */
-export function indexForAnchoring(files) {
-  const index = new Map();
-  for (const file of files ?? []) {
-    const { removed, added, context } = patchLines(file.patch);
-    const left = new Map();
-    const right = new Map();
-    const removedByText = new Map();
-    for (const line of removed) {
-      left.set(line.line, line.text);
-      const key = line.text.trim();
-      if (!removedByText.has(key)) removedByText.set(key, []);
-      removedByText.get(key).push(line.line);
-    }
-    for (const line of context) {
-      left.set(line.old, line.text);
-      right.set(line.line, line.text);
-    }
-    for (const line of added) right.set(line.line, line.text);
-    index.set(file.filename, { left, right, removedByText });
-  }
-  return index;
-}
-
-function nearest(lines, target) {
-  let best = null;
-  for (const line of lines) {
-    if (best === null || Math.abs(line - target) < Math.abs(best - target)) best = line;
-  }
-  return best;
-}
-
-/**
- * Where one guard entry's thread sits on the PR diff, or null when the PR diff
- * has no commentable line at all. In order:
- *   1. an item's own line, when the PR diff shows the same text there
- *      (always so on a full review, where the two diffs are one);
- *   2. a removed item's text among the PR diff's removed lines in that file
- *      (an amendment check: the line numbers differ, the text does not);
- *   3. the commentable line nearest the change in that file, either side;
- *   4. the first commentable line of the PR diff (the file is not in it: the
- *      amendment removed something only an earlier round had added).
- * `exact` is false from step 3 on, and the comment then names the real place.
- */
-export function anchorEntry(entry, index) {
-  const own = index.get(entry.path);
-  if (own) {
-    const items = entry.deleted
-      ? (entry.firstLine === null ? [] : [{ side: 'LEFT', line: entry.firstLine, text: own.left.get(entry.firstLine) }])
-      : entry.items;
-    for (const item of items) {
-      const side = item.side === 'LEFT' ? own.left : own.right;
-      if (side.has(item.line) && side.get(item.line) === item.text) return { path: entry.path, side: item.side, line: item.line, exact: true };
-    }
-    for (const item of items) {
-      if (item.side !== 'LEFT') continue;
-      const candidates = own.removedByText.get(item.text.trim());
-      if (candidates?.length) return { path: entry.path, side: 'LEFT', line: nearest(candidates, item.line), exact: true };
-    }
-    const at = entry.items?.[0]?.at ?? 1;
-    const right = nearest(own.right.keys(), at);
-    if (right !== null) return { path: entry.path, side: 'RIGHT', line: right, exact: false };
-    const left = nearest(own.left.keys(), at);
-    if (left !== null) return { path: entry.path, side: 'LEFT', line: left, exact: false };
-  }
-  for (const [path, sides] of index) {
-    const right = nearest(sides.right.keys(), 1);
-    if (right !== null) return { path, side: 'RIGHT', line: right, exact: false };
-    const left = nearest(sides.left.keys(), 1);
-    if (left !== null) return { path, side: 'LEFT', line: left, exact: false };
-  }
-  return null;
-}
-
-/** The comment tag that makes a thread a guard thread. `reply` reads it back. */
 export const GUARD_LENS = 'guard';
 /** Who may give a guard thread its verdict. The author may not clear it. */
 export const GUARD_ADJUDICATORS = Object.freeze(['conductor', 'operator']);
@@ -517,77 +440,100 @@ export const GUARD_ADJUDICATORS = Object.freeze(['conductor', 'operator']);
  */
 export const LANE_MARKER_ENV = 'WORKIT_LANE';
 
-const MAX_LISTED = 20;
+/**
+ * The section's total size, notice included. GitHub refuses a review body
+ * over 65,536 characters, and the whole POST fails with it, so the section
+ * keeps to a quarter of that and leaves the rest to the findings, summary,
+ * footer and marker.
+ */
+export const GUARD_SECTION_MAX_CHARS = 16_000;
+const NOTICE_RESERVE = 300;
+
+/** Matched lines an entry stands for: a deleted file counts what it held. */
+function matchedLines(entry, items) {
+  if (entry.deleted && !entry.patchMissing) return Math.max(entry.removedTests + entry.removedAssertions, 1);
+  return Math.max(items.length, 1);
+}
 
 function quote(text) {
   const clipped = text.trim().length > 160 ? `${text.trim().slice(0, 157)}...` : text.trim();
   return clipped.includes('`') ? `\`\` ${clipped} \`\`` : `\`${clipped}\``;
 }
 
-/** The body of one guard thread. The prefix is what `readPostedFinding` parses. */
-export function renderGuardComment(entry, anchor, { delta = false } = {}) {
-  const lines = [`**lens:** ${GUARD_LENS}`, ''];
-  if (delta) lines.push('**scope:** delta', '');
+/** One entry in the body section: the file's line, then one line per match. */
+function renderEntry(entry) {
   if (entry.deleted) {
-    lines.push(`**Test-weakening check: \`${entry.path}\` was deleted**`, '');
-    lines.push(entry.patchMissing
+    return { head: `- \`${entry.path}\`: deleted. ${entry.patchMissing
       ? 'GitHub sent no patch for it, so its tests and assertions were not counted.'
-      : `The file held ${entry.removedTests} test declaration line(s) and ${entry.removedAssertions} assertion line(s).`);
-  } else if (entry.unchecked) {
-    lines.push(`**Test-weakening check: \`${entry.path}\` not checked: no patch**`, '');
-    if (entry.renamedOut) lines.push(`Renamed out of the test paths from \`${entry.previousPath}\`, so no test runner picks it up.`, '');
-    lines.push(`This test file changed (${entry.status}), but GitHub sent no patch for it (a large diff or a binary file), so nothing in it was checked. Read the change before judging it.`);
-  } else {
-    lines.push(`**Test-weakening check: \`${entry.path}\`**`, '');
-    if (entry.renamedOut) lines.push(`- renamed out of the test paths: \`${entry.previousPath}\` → \`${entry.path}\`, so no test runner picks it up`);
-    for (const item of entry.items.slice(0, MAX_LISTED)) {
-      lines.push(`- ${item.side === 'LEFT' ? `\`-\` old line ${item.line}` : `\`+\` line ${item.line}`}, ${item.label}: ${quote(item.text)}`);
-    }
-    if (entry.items.length > MAX_LISTED) lines.push(`- ... and ${entry.items.length - MAX_LISTED} more in this file`);
+      : `It held ${entry.removedTests} test declaration line(s) and ${entry.removedAssertions} assertion line(s).`}`, items: [] };
   }
-  if (anchor && !anchor.exact) {
-    lines.push('', `This comment sits on the nearest line GitHub accepts (\`${anchor.path}\` ${anchor.side} ${anchor.line}); the change is in \`${entry.path}\` as listed above.`);
-  }
-  lines.push(
-    '',
-    'Matched by pattern, not judged. The conductor or the operator gives the verdict, never the lane: `refuted` with a quoted reason the removal is legitimate, `judgment`, or `confirmed` once the test is restored (`reply --verdict … --adjudicator conductor|operator`).',
-  );
-  return lines.join('\n');
+  const notes = [
+    ...(entry.renamedOut ? [`renamed out of the test paths from \`${entry.previousPath}\`, so no test runner picks it up`] : []),
+    ...(entry.unchecked ? [`not checked: no patch (${entry.status}; a large diff or a binary file)`] : []),
+  ];
+  return {
+    head: `- \`${entry.path}\`${notes.length > 0 ? `: ${notes.join('; ')}` : ''}`,
+    items: entry.items.map((item) => `  - ${item.side === 'LEFT' ? `\`-\` old line ${item.line}` : `\`+\` line ${item.line}`}, ${item.label}: ${quote(item.text)}`),
+  };
 }
 
 /**
- * The whole check as `post` runs it: detect over `sourceFiles`, anchor on
- * `prDiffFiles`, render. Returns the review comments to add, the entries that
- * found no line anywhere (listed in the body, and loud in the receipt), and a
- * body section. An empty result changes nothing in the review.
+ * The whole check as `post` runs it: detect over `sourceFiles` and render one
+ * review-body section. It opens no thread, so nothing in it needs a verdict
+ * before merge: a reviewer can read the listed lines, and that is all. Every
+ * matched line is listed until the section reaches GUARD_SECTION_MAX_CHARS;
+ * from there on nothing more is listed, and a closing notice counts the
+ * matched lines and files left out. An empty result changes nothing in the
+ * review. `render(maxChars)` re-renders under a smaller cap, for a body whose
+ * other sections leave the section less room.
  */
-export function guardReview({ sourceFiles, prDiffFiles, delta = false }) {
+export function guardReview({ sourceFiles, delta = false }) {
   const entries = detectTestWeakening(sourceFiles);
-  if (entries.length === 0) return { entries, comments: [], unanchored: [], section: null };
-  const index = indexForAnchoring(prDiffFiles);
-  const comments = [];
-  const unanchored = [];
-  for (const entry of entries) {
-    const anchor = anchorEntry(entry, index);
-    if (!anchor) {
-      unanchored.push(entry);
-      continue;
-    }
-    comments.push({ path: anchor.path, line: anchor.line, side: anchor.side, body: renderGuardComment(entry, anchor, { delta }) });
-  }
-  const section = [
+  if (entries.length === 0) return { entries, section: null };
+  const render = (maxChars) => renderGuardSection(entries, delta, maxChars);
+  return { entries, section: render(GUARD_SECTION_MAX_CHARS), render };
+}
+
+function renderGuardSection(entries, delta, maxChars) {
+  const lines = [
     '',
     '---',
     '',
-    '### Test-weakening check',
+    '### Test files whose assertions changed',
     '',
-    `${entries.length} test file(s) in ${delta ? 'this amendment' : 'this PR'} lost a test or an assertion, gained a skip, a focus or a disabling wrapper, left the test paths, or changed with no patch to check. Each is an open thread for the conductor or the operator to judge; the lane cannot clear it.`,
+    `Not blocking: nothing here needs a verdict to merge. ${entries.length} test file(s) in ${delta ? 'this amendment' : 'this PR'} lost or changed a test or an assertion, gained a skip, a focus or a disabling wrapper, left the test paths, or changed with no patch to check. The match is textual, so a strengthened or renamed assertion matches too; look if the lines below surprise you.`,
     '',
-    ...entries.map((entry) => `- \`${entry.path}\`: ${entry.deleted ? 'deleted' : [
-      ...(entry.renamedOut ? [`renamed out of the test paths from \`${entry.previousPath}\``] : []),
-      ...(entry.unchecked ? ['not checked: no patch'] : []),
-      ...entry.items.map((item) => item.label),
-    ].filter((label, i, all) => all.indexOf(label) === i).join(', ')}${unanchored.includes(entry) ? ' — **no line in this PR diff can carry a comment; judge it here**' : ''}`),
-  ].join('\n');
-  return { entries, comments, unanchored, section };
+  ];
+  const budget = maxChars - NOTICE_RESERVE;
+  let size = lines.join('\n').length;
+  let full = false;
+  let omittedLines = 0;
+  const omittedFiles = new Set();
+  // Appends while the budget holds; once a line does not fit, nothing after it is listed.
+  const fits = (line) => {
+    if (!full && size + 1 + line.length <= budget) {
+      lines.push(line);
+      size += 1 + line.length;
+      return true;
+    }
+    full = true;
+    return false;
+  };
+  for (const entry of entries) {
+    const { head, items } = renderEntry(entry);
+    if (!fits(head)) {
+      omittedLines += matchedLines(entry, items);
+      omittedFiles.add(entry.path);
+      continue;
+    }
+    const shown = items.findIndex((line) => !fits(line));
+    if (shown !== -1) {
+      omittedLines += items.length - shown;
+      omittedFiles.add(entry.path);
+    }
+  }
+  if (omittedLines > 0) {
+    lines.push('', `… ${omittedLines} more matched line(s) in ${omittedFiles.size} file(s) omitted: this section is capped at ${maxChars} characters so the review stays under GitHub's body limit. Read the PR diff for the rest.`);
+  }
+  return lines.join('\n');
 }

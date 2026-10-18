@@ -32,6 +32,8 @@ import {
   checkCoverage,
   validateFindingsShape,
   buildReviewPayload,
+  REVIEW_BODY_MAX_CHARS,
+  guardDiagnostic,
   parseArgs,
   cmdPost,
   cmdThreads,
@@ -90,7 +92,7 @@ import {
   deliveryKind,
   postedReviewScope,
 } from './pr-review-recognise.mjs';
-import { GUARD_ADJUDICATORS, LANE_MARKER_ENV } from './pr-review-guard.mjs';
+import { GUARD_ADJUDICATORS, LANE_MARKER_ENV, guardReview } from './pr-review-guard.mjs';
 import { LANE_MARKER_ENV as LANE_MJS_MARKER } from '../../../scripts/lane.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
@@ -654,6 +656,76 @@ test('buildReviewPayload emits COMMENT with line-anchored comments', () => {
   );
   assert.match(p.comments[0].body, /\*\*\[P2\] t\*\*/);
   assert.match(p.body, /1 anchored · 0 off-line · 0 not-anchorable · 0 off-diff/);
+});
+
+test('buildReviewPayload: 25 test files x 20 removed ~150-char assertions keep the review body under GitHub\'s 65,536-char limit', () => {
+  const sourceFiles = Array.from({ length: 25 }, (_, f) => ({
+    filename: `tests/suite-${String(f).padStart(2, '0')}.test.mjs`,
+    status: 'modified',
+    patch: ['@@ -1,20 +1,0 @@', ...Array.from({ length: 20 }, (_, i) => `-  assert.deepEqual(computeTheValueUnderTest(${f}, ${i}, { mode: 'strict', retries: 3 }), expectedValueFor(${f}, ${i}, 'with a long descriptive label'));`)].join('\n'),
+  }));
+  const p = buildReviewPayload({
+    summary: 'Looks mostly fine.',
+    coverage: 'examined 25 of 25 changed files',
+    anchored: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
+    offLine: [],
+    coverageCheck: { ok: true },
+    guard: guardReview({ sourceFiles }),
+  });
+  assert.ok(p.body.length < 65536, `review body is ${p.body.length} chars`);
+  assert.match(p.body, /more matched line\(s\) in \d+ file\(s\) omitted/);
+});
+
+test('buildReviewPayload: a long summary shrinks the guard section to the room left, marker reserve included', () => {
+  const sourceFiles = Array.from({ length: 10 }, (_, f) => ({
+    filename: `tests/suite-${f}.test.mjs`,
+    status: 'modified',
+    patch: ['@@ -1,20 +1,0 @@', ...Array.from({ length: 20 }, (_, i) => `-  assert.deepEqual(computeTheValueUnderTest(${f}, ${i}, { mode: 'strict', retries: 3 }), expectedValueFor(${f}, ${i}, 'with a long descriptive label'));`)].join('\n'),
+  }));
+  const p = buildReviewPayload({
+    summary: 'x'.repeat(50_000),
+    coverage: 'examined 10 of 10 changed files',
+    anchored: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
+    offLine: [],
+    coverageCheck: { ok: true },
+    guard: guardReview({ sourceFiles }),
+  });
+  assert.ok(p.body.length <= REVIEW_BODY_MAX_CHARS - 1_000, `review body is ${p.body.length} chars`);
+  assert.match(p.body, /more matched line\(s\) in \d+ file\(s\) omitted: this section is capped at \d+ characters/);
+  assert.match(p.body, /_Slim review · /, 'the footer survives');
+});
+
+test('buildReviewPayload: with less room than the guard\'s fixed text, the guard shrinks to one line or is left out; the body never goes over', () => {
+  const sourceFiles = [{ filename: 'tests/gone.test.mjs', status: 'modified', patch: '@@ -1,1 +1,0 @@\n-  assert.equal(a, 1);' }];
+  const build = (summary) => buildReviewPayload({
+    summary,
+    coverage: 'examined 1 of 1 changed files',
+    anchored: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
+    offLine: [],
+    coverageCheck: { ok: true },
+    guard: guardReview({ sourceFiles }),
+  });
+  const tight = build('x'.repeat(64_000));
+  assert.ok(tight.body.length <= REVIEW_BODY_MAX_CHARS - 1_000, `review body is ${tight.body.length} chars`);
+  assert.match(tight.body, /Test files whose assertions changed: 1 file\(s\), not listed: this review body had no room/);
+  const none = build('x'.repeat(64_400));
+  assert.ok(none.body.length <= REVIEW_BODY_MAX_CHARS - 1_000, `review body is ${none.body.length} chars`);
+  assert.equal(/Test files whose assertions changed/.test(none.body), false);
+  // The post log says what the body carries, never "listed" when it is not.
+  const guard = guardReview({ sourceFiles });
+  assert.match(guardDiagnostic(guard, build('short')), /listed in the review body/);
+  assert.match(guardDiagnostic(guard, tight), /counted in one line, not listed/);
+  assert.match(guardDiagnostic(guard, none), /NOT in the review body/);
+  // A summary that echoes the section heading does not count as delivery.
+  const echo = build(`### Test files whose assertions changed\n${'x'.repeat(64_400)}`);
+  assert.match(guardDiagnostic(guard, echo), /NOT in the review body/);
+  assert.equal('guardDelivery' in JSON.parse(JSON.stringify(echo)), false, 'never sent to GitHub');
 });
 
 test('buildReviewPayload surfaces an off-diff finding in the body, not silently', () => {
@@ -6068,26 +6140,28 @@ function runGuardPost({ since } = {}) {
 
 const guardComments = (payload) => payload.comments.filter((comment) => /^\*\*lens:\*\* guard\n/.test(comment.body));
 
-test('guard, standalone full post: a removed assertion becomes one inline guard thread, tagged, on the old side', () => {
+/** The review body's test-file section, up to the next section rule. */
+const guardSection = (payload) => /### Test files whose assertions changed[\s\S]*?(?=\n---\n|$)/.exec(payload.body)?.[0] ?? '';
+
+test('guard, standalone full post: a removed assertion is listed in the review body, never as an inline thread', () => {
   const { logs, posted } = runGuardPost();
   assert.equal(posted.length, 1);
-  const guard = guardComments(posted[0]);
-  assert.equal(guard.length, 1, 'one thread per weakened file');
-  assert.deepEqual({ path: guard[0].path, side: guard[0].side, line: guard[0].line }, { path: 'src/a.test.mjs', side: 'LEFT', line: 2 });
-  assert.ok(guard[0].body.includes('assert.equal(a, 1);') && guard[0].body.includes('assert.equal(b, 2);'), 'a full review lists every removal in the file');
-  assert.equal(guard[0].body.includes('**scope:** delta'), false);
-  assert.match(posted[0].body, /### Test-weakening check/);
-  assert.ok(logs.includes('guard          1 test file(s) weakened → 1 thread(s) for the conductor'));
+  assert.deepEqual(guardComments(posted[0]), [], 'the check posts no thread, so nothing waits on a verdict');
+  assert.deepEqual(posted[0].comments, [], 'zero findings and the guard together post no inline comment');
+  const section = guardSection(posted[0]);
+  assert.match(section, /Not blocking/);
+  assert.ok(section.includes('`src/a.test.mjs`'));
+  assert.ok(section.includes('assert.equal(a, 1);') && section.includes('assert.equal(b, 2);'), 'a full review lists every removal in the file');
+  assert.ok(logs.includes('guard          1 test file(s) with test or assertion changes → listed in the review body (non-blocking)'));
 });
 
-test('guard, standalone delta post: only the amendment\'s removal is reported, anchored by its text on the PR diff', () => {
+test('guard, standalone delta post: only the amendment\'s removal is listed', () => {
   const { posted } = runGuardPost({ since: SINCE });
-  const guard = guardComments(posted[0]);
-  assert.equal(guard.length, 1);
-  assert.deepEqual({ path: guard[0].path, side: guard[0].side, line: guard[0].line }, { path: 'src/a.test.mjs', side: 'LEFT', line: 9 });
-  assert.ok(guard[0].body.includes('assert.equal(b, 2);'));
-  assert.equal(guard[0].body.includes('assert.equal(a, 1);'), false, 'an earlier round\'s removal is not the amendment\'s');
-  assert.match(guard[0].body, /^\*\*lens:\*\* guard\n\n\*\*scope:\*\* delta\n/);
+  assert.deepEqual(guardComments(posted[0]), []);
+  const section = guardSection(posted[0]);
+  assert.match(section, /in this amendment/);
+  assert.ok(section.includes('assert.equal(b, 2);'));
+  assert.equal(section.includes('assert.equal(a, 1);'), false, 'an earlier round\'s removal is not the amendment\'s');
 });
 
 /** The pinned compare with its test-file patch now removing an assertion at base line 3. */
@@ -6098,7 +6172,7 @@ function weakenedCompare() {
   return payload;
 }
 
-test('guard, coordinated full post: the removed assertion rides the same single POST as a guard thread; the lens set is untouched', async () => {
+test('guard, coordinated full post: the removed assertion rides the same single POST in the review body; the lens set is untouched', async () => {
   const events = [];
   const fake = coordinatorFake({ events });
   await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
@@ -6107,11 +6181,10 @@ test('guard, coordinated full post: the removed assertion rides the same single 
       const out = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events, compare: weakenedCompare() }) });
       assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
       assert.equal(requests.length, 1);
-      const guard = guardComments(requests[0].body);
-      assert.equal(guard.length, 1);
-      assert.deepEqual({ path: guard[0].path, side: guard[0].side, line: guard[0].line }, { path: 'skills/slim-review/scripts/pr-review.test.mjs', side: 'LEFT', line: 3 });
+      assert.deepEqual(guardComments(requests[0].body), []);
+      assert.match(guardSection(requests[0].body), /- `skills\/slim-review\/scripts\/pr-review\.test\.mjs`\n {2}- `-` old line 3, assertion removed or changed: `assert\.equal\(result\.exit, 2\);`/);
       assert.deepEqual(parseMarker(requests[0].body.body).lenses, REQUIRED_LENSES, 'the marker names the lenses, never the guard');
-      assert.ok(out.diagnostics.includes('guard          1 test file(s) weakened → 1 thread(s) for the conductor'));
+      assert.ok(out.diagnostics.includes('guard          1 test file(s) with test or assertion changes → listed in the review body (non-blocking)'));
     });
   });
 });
@@ -6144,11 +6217,11 @@ test('guard, coordinated delta post: only the amendment\'s removal is reported, 
     await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
       const out = await runCoordinatedPost({ refFile, home, origin, seams: amendmentSeams(pinnedSeams({ events, compare: pinned }), amendment) });
       assert.equal(out.line().outcome, 'posted', JSON.stringify(out.deaths));
-      const guard = guardComments(requests[0].body);
-      assert.equal(guard.length, 1);
-      assert.deepEqual({ side: guard[0].side, line: guard[0].line }, { side: 'LEFT', line: 3 }, 'anchored by text on the pinned PR diff');
-      assert.match(guard[0].body, /\*\*scope:\*\* delta/);
-      assert.equal(guard[0].body.includes('assert.equal(other, 1);'), false, 'a PR-diff removal the amendment did not make is not reported');
+      assert.deepEqual(guardComments(requests[0].body), []);
+      const section = guardSection(requests[0].body);
+      assert.match(section, /in this amendment/);
+      assert.ok(section.includes('assert.equal(result.exit, 2);'));
+      assert.equal(section.includes('assert.equal(other, 1);'), false, 'a PR-diff removal the amendment did not make is not reported');
     });
   });
 });
