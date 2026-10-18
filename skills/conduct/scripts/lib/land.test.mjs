@@ -1575,7 +1575,9 @@ test('tierFor: raise only, on a contract path or an agent-action gate; a test fi
   assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], [], [], { repo: 'sirmaelstrom/workit' }), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['skills/conduct/scripts/lib/x.test.mjs'], []), 'T1');
   assert.equal(tierFor({ tier: 'T1' }, ['tests/fixture.md'], []), 'T1');
-  assert.equal(tierFor({ tier: 'T0' }, ['test/x.test.mjs'], []), 'T0');
+  assert.deepEqual(tierDecision({ tier: 'T0' }, ['test/x.test.mjs'], []), { tier: 'T1', rule: 'test-path-floor', path: 'test/x.test.mjs' }, 'a test is executable: a T0 WP that changes one gets the slim review');
+  assert.equal(tierFor({ tier: 'T0' }, ['README.md', 'docs/a.md'], []), 'T0', 'a docs-only T0 stays T0');
+  assert.equal(tierFor({ tier: 'T1' }, ['test/x.test.mjs'], []), 'T1', 'the floor never raises past T1');
   assert.equal(tierFor({ tier: 'T2' }, ['lib/x.test.mjs'], []), 'T2', 'a declared T2 stays T2');
   assert.equal(tierFor({ tier: 'weird' }, ['lib/x.test.mjs'], []), 'T2', 'an unknown tier stays T2');
   assert.deepEqual(tierDecision({ tier: 'T1' }, ['lib/x.test.mjs', 'scripts/lane.mjs'], contractPaths), { tier: 'T2', rule: 'contract-path', path: 'scripts/lane.mjs' });

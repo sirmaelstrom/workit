@@ -2465,6 +2465,12 @@ test('tier from the recipe file (D17): contractPaths raise T1 to T2; a test file
   const first = await drive(none, { until: (a) => a.part === 'meta' || a.part === 'managed' });
   assert.equal(first.part, 'meta');
   assert.equal(none.wp('WP-00').tier, 'T2');
+  // A declared T0 is reviewed once a test file changes: T1, the slim review, never straight to land.
+  const t0 = harness(t, { council: true, wps: [TWO[0], { ...TWO[1], tier: 'T0' }] });
+  t0.diff = { 'WP-02': 'lib/x.test.mjs\n' };
+  const t0First = await drive(t0, { until: (a) => a.wpId === 'WP-02' && (a.part === 'meta' || a.part === 'managed' || a.step === 'rebase' || a.step === 'merge') });
+  assert.equal(t0First.part, 'managed', `a test-only T0 takes the slim review, got ${t0First.step}/${t0First.part}`);
+  assert.equal(t0.wp('WP-02').tier, 'T1');
   const testOnly = harness(t, { depth: 'none', council: true });
   testOnly.diff = { 'WP-00': 'test/x.test.mjs\n' };
   const slim = await drive(testOnly, { until: (a) => a.part === 'meta' || a.part === 'managed' });
