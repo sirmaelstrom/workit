@@ -134,6 +134,15 @@ test('control 6: an edited prompt or an edited consequence is refused', () => {
   assert.equal(verify(mismatched).reason, REASONS.grant_tag_mismatch);
 });
 
+test('a row whose stored askReceiptId is missing or malformed is refused, never verified', () => {
+  const missing = rowOf();
+  delete missing.answer.askReceiptId;
+  assert.equal(verify(missing).reason, REASONS.sitting_malformed);
+  const malformed = rowOf();
+  malformed.answer.askReceiptId = 'not-a-uuid';
+  assert.equal(verify(malformed).reason, REASONS.sitting_malformed);
+});
+
 test('control 7: a signed decline (key b) authorizes nothing', () => {
   assert.equal(verify(rowOf({ answerKey: 'b' })).reason, REASONS.sitting_declined);
 });

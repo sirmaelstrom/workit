@@ -604,7 +604,10 @@ function sittingVerdict(row, { repo, branch, act, anchor, now }) {
   const grant = parseSittingPrompt(row.ask?.prompt);
   if (grant === null || !isStr(row.question) || !row.question.startsWith(`[sitting ${grant.sittingId}]`)) return out(REASONS.sitting_malformed);
   if (!isStr(row.questId) || !UUID.test(row.questId)) return out(REASONS.quest_id_not_full);
-  const proof = verifyAnswerProof({ answer: row.answer, question: row.question, ask: row.ask, questId: row.questId, anchor });
+  // The stored ask link is required and bound, so a row cannot shed it to dodge the check.
+  const askReceiptId = row.answer.askReceiptId;
+  if (!isStr(askReceiptId) || !UUID.test(askReceiptId)) return out(REASONS.sitting_malformed);
+  const proof = verifyAnswerProof({ answer: row.answer, question: row.question, ask: row.ask, questId: row.questId, askReceiptId, anchor });
   if (!proof.ok || proof.mode !== 'verified') return out(proof.reason ?? REASONS.proof_absent);
   if (!checkSitting(grant, row.ask, 'a')) return out(REASONS.grant_tag_mismatch);
   const signedAt = Date.parse(JSON.parse(row.answer.proof.statement).signedAt);
