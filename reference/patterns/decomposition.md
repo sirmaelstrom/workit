@@ -68,6 +68,8 @@ After decomposition, map dependencies explicitly:
 - What does this enable? (downstream dependents)
 - Can this run in parallel with anything? (wave planning — see `wave-execution`)
 
+**Keep a moving contract with its first consumer.** When a package consumes a route, schema or message shape that another package in the same run creates or changes, the contract is still being discovered, and the consumer is where its gaps show. Put the producer and its first consumer in one package (one lane), or make the consumer wait until the producer has shipped. Parallel lanes against a contract that is still moving find its gaps as cross-lane fix rounds. A contract settled before the run (an existing route, a spec'd shape no package changes) doesn't need this; split freely along it.
+
 Visualize with a Mermaid dependency graph. This is not optional for 4+ packages — the visual catches missed parallelism and hidden dependencies that linear lists obscure.
 
 ```mermaid

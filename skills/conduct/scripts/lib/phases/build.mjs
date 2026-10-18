@@ -341,8 +341,12 @@ const AMEND_TEXT = {
     ? ` The conductor also ruled on the report's other questions: ${a.rulings.map((r) => `${r.question ?? 'the ask'} → (${r.ruled}); evidence, verbatim: ${r.evidence}`).join('. ')}.` : ''}`,
   findings: (a) => `${a.ids
     ? `council review round ${a.round} (synthesis in ${a.reviewDir}) has ${a.ids.length} Critical/Major/Minor finding(s). Write them into this brief numbered ${a.ids.join(', ')} in synthesis order; the lane's ## Amendment table uses those ids.`
-    : `review round ${a.round} posted ${a.findings ?? 'an unknown number of'} finding(s) as PR review comments; the lane adjudicates each in an ## Amendment table keyed by its comment id.`} ${VERDICT_TEXT}`,
+    : `review round ${a.round} posted ${a.findings ?? 'an unknown number of'} finding(s) as PR review comments; the lane adjudicates each in an ## Amendment table keyed by its comment id.`} ${VERDICT_TEXT}${a.round > 1 ? ` ${REPEAT_TEXT(a.round)}` : ''}`,
 };
+
+// SKILL.md § Self-recovery, "a fix loop that repeats a class": the stop is
+// read where the conductor writes the round's brief, not only in the skill.
+const REPEAT_TEXT = (round) => `Before writing it, compare these findings with round ${round - 1}'s: when they share a defect class, another per-finding fix list is the wrong next step. Write a design ruling that removes the class, or narrow the WP's claim to what its fixes prove and name the rest as residuals, and rule each finding against that; a ruling wider than the approved scope is a re-plan.`;
 
 // The lane contract's verdicts (§ Finish step 4), which the check parses; any
 // other word in a table row, `declined` included, fails it.

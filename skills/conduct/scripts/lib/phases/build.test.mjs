@@ -1797,6 +1797,19 @@ test('threads in the loop (D19.9): findings → amendment → its table → adju
   assert.match(brief.instruction, /"no change" ruling is `refuted` .* otherwise `judgment`/);
 });
 
+test('a fix loop that repeats a class: round 2\'s findings brief asks for a design ruling or a narrowed claim; round 1\'s does not', async (t) => {
+  const h = harness(t, { council: true, wps: [TWO[0], { ...TWO[1], tier: 'T2' }] });
+  h.synth = [{ findings: 2, seats: ['gpt-6.1-sol'] }, { findings: 1, seats: ['gpt-6.1-sol'] }, { findings: 0, seats: ['gpt-6.1-sol'] }];
+  h.reports = { 'WP-02': ['report-built.md', 'report-council-amendment.md', 'report-council-amendment.md'] };
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+  await drive(h, { until: (a) => a.part === 'amendment' && a.amendment?.round === 2 });
+  const briefs = of(h, 'WP-02').filter((a) => a.part === 'amendment' && a.amendment?.kind === 'findings');
+  assert.deepEqual(briefs.map((a) => a.amendment.round), [1, 2]);
+  assert.doesNotMatch(briefs[0].instruction, /share a defect class/);
+  assert.match(briefs[1].instruction, /compare these findings with round 1's: when they share a defect class, another per-finding fix list is the wrong next step/);
+  assert.match(briefs[1].instruction, /design ruling that removes the class, or narrow the WP's claim/);
+});
+
 test('council meta and args (D20): meta precedes council_review; its args; a missing or wrong meta exits 2; C-ids reach the brief; no reply, thread-ids or resolve', async (t) => {
   const h = harness(t, { council: true, wps: [TWO[0], { ...TWO[1], tier: 'T2' }] });
   h.synth = [{ findings: 2, seats: ['gpt-6.1-sol'] }, { findings: 0, seats: ['gpt-6.1-sol'] }];

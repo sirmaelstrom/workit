@@ -352,6 +352,7 @@ After approval, run stages 5-6:
 - Output: `decomposition.md`
 - Apply the appropriate break pattern (API/Backend, UI, Refactor, Infrastructure) from the pattern.
 - Run the decomposition test: each unit <2hrs, clear boundaries, independently verifiable, disjoint files.
+- A unit that consumes a route or schema another unit in the same run creates or changes goes in that unit's package, or depends on it (the pattern's *Keep a moving contract with its first consumer*).
 - Include a Mermaid dependency graph for 4+ packages.
 
 #### Stage 6: Work Packages
