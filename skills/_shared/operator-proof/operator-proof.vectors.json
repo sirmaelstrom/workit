@@ -6498,5 +6498,882 @@
       "mode": "verified",
       "reason": null
     }
+  },
+  {
+    "name": "sitting-merge",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"a5efc20325e17158dfcf4413521f92835fd7f4b64806e60468bb61d5c523f91f\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidG1HVjdDS3lkSEstYnRfMG9EbTRuTmk0UFNPc05WRG5nSFMxbkkyTUZBMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEQCIAMm7_S4hP4fr_ghe56hQ_2B9M_wC0UsdrTpr_5gE8NcAiBQr1XFeNq5m7Q0J83Z1-zi-hvMZmRbKVppU_2VYpzkkg"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": true,
+      "mode": "verified",
+      "reason": null
+    }
+  },
+  {
+    "name": "sitting-deploy",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"a5efc20325e17158dfcf4413521f92835fd7f4b64806e60468bb61d5c523f91f\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidG1HVjdDS3lkSEstYnRfMG9EbTRuTmk0UFNPc05WRG5nSFMxbkkyTUZBMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEQCIGfJoiHDhimIekE02sjG0eHowiOF0Xd1kGnG9ahR6Ye_AiBrRLe2ho9zda68A4-y-Jt1BVHzTSJGIDSxq_xqbd9wEg"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "deploy:observatory",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": true,
+      "mode": "verified",
+      "reason": null
+    }
+  },
+  {
+    "name": "sitting-unsigned",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "proof_absent"
+    }
+  },
+  {
+    "name": "sitting-unconfigured",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"a5efc20325e17158dfcf4413521f92835fd7f4b64806e60468bb61d5c523f91f\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidG1HVjdDS3lkSEstYnRfMG9EbTRuTmk0UFNPc05WRG5nSFMxbkkyTUZBMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEUCIQDLdJMnj9CZQQC7DTLA0RK5lPVHhaG1mOoIgWIph5PFtAIgP7TxkgQAwnqlMYNuuS51ZvTU4eybSgzkpMP2LjXau2I"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 2,
+        "credentials": []
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "sitting_unconfigured"
+    }
+  },
+  {
+    "name": "sitting-expired",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"a5efc20325e17158dfcf4413521f92835fd7f4b64806e60468bb61d5c523f91f\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidG1HVjdDS3lkSEstYnRfMG9EbTRuTmk0UFNPc05WRG5nSFMxbkkyTUZBMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEYCIQCmpY12_zrHID2hCtA2xvQXzju9EVMz4bJPPXdQaG7MLAIhALELHwTb59bZQBnpp6n8-m7pwCgSiX4sp6dVGeGPz527"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792281541000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "grant_expired"
+    }
+  },
+  {
+    "name": "sitting-too-long",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-20T12:00:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-20T12:00:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-20T12:00Z. [sitting 828117b97753c74d]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"37e94f9058a52311a6cabc4859c826c2bf6c6ae5940294d1bf968ed623542aeb\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"0aeb938910c42ab749a670c1ce4b51737e966441ecf9d93faf13c99871946c2c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoieS1ZMnFuQkJjWXZtMlAtc2ZtNE1SbUE1c1NINTRtT0RKblNYU0stT19tSSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEUCIQDI2qKv38a5fi7AjzPYKC8_ZyJW7YVZgl41c7REc6SPHwIgdfttXj9KWb-DFxYLsoJwurv8g1ON-gIl4WCtG4C98Lc"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "sitting_too_long"
+    }
+  },
+  {
+    "name": "sitting-signed-before-filing",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"a5efc20325e17158dfcf4413521f92835fd7f4b64806e60468bb61d5c523f91f\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T11:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidUJBVmo1OGZtQmk2UUlJNWQ3OUxvMU93XzFfdWxENVRXX25sVWdZRk9XUSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEQCIDLPrmIuS6X5F3IcOM9xAkJA15p85x8FIieNgk8Aa-UZAiAOZ50yDoPnYWHZAHB2IcGoEsoPE9HZuwwK_1hVpDBaEw"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "sitting_bad_time"
+    }
+  },
+  {
+    "name": "sitting-other-repo",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"a5efc20325e17158dfcf4413521f92835fd7f4b64806e60468bb61d5c523f91f\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidG1HVjdDS3lkSEstYnRfMG9EbTRuTmk0UFNPc05WRG5nSFMxbkkyTUZBMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEUCIH7RZ-CAVypj0PoQ3KSwqjpOtKnkPVXbCJvn4TkfOL5iAiEAhIdnPxxVnQtNWOPfN3ZnZs7hxNbPUe3IKaGoouk9Ucs"
+          }
+        }
+      },
+      "repo": "owner/gamma",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "sitting_out_of_scope"
+    }
+  },
+  {
+    "name": "sitting-other-branch",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"a5efc20325e17158dfcf4413521f92835fd7f4b64806e60468bb61d5c523f91f\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidG1HVjdDS3lkSEstYnRfMG9EbTRuTmk0UFNPc05WRG5nSFMxbkkyTUZBMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEQCICVZ8B1nd-hGHUjXRiMPCUJ_bc5XrYo8y4CaHioHq-4wAiB_V67aGSv5hPQxIW16RjyxRNBymKuuiEqY9prVg2TkxQ"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "release",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "sitting_out_of_scope"
+    }
+  },
+  {
+    "name": "sitting-unlisted-service",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"a5efc20325e17158dfcf4413521f92835fd7f4b64806e60468bb61d5c523f91f\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoidG1HVjdDS3lkSEstYnRfMG9EbTRuTmk0UFNPc05WRG5nSFMxbkkyTUZBMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEUCIF--eUzp7hM8XFKA3Oui3rUzI_LSSfYr6K12tHV6hX3YAiEA5T1iMIjRR6MIoKZGBOrl3X6qVcbvQaArDvGgG3Cy2Yw"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "deploy:forge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "sitting_out_of_scope"
+    }
+  },
+  {
+    "name": "sitting-tag-mismatch",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 0000000000000000]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3b1166af023f810ea54476fb98471243610bf82d57ae510daeed9fcdcacd8d79\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiZXpIRzlpRDNnaVA5ZWh2U0JLUVY2Wm9zUm0tV3RucXNMa0FBX3JwbEM4SSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEQCIC55ll99JlcMcGEwQ3DyAJTeN50EfzDS1O7WRiYnRtaTAiAoPDDn4819GTncShxF3YUvzHAXSPHU_p83dfwc1NL6jQ"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "grant_tag_mismatch"
+    }
+  },
+  {
+    "name": "sitting-declined",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "Start a sitting.\n\n```json\n{\"v\":1,\"kind\":\"sitting\",\"sittingId\":\"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d\",\"filedAt\":\"2026-10-17T11:59:00Z\",\"notAfter\":\"2026-10-17T23:59:00Z\",\"repos\":[{\"remote\":\"owner/alpha\",\"branch\":\"main\"},{\"remote\":\"owner/beta\",\"branch\":\"main\"}],\"merge\":true,\"deploy\":[\"dogan\",\"observatory\"],\"runBudgetUsd\":25}\n```",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "b",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"a5efc20325e17158dfcf4413521f92835fd7f4b64806e60468bb61d5c523f91f\",\"key\":\"b\",\"label\":\"Decline\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoic202SDZ6aURFVUFhV2M4MVU5RjR2ZDRKbUVBSW84ZDdmRzdWSF9wSDh5WSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEUCIE7Pb0RLV_RQLFOwAvdo03qqBRijEzrRFVhMgnvWt8rQAiEA0sE_aewEakfpUsZYomjbiMD0DNQA_hjX0vQAJrpvUtg"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "sitting_declined"
+    }
+  },
+  {
+    "name": "sitting-malformed",
+    "kind": "sitting",
+    "input": {
+      "rows": {
+        "id": "cccccccc-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "questId": "11111111-2222-4333-8444-555555555555",
+        "outcome": "answered",
+        "question": "[sitting 9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d] Start a sitting until 2026-10-17T23:59:00Z?",
+        "ask": {
+          "prompt": "no grant here",
+          "allowFreeText": false,
+          "options": [
+            {
+              "key": "a",
+              "label": "Approve the sitting",
+              "consequence": "Sitting 9b8a7c6d: merges yes, 2 repos, 2 deploys, $25/run, until 2026-10-17T23:59Z. [sitting 1a6613244e970e05]"
+            },
+            {
+              "key": "b",
+              "label": "Decline",
+              "consequence": "Nothing is authorized; each merge and deploy asks."
+            }
+          ]
+        },
+        "answer": {
+          "key": "a",
+          "text": null,
+          "by": "operator:dogan",
+          "answeredAt": "2026-10-17T12:00:00Z",
+          "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          "proof": {
+            "v": 1,
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"fb00d74969e96289c15dc2676f5ef8c087c45e4d728896dc3401b2c1e3c803bb\",\"key\":\"a\",\"label\":\"Approve the sitting\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"3d302f6271514d0f766906dc4331078439dd3e7a5e3e58fea172c50932d093ce\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+            "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywFAAAAAQ",
+            "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiS1NfTWI0TjlkcHBnOGYydnhTWklVcDFQREFqaTcwNDl2cXo0QVZWOElSQSIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+            "signature": "MEYCIQCQCv1Zz3I_r6sJdGJgQMxbXMpYg-DGjvITWk7HbEy6PQIhAK14KWaH9dlQKqoibX4CbsRkI34cWhHk9IETZ4jDqLRn"
+          }
+        }
+      },
+      "repo": "owner/alpha",
+      "branch": "main",
+      "act": "merge",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": false,
+            "bs": false
+          }
+        ]
+      },
+      "now": 1792240200000
+    },
+    "expect": {
+      "ok": false,
+      "mode": "refused",
+      "reason": "sitting_malformed"
+    }
   }
 ]

@@ -13,7 +13,7 @@ import {
   GRANT_TTL_DAYS, OperatorProofError, REASONS, anchorFromFile, anchorPath, answerStatement, askSha256, canonical,
   challengeFor, checkGrant, checkRaise, grantTag, grantTagFor, questionSha256, raiseTag, readAnchor,
   registerBeginStatement, registerCosignStatement, renderGrant, renderRaise, verifyAnswerProof, verifyCosign,
-  verifyReceiptBody, verifyRecord, verifyRegistration,
+  verifyReceiptBody, verifyRecord, verifyRegistration, verifySitting,
 } from './operator-proof.mjs';
 import { TEST_KEY_1, TEST_KEY_2, makeTestAnchor, signAnswer } from './test-signer.mjs';
 
@@ -84,6 +84,10 @@ function run(vector) {
       });
     case 'record':
       return verifyRecord({ record: input.record, quest: input.quest, goalText: input.goalText, anchor: anchorFromFile(input.anchorFile), now: input.now });
+    case 'sitting':
+      return verifySitting({
+        rows: input.rows, repo: input.repo, branch: input.branch, act: input.act, anchor: anchorFromFile(input.anchorFile), now: input.now,
+      });
     default:
       throw new Error(`no runner for vector kind ${vector.kind}`);
   }

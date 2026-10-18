@@ -1568,13 +1568,20 @@ test('a gate pending only on an in-flight review waits, and says so', () => {
   assert.deepEqual([out.outcome, out.reason, out.waitMs, out.patch.queue[0].step], ['wait', 'a pipeline review of head is in flight', 60000, 'gate']);
 });
 
-test('tierFor (D19.11): raise only, on a contract path or a test file', () => {
+test('tierFor: raise only, on a contract path or an agent-action gate; a test file alone does not raise', () => {
   const contractPaths = JSON.parse(readFileSync(join(HERE, '..', '..', '..', '..', '.workit', 'conduct.json'), 'utf8')).contractPaths;
   assert.equal(tierFor({ tier: 'T2' }, ['README.md'], []), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], contractPaths), 'T2');
   assert.equal(tierFor({ tier: 'T1' }, ['scripts/lane.mjs'], [], [], { repo: 'sirmaelstrom/workit' }), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['skills/conduct/scripts/lib/x.test.mjs'], []), 'T2');
-  assert.equal(tierFor({ tier: 'T1' }, ['tests/fixture.md'], []), 'T2');
+  assert.equal(tierFor({ tier: 'T1' }, ['skills/conduct/scripts/lib/x.test.mjs'], []), 'T1');
+  assert.equal(tierFor({ tier: 'T1' }, ['tests/fixture.md'], []), 'T1');
+  assert.deepEqual(tierDecision({ tier: 'T0' }, ['test/x.test.mjs'], []), { tier: 'T1', rule: 'test-path-floor', path: 'test/x.test.mjs' }, 'a test is executable: a T0 WP that changes one gets the slim review');
+  assert.equal(tierFor({ tier: 'T0' }, ['README.md', 'docs/a.md'], []), 'T0', 'a docs-only T0 stays T0');
+  assert.equal(tierFor({ tier: 'T1' }, ['test/x.test.mjs'], []), 'T1', 'the floor never raises past T1');
+  assert.equal(tierFor({ tier: 'T2' }, ['lib/x.test.mjs'], []), 'T2', 'a declared T2 stays T2');
+  assert.equal(tierFor({ tier: 'weird' }, ['lib/x.test.mjs'], []), 'T2', 'an unknown tier stays T2');
+  assert.deepEqual(tierDecision({ tier: 'T1' }, ['lib/x.test.mjs', 'scripts/lane.mjs'], contractPaths), { tier: 'T2', rule: 'contract-path', path: 'scripts/lane.mjs' });
+  assert.deepEqual(tierDecision({ tier: 'T1' }, ['lib/x.test.mjs'], contractPaths), { tier: 'T1', rule: 'no-match', path: null });
   assert.equal(tierFor({ tier: 'T1' }, ['skills/spec/scripts/x.mjs'], []), 'T1');
   assert.equal(tierFor({ tier: 'T0' }, ['README.md'], []), 'T0');
   assert.equal(tierFor({ tier: 'weird' }, ['README.md'], []), 'T2');

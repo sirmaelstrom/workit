@@ -9,6 +9,7 @@
     "after": ["claude plugin update workit@workit"],
     "verify": ["node --test"]
   },
+  "contractPaths": ["src/contract.mjs"],
   "laneSuite": "Placeholder suite note for the seam fixture: run node --test before the PR boundary.",
   "laneEstimateUsd": 0
 }

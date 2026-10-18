@@ -832,7 +832,7 @@ test('judgment threads (D19.9, 022d6fd9): a judgment row\'s thread is listed und
 
 test('adjudication evidence (C1-14, C2-6): a council WP\'s adjudication row reads from its adjudicated events alone', async (t) => {
   const flags = ['herdr', 'notify', 'spend', 'spine', 'kb', 'verify'].flatMap((name) => ['--no-adapter', name]);
-  const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } },
+  const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } },
     [...flags, '--adapter', 'council']);
   await drive(h, { until: (a) => a.step === 'showcase' });
   // A council WP replies to no comment id; its one PR write is the round's review record (da57e5ba).
@@ -1807,7 +1807,7 @@ test('S1 property, more producers (council r3): configured runs through PR-comme
   const seen = new Map();
   const scenarios = [
     ['PR-comment findings', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-amendment.md'] }, findings: { 'WP-00': [3] }, amendDiff: 'docs/notes.md\n' } }, SPINE_ONLY],
-    ['council round', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } }, [...SPINE_ONLY, '--adapter', 'council']],
+    ['council round', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } }, [...SPINE_ONLY, '--adapter', 'council']],
     ['escalated ruling', { depth: 'none', h: { reports: { 'WP-00': ['build/report-needs-conductor.md', 'build/report-built.md'] }, rulings: [{ escalate: true, why: 'only the operator can pick the flag name' }] } }, SPINE_ONLY],
     ['herdr lanes', { herdr: true, env: { WORKIT_NOTIFY_CMD: 'notify-cmd --channel conduct' } }, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'spend']],
   ];
@@ -2028,7 +2028,7 @@ test('M1 stage (council r4, opus and cross-stage): each act that merges, deletes
 });
 
 test('M2 containment (council r4, astra/codex): a council review whose artifact paths add a traversal out of the lane worktree, or a worktree file the recorded diff does not list, is refused through next', async (t) => {
-  const h = seam(t, { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } });
+  const h = seam(t, { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } });
   phone(h);
   await start(h, [...SPINE_ONLY, '--adapter', 'council']);
   const review = await drive(h, { until: (a) => a.step === 'council' && a.part === 'review' });
@@ -2052,7 +2052,7 @@ test('M2 containment (council r4, astra/codex): a council review whose artifact 
 });
 
 test('M3 revision (council r4, astra): a council delta whose land.since and diff argv are both set to --output=<outside-file>, or to a sha other than the recorded baseline, is refused through next', async (t) => {
-  const h = seam(t, { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } });
+  const h = seam(t, { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } });
   phone(h);
   await start(h, [...SPINE_ONLY, '--adapter', 'council']);
   const delta = await drive(h, { until: (a) => a.step === 'council' && a.part === 'delta-diff' });
@@ -2070,7 +2070,7 @@ test('M3 revision (council r4, astra): a council delta whose land.since and diff
 test('runtime exercise (council r4): configured runs, plain and with a two-round council, and an unconfigured run each merge every WP through next and record, with no stored act dropped', async (t) => {
   const runs = [
     ['configured', {}, SPINE_ONLY, true],
-    ['configured, council', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/a.test.mjs\n' } } }, [...SPINE_ONLY, '--adapter', 'council'], true],
+    ['configured, council', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } }, [...SPINE_ONLY, '--adapter', 'council'], true],
     ['unconfigured (M8)', {}, OFF, false],
   ];
   for (const [name, opts, flags, signed] of runs) {
