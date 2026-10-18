@@ -147,22 +147,30 @@ Write a state file holding
 `{"touches":[{"tag":"<question up to its first space>","receiptId":"<ask receipt id>"}]}`
 for it. On re-entry, `spine_quest`'s `latestReceipt.answer` (`key` / `text`)
 IS the go when that receipt's `question` is your ask's, verbatim,
-`verify-receipt` with `--state` exits 0 on it, and, unconfigured, `answer.by`
+`verify-receipt` with `--state` exits 0 on it, `answer.askReceiptId` is present
+and equals the ask receipt id retained from `spine_receipt` at filing after
+lowercasing both, and either `mode` is `verified` or, unconfigured, `answer.by`
 begins `operator:`. Write the result body to a temp file and run
 `node "${CLAUDE_PLUGIN_ROOT}/skills/_shared/operator-proof/operator-proof.mjs" verify-receipt --file <it> --quest <full quest uuid> --state <the state file>`;
-an answer signed for an earlier filing of the same question is refused with
-`statement_mismatch`. Never assume the go from the quest having returned to the
+keep the state touch so the verifier also binds the signature to the filing
+when its lookup matches. The `statement_mismatch` binding applies only when a
+passkey is configured and the verifier finds that touch; the caller-side
+filing-id equality is required even when the lookup misses.
+Never assume the go from the quest having returned to the
 frontier. With an operator passkey configured, an unsigned `operator:t3` answer
 is not a go until the operator confirms it on the phone: wait for that signed
 answer. Unconfigured (the CLI prints `"mode":"unconfigured"`), the CLI checks no
-signature, so the `operator:` stamp is what makes the answer the operator's. A
+signature, so the gate is the operator stamp plus the filing-id equality. A
 later receipt hides the answer there, so before concluding there is none, run
 the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and your ask's whole
 question, each `'` doubled, as the tag. It searches every receipt. Save the row
 it prints; it IS the go when `verify-receipt --file <row> --quest <full quest
 uuid> --state <the state file>` exits 0 on it (the CLI accepts a bare row), its
-`question` passes the same verbatim check, and, unconfigured, its `answer.by`
-begins `operator:`. If the ask receipt id is lost, don't take it from the row:
+`question` passes the same verbatim check, `answer.askReceiptId` is present and
+equals the ask receipt id retained from `spine_receipt` at filing after
+lowercasing both, and either `mode` is `verified` or, unconfigured, its `answer.by`
+begins `operator:`. A missing or unequal filing id means not a go: re-file the ask.
+If the ask receipt id is lost, don't take it from the row:
 the answer's `askReceiptId` sits beside the proof, so whoever swaps the proof
 swaps it too. Without the id from your own filing the go is not verified;
 re-file the ask and read the answer to the new filing.

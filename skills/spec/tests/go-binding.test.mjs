@@ -1,6 +1,6 @@
 // The go checks run the verifier CLI the way the prose says, under a temp home.
-// /burn-down and /pickup bind a manual go to the ask they filed through the
-// state file their prose spells out; /spec binds an authority record to the
+// /burn-down and /pickup bind a manual go to the ask they filed through both
+// the state file and caller-side filing-id equality; /spec binds a record to the
 // current run by comparing the printed grant.runId; unconfigured, the CLI
 // checks no signature, so the operator stamp is what refuses a conductor row.
 import { test } from 'node:test';
@@ -87,8 +87,12 @@ for (const id of ['burn-down', 'pickup']) {
   });
 }
 
-// What /burn-down and /pickup accept: exit 0, and unconfigured the operator stamp.
-const manualGo = ({ exit, out }, row) => exit === 0 && (out.mode === 'verified' || String(row.answer.by).startsWith('operator:'));
+// These helpers re-implement the documented rules; they do not prove model execution.
+const manualGo = ({ exit, out }, row, filingId) => exit === 0
+  && typeof row.answer?.askReceiptId === 'string' && row.answer.askReceiptId.length > 0
+  && typeof filingId === 'string' && filingId.length > 0
+  && row.answer.askReceiptId.toLowerCase() === filingId.toLowerCase()
+  && (out.mode === 'verified' || (out.mode === 'unconfigured' && String(row.answer.by).startsWith('operator:')));
 
 for (const id of ['burn-down', 'pickup']) {
   for (const [name, questionText, touches] of [
@@ -109,7 +113,10 @@ for (const id of ['burn-down', 'pickup']) {
       const result = cli(dir, ['verify-receipt', '--file', file, '--quest', QUEST, '--state', state]);
       assert.deepEqual([result.exit, result.out.mode], [0, 'verified']);
       const replayGo = manualGo(result, row, 'rcpt-current');
-      const ownGo = manualGo(result, row, 'RCPT-OLD');
+      const ownState = put(dir, 'state-own.json', { touches: [{ tag: touches[0].tag, receiptId: 'rcpt-old' }] });
+      const own = cli(dir, ['verify-receipt', '--file', file, '--quest', QUEST, '--state', ownState]);
+      assert.deepEqual([own.exit, own.out.mode], [0, 'verified']);
+      const ownGo = manualGo(own, row, 'RCPT-OLD');
       console.log(`${id}, ${name}: verifier exit ${result.exit}, mode ${result.out.mode}; old filing ${replayGo ? 'ACCEPTED' : 'REFUSED'}; same filing ${ownGo ? 'ACCEPTED' : 'REFUSED'}`);
       assert.equal(replayGo, false, 'old filing must be refused even when the verifier touch lookup misses');
       assert.equal(ownGo, true, 'same filing must be accepted after lowercasing both ids');
