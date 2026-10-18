@@ -152,6 +152,7 @@ Try these first. A blocked touch is for what they can't settle.
 - **A stuck lane:** read its pane or log, re-arm the wait, then amend. A lane keeps its slot and its files until its process is observed exited, so don't start another WP on its files while it runs. An amendment to a herdr lane whose agent has exited starts the lane before prompting it; a live lane keeps its agent.
 - **A harness dialog** (a `block` with cause `dialog`): the verb re-polls once after about a minute, then blocks. **Never answer a harness dialog yourself**: not by sending keys, not by approving. It goes to the operator in the blocked touch.
 - **A council split:** you break the tie, inside the goal's bindings, and record why.
+- **A fix loop that repeats a class:** when review round N's findings share a defect class with round N−1's (the same bypass, reached by another path), another fix lane buys the next instance, not convergence. The round-N findings brief carries your design ruling instead: the one mechanism that removes the class, or the WP's claim narrowed to what its fixes prove, with the rest named as residuals. Rule each finding against it in the brief. A ruling wider than the approved scope is a re-plan (§ Re-planning mid-flight); one you can't settle from evidence is a blocked touch.
 - **A refuted premise:** a lane whose report says `refuted` ends its WP `refuted` and defers its dependents; that is a finding, not a failure to retry.
 
 ## Recovering a stopped WP
@@ -182,7 +183,7 @@ Every target except `pending` puts the WP back in a live state, so the scheduler
 
 ## Re-planning mid-flight
 
-When information that arrives mid-build shows the plan is wrong, or that another course is clearly better (a WP's premise refuted by a merged one, a cheaper route a lane found), restate the plan as a delta and record it before acting on it (quest e830d835):
+When information that arrives mid-build shows the plan is wrong, or that another course is clearly better (a WP's premise refuted by a merged one, a cheaper route a lane found, a lane that consumes a route or schema no WP owns), restate the plan as a delta and record it before acting on it (quest e830d835):
 
 ```
 conduct.mjs replan --run <dir> --plan <file>
