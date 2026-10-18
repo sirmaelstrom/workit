@@ -32,6 +32,7 @@ import {
   checkCoverage,
   validateFindingsShape,
   buildReviewPayload,
+  REVIEW_BODY_MAX_CHARS,
   parseArgs,
   cmdPost,
   cmdThreads,
@@ -674,6 +675,27 @@ test('buildReviewPayload: 25 test files x 20 removed ~150-char assertions keep t
   });
   assert.ok(p.body.length < 65536, `review body is ${p.body.length} chars`);
   assert.match(p.body, /more matched line\(s\) in \d+ file\(s\) omitted/);
+});
+
+test('buildReviewPayload: a long summary shrinks the guard section to the room left, marker reserve included', () => {
+  const sourceFiles = Array.from({ length: 10 }, (_, f) => ({
+    filename: `tests/suite-${f}.test.mjs`,
+    status: 'modified',
+    patch: ['@@ -1,20 +1,0 @@', ...Array.from({ length: 20 }, (_, i) => `-  assert.deepEqual(computeTheValueUnderTest(${f}, ${i}, { mode: 'strict', retries: 3 }), expectedValueFor(${f}, ${i}, 'with a long descriptive label'));`)].join('\n'),
+  }));
+  const p = buildReviewPayload({
+    summary: 'x'.repeat(50_000),
+    coverage: 'examined 10 of 10 changed files',
+    anchored: [],
+    offDiffChanged: [],
+    offDiffUnchanged: [],
+    offLine: [],
+    coverageCheck: { ok: true },
+    guard: guardReview({ sourceFiles }),
+  });
+  assert.ok(p.body.length <= REVIEW_BODY_MAX_CHARS - 1_000, `review body is ${p.body.length} chars`);
+  assert.match(p.body, /more matched line\(s\) in \d+ file\(s\) omitted: this section is capped at \d+ characters/);
+  assert.match(p.body, /_Slim review · /, 'the footer survives');
 });
 
 test('buildReviewPayload surfaces an off-diff finding in the body, not silently', () => {

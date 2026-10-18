@@ -545,6 +545,11 @@ export function countDeltaDefects(findings) {
   return new Set([...parent.keys()].map(root)).size + eligible.filter((f) => f.id == null).length;
 }
 
+/** GitHub refuses a review body over this many characters, and the whole POST with it. */
+export const REVIEW_BODY_MAX_CHARS = 65_536;
+// Room for the coordinated post's marker, appended after the payload is built.
+const REVIEW_BODY_RESERVE = 1_000;
+
 /**
  * Build the `POST /pulls/{n}/reviews` payload.
  *
@@ -605,7 +610,7 @@ export function buildReviewPayload({
     sections.push(lines.join('\n'));
   }
 
-  if (guard?.section) sections.push(guard.section);
+  const guardAt = sections.length;
   if (deltaFindings) sections.push(deltaManifest(deltaFindings));
 
   const footer = [
@@ -621,6 +626,12 @@ export function buildReviewPayload({
     footer.push('', `> ⚠️ **Warning:** ${warning}`);
   }
   sections.push(footer.join('\n'));
+
+  // The guard section gets what the rest of the body leaves, up to its own cap.
+  if (guard?.section) {
+    const room = REVIEW_BODY_MAX_CHARS - REVIEW_BODY_RESERVE - sections.join('\n').length - 1;
+    sections.splice(guardAt, 0, guard.section.length <= room ? guard.section : (guard.render?.(Math.max(room, 0)) ?? guard.section));
+  }
 
   return {
     event: 'COMMENT',

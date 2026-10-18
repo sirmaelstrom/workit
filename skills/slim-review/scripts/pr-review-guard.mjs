@@ -449,6 +449,12 @@ export const LANE_MARKER_ENV = 'WORKIT_LANE';
 export const GUARD_SECTION_MAX_CHARS = 16_000;
 const NOTICE_RESERVE = 300;
 
+/** Matched lines an entry stands for: a deleted file counts what it held. */
+function matchedLines(entry, items) {
+  if (entry.deleted && !entry.patchMissing) return Math.max(entry.removedTests + entry.removedAssertions, 1);
+  return Math.max(items.length, 1);
+}
+
 function quote(text) {
   const clipped = text.trim().length > 160 ? `${text.trim().slice(0, 157)}...` : text.trim();
   return clipped.includes('`') ? `\`\` ${clipped} \`\`` : `\`${clipped}\``;
@@ -478,11 +484,17 @@ function renderEntry(entry) {
  * matched line is listed until the section reaches GUARD_SECTION_MAX_CHARS;
  * from there on nothing more is listed, and a closing notice counts the
  * matched lines and files left out. An empty result changes nothing in the
- * review.
+ * review. `render(maxChars)` re-renders under a smaller cap, for a body whose
+ * other sections leave the section less room.
  */
 export function guardReview({ sourceFiles, delta = false }) {
   const entries = detectTestWeakening(sourceFiles);
   if (entries.length === 0) return { entries, section: null };
+  const render = (maxChars) => renderGuardSection(entries, delta, maxChars);
+  return { entries, section: render(GUARD_SECTION_MAX_CHARS), render };
+}
+
+function renderGuardSection(entries, delta, maxChars) {
   const lines = [
     '',
     '---',
@@ -492,7 +504,7 @@ export function guardReview({ sourceFiles, delta = false }) {
     `Not blocking: nothing here needs a verdict to merge. ${entries.length} test file(s) in ${delta ? 'this amendment' : 'this PR'} lost or changed a test or an assertion, gained a skip, a focus or a disabling wrapper, left the test paths, or changed with no patch to check. The match is textual, so a strengthened or renamed assertion matches too; look if the lines below surprise you.`,
     '',
   ];
-  const budget = GUARD_SECTION_MAX_CHARS - NOTICE_RESERVE;
+  const budget = maxChars - NOTICE_RESERVE;
   let size = lines.join('\n').length;
   let full = false;
   let omittedLines = 0;
@@ -510,7 +522,7 @@ export function guardReview({ sourceFiles, delta = false }) {
   for (const entry of entries) {
     const { head, items } = renderEntry(entry);
     if (!fits(head)) {
-      omittedLines += Math.max(items.length, 1);
+      omittedLines += matchedLines(entry, items);
       omittedFiles.add(entry.path);
       continue;
     }
@@ -521,7 +533,7 @@ export function guardReview({ sourceFiles, delta = false }) {
     }
   }
   if (omittedLines > 0) {
-    lines.push('', `… ${omittedLines} more matched line(s) in ${omittedFiles.size} file(s) omitted: this section is capped at ${GUARD_SECTION_MAX_CHARS} characters so the review stays under GitHub's body limit. Read the PR diff for the rest.`);
+    lines.push('', `… ${omittedLines} more matched line(s) in ${omittedFiles.size} file(s) omitted: this section is capped at ${maxChars} characters so the review stays under GitHub's body limit. Read the PR diff for the rest.`);
   }
-  return { entries, section: lines.join('\n') };
+  return lines.join('\n');
 }

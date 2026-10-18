@@ -247,6 +247,22 @@ test('reporting: the section is capped in total size, and says how much it left 
   assert.equal(shown + Number(notice[1]), 500, 'shown plus omitted is every matched line');
 });
 
+test('reporting: an omitted deleted file counts every line it held, not one', () => {
+  const gone = { filename: 'tests/zz-gone.test.mjs', status: 'removed', patch: ['@@ -1,10 +0,0 @@', ...Array.from({ length: 10 }, (_, i) => `-  assert.equal(value(${i}), ${i});`)].join('\n') };
+  const result = guardReview({ sourceFiles: [...manyRemovals(25, 20), gone] });
+  assert.equal(result.entries.at(-1).removedAssertions, 10);
+  const notice = /… (\d+) more matched line\(s\) in (\d+) file\(s\) omitted/.exec(result.section);
+  const shown = (result.section.match(/^ {2}- `-` old line /gm) ?? []).length;
+  assert.equal(shown + Number(notice[1]), 510, 'the deleted file\'s ten assertions are in the omitted count');
+});
+
+test('reporting: render(maxChars) keeps a smaller cap and names it', () => {
+  const result = guardReview({ sourceFiles: manyRemovals(25, 20) });
+  const small = result.render(4_000);
+  assert.ok(small.length <= 4_000, `section is ${small.length} chars`);
+  assert.match(small, /capped at 4000 characters/);
+});
+
 test('reporting: under the cap every matched line is listed, with no per-file limit', () => {
   const result = guardReview({ sourceFiles: manyRemovals(1, 30) });
   assert.equal((result.section.match(/^ {2}- `-` old line /gm) ?? []).length, 30);
@@ -436,7 +452,7 @@ test('4117560938: a test file renamed out of the test paths is reported, pure re
 test('guardReview renders a non-blocking body section, and nothing at all when no test was weakened', () => {
   const files = filesFromDiff(LOOSENED_ASSERTION);
   const result = guardReview({ sourceFiles: files, delta: true });
-  assert.deepEqual(Object.keys(result).sort(), ['entries', 'section']);
+  assert.deepEqual(Object.keys(result).sort(), ['entries', 'render', 'section'], 'no comments: nothing becomes an inline thread');
   assert.match(result.section, /### Test files whose assertions changed/);
   assert.match(result.section, /nothing here needs a verdict to merge/);
   assert.equal(/\*\*lens:\*\* guard/.test(result.section), false, 'the section carries no lens tag a reply could read as a thread');
