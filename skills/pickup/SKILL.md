@@ -163,7 +163,7 @@ answer. Unconfigured (the CLI prints `"mode":"unconfigured"`), the CLI checks no
 signature, so the gate is the operator stamp plus the filing-id equality. A
 later receipt hides the answer there, so before concluding there is none, run
 the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and your ask's whole
-question, each `'` doubled, as the tag. It searches every receipt. Save the row
+question, exactly as written, as the tag. It searches every receipt. Save the row
 it prints; it IS the go when `verify-receipt --file <row> --quest <full quest
 uuid> --state <the state file>` exits 0 on it (the CLI accepts a bare row), its
 `question` passes the same verbatim check, `answer.askReceiptId` is present and
