@@ -128,7 +128,7 @@ test('/conduct: the read-back names the configured proof and the unconfigured st
 
 test('/conduct: (d) declines the confirm, it does not re-open it', () => {
   const conduct = sentences(text('conduct'));
-  const confirm = conduct.filter((sentence) => sentence.includes('re-opens the confirm'));
+  const confirm = conduct.filter((sentence) => /re-opens the confirm|the confirm re-opens/.test(sentence));
   assert.ok(confirm.length > 0);
   for (const sentence of confirm) assert.doesNotMatch(sentence, /any other key re-opens/, sentence);
   assert.match(conduct.join(' '), /\(d\) declines: the run ends with `phase = 'declined'`/);
