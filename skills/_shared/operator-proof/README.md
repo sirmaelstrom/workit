@@ -56,12 +56,31 @@ Untrusted input never throws. Every refusal is a code in `REASONS`; compare code
 
 A granting option's consequence is exactly `renderGrant(grant) + ' [grant ' + grantTag(grant) + ']'`, where the tag is the first 16 hex digits of SHA-256(`canonical(grant)`). The consequence is inside `askSha256`, so the signature binds both the words and the tag. `checkGrant(grant, askLike, key)` enforces the equality; budget raises use `renderRaise`, `raiseTag` and `checkRaise` the same way. `GRANT_TTL_DAYS` is 14.
 
+**Sitting grants** authorize a sitting's merges and deploys with one signature.
+- **The grant JSON** rides in the ask's `prompt` as exactly one ```` ```json ```` fenced block. The prompt is inside `askSha256`, so the signature covers it.
+- **Option (a)'s consequence** is exactly `renderSitting(grant) + ' [sitting ' + sittingTag(grant) + ']'`. It is short by design and stays under the 240-character cap at the largest grant.
+- **The grant** is `{v:1, kind:'sitting', sittingId, filedAt, notAfter, repos:[{remote, branch}] (1..8, sorted by remote), merge, deploy (sorted, from SITTING_SERVICES), runBudgetUsd}`. The budget is per run.
+- **`verifySitting({rows, repo, branch, act, anchor, now})`** accepts a row only when all of these hold:
+  - the anchor is configured, so `unconfigured` refuses with `sitting_unconfigured`;
+  - the answer is key (a);
+  - the question starts `[sitting <sittingId>]`;
+  - the proof verifies and the tag matches;
+  - `notAfter − filedAt ≤ 72 h`;
+  - `signedAt` is no more than 2 minutes before `filedAt`;
+  - `now ≤ notAfter`;
+  - `{repo, branch}` is listed, and the act (`merge`, or `deploy:<service>`) is allowed.
+
+  The first row that verifies wins.
+
 ## CLI
 
 ```
 node operator-proof.mjs verify-receipt --file <f> --quest <full uuid> [--state <state.json>] [--goal <file>]
 node operator-proof.mjs verify-record --file <f> --quest <id|none> [--goal <file>]
+node operator-proof.mjs verify-sitting --file <rows.json> --repo <owner/name> --branch <base> --act <merge|deploy:service>
 ```
+
+`verify-sitting` prints `{ok, mode, reason, sittingId?, receiptId?, credentialId?, notAfter?, candidates}` and exits 0 only when `mode` is `verified`.
 
 Each prints one JSON line `{ok, mode, reason, credentialId, epoch, grant, answer, scopeOk?}`. It exits 0 only on `ok`, and bad usage exits 2. Importing the module never runs the CLI.
 
