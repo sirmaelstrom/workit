@@ -6437,5 +6437,66 @@
       "mode": "verified",
       "reason": null
     }
+  },
+  {
+    "name": "pixel-real-flags",
+    "kind": "answer",
+    "input": {
+      "answer": {
+        "key": "a",
+        "text": null,
+        "by": "operator:dogan",
+        "answeredAt": "2026-10-17T12:00:00Z",
+        "askReceiptId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        "proof": {
+          "v": 1,
+          "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+          "statement": "{\"askReceiptId\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"askSha256\":\"3fe0ff5090bfa17dce7abc0d973d85c7b3c61c584e3ebac2f4db59e85bdaf457\",\"key\":\"a\",\"label\":\"Fix and re-review\",\"origin\":\"https://example.test:8443\",\"questId\":\"11111111-2222-4333-8444-555555555555\",\"questionSha256\":\"1d098cb25c497cdf6d8c8d0b10f98fefa4ea764f96966a524a03dfd19d17f73c\",\"signedAt\":\"2026-10-17T12:00:00Z\",\"text\":null,\"v\":1}",
+          "authenticatorData": "myY_vLWJhTE3sz3cr6W8xUA0ZOrU2nZtD4GTSL-NRywdAAAAAQ",
+          "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiUkdLQTBDa0pqMWZFSnpsVTk3TDYxZDUxM3ZLZmNBVmw1a0xZRWNLVk9JMCIsIm9yaWdpbiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0Ojg0NDMiLCJjcm9zc09yaWdpbiI6ZmFsc2V9",
+          "signature": "MEQCIG2e-YjOpIfElqlZpyzXIKXvAreJMy0bv_nZDK30n2IKAiBrOCNk_4BwcnpGT8Aba_fuAB3-d5SRkMDBTm_OW50Ixw"
+        }
+      },
+      "question": "[conduct demo touch 2] (run r20261017-demo/1) Which way should the review go?",
+      "ask": {
+        "prompt": "Which way should the review go?",
+        "options": [
+          {
+            "key": "a",
+            "label": "Fix and re-review",
+            "consequence": "The lane fixes the findings and the council reviews again."
+          },
+          {
+            "key": "b",
+            "label": "Ship as is",
+            "consequence": "The PR merges and the findings are filed as follow-ups."
+          }
+        ],
+        "allowFreeText": true
+      },
+      "questId": "11111111-2222-4333-8444-555555555555",
+      "anchorFile": {
+        "v": 1,
+        "epoch": 0,
+        "credentials": [
+          {
+            "credentialId": "QBuvMUt84JZKGaLnApE7pA",
+            "publicKeySpki": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE4vjnUwqr2cnAF0dR2uyIhaweHqiu6p1NtuguCMhu1AVVy4T6iCG7eO0Be3O9NsqzpPZO4rHdyxcUHWytOhSxRg",
+            "alg": -7,
+            "rpId": "example.test",
+            "origin": "https://example.test:8443",
+            "registeredAt": "2026-10-17T00:00:00Z",
+            "label": "test key 1",
+            "be": true,
+            "bs": true
+          }
+        ]
+      }
+    },
+    "expect": {
+      "ok": true,
+      "mode": "verified",
+      "reason": null
+    }
   }
 ]
