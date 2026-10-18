@@ -143,10 +143,10 @@ test('/burn-down: the passkey confirm has no in-session exception (D5 lists its 
 });
 
 // A second passkey (Bitwarden) signs from any browser, so the skills name the
-// passkey, not the device. The Dogan button label is quoted as the UI shows it.
+// passkey, not the device, and quote the Dogan button as dogan#329 labels it.
 test('/pickup, /burn-down and /conduct send the operator to a passkey, not the phone', () => {
   for (const id of ['pickup', 'burn-down', 'conduct']) {
-    assert.doesNotMatch(text(id).replace(/Confirm on phone/g, ''), /on the phone/, id);
+    assert.doesNotMatch(text(id), /on the phone|Confirm on phone/, id);
   }
 });
 

@@ -136,7 +136,7 @@ export function handBackAction(state, touch) {
     step: touchStep(touch), kind: 'touch', part: 'hand-back', handBack: true,
     touch: { n: touch.n, question: touch.question, options: touch.options }, expects: { type: 'none' },
   };
-  const why = touch.awaiting === 'phone-confirmation' ? 'was answered in T3; confirm it on the phone (Dogan → Confirm on phone)' : 'has no operator-attributed answer yet';
+  const why = touch.awaiting === 'phone-confirmation' ? 'was answered in T3; confirm it with a passkey (Dogan → Confirm with passkey)' : 'has no operator-attributed answer yet';
   const waiting = `${touch.tag} is filed on quest ${state.intent.anchor} and ${why}. Do not record this action and do not poll.`;
   if (answerOn(state)) {
     const command = awaitAnswerCommand(state, touch);

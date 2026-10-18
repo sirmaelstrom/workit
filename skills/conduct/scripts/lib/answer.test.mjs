@@ -312,7 +312,7 @@ test('an unsigned T3 answer waits for the phone: no re-file, a confirm-on-phone 
   assert.equal(recordTouch(state, touch, touchAction(state, touch), viaAdapter(unsigned), CONFIGURED), undefined);
   assert.deepEqual([touch.status, touch.waiting, touch.awaiting, touch.filings, touch.refusal ?? null], ['filed', true, 'phone-confirmation', 1, null]);
   const back = handBackAction(state, touch);
-  assert.match(back.instruction, /answered in T3; confirm it on the phone \(Dogan → Confirm on phone\)/);
+  assert.match(back.instruction, /answered in T3; confirm it with a passkey \(Dogan → Confirm with passkey\)/);
   assert.doesNotMatch(back.instruction, /no operator-attributed answer yet/);
 
   const dir = runDir(t, state);
