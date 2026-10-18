@@ -192,7 +192,7 @@ Run stages 1-4 sequentially. For each stage:
 - Key discipline: Scan your own problem statement for ambiguity flags ("or", "possibly", "might", "TBD", "should consider"). Each real ambiguity becomes a numbered decision (D1, D2...).
 - For each decision: list options, state tradeoffs (one line each), **choose one**, document reasoning.
 - Mark decisions where you're uncertain as `[DECISION: D3 — low confidence, alternatives close]`.
-- **Limits.** When a decision leaves unestablished something a reader could assume it covers, list it under the decision as `**Limits:**`, one ID each, numbered across the spec: `L1: does not establish <what>`. The WP that ships the decision names its IDs, and its PR body lists them under `Residuals`.
+- **Limits.** When a decision leaves unestablished something a reader could assume it covers, list it under the decision as `Limits:`, one ID each, numbered across the spec: `L1: does not establish <what>`. The WP that ships the decision names its IDs, and its PR body lists them under `Residuals`.
 - Use the `parallel-explore` pattern mentally — consider at least 2 approaches before choosing.
 
 #### Greenfield: attack D1 before ruling it (`--greenfield` only)
@@ -548,7 +548,7 @@ A single document with four concise sections:
 {2-4 paragraphs. What we're solving, why, and the current state. Ground in real file paths.}
 
 ## Decisions
-{Numbered D1, D2... Only real ambiguities — not exhaustive. For each: options considered, choice made, one-line reasoning, and `**Limits:**` (`L1: does not establish <what>`) when the choice leaves something unestablished.}
+{Numbered D1, D2... Only real ambiguities — not exhaustive. For each: options considered, choice made, one-line reasoning, and `Limits:` (`L1: does not establish <what>`) when the choice leaves something unestablished.}
 
 ## Verification
 {For each decision: how an observer confirms it was implemented correctly. Concrete commands or observable behavior.}

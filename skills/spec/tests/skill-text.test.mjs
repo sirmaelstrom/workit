@@ -121,19 +121,25 @@ test('/burn-down: the operator confirms on the phone, and the agent waits', () =
   assert.match(body, /wait for that signed answer/);
 });
 
-// Decision D5 (spine-answer-passkey): only an authority-acting go needs the
-// signed answer; any other ask may proceed on the unsigned T3 answer.
-test('/burn-down and /pickup scope the phone confirm to authority, as D5 rules', () => {
-  for (const id of ['burn-down', 'pickup']) {
-    const [sentence, ...rest] = sentences(text(id)).filter((s) => s.includes('carries no authority'));
-    assert.equal(rest.length, 0, id);
-    assert.match(sentence, /merge, release, spend or pre-approve/, id);
-    assert.match(sentence, /until the operator confirms it on the phone/, id);
-    const exception = sentences(text(id)).filter((s) => s.includes('grants none of these'));
-    assert.equal(exception.length, 1, id);
-    assert.match(exception[0], /question and filing-id checks pass/, id);
-    assert.doesNotMatch(text(id), /answer is not a go until/, id);
-  }
+// Decision D5 (spine-answer-passkey): a T3 answer read back from Spine waits
+// for the signed answer; only an answer given in this session to the agent's
+// own ask skips the read-back, and never for an authority act. D5 lists the
+// /burn-down gates as proof-required, so burn-down carries no exception.
+const IN_SESSION = [/the operator gave in this session/, /to your own ask/, /\bnot when it grants a merge, release, budget or `--preapproved` run/];
+
+test('/pickup: only an in-session answer to its own ask skips the read-back, never for authority', () => {
+  const pickup = sentences(text('pickup'));
+  assert.ok(pickup.some((s) => /read back from Spine is not a go until the operator confirms it on the phone/.test(s)));
+  const found = pickup.filter((s) => s.includes('skips the read-back'));
+  assert.equal(found.length, 1);
+  assert.deepEqual(missing(found, IN_SESSION), []);
+  assertMutationsFail('pickup', found, IN_SESSION);
+});
+
+test('/burn-down: the phone confirm has no in-session exception (D5 lists its gates)', () => {
+  const body = sentences(text('burn-down')).join(' ');
+  assert.doesNotMatch(body, /skips the read-back/);
+  assert.match(body, /unsigned `operator:t3` answer is not a go until the operator confirms it on the phone/);
 });
 
 test('/conduct: the read-back names the configured proof and the unconfigured stamp', () => {

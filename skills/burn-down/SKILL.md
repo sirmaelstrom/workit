@@ -218,12 +218,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    only when a passkey is configured and the verifier finds that touch; the
    caller-side filing-id equality is required even when the lookup misses.
    With an operator passkey configured, an
-   unsigned `operator:t3` answer carries no authority: a go to merge, release,
-   spend or pre-approve waits until the operator confirms it on the phone
-   (Dogan → Confirm on phone), so wait for that signed answer, and don't
-   re-file. An ask that grants none of these may proceed on the T3 answer once
-   the question and filing-id checks pass, though `verify-receipt` refuses it
-   with `proof_absent`. Unconfigured (no passkey; the CLI prints
+   unsigned `operator:t3` answer is not a go until the operator confirms it
+   on the phone (Dogan → Confirm on phone): wait for that signed answer, and
+   don't re-file. Unconfigured (no passkey; the CLI prints
    `"mode":"unconfigured"`), the CLI checks no signature, so the
    `by: 'operator:dogan'` or `'operator:t3'` stamp is what makes the answer
    the operator's: the gate is the operator stamp plus the filing-id equality.
