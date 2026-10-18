@@ -1793,6 +1793,20 @@ function rulingActs(state, wp, action) {
   return [...questions.map((question) => rulingAct(state, wp, { asks: open.filter((ask) => (ask.question ?? null) === question) }, n)), ...rows.map((row) => rulingAct(state, wp, { row }, n))];
 }
 
+// The stage an act that merges, deletes, pushes or removes is queued at (S1,
+// council r4): membership in the union of a WP's producers is not enough.
+// - the rebase (its push) and its abort: the WP at its gate, the lock not another's;
+// - the squash: that, with the gate recorded passed at the PR's current head
+//   and the merge stage reached (expand 'merge'): every review the stage
+//   machine owes is behind the gate, and mergeActions checks the rest;
+// - the lane's worktree removal: the WP merged and out of the live states;
+//   its branch deletes, only once that removal removed the worktree.
+const atGate = (state, wp) => wp.state === 'gate' && mergeLockFor(state, wp) !== 'other';
+const squashStage = (state, wp) => atGate(state, wp) && wp.gate?.ok === true && Boolean(wp.gate.head) && wp.gate.head === wp.pr?.head && [null, undefined, 'merge'].includes(wp.stage);
+const CLEANUP_PARTS = new Set(['remove', 'branch-holder', 'branch', 'branch-remote']);
+const cleanupStage = (wp, act) => !(act.step === 'stop' && CLEANUP_PARTS.has(act.part))
+  || (Boolean(wp.merge?.sha) && !LIVE_STATES.includes(wp.state) && (act.part === 'remove' || wp.lane?.removed === true));
+
 // Every act `wp`'s queue can hold now, from the run's state and `authority`.
 // A producer whose inputs are not recorded yet derives nothing.
 function wpActs(state, wp, deps, authority, action) {
@@ -1805,7 +1819,7 @@ function wpActs(state, wp, deps, authority, action) {
     }
   };
   const gate = { ...shell('gate', 'gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', wp.id]), seam: STEP_SEAM.gate, wpId: wp.id };
-  add(() => backendOf(state, wp, deps).acts(wp));
+  add(() => backendOf(state, wp, deps).acts(wp).filter((act) => cleanupStage(wp, act)));
   add(() => flipActs(state, wp));
   add(() => briefAction(state, wp, deps));
   if (wp.amendment) add(() => amendmentBrief(state, wp, wp.amendment));
@@ -1820,10 +1834,10 @@ function wpActs(state, wp, deps, authority, action) {
   add(() => (councilRecord(state, wp, [{ comment: 'C1-1' }])?.action ?? []));
   add(() => resolveThreadActions(state, wp, wp.replyIds ?? []));
   add(() => Object.values(wp.threadIds ?? {}).map(resolveAction));
-  add(() => rebaseActions(state, wp));
+  if (atGate(state, wp)) add(() => rebaseActions(state, wp));
   const conflict = action.land?.conflict;
-  if (typeof conflict === 'string' && conflict.startsWith(`rebase onto origin/${state.intent.repo.defaultBranch ?? 'main'} conflicted: `)) add(() => rebaseAbort(wp, conflict));
-  if (wp.gate?.head) add(() => mergeActions(state, wp, wp.gate.head, authority));
+  if (atGate(state, wp) && typeof conflict === 'string' && conflict.startsWith(`rebase onto origin/${state.intent.repo.defaultBranch ?? 'main'} conflicted: `)) add(() => rebaseAbort(wp, conflict));
+  if (squashStage(state, wp)) add(() => mergeActions(state, wp, wp.gate.head, authority));
   add(() => mergeTail(state, wp));
   if (wp.gate?.inspect) add(() => inspectAction(state, wp, wp.gate.inspect, gate));
   if (wp.gate?.head && wp.visualRules?.length) add(() => visualAction(state, wp, wp.gate.head, gate));
@@ -1882,7 +1896,7 @@ export function derive(state, deps, action) {
   if (wp && mergesContent(action)) {
     // The squash the gate derives under a grant that holds: only the authority is refused.
     const granted = { ...authority, merge: true, reason: null, grant: null };
-    const squash = wp.gate?.head ? mergeActions(copy, twin, wp.gate.head, granted)[0] : undefined;
+    const squash = squashStage(copy, twin) ? mergeActions(copy, twin, wp.gate.head, granted)[0] : undefined;
     if (squash && sameAct(squash, action, wp)) return { refusal: mergeRefusal(state, authority) ?? 'no merge authority', authorityHeld: Boolean(authority.reason) };
     const merge = mergeRefusal(state, authority, repoArg(action.command));
     if (merge) return { refusal: `${what}: ${merge}${argv}` };

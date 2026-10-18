@@ -2040,9 +2040,9 @@ test('M2 containment (council r4, astra/codex): a council review whose artifact 
     // The recorded set itself naming a traversal derives nothing.
     ['recorded traversal', traversal, (wp) => wp.councilScope?.paths.push(`..${sep}secret.txt`)],
   ];
-  for (const [name, extra, record] of probes) {
+  for (const [name, extra, tamper] of probes) {
     const { emitted, after } = await trial(h, (state) => {
-      record(state.wps.find((wp) => wp.id === review.wpId));
+      tamper(state.wps.find((wp) => wp.id === review.wpId));
       state.pending = { ...state.pending, args: { ...state.pending.args, artifact_paths: [...state.pending.args.artifact_paths, extra] } };
     });
     t.diagnostic(`${name}: council_review artifact_paths + ${extra} → next emits ${emitted.id} ${emitted.tool ?? emitted.step} ${JSON.stringify(emitted.args?.artifact_paths ?? null)}; ${review.wpId} ${after.wps.find((wp) => wp.id === review.wpId).state}`);
