@@ -14,7 +14,10 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { answerStatement, askSha256, canonical, grantTag, questionSha256, raiseTag, registerBeginStatement, registerCosignStatement, renderGrant, renderRaise } from './operator-proof.mjs';
+import {
+  answerStatement, askSha256, canonical, grantTag, questionSha256, raiseTag, registerBeginStatement, registerCosignStatement, renderGrant, renderRaise,
+  renderSitting, sittingTag,
+} from './operator-proof.mjs';
 import {
   FLAG_AT, FLAG_BE, FLAG_BS, FLAG_UP, FLAG_UV, TEST_KEY_1, TEST_KEY_2, TEST_ORIGIN, TEST_RP_ID,
   credentialIdOf, makeTestAnchor, publicKeySpkiOf, signAnswer, signCosign, signRegistration,
@@ -367,10 +370,52 @@ function recordVectors() {
   ];
 }
 
+// A sitting grant rides in the ask's prompt; option (a) carries its prose and tag.
+const SITTING = {
+  v: 1, kind: 'sitting', sittingId: '9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d',
+  filedAt: '2026-10-17T11:59:00Z', notAfter: '2026-10-17T23:59:00Z',
+  repos: [{ remote: 'owner/alpha', branch: 'main' }, { remote: 'owner/beta', branch: 'main' }],
+  merge: true, deploy: ['dogan', 'observatory'], runBudgetUsd: 25,
+};
+
+function sittingVectors() {
+  const askOf = (grant, consequence = `${renderSitting(grant)} [sitting ${sittingTag(grant)}]`) => ({
+    prompt: `Start a sitting.\n\n\`\`\`json\n${JSON.stringify(grant)}\n\`\`\``,
+    allowFreeText: false,
+    options: [
+      { key: 'a', label: 'Approve the sitting', consequence },
+      { key: 'b', label: 'Decline', consequence: 'Nothing is authorized; each merge and deploy asks.' },
+    ],
+  });
+  const row = ({ grant = SITTING, ask = askOf(grant), key = 'a', signedAt = SIGNED_AT, unsigned = false } = {}) => {
+    const question = `[sitting ${grant.sittingId}] Start a sitting until ${grant.notAfter}?`;
+    const proof = signAnswer({ questId: QUEST, askReceiptId: ASK_RECEIPT, question, ask, answerKey: key, signedAt });
+    return { id: ANSWER_RECEIPT, questId: QUEST, outcome: 'answered', question, ask, answer: answerOf(unsigned ? undefined : proof, { key }) };
+  };
+  const at = Date.parse('2026-10-17T12:30:00Z');
+  const input = (rows, overrides = {}) => ({ rows, repo: 'owner/alpha', branch: 'main', act: 'merge', anchorFile: ANCHOR, now: at, ...overrides });
+  const long = { ...SITTING, notAfter: '2026-10-20T12:00:00Z' };
+  return [
+    vector('sitting-merge', 'sitting', input(row()), VERIFIED),
+    vector('sitting-deploy', 'sitting', input(row(), { act: 'deploy:observatory' }), VERIFIED),
+    vector('sitting-unsigned', 'sitting', input(row({ unsigned: true })), refused('proof_absent')),
+    vector('sitting-unconfigured', 'sitting', input(row(), { anchorFile: EMPTY_ANCHOR }), refused('sitting_unconfigured')),
+    vector('sitting-expired', 'sitting', input(row(), { now: Date.parse(SITTING.notAfter) + 1000 }), refused('grant_expired')),
+    vector('sitting-too-long', 'sitting', input(row({ grant: long })), refused('sitting_too_long')),
+    vector('sitting-signed-before-filing', 'sitting', input(row({ signedAt: '2026-10-17T11:00:00Z' })), refused('sitting_bad_time')),
+    vector('sitting-other-repo', 'sitting', input(row(), { repo: 'owner/gamma' }), refused('sitting_out_of_scope')),
+    vector('sitting-other-branch', 'sitting', input(row(), { branch: 'release' }), refused('sitting_out_of_scope')),
+    vector('sitting-unlisted-service', 'sitting', input(row(), { act: 'deploy:forge' }), refused('sitting_out_of_scope')),
+    vector('sitting-tag-mismatch', 'sitting', input(row({ ask: askOf(SITTING, `${renderSitting(SITTING)} [sitting 0000000000000000]`) })), refused('grant_tag_mismatch')),
+    vector('sitting-declined', 'sitting', input(row({ key: 'b' })), refused('sitting_declined')),
+    vector('sitting-malformed', 'sitting', input(row({ ask: { ...askOf(SITTING), prompt: 'no grant here' } })), refused('sitting_malformed')),
+  ];
+}
+
 export function generate() {
   return [
     ...answerVectors(), ...registrationVectors(), ...cosignVectors(), ...canonicalVectors(),
-    ...tagVectors(), ...anchorVectors(), ...receiptVectors(), ...recordVectors(),
+    ...tagVectors(), ...anchorVectors(), ...receiptVectors(), ...recordVectors(), ...sittingVectors(),
   ];
 }
 
