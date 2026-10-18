@@ -226,7 +226,7 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    the operator's: the gate is the operator stamp plus the filing-id equality.
    A later receipt hides the answer there: before concluding
    there is none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest
-   uuid and the ask's whole question, each `'` doubled, as the tag. It
+   uuid and the ask's whole question, exactly as written, as the tag. It
    searches every receipt. Save the row it prints; it IS the go when
    `verify-receipt --file <row> --quest <full quest uuid> --state <the state
    file>` exits 0 on it (the CLI accepts a bare row), its `question` passes
