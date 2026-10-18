@@ -172,15 +172,21 @@ export function isAgentActionGatePath(path, hookCommands = [], options = {}) {
   return agentActionGateRule(path, hookCommands, options) !== null;
 }
 
-// Raise only. Keep the first matched path and rule for the run record.
+// Raise only, to T2 on a contract path or an agent-action gate path. A test
+// file does not raise to T2: the slim review's lenses report a test that
+// cannot fail on its claimed defect, and the lane contract owes each test's
+// negative control. It is executable code, though, so it floors a T0 at T1:
+// reviewed, never landed unread. Keep the first matched path and rule for the
+// run record.
 export function tierDecision(wp, changedPaths = [], contractPaths = [], hookCommands = [], options = {}) {
   const contracts = contractPaths.map(globRegex);
   for (const path of changedPaths) {
-    const rule = isTestPath(path) ? 'test-path'
-      : contracts.some((re) => re.test(norm(path))) ? 'contract-path'
-        : agentActionGateRule(path, hookCommands, options);
+    const rule = contracts.some((re) => re.test(norm(path))) ? 'contract-path'
+      : agentActionGateRule(path, hookCommands, options);
     if (rule) return { tier: 'T2', rule, path };
   }
+  const test = effectiveTier(wp) === 'T0' ? changedPaths.find(isTestPath) : undefined;
+  if (test !== undefined) return { tier: 'T1', rule: 'test-path-floor', path: test };
   return { tier: effectiveTier(wp), rule: effectiveTier(wp) === 'T2' ? 'declared-t2' : 'no-match', path: null };
 }
 
