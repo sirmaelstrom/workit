@@ -40,6 +40,9 @@ export function dryDeps(deps) {
 }
 
 // A phase without its own `derive`: the act its `next` emits now, on a copy.
+// Contract: such a phase's `next` is repeatable. Called again on a state its
+// first call already changed, it returns the same act; a `next` that shifts a
+// queue or numbers its act on each call refuses its own pending act.
 function derivedByNext(state, deps, phase, action) {
   let spec;
   try {
