@@ -200,13 +200,21 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    anchor receipt carrying the exact revert command; merge-only, never deploy.
    Any doubt → held. **A go must be READ, never assumed: after filing a
    `needs_input` receipt, act only on an answer you can cite — for a structured
-   ask, `spine_quest`'s `latestReceipt.answer` (`key` and/or `text`, stamped
-   `by: 'operator:dogan'` or `'operator:t3'`) IS the go when that receipt's
-   `question` is the ask's, verbatim, read back with a tool call, never
-   inferred from the quest having left WAITING. A later receipt hides it there:
-   before concluding there is none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver
-   with the quest uuid and the ask's whole question, each `'` doubled, as the
-   tag. It searches every receipt; its result passes the same verbatim check.
+   ask, `spine_quest`'s `latestReceipt.answer` (`key` and/or `text`) IS the
+   go when `verify-receipt` exits 0 on the `spine_quest` result and that
+   receipt's `question` is the ask's, verbatim, read back with a tool call,
+   never inferred from the quest having left WAITING. Write the result body to
+   a temp file and run `node "${CLAUDE_PLUGIN_ROOT}/skills/_shared/operator-proof/operator-proof.mjs" verify-receipt --file <it> --quest <full quest uuid>`,
+   which checks the operator's passkey signature. With an operator passkey
+   configured, an unsigned `operator:t3` answer is history: confirm it on the
+   phone. Unconfigured (no passkey; the CLI prints `"mode":"unconfigured"`),
+   the `by: 'operator:dogan'` or `'operator:t3'` stamp is the go, as before.
+   A later receipt hides the answer there: before concluding there is none,
+   run the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest uuid and the ask's
+   whole question, each `'` doubled, as the tag. It searches every receipt.
+   Save the row it prints and run `verify-receipt --file <row> --quest <full
+   quest uuid>` on it (the CLI accepts a bare row); exit 0 plus the same
+   verbatim check is the go.
    Otherwise an operator message in-session,
    or a receipt/resolution read back via a tool call. An operator answer given in
    CHAT is recorded as a conductor receipt citing it — never posted through the
