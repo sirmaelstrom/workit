@@ -115,9 +115,9 @@ test('/spec defines the meta.json gate value once and every write site reference
   assert.ok(spec.split('the gate value (§').length - 1 >= 3, 'fewer than 3 write sites reference the gate value');
 });
 
-test('/burn-down: the operator confirms on the phone, and the agent waits', () => {
+test('/burn-down: the operator confirms with a passkey, and the agent waits', () => {
   const body = sentences(text('burn-down')).join(' ');
-  assert.match(body, /until the operator confirms it on the phone/);
+  assert.match(body, /until the operator confirms it with a passkey/);
   assert.match(body, /wait for that signed answer/);
 });
 
@@ -129,17 +129,25 @@ const IN_SESSION = [/the operator gave in this session/, /to your own ask/, /\bn
 
 test('/pickup: only an in-session answer to its own ask skips the read-back, never for authority', () => {
   const pickup = sentences(text('pickup'));
-  assert.ok(pickup.some((s) => /read back from Spine is not a go until the operator confirms it on the phone/.test(s)));
+  assert.ok(pickup.some((s) => /read back from Spine is not a go until the operator confirms it with a passkey/.test(s)));
   const found = pickup.filter((s) => s.includes('skips the read-back'));
   assert.equal(found.length, 1);
   assert.deepEqual(missing(found, IN_SESSION), []);
   assertMutationsFail('pickup', found, IN_SESSION);
 });
 
-test('/burn-down: the phone confirm has no in-session exception (D5 lists its gates)', () => {
+test('/burn-down: the passkey confirm has no in-session exception (D5 lists its gates)', () => {
   const body = sentences(text('burn-down')).join(' ');
   assert.doesNotMatch(body, /skips the read-back/);
-  assert.match(body, /unsigned `operator:t3` answer is not a go until the operator confirms it on the phone/);
+  assert.match(body, /unsigned `operator:t3` answer is not a go until the operator confirms it with a passkey/);
+});
+
+// A second passkey (Bitwarden) signs from any browser, so the skills name the
+// passkey, not the device. The Dogan button label is quoted as the UI shows it.
+test('/pickup, /burn-down and /conduct send the operator to a passkey, not the phone', () => {
+  for (const id of ['pickup', 'burn-down', 'conduct']) {
+    assert.doesNotMatch(text(id).replace(/Confirm on phone/g, ''), /on the phone/, id);
+  }
 });
 
 test('/conduct: the read-back names the configured proof and the unconfigured stamp', () => {

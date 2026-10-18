@@ -158,7 +158,7 @@ passkey is configured and the verifier finds that touch; the caller-side
 filing-id equality is required even when the lookup misses.
 Never assume the go from the quest having returned to the
 frontier. With an operator passkey configured, an unsigned `operator:t3` answer
-read back from Spine is not a go until the operator confirms it on the phone: wait
+read back from Spine is not a go until the operator confirms it with a passkey: wait
 for that signed answer. Only an answer the operator gave in this session, to your
 own ask, skips the read-back, and not when it grants a merge, release, budget or
 `--preapproved` run. Unconfigured (the CLI prints `"mode":"unconfigured"`), the CLI checks no

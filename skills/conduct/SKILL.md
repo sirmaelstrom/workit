@@ -47,7 +47,7 @@ so each invocation follows the run's recorded plugin root after an upgrade.
      tagged single-choice answer to Spine as `answered` (`by: 'operator:t3'`)
      while the ask is the anchor's latest receipt, and a touch's read-back
      accepts it in unconfigured mode; with an operator passkey configured, the
-     touch waits until the answer is confirmed on the phone (§ Signed
+     touch waits until the answer is confirmed with a passkey (§ Signed
      authority). When the hook reports the mirror refused or skipped it, or its
      pending job did not end `answered`, the touch waits for the Dogan press.
      - **Core path:** record `{}` after they have answered. An unanswered touch returns the same action with `answered: false`.
@@ -112,7 +112,7 @@ Every touch step's action and event, `resumed` included, carries the seam `opera
 
 A run is **configured** when `~/.claude/operator-passkeys.json` holds a registered passkey, and **unconfigured** otherwise. Unconfigured, everything in this skill works as written, and the run says so: each touch's recorded answer stores `proofMode: unconfigured`, and the authority line reads `(proof: UNCONFIGURED — answers not signed)`. A run whose touches were verified but which finds no anchor configured now reads `(proof: UNCONFIGURED — no anchor is configured now, so the stored answer is not checked)`. Configured:
 
-- **Touches are signed on the phone.** The read-back accepts only an answer whose passkey proof verifies against the ask this filing handed out, and its recorded answer stores `proofMode: verified`. An unsigned T3 answer waits until the operator confirms it on the phone (Dogan → Confirm on phone). A core-only run is refused at intake, because a TTY answer can't be signed (§ Refusals).
+- **Touches are signed with a passkey.** The read-back accepts only an answer whose passkey proof verifies against the ask this filing handed out, and its recorded answer stores `proofMode: verified`. An unsigned T3 answer waits until the operator confirms it with a passkey (Dogan → Confirm on phone). A core-only run is refused at intake, because a TTY answer can't be signed (§ Refusals).
 - **Grants are tagged.** Touch 1's (a) and (b) consequences end in ` [grant <tag>]`, and the budget touch's (a) ends in ` [raise <tag>]`. The tag is the first 16 hex digits of the SHA-256 of the grant's canonical JSON; the full grant is stored on the touch. The consequence is part of the signed ask, so the signature binds both the words and the tag. A (c) answer files a confirm touch: the checked grant's scope and the operator's text in the question, (a) Confirm with its own ` [grant <tag>]`, and (d) Decline. Authority stays zero until that signed (a) lands, and the grant becomes the run's authority. (d) declines: the run ends with `phase = 'declined'`. Any other key is refused, and the confirm re-opens saying why.
 - **What this protects.** Against an agent that edits `state.json`, exactly this holds:
   1. Merge, release and budget authority are recomputed from the signed content just before every act. `state.authority` is a display cache that no act reads.
