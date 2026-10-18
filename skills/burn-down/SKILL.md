@@ -199,14 +199,45 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    uncoupled, unstacked) merges at its boundary with an immediate Discord ping +
    anchor receipt carrying the exact revert command; merge-only, never deploy.
    Any doubt → held. **A go must be READ, never assumed: after filing a
-   `needs_input` receipt, act only on an answer you can cite — for a structured
-   ask, `spine_quest`'s `latestReceipt.answer` (`key` and/or `text`, stamped
-   `by: 'operator:dogan'` or `'operator:t3'`) IS the go when that receipt's
-   `question` is the ask's, verbatim, read back with a tool call, never
-   inferred from the quest having left WAITING. A later receipt hides it there:
-   before concluding there is none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver
-   with the quest uuid and the ask's whole question, each `'` doubled, as the
-   tag. It searches every receipt; its result passes the same verbatim check.
+   `needs_input` receipt, act only on an answer you can cite. When you file a
+   structured ask, keep the `id` that `spine_receipt` returns, with the ask in
+   your notes for the stop (and in the handoff if the session rotates): it is
+   the ask receipt id, and the go check takes it from you, never from the
+   answer. Write a state file holding
+   `{"touches":[{"tag":"<question up to its first space>","receiptId":"<ask receipt id>"}]}`
+   for it. For a structured ask, `spine_quest`'s `latestReceipt.answer`
+   (`key` and/or `text`) IS the go when `verify-receipt` with `--state` exits
+   0 on the `spine_quest` result, that receipt's `question` is the ask's,
+   verbatim, `answer.askReceiptId` is present and equals the ask receipt id
+   retained from `spine_receipt` at filing after lowercasing both, and either
+   `mode` is `verified` or, unconfigured, `answer.by` begins `operator:`. Read it back
+   with a tool call; never infer it from the quest having left WAITING. Write
+   the result body to a temp file and run `node "${CLAUDE_PLUGIN_ROOT}/skills/_shared/operator-proof/operator-proof.mjs" verify-receipt --file <it> --quest <full quest uuid> --state <the state file>`,
+   keeping the state touch so the verifier also binds the signature to the
+   filing when its lookup matches. The `statement_mismatch` binding applies
+   only when a passkey is configured and the verifier finds that touch; the
+   caller-side filing-id equality is required even when the lookup misses.
+   With an operator passkey configured, an
+   unsigned `operator:t3` answer is not a go until the operator confirms it
+   on the phone (Dogan → Confirm on phone): wait for that signed answer, and
+   don't re-file. Unconfigured (no passkey; the CLI prints
+   `"mode":"unconfigured"`), the CLI checks no signature, so the
+   `by: 'operator:dogan'` or `'operator:t3'` stamp is what makes the answer
+   the operator's: the gate is the operator stamp plus the filing-id equality.
+   A later receipt hides the answer there: before concluding
+   there is none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest
+   uuid and the ask's whole question, each `'` doubled, as the tag. It
+   searches every receipt. Save the row it prints; it IS the go when
+   `verify-receipt --file <row> --quest <full quest uuid> --state <the state
+   file>` exits 0 on it (the CLI accepts a bare row), its `question` passes
+   the same verbatim check, `answer.askReceiptId` is present and equals the
+   ask receipt id retained from `spine_receipt` at filing after lowercasing both,
+   and either `mode` is `verified` or, unconfigured, its `answer.by` begins
+   `operator:`. A missing or unequal filing id means not a go: re-file the ask.
+   If the ask receipt id is lost, don't take it from the row: the
+   answer's `askReceiptId` sits beside the proof, so whoever swaps the proof
+   swaps it too. Without the id from your own filing the go is not verified;
+   re-file the ask and read the answer to the new filing.
    Otherwise an operator message in-session,
    or a receipt/resolution read back via a tool call. An operator answer given in
    CHAT is recorded as a conductor receipt citing it — never posted through the
