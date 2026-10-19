@@ -743,12 +743,12 @@ function haltTouch(state, deps, reason, why, spendUsd = null) {
   if (why === 'budget' && halts.some((halt) => halt.kind === 'budget')) return;
   const budget = why === 'budget';
   const options = budget
-    ? [option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; metering continues against it.'),
+    ? [option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; booked lane cost is checked against it.'),
       option('b', 'Stop new paid lane work', 'No dispatch, start, prompt or fallback; PRs already up may still land.')]
     : [option('a', 'Resume dispatch', 'This halt is cleared.'), option('b', 'End the build', 'Live lanes finish; nothing new is dispatched.')];
   const touch = buildTouch(state, deps, why, {
     question: budget
-      ? `DO: decide whether conduct ${state.slug} spends more. ${reason}. EXPECT: (a) answered with the text "budget <USD>" above the current spend raises the ceiling to it, and metering continues; (b) no new paid lane work (no dispatch, lane start, prompt or fallback); work already at a PR boundary may still be reviewed and landed, and the build ends.`
+      ? `DO: decide whether conduct ${state.slug} spends more. ${reason}. EXPECT: (a) answered with the text "budget <USD>" above the current spend raises the ceiling to it, and the lane-only lower bound is checked against it; (b) no new paid lane work (no dispatch, lane start, prompt or fallback); work already at a PR boundary may still be reviewed and landed, and the build ends.`
       : `DO: decide whether conduct ${state.slug} dispatches more lanes. ${reason}. EXPECT: (a) this halt is cleared; dispatch resumes once no other halt is open; (b) no new lane starts, the live ones finish, and the build ends.`,
     options,
     allowFreeText: budget,

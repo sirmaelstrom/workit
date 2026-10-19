@@ -7,8 +7,8 @@
 // from an in-memory copy of the sentences to show the check then fails.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const skills = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -108,6 +108,29 @@ test('/conduct carries no retired proof, ask-tag, spend-meter or answer-adapter 
     assert.doesNotMatch(body, retired, `conduct: ${retired}`);
   }
   assert.match(body, /pose it as a plain AskUserQuestion with the recommendation first/);
+});
+
+test('/conduct: a chat answer is not a touch\'s go; the channel\'s answer wins', () => {
+  assert.match(sentences(text('conduct')).join(' '), /A chat answer is not a go for a touch: when it and the channel's answer differ, the channel's answer wins/);
+});
+
+// Frozen workshop text read as data, and history files, keep the retired words.
+const HISTORY = (path) => /[\\/]__fixtures__[\\/]/.test(path) || /CHANGELOG|HISTORY/i.test(basename(path));
+const markdown = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+  const path = join(dir, entry.name);
+  if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : markdown(path);
+  return entry.name.endsWith('.md') ? [path] : [];
+});
+const RETIRED_EVERYWHERE = [/spend adapter/i, /verify-receipt/, /operator-proof/, /passkey/i, /\[ask </, /WORKIT_TOUCH_ANSWER_CMD/, /sitting grant/i];
+
+test('no skill or reference doc names a retired proof, ask-tag, spend-adapter or answer-resolver mechanism', () => {
+  const files = [...markdown(skills), ...markdown(join(skills, '..', 'reference'))].filter((path) => !HISTORY(path));
+  assert.ok(files.length > 50, `walked ${files.length} files`);
+  const hits = files.flatMap((path) => {
+    const body = readFileSync(path, 'utf8');
+    return RETIRED_EVERYWHERE.filter((retired) => retired.test(body)).map((retired) => `${relative(join(skills, '..'), path)}: ${retired}`);
+  });
+  assert.deepEqual(hits, []);
 });
 
 test('/burn-down and /pickup: in session, the operator\'s message is the go', () => {

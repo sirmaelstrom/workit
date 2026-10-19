@@ -20,7 +20,7 @@ import { runLaneVerb } from '../lanes.mjs';
 import { runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
-import { acceptAnswer, correlation } from '../touch.mjs';
+import { acceptAnswer } from '../touch.mjs';
 import { runConduct } from '../../conduct.mjs';
 
 // The section a lane PR body carries (lane contract § Finish; fca05d92).
@@ -1646,7 +1646,7 @@ test('blocked recovery (D19.4), spine, idle build (E6): with no lane work left t
   // The operator answers (a) on the spine: the next resume reads it back.
   h.spineQuest = () => {
     const result = JSON.parse(fixture('intake', 'spine-quest-answered.json'));
-    result.quests[0].latestReceipt.question = `${correlation(h.current(), h.current().touches[0])} synthetic question`;
+    result.quests[0].latestReceipt.question = h.current().touches[0].filedQuestion;
     result.quests[0].latestReceipt.answer.key = 'a';
     return result;
   };
@@ -2949,6 +2949,10 @@ test('budget (b) (C2-1, C2-2): no prompt after (b) for a second WP, which blocks
   await drive(h, { until: (a) => a.part === 'announce' });
   assert.match(h.state.touches[0].question, /\(b\) no new paid lane work \(no dispatch, lane start, prompt or fallback\); work already at a PR boundary may still be reviewed and landed/);
   assert.equal(h.state.touches[0].options[1].label, 'Stop new paid lane work');
+  // M4: the raise names the lane-only lower bound; nothing says metering goes on.
+  assert.match(h.state.touches[0].question, /raises the ceiling to it, and the lane-only lower bound is checked against it;/);
+  assert.match(h.state.touches[0].options[0].consequence, /booked lane cost is checked against it\.$/);
+  assert.doesNotMatch(`${h.state.touches[0].question} ${h.state.touches[0].options.map((o) => o.consequence).join(' ')}`, /metering|meter reading/i);
   await recordPending(h, {});
   answerCore(h, 1, 'b');
   assert.equal(await drive(h), null);

@@ -14,7 +14,7 @@ import { STEPS, STEP_SEAM, ConductError, resolveRunDir, readEvents, saveState, a
 import { detectAdapters, laneModel } from './lib/adapters.mjs';
 import { resolveRecipe, recipeArgv } from './lib/recipe.mjs';
 import { shellArgv, spawnDetached, pidAlive } from './lib/exec.mjs';
-import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, resumeCommand, shellLiteral, filedLength, QUESTION_MAX } from './lib/touch.mjs';
+import { openTouch, touchAction, recordTouch, answersFiling, handBackAction, answerCommand, resumeCommand, shellLiteral, filedLength, QUESTION_MAX } from './lib/touch.mjs';
 import { validateGrant } from './lib/phases/preapproval.mjs';
 import { samePath, next as specNext } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
@@ -89,10 +89,10 @@ const fsDeps = { exists: existsSync, read: (path) => readFileSync(path, 'utf8') 
 const events = (runDir) => readEvents(runDir, fsDeps, readState(runDir));
 const rawEvents = (runDir) => readFileSync(join(runDir, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
 // A spine read-back result answering this run's current filing of touch n.
-function answeredFor(runDir, n = 1, answerPatch = {}) {
-  const result = fixtureJson('spine-quest-answered.json');
+function answeredFor(runDir, n = 1, answerPatch = {}, name = 'spine-quest-answered.json') {
+  const result = fixtureJson(name);
   const touch = readState(runDir).touches[n - 1];
-  result.quests[0].latestReceipt.question = `${touch.tag} (run ${RUN_ID}/${touch.filings}) synthetic question`;
+  result.quests[0].latestReceipt.question = touch.filedQuestion;
   Object.assign(result.quests[0].latestReceipt.answer, answerPatch);
   return result;
 }
@@ -665,6 +665,102 @@ test('plugin-root handover (D19.22)', async (t) => {
   assert.equal(recorded.code, 0, recorded.stdout);
 });
 
+// Shapes a conduct with the passkey, spend or answer adapters left in state.json.
+const AWAIT_ANSWER = { id: '3-preapproval', phase: 'preapproval', step: 'preapproval', kind: 'shell', part: 'read-back', touch: { n: 2 },
+  command: ['node', 'conduct.mjs', 'await-answer', '--run', 'x', '--touch', '2', '--once'], expects: { type: 'json' } };
+const RETIRED = {
+  'preapproval-confirm': {
+    phase: 'preapproval', adapters: { spine: { on: true } },
+    authority: { merge: false, release: false, budgetUsd: 0, scope: 'Widget only', notes: null, grant: 'touches/1-grant.json' },
+    touches: [
+      { n: 1, kind: 'preapproval', status: 'answered', tag: '[conduct seeded touch 1]', question: '[conduct seeded touch 1] Q', options: [{ key: 'a' }, { key: 'c' }], answer: { key: 'c', text: 'Widget only, hold merges, budget 10' } },
+      { n: 2, kind: 'preapproval-confirm', status: 'filed', tag: '[conduct seeded touch 2]', question: '[conduct seeded touch 2] Confirm on phone', options: [{ key: 'a' }], filings: 1, answer: null },
+    ],
+  },
+  'await-answer': { phase: 'preapproval', adapters: { spine: { on: true } }, pending: AWAIT_ANSWER },
+  meter: { build: { halts: [{ kind: 'meter', reason: 'the spend meter is re-read', waitLeftMs: 300000 }] }, dispatchHalt: { reason: 'the spend meter is re-read', since: ANSWERED_AT } },
+  authority: { build: { halts: [{ kind: 'authority', reason: 'grant expired', waitLeftMs: 60000, dueAt: null }] } },
+  'authority-ended': { build: { halts: [{ kind: 'authority-ended', reason: 'grant expired' }] } },
+  spend: { wps: [{ id: 'WP-01', state: 'gate', queue: [{ kind: 'shell', step: 'spend', command: ['node', 'spend.mjs'] }] }] },
+  held: { pending: { id: '4-wait', phase: 'build', step: 'wait', kind: 'wait', waitMs: 1000, held: true } },
+  heldObserving: { phase: 'release', release: { state: 'pending', queue: [], heldObserving: 'release held: the grant expired' } },
+};
+
+test('retired shapes (M1, M2, U2): a run a passkey-era conduct left mid-flight is refused by next, record and answer, naming what it carries; status still reads it', async (t) => {
+  const f = fixture(t);
+  for (const [name, patch] of Object.entries(RETIRED)) {
+    const runDir = seedRun(f, { intent: { goal: GOAL, anchor: null, repo: { path: f.repo, remote: 'sirmaelstrom/workit' } }, ...patch });
+    const before = readFileSync(join(runDir, 'state.json'), 'utf8');
+    for (const argv of [['next', '--run', runDir], ['record', '--run', runDir, '--action', '3-preapproval', '--result', '{"code":0,"stdout":"{}","stderr":""}'],
+      ['answer', '--run', runDir, '--touch', '2', '--key', 'a']]) {
+      const result = await f.run(argv, { stdinIsTTY: true });
+      assert.equal(result.code, 2, `${name} ${argv[0]}: ${result.stdout}`);
+      assert.match(out(result).error, /written by a conduct with the passkey, spend or answer adapters, and this conduct cannot resume it: .+ Start a new run/, name);
+    }
+    assert.equal(readFileSync(join(runDir, 'state.json'), 'utf8'), before, `${name}: the state is untouched`);
+    assert.equal((await f.run(['status', '--run', runDir])).code, 0, name);
+    rmSync(join(f.runs, 'seeded'), { recursive: true });
+  }
+  const runDir = seedRun(f, RETIRED['preapproval-confirm']);
+  assert.match(out(await f.run(['next', '--run', runDir])).error, /touch 2 is an unanswered preapproval-confirm/);
+  rmSync(join(f.runs, 'seeded'), { recursive: true });
+  assert.match(out(await f.run(['next', '--run', seedRun(f, RETIRED['await-answer'])])).error, /pending action 3-preapproval is the await-answer read-back/);
+  rmSync(join(f.runs, 'seeded'), { recursive: true });
+  assert.match(out(await f.run(['next', '--run', seedRun(f, RETIRED.meter)])).error, /build halt "meter" \(the spend meter is re-read\)/);
+});
+
+test('retired shapes: a current run moves, and a finished run carrying a retired halt still answers next', async (t) => {
+  const f = fixture(t);
+  const current = seedRun(f, { build: { halts: [{ kind: 'budget', reason: 'over', touch: 1 }, { kind: 'merged', reason: 'differs', touch: 2 }] } });
+  assert.equal(out(await f.run(['next', '--run', current])).action.kind, 'done');
+  rmSync(join(f.runs, 'seeded'), { recursive: true });
+  const closed = seedRun(f, { ...RETIRED.meter, phase: 'closed' });
+  assert.equal(out(await f.run(['next', '--run', closed])).action.kind, 'done');
+});
+
+test('read-back (U1): the filed question verbatim is this filing\'s answer; a question sharing its run and filing prefix is not', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-verbatim-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
+  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z' };
+  const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
+  const touch = openTouch(state, { kind: 'preapproval', question: 'Approve $25 run?', options }, deps);
+  const filing = touchAction(state, touch);
+  recordTouch(state, touch, filing, { id: '00000000-0000-4000-8000-0000000000f3' });
+  assert.equal(touch.filedQuestion, filing.args.question);
+  const reply = (question) => {
+    const result = fixtureJson('spine-quest-answered.json');
+    result.quests[0].latestReceipt.question = question;
+    return result;
+  };
+  const prefix = filing.args.question.replace('Approve $25 run?', 'Decline $25 run?');
+  assert.ok(prefix.startsWith(`${touch.tag} (run ${RUN_ID}/1) `));
+  recordTouch(state, touch, touchAction(state, touch), reply(prefix));
+  assert.equal(touch.status, 'filed');
+  assert.equal(touch.waiting, true);
+  touch.waiting = false;
+  recordTouch(state, touch, touchAction(state, touch), reply(`${filing.args.question} and more`));
+  assert.equal(touch.status, 'filed');
+  touch.waiting = false;
+  recordTouch(state, touch, touchAction(state, touch), reply(filing.args.question));
+  assert.equal(touch.status, 'answered');
+});
+
+test('read-back (U1): a touch filed before the filed question was kept matches its whole body, not its prefix alone', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-legacy-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
+  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z' };
+  const options = [{ key: 'a', label: 'yes', consequence: 'go' }];
+  const touch = openTouch(state, { kind: 'preapproval', question: 'Approve $25 run?', options }, deps);
+  Object.assign(touch, { status: 'filed', filings: 2, receiptId: '00000000-0000-4000-8000-0000000000f4' });
+  const head = `${touch.tag} (run ${RUN_ID}/2) `;
+  for (const [question, ok] of [[`${head}Decline $25 run?`, false], [`${head}Approve $25 run? Decline`, false], [`${head}Nope. Approve $25 run?`, false],
+    [`${head}Your previous answer could not be used (a reason). Approve $25 run?`, true], [`${head}Approve $25 run?`, true]]) {
+    assert.equal(answersFiling(state, touch, question), ok, question);
+  }
+});
+
 test('depth none writes wp-00.md', async (t) => {
   const f = fixture(t);
   const { runDir, spec } = await toCoreSpec(f);
@@ -767,7 +863,7 @@ test('the anchor step refuses a spine_quest id that is only a prefix (exit 2): t
 test('record refuses unattributed answer', async (t) => {
   const f = fixture(t);
   const { runDir, readBack } = await toSpineReadBack(f);
-  const result = fixtureJson('spine-quest-answered.json');
+  const result = answeredFor(runDir);
   result.quests[0].latestReceipt.answer = { by: 'agent:claude', key: 'a' };
   const refused = await record(f, runDir, readBack.id, result);
   assert.equal(refused.code, 3);
@@ -973,12 +1069,12 @@ test('spine touch is filed once', async (t) => {
     assert.equal(out(await f.run(['next', '--resume', runDir])).action.tool, 'spine_quest');
   }
   assert.equal(readState(runDir).touches[0].filings, 1);
-  assert.equal(out(await record(f, runDir, readState(runDir).pending.id, fixtureJson('spine-quest-answered.json'))).phase, 'spec');
+  assert.equal(out(await record(f, runDir, readState(runDir).pending.id, answeredFor(runDir))).phase, 'spec');
   assert.equal(readState(runDir).touches[0].answer.receiptId, null);
 
   const g = fixture(t);
   const flow = await toSpineReadBack(g);
-  await record(g, flow.runDir, flow.readBack.id, fixtureJson('spine-quest-answered-with-id.json'));
+  await record(g, flow.runDir, flow.readBack.id, answeredFor(flow.runDir, 1, {}, 'spine-quest-answered-with-id.json'));
   assert.equal(readState(flow.runDir).touches[0].answer.receiptId, fixtureJson('spine-quest-answered-with-id.json').quests[0].latestReceipt.id);
 });
 
@@ -990,7 +1086,7 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   assert.equal(back.handBack, true);
   const again = out(await f.run(['next', '--resume', runDir])).action;
   assert.equal(again.tool, 'spine_quest');
-  assert.equal(out(await record(f, runDir, again.id, fixtureJson('spine-quest-answered.json'))).phase, 'spec');
+  assert.equal(out(await record(f, runDir, again.id, answeredFor(runDir))).phase, 'spec');
 
   // Two open touches: only one is filed at a time.
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-touch-'));
@@ -1005,7 +1101,9 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' });
   assert.equal(touchAction(state, second), null);
   assert.equal(second.status, 'open');
-  recordTouch(state, first, touchAction(state, first), fixtureJson('spine-quest-answered.json'));
+  const answered = fixtureJson('spine-quest-answered.json');
+  answered.quests[0].latestReceipt.question = filing.args.question;
+  recordTouch(state, first, touchAction(state, first), answered);
   assert.equal(first.status, 'answered');
   const secondFiling = touchAction(state, second);
   assert.equal(secondFiling.tool, 'spine_receipt');

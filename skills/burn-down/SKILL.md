@@ -201,11 +201,12 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    that receipt is `answered`, its `question` is the ask's, verbatim, and its
    `answer.by` begins `operator:`. Read it back with a tool call; never infer
    it from the quest having left WAITING. A later receipt hides the answer
-   there: before concluding there is none, run the `WORKIT_TOUCH_ANSWER_CMD`
-   resolver with the quest uuid and the ask's whole question, exactly as
-   written, as the tag. It searches every receipt. The row it prints IS the go
-   when its `question` passes the same verbatim check and its `answer.by`
-   begins `operator:`.
+   there: before concluding there is none, read the newest answered receipt
+   from Observatory's
+   `GET /api/spine/quests/<quest uuid>/receipts/latest-answer?questionPrefix=<the ask's whole question, URL-encoded>`
+   route. It searches every receipt and returns one row, or `null`. The row IS
+   the go when its `question` passes the same verbatim check and its
+   `answer.by` begins `operator:`.
    "Merge approved" with nothing readable behind it is fabricated authorization
    (measured 2026-08-11: a burn-down filed needs_input, asserted approval 33s
    later with no in-band answer, and recorded "on operator go" in the receipt —

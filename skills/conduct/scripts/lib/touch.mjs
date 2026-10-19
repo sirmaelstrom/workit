@@ -157,6 +157,19 @@ function filedQuestion(state, touch, filing) {
   return `${head}${refused}${body}`;
 }
 
+// The answered receipt's question is the filed one, verbatim. A touch filed
+// before the filed question was kept matches on its correlation head plus its
+// whole question body, with nothing between them but the refusal sentence.
+export function answersFiling(state, touch, question) {
+  if (typeof question !== 'string') return false;
+  if (typeof touch.filedQuestion === 'string') return question === touch.filedQuestion;
+  const head = `${correlation(state, touch)} `;
+  const body = touch.question.slice(touch.tag.length + 1);
+  if (!question.startsWith(head) || !question.endsWith(body)) return false;
+  const between = question.slice(head.length, question.length - body.length);
+  return between === '' || between.startsWith('Your previous answer could not be used');
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // A spine acknowledgement must answer what was asked: no error, the same
@@ -222,6 +235,7 @@ export function recordTouch(state, touch, action, result) {
     const failure = spineAckFailure(action, result);
     if (failure) throw new ConductError(2, `spine_receipt did not file ${touch.tag}: ${failure}`);
     touch.receiptId = result.id;
+    touch.filedQuestion = action.args.question;
     touch.filings += 1;
     touch.status = 'filed';
     touch.refusal = null;
@@ -231,8 +245,7 @@ export function recordTouch(state, touch, action, result) {
   // spine_quest shows only the latest receipt, so a later receipt on the
   // anchor hides it there.
   const latest = result?.quests?.[0]?.latestReceipt;
-  const answered = latest?.outcome === 'answered' && latest.answer
-    && typeof latest.question === 'string' && latest.question.startsWith(correlation(state, touch));
+  const answered = latest?.outcome === 'answered' && latest.answer && answersFiling(state, touch, latest.question);
   if (!answered) {
     touch.waiting = true;
     return;

@@ -292,7 +292,7 @@ function tool(h, action) {
       if (action.step === 'anchor') return { quests: [{ id: ANCHOR, campaign: { slug: 'seam', title: 'Seam campaign' }, latestReceipt: null }] };
       const touch = state.touches.find((candidate) => candidate.status === 'filed');
       const { key, text: words = null } = h.answers[touch.kind];
-      return { quests: [{ id: ANCHOR, latestReceipt: { outcome: 'answered', question: `${correlation(state, touch)} synthetic question`,
+      return { quests: [{ id: ANCHOR, latestReceipt: { outcome: 'answered', question: touch.filedQuestion,
         answer: { key, text: words, by: 'operator:seam', answeredAt: new Date(h.clock).toISOString() } } }] };
     }
     case 'spine_receipt': return { id: `00000000-0000-4000-8000-${String((h.seq += 1)).padStart(12, '0')}`, questId: action.args.questId, outcome: action.args.outcome };
@@ -997,9 +997,9 @@ function spineReplies(h) {
     const touch = state.touches.find((candidate) => candidate.status === 'filed');
     const answer = { key: 'a', text: null, by: 'operator:seam', answeredAt: new Date(h.clock).toISOString() };
     const latest = {
-      none: { outcome: 'needs_input', question: `${correlation(state, touch)} synthetic question`, answer: null },
-      stale: { outcome: 'answered', question: `${touch.tag} (run 00000000/${touch.filings}) synthetic question`, answer },
-      agent: { outcome: 'answered', question: `${correlation(state, touch)} synthetic question`, answer: { ...answer, by: 'agent:claude' } },
+      none: { outcome: 'needs_input', question: touch.filedQuestion, answer: null },
+      stale: { outcome: 'answered', question: touch.filedQuestion.replace(correlation(state, touch), `${touch.tag} (run 00000000/${touch.filings})`), answer },
+      agent: { outcome: 'answered', question: touch.filedQuestion, answer: { ...answer, by: 'agent:claude' } },
     }[h.reply];
     return { quests: [{ id: ANCHOR, latestReceipt: latest }] };
   };

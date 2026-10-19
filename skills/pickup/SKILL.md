@@ -139,10 +139,11 @@ Unattended, on re-entry, `spine_quest`'s `latestReceipt.answer` (`key` / `text`)
 IS the go when that receipt is `answered`, its `question` is your ask's,
 verbatim, and its `answer.by` begins `operator:`. Never assume the go from the
 quest having returned to the frontier. A later receipt hides the answer there,
-so before concluding there is none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver
-with the quest uuid and your ask's whole question, exactly as written, as the
-tag. It searches every receipt. The row it prints IS the go when its `question`
-passes the same verbatim check and its `answer.by` begins `operator:`.
+so before concluding there is none, read the newest answered receipt from
+Observatory's `GET /api/spine/quests/<quest uuid>/receipts/latest-answer?questionPrefix=<your ask's whole question, URL-encoded>`
+route. It searches every receipt and returns one row, or `null`. The row IS the
+go when its `question` passes the same verbatim check and its `answer.by`
+begins `operator:`.
 
 Work-state and attention are orthogonal: `dismissed` is not `done`, and a quest
 you finished is not closed until `workState` says so.

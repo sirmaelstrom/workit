@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execute, spawnDetached, pidAlive, defaultCodexExe } from './lib/exec.mjs';
 import {
   ConductError, SCHEMA_VERSION, STEPS, STEP_SEAM, TERMINAL_PHASES,
-  appendEvent, loadState, resolveRunDir, saveState, slugify, statePath, withStateLock,
+  appendEvent, loadState, refuseRetired, resolveRunDir, saveState, slugify, statePath, withStateLock,
 } from './lib/state.mjs';
 import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
@@ -107,6 +107,7 @@ function openRun(flags, deps) {
 function transact(flags, deps, fn, { duringRotation = false } = {}) {
   return withStateLock(runDirFlag(flags), deps, () => {
     const { state } = openRun(flags, deps);
+    refuseRetired(state);
     const rotation = duringRotation ? null : openRotation(state);
     if (rotation) throw new ConductError(5, `rotation ${rotation.attempt} is open: custody comes first (next), and nothing else changes the run until it is taken or cancelled`);
     return fn(state);
