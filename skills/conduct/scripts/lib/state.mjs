@@ -42,11 +42,55 @@ export const STEP_SEAM = Object.freeze({
   rotate: 'rotation', custody: 'rotation',
   analyze: 'run-analysis',
   preapproval: TOUCH_SEAM, grant: TOUCH_SEAM, showcase: TOUCH_SEAM, 'showcase-brief': TOUCH_SEAM, touch: TOUCH_SEAM,
-  spend: null, notify: null, receipt: null, stop: null, alarm: null,
+  notify: null, receipt: null, stop: null, alarm: null,
 });
 export const STEPS = Object.freeze(Object.keys(STEP_SEAM));
 
 export const TERMINAL_PHASES = Object.freeze(['closed', 'declined', 'sent-back']);
+
+// The touch and halt kinds the passkey, spend and answer adapters opened and
+// this conduct no longer opens or clears. A kind not named here passes.
+export const RETIRED_TOUCH_KINDS = Object.freeze(['preapproval-confirm']);
+export const RETIRED_HALT_KINDS = Object.freeze(['meter', 'authority', 'authority-ended']);
+
+// What a run written by a conduct with the passkey, spend or answer adapters
+// can carry that this conduct no longer handles: resumed, each would take a
+// path that is gone (a confirm answer widens a narrowed grant, the await-answer
+// read-back wedges, a meter or authority halt holds dispatch and nothing
+// clears it). A finished run carries nothing to resume.
+export function retiredShapes(state) {
+  if (TERMINAL_PHASES.includes(state.phase)) return [];
+  const found = [];
+  for (const touch of state.touches ?? []) {
+    if (RETIRED_TOUCH_KINDS.includes(touch.kind) && touch.status !== 'answered') found.push(`touch ${touch.n} is an unanswered ${touch.kind} (the passkey confirmation)`);
+  }
+  for (const halt of state.build?.halts ?? []) {
+    if (RETIRED_HALT_KINDS.includes(halt.kind)) found.push(`build halt ${JSON.stringify(halt.kind)} (${halt.reason ?? 'no reason'})`);
+  }
+  const stored = [
+    ['pending', state.pending],
+    ...(state.wps ?? []).flatMap((wp) => [...(wp.queue ?? []).map((a) => [`${wp.id} queue`, a]), ...(wp.owed?.queue ?? []).map((a) => [`${wp.id} owed queue`, a])]),
+    ...(state.release?.queue ?? []).map((a) => ['release queue', a]),
+  ];
+  for (const [where, action] of stored) {
+    if (!action || typeof action !== 'object') continue;
+    const name = `${where} action ${action.id ?? action.step}`;
+    if (action.kind === 'shell' && action.part === 'read-back') found.push(`${name} is the await-answer read-back`);
+    else if (typeof action.step === 'string' && !STEPS.includes(action.step)) found.push(`${name} has the retired step ${action.step}`);
+    else if (action.held === true) found.push(`${name} is held by a refused passkey authority`);
+  }
+  for (const key of ['heldObserving', 'heldAfterMerge']) {
+    if (state.release?.[key]) found.push(`release.${key}: ${state.release[key]}`);
+  }
+  return found;
+}
+
+// Refuses (exit 2) to move a run that carries a retired shape, naming each one.
+export function refuseRetired(state) {
+  const found = retiredShapes(state);
+  if (!found.length) return;
+  throw new ConductError(2, `run ${state.runDir} carries ${found.join('; ')}. A conduct with the passkey, spend or answer adapters wrote that, and this conduct cannot resume it. Start a new run with \`conduct.mjs intake\`; status and analyze still read this one.`);
+}
 
 export function slugify(goal) {
   const slug = String(goal).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');

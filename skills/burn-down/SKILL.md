@@ -85,17 +85,11 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    agent running; the press writes an `answered` receipt that supersedes the
    ask and puts the quest back on the frontier by itself (quest 9a1ce903,
    2026-09-21). Options buried in the question prose are a wall of text the
-   card cannot render as buttons. Pose any ask or list of choices as selectable
-   options (AskUserQuestion in T3), with the Dogan ask filed too when it needs a
-   record; a T3 answer is written back to Spine the same turn. Put the ask key
-   in each option label (`a — Full grant, $200`) and the receipt tag in the
-   question (`[ask <receiptId>]`). Use at most four options per question; split
-   or collapse a Dogan ask with five or six options. A headless lane with no
-   operator present files the Dogan ask only. The T3 ask-mirror hook writes a
-   tagged single-choice answer to Spine as `answered` (`by: 'operator:t3'`)
-   while the ask is still the quest's latest receipt; write a conductor receipt
-   quoting the answer only when the hook reports the mirror refused or skipped
-   it, or its pending job did not end `answered`.
+   card cannot render as buttons. That Spine ask is for unattended runs. In
+   session, pose any ask or list of choices as a plain AskUserQuestion with the
+   recommendation first: the recommended option listed first, its label ending
+   "(Recommended)". Use at most four options per question. Record the ruling in
+   your next Spine receipt: the chosen label verbatim, plus the session id.
    **Refutation is a valid outcome:** an item whose note does
    not survive re-derivation is handed back *refuted* with the evidence
    receipted, not built — across runs 3–4 the note was wrong or stale more
@@ -199,49 +193,20 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    uncoupled, unstacked) merges at its boundary with an immediate Discord ping +
    anchor receipt carrying the exact revert command; merge-only, never deploy.
    Any doubt → held. **A go must be READ, never assumed: after filing a
-   `needs_input` receipt, act only on an answer you can cite. When you file a
-   structured ask, keep the `id` that `spine_receipt` returns, with the ask in
-   your notes for the stop (and in the handoff if the session rotates): it is
-   the ask receipt id, and the go check takes it from you, never from the
-   answer. Write a state file holding
-   `{"touches":[{"tag":"<question up to its first space>","receiptId":"<ask receipt id>"}]}`
-   for it. For a structured ask, `spine_quest`'s `latestReceipt.answer`
-   (`key` and/or `text`) IS the go when `verify-receipt` with `--state` exits
-   0 on the `spine_quest` result, that receipt's `question` is the ask's,
-   verbatim, `answer.askReceiptId` is present and equals the ask receipt id
-   retained from `spine_receipt` at filing after lowercasing both, and either
-   `mode` is `verified` or, unconfigured, `answer.by` begins `operator:`. Read it back
-   with a tool call; never infer it from the quest having left WAITING. Write
-   the result body to a temp file and run `node "${CLAUDE_PLUGIN_ROOT}/skills/_shared/operator-proof/operator-proof.mjs" verify-receipt --file <it> --quest <full quest uuid> --state <the state file>`,
-   keeping the state touch so the verifier also binds the signature to the
-   filing when its lookup matches. The `statement_mismatch` binding applies
-   only when a passkey is configured and the verifier finds that touch; the
-   caller-side filing-id equality is required even when the lookup misses.
-   With an operator passkey configured, an
-   unsigned `operator:t3` answer is not a go until the operator confirms it
-   on the phone (Dogan → Confirm on phone): wait for that signed answer, and
-   don't re-file. Unconfigured (no passkey; the CLI prints
-   `"mode":"unconfigured"`), the CLI checks no signature, so the
-   `by: 'operator:dogan'` or `'operator:t3'` stamp is what makes the answer
-   the operator's: the gate is the operator stamp plus the filing-id equality.
-   A later receipt hides the answer there: before concluding
-   there is none, run the `WORKIT_TOUCH_ANSWER_CMD` resolver with the quest
-   uuid and the ask's whole question, exactly as written, as the tag. It
-   searches every receipt. Save the row it prints; it IS the go when
-   `verify-receipt --file <row> --quest <full quest uuid> --state <the state
-   file>` exits 0 on it (the CLI accepts a bare row), its `question` passes
-   the same verbatim check, `answer.askReceiptId` is present and equals the
-   ask receipt id retained from `spine_receipt` at filing after lowercasing both,
-   and either `mode` is `verified` or, unconfigured, its `answer.by` begins
-   `operator:`. A missing or unequal filing id means not a go: re-file the ask.
-   If the ask receipt id is lost, don't take it from the row: the
-   answer's `askReceiptId` sits beside the proof, so whoever swaps the proof
-   swaps it too. Without the id from your own filing the go is not verified;
-   re-file the ask and read the answer to the new filing.
-   Otherwise an operator message in-session,
-   or a receipt/resolution read back via a tool call. An operator answer given in
-   CHAT is recorded as a conductor receipt citing it — never posted through the
-   Dogan's answer route, which stamps the operator's identity.
+   `needs_input` receipt, act only on an answer you can cite. In session, the
+   go is the operator's message; record the ruling in your next Spine receipt
+   (the chosen label verbatim, plus the session id), never through the Dogan's
+   answer route, which stamps the operator's identity. Unattended,
+   `spine_quest`'s `latestReceipt.answer` (`key` and/or `text`) IS the go when
+   that receipt is `answered`, its `question` is the ask's, verbatim, and its
+   `answer.by` begins `operator:`. Read it back with a tool call; never infer
+   it from the quest having left WAITING. A later receipt hides the answer
+   there: before concluding there is none, read the newest answered receipt
+   from Observatory's
+   `GET $OBSERVATORY_BASE_URL/api/spine/quests/<quest uuid>/receipts/latest-answer?questionPrefix=<the ask's whole question, URL-encoded>`
+   route (`OBSERVATORY_BASE_URL` default `http://127.0.0.1:3100`). It searches every receipt and returns one row, or `null`. The row IS
+   the go when its `question` passes the same verbatim check and its
+   `answer.by` begins `operator:`.
    "Merge approved" with nothing readable behind it is fabricated authorization
    (measured 2026-08-11: a burn-down filed needs_input, asserted approval 33s
    later with no in-band answer, and recorded "on operator go" in the receipt —

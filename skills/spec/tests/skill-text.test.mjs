@@ -1,15 +1,15 @@
-// The pre-approval gates in /spec, /burn-down and /pickup run the
-// operator-proof verifier on the signed bytes; `answer.by` is the go only in
-// unconfigured mode. conduct's prose quotes what a configured run shows.
-// Every acceptance sentence is checked for each requirement on its own, and a
-// mutation control strips each requirement from an in-memory copy of the
-// sentences to show the check then fails.
+// Asks and gos in /spec, /burn-down and /pickup. In session an ask is a plain
+// AskUserQuestion with the recommendation first, and the ruling goes in the
+// next Spine receipt; a Spine `needs_input` ask is for unattended runs, and its
+// go is an `answered` receipt stamped `operator:` to the ask's question. No
+// proof or verifier check remains. Every acceptance sentence is checked for
+// each requirement on its own, and a mutation control strips each requirement
+// from an in-memory copy of the sentences to show the check then fails.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AUTHORITY_TERMINAL, AUTHORITY_WAITING } from '../../conduct/scripts/lib/authority.mjs';
 
 const skills = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const text = (id) => readFileSync(join(skills, id, 'SKILL.md'), 'utf8');
@@ -22,25 +22,18 @@ const sentences = (body) => body
   .map((block) => block.replace(/\s+/g, ' ').trim())
   .flatMap((block) => block.split(/(?<=[.!?]\**)\s+(?=[A-Z*`(])/));
 
-const UNCONFIGURED = [/\bunconfigured\b/i, /`answer\.by`/, /\bbegin(?:s|ning)? `operator:`/];
-const FILING = [/`answer\.askReceiptId` is present/, /equals the ask receipt id retained from `spine_receipt` at filing after lowercasing both/];
+const STAMP = [/`answer\.by`/, /\bbegins `operator:`/];
+const QUESTION = /`question` (?:is (?:your|the) ask's, verbatim|passes the same verbatim check)/;
 
 // Where each skill accepts a go, how many paths it has (primary and resolver,
 // or spine: and core:), and what each path must say.
 const GATES = {
-  spec: {
-    accepts: /valid only on exit 0/, paths: 2,
-    configured: [/`scopeOk: true`/, /the printed `grant\.runId` equal to `state\.json`'s `runId`/],
-  },
-  'burn-down': {
-    accepts: /\bIS the go\b/, paths: 2,
-    configured: [/verify-receipt/, /exits 0/, /--state\b/, /`mode` is `verified`/, ...FILING],
-  },
-  pickup: {
-    accepts: /\bIS the go\b/, paths: 2,
-    configured: [/verify-receipt/, /exits 0/, /--state\b/, /`mode` is `verified`/, ...FILING],
-  },
+  spec: { accepts: /\b[Tt]he ref is valid only when\b/, paths: 2, required: STAMP },
+  'burn-down': { accepts: /\bIS the go\b/, paths: 2, required: [...STAMP, QUESTION] },
+  pickup: { accepts: /\bIS the go\b/, paths: 2, required: [...STAMP, QUESTION] },
 };
+
+const ASKERS = ['pickup', 'burn-down', 'spec'];
 
 const acceptance = (id) => sentences(text(id)).filter((sentence) => GATES[id].accepts.test(sentence));
 
@@ -64,48 +57,107 @@ for (const id of Object.keys(GATES)) {
     assert.ok(acceptance(id).length >= GATES[id].paths, `${id}: ${acceptance(id).length} acceptance sentences, want ${GATES[id].paths}`);
   });
 
-  test(`/${id} configured: every acceptance path names what the verifier must print`, () => {
+  test(`/${id}: every acceptance path requires the operator stamp`, () => {
     const found = acceptance(id);
     assert.ok(found.length > 0, id);
-    assert.deepEqual(missing(found, GATES[id].configured), [], id);
-    assertMutationsFail(id, found, GATES[id].configured);
-  });
-
-  test(`/${id} unconfigured: every acceptance path keeps the operator stamp`, () => {
-    const found = acceptance(id);
-    assert.ok(found.length > 0, id);
-    assert.deepEqual(missing(found, UNCONFIGURED), [], id);
-    assertMutationsFail(id, found, UNCONFIGURED);
+    assert.deepEqual(missing(found, GATES[id].required), [], id);
+    assertMutationsFail(id, found, GATES[id].required);
   });
 }
 
-test('/burn-down and /pickup take the ask id from their own filing', () => {
+const PLAIN_ASK = [/plain AskUserQuestion/, /recommendation first/, /recommended option listed first/, /label ending "\(Recommended\)"/];
+const RULING = [/the chosen label verbatim/, /the session id/];
+
+for (const id of ASKERS) {
+  test(`/${id}: an in-session ask is a plain AskUserQuestion, recommendation first`, () => {
+    const found = sentences(text(id)).filter((sentence) => sentence.includes('AskUserQuestion'));
+    assert.equal(found.length, 1, id);
+    assert.deepEqual(missing(found, PLAIN_ASK), [], id);
+    assertMutationsFail(id, found, PLAIN_ASK);
+  });
+
+  test(`/${id}: the ruling goes in the next Spine receipt with the label and session id`, () => {
+    const found = sentences(text(id)).filter((sentence) => /record the ruling in your next Spine receipt/i.test(sentence));
+    assert.ok(found.length > 0, id);
+    assert.deepEqual(missing(found, RULING), [], id);
+    assertMutationsFail(id, found, RULING);
+  });
+
+  test(`/${id}: a Spine ask is for unattended runs`, () => {
+    assert.match(sentences(text(id)).join(' '), /Spine (?:`needs_input` )?ask is for unattended runs/, id);
+  });
+
+  test(`/${id} carries no retired proof or ask-tag mechanism`, () => {
+    const body = text(id);
+    for (const retired of [
+      /\[ask </, /verify-receipt/, /verify-record/, /operator-proof/, /passkey/i, /ask-mirror/, /operator:t3/,
+      /on the phone|Confirm on phone/, /sitting grant/i, /\bscopeOk\b/, /statement_mismatch/, /askReceiptId/,
+      /"mode":"unconfigured"/, /`mode` is `verified`/, /answers not signed/,
+    ]) {
+      assert.doesNotMatch(body, retired, `${id}: ${retired}`);
+    }
+  });
+}
+
+test('/conduct carries no retired proof, ask-tag, spend-meter or answer-adapter mechanism', () => {
+  const body = sentences(text('conduct')).join(' ');
+  for (const retired of [
+    /\[ask </, /verify-receipt/, /operator-proof/, /passkey/i, /ask-mirror/, /operator:t3/, /on the phone|Confirm on phone/,
+    /sitting grant/i, /WORKIT_SPEND_CMD/, /WORKIT_TOUCH_ANSWER_CMD/, /await-answer/, /Signed authority/, /spend adapter/,
+  ]) {
+    assert.doesNotMatch(body, retired, `conduct: ${retired}`);
+  }
+  assert.match(body, /pose it as a plain AskUserQuestion with the recommendation first/);
+});
+
+test('/conduct: a chat answer is not a touch\'s go; the channel\'s answer wins', () => {
+  assert.match(sentences(text('conduct')).join(' '), /A chat answer is not a go for a touch: when it and the channel's answer differ, the channel's answer wins/);
+});
+
+// Frozen workshop text read as data, and history files, keep the retired words.
+const HISTORY = (path) => /[\\/]__fixtures__[\\/]/.test(path) || /CHANGELOG|HISTORY/i.test(basename(path));
+const markdown = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+  const path = join(dir, entry.name);
+  if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : markdown(path);
+  return entry.name.endsWith('.md') ? [path] : [];
+});
+const RETIRED_EVERYWHERE = [/spend adapter/i, /verify-receipt/, /operator-proof/, /passkey/i, /\[ask </, /WORKIT_TOUCH_ANSWER_CMD/, /sitting grant/i];
+
+test('no skill or reference doc names a retired proof, ask-tag, spend-adapter or answer-resolver mechanism', () => {
+  const files = [...markdown(skills), ...markdown(join(skills, '..', 'reference'))].filter((path) => !HISTORY(path));
+  assert.ok(files.length > 50, `walked ${files.length} files`);
+  const hits = files.flatMap((path) => {
+    const body = readFileSync(path, 'utf8');
+    return RETIRED_EVERYWHERE.filter((retired) => retired.test(body)).map((retired) => `${relative(join(skills, '..'), path)}: ${retired}`);
+  });
+  assert.deepEqual(hits, []);
+});
+
+test('/burn-down and /pickup: in session, the operator\'s message is the go', () => {
   for (const id of ['burn-down', 'pickup']) {
-    const body = sentences(text(id)).join(' ');
-    assert.match(body, /keep the `id` that `spine_receipt` returns/, id);
-    assert.match(body, /never from the answer/, id);
-    assert.match(body, /`statement_mismatch`/, id);
-    // A lost id is not recovered from the answer: the go is not verified.
-    assert.match(body, /the go is not verified/, id);
-    assert.match(body, /`statement_mismatch` binding applies only when a passkey is configured/, id);
-    assert.match(body, /operator stamp plus the filing-id equality/, id);
+    assert.match(sentences(text(id)).join(' '), /In session, (?:the operator's message is the go|the go is the operator's message)/, id);
   }
 });
 
-test('/spec names both verifier commands, and the run-prefix check stays', () => {
-  const spec = sentences(text('spec')).join(' ');
-  assert.match(spec, /verify-receipt/);
-  assert.match(spec, /verify-record/);
-  assert.match(spec, /does not replace this prefix check/);
+test('/burn-down: the latest-answer route names Observatory\'s base URL and default as /pickup\'s atlas line does', () => {
+  const base = /`\$OBSERVATORY_BASE_URL\/api\/atlas`, default `(http[^`]+)`/.exec(sentences(text('pickup')).join(' '));
+  assert.ok(base, 'pickup names $OBSERVATORY_BASE_URL and its default');
+  const route = sentences(text('burn-down')).join(' ');
+  assert.match(route, /`GET \$OBSERVATORY_BASE_URL\/api\/spine\/quests\/<quest uuid>\/receipts\/latest-answer\?/);
+  assert.ok(route.includes(`\`OBSERVATORY_BASE_URL\` default \`${base[1]}\``), 'burn-down gives the same default');
 });
 
-test('/spec separates the record\'s (c) from the confirm\'s signed (a), and explains the unconfirmed record', () => {
+test('/spec keeps the run-prefix check on a spine: ref', () => {
+  const spec = sentences(text('spec')).join(' ');
+  assert.match(spec, /this run's correlation prefix `\(run <runId>\/`/);
+  assert.match(spec, /the bare tag isn't enough/);
+});
+
+test('/spec: an authority record approves on its own (c) and binds its scope', () => {
   const spec = sentences(text('spec')).join(' ');
   assert.match(spec, /its own `answer\.key` is `c`/);
-  assert.match(spec, /the confirm's signed key, which must be `a`/);
-  assert.match(spec, /before the operator confirms it/);
-  assert.match(spec, /no verified confirming grant, or `scopeOk: false`, means not a go/);
-  assert.doesNotMatch(spec, /refuses it with `proof_absent`/);
+  assert.match(spec, /an authority record binds its `scope` field/);
+  assert.doesNotMatch(spec, /the confirm's signed key/);
 });
 
 test('/spec defines the meta.json gate value once and every write site references it', () => {
@@ -115,46 +167,22 @@ test('/spec defines the meta.json gate value once and every write site reference
   assert.ok(spec.split('the gate value (§').length - 1 >= 3, 'fewer than 3 write sites reference the gate value');
 });
 
-test('/burn-down: the operator confirms on the phone, and the agent waits', () => {
-  const body = sentences(text('burn-down')).join(' ');
-  assert.match(body, /until the operator confirms it on the phone/);
-  assert.match(body, /wait for that signed answer/);
+test('/spec: a decision lists its Limits with IDs, and the shipping PR carries them as Residuals', () => {
+  const spec = sentences(text('spec'));
+  const found = spec.filter((sentence) => sentence.includes('`L1: does not establish <what>`') && sentence.includes('numbered across the spec'));
+  assert.equal(found.length, 1);
+  assert.match(spec.join(' '), /The WP that ships the decision names its IDs, and its PR body lists them under `Residuals`/);
+  // The lite template's Decisions slot carries the same Limits line.
+  const lite = text('spec').split('\n').find((line) => line.startsWith('{Numbered D1, D2...'));
+  assert.ok(lite, 'no lite Decisions template line');
+  assert.match(lite, /`Limits:` \(`L1: does not establish <what>`\)/);
 });
 
-test('/conduct: the read-back names the configured proof and the unconfigured stamp', () => {
-  // Rule 6: the read-back's two sentences about "that filing".
-  const found = sentences(text('conduct')).filter((sentence) => sentence.includes('that filing'));
+// conduct's read-back takes an answered receipt to its filing, stamped `operator:`.
+test('/conduct: the read-back accepts only an answered receipt to that filing, stamped operator:', () => {
+  const found = sentences(text('conduct')).filter((sentence) => sentence.includes('read-back accepts') && sentence.includes('that filing'));
   assert.ok(found.length > 0);
-  assert.equal(found.length, 2);
-  for (const sentence of found) {
-    const required = sentence.includes('read-back accepts')
-      ? [/only an answered receipt to that filing/, /stamped `operator:`/]
-      : [/With a passkey configured/, /proof that verifies against that filing's ask/];
-    assert.deepEqual(missing([sentence], required), []);
-    assertMutationsFail('conduct', [sentence], required);
-  }
-});
-
-test('/conduct: (d) declines the confirm, it does not re-open it', () => {
-  const conduct = sentences(text('conduct'));
-  const confirm = conduct.filter((sentence) => /re-opens the confirm|the confirm re-opens/.test(sentence));
-  assert.ok(confirm.length > 0);
-  for (const sentence of confirm) assert.doesNotMatch(sentence, /any other key re-opens/, sentence);
-  assert.match(conduct.join(' '), /\(d\) declines: the run ends with `phase = 'declined'`/);
-});
-
-test('the documented answer adapter selects the ask column', () => {
-  const example = text('conduct').split('\n').find((line) => line.includes('select row_to_json'));
-  assert.ok(example, 'no answer-adapter example in conduct/SKILL.md');
-  assert.match(example, /select id, outcome, question, ask, answer from/);
-});
-
-test('conduct quotes what a configured run shows the operator', () => {
-  const conduct = text('conduct');
-  for (const shown of [
-    '[grant <tag>]', '[raise <tag>]', 'UNCONFIGURED — answers not signed',
-    'UNCONFIGURED — no anchor is configured now, so the stored answer is not checked', AUTHORITY_WAITING, AUTHORITY_TERMINAL,
-  ]) {
-    assert.ok(conduct.includes(shown), shown);
-  }
+  const required = [/only an answered receipt to that filing/, /stamped `operator:`/];
+  assert.deepEqual(missing(found, required), []);
+  assertMutationsFail('conduct', found, required);
 });

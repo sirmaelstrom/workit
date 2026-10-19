@@ -108,7 +108,7 @@ export function resolvePluginRoot({ installedPluginsPath, pluginKey = 'workit@wo
 }
 
 // A release runs only after a complete build, with a recipe and the
-// authority: the phase's verifiedAuthority, computed just before the act.
+// authority (lib/authority.mjs runAuthority).
 export function releaseEligible(state, authority) {
   if (!authority) throw new ConductError(2, 'authority not passed');
   const wps = state.wps ?? [];

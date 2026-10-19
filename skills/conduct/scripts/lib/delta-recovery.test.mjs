@@ -82,7 +82,7 @@ test('the build requests a full review after a changed-parent rebase instead of 
   Object.assign(h.wp, { state: 'pr', stage: 'delta', queue: [], files: ['a.txt', 'b.txt'], lane: { ...h.wp.lane, backend: 'exec', exitedAt: new Date().toISOString() } });
   const state = { phase: 'build', runDir: h.dir, pluginRoot: h.dir, slug: 'mapping-control', wps: [h.wp], touches: [], adapters: {},
     intent: { agent: 'codex', repo: { path: h.dir, remote: 'test/test', defaultBranch: 'main' }, lanesCap: 1 }, authority: { budgetUsd: 1000 }, build: { contract: 'fixture', halts: [] } };
-  const deps = { ...h.deps, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => false, readAnchor: () => ({ configured: false, epoch: 0 }) };
+  const deps = { ...h.deps, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => false };
   const action = buildNext(state, deps);
   assert.equal(action.step, 'review');
   assert.equal(action.part, 'diff');
@@ -128,7 +128,7 @@ test('a gate fix after a rebase of the reviewed head is diffed from the verified
     };
     const state = { phase: 'build', runDir: dir, pluginRoot: dir, slug: 'gate-fix-control', wps: [wp], touches: [], adapters: {},
       intent: { agent: 'codex', repo: { path: dir, remote: 'test/test', defaultBranch: 'main' }, lanesCap: 1 }, authority: { budgetUsd: 1000 }, build: { contract: 'fixture', halts: [] } };
-    const action = buildNext(state, { exec, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => true, readAnchor: () => ({ configured: false, epoch: 0 }) });
+    const action = buildNext(state, { exec, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => true });
     assert.equal(action.part, 'amend-diff', `deltaFrom ${deltaFrom}: ${wp.reason}`);
     assert.equal(action.command.at(-2), rebased);
     assert.equal(wp.deltaRecovery.baseline, rebased);
@@ -145,7 +145,7 @@ test('a later full review retires the old rebase proof before reviewing its own 
   Object.assign(h.wp, { state: 'pr', stage: 'delta', queue: [], files: ['a.txt', 'b.txt'], lane: { ...h.wp.lane, backend: 'exec', exitedAt: new Date().toISOString() } });
   const state = { phase: 'build', runDir: h.dir, pluginRoot: h.dir, slug: 'mapping-control', wps: [h.wp], touches: [], adapters: {},
     intent: { agent: 'codex', repo: { path: h.dir, remote: 'test/test', defaultBranch: 'main' }, lanesCap: 1 }, authority: { budgetUsd: 1000 }, build: { contract: 'fixture', halts: [] } };
-  const action = buildNext(state, { ...h.deps, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => true, readAnchor: () => ({ configured: false, epoch: 0 }) });
+  const action = buildNext(state, { ...h.deps, env: {}, now: Date.now, timestamp: () => new Date().toISOString(), exists: () => true });
   assert.equal(action.part, 'amend-diff');
   assert.equal(action.command.at(-2), currentReview);
   assert.equal(h.wp.deltaRecovery.reviewedHead, currentReview);
@@ -179,7 +179,7 @@ test('landing revalidates legacy patch-only receipts and sends a changed-parent 
     assert.equal(verdict.ok, !changedParent, JSON.stringify(verdict));
     if (changedParent) {
       assert.equal(verdict.needsFullReview, true);
-      const unsigned = { merge: true, release: false, budgetUsd: 0, proofMode: 'unconfigured', reason: null, grant: null };
+      const unsigned = { merge: true, release: false, budgetUsd: 0 };
       const out = recordLandStep(state, wp, { step: 'gate', part: 'gate', kind: 'shell' }, { code: 5, stdout: JSON.stringify(verdict), stderr: '' }, { exec }, unsigned);
       assert.equal(out.outcome, 'continue');
       assert.ok(out.patch.queue.some((action) => action.step === 'review'));

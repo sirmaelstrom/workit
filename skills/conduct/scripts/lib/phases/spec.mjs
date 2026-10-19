@@ -1,9 +1,9 @@
 // Phase spec: run /spec under the touch-1 pre-approval, read back the depth it
 // chose, and turn depth none|lite into the single WP-00 record.
 import { join, resolve, win32 } from 'node:path';
-import { ConductError, appendEvent } from '../state.mjs';
+import { ConductError } from '../state.mjs';
 import { parseDesignDirection, skillsField, stripWrappingBackticks, visualRules } from '../schedule.mjs';
-import { AUTHORITY_RECOVERY, AUTHORITY_TERMINAL, approvingTouch, terminalRefusal, verifiedAuthority } from '../authority.mjs';
+import { approvingTouch, runAuthority } from '../authority.mjs';
 
 // The record that carries the run's authority: a (c) answer's validated grant
 // (scope included), else the answering touch (scope = the goal verbatim).
@@ -21,22 +21,8 @@ export function samePath(a, b, platform) {
   return normalize(a) === normalize(b);
 }
 
-// /spec runs under the verified authority's scope: on zero authority the
-// phase holds with the reason (P3). A record that can be restored holds as a
-// wait the driver records, never a `done`, which would end the run. One that
-// cannot (an expired grant, another run's) is terminal at once: `done`,
-// handing the run back with the reason, and no wait loop.
-const HELD_WAIT_MS = 5 * 60000;
-export function next(state, deps) {
-  const authority = verifiedAuthority(state, deps);
-  if (authority.reason && terminalRefusal(authority.reason)) return { kind: 'done', reason: `spec held: ${authority.reason}: ${AUTHORITY_TERMINAL}` };
-  if (authority.reason) {
-    const reason = `spec held: ${authority.reason}`;
-    return {
-      kind: 'wait', step: 'spec', held: true, reason, waitMs: HELD_WAIT_MS,
-      instruction: `The run is held before /spec (${reason}): waiting: ${AUTHORITY_RECOVERY}; a restored record resumes /spec on its own. Tell the operator. Wait ${HELD_WAIT_MS / 1000} s, then record {}.`,
-    };
-  }
+// /spec runs under the approved scope.
+export function next(state) {
   const ref = preapprovedRef(state);
   // Intake's greenfield trigger (quest 977d3efb) also puts D1, the stack
   // decision, through /spec's stack attack (quest 061b526a).
@@ -79,8 +65,6 @@ function writeWp00(state, gateCommand, scope, deps) {
 }
 
 export function record(state, action, result, deps) {
-  // A held wait records nothing; next checks the authority again.
-  if (action.kind === 'wait') return;
   const { depth, workshopDir, reviewLevel = null, gateCommand = null } = result ?? {};
   if (!['none', 'lite', 'deep'].includes(depth)) throw new ConductError(2, `spec result depth must be none, lite or deep (got ${depth})`);
   if (typeof workshopDir !== 'string' || !samePath(workshopDir, state.workshopDir, deps.platform)) {
@@ -99,16 +83,9 @@ export function record(state, action, result, deps) {
     const duplicate = ids.find((id, i) => ids.indexOf(id) !== i);
     if (duplicate) throw new ConductError(2, `the spec result lists WP id ${duplicate} twice`);
   }
-  // Zero authority holds the phase: the result is not recorded (an event says
-  // so), and next names the reason.
-  const authority = verifiedAuthority(state, deps);
-  if (authority.reason) {
-    appendEvent(state, deps, { step: 'spec', event: 'spec-held', data: { reason: authority.reason, depth } });
-    return;
-  }
   state.spec = { ...state.spec, depth, reviewLevel, gateCommand };
   if (depth === 'none') {
-    const wp00 = writeWp00(state, gateCommand, authority.scope, deps);
+    const wp00 = writeWp00(state, gateCommand, runAuthority(state).scope, deps);
     state.wps = [wpRecord({ id: 'WP-00', name: state.intent.goal, specPath: wp00.path, runtimeExercise: wp00.runtimeExercise })];
   } else if (depth === 'lite') {
     const specPath = join(state.workshopDir, 'spec.md');

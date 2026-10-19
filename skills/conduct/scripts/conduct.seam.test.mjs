@@ -20,7 +20,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runConduct } from './conduct.mjs';
 import { STEPS, readEvents } from './lib/state.mjs';
@@ -28,9 +28,6 @@ import { shellArgv } from './lib/exec.mjs';
 import { correlation, shellLiteral } from './lib/touch.mjs';
 import { SEAM_ROWS } from './lib/analyze.mjs';
 import { namedSeam } from './lib/phases/showcase.mjs';
-import { testAnchor, testDeps } from './test-deps.mjs';
-import { anchorFromFile } from '../../_shared/operator-proof/operator-proof.mjs';
-import { makeTestAnchor, signAnswer } from '../../_shared/operator-proof/test-signer.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = join(HERE, '__fixtures__');
@@ -44,7 +41,7 @@ const RELEASE_HEAD = 'e'.repeat(40);
 const LANE_COST = 0.25;
 const PROOF_PATCH = 'diff --git a/proof.txt b/proof.txt\nnew file mode 100644\nindex 0000000000000000000000000000000000000000..1111111111111111111111111111111111111111\n--- /dev/null\n+++ b/proof.txt\n@@ -0,0 +1 @@\n+proof\n';
 const LIVE = ['dispatched', 'pr', 'review', 'amending', 'gate'];
-const OFF = ['herdr', 'notify', 'spend', 'spine', 'council', 'kb', 'verify'].flatMap((name) => ['--no-adapter', name]);
+const OFF = ['herdr', 'notify', 'spine', 'council', 'kb', 'verify'].flatMap((name) => ['--no-adapter', name]);
 const PRIVATE_PATHS = [/[A-Za-z]:[\\/]+(Users|Development)\b/i, /[\\/]Users[\\/][^\\/\s"]+[\\/]/];
 
 const text = (...parts) => readFileSync(join(FIX, ...parts), 'utf8');
@@ -87,7 +84,7 @@ function seam(t, opts = {}) {
     sleep: async () => {}, resolveCodex: () => 'codex', spawnDetached: (program, args, options) => fakeSpawn(h, options),
     pidAlive: (pid) => (h.life[`WP-${String(pid - 4200).padStart(2, '0')}`] ?? 0) > 0,
   };
-  h.run = (argv, more = {}) => runConduct(argv, testDeps({ ...h.deps, ...more }));
+  h.run = (argv, more = {}) => runConduct(argv, { ...h.deps, ...more });
   h.state = () => JSON.parse(readFileSync(join(h.runDir, 'state.json'), 'utf8'));
   h.events = () => readEvents(h.runDir, { exists: existsSync, read: (path) => readFileSync(path, 'utf8') }, h.state());
   h.wp = (id) => h.state().wps.find((wp) => wp.id === id);
@@ -184,7 +181,7 @@ const RULES = [
     return { code: h.afterCode ?? 0, stdout: '', stderr: h.afterCode ? 'update failed (synthetic)' : '' };
   }],
   [/^node --test$/, (h) => ({ code: h.verifyCode ?? 0, stdout: '', stderr: h.verifyCode ? 'not ok 1 - synthetic' : '' })],
-  [/^sh -c /, (h, m, input, args) => ({ code: 0, stdout: /spend/.test(args.at(-1)) ? `${h.spendOut?.length ? h.spendOut.shift() : '1'}\n` : '', stderr: '' })],
+  [/^sh -c /, () => ({ code: 0, stdout: '', stderr: '' })],
 ];
 
 function fakeExec(h, program, args, { input } = {}) {
@@ -238,7 +235,7 @@ function herdrVerb(h, action) {
 async function conductVerb(h, action) {
   const root = resolve(dirname(action.command[1]), '..', '..', '..');
   const argv = action.command.slice(2);
-  const result = await runConduct(argv, testDeps({ ...h.deps, pluginRoot: root }));
+  const result = await runConduct(argv, { ...h.deps, pluginRoot: root });
   if (argv[0] === 'lane' && argv[1] === 'alive') {
     const id = argv[argv.indexOf('--wp') + 1];
     h.life[id] = Math.max(0, (h.life[id] ?? 0) - 1);
@@ -295,7 +292,7 @@ function tool(h, action) {
       if (action.step === 'anchor') return { quests: [{ id: ANCHOR, campaign: { slug: 'seam', title: 'Seam campaign' }, latestReceipt: null }] };
       const touch = state.touches.find((candidate) => candidate.status === 'filed');
       const { key, text: words = null } = h.answers[touch.kind];
-      return { quests: [{ id: ANCHOR, latestReceipt: { outcome: 'answered', question: `${correlation(state, touch)} synthetic question`,
+      return { quests: [{ id: ANCHOR, latestReceipt: { outcome: 'answered', question: touch.filedQuestion,
         answer: { key, text: words, by: 'operator:seam', answeredAt: new Date(h.clock).toISOString() } } }] };
     }
     case 'spine_receipt': return { id: `00000000-0000-4000-8000-${String((h.seq += 1)).padStart(12, '0')}`, questId: action.args.questId, outcome: action.args.outcome };
@@ -802,21 +799,6 @@ test('not-exercised steps (D18): a "human review" gate command lists gate-cmd un
   assert.match(section(h.analysis(), 'Seam coverage'), /^- merge-gate: owned .*\n {2}- gate-cmd not exercised \(WP-00\): "human review" is not a command$/m);
 });
 
-test('spend on (D19.28, M4): a metered run that stays below budget shows its last reading in the audit; a halted one shows the reading after the halt', async (t) => {
-  const flags = ['--no-adapter', 'herdr', '--no-adapter', 'notify'];
-  const below = await nonePath(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' }, h: { spendOut: ['3.5', '4.25'] } }, flags);
-  await drive(below, { until: (a) => a.step === 'showcase' });
-  assert.ok(!below.state().touches.some((touch) => touch.kind === 'blocked'), 'no budget halt');
-  const last = below.state().build.lastSpend;
-  assert.equal(last.usd, 4.25);
-  const audit = section(below.analysis(), 'Pre-approval audit');
-  assert.ok(audit.includes(`- budget: metered by the spend adapter; spend reading: $4.25 (read ${last.at})`), audit);
-  assert.ok(!audit.includes('unmetered'));
-  const halted = await nonePath(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' }, answers: { blocked: { key: 'a', text: 'budget 100' } }, h: { spendOut: ['30'] } }, flags);
-  await drive(halted, { until: (a) => a.step === 'showcase' });
-  assert.match(section(halted.analysis(), 'Pre-approval audit'), /^- budget: metered by the spend adapter; spend reading: \$1\.00 \(read \S+\)$/m);
-});
-
 test('judgment threads (D19.9, 022d6fd9): a judgment row\'s thread is listed under the audit; the showcase question cites them by count and file', async (t) => {
   const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-amendment.md'] }, findings: { 'WP-00': [3] }, amendDiff: 'docs/notes.md\n' } });
   await drive(h, { until: (a) => a.step === 'showcase' });
@@ -831,7 +813,7 @@ test('judgment threads (D19.9, 022d6fd9): a judgment row\'s thread is listed und
 });
 
 test('adjudication evidence (C1-14, C2-6): a council WP\'s adjudication row reads from its adjudicated events alone', async (t) => {
-  const flags = ['herdr', 'notify', 'spend', 'spine', 'kb', 'verify'].flatMap((name) => ['--no-adapter', name]);
+  const flags = ['herdr', 'notify', 'spine', 'kb', 'verify'].flatMap((name) => ['--no-adapter', name]);
   const h = await nonePath(t, { h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } },
     [...flags, '--adapter', 'council']);
   await drive(h, { until: (a) => a.step === 'showcase' });
@@ -923,7 +905,7 @@ test('resume (M5): stopped after the release PR merges, `--resume` from the run 
   await start(h, OFF);
   await drive(h, { until: () => merged });
   const stoppedAt = h.trace.length - 1;
-  const resumed = await runConduct(['--resume', h.runDir], testDeps({ ...h.deps }));
+  const resumed = await runConduct(['--resume', h.runDir], { ...h.deps });
   assert.equal(resumed.code, 0);
   h.pending = out(resumed).action;
   assert.equal((await drive(h)).kind, 'done');
@@ -945,7 +927,7 @@ test('herdr from outside (T3 Code): with no HERDR_ENV the herdr adapter is on wh
 test('spine + herdr: spine_author once, a receipt per WP stop, touches filed once and read back, lane steps through lane.mjs --log, the runtime-only check; notify env (D20); seams keyed on seam (D19.15)', async (t) => {
   const notify = 'notify-cmd --channel conduct';
   const h = seam(t, { herdr: true, env: { WORKIT_NOTIFY_CMD: notify } });
-  await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'spend']);
+  await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8)]);
   assert.equal((await drive(h)).kind, 'done');
   const state = h.state();
   assert.deepEqual(state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
@@ -1015,14 +997,14 @@ function spineReplies(h) {
     const touch = state.touches.find((candidate) => candidate.status === 'filed');
     const answer = { key: 'a', text: null, by: 'operator:seam', answeredAt: new Date(h.clock).toISOString() };
     const latest = {
-      none: { outcome: 'needs_input', question: `${correlation(state, touch)} synthetic question`, answer: null },
-      stale: { outcome: 'answered', question: `${touch.tag} (run 00000000/${touch.filings}) synthetic question`, answer },
-      agent: { outcome: 'answered', question: `${correlation(state, touch)} synthetic question`, answer: { ...answer, by: 'agent:claude' } },
+      none: { outcome: 'needs_input', question: touch.filedQuestion, answer: null },
+      stale: { outcome: 'answered', question: touch.filedQuestion.replace(correlation(state, touch), `${touch.tag} (run 00000000/${touch.filings})`), answer },
+      agent: { outcome: 'answered', question: touch.filedQuestion, answer: { ...answer, by: 'agent:claude' } },
     }[h.reply];
     return { quests: [{ id: ANCHOR, latestReceipt: latest }] };
   };
 }
-const SPINE_ONLY = ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'herdr', '--no-adapter', 'notify', '--no-adapter', 'spend'];
+const SPINE_ONLY = ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'herdr', '--no-adapter', 'notify'];
 const isHandBack = (a) => a.handBack === true;
 const needsInput = (h) => h.trace.filter((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input');
 
@@ -1063,280 +1045,6 @@ test('E6 hand-back (spine): no attributed answer → a touch-kind hand-back, nev
   assert.equal(spec.step, 'spec');
   assert.equal(h.state().touches[0].answer.by, 'operator:seam');
   assert.ok(!h.trace.some((a) => a.kind === 'wait'), 'no wait at any touch');
-});
-
-// The passkey read-back's runtime exercise: an anchor configured through deps,
-// the spine_quest reply carrying the filed question and ask. 'unsigned' is the
-// operator-stamped answer with no proof; 'signed' is minted over this filing;
-// 'relabelled' is a valid proof over an ask whose option (a) means something else.
-test('passkey read-back: with an anchor configured a proof over a relabelled ask and an unsigned answer each exit 3 with their refusal, and a signed one is answered, verified, its signed block in state.json', async (t) => {
-  const h = seam(t);
-  h.deps.readAnchor = () => anchorFromFile(makeTestAnchor());
-  h.custom = (action) => {
-    if (action.tool !== 'spine_quest' || action.step === 'anchor') return undefined;
-    const state = h.state();
-    const touch = state.touches.find((candidate) => candidate.status === 'filed');
-    const filed = h.trace.findLast((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' && a.args.question.startsWith(correlation(state, touch)));
-    const { question } = filed.args;
-    // 'relabelled': the receipt's ask says option (a) means something else, and the phone signed that.
-    const ask = h.reply === 'relabelled' ? { ...filed.args.ask, options: filed.args.ask.options.map((option) => (option.key === 'a' ? { ...option, label: 'Decline', consequence: 'Stop without merging' } : option)) } : filed.args.ask;
-    const answer = { key: 'a', text: null, by: 'operator:dogan', answeredAt: new Date(h.clock).toISOString() };
-    if (h.reply !== 'unsigned') {
-      // The phone signs the full quest uuid; the run was started with its 8-char prefix.
-      Object.assign(answer, { askReceiptId: touch.receiptId, proof: signAnswer({ questId: ANCHOR, askReceiptId: touch.receiptId, question, ask, answerKey: 'a' }) });
-    }
-    return { quests: [{ id: ANCHOR, latestReceipt: { id: '00000000-0000-4000-8000-00000000a0a0', outcome: 'answered', question, ask, answer } }] };
-  };
-  await start(h, SPINE_ONLY);
-  const read = await drive(h, { until: (a) => a.tool === 'spine_quest' && a.part === 'read-back', max: 10 });
-  assert.deepEqual([SPINE_ONLY[SPINE_ONLY.indexOf('--anchor') + 1], h.state().intent.anchor], [ANCHOR.slice(0, 8), ANCHOR]);
-  h.reply = 'relabelled';
-  const mismatched = await h.run(['record', '--run', h.runDir, '--action', read.id, '--result', JSON.stringify(await perform(h, read))]);
-  t.diagnostic(`relabelled: exit ${mismatched.code} ${JSON.stringify({ refused: out(mismatched).refused, next: out(mismatched).action?.tool, status: h.state().touches[0].status })}`);
-  assert.deepEqual([mismatched.code, out(mismatched).refused, out(mismatched).action.tool, h.state().touches[0].answer], [3, 'proof filed_mismatch', 'spine_receipt', null]);
-  h.pending = out(mismatched).action;
-  const reread = await drive(h, { until: (a) => a.tool === 'spine_quest' && a.part === 'read-back', max: 10 });
-  h.reply = 'unsigned';
-  const refused = await h.run(['record', '--run', h.runDir, '--action', reread.id, '--result', JSON.stringify(await perform(h, reread))]);
-  t.diagnostic(`unsigned: exit ${refused.code} ${JSON.stringify({ refused: out(refused).refused, next: out(refused).action?.tool })}`);
-  assert.deepEqual([refused.code, out(refused).refused, out(refused).action.tool], [3, 'proof proof_absent', 'spine_receipt']);
-  h.reply = 'signed';
-  h.pending = out(refused).action;
-  const spec = await drive(h, { until: (a) => a.kind === 'skill', max: 10 });
-  const { answer } = h.state().touches[0];
-  t.diagnostic(`signed: ${JSON.stringify({ status: h.state().touches[0].status, proofMode: answer.proofMode, credentialId: answer.credentialId, signed: Object.keys(answer.signed ?? {}) })}`);
-  assert.deepEqual([spec.step, h.state().touches[0].status, answer.proofMode, h.state().touches[0].filings], ['spec', 'answered', 'verified', 3]);
-  assert.deepEqual(Object.keys(answer.signed).sort(), ['answer', 'ask', 'question']);
-  assert.equal(answer.signed.answer.proof.v, 1);
-});
-
-// The phone, for a configured run: every filed touch is answered with
-// h.answers[its kind] (blocked for a kind with no entry), signed over exactly
-// the question and ask that filing carried.
-function phone(h) {
-  h.deps.readAnchor = testAnchor;
-  h.custom = (action) => {
-    if (action.tool !== 'spine_quest' || action.step === 'anchor') return undefined;
-    const state = h.state();
-    const touch = state.touches.find((candidate) => candidate.status === 'filed');
-    const filed = h.trace.findLast((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' && a.args.question.startsWith(correlation(state, touch)));
-    const { question, ask } = filed.args;
-    const { key, text: words = null } = h.answers[touch.kind] ?? h.answers.blocked;
-    const proof = signAnswer({ questId: ANCHOR, askReceiptId: touch.receiptId, question, ask, answerKey: key, text: words });
-    const answer = { key, text: words, by: 'operator:dogan', answeredAt: new Date(h.clock).toISOString(), askReceiptId: touch.receiptId, proof };
-    return { quests: [{ id: ANCHOR, latestReceipt: { id: '00000000-0000-4000-8000-00000000a0a1', outcome: 'answered', question, ask, answer } }] };
-  };
-}
-
-const editState = (h, edit) => {
-  const state = h.state();
-  edit(state);
-  writeFileSync(join(h.runDir, 'state.json'), JSON.stringify(state, null, 2));
-};
-
-test('V7 (D13, council F8): a signed (b) with touch.answer.key edited to a and merge edited to true still holds every merge; an edited signed key holds with authority proof invalid: statement_mismatch', async (t) => {
-  const h = seam(t, { answers: { preapproval: { key: 'b' } } });
-  phone(h);
-  await start(h, SPINE_ONLY);
-  await drive(h, { until: (a) => a.kind === 'skill' });
-  editState(h, (state) => {
-    state.touches[0].answer.key = 'a';
-    Object.assign(state.authority, { merge: true, release: true });
-  });
-  await drive(h, { until: (a) => a.step === 'showcase' });
-  assert.ok(!h.trace.some((a) => a.part === 'squash'), 'no squash was emitted');
-  assert.deepEqual([h.wp('WP-01').state, h.wp('WP-01').reason], ['held', 'gate passed; no merge authority']);
-
-  const signed = seam(t);
-  phone(signed);
-  await start(signed, SPINE_ONLY);
-  signed.onEmit = (a) => {
-    if (a.step === 'gate' && a.part === 'gate' && a.wpId === 'WP-01' && signed.wp('WP-01').reason === null) editState(signed, (state) => { state.touches[0].answer.signed.answer.key = 'b'; });
-  };
-  // An edited signed record is restorable: the WP waits at its merge stage (council r3, S4).
-  const wait = await drive(signed, { until: (a) => a.step === 'showcase' || authorityWait(a) });
-  assert.ok(authorityWait(wait), JSON.stringify(wait));
-  assert.ok(!signed.trace.some((a) => a.part === 'squash'), 'no squash was emitted');
-  assert.deepEqual([signed.wp('WP-01').state, signed.wp('WP-01').stage], ['gate', 'merge']);
-  assert.match(signed.state().dispatchHalt.reason, /^authority refused \(authority proof invalid: statement_mismatch\): waiting: /);
-});
-
-test('runtime exercise (WP-07): a signed touch 1 (a) at $10 driven to the merge; state.json edited to $100 → verifiedAuthority $10 verified, the analysis names the proof, a $15 spend halts; an edited grant → grant_tag_mismatch', async (t) => {
-  const { verifiedAuthority } = await import('./lib/authority.mjs');
-  const build = await import('./lib/phases/build.mjs');
-  const { analyzeRun } = await import('./lib/analyze.mjs');
-  const h = seam(t);
-  phone(h);
-  await start(h, [...SPINE_ONLY, '--budget', '10']);
-  const squash = await drive(h, { until: (a) => a.step === 'merge' && a.part === 'squash' });
-  t.diagnostic(`at the merge: ${squash.id} ${squash.command.join(' ')}`);
-  editState(h, (state) => { state.authority.budgetUsd = 100; });
-  const deps = testDeps({ ...h.deps, readAnchor: testAnchor, read: (path) => readFileSync(path, 'utf8'), write: writeFileSync, exists: existsSync });
-  const state = h.state();
-  const authority = verifiedAuthority(state, deps);
-  t.diagnostic(`1. verifiedAuthority: ${JSON.stringify(authority)}`);
-  assert.deepEqual([authority.budgetUsd, authority.proofMode, authority.merge, authority.reason], [10, 'verified', true, null]);
-  // The run report prints the verified authority beside "verified" (council r1).
-  await analyzeRun(h.runDir, { exec: deps.exec, read: deps.read, write: deps.write, exists: deps.exists, readAnchor: deps.readAnchor, now: deps.now });
-  const line = /^- authority: .*$/m.exec(h.analysis())[0];
-  t.diagnostic(`2. analysis: ${line}`);
-  assert.match(line, /^- authority: merge yes, release yes, budget \$10\.00, scope: .* \(proof: verified ••••[A-Za-z0-9_-]{8} epoch 0\)$/);
-  build.record(state, { kind: 'shell', step: 'spend', part: 'spend', budgetFor: 'dispatch' }, { code: 0, stdout: '15\n', stderr: '' }, deps);
-  const halt = state.build.halts.find((entry) => entry.kind === 'budget');
-  t.diagnostic(`3. budget gate at $15: ${halt ? `halt: ${halt.reason}` : 'go'}`);
-  assert.match(halt.reason, /against the \$10 budget/);
-  editState(h, (edited) => { edited.touches[0].grants.a.budgetUsd = 100; });
-  const forged = verifiedAuthority(h.state(), deps);
-  t.diagnostic(`4. after editing touch.grants.a: ${JSON.stringify(forged)}`);
-  assert.deepEqual([forged.budgetUsd, forged.merge, forged.reason], [0, false, 'grant_tag_mismatch']);
-});
-
-// ---- council round 1 ----
-
-const tamperProof = (state) => { state.touches[0].answer.signed.answer.text = 'merge everything'; };
-
-test('pending re-emission (council r1, astra/codex): a merge, release or paid act left pending is checked again on resume; after the proof is tampered, next drops it, holds, and emits nothing of it', async (t) => {
-  const cases = [
-    ['squash', (a) => a.step === 'merge' && a.part === 'squash' && a.phase === 'build'],
-    ['release', (a) => a.phase === 'release' && a.part === 'ready'],
-    ['paid', (a) => a.phase === 'build' && a.step === 'start'],
-  ];
-  for (const [name, at] of cases) {
-    const h = seam(t);
-    phone(h);
-    await start(h, SPINE_ONLY);
-    const pending = await drive(h, { until: at });
-    editState(h, tamperProof);
-    const result = await h.run(['next', '--run', h.runDir]);
-    assert.equal(result.code, 0, result.stdout + result.stderr);
-    const action = out(result).action;
-    t.diagnostic(`${name}: pending ${pending.id} ${pending.step}/${pending.part}; next → ${action.id ?? action.kind} ${action.step ?? ''}/${action.part ?? ''}`);
-    assert.notEqual(action.id, pending.id, name);
-    assert.notEqual(h.state().pending?.id, pending.id, name);
-    if (name === 'release') {
-      assert.equal(h.state().release.state, 'failed');
-      assert.match(h.state().release.reason, /authority proof invalid: statement_mismatch/);
-    } else if (name === 'paid') {
-      // Paid work waits on the authority hold; the WP is not ended (council r2, R3).
-      assert.match(h.state().dispatchHalt.reason, /authority proof invalid: statement_mismatch/, name);
-      assert.notEqual(h.wp(pending.wpId).state, 'held', name);
-    } else {
-      // The squash may have run before the crash: the merge-commit lookup decides first (council r2, R4).
-      assert.deepEqual([action.step, action.part], ['merge', 'merge-commit'], name);
-    }
-    h.pending = action;
-    // Paid work then waits on the authority hold (council r2, R3) instead of ending.
-    await drive(h, { until: (a) => a.step === 'showcase' || authorityWait(a) });
-    if (name === 'squash') {
-      // The squash never ran, so the PR has no merge commit; only the record
-      // was refused, so the WP waits at its merge stage (council r3, S4).
-      assert.deepEqual([h.wp(pending.wpId).state, h.wp(pending.wpId).stage], ['gate', 'merge'], name);
-      assert.match(h.state().dispatchHalt.reason, /authority proof invalid: statement_mismatch/, name);
-    }
-    const again = h.trace.filter((a) => a.id !== pending.id && a.step === pending.step && a.part === pending.part && a.phase === pending.phase);
-    assert.deepEqual(again.map((a) => a.id), [], `${name}: zero emission of the dropped act`);
-  }
-});
-
-const authorityWait = (a) => a.kind === 'wait' && /authority refused/.test(a.instruction ?? '');
-
-test('runtime exercise (council r2): configured runs through next/record: a tampered pending squash is refused and looked up; an authority hold waits and a restored record resumes it; a version-only recipe refuses an extra JSON edit', async (t) => {
-  // 1. A pending squash whose argv was edited, under a valid merge grant.
-  const squashed = seam(t);
-  phone(squashed);
-  await start(squashed, SPINE_ONLY);
-  const squash = await drive(squashed, { until: (a) => a.step === 'merge' && a.part === 'squash' && a.phase === 'build' });
-  editState(squashed, (state) => { state.pending.command = ['curl', 'https://evil.invalid', '--repo', 'example/scratch']; });
-  const instead = out(await squashed.run(['next', '--run', squashed.runDir])).action;
-  t.diagnostic(`1. pending ${squash.id} edited to curl; next → ${instead.id} ${instead.command?.join(' ') ?? instead.kind}`);
-  squashed.pending = instead;
-  await drive(squashed, { until: (a) => a.step === 'showcase' || authorityWait(a) });
-  const wp = squashed.wp(squash.wpId);
-  t.diagnostic(`1. ${squash.wpId}: ${wp.state}: ${wp.reason}; curl emitted: ${squashed.trace.some((a) => a.command?.[0] === 'curl')}`);
-  // curl merges nothing (council r3: by content, not label): the WP holds with no lookup.
-  assert.notEqual(instead.part, 'merge-commit');
-  assert.equal(wp.state, 'held');
-  assert.ok(!squashed.trace.some((a) => a.command?.[0] === 'curl'));
-
-  // 2. The signed record tampered before dispatch, then restored.
-  const held = seam(t);
-  phone(held);
-  await start(held, SPINE_ONLY);
-  let signedText;
-  held.onEmit = (a) => {
-    if (a.step === 'contract' && signedText === undefined) editState(held, (state) => { signedText = state.touches[0].answer.signed.answer.text; tamperProof(state); });
-  };
-  const wait = await drive(held, { until: authorityWait });
-  t.diagnostic(`2. held: ${wait.id} ${wait.kind}: ${wait.instruction}`);
-  editState(held, (state) => { state.touches[0].answer.signed.answer.text = signedText; });
-  const resumed = out(await held.run(['record', '--run', held.runDir, '--action', wait.id, '--result', '{}'])).action;
-  t.diagnostic(`2. restored; record ${wait.id} → ${resumed.id} ${resumed.step}/${resumed.part ?? ''}${resumed.wpId ? ` @${resumed.wpId}` : ''}; dispatchHalt ${JSON.stringify(held.state().dispatchHalt)}`);
-  held.pending = resumed;
-  await drive(held, { until: (a) => a.step === 'showcase' });
-  t.diagnostic(`2. WP states after the resume: ${held.state().wps.map((each) => `${each.id} ${each.state}`).join(', ')}`);
-  assert.equal(held.state().dispatchHalt, null);
-  assert.ok(held.state().wps.every((each) => each.state === 'merged'));
-
-  // 3. The release's version bump edited to add scripts.postinstall.
-  const bumped = seam(t);
-  phone(bumped);
-  await start(bumped, SPINE_ONLY);
-  const bump = await drive(bumped, { until: (a) => a.phase === 'release' && a.part === 'bump' });
-  const slot = '"homepage": "https://github.com/example/scratch"';
-  const forged = { slots: { [slot]: `${slot}, "scripts": {"postinstall": "UNSIGNED_EDIT"}` }, bump: { ...bump.bump, jsonPath: 'scripts.postinstall', to: 'UNSIGNED_EDIT' } };
-  editState(bumped, (state) => {
-    Object.assign(state.pending, forged);
-    Object.assign(state.release.queue[0], forged);
-  });
-  const after = out(await bumped.run(['next', '--run', bumped.runDir])).action;
-  const release = bumped.state().release;
-  t.diagnostic(`3. pending ${bump.id} bump edited to scripts.postinstall; next → ${after.id ?? after.kind} ${after.step ?? ''}; release ${release.state}: ${release.reason}`);
-  assert.notEqual(after.id, bump.id);
-  assert.equal(release.state, 'failed');
-  assert.match(release.reason, /^release held: release\/bump: the queued edit is not the bump the verified recipe derives/);
-});
-
-test('paid replay (council r2, R5): configured and metered, a paid act left pending keeps its id on resume: a fresh spend read, then the same act, whose earlier result records; it runs once', async (t) => {
-  const h = seam(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' } });
-  phone(h);
-  await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'herdr', '--no-adapter', 'notify']);
-  const paid = await drive(h, { until: (a) => a.phase === 'build' && a.step === 'start' });
-  // The driver ran it and lost track of its output: next again.
-  const replay = out(await h.run(['next', '--run', h.runDir])).action;
-  assert.equal(replay.step, 'spend', JSON.stringify(replay));
-  const recorded = await h.run(['record', '--run', h.runDir, '--action', replay.id, '--result', JSON.stringify(await perform(h, replay))]);
-  assert.equal(recorded.code, 0, recorded.stdout + recorded.stderr);
-  const again = out(recorded).action;
-  t.diagnostic(`pending ${paid.id}; next → ${replay.id} spend; record → ${again.id} ${again.step}`);
-  assert.equal(again.id, paid.id, JSON.stringify(again));
-  assert.deepEqual(again.command, paid.command);
-  h.pending = again;
-  await drive(h, { until: (a) => a.step === 'showcase' });
-  assert.equal(h.trace.filter((a) => a.step === 'start' && a.wpId === paid.wpId).length, 1, 'the act ran once');
-});
-
-test('post-merge cleanup (council r1, opus): the grant expiring right after the release merge, or in its after, verify or handover stage, still removes the release worktree; no other release command runs after the expiry', async (t) => {
-  const DAY = 24 * 60 * 60 * 1000;
-  const CLEANUP = ['remove', 'branch-holder', 'branch', 'branch-remote'];
-  for (const at of ['squash', 'merge-commit', 'merged', 'after', 'verify', 'remove']) {
-    const h = seam(t);
-    phone(h);
-    await start(h, SPINE_ONLY);
-    let expiredAt = null;
-    h.onEmit = (a) => {
-      if (expiredAt === null && a.phase === 'release' && a.part === at) {
-        h.clock += 15 * DAY;
-        expiredAt = h.trace.length - 1;
-      }
-    };
-    await drive(h, { until: (a) => a.step === 'showcase' });
-    assert.notEqual(expiredAt, null, at);
-    const later = h.trace.slice(expiredAt + 1).filter((a) => a.phase === 'release' && a.kind !== 'wait' && !a.touch);
-    t.diagnostic(`${at}: after the expiry ${later.map((a) => `${a.step}/${a.part}`).join(', ') || 'nothing'}; release ${h.state().release.state}: ${h.state().release.reason}`);
-    assert.deepEqual(later.filter((a) => !CLEANUP.includes(a.part)).map((a) => a.part), [], at);
-    if (at !== 'remove') assert.ok(later.some((a) => a.part === 'remove'), `${at}: the worktree removal ran`);
-    assert.equal(h.state().release.cleanup?.removed !== undefined, true, `${at}: cleanup recorded`);
-  }
 });
 
 test('E6 hand-back (spine): the showcase touch hands back the same way; the resumed read-back closes the run', async (t) => {
@@ -1424,7 +1132,7 @@ test('deep mint needs its workshop (C1-1): a missing orchestrator, or a workshop
 
 test('touch filings (C1-2): a showcase filing acknowledged with ok:false, success:false, no receipt uuid, another quest or another outcome stays open and is re-emitted', async (t) => {
   const h = seam(t, { depth: 'none' });
-  await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), ...['herdr', 'notify', 'spend'].flatMap((name) => ['--no-adapter', name])]);
+  await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), ...['herdr', 'notify'].flatMap((name) => ['--no-adapter', name])]);
   const filing = await drive(h, { until: (a) => a.tool === 'spine_receipt' && a.args.question?.includes('touch 2]') });
   const good = { id: '00000000-0000-4000-8000-0000000000aa', questId: ANCHOR, outcome: 'needs_input' };
   const bad = [{ ...good, ok: false }, { ...good, success: false }, { questId: ANCHOR, outcome: 'needs_input' },
@@ -1513,7 +1221,7 @@ test('failure showcase (U4): a blocked WP and an open run touch are named in the
 
 // ---- conductor rotation (d3ce5461) ----
 
-const ROTATE_SPINE = ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'spend'];
+const ROTATE_SPINE = ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8)];
 const ROTATE = ['--why', 'context at 41%', '--model', 'claude-opus-5-5', '--effort', 'high'];
 const isLaneWait = (a) => a.kind === 'shell' && a.step === 'wait';
 const bothLanesUp = (h) => ['WP-02', 'WP-03'].every((id) => (h.spawns[id] ?? 0) >= 1);
@@ -1681,410 +1389,22 @@ test('rotate (d3ce5461): outside herdr there is no chain and no pane to retire �
   assert.deepEqual(h.state().wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
 });
 
-// ---- council round 3: a stored act is judged by its content, never its labels ----
-
-const MARK = 'FORGED_R3';
-// What emission stamps or a wait counts down; everything else is the act.
-const STAMPS = new Set(['id', 'phase', 'seam', 'wpId', 'dueAt', 'remainingMs']);
-const sortedJson = (value) => JSON.stringify(value, (key, x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
-const body = (action) => sortedJson(Object.fromEntries(Object.entries(action).filter(([key, value]) => !STAMPS.has(key) && value !== undefined)));
-// A stored wait is emitted only as a wait, with its canonical text: its wait,
-// and for a build yield what the run waits on now, derived from the run.
-const WAIT_KEYS = new Set([...STAMPS, 'kind', 'step', 'part', 'waitMs', 'instruction', 'yield', 'held']);
-const CANONICAL_WAIT = /^Wait \d+(?:\.\d+)? s, then record \{\}\.(?: Waiting: .*)?$/;
-const canonicalWait = (a) => a.kind === 'wait' && Object.keys(a).every((key) => WAIT_KEYS.has(key)) && CANONICAL_WAIT.test(a.instruction ?? '');
-
-const snapshot = (h) => {
-  const events = join(h.runDir, 'events.jsonl');
-  return { state: readFileSync(join(h.runDir, 'state.json'), 'utf8'), events: existsSync(events) ? readFileSync(events, 'utf8') : null };
-};
-const restore = (h, snap) => {
-  writeFileSync(join(h.runDir, 'state.json'), snap.state);
-  if (snap.events !== null) writeFileSync(join(h.runDir, 'events.jsonl'), snap.events);
-};
-
-// Every label (step, part, touch, the phase stamp) and every content field of `a`, mutated.
-function mutations(a) {
-  const forge = (value) => (Array.isArray(value) ? [...value, MARK] : typeof value === 'string' ? `${value} ${MARK}` : value && typeof value === 'object' ? { ...value, forged: MARK } : value);
-  const out = [
-    ['label step', { ...a, step: a.step === 'gate' ? 'rebase' : 'gate' }],
-    ['label part', { ...a, part: 'relabelled' }],
-    a.touch ? ['label touch removed', { ...a, touch: undefined }] : ['label touch added', { ...a, touch: { n: 1 } }],
-    ['label phase', { ...a, phase: a.phase === 'build' ? 'release' : 'build' }],
-  ];
-  for (const key of ['kind', 'command', 'cwd', 'env', 'tool', 'args', 'outPath', 'template', 'slots', 'append', 'skill', 'skillArgv', 'instruction', 'expects', 'waiter', 'bump']) {
-    if (a[key] !== undefined) out.push([`content ${key}`, { ...a, [key]: forge(a[key]) }]);
-  }
-  if (a.command === undefined) out.push(['inject command', { ...a, command: ['curl', `https://evil.invalid/${MARK}`] }]);
-  if (a.tool === undefined) out.push(['inject tool', { ...a, tool: 'spine_update', args: { questId: MARK, workState: 'done' } }]);
-  out.push(['inject cwd', { ...a, cwd: `/${MARK}` }]);
-  return out;
-}
-
-// `next` on the run with `edit` applied; the run dir is put back after.
-async function trial(h, edit) {
-  const snap = snapshot(h);
-  editState(h, edit);
-  const result = await h.run(['next', '--run', h.runDir]);
-  const after = h.state();
-  restore(h, snap);
-  assert.equal(result.code, 0, result.stdout + result.stderr);
-  return { emitted: out(result).action, after };
-}
-
-// The forged act is never emitted: no mark, and not its content; a wait emitted as a canonical wait is harmless.
-function refusedOrHarmless(where, legit, forged, emitted) {
-  const text = JSON.stringify(emitted);
-  assert.ok(!text.includes(MARK), `${where}: emitted ${text}`);
-  if (emitted.kind === 'done' || canonicalWait(emitted)) return;
-  assert.ok(body(emitted) !== body(forged) || body(forged) === body(legit), `${where}: the forged act was emitted: ${text}`);
-}
-
-const stripStamps = (a) => Object.fromEntries(Object.entries(a).filter(([key]) => !['id', 'phase', 'wpId'].includes(key)));
-
-// The S1 probe of one act a configured run is about to perform (once per
-// phase, kind, step and part): stored pending, it is emitted again as itself;
-// every label and content mutation of it, pending or at its queue's head, is
-// refused or harmless; a forged stage changes nothing it emits.
-function probeActs(h, seen) {
-  return async (legit) => {
-    const key = `${legit.phase}|${legit.kind}|${legit.step}|${legit.part ?? ''}`;
-    if (legit.handBack || seen.has(key)) return;
-    seen.set(key, 0);
-    const where = (name, how) => `${legit.phase} ${legit.kind} ${legit.step}/${legit.part ?? ''} (${legit.id}), ${how} ${name}`;
-    // The legitimate act, stored pending, is emitted again as itself (a wait as itself or canonical).
-    const again = (await trial(h, () => {})).emitted;
-    if (!(legit.kind === 'wait' && canonicalWait(again))) assert.deepEqual([again.id, body(again)], [legit.id, body(legit)], where('none', 'pending'));
-    for (const [name, forged] of mutations(legit)) {
-      refusedOrHarmless(where(name, 'pending'), legit, forged, (await trial(h, (state) => { state.pending = forged; })).emitted);
-      seen.set(key, seen.get(key) + 1);
-    }
-    // The same mutations at the head of the queue it came from, nothing pending.
-    const head = (state) => (legit.phase === 'build' && legit.wpId ? state.wps.find((wp) => wp.id === legit.wpId)?.queue : legit.phase === 'release' ? state.release.queue : null);
-    if (!head(h.state())?.length || body(head(h.state())[0]) !== body(stripStamps(legit))) return;
-    for (const [name, forged] of mutations(legit).filter(([name]) => name !== 'label phase')) {
-      const { emitted } = await trial(h, (state) => {
-        state.pending = null;
-        head(state)[0] = stripStamps(forged);
-      });
-      refusedOrHarmless(where(name, 'queued'), legit, forged, emitted);
-    }
-    // A forged stage: the legitimate pending act is emitted again only as itself.
-    const { emitted } = await trial(h, (state) => {
-      if (legit.phase === 'build' && legit.wpId) state.wps.find((wp) => wp.id === legit.wpId).stage = 'merge';
-      if (legit.phase === 'release') state.release.stage = state.release.stage === 'cleanup' ? 'setup' : 'cleanup';
-    });
-    assert.ok(emitted.id !== legit.id || body(emitted) === body(legit) || canonicalWait(emitted), where('stage', 'pending'));
-  };
-}
-
-// No act a configured run derives is refused: no stored act was dropped.
-const droppedActs = (h) => h.events().filter((e) => e.event === 'dropped').map((e) => `${e.actionId ?? ''} ${e.step}: ${e.data?.reason ?? ''}`);
-
-test('S1 property (council r3): every act a configured run emits, in every phase and of every kind, stored pending or queued, is refused when any content field changes, and refused or harmless when a label changes', async (t) => {
-  const h = seam(t);
-  phone(h);
-  await start(h, SPINE_ONLY);
-  const seen = new Map();
-  h.beforePerform = probeActs(h, seen);
-  assert.equal((await drive(h)).kind, 'done');
-  assert.deepEqual(droppedActs(h), []);
-  // S2: every cleanup act is a derived worktree or branch command, and none carries --force.
-  const cleanup = h.trace.filter((a) => ['remove', 'branch-holder', 'branch', 'branch-remote'].includes(a.part));
-  assert.ok(cleanup.length >= 4, cleanup.map((a) => a.part).join(', '));
-  for (const a of cleanup) {
-    assert.ok(!a.command.includes('--force'), a.command.join(' '));
-    assert.ok(a.command[0] === 'git' && ['worktree remove', 'worktree list', 'update-ref -d', 'push origin'].some((verb) => a.command.slice(3, 5).join(' ').startsWith(verb)), a.command.join(' '));
-  }
-  const phases = new Set([...seen.keys()].map((key) => key.split('|')[0]));
-  const kinds = new Set([...seen.keys()].map((key) => key.split('|')[1]));
-  t.diagnostic(`probed ${seen.size} acts: ${[...seen.keys()].join(', ')}`);
-  for (const phase of ['intake', 'preapproval', 'spec', 'mint', 'build', 'release', 'analyze', 'showcase']) assert.ok(phases.has(phase), `phase ${phase} probed`);
-  for (const kind of ['agent-tool', 'shell', 'author', 'skill', 'wait']) assert.ok(kinds.has(kind), `kind ${kind} probed`);
-});
-
-test('S1 property, more producers (council r3): configured runs through PR-comment findings (replies, thread lookup, resolves), a council round, an escalated ruling, and herdr lanes; each act probed, and none the run derives is refused', async (t) => {
-  const seen = new Map();
-  const scenarios = [
-    ['PR-comment findings', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-amendment.md'] }, findings: { 'WP-00': [3] }, amendDiff: 'docs/notes.md\n' } }, SPINE_ONLY],
-    ['council round', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } }, [...SPINE_ONLY, '--adapter', 'council']],
-    ['escalated ruling', { depth: 'none', h: { reports: { 'WP-00': ['build/report-needs-conductor.md', 'build/report-built.md'] }, rulings: [{ escalate: true, why: 'only the operator can pick the flag name' }] } }, SPINE_ONLY],
-    ['herdr lanes', { herdr: true, env: { WORKIT_NOTIFY_CMD: 'notify-cmd --channel conduct' } }, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'spend']],
-  ];
-  for (const [name, opts, flags] of scenarios) {
-    const h = seam(t, opts);
-    phone(h);
-    await start(h, flags);
-    h.beforePerform = probeActs(h, seen);
-    await drive(h, { until: (a) => a.step === 'showcase' });
-    assert.deepEqual(droppedActs(h), [], name);
-    assert.ok(h.state().wps.every((wp) => wp.state === 'merged'), `${name}: ${JSON.stringify(h.state().wps.map((wp) => [wp.id, wp.state, wp.reason]))}`);
-  }
-  const keys = [...seen.keys()];
-  t.diagnostic(`probed ${keys.length} acts: ${keys.join(', ')}`);
-  for (const want of ['build|author|reply|bodies', 'build|shell|reply|reply', 'build|shell|thread-ids|lookup', 'build|shell|resolve|resolve', 'build|agent-tool|council|review',
-    'build|author|ruling|ask', 'build|shell|prompt|', 'build|author|brief|amendment']) assert.ok(keys.includes(want), `${want} probed`);
-});
-
-test('S1 probes (council r3, verbatim): a touch marker on an arbitrary release command, a relabelled pending squash, a queued head relabelled to gh pr merge --admin on a foreign repo, and a pending act in a phase with no checkPending are each refused through next', async (t) => {
-  const h = seam(t);
-  phone(h);
-  await start(h, SPINE_ONLY);
-
-  // Round 3, all four seats: release.mjs:326 accepted any pending act carrying `touch`.
-  const ready = await drive(h, { until: (a) => a.phase === 'release' && a.part === 'ready' });
-  for (const [seat, command] of [['astra', ['echo', 'UNSIGNED_TOUCH_PAYLOAD']], ['codex', ['curl', 'https://evil.invalid/codex']], ['sonnet', ['curl', 'https://evil.invalid']]]) {
-    const { emitted, after } = await trial(h, (state) => {
-      state.pending = { ...state.pending, kind: 'shell', command, touch: { n: 1 } };
-      state.release.queue = [];
-    });
-    t.diagnostic(`touch marker (${seat}): pending ${command.join(' ')} with touch {n:1} → next emits ${emitted.id ?? emitted.kind} ${emitted.step ?? ''}/${emitted.part ?? ''} ${emitted.command?.join(' ') ?? ''}; release ${after.release.state}`);
-    assert.ok(!JSON.stringify(emitted).includes(command.at(-1)), seat);
-    assert.notEqual(emitted.id, ready.id, seat);
-  }
-  // A pending act in a phase without checkPending (sonnet: conduct.mjs:143-152).
-  const analyze = await drive(h, { until: (a) => a.phase === 'analyze' });
-  const forgedAnalyze = await trial(h, (state) => { state.pending = { ...state.pending, command: ['curl', 'https://evil.invalid/analyze'] }; });
-  t.diagnostic(`no checkPending (analyze): pending curl → next emits ${forgedAnalyze.emitted.id} ${forgedAnalyze.emitted.command?.join(' ')}`);
-  assert.ok(!JSON.stringify(forgedAnalyze.emitted).includes('evil.invalid'));
-  assert.equal(forgedAnalyze.emitted.id === analyze.id ? body(forgedAnalyze.emitted) : body(analyze), body(analyze));
-
-  const b = seam(t);
-  phone(b);
-  await start(b, SPINE_ONLY);
-  const squash = await drive(b, { until: (a) => a.phase === 'build' && a.step === 'merge' && a.part === 'squash' });
-  const relabels = [
-    ['codex: step gate, curl', { step: 'gate', command: ['curl', 'https://evil.invalid/codex'] }],
-    ['opus: rebase/fetch, a squash', { step: 'rebase', part: 'fetch', command: ['gh', 'pr', 'merge', String(squash.command[3]), '--repo', 'example/scratch', '--squash'] }],
-    ['sonnet: part relabelled, --admin on another repo', { part: 'relabelled', command: ['gh', 'pr', 'merge', '77', '--repo', 'evil/other', '--admin'] }],
-  ];
-  for (const [who, edit] of relabels) {
-    const { emitted } = await trial(b, (state) => { state.pending = { ...state.pending, ...edit }; });
-    t.diagnostic(`pending relabel (${who}) → next emits ${emitted.id} ${emitted.step}/${emitted.part ?? ''} ${emitted.command?.join(' ') ?? ''}`);
-    assert.ok(emitted.id !== squash.id || body(emitted) === body(squash), who);
-    assert.ok(!(emitted.command ?? []).includes('--admin') && !(emitted.command ?? []).includes('evil/other') && emitted.command?.[0] !== 'curl', who);
-  }
-  // The queued head (opus/sonnet: build.mjs:1518), relabelled, nothing pending.
-  const admin = ['gh', 'pr', 'merge', '77', '--repo', 'evil/other', '--admin'];
-  const queued = await trial(b, (state) => {
-    state.pending = null;
-    const wp = state.wps.find((each) => each.id === squash.wpId);
-    wp.queue[0] = { ...stripStamps(squash), part: 'relabelled', command: admin };
-  });
-  t.diagnostic(`queued head relabelled to ${admin.join(' ')} → next emits ${queued.emitted.id} ${queued.emitted.step}/${queued.emitted.part ?? ''} ${queued.emitted.command?.join(' ') ?? ''}; ${squash.wpId} ${queued.after.wps.find((wp) => wp.id === squash.wpId).state}: ${queued.after.wps.find((wp) => wp.id === squash.wpId).reason}`);
-  assert.ok(!(queued.emitted.command ?? []).includes('--admin'), JSON.stringify(queued.emitted));
-  assert.notEqual(queued.after.wps.find((wp) => wp.id === squash.wpId).state, 'merged');
-});
-
-test('S1(b) (council r3): record of an unanswered touch never returns a forged stored act; a forged hand-back waiter is refused', async (t) => {
-  const h = seam(t);
-  spineReplies(h);
-  h.deps.readAnchor = testAnchor;
-  await start(h, SPINE_ONLY);
-  const back = await drive(h, { until: isHandBack, max: 10 });
-  editState(h, (state) => { state.pending = { ...state.pending, waiter: { command: ['curl', `https://evil.invalid/${MARK}`], background: true } }; });
-  const recorded = await h.run(['record', '--run', h.runDir, '--action', back.id, '--result', '{}']);
-  t.diagnostic(`record ${back.id} with a forged waiter → exit ${recorded.code}: ${recorded.stdout.slice(0, 300)}`);
-  assert.ok(!recorded.stdout.includes(MARK), recorded.stdout);
-});
-
-test('S3 paid replay (council r3, opus): the paid act the driver already ran is re-emitted under its id after the fresh spend read; its saved result records, and the performer ran it once', async (t) => {
-  const h = seam(t, { env: { WORKIT_SPEND_CMD: 'spend-meter' } });
-  phone(h);
-  await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'herdr', '--no-adapter', 'notify']);
-  const paid = await drive(h, { until: (a) => a.phase === 'build' && a.step === 'start' });
-  // The driver performs the start and keeps its result, then crashes before recording it.
-  const saved = await perform(h, paid);
-  assert.equal(h.spawns[paid.wpId], 1);
-  const spend = out(await h.run(['next', '--run', h.runDir])).action;
-  assert.equal(spend.step, 'spend', JSON.stringify(spend));
-  const again = out(await h.run(['record', '--run', h.runDir, '--action', spend.id, '--result', JSON.stringify(await perform(h, spend))])).action;
-  assert.deepEqual([again.id, again.command], [paid.id, paid.command], JSON.stringify(again));
-  // The saved result is recorded against the replayed id; the start is not performed again.
-  const recorded = await h.run(['record', '--run', h.runDir, '--action', again.id, '--result', JSON.stringify(saved)]);
-  assert.equal(recorded.code, 0, recorded.stdout + recorded.stderr);
-  const after = out(recorded).action;
-  t.diagnostic(`pending ${paid.id} performed (spawns ${h.spawns[paid.wpId]}); next → ${spend.id} spend; record → ${again.id} ${again.step}; record saved result → ${after.id} ${after.step}/${after.part ?? ''}`);
-  assert.notEqual(after.step, 'start', JSON.stringify(after));
-  h.pending = after;
-  await drive(h, { until: (a) => a.step === 'showcase' });
-  assert.equal(h.spawns[paid.wpId], 1, 'the performer ran the start once');
-  assert.equal(h.trace.filter((a) => a.step === 'start' && a.wpId === paid.wpId && a.id !== paid.id).length, 0, 'no start under another id');
-});
-
-test('S4 recovery (council r3): an authority refused at the merge waits, and restoring the signed record resumes the build to the merge; a grant_expired hold is terminal at once, with no wait loop', async (t) => {
-  const h = seam(t);
-  phone(h);
-  await start(h, SPINE_ONLY);
-  const squash = await drive(h, { until: (a) => a.phase === 'build' && a.step === 'merge' && a.part === 'squash' });
-  // The run resumes with the squash queued and the signed record edited.
-  let signedText;
-  editState(h, (state) => {
-    signedText = state.touches[0].answer.signed.answer.text;
-    tamperProof(state);
-    state.pending = null;
-  });
-  h.pending = null;
-  const wait = await drive(h, { until: (a) => authorityWait(a) || a.step === 'showcase' });
-  t.diagnostic(`tampered at ${squash.id}: next → ${wait.id} ${wait.kind}: ${wait.instruction}; ${squash.wpId} ${h.wp(squash.wpId).state}`);
-  assert.ok(authorityWait(wait), JSON.stringify(wait));
-  assert.notEqual(h.wp(squash.wpId).state, 'held');
-  assert.match(wait.instruction, /waiting/);
-  editState(h, (state) => { state.touches[0].answer.signed.answer.text = signedText; });
-  const resumed = out(await h.run(['record', '--run', h.runDir, '--action', wait.id, '--result', '{}'])).action;
-  t.diagnostic(`restored; record ${wait.id} → ${resumed.id} ${resumed.step}/${resumed.part ?? ''} ${resumed.command?.join(' ') ?? ''}`);
-  h.pending = resumed;
-  await drive(h, { until: (a) => a.step === 'showcase' });
-  assert.equal(h.wp(squash.wpId).state, 'merged');
-  assert.equal(h.state().dispatchHalt, null);
-
-  const DAY = 24 * 60 * 60 * 1000;
-  const expired = seam(t);
-  phone(expired);
-  await start(expired, SPINE_ONLY);
-  await drive(expired, { until: (a) => a.phase === 'build' && a.step === 'brief' });
-  expired.clock += 15 * DAY;
-  const from = expired.trace.length;
-  await drive(expired, { until: (a) => a.step === 'showcase', max: 200 });
-  const waits = expired.trace.slice(from).filter(authorityWait);
-  t.diagnostic(`grant_expired: ${waits.length} authority wait(s); WPs ${expired.state().wps.map((wp) => `${wp.id} ${wp.state}: ${wp.reason}`).join('; ')}`);
-  assert.deepEqual(waits.map((a) => a.id), []);
-  assert.ok(expired.state().wps.some((wp) => wp.state === 'held' && /grant_expired.*terminal/.test(wp.reason ?? '')), JSON.stringify(expired.state().wps.map((wp) => [wp.id, wp.state, wp.reason])));
-  assert.ok(!expired.trace.slice(from).some((a) => a.phase === 'build' && ['start', 'prompt', 'fallback'].includes(a.step)), 'no paid act after the expiry');
-});
-
-// ---- council round 4: an act is admitted only at the stage that queues it ----
-
-const mergesArgv = (a) => a.command?.[0] === 'gh' && a.command[1] === 'pr' && a.command[2] === 'merge';
-// A rebase that moves nothing: every head stays the lane's, so an act a later
-// stage queues names the same heads an earlier stage's producers would.
-// A removal that removes, so the branch deletes queue behind it.
-const STABLE_REBASE = [
-  [/^git -C (\S+) rev-parse refs\/heads\/\S+ origin\/main$/, (h, m) => ok(`${headOf(h, idOfWorktree(m[1]))}\n${'9'.repeat(40)}\n`)],
-  [/^git -C \S+ worktree remove (\S+)$/, (h, m) => {
-    rmSync(m[1], { recursive: true, force: true });
-    return ok();
-  }],
-  [/^git -C \S+ worktree list --porcelain$/, (h) => ok(`worktree ${h.repo}\nHEAD ${BASE}\nbranch refs/heads/main\n`)],
-  [/^git -C \S+ update-ref -d /, () => ok()],
-];
-
-// `next` on the run put back to `snap`, with `edit` applied.
-async function trialAt(h, snap, edit) {
-  restore(h, snap);
-  editState(h, edit);
-  const result = await h.run(['next', '--run', h.runDir]);
-  assert.equal(result.code, 0, result.stdout + result.stderr);
-  return { emitted: out(result).action, after: h.state() };
-}
-
-test('M1 stage (council r4, codex): a squash stored pending while the gate is recorded failed at its head, at the gate stage, is refused through next; the WP does not merge', async (t) => {
-  const h = seam(t);
-  phone(h);
-  await start(h, SPINE_ONLY);
-  const squash = await drive(h, { until: (a) => a.phase === 'build' && a.step === 'merge' && a.part === 'squash' });
-  const { emitted, after } = await trial(h, (state) => {
-    const wp = state.wps.find((each) => each.id === squash.wpId);
-    wp.gate = { ...wp.gate, ok: false };
-    wp.stage = 'gate';
-  });
-  const wp = after.wps.find((each) => each.id === squash.wpId);
-  t.diagnostic(`gate.ok:false, stage gate, pending ${squash.id} ${squash.command.join(' ')} → next emits ${emitted.id} ${emitted.step}/${emitted.part ?? ''} ${emitted.command?.join(' ') ?? ''}; ${wp.id} ${wp.state}`);
-  assert.ok(!mergesArgv(emitted), JSON.stringify(emitted));
-  assert.notEqual(wp.state, 'merged');
-});
-
-test('M1 stage (council r4, opus and cross-stage): each act that merges, deletes, pushes or removes, taken from the stage that queues it and stored pending at an earlier stage, is refused through next', async (t) => {
-  const h = seam(t, { h: { rules: STABLE_REBASE } });
-  phone(h);
-  await start(h, SPINE_ONLY);
-  const review = await drive(h, { until: (a) => a.phase === 'build' && a.step === 'review' });
-  const id = review.wpId;
-  const mine = (step, part) => (a) => a.phase === 'build' && a.wpId === id && a.step === step && a.part === part;
-  const snaps = [['review', snapshot(h), h.wp(id).state]];
-  await drive(h, { until: mine('gate-cmd', 'gate-cmd') });
-  snaps.push(['gate-cmd', snapshot(h), h.wp(id).state]);
-  await drive(h, { until: mine('merge', 'squash') });
-  snaps.push(['squash', snapshot(h), h.wp(id).state]);
-  await drive(h, { until: (a) => a.step === 'showcase' });
-  assert.equal(h.wp(id).state, 'merged');
-  const later = [['rebase', 'push'], ['merge', 'squash'], ['stop', 'remove'], ['stop', 'branch-holder'], ['stop', 'branch'], ['stop', 'branch-remote']]
-    .map(([step, part]) => h.trace.find(mine(step, part)));
-  assert.ok(later.every(Boolean), JSON.stringify(later.map((a) => a?.part)));
-  // Each later act is earlier than the stages it is probed at.
-  const before = { push: ['review'], squash: ['review', 'gate-cmd'], remove: ['review', 'gate-cmd', 'squash'] };
-  let probed = 0;
-  const admitted = [];
-  for (const act of later) {
-    for (const [at, snap, wpState] of snaps.filter(([name]) => (before[act.part] ?? before.remove).includes(name))) {
-      const { emitted, after } = await trialAt(h, snap, (state) => { state.pending = { ...act, id: state.pending.id }; });
-      t.diagnostic(`${act.step}/${act.part} ${act.command.slice(3).join(' ')} stored pending at ${at} (wp ${wpState}) → next emits ${emitted.id} ${emitted.step ?? emitted.kind}/${emitted.part ?? ''}; ${id} ${after.wps.find((wp) => wp.id === id).state}`);
-      if (body(emitted) === body(act)) admitted.push(`${act.step}/${act.part} at ${at}`);
-      probed += 1;
-    }
-  }
-  assert.deepEqual(admitted, []);
-  assert.equal(probed, 15);
-});
-
-test('M2 containment (council r4, astra/codex): a council review whose artifact paths add a traversal out of the lane worktree, or a worktree file the recorded diff does not list, is refused through next', async (t) => {
-  const h = seam(t, { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } });
-  phone(h);
-  await start(h, [...SPINE_ONLY, '--adapter', 'council']);
-  const review = await drive(h, { until: (a) => a.step === 'council' && a.part === 'review' });
-  const worktree = review.args.code_root;
-  const traversal = `${worktree}${sep}..${sep}secret.txt`;
-  const probes = [
-    ['traversal', traversal, () => {}],
-    ['unrelated worktree file', join(worktree, 'unrelated.txt'), () => {}],
-    // The recorded set itself naming a traversal derives nothing, though the
-    // act carries exactly the path t2Actions would join from it.
-    ['recorded traversal', join(worktree, '..', 'secret.txt'), (wp) => wp.councilScope?.paths.push(`..${sep}secret.txt`)],
-  ];
-  for (const [name, extra, tamper] of probes) {
-    const { emitted, after } = await trial(h, (state) => {
-      tamper(state.wps.find((wp) => wp.id === review.wpId));
-      state.pending = { ...state.pending, args: { ...state.pending.args, artifact_paths: [...state.pending.args.artifact_paths, extra] } };
-    });
-    t.diagnostic(`${name}: council_review artifact_paths + ${extra} → next emits ${emitted.id} ${emitted.tool ?? emitted.step} ${JSON.stringify(emitted.args?.artifact_paths ?? null)}; ${review.wpId} ${after.wps.find((wp) => wp.id === review.wpId).state}`);
-    assert.ok(!(emitted.args?.artifact_paths ?? []).includes(extra), name);
-  }
-});
-
-test('M3 revision (council r4, astra): a council delta whose land.since and diff argv are both set to --output=<outside-file>, or to a sha other than the recorded baseline, is refused through next', async (t) => {
-  const h = seam(t, { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } });
-  phone(h);
-  await start(h, [...SPINE_ONLY, '--adapter', 'council']);
-  const delta = await drive(h, { until: (a) => a.step === 'council' && a.part === 'delta-diff' });
-  const since = delta.land.since;
-  assert.match(since, /^[0-9a-f]{40}$/);
-  const outside = join(h.dir, 'outside.txt');
-  for (const [name, value] of [['--output injection', `--output=${outside}`], ['another sha', 'f'.repeat(40)]]) {
-    const forged = { ...delta, land: { ...delta.land, since: value }, command: delta.command.map((arg) => (arg === since ? value : arg)) };
-    const { emitted, after } = await trial(h, (state) => { state.pending = forged; });
-    t.diagnostic(`${name}: land.since and argv → ${value} → next emits ${emitted.id} ${emitted.step}/${emitted.part ?? ''} ${emitted.command?.join(' ') ?? ''}; ${delta.wpId} ${after.wps.find((wp) => wp.id === delta.wpId).state}`);
-    assert.ok(!(emitted.command ?? []).includes(value) && emitted.land?.since !== value, name);
-  }
-});
-
-test('runtime exercise (council r4): configured runs, plain and with a two-round council, and an unconfigured run each merge every WP through next and record, with no stored act dropped', async (t) => {
+test('runtime exercise (slim): a spine run, plain and with a two-round council, and a core run each merge every WP through next and record, on git and gh alone', async (t) => {
   const runs = [
-    ['configured', {}, SPINE_ONLY, true],
-    ['configured, council', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } }, [...SPINE_ONLY, '--adapter', 'council'], true],
-    ['unconfigured (M8)', {}, OFF, false],
+    ['spine', {}, SPINE_ONLY],
+    ['spine, council', { depth: 'none', h: { reports: { 'WP-00': ['build/report-built.md', 'build/report-council-amendment.md'] }, council: [2, 0], diff: { 'WP-00': 'src/contract.mjs\n' } } }, [...SPINE_ONLY, '--adapter', 'council']],
+    ['core', {}, OFF],
   ];
-  for (const [name, opts, flags, signed] of runs) {
+  for (const [name, opts, flags] of runs) {
     const h = seam(t, opts);
-    if (signed) phone(h);
     await start(h, flags);
     await drive(h, { until: (a) => a.step === 'showcase' });
     const wps = h.state().wps;
     const council = h.trace.filter((a) => a.step === 'council').map((a) => a.part);
     const squashes = merges(h).filter((a) => a.phase === 'build');
-    t.diagnostic(`${name}: ${wps.map((wp) => `${wp.id} ${wp.state}`).join(', ')}; build squashes ${squashes.length}; release ${h.state().release.state}; council acts ${council.join(' ') || 'none'}; dropped ${droppedActs(h).length}`);
+    t.diagnostic(`${name}: ${wps.map((wp) => `${wp.id} ${wp.state}`).join(', ')}; build squashes ${squashes.length}; release ${h.state().release.state}; council acts ${council.join(' ') || 'none'}`);
     assert.ok(wps.every((wp) => wp.state === 'merged'), name);
     assert.equal(squashes.length, wps.length, name);
-    assert.deepEqual(droppedActs(h), [], name);
   }
 });
 

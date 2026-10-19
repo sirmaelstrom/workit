@@ -12,14 +12,9 @@ import {
 } from './land.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
 import { runConduct } from '../conduct.mjs';
-import { testDeps } from '../test-deps.mjs';
+import { runAuthority as unsignedAuthority } from './authority.mjs';
 
-// The authority a phase passes with no operator passkey configured: the
-// state's own (verifiedAuthority's unconfigured path). A test passes another.
-const unsignedAuthority = (state) => ({
-  merge: state.authority?.merge === true, release: state.authority?.release === true, budgetUsd: state.authority?.budgetUsd ?? 0,
-  scope: state.authority?.scope, proofMode: 'unconfigured', reason: null, ignored: [], grant: null,
-});
+// The authority a phase passes is the state's own (runAuthority). A test passes another.
 const mergeActions = (state, wp, head, authority = unsignedAuthority(state)) => mergeActionsWith(state, wp, head, authority);
 const recordLandStep = (state, wp, action, r, deps = {}, authority = unsignedAuthority(state)) => recordLandStepWith(state, wp, action, r, deps, authority);
 
@@ -1163,7 +1158,7 @@ test('C2-13 a rounds recovery with empty stdout reaches the recorder through the
   let outcome = null;
   const build = { next: () => ({ kind: 'done' }), record: (s, action, r, deps) => { outcome = recordLandStep(s, s.wps[0], action, r, deps); } };
   const out = await runConduct(['record', '--run', dir, '--action', '1-review', '--result', JSON.stringify({ code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' })],
-    testDeps({ importModule: (relPath) => (relPath === 'lib/phases/build.mjs' ? build : import(pathToFileURL(join(HERE, '..', relPath)).href)) }));
+    { importModule: (relPath) => (relPath === 'lib/phases/build.mjs' ? build : import(pathToFileURL(join(HERE, '..', relPath)).href)) });
   assert.equal(out.code, 0, out.stdout + out.stderr);
   assert.deepEqual([outcome.outcome, outcome.patch.queue], ['held', []]);
 });

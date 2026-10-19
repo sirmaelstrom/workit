@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { STEP_SEAM, TOUCH_SEAM, loadState, readEvents } from './state.mjs';
 import { firstLine } from './adapters.mjs';
 import { analysisLine as repoConfigLine } from './repo-config.mjs';
-import { authorityDisplay } from './authority.mjs';
+import { runAuthority } from './authority.mjs';
 
 const VERDICT_TEXT = { exercised: 'exercised', vacuous: 'vacuous', 'not-exercised': 'not exercised', 'no-surface': 'no runtime surface', missing: 'missing' };
 const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
@@ -15,13 +15,12 @@ const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
 // section) and null are not seam rows.
 export const SEAM_ROWS = Object.freeze([...new Set(Object.values(STEP_SEAM))].filter((seam) => seam && seam !== TOUCH_SEAM)
   .flatMap((seam) => (seam === 'spec' ? SPEC_ROWS : [seam])).concat('runtime-exercise'));
-// A phase hand-over and a skipped step are not a seam crossed, nor is a
-// refusal: a held or dropped act, a held wait, or a release that ended held.
-// Seam evidence shows behaviour that was exercised, never that it succeeded:
-// a release that ran its setup and bump and then ended held still counts
-// those acts under its seam row, and its outcome is the queue-accounting line.
-const NOT_EVIDENCE = new Set(['phase', 'not-exercised', 'dropped', 'spec-held', 'release-held']);
-const refusal = (e) => NOT_EVIDENCE.has(e.event) || e.data?.held === true || (e.event === 'release' && /^release held: /.test(e.data?.reason ?? ''));
+// A phase hand-over and a skipped step are not a seam crossed. Seam evidence
+// shows behaviour that was exercised, never that it succeeded: a release that
+// ran its setup and bump and then failed still counts those acts under its
+// seam row, and its outcome is the queue-accounting line.
+const NOT_EVIDENCE = new Set(['phase', 'not-exercised']);
+const refusal = (e) => NOT_EVIDENCE.has(e.event);
 
 const usd = (n) => `$${Number(n).toFixed(2)}`;
 
@@ -218,11 +217,10 @@ function postMergeThreads(state, exec) {
   return [`post-merge threads: ${rows.length ? `${rows.length} merged PR(s) need a read` : 'none open on any merged PR'}`, ...rows];
 }
 
-function preapproval(state, deps) {
+function preapproval(state) {
   const a = state.authority ?? {};
-  // Display, never an act: beside a verified proof, the verified authority.
-  const shown = authorityDisplay(state, deps);
-  const out = [`- authority: merge ${shown.merge ? 'yes' : 'no'}, release ${shown.release ? 'yes' : 'no'}, budget ${usd(shown.budgetUsd)}, scope: ${shown.scope} ${shown.label}`];
+  const shown = runAuthority(state);
+  const out = [`- authority: merge ${shown.merge ? 'yes' : 'no'}, release ${shown.release ? 'yes' : 'no'}, budget ${usd(shown.budgetUsd)}, scope: ${shown.scope}`];
   if (a.grant) out.push(`- grant: ${a.grant}; the operator's text, verbatim: ${JSON.stringify(a.notes ?? '')}`);
   out.push(repoConfigLine(state));
   const merges = mergedPrs(state);
@@ -247,16 +245,8 @@ function preapproval(state, deps) {
   if (records.length) {
     out.push(`- council review records: ${posted.length} posted${posted.length ? ` (${posted.map(({ wp, review }) => `${wp.id} round ${review.round}: ${review.record.url ?? 'no url returned'}`).join('; ')})` : ''}${failed.length ? `, ${failed.length} not posted (${failed.map(({ wp, review }) => `${wp.id} round ${review.round}: ${review.record.failed}`).join('; ')})` : ''}`);
   }
-  if (a.metered) {
-    // The build's last successful reading, else the latest budget touch's snapshot.
-    const last = state.build?.lastSpend;
-    const touch = (state.touches ?? []).filter((candidate) => typeof candidate.spendUsd === 'number').at(-1);
-    const reading = typeof last?.usd === 'number' ? `${usd(last.usd)} (read ${last.at})` : touch ? `${usd(touch.spendUsd)} (touch ${touch.n})` : 'none stored';
-    out.push(`- budget: metered by the spend adapter; spend reading: ${reading}`);
-  } else {
-    const lower = state.wps.reduce((sum, wp) => sum + (Number(wp.lane?.costUsd) || 0), 0);
-    out.push(`- budget: unmetered; lane-only lower bound ${usd(lower)} (exec claude lanes' total_cost_usd; codex and herdr lanes not counted)`);
-  }
+  const lower = state.wps.reduce((sum, wp) => sum + (Number(wp.lane?.costUsd) || 0), 0);
+  out.push(`- budget: unmetered; lane-only lower bound ${usd(lower)} (exec claude lanes' total_cost_usd; codex and herdr lanes not counted)`);
   return out;
 }
 
@@ -272,7 +262,7 @@ export async function analyzeRun(runDir, deps) {
     ['Where the time went', timeWent(state, events)],
     ['Catches by watcher position', catches(state, events)],
     ['Escapes', escapes(state, deps.exec)],
-    ['Pre-approval audit', preapproval(state, deps)],
+    ['Pre-approval audit', preapproval(state)],
     ['Recommendations', ['_The conductor replaces this line with at most five recommendations._']],
   ];
   const text = [`# Run analysis: conduct ${state.slug}`, '', `Run dir: ${runDir}. Goal: ${state.intent.goal}`, '',

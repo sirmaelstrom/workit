@@ -73,26 +73,20 @@ For deep specs, parse the `--review` flag. If not specified, auto-select:
 
 #### Verifying a `--preapproved` ref
 
-Before any gate is crossed, check the ref against the record it names. Every step is yours to perform; nothing else reads it.
-
-**The verifier.** Steps 1 and 2 run `node "${CLAUDE_PLUGIN_ROOT}/skills/_shared/operator-proof/operator-proof.mjs"`, which checks the operator's passkey signature on the answer against `~/.claude/operator-passkeys.json`. It prints one JSON line, `{ok, mode, reason, credentialId, epoch, grant, answer, scopeOk?}`, and exits 0 only on `ok`. With a passkey registered, `mode` is `verified` or `refused`, and `answer.by` is not evidence: anyone who can write a receipt can write `by`. A stored `proofMode` field is never proof either. With no passkey registered, the CLI exits 0 with `"mode":"unconfigured"`, and the `by` checks below are the unsigned fallback, as before passkeys.
+Before any gate is crossed, check the ref against the record it names. Every step is yours to perform; nothing else reads it. The evidence is the `operator:` stamp on the record the ref names.
 
 0. **Bind it to this run.** The run's state is `<workshop>/run/state.json` (the `--workshop` layout); read it for `runId`. No readable state, or no `runId`, means the ref can't be bound to a run.
-1. **`spine:<anchor uuid>@<answeredAt> by <by>`.** Read the quest with the Spine quest-read tool (`spine_quest`). Its **latest** receipt must have outcome `answered`, its `answer.answeredAt` must equal `<answeredAt>`, and its question must carry this run's correlation prefix `(run <runId>/` after the `[conduct <slug> touch <n>]` tag (the bare tag isn't enough: it is shared by every run of the same goal). The verifier does not replace this prefix check: it reads the run from the question only when `--state` matches a touch that holds a grant, so check the prefix yourself in both modes. Then write the `spine_quest` result body to a temp file and run `verify-receipt --file <temp file> --quest <anchor uuid> --state <workshop>/run/state.json --goal <workshop>/run/goal.md`; the ref is valid only on exit 0 and, configured, with `scopeOk: true` and the printed `grant.runId` equal to `state.json`'s `runId`, or, unconfigured, with `answer.by` equal to `<by>` and beginning `operator:`. Configured, nothing checks the ref's `by <by>`: the signature is the evidence. A superseded receipt (a later one exists), an unanswered one, or one the verifier refuses is not an approval. If a later receipt supersedes the approval, stop: the conductor re-files the touch, an extra touch that the run analysis counts. With no Spine tool to read it, the ref can't be verified.
-2. **`core:<path>`.** The path resolves to a file under `<workshop>/run/touches/`, which exists, parses as JSON, and has one of the two shapes the conductor writes. Run `verify-record --file <the record> --quest <anchor> --goal <workshop>/run/goal.md`, where `<anchor>` is `state.json`'s `intent.anchor`, or `none` for a run with no anchor; the ref is valid only on exit 0 and, configured, with `scopeOk: true` and the printed `grant.runId` equal to `state.json`'s `runId`, or, unconfigured, with the record's `answer.by` beginning `operator:`. Compare the run yourself: `verify-record` checks a grant against its own signed question, never against this run, so another run's valid confirm on the same anchor exits 0 and fails only this comparison. Then validate the record against its own shape:
-   - a touch record `touches/<n>.json` (any `<n>`: a re-asked touch after an ambiguous grant is `touches/2.json`): `status` is `answered`, `tty` is `true`, and `kind` is `preapproval` or the re-ask (`blocked` with a question about the "(c) answer to touch <m>"; any other blocked touch is not an approval). Only a core-only run writes one, and conduct refuses a core-only run once a passkey is configured, so this record is valid only in unconfigured mode, where its `answer.by` must also begin `operator:`;
-   - an authority record `touches/<n>-authority.json` (the checked grant after a "change it" answer): `{ merge, release, budgetUsd, scope, validated: true, touch, grant, answer, confirm? }` with `validated` `true`, a non-empty `scope`, and an `answer` whose `key` is `c`. Conduct writes it when it checks the (c) answer, before the operator confirms it. With a passkey configured, the confirm lands later as `confirm` (`{touch, receiptId, answer, options, grants}`): the operator's signed (a) to the confirm touch, which is what `verify-record` checks. Until it lands the record retains the signed (c) answer without a `confirm`: no verified confirming grant, or `scopeOk: false`, means not a go. This is a pending confirmation, and the gate is not preapproved. In unconfigured mode there is no `confirm`, and the `answer`'s `by` must begin `operator:`.
+1. **`spine:<anchor uuid>@<answeredAt> by <by>`.** Read the quest with the Spine quest-read tool (`spine_quest`). Its **latest** receipt must have outcome `answered`, its `answer.answeredAt` must equal `<answeredAt>`, and its question must carry this run's correlation prefix `(run <runId>/` after the `[conduct <slug> touch <n>]` tag (the bare tag isn't enough: it is shared by every run of the same goal). The ref is valid only when those three checks pass and the receipt's `answer.by` equals `<by>` and begins `operator:`. A superseded receipt (a later one exists) or an unanswered one is not an approval. If a later receipt supersedes the approval, stop: the conductor re-files the touch, an extra touch that the run analysis counts. With no Spine tool to read it, the ref can't be verified.
+2. **`core:<path>`.** The path resolves to a file under `<workshop>/run/touches/`, which exists, parses as JSON, and has one of the two shapes the conductor writes; the ref is valid only when the record matches its shape below and its `answer.by` begins `operator:`:
+   - a touch record `touches/<n>.json` (any `<n>`: a re-asked touch after an ambiguous grant is `touches/2.json`): `status` is `answered`, `tty` is `true`, and `kind` is `preapproval` or the re-ask (`blocked` with a question about the "(c) answer to touch <m>"; any other blocked touch is not an approval). Only a core-only run writes one;
+   - an authority record `touches/<n>-authority.json` (the checked grant after a "change it" answer): `{ merge, release, budgetUsd, scope, validated: true, touch, answer, … }` with `validated` `true`, a non-empty `scope`, and an `answer` whose `key` is `c`.
 
    A file that is missing, unreadable, outside `<workshop>/run/touches/`, of another shape, or with an empty `answer` is not an approval.
    
-   **The answer must approve.** The conductor maps the answer key to authority: `a` approves as proposed, `b` approves with every PR held, `c` approves a checked grant (recorded as the authority record, never as the touch record), and **`d` declines** the run. So a touch record or a Spine answer is an approval only with key `a` or `b`, and an authority record only when its own `answer.key` is `c` (the operator's change-it answer to touch 1). Configured, read the key from the CLI's `answer` (the signed values, not the record's copy); for an authority record that is the confirm's signed key, which must be `a` (Confirm). The two keys belong to two answers: `c` on the record and `a` from the CLI is the approving pair. A decline, or any other key, is a stop.
-3. **Scope.** In configured mode the binding scope comes from the verifier, and only when it prints `scopeOk: true`:
-   - a Spine answer (a) or (b): the goal, whose hash the signed grant carries;
-   - an authority record: the record's `scope`, checked against the hash in the confirm's signed grant.
-
-   `scopeOk` false or absent is a failed check. In unconfigured mode no grant is signed: a touch record or a Spine answer approves the goal as written, and an authority record binds its `scope` field. When the binding scope is the authority record's, keep the goal for context but write the spec, the WPs and every assumption **only inside the scope**. List whatever the goal asks beyond it under an `Out of scope` heading (a short list in `problem-statement.md`, or in lite's Problem section) and never plan it. The goal text stays verbatim: the conductor passes it unchanged even under a narrowed grant. An `[ASSUMPTION: …]` that would widen the scope is not written.
-4. **Any failed check keeps the normal stop** (the gate waits for a person, as without the flag) and prints one line naming the check that failed: `Gate not preapproved: <the check>`, quoting the CLI's `reason` when the verifier refused. An empty value, or one beginning with neither `spine:` nor `core:`, fails step 1 or 2 the same way.
-5. **The gate value.** `meta.json` `gate` is `"preapproved <ref>"` for a verified ref, and `"preapproved <ref> (UNCONFIGURED — answers not signed)"` in unconfigured mode. Every site below that records the gate writes this value. The one line printed for a verified ref names the ref with the same suffix and includes the CLI's JSON line.
+   **The answer must approve.** The conductor maps the answer key to authority: `a` approves as proposed, `b` approves with every PR held, `c` approves a checked grant (recorded as the authority record, never as the touch record), and **`d` declines** the run. So a touch record or a Spine answer is an approval only with key `a` or `b`, and an authority record only when its own `answer.key` is `c` (the operator's change-it answer to touch 1). A decline, or any other key, is a stop.
+3. **Scope.** A touch record or a Spine answer approves the goal as written, and an authority record binds its `scope` field. When the binding scope is the authority record's, keep the goal for context but write the spec, the WPs and every assumption **only inside the scope**. List whatever the goal asks beyond it under an `Out of scope` heading (a short list in `problem-statement.md`, or in lite's Problem section) and never plan it. The goal text stays verbatim: the conductor passes it unchanged even under a narrowed grant. An `[ASSUMPTION: …]` that would widen the scope is not written.
+4. **Any failed check keeps the normal stop** (the gate waits for a person, as without the flag) and prints one line naming the check that failed: `Gate not preapproved: <the check>`. An empty value, or one beginning with neither `spine:` nor `core:`, fails step 1 or 2 the same way.
+5. **The gate value.** `meta.json` `gate` is `"preapproved <ref>"` for a verified ref. Every site below that records the gate writes this value. The one line printed for a verified ref names the ref.
 
 With a verified `--preapproved`:
 - **Deep, Phase 4:** still write and render `review-gate.json`, set `meta.json` `gate` to the gate value (§ *Verifying a `--preapproved` ref*, step 5), print one line naming the ref, and continue to Phase 6 without stopping at `**STOP HERE.**`.
@@ -192,6 +186,7 @@ Run stages 1-4 sequentially. For each stage:
 - Key discipline: Scan your own problem statement for ambiguity flags ("or", "possibly", "might", "TBD", "should consider"). Each real ambiguity becomes a numbered decision (D1, D2...).
 - For each decision: list options, state tradeoffs (one line each), **choose one**, document reasoning.
 - Mark decisions where you're uncertain as `[DECISION: D3 — low confidence, alternatives close]`.
+- **Limits.** When a decision leaves unestablished something a reader could assume it covers, list it under the decision as `Limits:`, one ID each, numbered across the spec: `L1: does not establish <what>`. The WP that ships the decision names its IDs, and its PR body lists them under `Residuals`.
 - Use the `parallel-explore` pattern mentally — consider at least 2 approaches before choosing.
 
 #### Greenfield: attack D1 before ruling it (`--greenfield` only)
@@ -200,7 +195,7 @@ Run stages 1-4 sequentially. For each stage:
 - **Run the lens**: one turn from a model of another vendor family, the same `codex exec` invocation as the blind second read. Save it as `stack-attack-<model>-<YYYY-MM-DD>.md`. It reads the draft on purpose, because attacking the draft is its job.
 - **`Verdict: no credible alternative`**: rule D1 as drafted, and answer the attack's strongest point in D1's reasoning.
 - **`Verdict: credible alternative`**: run 2–3 throwaway spikes of the core loop through `parallel-explore` § Spike mode. The branches are the drafted stack plus each alternative the lens named. Rule D1 from the spike synthesis's measured numbers. Spike code never enters the workshop.
-- **D1 ends with** `Stack attack: <verdict> (<file>)`, plus `Spikes: <synthesis path>; worst case <branches × timeout>, took <wall-clock>` when spikes ran. Phase 9's summary repeats that line. With a verified `--preapproved`, neither step waits for a person. The build's budget gate does not meter the spikes at dispatch; only the spend adapter's first reading counts them, afterwards (`parallel-explore` § Spike mode, *Cost check*).
+- **D1 ends with** `Stack attack: <verdict> (<file>)`, plus `Spikes: <synthesis path>; worst case <branches × timeout>, took <wall-clock>` when spikes ran. Phase 9's summary repeats that line. With a verified `--preapproved`, neither step waits for a person. The build's budget gate does not count the spikes: it sums the build lanes' own cost (the lane-only lower bound), and the spikes are not lanes, so their spend is counted nowhere (`parallel-explore` § Spike mode, *Cost check*).
 - The lens file and the spike synthesis are supporting material, outside the council's required layout. Pass them to Phase 8 as `artifact_paths` so the council sees why D1 holds.
 
 #### Stage 3: Verification
@@ -321,17 +316,12 @@ After the renderer succeeds, point the operator at `review-gate.html` (one line 
 
 **Without `--preapproved`, or when its ref doesn't verify: STOP HERE.** Use the ask rule below. Wait for human input. Do not proceed to decomposition without explicit approval.
 
-**Ask rule for both review gates:** Pose any ask or list of choices as selectable
-options (AskUserQuestion in T3), with the Dogan ask filed too when it needs a
-record; a T3 answer is written back to Spine the same turn. Put the ask key in
-each option label (`a — Full grant, $200`) and the receipt tag in the question
-(`[ask <receiptId>]`) when a Spine ask exists. Use at most four options per
-question; split or collapse a Dogan ask with five or six options. A headless
-lane with no operator present files the Dogan ask only. The T3 ask-mirror hook
-writes a tagged single-choice answer to Spine as `answered` (`by:
-'operator:t3'`) while the ask is still the quest's latest receipt; write a
-conductor receipt quoting the answer only when the hook reports the mirror
-refused or skipped it, or its pending job did not end `answered`.
+**Ask rule for both review gates:** In session, pose any ask or list of choices
+as a plain AskUserQuestion with the recommendation first: the recommended option
+listed first, its label ending "(Recommended)". Use at most four options per
+question. When a quest carries the work, record the ruling in your next Spine
+receipt: the chosen label verbatim, plus the session id. A Spine `needs_input`
+ask is for unattended runs.
 
 ### Phase 5: Revision (if needed)
 
@@ -548,7 +538,7 @@ A single document with four concise sections:
 {2-4 paragraphs. What we're solving, why, and the current state. Ground in real file paths.}
 
 ## Decisions
-{Numbered D1, D2... Only real ambiguities — not exhaustive. For each: options considered, choice made, one-line reasoning.}
+{Numbered D1, D2... Only real ambiguities — not exhaustive. For each: options considered, choice made, one-line reasoning, and `Limits:` (`L1: does not establish <what>`) when the choice leaves something unestablished.}
 
 ## Verification
 {For each decision: how an observer confirms it was implemented correctly. Concrete commands or observable behavior.}
