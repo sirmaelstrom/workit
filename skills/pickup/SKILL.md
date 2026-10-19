@@ -172,7 +172,9 @@ where the spec file holds the receipt's id, the id of the quest it is filed on
 the target `<owner/repo>#<n>` and the run's name. `post` also mints the
 comment's URL on that quest as an `evidence` url labelled `ask <receipt id>`,
 which the Dogan's Asks list links to; `linked: false` in its output means
-Observatory missed the mint, and the next `post` or `poll` mints it again. The operator replies from any
+Observatory missed the mint, and the next `post` or `poll` mints it again,
+except with `linkError: "no_quest"`: the spec has no `questId`, so nothing is
+minted until you add it. The operator replies from any
 device with the option letter alone on the first line; notes, a typed answer
 included, go on the lines below and become the answer's `text`. Then run
 `github-ask.mjs poll --spec <file> --once`, once per re-entry: it finds that

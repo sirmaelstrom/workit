@@ -265,8 +265,8 @@ test('post: a malformed spec is a usage error (exit 2) and posts nothing', async
     { ...SPEC, recommended: 'c' },
     { ...SPEC, allowFreeText: 'yes' },
     { ...SPEC, run: '' },
-    { ...SPEC, questId: undefined },
     { ...SPEC, questId: 'quest-1' },
+    { ...SPEC, questId: 42 },
   ];
   for (const spec of cases) {
     const result = await main(['post', '--spec', 'x.json'], deps(fake.gh, { readFile: () => JSON.stringify(spec) }));
@@ -312,6 +312,33 @@ test('post mint: a re-post mints the same (type, locator) again, so a missed min
   assert.equal(obs.links.length, 2);
   assert.deepEqual(obs.links[0].body, obs.links[1].body);
   assert.deepEqual([...obs.rows], [`url https://github.com/o/r/issues/7#issuecomment-1001 ${QUEST}`]);
+});
+
+test('post legacy: a pending spec written before questId posts (exit 0) with linked false and the warning; a spec with questId still links', async (t) => {
+  const obs = await fakeObservatory(t, () => [500, {}]);
+  const { questId, ...legacy } = SPEC;
+  const fake = fakeGh();
+  const d = deps(fake.gh, { readFile: () => JSON.stringify(legacy) });
+  const result = await main(['post', '--spec', 's.json', '--observatory', obs.base], d);
+  assert.deepEqual([result.status, EXIT[result.status], result.linked, result.linkError, result.warning], ['posted', 0, false, 'no_quest', 'no questId in spec; ask link not recorded']);
+  assert.equal(fake.posts().length, 1);
+  assert.equal(obs.links.length, 0);
+  assert.ok(d.logs.includes('no questId in spec; ask link not recorded'));
+  const linked = await main(['post', '--spec', 's.json', '--observatory', obs.base], deps(fakeGh().gh, { readFile: () => JSON.stringify({ ...legacy, questId }) }));
+  assert.deepEqual([linked.status, linked.linked, obs.links.length], ['posted', true, 1]);
+});
+
+test('poll mint: an --ask-comment that 404s or is not this ask\'s mints nothing; this ask\'s comment mints once', async (t) => {
+  const obs = await fakeObservatory(t, () => recorded());
+  const missing = await poll(pollOpts(obs.base, { quest: QUEST, askComment: 'https://github.com/o/r/issues/7#issuecomment-999' }), deps(fakeGh([askComment()]).gh));
+  assert.deepEqual([missing.status, missing.linked, missing.linkError, obs.links.length], ['error', false, 'ask_comment_unread', 0]);
+  const other = await poll(pollOpts(obs.base, { quest: QUEST }), deps(fakeGh([askComment(500, askBody({ ...SPEC, askReceiptId: OTHER_ASK }))]).gh));
+  assert.deepEqual([other.status, other.linked, other.linkError, obs.links.length], ['waiting', false, 'not_this_ask', 0]);
+  const plain = await poll(pollOpts(obs.base, { quest: QUEST }), deps(fakeGh([askComment(500, 'just a comment')]).gh));
+  assert.deepEqual([plain.linked, plain.linkError, obs.links.length], [false, 'not_this_ask', 0]);
+  const real = await poll(pollOpts(obs.base, { quest: QUEST }), deps(fakeGh([askComment()]).gh));
+  assert.deepEqual([real.status, real.linked], ['waiting', true]);
+  assert.deepEqual(obs.links.map((l) => [l.url, l.body]), [[`/api/spine/quests/${QUEST}/update`, { artifacts: [askArtifact(ASK, askUrl)] }]]);
 });
 
 test('poll mint: with the spec\'s quest, poll mints the ask comment once before its pass, and a failed mint changes nothing else', async (t) => {

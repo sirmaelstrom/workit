@@ -14,7 +14,9 @@
  *          read-only Asks list links to. The mint is idempotent per (type,
  *          locator), so post and poll both run it; when Observatory is down
  *          the post still succeeds with `linked: false`, and the next post or
- *          poll mints it again.
+ *          poll mints it again. A spec with no questId (one written before the
+ *          field existed) posts too, with `linked: false`, `linkError:
+ *          'no_quest'` and a warning.
  *   poll —find the operator's reply after the ask and record it through
  *          Observatory's `POST /api/spine/answers/github` route, which fetches
  *          the comment itself and writes the `answered` receipt
@@ -48,7 +50,10 @@
  *     [--quest <questId>] [--operator <login>] [--interval <s>] [--timeout <s>] [--once] [--observatory <base URL>]
  *     With --spec, the ask comment is the one `post` left on the spec's target.
  *     With a quest (the spec's questId, or --quest), poll mints the ask
- *     comment's URL on it once before its first pass, as post does.
+ *     comment's URL on it once before its first pass, as post does, after it
+ *     has read the comment and found this ask's marker or tag on it. A
+ *     comment it cannot read or that is not this ask's mints nothing
+ *     (`linkError` `ask_comment_unread` or `not_this_ask`).
  *
  * Prints one JSON line on stdout; progress goes to stderr. `status` and the
  * exit code are what a caller branches on. `linked` (and `linkError` when it
@@ -137,6 +142,7 @@ const ASK_CLOSED = new Set(['no_open_ask', 'stale_ask']);
 const NOT_FOUND_PASSES = 3;
 const MAX_BACKOFF_S = 900;
 const FETCH_TIMEOUT_MS = 10000;
+const NO_QUEST_WARNING = 'no questId in spec; ask link not recorded';
 
 const askMarker = (askReceiptId) => `<!-- workit:github-ask ask=${askReceiptId.toLowerCase()} -->`;
 const followUpMarker = (askReceiptId, replyId) => `<!-- workit:github-ask follow-up ask=${askReceiptId.toLowerCase()} reply=${replyId} -->`;
@@ -192,11 +198,14 @@ export function followUpBody(askReceiptId, reply, code, { quote = false } = {}) 
 
 export function validateSpec(spec) {
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new UsageError('the spec is not a JSON object');
-  for (const field of ['askReceiptId', 'questId', 'question', 'target', 'run']) {
+  for (const field of ['askReceiptId', 'question', 'target', 'run']) {
     if (typeof spec[field] !== 'string' || spec[field].trim() === '') throw new UsageError(`spec.${field} is missing`);
   }
   if (!UUID_RE.test(spec.askReceiptId)) throw new UsageError('spec.askReceiptId is not a receipt uuid');
-  if (!QUEST_RE.test(spec.questId)) throw new UsageError('spec.questId is not a quest uuid or an 8+ char short id');
+  // A spec written before questId existed still posts; it is just not linked.
+  if (spec.questId !== undefined && (typeof spec.questId !== 'string' || !QUEST_RE.test(spec.questId))) {
+    throw new UsageError('spec.questId is not a quest uuid or an 8+ char short id');
+  }
   if (!TARGET_RE.test(spec.target) && !REPO_RE.test(spec.target)) throw new UsageError('spec.target is not <owner/repo>#<number> or <owner/repo>');
   if (REPO_RE.test(spec.target) && (typeof spec.issue?.key !== 'string' || !spec.issue.key.trim() || typeof spec.issue?.title !== 'string' || !spec.issue.title.trim())) {
     throw new UsageError('an <owner/repo> target needs spec.issue {key, title}: the run\'s asks issue');
@@ -335,6 +344,10 @@ export function askArtifact(askReceiptId, askCommentUrl) {
 // Mints the ask comment on its quest. A failure is reported, not thrown: the
 // ask is on GitHub either way, and the next post or poll mints it again.
 async function link(deps, base, questId, askReceiptId, askCommentUrl) {
+  if (!questId) {
+    deps.log?.(NO_QUEST_WARNING);
+    return { linked: false, linkError: 'no_quest', warning: NO_QUEST_WARNING };
+  }
   if (!base) return { linked: false, linkError: 'no_observatory' };
   const result = await sendJson(deps, `${base.replace(/\/+$/, '')}/api/spine/quests/${encodeURIComponent(questId)}/update`, { artifacts: [askArtifact(askReceiptId, askCommentUrl)] });
   if (result.http === 200) return { linked: true };
@@ -449,13 +462,20 @@ export async function poll(opts, deps) {
   const ask = parseCommentUrl(opts.askComment);
   if (!ask) throw new UsageError('--ask-comment is not an issue comment URL (…/issues|pull/<n>#issuecomment-<id>)');
   opts = { ...opts, ask: opts.ask.toLowerCase() };
-  // The mint post may have missed, once per poll: a mint already made is a no-op.
-  const linked = opts.quest ? await link(deps, opts.observatory, opts.quest, opts.ask, opts.askComment) : {};
   let askComment;
   try {
     askComment = JSON.parse(deps.gh(['api', `repos/${ask.owner}/${ask.repo}/issues/comments/${ask.commentId}`]));
   } catch (err) {
-    return { status: 'error', error: `the ask comment could not be read: ${String(err?.stderr || err?.message || err).trim().slice(0, 300)}`, ...linked };
+    return { status: 'error', error: `the ask comment could not be read: ${String(err?.stderr || err?.message || err).trim().slice(0, 300)}`, ...(opts.quest ? { linked: false, linkError: 'ask_comment_unread' } : {}) };
+  }
+  // The mint post may have missed, once per poll: a mint already made is a no-op.
+  // Minted only once the comment is read and is this ask's, so a stale or
+  // mistyped --ask-comment leaves no pointer on the quest.
+  let linked = {};
+  if (opts.quest) {
+    linked = asksFor(askComment, opts.ask)
+      ? await link(deps, opts.observatory, opts.quest, opts.ask, askComment.html_url ?? opts.askComment)
+      : { linked: false, linkError: 'not_this_ask' };
   }
   const state = { ask, askCreatedAt: askComment.created_at, operator, seen: new Set(), notFound: new Map() };
   return { ...(await watch(opts, deps, state)), ...linked };
