@@ -488,8 +488,11 @@ escalation under `burn-down` § Per item step 3.
 session or conductor). Observatory's pr-review beat follows it too
 (observatory#765, deployed 2026-09-28): it asks `rounds` (under Managed
 repositories) before it claims, runs round two as a delta pass, and records a
-later head as `capped` without claiming it. Both callers read the rounds from
-the same code.
+later head as `capped` without claiming it. Conduct's land phase asks `rounds`
+too, when a claim is refused as already reviewed (`recoverAction`), and imports
+the escalation and rebase-mapping helpers from `pr-review-rounds.mjs` in
+process. The cap has one implementation, that module; manual T1 follows it by
+running `rounds` itself, which nothing enforces.
 
 When every thread has a verdict and CI is green, the PR is ready to merge. Inside
 a pre-approved run, the conductor merges; outside one, merging is the operator's

@@ -1,6 +1,6 @@
 ---
 name: failure-audit
-description: "Use when auditing newly archived agent-session transcripts for delta failure modes. Trigger on '/failure-audit', 'failure audit', 'audit the new transcripts', 'delta audit'. NOT for scheduled runs or continuous scanning; use operator-pulled spot checks."
+description: "Audit newly archived agent-session transcripts for delta failure modes. User-invoked: /failure-audit. NOT for scheduled runs or continuous scanning; use operator-pulled spot checks."
 disable-model-invocation: true
 ---
 

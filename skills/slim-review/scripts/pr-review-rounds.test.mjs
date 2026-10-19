@@ -98,6 +98,25 @@ test('a patch-identical rebase reads reviewed, with rebased_from naming the revi
   assert.deepEqual([capped.answer.round, capped.answer.rebased_from, capped.answer.problem], ['reviewed', reviewed, null]);
 });
 
+test('a patch-identical rebase keeps a pending delta escalation (two P1/P2 defects) on the wire', () => {
+  // Ported from babysit's 'a qualifying delta still blocks on a patch-identical
+  // rebase': the rebase maps the head back to the reviewed delta head, and the
+  // council it owes stays owed. Conduct's recoverAction reads `escalate` here.
+  const { dir, c1, c2: reviewed } = prOnMain();
+  advanceMain(dir, 'c.txt', 'c.txt line 1', 'c.txt line 1 (main)');
+  git(dir, ['rebase', '-q', 'main']);
+  const rebased = head(dir);
+  const owed = { ...delta(reviewed, c1), majorFindings: 2 };
+  const r = round(dir, [full(c1), owed], rebased);
+  assert.equal(r.rawTail.status, 'diverged', 'the compare from the reviewed delta head diverged');
+  assert.deepEqual([r.answer.round, r.answer.rebased_from, r.answer.rebase?.kind], ['reviewed', reviewed, 'identical']);
+  assert.deepEqual([r.answer.escalate, r.answer.major_findings], ['t2-council', 2], JSON.stringify(r.answer));
+
+  // A recorded council round on the delta is what clears it, not the rebase.
+  const cleared = round(dir, [full(c1), { ...owed, councilRoundId: 'run/WP-01/3' }], rebased);
+  assert.equal(cleared.answer.escalate, undefined, JSON.stringify(cleared.answer));
+});
+
 test('a rebase with one conflict-resolution hunk: the delta is exactly that commit, since its parent', () => {
   const { dir, c2: reviewed } = prOnMain();
   // main edits the line the PR's second commit edits, so the rebase conflicts there.

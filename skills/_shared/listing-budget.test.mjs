@@ -155,7 +155,30 @@ test('the exclusion is not vacuous: the repo has user-invoked skills and the gua
 // its own per-skill policy file instead. Without the pair a user-invoked skill
 // is still implicitly loaded in Codex sessions (slim-review's lenses loaded
 // `review` on their own).
-const CODEX_POLICY_RE = /^\s*allow_implicit_invocation:\s*false\s*$/m;
+//
+// The key counts where Codex reads it: `allow_implicit_invocation: false` as a
+// direct child of a top-level `policy:` block. A root-level key, one under
+// another parent, or any `allow_implicit_invocation` under `policy:` whose
+// value is not `false` is a problem. There is no YAML parser in this repo, so
+// the block is read by indentation, and a flow mapping (`policy: {…}`) is
+// refused rather than parsed.
+export function codexPolicyProblem(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim() && !l.trimStart().startsWith('#'));
+  const tops = lines.flatMap((l, i) => (/^policy:\s*(#.*)?$/.test(l) ? [i] : []));
+  if (tops.length !== 1) return tops.length ? 'has more than one top-level policy:' : 'has no top-level policy: block';
+  const block = [];
+  for (const l of lines.slice(tops[0] + 1)) {
+    if (!/^\s/.test(l)) break;
+    block.push(l);
+  }
+  const indent = (l) => l.length - l.trimStart().length;
+  const keys = block
+    .filter((l) => /^\s*allow_implicit_invocation\s*:/.test(l))
+    .map((l) => ({ at: indent(l), value: l.replace(/^\s*allow_implicit_invocation\s*:\s*/, '').replace(/\s+#.*$/, '').trim() }));
+  if (keys.some((k) => k.value !== 'false')) return 'sets allow_implicit_invocation under policy: to something other than false';
+  if (!block.length || !keys.some((k) => k.at === indent(block[0]))) return 'lacks policy.allow_implicit_invocation: false';
+  return null;
+}
 
 export function codexPolicyProblems(skillsDir) {
   const problems = [];
@@ -164,8 +187,12 @@ export function codexPolicyProblems(skillsDir) {
     const file = join(skillsDir, e.name, 'SKILL.md');
     if (!existsSync(file) || readListingRow(file).listed) continue;
     const policy = join(skillsDir, e.name, 'agents', 'openai.yaml');
-    if (!existsSync(policy)) problems.push(`${e.name}: no agents/openai.yaml`);
-    else if (!CODEX_POLICY_RE.test(readFileSync(policy, 'utf8'))) problems.push(`${e.name}: agents/openai.yaml lacks allow_implicit_invocation: false`);
+    if (!existsSync(policy)) {
+      problems.push(`${e.name}: no agents/openai.yaml`);
+      continue;
+    }
+    const problem = codexPolicyProblem(readFileSync(policy, 'utf8'));
+    if (problem) problems.push(`${e.name}: agents/openai.yaml ${problem}`);
   }
   return problems;
 }
@@ -192,9 +219,42 @@ test('the Codex policy guard fails on a user-invoked skill with no policy or a t
     skill('bare', 'disable-model-invocation: true\n');
     skill('allowed', 'disable-model-invocation: true\n', 'policy:\n  allow_implicit_invocation: true\n');
     assert.deepEqual(codexPolicyProblems(dir).sort(), [
-      'allowed: agents/openai.yaml lacks allow_implicit_invocation: false',
+      'allowed: agents/openai.yaml sets allow_implicit_invocation under policy: to something other than false',
       'bare: no agents/openai.yaml',
     ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the Codex policy guard refuses a false that sits outside policy: or beside a true', () => {
+  const refused = {
+    'root-level': 'allow_implicit_invocation: false\n',
+    'wrong parent': 'interface:\n  allow_implicit_invocation: false\n',
+    'true plus unrelated false': 'policy:\n  allow_implicit_invocation: true\nother:\n  allow_implicit_invocation: false\n',
+    'nested too deep': 'policy:\n  other: 1\n  inner:\n    allow_implicit_invocation: false\n',
+    'flow mapping': 'policy: { allow_implicit_invocation: false }\n',
+    'two policy blocks': 'policy:\n  allow_implicit_invocation: false\npolicy:\n  allow_implicit_invocation: true\n',
+  };
+  for (const [label, text] of Object.entries(refused)) {
+    assert.notEqual(codexPolicyProblem(text), null, `${label} passed the guard:\n${text}`);
+  }
+  for (const text of [
+    'policy:\n  allow_implicit_invocation: false\n',
+    '# a comment\npolicy:\n  allow_implicit_invocation: false  # user-invoked\n',
+    'interface:\n  display_name: x\npolicy:\n  allow_implicit_invocation: false\n',
+  ]) {
+    assert.equal(codexPolicyProblem(text), null, text);
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'codex-policy-'));
+  try {
+    for (const [label, text] of Object.entries(refused)) {
+      const id = label.replace(/\s+/g, '-');
+      mkdirSync(join(dir, id, 'agents'), { recursive: true });
+      writeFileSync(join(dir, id, 'SKILL.md'), `---\nname: ${id}\ndescription: "Ten chars."\ndisable-model-invocation: true\n---\n\nbody\n`);
+      writeFileSync(join(dir, id, 'agents', 'openai.yaml'), text);
+    }
+    assert.equal(codexPolicyProblems(dir).length, Object.keys(refused).length, codexPolicyProblems(dir).join('\n'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
