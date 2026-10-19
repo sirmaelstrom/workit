@@ -178,9 +178,13 @@ reply and records it through Observatory as an `answered` receipt from
 - 7, no reply yet: end the turn, and run it again on the next re-entry. Never
   run the blocking form in a turn that should end.
 - 3, the ask was answered another way or replaced: read it back.
+- 8, no operator login: tell the operator to set
+  `OBSERVATORY_OPERATOR_GITHUB_LOGIN` to their GitHub login in the Claude Code
+  `settings.json` `env` block, and stop. It is configuration, not a reply, so
+  nothing moves until it is set.
 - 4 (not the operator's), 5 (Observatory unconfigured), 6 (the route refused
-  it), 1 (gh failed) or 2 (bad arguments, or no operator login): report the
-  printed status and error to the operator, and stop.
+  it), 1 (gh failed) or 2 (a malformed spec or argument): report the printed
+  status and error to the operator, and stop.
 
 poll counts only comments by the login in `OBSERVATORY_OPERATOR_GITHUB_LOGIN`
 (or `--operator`). That filter is a convenience; Observatory's own check of the

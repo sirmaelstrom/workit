@@ -415,6 +415,9 @@ async function record(tokens, deps) {
     // A refused answer (not operator-attributed) is recorded as a refusal:
     // exit 3, no authority, and the next action re-files the touch.
     if (outcome?.refused) return { code: 3, out: { ok: false, refused: outcome.refused, recorded: id, phase: state.phase, action: next } };
+    // A failed step recorded as a failure (a touch's post): its count is
+    // saved, the exit is 2, and the next action retries or hands back.
+    if (outcome?.failed) return { code: 2, out: { ok: false, error: outcome.failed, recorded: id, phase: state.phase, action: next } };
     return { out: { ok: true, phase: state.phase, action: next } };
   }, { duringRotation: true });
 }

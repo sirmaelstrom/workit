@@ -92,7 +92,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    once each time the run comes back to the item, finds the reply and records
    it as an `answered` receipt from `operator:github`, which supersedes the ask
    and puts the quest back on the frontier; exit 7 means no reply yet, so park
-   the item and go on. The login filter in poll is a convenience, and
+   the item and go on; exit 8 means no operator login is configured, so stop
+   and tell the operator to set `OBSERVATORY_OPERATOR_GITHUB_LOGIN` in the
+   Claude Code `settings.json` `env` block. The login filter in poll is a convenience, and
    Observatory's check of the operator login is the authority. Options buried
    in the question prose can't be answered by letter. The Dogan lists waiting
    asks read-only.

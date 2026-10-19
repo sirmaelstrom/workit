@@ -238,7 +238,8 @@ function shellResult(h, action) {
   if (command[0] === 'node' && command[1].endsWith('lane.mjs')) return herdrVerb(h, action);
   // github-ask post: the touch's comment on the run's asks issue.
   if (command[0] === 'node' && command[1].endsWith('github-ask.mjs')) {
-    return ok(JSON.stringify({ status: 'posted', existing: false, target: 'o/r#9', askCommentUrl: `https://github.com/o/r/issues/9#issuecomment-${900 + action.touch.n}`, askCommentId: 900 + action.touch.n }));
+    const { askReceiptId } = JSON.parse(readFileSync(command.at(-1), 'utf8'));
+    return ok(JSON.stringify({ status: 'posted', existing: false, askReceiptId, target: 'o/r#9', askCommentUrl: `https://github.com/o/r/issues/9#issuecomment-${900 + action.touch.n}`, askCommentId: 900 + action.touch.n }));
   }
   switch (action.part ? `${action.step}/${action.part}` : action.step) {
     case 'base': return ok(`${BASE}\n`);

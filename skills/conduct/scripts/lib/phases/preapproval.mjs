@@ -126,7 +126,7 @@ export function next(state, deps) {
       instruction: `Write ${outPath} = { "merge": <bool>, "release": <bool>, "budgetUsd": <number>, "scope": "<the goal, or the narrowing the text states>" } from the operator's text, each field no wider than option (a) ${JSON.stringify(proposal(state))}; write { "ambiguous": true, "why": "<which field the text does not settle>" } when it does not settle a field. Then record this action with {}. The operator's text: ${touch.answer.text ?? '(none)'}`,
     };
   }
-  return touchAction(state, touch);
+  return touchAction(state, touch, deps);
 }
 
 function readGrant(path, deps) {

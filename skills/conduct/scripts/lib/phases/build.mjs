@@ -1438,7 +1438,7 @@ function workAction(state, deps) {
   }
   if (spineOn(state)) {
     for (const touch of openBuildTouches(state)) {
-      const spec = touchAction(state, touch);
+      const spec = touchAction(state, touch, deps);
       // A waiting touch is re-read by the yield below, or handed back when idle.
       if (spec && !spec.handBack) return spec;
     }

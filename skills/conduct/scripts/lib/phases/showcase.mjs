@@ -154,7 +154,7 @@ export function next(state, deps) {
   }, deps);
   if (touch.status === 'answered') return apply(state, touch, deps);
   // One filed touch at a time (spine): a touch filed earlier is read back first.
-  const spec = touchAction(state, touch) ?? touchAction(state, state.touches.find((other) => other !== touch && other.status === 'filed'));
+  const spec = touchAction(state, touch, deps) ?? touchAction(state, state.touches.find((other) => other !== touch && other.status === 'filed'), deps);
   if (!spec) throw new ConductError(2, `the showcase touch ${touch.n} has no action to emit`);
   return spec;
 }

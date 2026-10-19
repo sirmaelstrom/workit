@@ -4,6 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { askBody, carriesUnquotedTag, EXIT, GRAMMAR, main, poll, post } from './github-ask.mjs';
@@ -202,6 +204,37 @@ test('post --spec: the opened asks issue\'s number goes into the spec file, so a
   assert.equal(JSON.parse(file).target, 'o/r#40');
 });
 
+test('post --spec: the asks issue is pinned before the comment, so a run whose reconciliation read fails is retried into the same issue: one issue, one ask', async () => {
+  const fake = fakeGh();
+  let lists = 0;
+  // GitHub's issue list never shows the new issue, and run 1's second comment listing fails.
+  const flaky = (args, opts) => {
+    const path = args.find((arg) => arg.startsWith('repos/')) ?? '';
+    if (/issues\?state=all/.test(path)) return '';
+    if (/\/comments\?/.test(path) && !args.includes('POST') && (lists += 1) === 2) throw Object.assign(new Error('read fail'), { stderr: 'read fail' });
+    return fake.gh(args, opts);
+  };
+  let file = JSON.stringify({ ...SPEC, target: 'o/r', issue: { key: 'conduct demo abcd1234', title: 'asks' } });
+  const d = deps(flaky, { readFile: () => file, writeFile: (path, text) => { file = text; } });
+  const first = await main(['post', '--spec', 's.json'], d);
+  assert.deepEqual([first.status, first.error, JSON.parse(file).target], ['error', 'read fail', 'o/r#40']);
+  const second = await main(['post', '--spec', 's.json'], d);
+  assert.deepEqual([second.status, second.target, second.existing], ['posted', 'o/r#40', true]);
+  assert.equal(fake.issues.length, 1);
+  assert.deepEqual(fake.comments.filter((c) => c.body.includes(`[ask ${ASK}]`)).map((c) => c.issue), [40]);
+});
+
+test('post: a concurrent poster deletes its own comment only when it sees a lower-id one; a higher-id match alone never deletes ours', async () => {
+  // Our comment (1001) is not in the listing yet; a racer's later 1002 is.
+  const fake = fakeGh([], {
+    visible: (c) => c.id !== 1001,
+    onPost: (comment, all) => { if (comment.id === 1001) all.push({ id: 1002, body: askBody(SPEC), created_at: '2026-10-19T15:02:00Z', login: OPERATOR, type: 'User', app: false, issue: 7 }); },
+  });
+  const result = await post(SPEC, deps(fake.gh));
+  assert.deepEqual([result.existing, result.askCommentId], [false, 1001]);
+  assert.equal(fake.deletes().length, 0);
+});
+
 test('post: a malformed spec is a usage error (exit 2) and posts nothing', async () => {
   const fake = fakeGh();
   const cases = [
@@ -260,7 +293,7 @@ test('poll: skips comments before the ask, other authors, apps, its own marker a
   assert.deepEqual(obs.seen.map((s) => s.body.commentUrl), ['https://github.com/o/r/issues/7#issuecomment-505']);
 });
 
-test('poll: the operator is the configured login, never the ask comment\'s author; none configured is a usage error', async (t) => {
+test('poll: the operator is the configured login, never the ask comment\'s author; none configured is no_operator', async (t) => {
   // The ask was posted by a bot account; the operator's reply is still the one submitted.
   const fake = fakeGh([askComment(500, askBody(SPEC)), reply(501, 'a', { login: 'workit-bot' }), reply(502, 'b')]);
   fake.comments[0].login = 'workit-bot';
@@ -269,8 +302,8 @@ test('poll: the operator is the configured login, never the ask comment\'s autho
   assert.equal(viaEnv.status, 'answered');
   assert.deepEqual(obs.seen.map((s) => s.body.commentUrl), ['https://github.com/o/r/issues/7#issuecomment-502']);
   const none = await main(['poll', '--ask', ASK, '--ask-comment', askUrl, '--once', '--observatory', obs.base], deps(fake.gh));
-  assert.equal(none.status, 'usage');
-  assert.match(none.error, /pass --operator <login> or set OBSERVATORY_OPERATOR_GITHUB_LOGIN/);
+  assert.equal(none.status, 'no_operator');
+  assert.match(none.error, /set OBSERVATORY_OPERATOR_GITHUB_LOGIN/);
 });
 
 test('poll: a reply that is not a ruling gets one follow-up restating the grammar, and the next reply is recorded', async (t) => {
@@ -326,6 +359,63 @@ test('poll: a follow-up goes only to a reply bound to this ask that reads as an 
   assert.equal((await poll(pollOpts(obs.base), deps(fake.gh))).status, 'waiting');
   const replied = fake.posts().map((call) => /reply=(\d+)/.exec(JSON.parse(call.input).body)[1]);
   assert.deepEqual(replied, ['505']);
+});
+
+test('poll: under an ask posted as an app, a letter reply (400 no_ask_tag) and an attempt (422) each get a follow-up saying to quote the tag, and the quoted reply is recorded', async (t) => {
+  const fake = fakeGh([
+    { ...askComment(), login: 'workit-helper[bot]', type: 'Bot', app: true },
+    reply(501, 'b.'),
+    reply(502, 'b'),
+  ]);
+  const obs = await fakeObservatory(t, (body) => (body.commentUrl.endsWith('-501') ? [422, { error: 'not_a_ruling', message: 'no' }]
+    : body.commentUrl.endsWith('-502') ? [400, { error: 'no_ask_tag', message: 'no operator ask comment comes before it' }]
+      : recorded()));
+  const d = deps(fake.gh);
+  assert.equal((await poll(pollOpts(obs.base), d)).status, 'waiting');
+  const followUps = fake.posts().map((call) => JSON.parse(call.input).body);
+  assert.deepEqual(followUps.map((body) => /reply=(\d+)/.exec(body)[1]), ['501', '502']);
+  for (const body of followUps) assert.ok(body.includes(`\`> [ask ${ASK}]\``), body);
+  fake.comments.push(reply(503, `> [ask ${ASK}]\nb`, { login: OPERATOR, type: 'User', app: false, issue: 7 }));
+  const result = await poll(pollOpts(obs.base), d);
+  assert.equal(result.status, 'answered');
+  assert.equal(result.commentUrl, 'https://github.com/o/r/issues/7#issuecomment-503');
+});
+
+test('poll: a 404 comment_not_found is retried on later passes, earliest reply first, and skipped after three', async (t) => {
+  const fake = fakeGh([askComment(), reply(501, 'a')]);
+  let calls = 0;
+  const obs = await fakeObservatory(t, () => ((calls += 1) === 1 ? [404, { error: 'comment_not_found', message: 'not yet' }] : recorded('a')));
+  const result = await poll(pollOpts(obs.base, { once: false, interval: 10 }), deps(fake.gh));
+  assert.equal(result.status, 'answered');
+  assert.deepEqual(obs.seen.map((s) => s.body.commentUrl.slice(-3)), ['501', '501']);
+
+  const gone = fakeGh([askComment(), reply(501, 'a'), reply(502, 'b')]);
+  const obs2 = await fakeObservatory(t, (body) => (body.commentUrl.endsWith('-501') ? [404, { error: 'comment_not_found', message: 'gone' }] : recorded()));
+  const after = await poll(pollOpts(obs2.base, { once: false, interval: 10 }), deps(gone.gh));
+  assert.equal(after.status, 'answered');
+  assert.deepEqual(obs2.seen.map((s) => s.body.commentUrl.slice(-3)), ['501', '501', '501', '502']);
+});
+
+test('cli: no operator login exits 8 naming the variable and where to set it; a malformed spec still exits 2 with its own message', () => {
+  const env = { ...process.env, OBSERVATORY_OPERATOR_GITHUB_LOGIN: '' };
+  const none = spawnSync(process.execPath, [SCRIPT, 'poll', '--ask', ASK, '--ask-comment', askUrl, '--once'], { encoding: 'utf8', env });
+  assert.equal(none.status, 8, none.stdout);
+  const printed = JSON.parse(none.stdout);
+  assert.deepEqual([printed.status, printed.variable], ['no_operator', 'OBSERVATORY_OPERATOR_GITHUB_LOGIN']);
+  assert.match(printed.error, /set OBSERVATORY_OPERATOR_GITHUB_LOGIN to the operator's GitHub login .* in the Claude Code settings\.json `env` block/);
+  const dir = mkdtempSync(join(tmpdir(), 'github-ask-spec-'));
+  try {
+    const specPath = join(dir, 'spec.json');
+    writeFileSync(specPath, JSON.stringify({ ...SPEC, askReceiptId: 'not-a-uuid' }));
+    for (const argv of [['post', '--spec', specPath], ['poll', '--spec', specPath, '--once']]) {
+      const bad = spawnSync(process.execPath, [SCRIPT, ...argv], { encoding: 'utf8', env });
+      assert.equal(bad.status, 2, `${argv[0]}: ${bad.stdout}`);
+      assert.equal(JSON.parse(bad.stdout).status, 'usage');
+      assert.doesNotMatch(JSON.parse(bad.stdout).error, /OBSERVATORY_OPERATOR_GITHUB_LOGIN/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('poll: 409 no_open_ask and stale_ask, 403 and 503 stop with their status; another 4xx is refused', async (t) => {

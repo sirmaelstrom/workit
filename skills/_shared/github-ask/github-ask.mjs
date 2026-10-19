@@ -32,8 +32,11 @@
  *     already says so; no option is marked by its position.
  *     An <owner/repo> target is the run's asks issue on that repo: the issue
  *     whose body carries the spec's issue key, opened the first time. post
- *     then writes the issue's number into the spec file's target, because
- *     GitHub's issue list trails a new issue by seconds.
+ *     writes the issue's number into the spec file's target before it posts
+ *     the comment, because GitHub's issue list trails a new issue by seconds:
+ *     a re-run after any later failure goes to that issue and finds the
+ *     comment there by its tag. With `--spec -` there is no file to pin, so
+ *     a re-run may open a second issue.
  *   node github-ask.mjs poll (--spec <file.json> | --ask <askReceiptId> --ask-comment <ask comment URL>)
  *     [--operator <login>] [--interval <s>] [--timeout <s>] [--once] [--observatory <base URL>]
  *     With --spec, the ask comment is the one `post` left on the spec's target.
@@ -42,12 +45,15 @@
  * exit code are what a caller branches on:
  *   0 posted (post) · answered (poll; `duplicate: true` when the route had it already)
  *   1 error: gh or the ask comment could not be read
- *   2 usage: bad arguments or spec, or no operator login configured
+ *   2 usage: bad arguments or spec
  *   3 conflict: 409 `no_open_ask` or `stale_ask`, the ask itself is closed or replaced
  *   4 not_operator: 403
  *   5 unconfigured: 503, Observatory has no operator login or no GitHub token
  *   6 refused: any other 4xx from the route (the body's `error` is in `code`)
  *   7 waiting (--once) or timeout: no reply recorded yet; the ask stays open
+ *   8 no_operator: poll has no operator login (--operator, or
+ *     OBSERVATORY_OPERATOR_GITHUB_LOGIN in the Claude Code settings.json `env`
+ *     block); `variable` names it. Configuration, not a bad spec: hand back.
  *
  * Who counts as the operator. poll submits comments by the configured
  * operator login (--operator, else OBSERVATORY_OPERATOR_GITHUB_LOGIN, the
@@ -67,14 +73,26 @@
  * when the reply is bound to this ask (it quotes the tag, or this ask is the
  * last one before it in the thread) and reads as an attempt at it, poll posts
  * one short follow-up restating the grammar under it, unless one is already
- * there. Observatory unreachable, 502 or another 5xx: the reply is retried on
- * the next pass with backoff (spec-lite D4, Spine down: nothing is spooled;
- * the comment on GitHub keeps the authority).
+ * there. The route binds by thread only to an ask comment posted as the
+ * operator. When the ask was posted as another account or an app, a letter
+ * reply under it is 400 `no_ask_tag`: poll skips it and its follow-up says to
+ * quote the ask's tag line. A 404 `comment_not_found` is retried on the next
+ * pass, up to three, before the reply is skipped. Observatory unreachable,
+ * 502 or another 5xx: the reply is retried on the next pass with backoff
+ * (spec-lite D4, Spine down: nothing is spooled; the comment on GitHub keeps
+ * the authority).
  *
  * Races. Two posts of one ask at once can both create a comment: each re-reads
- * the thread after posting, the earliest comment wins, and the later poster
- * deletes its own. Opening the asks issue has no such check, so one run posts
- * its asks from one process at a time (conduct's actions run one at a time).
+ * the thread after posting, and a poster deletes its own comment only when it
+ * sees a lower-id comment for the same ask, so the lowest one stays. Opening
+ * the asks issue has no such check, so one run posts its asks from one process
+ * at a time (conduct's actions run one at a time).
+ *
+ * Asks issues are not closed here. A run can post another ask after any
+ * answer (conduct's build halts, showcase and release touches come later), so
+ * no answer is known to be the issue's last, and the issue is the run's
+ * record of its asks. With the target pinned in the spec, the issue-list scan
+ * runs only at a run's first post.
  *
  * Env: OBSERVATORY_BASE_URL (default http://127.0.0.1:3100),
  * OBSERVATORY_OPERATOR_GITHUB_LOGIN (poll's operator login).
@@ -87,7 +105,9 @@ import { pathToFileURL } from 'node:url';
 export const GRAMMAR = 'Reply with the letter alone on the first line; put any notes on the lines below.';
 export const DEFAULT_BASE = 'http://127.0.0.1:3100';
 export const OPERATOR_ENV = 'OBSERVATORY_OPERATOR_GITHUB_LOGIN';
-export const EXIT = { posted: 0, answered: 0, error: 1, usage: 2, conflict: 3, not_operator: 4, unconfigured: 5, refused: 6, waiting: 7, timeout: 7 };
+export const EXIT = { posted: 0, answered: 0, error: 1, usage: 2, conflict: 3, not_operator: 4, unconfigured: 5, refused: 6, waiting: 7, timeout: 7, no_operator: 8 };
+// Where the operator login is configured for Claude sessions.
+export const OPERATOR_HOME = 'the Claude Code settings.json `env` block';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TARGET_RE = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#(\d+)$/;
@@ -101,6 +121,8 @@ const ATTEMPT_RE = /^[([]?([a-f])(?:[)\].:,;!?\-–—]|\s+[-–—:]|\s*$)/i;
 const NOT_A_RULING = new Set(['not_a_ruling', 'unknown_option', 'text_not_allowed', 'text_too_long']);
 // The 409s that close the ask itself; any other 409 is about that one reply.
 const ASK_CLOSED = new Set(['no_open_ask', 'stale_ask']);
+// A reply GitHub could not find yet is retried this many passes before it is skipped.
+const NOT_FOUND_PASSES = 3;
 const MAX_BACKOFF_S = 900;
 const FETCH_TIMEOUT_MS = 10000;
 
@@ -108,8 +130,11 @@ const askMarker = (askReceiptId) => `<!-- workit:github-ask ask=${askReceiptId.t
 const followUpMarker = (askReceiptId, replyId) => `<!-- workit:github-ask follow-up ask=${askReceiptId.toLowerCase()} reply=${replyId} -->`;
 const issueMarker = (key) => `<!-- workit:github-ask issue=${key} -->`;
 const MARKER_RE = /<!-- workit:github-ask /;
+const ASK_MARKER_RE = /<!-- workit:github-ask ask=/;
 
 class UsageError extends Error {}
+// Missing configuration: its own status, so a caller hands back instead of going on.
+class ConfigError extends Error {}
 
 // What the reply grammar means for this ask's shape, after GRAMMAR.
 function shapeLine(spec) {
@@ -143,11 +168,14 @@ export function askBody(spec) {
   ].join('\n');
 }
 
-export function followUpBody(askReceiptId, reply, code) {
-  return [
+export function followUpBody(askReceiptId, reply, code, { quote = false } = {}) {
+  const lines = [
     followUpMarker(askReceiptId, reply.id),
     `That reply was not recorded (\`${code}\`), so the ask is still open. ${GRAMMAR}`,
-  ].join('\n');
+  ];
+  // The route binds by thread only to an ask the operator posted; any other ask is bound by its quoted tag.
+  if (quote) lines.push(`This ask was not posted from the operator's account, so put its tag, quoted, above the letter: \`> [ask ${askReceiptId.toLowerCase()}]\`.`);
+  return lines.join('\n');
 }
 
 export function validateSpec(spec) {
@@ -230,22 +258,36 @@ function resolveTarget(deps, target, issueSpec, { create }) {
   return { owner, repo, issue: String(opened.number) };
 }
 
-export async function post(spec, deps) {
+// An ask comment for this ask: one carrying its marker, or its tag unquoted
+// (the tag line every ask comment ends with).
+function asksFor(comment, askReceiptId) {
+  const body = String(comment.body ?? '');
+  const id = askReceiptId.toLowerCase();
+  return body.includes(askMarker(askReceiptId)) || unquotedLines(body).some((line) => TAG_RE.exec(line)?.[1].toLowerCase() === id);
+}
+
+/**
+ * Posts the ask, once. `pin(target)` runs when the target resolves to an asks
+ * issue, before anything is posted there, so a re-run after a later failure
+ * goes to that issue and finds the comment instead of opening another.
+ */
+export async function post(spec, deps, { pin = null } = {}) {
   validateSpec(spec);
   const where = resolveTarget(deps, spec.target, spec.issue, { create: true });
   const target = `${where.owner}/${where.repo}#${where.issue}`;
+  if (target !== spec.target && pin) pin(target);
   const result = (comment, existing) => ({ status: 'posted', existing, askReceiptId: spec.askReceiptId.toLowerCase(), target, askCommentUrl: comment.html_url ?? comment.url, askCommentId: comment.id });
-  const marker = askMarker(spec.askReceiptId);
   const carrying = () => listComments(deps, where.owner, where.repo, where.issue)
-    .filter((comment) => String(comment.body ?? '').includes(marker)).sort((x, y) => x.id - y.id);
+    .filter((comment) => asksFor(comment, spec.askReceiptId)).sort((x, y) => x.id - y.id);
   const existing = carrying()[0];
   if (existing) return result(existing, true);
   const posted = postComment(deps, where.owner, where.repo, where.issue, askBody(spec));
-  // A concurrent post of the same ask: the earliest comment wins and the later poster deletes its own.
-  const winner = carrying()[0];
-  if (winner && winner.id !== posted.id) {
+  // A concurrent post of the same ask: a poster deletes its own comment only
+  // when a lower-id one is visible, so the lowest stays whatever each one sees.
+  const lower = carrying().find((comment) => comment.id < posted.id);
+  if (lower) {
     deps.gh(['api', '--method', 'DELETE', `repos/${where.owner}/${where.repo}/issues/comments/${posted.id}`]);
-    return result(winner, true);
+    return result(lower, true);
   }
   return result(posted, false);
 }
@@ -267,18 +309,23 @@ async function record(deps, base, askReceiptId, commentUrl) {
 }
 
 // A reply is bound to this ask when it quotes the ask's tag, or when the last
-// operator comment before it carrying an unquoted tag is this ask's (the
-// route's thread binding). Only a bound reply that reads as an attempt at an
-// answer gets a follow-up: a 400 from the grammar's later checks always does,
-// a 422 only when its first line looks like a key.
+// ask comment before it is this ask's: an operator comment carrying an
+// unquoted tag (the route's thread binding), or one this script posted under
+// another account. Only a bound reply that reads as an attempt at an answer
+// gets a follow-up: a 400 from the grammar's later checks always does, a 422
+// only when its first line looks like a key. The follow-up says to quote the
+// tag when the ask it follows is not the operator's, because the route binds
+// by thread only to the operator's. Returns false or the follow-up's options.
 function wantsFollowUp(reply, code, comments, opts, isOperator) {
   const quoted = String(reply.body ?? '').split(/\r?\n/).some((line) => QUOTED_RE.test(line) && TAG_RE.exec(line)?.[1].toLowerCase() === opts.ask);
-  const lastAsk = comments.filter((comment) => comment.id < reply.id && isOperator(comment) && carriesUnquotedTag(comment.body)).sort((x, y) => x.id - y.id).at(-1);
+  const isAsk = (comment) => carriesUnquotedTag(comment.body) && (isOperator(comment) || ASK_MARKER_RE.test(String(comment.body ?? '')));
+  const lastAsk = comments.filter((comment) => comment.id < reply.id && isAsk(comment)).sort((x, y) => x.id - y.id).at(-1);
   const threaded = lastAsk ? unquotedLines(lastAsk.body).map((line) => TAG_RE.exec(line)?.[1]).find(Boolean)?.toLowerCase() === opts.ask : false;
   if (!quoted && !threaded) return false;
-  if (code !== 'not_a_ruling') return true;
+  const follow = { quote: !quoted && !isOperator(lastAsk) };
+  if (code !== 'not_a_ruling') return follow;
   const first = unquotedLines(reply.body).map((line) => line.trim()).find((line) => line !== '') ?? '';
-  return ATTEMPT_RE.test(first);
+  return ATTEMPT_RE.test(first) ? follow : false;
 }
 
 // One pass over the thread. Returns a terminal result, or null to keep polling
@@ -309,15 +356,28 @@ async function pass(opts, deps, state) {
     if (result.http === 409 && ASK_CLOSED.has(code)) return { status: 'conflict', code, message: result.body?.message ?? null, ...base };
     if (result.http === 403) return { status: 'not_operator', code, message: result.body?.message ?? null, ...base };
     if (result.http === 503) return { status: 'unconfigured', code, message: result.body?.message ?? null, ...base };
-    if (result.http === 409 || code === 'comment_not_found') {
+    if (code === 'comment_not_found') {
+      // GitHub can trail a new comment: retried, earliest reply first, before it is given up.
+      const misses = (state.notFound.get(reply.id) ?? 0) + 1;
+      state.notFound.set(reply.id, misses);
+      if (misses < NOT_FOUND_PASSES) {
+        deps.log(`reply ${reply.html_url} not found yet (${misses}/${NOT_FOUND_PASSES}); retried on the next pass`);
+        return { retry: true, pending: { ...base, reason: code } };
+      }
+      deps.log(`reply ${reply.html_url} skipped: not found on ${misses} passes`);
+      state.seen.add(reply.id);
+      continue;
+    }
+    if (result.http === 409) {
       deps.log(`reply ${reply.html_url} skipped (${code}): it is not a reply to this ask`);
       state.seen.add(reply.id);
       continue;
     }
-    if (NOT_A_RULING.has(code)) {
-      deps.log(`reply ${reply.html_url} is not a ruling (${code}); the ask stays open`);
+    if (NOT_A_RULING.has(code) || code === 'no_ask_tag') {
+      deps.log(`reply ${reply.html_url} is not a ruling for this ask (${code}); the ask stays open`);
       // Marked seen only once its follow-up is posted: a failed post throws, and the next pass tries again.
-      if (!followedUp.has(reply.id) && wantsFollowUp(reply, code, comments, opts, isOperator)) postComment(deps, owner, repo, issue, followUpBody(opts.ask, reply, code));
+      const follow = followedUp.has(reply.id) ? false : wantsFollowUp(reply, code, comments, opts, isOperator);
+      if (follow) postComment(deps, owner, repo, issue, followUpBody(opts.ask, reply, code, follow));
       state.seen.add(reply.id);
       continue;
     }
@@ -338,13 +398,13 @@ function findAskComment(deps, target, issueSpec, askReceiptId) {
 export async function poll(opts, deps) {
   if (!UUID_RE.test(opts.ask ?? '')) throw new UsageError('--ask is not a receipt uuid');
   const operator = String(opts.operator || deps.env?.[OPERATOR_ENV] || '').trim().toLowerCase();
-  if (!operator) throw new UsageError(`no operator login: pass --operator <login> or set ${OPERATOR_ENV}, the login Observatory checks`);
+  if (!operator) throw new ConfigError(`no operator login: set ${OPERATOR_ENV} to the operator's GitHub login (the login Observatory checks) in ${OPERATOR_HOME}, or pass --operator <login>`);
   if (!opts.askComment && opts.target) {
     let found;
     try {
       found = findAskComment(deps, opts.target, opts.issue, opts.ask);
     } catch (err) {
-      if (err instanceof UsageError) throw err;
+      if (err instanceof UsageError || err instanceof ConfigError) throw err;
       return { status: 'error', error: `the thread could not be read: ${String(err?.stderr || err?.message || err).trim().slice(0, 300)}` };
     }
     if (!found) return { status: 'error', error: `no ask comment for ${opts.ask} on ${opts.target}; run post first` };
@@ -359,7 +419,7 @@ export async function poll(opts, deps) {
   } catch (err) {
     return { status: 'error', error: `the ask comment could not be read: ${String(err?.stderr || err?.message || err).trim().slice(0, 300)}` };
   }
-  const state = { ask, askCreatedAt: askComment.created_at, operator, seen: new Set() };
+  const state = { ask, askCreatedAt: askComment.created_at, operator, seen: new Set(), notFound: new Map() };
   const deadline = deps.now() + opts.timeout * 1000;
   let failures = 0;
   for (;;) {
@@ -416,11 +476,10 @@ export async function main(argv, deps) {
       } catch (err) {
         throw new UsageError(`the spec could not be read: ${err.message}`);
       }
-      const result = await post(spec, deps);
       // GitHub's issue list trails a new issue by seconds, so a re-run could not find it there:
-      // the spec file keeps the issue's number from here on.
-      if (result.target !== spec.target && flags.spec !== '-') deps.writeFile(flags.spec, `${JSON.stringify({ ...spec, target: result.target }, null, 2)}\n`);
-      return result;
+      // the spec file keeps the issue's number from before the comment is posted.
+      const pin = flags.spec === '-' ? null : (target) => deps.writeFile(flags.spec, `${JSON.stringify({ ...spec, target }, null, 2)}\n`);
+      return await post(spec, deps, { pin });
     }
     if (command === 'poll') {
       let spec = {};
@@ -446,6 +505,7 @@ export async function main(argv, deps) {
     throw new UsageError('usage: github-ask.mjs post --spec <file> | poll (--spec <file> | --ask <uuid> --ask-comment <url>) [--operator <login>] [--once]');
   } catch (err) {
     if (err instanceof UsageError) return { status: 'usage', error: err.message };
+    if (err instanceof ConfigError) return { status: 'no_operator', variable: OPERATOR_ENV, error: err.message };
     return { status: 'error', error: String(err?.stderr || err?.message || err).trim().slice(0, 300) };
   }
 }
