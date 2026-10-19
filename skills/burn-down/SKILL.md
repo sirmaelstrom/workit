@@ -80,13 +80,25 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    not a question. **A needs_input that is a CHOICE passes `ask.options`** —
    one entry per choice with a letter key (`a`..`f`), a short label, and a
    ONE-LINE consequence — plus `allowFreeText` when a typed answer is also
-   acceptable (`question` stays alongside it as the prompt fallback). The
-   operator then answers from the Dogan's WAITING card with a button and no
-   agent running; the press writes an `answered` receipt that supersedes the
-   ask and puts the quest back on the frontier by itself (quest 9a1ce903,
-   2026-09-21). Options buried in the question prose are a wall of text the
-   card cannot render as buttons. That Spine ask is for unattended runs. In
-   session, pose any ask or list of choices as a plain AskUserQuestion with the
+   acceptable (`question` stays alongside it as the prompt fallback). That
+   Spine ask is for unattended runs, and it reaches the operator as a GitHub
+   comment on the run's PR or issue, posted with
+   `node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`
+   (`pickup` lists the spec's fields and what each exit code means). The
+   operator replies with the option letter alone on the first line, notes below
+   it, from any device and with no agent running. A question with no choices is
+   filed as one option, `a`, with `allowFreeText: true`, and the operator puts
+   the answer under the `a`. `github-ask.mjs poll --spec <file> --once`, run
+   once each time the run comes back to the item, finds the reply and records
+   it as an `answered` receipt from `operator:github`, which supersedes the ask
+   and puts the quest back on the frontier; exit 7 means no reply yet, so park
+   the item and go on; exit 8 means no operator login is configured, so stop
+   and tell the operator to set `OBSERVATORY_OPERATOR_GITHUB_LOGIN` in the
+   Claude Code `settings.json` `env` block. The login filter in poll is a convenience, and
+   Observatory's check of the operator login is the authority. Options buried
+   in the question prose can't be answered by letter. The Dogan lists waiting
+   asks read-only.
+   In session, pose any ask or list of choices as a plain AskUserQuestion with the
    recommendation first: the recommended option listed first, its label ending
    "(Recommended)". Use at most four options per question. Record the ruling in
    your next Spine receipt: the chosen label verbatim, plus the session id.
@@ -198,8 +210,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    Any doubt → held. **A go must be READ, never assumed: after filing a
    `needs_input` receipt, act only on an answer you can cite. In session, the
    go is the operator's message; record the ruling in your next Spine receipt
-   (the chosen label verbatim, plus the session id), never through the Dogan's
-   answer route, which stamps the operator's identity. Unattended,
+   (the chosen label verbatim, plus the session id), never by replying to the
+   ask's GitHub comment yourself or through any answer route, which stamps the
+   operator's identity. Unattended,
    `spine_quest`'s `latestReceipt.answer` (`key` and/or `text`) IS the go when
    that receipt is `answered`, its `question` is the ask's, verbatim, and its
    `answer.by` begins `operator:`. Read it back with a tool call; never infer
@@ -361,10 +374,22 @@ bindings are resume notes (rule 4), conventions are *this file*.
 
 Decisions, secrets, external actions, and merges. Everything else auto-captures.
 A decision is summoned as a `needs_input` receipt carrying the exact question —
-and, when it is a choice, `ask.options` (letter, label, one-line consequence)
-so it renders as buttons on the WAITING card — not as a paused session waiting
-to be noticed. The answer is read back (`latestReceipt.answer`, else the
+and, when it is a choice, `ask.options` (letter, label, one-line consequence),
+posted as a GitHub comment the operator answers by letter (`github-ask.mjs`,
+step 2) — not as a paused session waiting to be noticed. The answer is read
+back (`latestReceipt.answer`, else the
 answer resolver, step 4), never assumed.
+
+## Observatory down
+
+The run keeps going on `pickup` § Observatory down: one health probe
+(`GET $OBSERVATORY_BASE_URL/api/health`, 3 s), then the queue's quests are read
+from the file mirror and every stop-receipt goes through Observatory's
+`scripts/spine-receipt-spool.mjs`. What degrades: the board is the mirror's
+snapshot, up to 15 minutes behind the live board and frozen for the outage, so
+say its age; nothing is written but receipts, so the pickup flip, lane moves
+and closeouts wait for recovery; and no ask is answered until Observatory is
+back to record it. Items that need any of those park; the rest proceed.
 
 ## Measure the run
 

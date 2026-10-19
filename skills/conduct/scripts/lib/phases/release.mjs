@@ -224,8 +224,8 @@ function handover(state, deps) {
 }
 
 // A touch the release opened, or the one filed ahead of it (spine).
-function touchSpec(state, touch) {
-  const spec = touchAction(state, touch) ?? touchAction(state, state.touches.find((other) => other !== touch && other.status === 'filed'));
+function touchSpec(state, touch, deps) {
+  const spec = touchAction(state, touch, deps) ?? touchAction(state, state.touches.find((other) => other !== touch && other.status === 'filed'), deps);
   if (!spec) throw new ConductError(2, `touch ${touch.n} has no action to emit`);
   return { ...spec, seam: SEAM };
 }
@@ -251,7 +251,7 @@ export function next(state, deps) {
   }
   if (r.anomaly) {
     const touch = state.touches[r.anomaly.touch - 1];
-    if (touch.status !== 'answered') return touchSpec(state, touch);
+    if (touch.status !== 'answered') return touchSpec(state, touch, deps);
     return finish(state, deps, 'failed', `${r.anomaly.reason}; operator answer (${touch.answer.key})${touch.answer.text ? `: ${touch.answer.text}` : ''}`);
   }
   if (!r.stage) {

@@ -109,10 +109,18 @@ function answer(f, runDir, key, { text, tty = true } = {}) {
 }
 
 // intake → anchor → touch 1 filed; returns the read-back action.
+// The filing's second half: conduct's post action, performed by a github-ask that posted.
+const ASK_COMMENT = 'https://github.com/o/r/issues/9#issuecomment-901';
+const posted = (extra = {}) => ({ code: 0, stdout: JSON.stringify({ status: 'posted', existing: false, askReceiptId: '00000000-0000-4000-8000-0000000000f1', target: 'o/r#9', askCommentUrl: ASK_COMMENT, askCommentId: 901, ...extra }), stderr: '' });
+async function recordFiled(f, runDir, receiptId, result) {
+  const post = out(await record(f, runDir, receiptId, result)).action;
+  assert.equal(post.part, 'post', JSON.stringify(post));
+  return out(await record(f, runDir, post.id, posted({ askReceiptId: result.id }))).action;
+}
 async function toSpineReadBack(f, extra = [], goal = GOAL) {
   const first = out(await intake(f, [...SPINE, ...extra], {}, goal));
   const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
-  const readBack = out(await record(f, first.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' })).action;
+  const readBack = await recordFiled(f, first.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' });
   return { runDir: first.runDir, anchorAction: first.action, receipt, readBack };
 }
 async function toSpineSpec(f, extra = [], goal = GOAL) {
@@ -259,7 +267,7 @@ test('refusal 8 (022d6fd9): with the Spine adapter, a touch 1 still over 2,000 c
 });
 
 test('refiling (022d6fd9): a refused answer\'s reason gives way to spine_receipt\'s cap, never the question', () => {
-  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR } };
+  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', pluginRoot: 'X:/fixture/plugin', touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR } };
   const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
   // The longest question intake lets through, measured by intake's own filedLength.
   const question = 'q'.repeat(2000 - filedLength(state, 1, ''));
@@ -722,11 +730,12 @@ test('read-back (U1): the filed question verbatim is this filing\'s answer; a qu
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-verbatim-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
-  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z' };
+  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
   const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
   const touch = openTouch(state, { kind: 'preapproval', question: 'Approve $25 run?', options }, deps);
   const filing = touchAction(state, touch);
-  recordTouch(state, touch, filing, { id: '00000000-0000-4000-8000-0000000000f3' });
+  recordTouch(state, touch, filing, { id: '00000000-0000-4000-8000-0000000000f3' }, deps);
+  recordTouch(state, touch, touchAction(state, touch), posted({ askReceiptId: '00000000-0000-4000-8000-0000000000f3' }), deps);
   assert.equal(touch.filedQuestion, filing.args.question);
   const reply = (question) => {
     const result = fixtureJson('spine-quest-answered.json');
@@ -750,7 +759,7 @@ test('read-back (U2, M1, round 2): touch.filed.question is matched verbatim; a t
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-legacy-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
-  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z' };
+  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
   const options = [{ key: 'a', label: 'yes', consequence: 'go' }];
   const reply = (question) => {
     const result = fixtureJson('spine-quest-answered.json');
@@ -915,7 +924,7 @@ test('a prefix --anchor is resolved to the full quest uuid at the anchor step, a
   const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
   assert.equal(readState(first.runDir).intent.anchor, ANCHOR_UUID);
   assert.equal(receipt.args.questId, ANCHOR_UUID);
-  const readBack = out(await record(f, first.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' })).action;
+  const readBack = await recordFiled(f, first.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' });
   assert.deepEqual(readBack.args, { ids: [ANCHOR_UUID] });
   const answer = { key: 'a', text: null, by: 'operator:dogan', answeredAt: ANSWERED_AT };
   const done = await record(f, first.runDir, readBack.id, { quests: [{ id: ANCHOR_UUID, latestReceipt: { id: 'r-1', outcome: 'answered', question: receipt.args.question, answer } }] });
@@ -932,6 +941,136 @@ test('the anchor step refuses a spine_quest id that is only a prefix (exit 2): t
   assert.equal(refused.code, 2, refused.stdout);
   assert.match(out(refused).error, /not a full quest uuid/);
   assert.deepEqual([readState(first.runDir).phase, readState(first.runDir).touches.length], ['intake', 0]);
+});
+
+test('github post: the receipt writes the ask spec in spine mode, a failed post stays pending and resume re-emits it, and the touch is read back only once its post is recorded', async (t) => {
+  const f = fixture(t);
+  const first = out(await intake(f, SPINE));
+  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  assert.doesNotMatch(receipt.instruction, /github-ask/);
+  const receiptId = '00000000-0000-4000-8000-0000000000f1';
+  const post = out(await record(f, first.runDir, receipt.id, { id: receiptId })).action;
+  const specPath = join(first.runDir, 'touches', '1.github-ask.json');
+  const spec = JSON.parse(readFileSync(specPath, 'utf8'));
+  assert.deepEqual([spec.askReceiptId, spec.question, spec.options, spec.allowFreeText, spec.target], [receiptId, receipt.args.question, receipt.args.ask.options, receipt.args.ask.allowFreeText, 'sirmaelstrom/workit']);
+  assert.match(spec.issue.key, /^conduct \S+ \S+$/);
+  assert.deepEqual([post.kind, post.part, post.expects.type, post.command.slice(2)], ['shell', 'post', 'json', ['post', '--spec', specPath]]);
+  assert.ok(post.command[1].endsWith(join('skills', '_shared', 'github-ask', 'github-ask.mjs')), post.command[1]);
+
+  // A failed post is refused: the touch stays filed and unposted, the failure is counted, and the post is emitted again.
+  const failed = await record(f, first.runDir, post.id, { code: 1, stdout: JSON.stringify({ status: 'error', error: 'gh: HTTP 502' }), stderr: '' });
+  assert.equal(failed.code, 2);
+  assert.match(JSON.stringify(out(failed)), /did not post .*error: gh: HTTP 502/);
+  assert.deepEqual([readState(first.runDir).touches[0].status, readState(first.runDir).touches[0].post.state, readState(first.runDir).touches[0].post.failures, readState(first.runDir).pending.part], ['filed', 'pending', 1, 'post']);
+  const resumed = out(await f.run(['next', '--resume', first.runDir])).action;
+  assert.deepEqual([resumed.id, resumed.part], [out(failed).action.id, 'post']);
+
+  // Recorded once, the post leads to the read-back, and no post is emitted again.
+  const readBack = out(await record(f, first.runDir, resumed.id, posted())).action;
+  assert.equal(readBack.part, 'read-back');
+  assert.match(readBack.instruction, /^First run node .*github-ask\.mjs'? poll --spec '?[^ ]*1\.github-ask\.json'? --once/);
+  assert.match(readBack.instruction, /0 \(answered\) or 7 \(waiting\): go on\. 8 \(no_operator[^]* 3 \(conflict/);
+  assert.deepEqual([readState(first.runDir).touches[0].post.askCommentUrl, readState(first.runDir).githubAsks.target], [ASK_COMMENT, 'o/r#9']);
+  const back = out(await record(f, first.runDir, readBack.id, { quests: [{ latestReceipt: null }] })).action;
+  assert.equal(back.handBack, true);
+  assert.ok(back.instruction.includes(`reply to ${ASK_COMMENT}`), back.instruction);
+  assert.match(back.instruction, /Run no blocking poll/);
+  assert.equal(out(await f.run(['next', '--resume', first.runDir])).action.part, 'read-back');
+});
+
+test('github read-back: conduct passes --operator when OBSERVATORY_OPERATOR_GITHUB_LOGIN is set; without it, exit 8 hands back naming the variable and the settings.json env block', async (t) => {
+  const toReadBack = async (env) => {
+    const f = fixture(t);
+    const first = out(await intake(f, SPINE));
+    const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+    const post = out(await record(f, first.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' })).action;
+    return out(await record(f, first.runDir, post.id, posted(), { env })).action;
+  };
+  const set = await toReadBack({ OBSERVATORY_OPERATOR_GITHUB_LOGIN: "Sir'Maelstrom" });
+  assert.match(set.instruction, /poll --spec '?[^ ]*1\.github-ask\.json'? --once --operator '?Sir'\\?''?Maelstrom'?:/);
+  const unset = await toReadBack({});
+  assert.equal(unset.part, 'read-back');
+  assert.doesNotMatch(unset.instruction, /--operator/);
+  assert.match(unset.instruction, /8 \(no_operator: no operator login is configured\): stop here\. Call no spine_quest and record nothing\. Tell the operator to set OBSERVATORY_OPERATOR_GITHUB_LOGIN to their GitHub login in the Claude Code settings\.json `env` block, then end your turn/);
+  assert.match(unset.instruction, /2 \(usage: a malformed spec or argument\): tell the operator/);
+});
+
+test('github post: three failed posts in a row hand back with the last error; each resume then posts once more; a post is accepted only with exit 0 and this filing\'s receipt', async (t) => {
+  const f = fixture(t);
+  const first = out(await intake(f, SPINE));
+  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  const receiptId = '00000000-0000-4000-8000-0000000000f1';
+  let action = out(await record(f, first.runDir, receipt.id, { id: receiptId })).action;
+  const fail = (n) => ({ code: 1, stdout: JSON.stringify({ status: 'error', error: `gh: HTTP 50${n}` }), stderr: '' });
+  for (let n = 1; n <= 2; n += 1) {
+    const failed = await record(f, first.runDir, action.id, fail(n));
+    assert.equal(failed.code, 2);
+    action = out(failed).action;
+    assert.equal(action.part, 'post', `after failure ${n}`);
+  }
+  const third = await record(f, first.runDir, action.id, fail(3));
+  assert.equal(third.code, 2);
+  const back = out(third).action;
+  assert.deepEqual([back.handBack, back.part], [true, 'hand-back']);
+  assert.match(back.instruction, /github-ask post failed 3 times, so it is not on GitHub[^]*The last failure: error: gh: HTTP 503 \(exit 1\)[^]*resume with: node /);
+  // A resume tries once more; a fourth failure hands back again at once.
+  const retry = out(await f.run(['next', '--resume', first.runDir])).action;
+  assert.equal(retry.part, 'post');
+  assert.equal(out(await record(f, first.runDir, retry.id, fail(4))).action.handBack, true);
+  // Status posted with a non-zero exit, or for another filing's receipt, is not a post.
+  const again = out(await f.run(['next', '--resume', first.runDir])).action;
+  const badExit = await record(f, first.runDir, again.id, { ...posted({ askReceiptId: receiptId }), code: 1 });
+  assert.equal(badExit.code, 2);
+  assert.match(out(badExit).error, /printed status posted but exited 1/);
+  const again2 = out(await f.run(['next', '--resume', first.runDir])).action;
+  const otherAsk = await record(f, first.runDir, again2.id, posted({ askReceiptId: '00000000-0000-4000-8000-0000000000aa' }));
+  assert.equal(otherAsk.code, 2);
+  assert.match(out(otherAsk).error, /posted ask 00000000-0000-4000-8000-0000000000aa, not this filing's 00000000-0000-4000-8000-0000000000f1/);
+  const again3 = out(await f.run(['next', '--resume', first.runDir])).action;
+  const readBack = out(await record(f, first.runDir, again3.id, posted({ askReceiptId: receiptId.toUpperCase() }))).action;
+  assert.equal(readBack.part, 'read-back');
+  assert.deepEqual([readState(first.runDir).touches[0].post.state, readState(first.runDir).touches[0].waiting], ['posted', false]);
+});
+
+test('github post: a touch filed by a conduct that did not post gets its spec and its post on resume; the receipt\'s spec is written before the touch changes', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-legacy-post-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID, repo: { remote: 'o/r' } }, pluginRoot: dir };
+  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
+  const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
+  const touch = openTouch(state, { kind: 'preapproval', question: 'Approve $25 run?', options }, deps);
+  // As a pre-upgrade conduct left it: filed, waiting, with no post and no spec.
+  Object.assign(touch, { status: 'filed', receiptId: '00000000-0000-4000-8000-0000000000f4', filedQuestion: `${touch.tag} (run ${RUN_ID}/1) Approve $25 run?`, filings: 1, waiting: true });
+  const legacy = touchAction(state, touch, deps);
+  assert.equal(legacy.part, 'post');
+  const spec = JSON.parse(readFileSync(join(dir, 'touches', '1.github-ask.json'), 'utf8'));
+  assert.deepEqual([spec.askReceiptId, spec.question, spec.target], [touch.receiptId, touch.filedQuestion, 'o/r']);
+  recordTouch(state, touch, legacy, posted({ askReceiptId: touch.receiptId }), deps);
+  assert.equal(touchAction(state, touch, deps).part, 'read-back');
+
+  // A spec write that fails leaves the touch unfiled, so the filing is re-emitted as it was.
+  const other = openTouch({ ...state, touches: [] }, { kind: 'preapproval', question: 'Again?', options }, deps);
+  const s2 = { ...state, touches: [other] };
+  const filing = touchAction(s2, other, deps);
+  const failing = { ...deps, write: () => { throw new Error('EACCES: the spec could not be written'); } };
+  assert.throws(() => recordTouch(s2, other, filing, { id: '00000000-0000-4000-8000-0000000000f5' }, failing), /EACCES/);
+  assert.deepEqual([other.status, other.receiptId, other.filings, other.filedQuestion ?? null, other.post ?? null], ['open', null, 0, null, null]);
+});
+
+test('spine read-back: a GitHub reply recorded as operator:github is the go, as a Dogan press is', async (t) => {
+  const f = fixture(t);
+  const { runDir, readBack } = await toSpineReadBack(f);
+  assert.match(readBack.instruction, /^First run node .*github-ask\.mjs'? poll --spec '?[^ ]*1\.github-ask\.json'? --once/);
+  const next = out(await record(f, runDir, readBack.id, answeredFor(runDir, 1, {}, 'spine-quest-answered-github.json')));
+  assert.equal(next.phase, 'spec');
+  assert.deepEqual([readState(runDir).touches[0].answer.by, readState(runDir).touches[0].answer.key], ['operator:github', 'a']);
+
+  // The same receipt stamped by a writer that is not an operator's is refused.
+  const g = fixture(t);
+  const flow = await toSpineReadBack(g);
+  const refused = await record(g, flow.runDir, flow.readBack.id, answeredFor(flow.runDir, 1, { by: 'github' }, 'spine-quest-answered-github.json'));
+  assert.equal(refused.code, 3);
+  assert.match(out(refused).refused, /by github is not operator-attributed/);
 });
 
 test('record refuses unattributed answer', async (t) => {
@@ -1166,13 +1305,15 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-touch-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
-  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z' };
+  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
   const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
   const first = openTouch(state, { kind: 'preapproval', question: 'Q1', options }, deps);
   const second = openTouch(state, { kind: 'blocked', question: 'Q2', options }, deps);
   const filing = touchAction(state, first);
   assert.equal(filing.tool, 'spine_receipt');
-  recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' });
+  recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' }, deps);
+  assert.equal(touchAction(state, second), null);
+  recordTouch(state, first, touchAction(state, first), posted({ askReceiptId: '00000000-0000-4000-8000-0000000000f2' }), deps);
   assert.equal(touchAction(state, second), null);
   assert.equal(second.status, 'open');
   const answered = fixtureJson('spine-quest-answered.json');
@@ -1261,7 +1402,7 @@ test('action consumption (D19.19)', async (t) => {
   assert.equal(replay.code, 0);
   assert.equal(events(runDir).length, lines);
   assert.equal((await record(f, runDir, '99-spec', {})).code, 5);
-  const readBack = out(await record(f, runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f3' })).action;
+  const readBack = await recordFiled(f, runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f3' });
   assert.equal((await record(f, runDir, first.action.id, {})).code, 5);
   const back = out(await record(f, runDir, readBack.id, { quests: [{ latestReceipt: null }] })).action;
   assert.equal(back.handBack, true);
@@ -1451,7 +1592,7 @@ test('C1: a failed receipt filing is refused and the filing stays retryable', as
   assert.equal((await record(f, first.runDir, receipt.id, {})).code, 2);
   assert.equal(readState(first.runDir).touches[0].status, 'open');
   const uuid = '00000000-0000-4000-8000-0000000000f4';
-  assert.equal(out(await record(f, first.runDir, receipt.id, { id: uuid })).action.tool, 'spine_quest');
+  assert.equal((await recordFiled(f, first.runDir, receipt.id, { id: uuid })).tool, 'spine_quest');
   assert.equal(readState(first.runDir).touches[0].receiptId, uuid);
 });
 

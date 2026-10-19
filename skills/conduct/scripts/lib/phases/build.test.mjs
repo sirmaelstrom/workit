@@ -236,6 +236,11 @@ function shellResult(h, action) {
   const { command } = action;
   if (command[0] === 'node' && command[1].endsWith('conduct.mjs')) return conductVerb(h, action);
   if (command[0] === 'node' && command[1].endsWith('lane.mjs')) return herdrVerb(h, action);
+  // github-ask post: the touch's comment on the run's asks issue.
+  if (command[0] === 'node' && command[1].endsWith('github-ask.mjs')) {
+    const { askReceiptId } = JSON.parse(readFileSync(command.at(-1), 'utf8'));
+    return ok(JSON.stringify({ status: 'posted', existing: false, askReceiptId, target: 'o/r#9', askCommentUrl: `https://github.com/o/r/issues/9#issuecomment-${900 + action.touch.n}`, askCommentId: 900 + action.touch.n }));
+  }
   switch (action.part ? `${action.step}/${action.part}` : action.step) {
     case 'base': return ok(`${BASE}\n`);
     case 'pr-lookup': return ok(JSON.stringify([{ number: prNumber(id), headRefOid: h.head(id), state: 'OPEN' }]));
@@ -1630,7 +1635,7 @@ test('blocked recovery (D19.4), spine, idle build (E6): with no lane work left t
   await drive(h, { until: (a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' });
   const from = h.trace.length - 1;
   const back = await drive(h, { until: (a) => a.handBack === true, max: 10 });
-  assert.deepEqual(h.trace.slice(from).map((a) => a.tool ?? a.part), ['spine_receipt', 'spine_quest', 'hand-back']);
+  assert.deepEqual(h.trace.slice(from).map((a) => a.tool ?? a.part), ['spine_receipt', 'post', 'spine_quest', 'hand-back']);
   assert.deepEqual([back.kind, back.step, back.touch.n], ['touch', 'touch', 1]);
   assert.equal(h.state.phase, 'build');
   assert.equal(h.wp('WP-04').state, 'deferred');
@@ -2708,6 +2713,29 @@ test('budget before amendment prompts (C1-2, C1-5): an over-budget amendment is 
   assert.equal(h.state.authority.budgetUsd, 1500);
   assert.deepEqual(h.state.authority.budgetSource.touch, 1);
   assert.equal(h.state.build.resumed, undefined);
+  assert.equal(h.wp('WP-02').state, 'merged');
+});
+
+test('budget on GitHub: an operator:github (a) whose notes say "budget 25" raises the ceiling to 25; without the amount it is refused, saying where the amount goes', async (t) => {
+  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1]], budget: 1.5 });
+  h.gateCmdCode = { 'WP-02': [1] };
+  let text = null;
+  h.spineQuest = () => {
+    const result = JSON.parse(fixture('intake', 'spine-quest-answered-github.json'));
+    const touch = h.state.touches[0];
+    Object.assign(result.quests[0].latestReceipt, { question: touch.filedQuestion, ask: { options: touch.options, allowFreeText: touch.allowFreeText } });
+    Object.assign(result.quests[0].latestReceipt.answer, { key: 'a', text });
+    return result;
+  };
+  const refiled = await drive(h, { until: (a) => a.tool === 'spine_receipt' && h.state.touches[0]?.filings === 1 });
+  assert.equal(h.state.touches[0].build, 'budget');
+  assert.equal(h.state.touches[0].answer, null);
+  assert.match(refiled.args.question, /\(a\) needs the text "budget <USD>" \(on GitHub: on the line below the letter a\) above the current spend/);
+  assert.equal(h.state.authority.budgetUsd, 1.5);
+  text = 'budget 25';
+  assert.equal(await drive(h), null);
+  assert.equal(h.state.authority.budgetUsd, 25);
+  assert.deepEqual([h.state.authority.budgetSource.by, h.state.authority.budgetSource.text], ['operator:github', 'budget 25']);
   assert.equal(h.wp('WP-02').state, 'merged');
 });
 

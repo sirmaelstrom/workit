@@ -946,7 +946,9 @@ function answerRunTouch(state, touch, deps) {
   }
   if (touch.build === 'budget') {
     const usd = budgetAmount(text);
-    if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, `(a) needs the text "budget <USD>" above the current spend of $${touch.spendUsd ?? 'unknown'}`, deps);
+    // A GitHub reply's text is the notes below its letter.
+    const where = touch.answer.by === 'operator:github' ? ' (on GitHub: on the line below the letter a)' : '';
+    if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, `(a) needs the text "budget <USD>"${where} above the current spend of $${touch.spendUsd ?? 'unknown'}`, deps);
     state.authority.budgetUsd = usd;
     state.authority.budgetSource = { touch: touch.n, by: touch.answer.by, answeredAt: touch.answer.answeredAt, text };
   }
@@ -1436,7 +1438,7 @@ function workAction(state, deps) {
   }
   if (spineOn(state)) {
     for (const touch of openBuildTouches(state)) {
-      const spec = touchAction(state, touch);
+      const spec = touchAction(state, touch, deps);
       // A waiting touch is re-read by the yield below, or handed back when idle.
       if (spec && !spec.handBack) return spec;
     }
@@ -2017,7 +2019,7 @@ export function record(state, action, result = {}, deps) {
   state.build ??= { contract: null, halts: [] };
   if (action.step === 'contract') return recordContract(state, action, deps);
   if (action.yield) return recordYield(state, action);
-  if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result);
+  if (action.touch) return recordTouch(state, state.touches[action.touch.n - 1], action, result, deps);
   if (action.step === 'replan') return action.part === 'apply' ? recordReplanApply(state, action, deps) : recordReplanReceipt(state, action, result, deps);
   const wp = state.wps.find((candidate) => candidate.id === action.wpId);
   if (!wp) throw new ConductError(2, `action ${action.id} names no WP of this run (${action.wpId})`);

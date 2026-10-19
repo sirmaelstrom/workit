@@ -19,4 +19,5 @@ Policy: quest and campaign UUIDs, campaign titles, timestamps and workspace-rela
 - `gh-actions-workflows-dependabot-only.json`: `gh-actions-workflows.json` with only the Dependabot dynamic workflow line (a repo with no workflow that can gate a PR).
 - `spine-quest-answered-with-id.json`: `spine-quest-answered.json` plus a synthetic `latestReceipt.id`. Today's `spine_quest` carries no receipt id; this variant tests the path that stores one.
 - `spine-quest-answered-touch-2.json`: `spine-quest-answered.json` with the question tag reading `touch 2` (an answer to a different question).
+- `spine-quest-answered-github.json`: `spine-quest-answered.json` answered from a GitHub comment reply: `answer.by` is `operator:github`, `stoppedAt` is `answered from GitHub`, and the answer carries the `label`, `askReceiptId` and `evidence` shape Observatory's `POST /api/spine/answers/github` writes (example.com-style synthetic URLs and login).
 - `spine-quest-answered-stale.json`: an answer dated 2020 whose question carries the right `fixture-run touch 1` tag but another run's id (`00000000`), i.e. an earlier run of the same goal.

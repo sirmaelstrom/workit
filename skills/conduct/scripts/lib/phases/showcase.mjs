@@ -29,7 +29,7 @@ export function namedSeam(text) {
 
 // ---- the briefing ----
 
-// The operator answers the showcase from its question alone (in the Dogan), so
+// The operator answers the showcase from its question alone (its GitHub comment), so
 // the question leads with the conductor's briefing: what was delivered, the
 // proof it works, what did not happen, the one thing to check, and the
 // recommended answer. The conductor writes it before the touch is filed.
@@ -45,7 +45,7 @@ function briefAction(state) {
   const stopped = unfinished(state).map((wp) => `${wp.id} (${wp.state}: ${wp.reason ?? 'no reason recorded'})`);
   return {
     kind: 'author', step: 'showcase-brief', outPath, expects: { type: 'file' },
-    instruction: `Before the showcase is filed, write ${outPath}. The operator answers from this briefing alone, in the Dogan, so it carries your judgment in plain words, not process vocabulary. JSON: { "delivered": "<what now exists that did not before>", "proof": "<the runtime evidence that it works: the command and what it showed, quoted from a lane report's ## Runtime exercise; or why there is none>", "notDone": "<what the goal asked that did not happen, and why${stopped.length > NAMED_MAX ? `; say that ${stopped.length} WPs did not finish` : stopped.length ? `; name every one of ${unfinished(state).map((wp) => wp.id).join(', ')}` : '; \\"nothing\\" when everything landed'}>", "check": "<the one thing worth checking yourself, and where>", "recommend": "a" | "b" | "c", "why": "<one sentence: why that answer>" }. Each text field is one or two sentences, at most ${BRIEF_FIELD_MAX} characters. (a) accept, (b) accept with notes, (c) send back. Sources: ${join(state.runDir, 'run-analysis.md')}, each WP's report and PR.${stopped.length ? ` Not finished: ${stopped.join('; ')}.` : ''} Record {}.`,
+    instruction: `Before the showcase is filed, write ${outPath}. The operator answers from this briefing alone, in a GitHub reply, so it carries your judgment in plain words, not process vocabulary. JSON: { "delivered": "<what now exists that did not before>", "proof": "<the runtime evidence that it works: the command and what it showed, quoted from a lane report's ## Runtime exercise; or why there is none>", "notDone": "<what the goal asked that did not happen, and why${stopped.length > NAMED_MAX ? `; say that ${stopped.length} WPs did not finish` : stopped.length ? `; name every one of ${unfinished(state).map((wp) => wp.id).join(', ')}` : '; \\"nothing\\" when everything landed'}>", "check": "<the one thing worth checking yourself, and where>", "recommend": "a" | "b" | "c", "why": "<one sentence: why that answer>" }. Each text field is one or two sentences, at most ${BRIEF_FIELD_MAX} characters. (a) accept, (b) accept with notes, (c) send back. Sources: ${join(state.runDir, 'run-analysis.md')}, each WP's report and PR.${stopped.length ? ` Not finished: ${stopped.join('; ')}.` : ''} Record {}.`,
   };
 }
 
@@ -154,7 +154,7 @@ export function next(state, deps) {
   }, deps);
   if (touch.status === 'answered') return apply(state, touch, deps);
   // One filed touch at a time (spine): a touch filed earlier is read back first.
-  const spec = touchAction(state, touch) ?? touchAction(state, state.touches.find((other) => other !== touch && other.status === 'filed'));
+  const spec = touchAction(state, touch, deps) ?? touchAction(state, state.touches.find((other) => other !== touch && other.status === 'filed'), deps);
   if (!spec) throw new ConductError(2, `the showcase touch ${touch.n} has no action to emit`);
   return spec;
 }
