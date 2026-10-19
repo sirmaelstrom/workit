@@ -1,15 +1,10 @@
----
-name: execute-wp
-description: "Execute a work package from a spec. Trigger: 'execute WP-01', 'run wp', 'execute wp', or referencing a specific work package. READ THE FULL SKILL — the execution lifecycle (read orchestrator → execute → append progress log) is defined below."
----
-
 # Execute WP — Work Package Execution with Progress Log
 
-Execute a single work package from a workshop specification. Handles the full lifecycle: read orchestrator context, read progress log, execute the work, append a progress entry. The progress log is what makes later packages smarter than earlier ones — this skill makes that lifecycle automatic.
+Execute a single work package from a workshop specification by hand, outside a `/conduct` run (asked to "execute WP-01" or "run wp"). Handles the full lifecycle: read orchestrator context, read progress log, execute the work, append a progress entry. The progress log is what makes later packages smarter than earlier ones. A `/conduct` run schedules its lanes from the same work packages; this is the single-package path.
 
-## Why This Skill Exists
+## Why This Procedure Exists
 
-The progress log pattern (in `_orchestrator.md`) gives multi-package execution institutional memory. Each execution agent reads what came before and records what it did. But relying on agents to remember this lifecycle is fragile — they skip the read, forget the append, or write entries that don't follow the format. This skill makes the lifecycle structural.
+The progress log pattern (in `_orchestrator.md`) gives multi-package execution institutional memory. Each execution agent reads what came before and records what it did. But relying on agents to remember this lifecycle is fragile — they skip the read, forget the append, or write entries that don't follow the format. This procedure makes the lifecycle structural.
 
 ## Prerequisites
 
@@ -60,7 +55,7 @@ Parse the required fields: the 6 core ones, plus Review tier and Runtime exercis
 - **Verification** — The concrete check proving it works.
 - **Failure Criteria** — Diagnostic footholds if things go wrong.
 - **Boundary** — What's explicitly out of scope. Respect this.
-- **Review tier** — `T0`, `T1` or `T2`: the review the change gets at its PR. This skill does not run that review; whoever opens the PR applies `burn-down` § Per item step 3 and may raise the tier but never lower it.
+- **Review tier** — `T0`, `T1` or `T2`: the review the change gets at its PR. This procedure does not run that review; whoever opens the PR applies `burn-down` § Per item step 3 and may raise the tier but never lower it.
 - **Runtime exercise** — The surface and the check that exercises the change at runtime, or `none: <why>`. Step 6 runs it.
 
 Also read any Implementation section for detailed guidance (code snippets, API shapes, component structure).
@@ -155,7 +150,6 @@ For packages with dependencies — execute prerequisite packages first, verify, 
 
 ## Relationship to Other Skills
 
-- **`/spec`** creates the spec artifacts that this skill executes against
-- **`/spec-validate`** checks artifact quality before execution — run it first if you're unsure about spec quality
+- **`/spec`** creates the spec artifacts this procedure executes against, and its validator (`skills/spec/scripts/validate.mjs`) checks artifact quality before execution — run it first if you're unsure about spec quality
 
 </supporting_info>

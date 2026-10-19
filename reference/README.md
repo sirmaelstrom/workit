@@ -2,7 +2,7 @@
 
 The **philosophy and patterns** layer of this toolkit. The `skills/` are the active, triggerable interface; this `reference/` layer is the methodology they draw on — the *why* and *how* behind the *what*.
 
-Several skills read these files at runtime (e.g. `spec` reads `patterns/*` as it writes each artifact; `execute-wp` and `spec-validate` use the templates). They're also useful to read directly.
+Several skills read these files at runtime (e.g. `spec` reads `patterns/*` as it writes each artifact; conduct's `reference/execute-wp.md` and spec's validator use the templates). They're also useful to read directly.
 
 ## Layout
 

@@ -140,7 +140,6 @@ const GATE_PATHS = {
     'skills/slim-review/scripts/pr-review-recognise.mjs',
     'skills/slim-review/scripts/pr-review-outcomes.mjs',
     'skills/slim-review/scripts/pr-review-coordinator.mjs',
-    'skills/babysit/scripts/pr-babysit.mjs',
     'skills/conduct/scripts/lib/land.mjs',
     'skills/conduct/scripts/lib/phases/build.mjs',
   ]),

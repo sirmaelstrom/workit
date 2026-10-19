@@ -17,12 +17,12 @@
 9. **Runtime exercise** — required for every deep WP: the surface the change runs on and the check that exercises it (a CLI run against a real input, a service probed, a page loaded), or `none: <why>` when no runtime behavior changes. `/conduct` hands it to the lane, which must quote the check's output under `## Runtime exercise` in its report, so a WP with no surface named gets a lane that guesses. A check that cannot fail is vacuous; say what it would show if the change were broken.
 
 Write each field as a bold label — `**Precondition:**`, `**Goal:**`, … — or as a
-heading (`## Precondition`). `spec-validate` and `execute-wp` both look for the
+heading (`## Precondition`). The spec validator and `execute-wp` both look for the
 field name; the colon-inside (`**Field:**`) and colon-outside (`**Field**:`)
 forms are equivalent for the six core fields. **Review tier**, **Runtime exercise**
 and the **Files** bullets are read by `/conduct`'s parser, which takes only the
 bold-label form (`**Files:**`, `**Runtime exercise:**`, `**Review tier:**`), and
-`spec-validate` rejects a WP that lacks them. The first six, plus those three, are
+the spec validator rejects a WP that lacks them. The first six, plus those three, are
 required; **Commit** is recommended.
 
 Two optional fields, for a goal with a UI (the orchestrator then carries a `## Design direction`): `**Visual rules:** <rule numbers | all | none>` (numbers separated by commas or spaces, e.g. `1, 3, 4`; no ranges) names the design-direction rules `/conduct`'s merge gate reads this WP's frames against, and `**Skills:** <skill>, …` names the skills the lane brief tells the lane to load (the polish WP that closes a UI goal names `frontend-design:frontend-design`). Same bold-label form.
@@ -78,7 +78,7 @@ The underscore prefix (`_orchestrator.md`) sorts it first in directory listings 
 
 ### Orchestrator Format — Coordination Sections
 
-The orchestrator has three structured sections that execution agents and `spec-validate` rely on. Format matters.
+The orchestrator has three structured sections that execution agents and the spec validator rely on. Format matters.
 
 > **File location is load-bearing.** The orchestrator MUST live at `work-packages/_orchestrator.md` — not at the workshop root. The workshop directory is derived from `dirname(dirname(orchestratorPath))`. An orchestrator at the workshop root will cause tools to look for `meta.json` and spec files in the wrong directory, failing silently or with confusing path errors. A template is available at `templates/_orchestrator.template.md` in this repo.
 

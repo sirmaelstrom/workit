@@ -1739,7 +1739,7 @@ export function renderPinnedDiff(comparePayload) {
 }
 
 // `amendmentProblem` and `COMPARE_FILE_CAP` live with the round cap in
-// pr-review-rounds.mjs (babysit and `rounds` read them there); re-exported for
+// pr-review-rounds.mjs (`rounds` reads them there); re-exported for
 // every caller that imports them from here.
 export { amendmentProblem, COMPARE_FILE_CAP };
 
@@ -2404,8 +2404,7 @@ export async function cmdRecognise(opts, {
  * `rounds --repo --pr --head` — which review round this head is in under the
  * cap (slim-review § 4), read from the PR's posted review markers.
  *
- * The scheduled half asks this before it claims; babysit asks the same
- * `roundsAnswer` in process. One JSON line, and only two outcomes: `ok` with
+ * The scheduled half asks this before it claims. One JSON line, and only two outcomes: `ok` with
  * `round` (and `since` / `last` / `rebased_from` / `rebase` / `problem`; a
  * rebased head is mapped by patch id, pr-review-rounds.mjs), or `refused`
  * with a reason — a

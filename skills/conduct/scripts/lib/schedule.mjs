@@ -152,7 +152,7 @@ function waves(orchestrator) {
 }
 
 // A WP's tier: what it declares, not what it quotes. Fenced blocks, `>` lines and inline
-// code spans are dropped first (skills/spec-validate/scripts/validate.mjs does the same):
+// code spans are dropped first (skills/spec/scripts/validate.mjs does the same):
 // a fence closes only on the same character with a run at least as long as its opener, a
 // span is delimited by equal-length backtick runs, and a span that is the label's own value
 // (**Review tier:** `T2`) is the value. The value is the first token after the label and must

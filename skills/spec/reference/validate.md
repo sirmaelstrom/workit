@@ -1,15 +1,10 @@
----
-name: spec-validate
-description: "Validate a workshop spec's quality. Trigger: 'spec-validate', 'validate spec', 'check workshop', 'is this ready?'. READ THE FULL SKILL — validation checks and script usage are defined below."
----
+# Spec validation — workshop artifact checks
 
-# Spec Validate — Workshop Artifact Validation
-
-Run the bundled pattern-library validation checklist against a workshop directory. Produces a report with errors and warnings where every message teaches — not just reports.
+Run the bundled pattern-library validation checklist against a workshop directory. Produces a report with errors and warnings where every message teaches — not just reports. `/spec` runs it at its validation stage; run it by hand when asked to "validate spec", "check workshop" or "is this ready?".
 
 ## How It Works
 
-This skill bundles a validation script at `scripts/validate.mjs` that performs deterministic checks against workshop artifacts. The script handles:
+The `spec` skill bundles a validation script at `skills/spec/scripts/validate.mjs` that performs deterministic checks against workshop artifacts. The script handles:
 
 - **Structural completeness** — are expected sections present in each artifact?
 - **Decision ambiguity scanning** — flag words ("or", "possibly", "TBD", "might", "should consider") in non-constraint contexts
@@ -35,7 +30,7 @@ Workshops live at `{workspace}/data/outputs/workshops/{slug}/` — under the wor
 ### Step 2: Run the script
 
 ```bash
-node "${CLAUDE_SKILL_DIR}/scripts/validate.mjs" <workshop-path>
+node "${CLAUDE_PLUGIN_ROOT}/skills/spec/scripts/validate.mjs" <workshop-path>
 ```
 
 The script exits 0 if no errors (warnings are OK), exits 1 if any errors found.
@@ -56,7 +51,7 @@ To validate all workshops at once (skip lite specs — the validator hard-errors
 
 ```bash
 for dir in "{workspace}/data/outputs/workshops"/*/; do
-  node "${CLAUDE_SKILL_DIR}/scripts/validate.mjs" "$dir" 2>&1
+  node "${CLAUDE_PLUGIN_ROOT}/skills/spec/scripts/validate.mjs" "$dir" 2>&1
   echo ""
 done
 ```
@@ -119,8 +114,8 @@ Remaining edge cases:
 
 When presenting results, note any false positives you spot and help the user focus on real issues.
 
-## Relationship to Other Skills
+## Relationship to the pipeline
 
-- **`/spec`** creates and advances workshops through the pipeline. `/spec-validate` checks the quality of what was produced.
-- Use `/spec-validate` before execution to catch issues early — a workshop that passes validation has a much higher chance of successful work-package execution.
+- **`/spec`** creates and advances workshops through the pipeline. This validator checks the quality of what was produced.
+- Run it before execution to catch issues early — a workshop that passes validation has a much higher chance of successful work-package execution.
 - After a campaign post-mortem reveals spec quality issues, run validation on the workshop to see if the checks would have caught them. If not, that's a signal to add a new check to the script.

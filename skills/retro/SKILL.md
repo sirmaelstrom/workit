@@ -1,14 +1,16 @@
 ---
 name: retro
-description: "Retro on one to three sessions: read the real transcript and propose environment changes (checks over prose, steering no-ops, tool economy, information access), never code. User-invoked only: type /retro (the model never starts it from a phrase). NOT for fleet failure rates (failure-audit) or CLAUDE.md one-liners (/reflect)."
+description: "Retro on one to three sessions: read the real transcript and propose environment changes (checks over prose, steering no-ops, tool economy, information access), never code. `/retro reflect` is the quick pass over the current session for one-line CLAUDE.md corrections. User-invoked only: type /retro (the model never starts it from a phrase). NOT for fleet failure rates (failure-audit)."
 disable-model-invocation: true
 ---
 
 # Retro — change the environment, not the code
 
-The operator has asked for a retrospective. Read what the agent actually did in a session and propose changes to its **environment** so the next run does not repeat it. Ported from Matt Pocock's `retro` skill (mattpocock/skills v1.3.1, MIT — license note at the bottom). House deltas: transcript locations, the remedy ladder and the carriers remedies land on, the relation to `failure-audit` and `/reflect`, and the measurement rule.
+The operator has asked for a retrospective. Read what the agent actually did in a session and propose changes to its **environment** so the next run does not repeat it. Ported from Matt Pocock's `retro` skill (mattpocock/skills v1.3.1, MIT — license note at the bottom). House deltas: transcript locations, the remedy ladder and the carriers remedies land on, the relation to `failure-audit`, the measurement rule, and the reflect pass (§ The reflect pass), which absorbed the former `/reflect` command.
 
-Where it sits in this toolkit: `failure-audit` measures enacted failure classes across the fleet against a frozen baseline. `/reflect` looks for one imperative sentence to add to `CLAUDE.md`. Retro reads one to three sessions and asks the opposite question of the steering files: what should become a check, and what should be deleted.
+Where it sits in this toolkit: `failure-audit` measures enacted failure classes across the fleet against a frozen baseline. Retro reads one to three sessions and asks the opposite question of the steering files: what should become a check, and what should be deleted. Its reflect pass is the small case: one imperative sentence for a `CLAUDE.md` Corrections section, from the current session only.
+
+**Which mode.** `/retro reflect` runs § The reflect pass and stops; inside a `/retro` the operator already typed, "reflect on this session" picks the same pass. The phrase does not start the skill on its own. Anything else runs the Steps below.
 
 ## Steps
 
@@ -35,8 +37,25 @@ Where it sits in this toolkit: `failure-audit` measures enacted failure classes 
    1. a check that can fail (lint rule, test, hook, CI job, the `lane check` shape check);
    2. a path-scoped rule in `.claude/rules/` or a skill step, loaded only when relevant;
    3. an auto-memory entry (cross-project) or the project `CLAUDE.md` Corrections section (project-scoped);
-   4. a `CLAUDE.md` navigation pointer, and only a pointer.
+   4. a navigation pointer in a root or navigation `CLAUDE.md`, and nothing else there (a project's `## Corrections` line is rung 3).
    A deletion is a remedy. When a line moves to a check, remove the line; the evidence for the move goes in the commit message, not in the file (`git log -L` on the line reaches it). Correct the carrier that still asserts the stale thing in the same change.
+
+## The reflect pass
+
+The quick case, run on the current session only: find corrections worth one line in a `CLAUDE.md` `## Corrections` section. Scope is the messages and tool logs since the last `<!-- /reflect completed … -->` marker in this session, or since session start; never prior sessions.
+
+1. **List candidates with evidence; don't judge yet.** Each needs an observable event in the log, not hesitation or hedging: a tool call that errored and was retried with different parameters (non-zero exit, `ENOENT`, `permission denied`, a timeout, a rate limit, 401/403, a validation failure); a command or path assumption that failed; an operator correction ("actually…", "no, use…"); a confident claim later shown wrong; a retry with altered flags or paths; an existing correction that was applied and caused the error (a signal to remove or revise it, not to add).
+2. **Gate each candidate; all three must pass.**
+   - *Root cause:* the issue traces to missing, wrong or ambiguous information in `CLAUDE.md` or `.claude/` config. Not style, tone, naming, a one-off typo, an outage, an irreproducible environment issue, or a preference that won't hold across sessions.
+   - *Preventable by text:* one imperative sentence would stop it recurring: a concrete verb, an object and a constraint, executable without interpretation (`Use pnpm instead of npm in this repository.`, never `Be careful with dependencies.`).
+   - *Recurrence likely:* the same kind of issue happened at least twice this session, or it sits on a hot path (`## Hot Paths` in `CLAUDE.md`, else build, test, lint, format, dev, docker, db, migrations, ci).
+3. **Keep only the strong ones.** Rate impact on the scale blocks progress > wrong output > time sink > minor annoyance, and confidence as strong, moderate or weak. Keep a candidate at time sink or above with strong confidence; a minor annoyance is dropped.
+4. **Check conflict and staleness** against the existing corrections: a contradiction is proposed as a replacement, not an append; a correction that caused an error is proposed for removal or revision, with the evidence.
+5. **Dry run first.** For each candidate print: the short description; `Action: ADD | REPLACE <line> | REMOVE <line>`; the signals from the log; each gate's pass or fail with the reason; impact and confidence; and the proposed line, `- [YYYY-MM-DD UTC] VERB specific instruction. Reason: <≤10 words>.` Change no file until the operator approves.
+6. **Write back what was approved** under `## Corrections`: one line, one imperative clause, the reason in ten words or fewer (or omitted), and no duplicate of an existing line (compare lowercased, dates and reasons stripped, by the leading verb phrase). At 30 corrections in a project, make room before adding: never evict a line marked `*(permanent — retained by design)*`; prefer graduating a stable correction (four weeks or more, consistently followed) into the project's Conventions section; then evict the oldest non-recurring one.
+7. **Mark the pass done** by ending your reply with `<!-- /reflect completed YYYY-MM-DD UTC -->`, so the next pass in this session starts after it.
+
+A candidate that fails the text gate but keeps recurring is a finding for the full retro (Steps above): a check, not a sentence.
 
 ## Do not automate this
 
@@ -47,7 +66,6 @@ Run it on a session where the agent did something odd, after a `diagnose` that f
 ## Connection to other skills
 
 - **`failure-audit`** — fleet delta, failure classes, treatment rates. A class retro keeps finding is a candidate for its seeded taxonomy.
-- **`/reflect`** (operator command) — the one-sentence `CLAUDE.md` fix. Retro's steering-file categories run the other way: out of prose, into checks.
 - **`diagnose`** — finds the cause of one broken behavior; retro asks what would have stopped the agent from causing it.
 - **`audit-skills`** — scores skills against a rubric; a skill retro finds the session ran and ignored is an input to it.
 - **`unslop`** — the findings list and any prose remedy go through it before they land anywhere public.

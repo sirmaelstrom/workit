@@ -38,7 +38,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -149,6 +149,143 @@ test('the exclusion is not vacuous: the repo has user-invoked skills and the gua
   // delete this test; if it fails with that skill still present, the parser broke.
   const unlisted = skillFiles().map(readListingRow).filter((row) => !row.listed).map((row) => row.name);
   assert.ok(unlisted.length > 0, 'no disable-model-invocation skill detected under skills/');
+});
+
+// Codex ignores `disable-model-invocation` and lists the row anyway; it reads
+// its own per-skill policy file instead. Without the pair a user-invoked skill
+// is still implicitly loaded in Codex sessions (slim-review's lenses loaded
+// `review` on their own).
+//
+// The key counts where Codex reads it: `allow_implicit_invocation: false` as a
+// direct child of a top-level `policy:` block. A root-level key, one under
+// another parent, or any `allow_implicit_invocation` under `policy:` whose
+// value is not `false` is a problem. There is no YAML parser in this repo, so
+// the block is read by indentation, and these forms are refused rather than
+// parsed: a tab in a line's indentation (invalid YAML), a dedent to a column no
+// open block starts at (invalid YAML), and a `policy:` header carrying anything
+// but a comment (a flow mapping `{…}`, an anchor `&a`, an alias `*a` or a tag).
+// Codex may drop an invalid file and fall back to implicit invocation.
+export function codexPolicyProblem(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim() && !l.trimStart().startsWith('#'));
+  const indent = (l) => l.length - l.trimStart().length;
+  if (lines.some((l) => /^ *\t/.test(l))) return 'indents with a tab, which YAML does not allow';
+  const open = [0];
+  for (const l of lines) {
+    if (indent(l) > open.at(-1)) open.push(indent(l));
+    while (indent(l) < open.at(-1)) open.pop();
+    if (indent(l) !== open.at(-1)) return 'dedents to a column no open block starts at';
+  }
+  const tops = lines.flatMap((l, i) => (/^policy\s*:/.test(l) ? [i] : []));
+  if (tops.length !== 1) return tops.length ? 'has more than one top-level policy:' : 'has no top-level policy: block';
+  if (!/^policy\s*:\s*(#.*)?$/.test(lines[tops[0]])) {
+    return 'writes policy: in an unsupported YAML form (a flow mapping, anchor, alias or tag)';
+  }
+  const block = [];
+  for (const l of lines.slice(tops[0] + 1)) {
+    if (!/^\s/.test(l)) break;
+    block.push(l);
+  }
+  const keys = block
+    .filter((l) => /^\s*allow_implicit_invocation\s*:/.test(l))
+    .map((l) => ({ at: indent(l), value: l.replace(/^\s*allow_implicit_invocation\s*:\s*/, '').replace(/\s+#.*$/, '').trim() }));
+  if (keys.some((k) => k.value !== 'false')) return 'sets allow_implicit_invocation under policy: to something other than false';
+  if (!block.length || !keys.some((k) => k.at === indent(block[0]))) return 'lacks policy.allow_implicit_invocation: false';
+  return null;
+}
+
+export function codexPolicyProblems(skillsDir) {
+  const problems = [];
+  for (const e of readdirSync(skillsDir, { withFileTypes: true })) {
+    if (!e.isDirectory() || e.name === '_shared') continue;
+    const file = join(skillsDir, e.name, 'SKILL.md');
+    if (!existsSync(file) || readListingRow(file).listed) continue;
+    const policy = join(skillsDir, e.name, 'agents', 'openai.yaml');
+    if (!existsSync(policy)) {
+      problems.push(`${e.name}: no agents/openai.yaml`);
+      continue;
+    }
+    const problem = codexPolicyProblem(readFileSync(policy, 'utf8'));
+    if (problem) problems.push(`${e.name}: agents/openai.yaml ${problem}`);
+  }
+  return problems;
+}
+
+test('a user-invoked skill is user-invoked in Codex too', () => {
+  assert.deepEqual(
+    codexPolicyProblems(SKILLS_DIR),
+    [],
+    'a disable-model-invocation skill needs skills/<id>/agents/openai.yaml with\n' +
+      '  policy:\n    allow_implicit_invocation: false\nor Codex still lists it.',
+  );
+});
+
+test('the Codex policy guard fails on a user-invoked skill with no policy or a true one', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-policy-'));
+  try {
+    const skill = (id, frontMatter, policy) => {
+      mkdirSync(join(dir, id, 'agents'), { recursive: true });
+      writeFileSync(join(dir, id, 'SKILL.md'), `---\nname: ${id}\ndescription: "Ten chars."\n${frontMatter}---\n\nbody\n`);
+      if (policy !== undefined) writeFileSync(join(dir, id, 'agents', 'openai.yaml'), policy);
+    };
+    skill('listed', '');
+    skill('paired', 'disable-model-invocation: true\n', 'policy:\n  allow_implicit_invocation: false\n');
+    skill('bare', 'disable-model-invocation: true\n');
+    skill('allowed', 'disable-model-invocation: true\n', 'policy:\n  allow_implicit_invocation: true\n');
+    assert.deepEqual(codexPolicyProblems(dir).sort(), [
+      'allowed: agents/openai.yaml sets allow_implicit_invocation under policy: to something other than false',
+      'bare: no agents/openai.yaml',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the Codex policy guard refuses a false that sits outside policy: or beside a true', () => {
+  const refused = {
+    'root-level': 'allow_implicit_invocation: false\n',
+    'wrong parent': 'interface:\n  allow_implicit_invocation: false\n',
+    'true plus unrelated false': 'policy:\n  allow_implicit_invocation: true\nother:\n  allow_implicit_invocation: false\n',
+    'nested too deep': 'policy:\n  other: 1\n  inner:\n    allow_implicit_invocation: false\n',
+    'flow mapping': 'policy: { allow_implicit_invocation: false }\n',
+    'two policy blocks': 'policy:\n  allow_implicit_invocation: false\npolicy:\n  allow_implicit_invocation: true\n',
+  };
+  for (const [label, text] of Object.entries(refused)) {
+    assert.notEqual(codexPolicyProblem(text), null, `${label} passed the guard:\n${text}`);
+  }
+  for (const text of [
+    'policy:\n  allow_implicit_invocation: false\n',
+    '# a comment\npolicy:\n  allow_implicit_invocation: false  # user-invoked\n',
+    'interface:\n  display_name: x\npolicy:\n  allow_implicit_invocation: false\n',
+  ]) {
+    assert.equal(codexPolicyProblem(text), null, text);
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'codex-policy-'));
+  try {
+    for (const [label, text] of Object.entries(refused)) {
+      const id = label.replace(/\s+/g, '-');
+      mkdirSync(join(dir, id, 'agents'), { recursive: true });
+      writeFileSync(join(dir, id, 'SKILL.md'), `---\nname: ${id}\ndescription: "Ten chars."\ndisable-model-invocation: true\n---\n\nbody\n`);
+      writeFileSync(join(dir, id, 'agents', 'openai.yaml'), text);
+    }
+    assert.equal(codexPolicyProblems(dir).length, Object.keys(refused).length, codexPolicyProblems(dir).join('\n'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the Codex policy guard refuses malformed YAML and names an unsupported form', () => {
+  const unsupported = 'writes policy: in an unsupported YAML form (a flow mapping, anchor, alias or tag)';
+  const cases = [
+    ['policy:\n\tallow_implicit_invocation: false\n', 'indents with a tab, which YAML does not allow'],
+    ['policy:\n  \tallow_implicit_invocation: false\n', 'indents with a tab, which YAML does not allow'],
+    ['policy:\n    allow_implicit_invocation: false\n  x: 1\n', 'dedents to a column no open block starts at'],
+    ['policy: {allow_implicit_invocation: false}\n', unsupported],
+    ['policy: &a\n  allow_implicit_invocation: false\n', unsupported],
+    ['base: &b\n  allow_implicit_invocation: false\npolicy: *b\n', unsupported],
+    ['policy: !!map\n  allow_implicit_invocation: false\n', unsupported],
+  ];
+  for (const [text, problem] of cases) assert.equal(codexPolicyProblem(text), problem, text);
+  assert.equal(codexPolicyProblem('policy:  # user-invoked\n    allow_implicit_invocation: false\n'), null);
 });
 
 test('every description states when NOT to use the skill', () => {

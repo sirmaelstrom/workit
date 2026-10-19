@@ -1,7 +1,8 @@
 ---
 name: review
-description: "Review a target with an adaptive multi-reviewer pipeline: GitHub PR, local branch (pre-PR), working tree, file/directory, or plan/spec. Triggered by '/review', '/review <PR-URL>', '/review #<num>', '/review branch[:<name>]', '/review wt', '/review file <path>', '/review plan <path>', or 'review my branch / plan / changes'. This heavy pipeline is dormant (no main-session use in 60 days) pending the H1 pilot. Not for routine PR boundaries; use two-lens slim-review there."
+description: "Review a target with an adaptive multi-reviewer pipeline: GitHub PR, local branch (pre-PR), working tree, file/directory, or plan/spec. User-invoked: /review [<PR-URL> | #<num> | branch[:<name>] | wt | file <path> | plan <path>]. This heavy pipeline is dormant (no main-session use in 60 days) pending the H1 pilot. Not for routine PR boundaries; use two-lens slim-review there."
 model: opus
+disable-model-invocation: true
 ---
 
 # Adaptive Multi-Target Review

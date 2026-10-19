@@ -32,7 +32,7 @@ The only inputs are the WP file, the workshop's `meta.json`, and the orchestrato
 
 Quest-place resolution is **out of scope for execute-wp**: a spec-driven run has no quest. Do not add quest lookups to this surface — the two consumers must not conflate their input sources.
 
-`spec-validate` enforces the declaration side: `meta.projects` must be a non-empty array, every inventory `Project` must appear in it, and with `--workspace-root <abs>` (or `WORKIT_WORKSPACE_ROOT`) each project must resolve on disk.
+The spec validator (`skills/spec/scripts/validate.mjs`) enforces the declaration side: `meta.projects` must be a non-empty array, every inventory `Project` must appear in it, and with `--workspace-root <abs>` (or `WORKIT_WORKSPACE_ROOT`) each project must resolve on disk.
 
 ### Roadmap / loop orchestrator (quest-driven)
 
@@ -137,11 +137,11 @@ Exit 0 = rooting is cwd-independent. If the recipe in this file ever changes, th
 
 ## Consumers (pointers, not copies)
 
-- `skills/execute-wp/SKILL.md` — "Root the Target" step (summary + pointer here).
+- `skills/conduct/reference/execute-wp.md` — "Root the Target" step (summary + pointer here).
 - `reference/templates/_orchestrator.template.md` — one-line pointer beside Gate Commands.
-- Output rooting (`{workspace}/data/outputs/…`): `skills/handoff`, `skills/spec`,
-  `skills/execute-wp`, `skills/spec-validate`, `skills/parallel-explore`,
-  `skills/audit-skills`. `skills/_shared/output-rooting.test.mjs` keeps them from
+- Output rooting (`{workspace}/data/outputs/…`): `skills/handoff`, `skills/spec`
+  (with its validator, `reference/validate.md`), `skills/conduct/reference/execute-wp.md`,
+  `skills/parallel-explore`, `skills/audit-skills`. `skills/_shared/output-rooting.test.mjs` keeps them from
   drifting back to a bare `./outputs/`.
 - Workspace-root `CLAUDE.md` §Cross-Repo Agent Work — one-line pointer (operator-maintained; outside this repo).
 - Walk-away pipeline doc — one-line pointer (operator-maintained; outside this repo).
