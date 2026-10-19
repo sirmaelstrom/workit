@@ -42,20 +42,37 @@ export function shellLiteral(value, platform = process.platform) {
 }
 
 // The spine path's channel: the filed touch is posted as a comment on the run's
-// PR or issue, and the operator's reply there is recorded as the answer by the
-// shared github-ask script (quest 008747c2).
+// asks issue, and the operator's reply there is recorded as the answer by the
+// shared github-ask script. Filing is the receipt, then the post: the touch is
+// read back only once the post is recorded.
+export function githubAskScript(state) {
+  return join(state.pluginRoot, 'skills', '_shared', 'github-ask', 'github-ask.mjs');
+}
+
 export function githubAskSpecPath(state, touch) {
   return join(state.runDir, 'touches', `${touch.n}.github-ask.json`);
 }
 
 export function githubAskCommand(state, touch, sub, extra = '') {
-  const script = join(state.pluginRoot, 'skills', '_shared', 'github-ask', 'github-ask.mjs');
-  return `node ${shellLiteral(script)} ${sub} --spec ${shellLiteral(githubAskSpecPath(state, touch))}${extra}`;
+  return `node ${shellLiteral(githubAskScript(state))} ${sub} --spec ${shellLiteral(githubAskSpecPath(state, touch))}${extra}`;
 }
 
-function githubPostStep(state, touch) {
-  return `Then post it where the operator answers it: write ${githubAskSpecPath(state, touch)} as JSON { "quest": "${state.intent.anchor}", "askReceiptId": "<the id spine_receipt returned>", "question": <args.question>, "options": <args.ask.options>, "run": "conduct ${state.slug} run ${state.runId}", "target": "<owner/repo>#<n>: the PR this touch is about, else the run's asks issue on its repo (open one the first time)" } and run: ${githubAskCommand(state, touch, 'post')}`;
+// The asks issue is the run's own, on its repo, until the first post names its number.
+function githubAskSpec(state, touch, askReceiptId, question) {
+  return {
+    askReceiptId, question, options: touch.options, allowFreeText: touch.allowFreeText === true,
+    run: `conduct ${state.slug} run ${state.runId}`,
+    target: state.githubAsks?.target ?? state.intent.repo?.remote ?? null,
+    issue: { key: `conduct ${state.slug} ${state.runId}`, title: `conduct ${state.slug}: operator asks (run ${state.runId})` },
+  };
 }
+
+function writeGithubAskSpec(state, touch, deps) {
+  deps.mkdir(join(state.runDir, 'touches'));
+  deps.write(githubAskSpecPath(state, touch), `${JSON.stringify(githubAskSpec(state, touch, touch.receiptId, touch.filedQuestion), null, 2)}\n`);
+}
+
+const READ_BACK_EXITS = 'Its exit: 0 (answered) or 7 (waiting): go on. 3 (conflict: the ask is closed or replaced), 4 (not_operator), 5 (unconfigured), 6 (refused), 1 (error) or 2 (usage): tell the operator the printed status, code and error, then go on.';
 
 export function answerCommand(state, touch) {
   const keys = touch.options.map((option) => option.key).join('|');
@@ -99,18 +116,25 @@ export function touchAction(state, touch) {
       instruction: `Stop. Show the operator ${join(state.runDir, touch.file)} and ask them to run, in their own terminal: ${answerCommand(state, touch)}. Then record this action with {}.`,
     };
   }
+  if (touch.status === 'filed' && touch.post?.state === 'pending') {
+    return {
+      ...base, kind: 'shell', part: 'post', command: ['node', githubAskScript(state), 'post', '--spec', githubAskSpecPath(state, touch)],
+      expects: { type: 'json' },
+      instruction: `Run this exact argv (no shell) and record its { code, stdout, stderr }. It posts ${touch.tag} on the run's asks issue, or finds the comment a previous run of it posted; until it prints status posted, the touch is not read back and this action is emitted again.`,
+    };
+  }
   if (touch.waiting) return handBackAction(state, touch);
   if (touch.status === 'filed') {
     return {
       ...base, kind: 'agent-tool', part: 'read-back', tool: 'spine_quest', args: { ids: [state.intent.anchor] },
       expects: { type: 'json' },
-      instruction: `First run ${githubAskCommand(state, touch, 'poll', ' --once')}: it records an operator reply to the touch's GitHub comment, if one has come. Then call spine_quest with these args and record its raw result.`,
+      instruction: `First run ${githubAskCommand(state, touch, 'poll', ' --once')}: it records an operator reply to the touch's GitHub comment, if one has come. ${READ_BACK_EXITS} Then call spine_quest with these args and record its raw result: the answer is what spine_quest shows, never what poll printed.`,
     };
   }
   if (state.touches.some((other) => other !== touch && other.status === 'filed')) return null;
   return {
     ...base, kind: 'agent-tool', part: 'receipt', tool: 'spine_receipt', expects: { type: 'json' },
-    instruction: `Call spine_receipt with these args and record its raw result. ${githubPostStep(state, touch)}`,
+    instruction: 'Call spine_receipt with these args and record its raw result. The next action posts it on GitHub.',
     args: {
       questId: state.intent.anchor,
       outcome: 'needs_input',
@@ -137,7 +161,7 @@ export function handBackAction(state, touch) {
   const waiting = `${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action.`;
   return {
     ...base,
-    instruction: `Stop and end your turn: ${waiting} Tell the operator it waits for their reply to the touch's GitHub comment (the askCommentUrl that post printed). To pick the reply up, run ${githubAskCommand(state, touch, 'poll')}, which waits for it and records it, then resume with: ${resumeCommand(state)} (its first action reads the answer back).`,
+    instruction: `Stop and end your turn: ${waiting} Tell the operator it waits for their reply to ${touch.post?.askCommentUrl ?? 'the touch\'s GitHub comment'}. Run no blocking poll. Later, you or a scheduler resume with: ${resumeCommand(state)} (its first action, the read-back, runs poll --once and reads the answer back).`,
   };
 }
 
@@ -237,9 +261,21 @@ export function acceptAnswer(state, touch, answer) {
   touch.waiting = false;
 }
 
-export function recordTouch(state, touch, action, result) {
+export function recordTouch(state, touch, action, result, deps) {
   if (action.kind === 'wait') {
     touch.waiting = false;
+    return;
+  }
+  if (action.kind === 'shell' && action.part === 'post') {
+    // A post that did not print status posted is refused: the action stays
+    // pending and is emitted again, and the touch is not read back.
+    let out = null;
+    try { out = JSON.parse(result?.stdout ?? ''); } catch { out = null; }
+    if (out?.status !== 'posted') {
+      throw new ConductError(2, `github-ask post did not post ${touch.tag} (exit ${result?.code}): ${out?.status ?? 'no JSON'}${out?.error ? `: ${out.error}` : ''}`);
+    }
+    touch.post = { state: 'posted', target: out.target, askCommentUrl: out.askCommentUrl, askCommentId: out.askCommentId, existing: out.existing === true };
+    state.githubAsks = { ...state.githubAsks, target: out.target };
     return;
   }
   if (action.kind !== 'agent-tool') return;
@@ -253,6 +289,9 @@ export function recordTouch(state, touch, action, result) {
     touch.filings += 1;
     touch.status = 'filed';
     touch.refusal = null;
+    // The filing's second half: the spec is written here, and the post action comes next.
+    writeGithubAskSpec(state, touch, deps);
+    touch.post = { state: 'pending', spec: `touches/${touch.n}.github-ask.json` };
     return;
   }
   // The read-back: accept only an answered receipt to THIS run's filing.

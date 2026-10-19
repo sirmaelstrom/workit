@@ -84,12 +84,18 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    Spine ask is for unattended runs, and it reaches the operator as a GitHub
    comment on the run's PR or issue, posted with
    `node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`
-   (`pickup` lists the spec's fields and the exit codes). The operator replies with
-   the option letter alone on the first line, from any device and with no agent
-   running. `github-ask.mjs poll --spec <file>` finds the reply and records it
-   as an `answered` receipt from `operator:github`, which supersedes the ask
-   and puts the quest back on the frontier. Options buried in the question
-   prose can't be answered by letter. The Dogan lists waiting asks read-only.
+   (`pickup` lists the spec's fields and what each exit code means). The
+   operator replies with the option letter alone on the first line, notes below
+   it, from any device and with no agent running. A question with no choices is
+   filed as one option, `a`, with `allowFreeText: true`, and the operator puts
+   the answer under the `a`. `github-ask.mjs poll --spec <file> --once`, run
+   once each time the run comes back to the item, finds the reply and records
+   it as an `answered` receipt from `operator:github`, which supersedes the ask
+   and puts the quest back on the frontier; exit 7 means no reply yet, so park
+   the item and go on. The login filter in poll is a convenience, and
+   Observatory's check of the operator login is the authority. Options buried
+   in the question prose can't be answered by letter. The Dogan lists waiting
+   asks read-only.
    In session, pose any ask or list of choices as a plain AskUserQuestion with the
    recommendation first: the recommended option listed first, its label ending
    "(Recommended)". Use at most four options per question. Record the ruling in
@@ -368,7 +374,8 @@ Decisions, secrets, external actions, and merges. Everything else auto-captures.
 A decision is summoned as a `needs_input` receipt carrying the exact question —
 and, when it is a choice, `ask.options` (letter, label, one-line consequence),
 posted as a GitHub comment the operator answers by letter (`github-ask.mjs`,
-step 2) — not as a paused session waiting to be noticed. The answer is read back (`latestReceipt.answer`, else the
+step 2) — not as a paused session waiting to be noticed. The answer is read
+back (`latestReceipt.answer`, else the
 answer resolver, step 4), never assumed.
 
 ## Observatory down

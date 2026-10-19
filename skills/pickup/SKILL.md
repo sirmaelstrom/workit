@@ -121,7 +121,10 @@ What degrades, exactly:
   on recovery (exit 0 either way; 1 is a refusal to fix). It takes `completed`,
   `paused` and `needs_input`.
 - **Asks wait for recovery.** A spooled `needs_input` has no receipt id until
-  it replays, so its GitHub comment is posted after recovery. A reply to a
+  it replays, so its GitHub comment is posted at the first re-entry after the
+  probe answers again: read the replayed receipt's id from `spine_quest`, write
+  the spec and run `post` (it finds a comment already posted rather than
+  posting twice). A reply to a
   comment already posted stays on GitHub, and `github-ask.mjs poll` keeps
   retrying it until Observatory records it.
 
@@ -158,18 +161,33 @@ dropping the needle. Stopped because you are blocked rather than done? Use
 surfaces blocked-waiting instead of looking abandoned. When the question is a
 CHOICE, pass `ask.options` too — one entry per choice with a letter key
 (`a`..`f`), a short label, and a ONE-LINE consequence, plus `allowFreeText`
-when a typed answer is also acceptable. That Spine ask is for unattended runs,
-and it reaches the operator as a GitHub comment on the run's PR or issue. Post
-it with `node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`,
-where the spec file holds the quest, the receipt's id, the question, the options
-(recommendation first), the target `<owner/repo>#<n>` and the run's name. The
-operator replies from any device with the option letter alone on the first
-line. Then run `github-ask.mjs poll --spec <file>`: it finds that reply and
-records it through Observatory as an `answered` receipt from `operator:github`
-that supersedes the ask. Exit 0 is recorded, 7 is no reply yet, and 3 to 6 stop
-with the status it prints (the ask was answered or replaced, the reply is not
-the operator's, Observatory is unconfigured, or the route refused it). The
-Dogan still lists waiting asks, read-only; it no longer answers them. In session, pose any ask or list of choices
+when a typed answer is also acceptable. A question with no choices is filed as
+one option, `a` (label "Answer below"), with `allowFreeText: true`, because a
+GitHub answer needs a key. That Spine ask is for unattended runs, and it
+reaches the operator as a GitHub comment on the run's PR or issue. Post it with
+`node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`,
+where the spec file holds the receipt's id, the question, the options and
+`allowFreeText` exactly as filed, the recommended option's key (`recommended`),
+the target `<owner/repo>#<n>` and the run's name. The operator replies from any
+device with the option letter alone on the first line; notes, a typed answer
+included, go on the lines below and become the answer's `text`. Then run
+`github-ask.mjs poll --spec <file> --once`, once per re-entry: it finds that
+reply and records it through Observatory as an `answered` receipt from
+`operator:github` that supersedes the ask. Its exit says what to do next:
+- 0, recorded: read the answer back (below).
+- 7, no reply yet: end the turn, and run it again on the next re-entry. Never
+  run the blocking form in a turn that should end.
+- 3, the ask was answered another way or replaced: read it back.
+- 4 (not the operator's), 5 (Observatory unconfigured), 6 (the route refused
+  it), 1 (gh failed) or 2 (bad arguments, or no operator login): report the
+  printed status and error to the operator, and stop.
+
+poll counts only comments by the login in `OBSERVATORY_OPERATOR_GITHUB_LOGIN`
+(or `--operator`). That filter is a convenience; Observatory's own check of the
+login on the comment it fetches is the authority. A run holding the operator's
+gh token can post as the operator, and nothing tells that comment apart, so
+never reply to an ask comment yourself. The Dogan still lists waiting asks,
+read-only; it no longer answers them. In session, pose any ask or list of choices
 as a plain AskUserQuestion with the recommendation first: the recommended option
 listed first, its label ending "(Recommended)". Use at most four options per
 question. Record the ruling in your next Spine receipt: the chosen label

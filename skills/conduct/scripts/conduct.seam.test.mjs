@@ -28,6 +28,7 @@ import { shellArgv } from './lib/exec.mjs';
 import { correlation, shellLiteral } from './lib/touch.mjs';
 import { SEAM_ROWS } from './lib/analyze.mjs';
 import { namedSeam } from './lib/phases/showcase.mjs';
+import { post as postGithubAsk } from '../../_shared/github-ask/github-ask.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = join(HERE, '__fixtures__');
@@ -334,6 +335,11 @@ async function perform(h, action) {
     default: {
       const { command } = action;
       if (command[0] === 'node' && command[1].endsWith('conduct.mjs')) return conductVerb(h, action);
+      // github-ask post: the touch's comment on the run's asks issue.
+      if (command[0] === 'node' && command[1].endsWith('github-ask.mjs')) {
+        h.calls.push(command.join(' '));
+        return { code: 0, stdout: JSON.stringify({ status: 'posted', existing: false, target: 'o/r#9', askCommentUrl: `https://github.com/o/r/issues/9#issuecomment-${900 + action.touch.n}`, askCommentId: 900 + action.touch.n }), stderr: '' };
+      }
       if (command[0] === 'node' && command[1].endsWith('lane.mjs')) {
         h.calls.push(command.join(' '));
         return herdrVerb(h, action);
@@ -941,7 +947,8 @@ test('spine + herdr: spine_author once, a receipt per WP stop, touches filed onc
   for (const touch of state.touches) {
     const filings = h.trace.filter((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' && a.args.question.startsWith(touch.tag));
     assert.equal(filings.length, 1, touch.tag);
-    const next = h.trace[h.trace.indexOf(filings[0]) + 1];
+    const [post, next] = h.trace.slice(h.trace.indexOf(filings[0]) + 1);
+    assert.deepEqual([post.part, post.command.at(-1)], ['post', join(h.runDir, 'touches', `${touch.n}.github-ask.json`)]);
     assert.deepEqual([next.tool, next.args.ids], ['spine_quest', [ANCHOR]]);
   }
   // A merged lane's branch deletes are git cleanup, not lane steps.
@@ -1013,7 +1020,7 @@ test('E6 hand-back (spine): no attributed answer → a touch-kind hand-back, nev
   spineReplies(h);
   await start(h, SPINE_ONLY);
   const back = await drive(h, { until: isHandBack, max: 10 });
-  assert.deepEqual(h.trace.map((a) => `${a.tool ?? a.kind}/${a.part ?? ''}`), ['spine_quest/', 'spine_receipt/receipt', 'spine_quest/read-back', 'touch/hand-back']);
+  assert.deepEqual(h.trace.map((a) => `${a.tool ?? a.kind}/${a.part ?? ''}`), ['spine_quest/', 'spine_receipt/receipt', 'shell/post', 'spine_quest/read-back', 'touch/hand-back']);
   assert.deepEqual([back.kind, back.step, back.touch.n, back.seam], ['touch', 'preapproval', 1, 'operator-touch']);
   assert.match(back.instruction, /^Stop and end your turn: \[conduct seam-run touch 1\] is filed on quest a0a0a0a0-/);
   assert.ok(back.instruction.includes(`next --resume ${shellLiteral(h.runDir)}`), back.instruction);
@@ -1070,6 +1077,18 @@ test('E6 hand-back (spine): the release anomaly\'s touch hands back with seam re
   const back = await drive(h, { until: isHandBack });
   assert.deepEqual([back.kind, back.step, back.part, back.seam], ['touch', 'touch', 'hand-back', 'release']);
   assert.deepEqual([h.state().touches[back.touch.n - 1].kind, h.state().touches[back.touch.n - 1].wpId], ['blocked', null]);
+  // Its spec, as conduct wrote it, has one option, and the real github-ask posts it.
+  const spec = JSON.parse(readFileSync(join(h.runDir, 'touches', `${back.touch.n}.github-ask.json`), 'utf8'));
+  assert.deepEqual([spec.options.length, spec.allowFreeText], [1, true]);
+  const bodies = [];
+  const gh = (args, { input } = {}) => {
+    if (!args.includes('POST')) return '';
+    bodies.push(JSON.parse(input).body);
+    return JSON.stringify({ id: 1, html_url: 'https://github.com/o/r/issues/9#issuecomment-1' });
+  };
+  const postedAsk = await postGithubAsk({ ...spec, target: 'o/r#9' }, { gh });
+  assert.equal(postedAsk.status, 'posted');
+  assert.match(bodies[0], /This ask has one option: reply with `a` on the first line, then your answer on the lines below\./);
   const resumed = out(await h.run(['next', '--resume', h.runDir])).action;
   assert.deepEqual([resumed.tool, resumed.part, resumed.seam], ['spine_quest', 'read-back', 'release']);
   assert.deepEqual(h.events().filter((e) => e.event === 'resumed').map((e) => [e.actionId, e.seam]), [[back.id, 'release']]);
@@ -1148,7 +1167,7 @@ test('touch filings (C1-2): a showcase filing acknowledged with ok:false, succes
   }
   // C2-10: `error: null` is no error.
   const filed = out(await h.run(['record', '--run', h.runDir, '--action', filing.id, '--result', JSON.stringify({ ...good, error: null })]));
-  assert.equal(filed.action.tool, 'spine_quest');
+  assert.equal(filed.action.part, 'post');
   assert.deepEqual([h.state().touches[1].status, h.state().touches[1].receiptId], ['filed', good.id]);
 });
 
