@@ -139,6 +139,14 @@ test('/burn-down and /pickup: in session, the operator\'s message is the go', ()
   }
 });
 
+test('/burn-down: the latest-answer route names Observatory\'s base URL and default as /pickup\'s atlas line does', () => {
+  const base = /`\$OBSERVATORY_BASE_URL\/api\/atlas`, default `(http[^`]+)`/.exec(sentences(text('pickup')).join(' '));
+  assert.ok(base, 'pickup names $OBSERVATORY_BASE_URL and its default');
+  const route = sentences(text('burn-down')).join(' ');
+  assert.match(route, /`GET \$OBSERVATORY_BASE_URL\/api\/spine\/quests\/<quest uuid>\/receipts\/latest-answer\?/);
+  assert.ok(route.includes(`\`OBSERVATORY_BASE_URL\` default \`${base[1]}\``), 'burn-down gives the same default');
+});
+
 test('/spec keeps the run-prefix check on a spine: ref', () => {
   const spec = sentences(text('spec')).join(' ');
   assert.match(spec, /this run's correlation prefix `\(run <runId>\/`/);

@@ -559,6 +559,8 @@ async function upgradeRootVerb(tokens, deps) {
   const flags = parseFlags(tokens), why = stringFlag(flags, 'why'), runDir = runDirFlag(flags);
   return withStateLock(runDir, deps, () => {
     const state = loadState(runDir, deps);
+    // It rewrites the run's paths for a resume, so a run no resume can take is refused, not rewritten.
+    refuseRetired(state);
     if (openRotation(state)) throw new ConductError(5, 'upgrade-root: a rotation is open; take custody (next) before moving the run');
     if (state.pending && !['author', 'wait'].includes(state.pending.kind)) throw new ConductError(5, `upgrade-root: record pending action ${state.pending.id} first; executable actions cannot be migrated safely (upgrade at an author or wait action)`);
     if (state.pluginRoot === deps.pluginRoot) return { out: { ok: true, unchanged: true, pluginRoot: state.pluginRoot } };

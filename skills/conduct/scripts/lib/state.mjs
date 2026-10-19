@@ -48,8 +48,10 @@ export const STEPS = Object.freeze(Object.keys(STEP_SEAM));
 
 export const TERMINAL_PHASES = Object.freeze(['closed', 'declined', 'sent-back']);
 
-// The halt kinds the build still opens and clears.
-const HALT_KINDS = Object.freeze(['budget', 'merged']);
+// The touch and halt kinds the passkey, spend and answer adapters opened and
+// this conduct no longer opens or clears. A kind not named here passes.
+export const RETIRED_TOUCH_KINDS = Object.freeze(['preapproval-confirm']);
+export const RETIRED_HALT_KINDS = Object.freeze(['meter', 'authority', 'authority-ended']);
 
 // What a run written by a conduct with the passkey, spend or answer adapters
 // can carry that this conduct no longer handles: resumed, each would take a
@@ -60,10 +62,10 @@ export function retiredShapes(state) {
   if (TERMINAL_PHASES.includes(state.phase)) return [];
   const found = [];
   for (const touch of state.touches ?? []) {
-    if (touch.kind === 'preapproval-confirm' && touch.status !== 'answered') found.push(`touch ${touch.n} is an unanswered preapproval-confirm (the passkey confirmation)`);
+    if (RETIRED_TOUCH_KINDS.includes(touch.kind) && touch.status !== 'answered') found.push(`touch ${touch.n} is an unanswered ${touch.kind} (the passkey confirmation)`);
   }
   for (const halt of state.build?.halts ?? []) {
-    if (!HALT_KINDS.includes(halt.kind)) found.push(`build halt ${JSON.stringify(halt.kind)} (${halt.reason ?? 'no reason'})`);
+    if (RETIRED_HALT_KINDS.includes(halt.kind)) found.push(`build halt ${JSON.stringify(halt.kind)} (${halt.reason ?? 'no reason'})`);
   }
   const stored = [
     ['pending', state.pending],
@@ -87,7 +89,7 @@ export function retiredShapes(state) {
 export function refuseRetired(state) {
   const found = retiredShapes(state);
   if (!found.length) return;
-  throw new ConductError(2, `run ${state.runDir} was written by a conduct with the passkey, spend or answer adapters, and this conduct cannot resume it: ${found.join('; ')}. Start a new run with \`conduct.mjs intake\`; status and analyze still read this one.`);
+  throw new ConductError(2, `run ${state.runDir} carries ${found.join('; ')}. A conduct with the passkey, spend or answer adapters wrote that, and this conduct cannot resume it. Start a new run with \`conduct.mjs intake\`; status and analyze still read this one.`);
 }
 
 export function slugify(goal) {

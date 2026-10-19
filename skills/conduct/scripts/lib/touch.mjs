@@ -157,17 +157,14 @@ function filedQuestion(state, touch, filing) {
   return `${head}${refused}${body}`;
 }
 
-// The answered receipt's question is the filed one, verbatim. A touch filed
-// before the filed question was kept matches on its correlation head plus its
-// whole question body, with nothing between them but the refusal sentence.
-export function answersFiling(state, touch, question) {
-  if (typeof question !== 'string') return false;
-  if (typeof touch.filedQuestion === 'string') return question === touch.filedQuestion;
-  const head = `${correlation(state, touch)} `;
-  const body = touch.question.slice(touch.tag.length + 1);
-  if (!question.startsWith(head) || !question.endsWith(body)) return false;
-  const between = question.slice(head.length, question.length - body.length);
-  return between === '' || between.startsWith('Your previous answer could not be used');
+// The answered receipt's question is the filed one, verbatim: touch.filedQuestion,
+// or touch.filed.question on a touch filed by a conduct that kept only that.
+export function filedQuestionOf(touch) {
+  const filed = touch.filedQuestion ?? touch.filed?.question;
+  return typeof filed === 'string' ? filed : null;
+}
+export function answersFiling(touch, question) {
+  return typeof question === 'string' && question === filedQuestionOf(touch);
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -244,8 +241,9 @@ export function recordTouch(state, touch, action, result) {
   // The read-back: accept only an answered receipt to THIS run's filing.
   // spine_quest shows only the latest receipt, so a later receipt on the
   // anchor hides it there.
+  if (filedQuestionOf(touch) === null) throw new ConductError(2, `touch ${touch.n} was filed before conduct kept the filed question (touch.filedQuestion), so no answer can be matched to it verbatim. Answer it in a new run (\`conduct.mjs intake\`); status and analyze still read this one.`);
   const latest = result?.quests?.[0]?.latestReceipt;
-  const answered = latest?.outcome === 'answered' && latest.answer && answersFiling(state, touch, latest.question);
+  const answered = latest?.outcome === 'answered' && latest.answer && answersFiling(touch, latest.question);
   if (!answered) {
     touch.waiting = true;
     return;
