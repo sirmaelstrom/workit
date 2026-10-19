@@ -1,11 +1,13 @@
 ---
 name: spec
-description: "Generate a specification. Trigger: '/spec', 'spec this', 'write a spec for', 'auto-spec'. READ THE FULL SKILL before executing — depth selection, pipeline stages, and review gates are defined below."
+description: "Generate or validate a specification. Trigger: '/spec', 'spec this', 'write a spec for', 'auto-spec', 'validate spec'. READ THE FULL SKILL before executing — depth selection, pipeline stages, and review gates are defined below."
 ---
 
 # Spec — Autonomous Specification Pipeline
 
 Generate a complete, execution-ready specification from a short intent description. The spec is **a tool you reach for, not a gate you pass through.** Three depths are available — choose based on the problem, not habit.
+
+**Validate only.** Asked to validate or check an existing deep workshop ("validate spec", "is this ready?") rather than write one: run `node "${CLAUDE_SKILL_DIR}/scripts/validate.mjs" <workshop-path>` and read its report as `${CLAUDE_SKILL_DIR}/reference/validate.md` describes. Nothing else in this skill runs.
 
 ## Spec Depth
 
@@ -349,7 +351,7 @@ After approval, run stages 5-6:
 - Pattern: `${CLAUDE_PLUGIN_ROOT}/reference/patterns/work-package.md`
 - Output: `work-packages/wp-{NN}-{slug}.md` for each package + `work-packages/_orchestrator.md`
 - Use the `_orchestrator.template.md` template from `${CLAUDE_PLUGIN_ROOT}/reference/templates/`
-- Required fields per WP: the 6 core ones (precondition, goal, files, verification, failure criteria, boundary) plus three that `/conduct`'s scheduler reads. `spec-validate` rejects a WP missing any of them; the rule and each field's form live in `${CLAUDE_PLUGIN_ROOT}/reference/patterns/work-package.md`:
+- Required fields per WP: the 6 core ones (precondition, goal, files, verification, failure criteria, boundary) plus three that `/conduct`'s scheduler reads. The validator (`scripts/validate.mjs`) rejects a WP missing any of them; the rule and each field's form live in `${CLAUDE_PLUGIN_ROOT}/reference/patterns/work-package.md`:
   - **Files** as bullets that begin `- Create ` or `- Modify ` with the path as the first backticked token (a WP with no such bullet parses to an empty file set and runs alone).
   - `**Review tier:** T0|T1|T2`.
   - `**Runtime exercise:**` — the surface and the check, or `none: <why>`.
@@ -479,9 +481,9 @@ Count amendments applied.
 
 Run one more Opus fresh-eyes wave (same prompt and model as 7a) to verify the council amendments didn't introduce new issues. This is the final quality gate.
 
-Then run the spec-validate script (bundled in this plugin):
+Then run the validator bundled with this skill (what it checks and how to read its report: `${CLAUDE_SKILL_DIR}/reference/validate.md`):
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/skills/spec-validate/scripts/validate.mjs" "{workshop_path}"
+node "${CLAUDE_SKILL_DIR}/scripts/validate.mjs" "{workshop_path}"
 ```
 
 Report: validation result (errors/warnings/passes) + final wave verdict.
@@ -611,7 +613,7 @@ Write a ledger event — as `event_type: "note"` with the stage record in the pa
 - **Ground everything.** No architectural claims without file references. No "the system probably does X."
 - **Flag, don't hide.** Uncertainty is fine — hiding it isn't. Use [DECISION] and [ASSUMPTION] callouts liberally.
 - **Patterns are runtime reads, not memorized content.** Read each pattern file fresh before writing its artifact. Patterns evolve.
-- **The output is a real workshop.** Not a separate format. The review council works on these artifacts unchanged; `spec-validate` applies to **deep** specs only — its checker hard-errors on a lite spec's single-file shape (auto-memory `workit-spec-validate-files-header-strict`).
+- **The output is a real workshop.** Not a separate format. The review council works on these artifacts unchanged; the validator applies to **deep** specs only — its checker hard-errors on a lite spec's single-file shape (auto-memory `workit-spec-validate-files-header-strict`).
 - **Convergence, not perfection.** The refinement loop stops when P1s are gone, not when findings are zero. P3s are noise — chasing them degrades momentum.
 - **The spec is a tool, not a gate.** Deep when it helps, lite when it's enough, none when it's overhead. The operator chooses.
 
@@ -653,4 +655,4 @@ Omit `--prior-report` for wave 1. The event payload has this shape for wave N > 
 
 ---
 *Pattern library: bundled under `reference/`*
-*Related skills: /spec-validate (quality check), /grill-me (stress-test before speccing), /parallel-explore (compare approaches), /chart (map a foggy multi-session effort before speccing)*
+*Related skills: /grill-me (stress-test before speccing), /parallel-explore (compare approaches), /chart (map a foggy multi-session effort before speccing)*

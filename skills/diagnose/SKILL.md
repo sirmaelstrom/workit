@@ -132,7 +132,7 @@ If the root cause is durable and text-preventable, propose **one or more** of:
 - **CLAUDE.md correction** — if this class of mistake is likely to recur in this project
 - **Hook idea** — if a mechanical check would catch it (version check, process check)
 - **Test/verification addition** — if a test would prevent regression
-- **Auto-memory entry** — if it applies cross-project or is a new insight worth preserving (the workspace's persistent memory store: one-fact file + index line). Legacy global LESSONS.md/CORRECTIONS.md are closed curated archives (2026-08-05) — do not add entries there.
+- **Auto-memory entry** — if it applies cross-project or is a new insight worth preserving (the workspace's persistent memory store: one-fact file + a pointer line in the hub that fits it). Legacy global LESSONS.md/CORRECTIONS.md are closed curated archives (2026-08-05) — do not add entries there.
 
 Only propose what's warranted. Not every bug needs a correction entry.
 

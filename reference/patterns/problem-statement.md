@@ -46,7 +46,7 @@ The second version surfaces: what system, what "failure" means specifically, wha
 {What you don't know yet. These don't block capture — they guide refinement.}
 ```
 
-> **Two structures, one pattern.** The lightweight form above is for *capture* — a problem statement that can sit on its own for days. When the problem enters the `/spec` pipeline, use the fuller structure in `templates/problem-statement.template.md` (`What We're Solving` / `Current State` / `What "Solved" Looks Like` / `What's Actually Broken`), which forces more grounding. `spec-validate` accepts **either** vocabulary — the headings differ, the discipline is the same.
+> **Two structures, one pattern.** The lightweight form above is for *capture* — a problem statement that can sit on its own for days. When the problem enters the `/spec` pipeline, use the fuller structure in `templates/problem-statement.template.md` (`What We're Solving` / `Current State` / `What "Solved" Looks Like` / `What's Actually Broken`), which forces more grounding. The spec validator accepts **either** vocabulary — the headings differ, the discipline is the same.
 
 ## Ground It Before You Write It
 

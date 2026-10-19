@@ -6,7 +6,7 @@
      COORDINATION SECTIONS
      The three sections below (Wave Plan, Package Inventory, Gate Commands)
      are the structured coordination layer. Format matters for execution
-     agents and spec-validate. Everything else is for human readers.
+     agents and the spec validator. Everything else is for human readers.
 
      THIS FILE MUST LIVE AT: work-packages/_orchestrator.md
      The workshop directory is derived from dirname(dirname(path)).

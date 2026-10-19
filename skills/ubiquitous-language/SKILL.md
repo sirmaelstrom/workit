@@ -100,7 +100,7 @@ After writing, state: "I've written/updated `UBIQUITOUS_LANGUAGE.md`. I'll use t
 ## Relationship to Other Skills
 
 - **`/spec`** — Stage 1 (problem statement) should check for a glossary; Stage 2 (decisions) should use canonical terms
-- **`/spec-validate`** — could check spec artifacts against the glossary for terminology consistency (future enhancement)
+- **`/spec`'s validator** — could check spec artifacts against the glossary for terminology consistency (future enhancement)
 - **Project onboarding** — *not built; no such skill exists.* The idea: surface the glossary as part of project context loading. (`/pickup` re-enters quests but does not load glossaries.)
 - **`/improve-architecture`** — terminology scattered across modules is a code smell this skill can diagnose
 

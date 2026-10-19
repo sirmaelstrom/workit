@@ -1,6 +1,7 @@
 ---
 name: wizard
 description: "Generate an interactive bash wizard that walks a human through steps only they can perform. Trigger: 'wizard for X', provisioning infrastructure, credentials/CI-secrets setup, unfamiliar third-party dashboards, one-off migrations or cutovers. Not for steps the agent can do itself."
+disable-model-invocation: true
 ---
 
 # Wizard

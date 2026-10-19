@@ -1,6 +1,6 @@
 ---
 name: conduct
-description: "Take a goal end to end: spec, parallel lanes, review, merge, analysis, two touches. Trigger: /conduct. Not for one quest (pickup) or a queue (burn-down)."
+description: "Take a goal end to end: spec, parallel lanes, review, merge, analysis, two touches; or run one spec work package by hand ('execute WP-01'). Trigger: /conduct. Not for one quest (pickup) or a queue (burn-down)."
 ---
 
 # Conduct — take a stated goal end to end
@@ -21,6 +21,8 @@ You drive a one-shot state machine, `${CLAUDE_SKILL_DIR}/scripts/conduct.mjs`. E
          [--runs-root <dir>]          # where the run dir goes
 /conduct --resume <run dir>           # continue a run
 ```
+
+**One work package by hand.** Asked to execute a single WP from a spec outside a run ("execute WP-01", "run wp"), follow `${CLAUDE_SKILL_DIR}/reference/execute-wp.md` instead of the state machine: it reads the orchestrator and progress log, roots the target, builds the WP and appends its progress entry.
 
 ## The loop
 

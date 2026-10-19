@@ -125,9 +125,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      (one that changes an executable line), one delta-only pass per lens
      (`lens --since <reviewed head>`). There is no
      second full-PR review and no third round at T1; a fix made after the delta
-     pass is checked by its seen-failing control. The cap binds manual T1,
-     `babysit`, and Observatory's pr-review beat (observatory#765); all three
-     read the rounds through the writer's `rounds`.
+     pass is checked by its seen-failing control. The cap binds manual T1 and
+     Observatory's pr-review beat (observatory#765); both read the rounds
+     through the writer's `rounds`.
      If the delta pass finds at least two distinct new P1/P2 defects inside the
      amendment, review the amended whole PR in a T2 council round. A `--dup-of`
      pair counts once; guard comments and P3s do not count. The obligation ends

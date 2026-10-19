@@ -23,8 +23,7 @@ Grouped by what they're for:
 | Skill | What it does |
 |-------|--------------|
 | `chart` | Map a foggy, multi-session effort as a decision tree on disk, then resolve one question per session — scheduling `grill-me` / `prototype` / `parallel-explore` to do the answering. Halts rather than charting when the route is already clear. |
-| `spec` | Generate a specification through a staged pipeline with review gates and depth auto-selection. |
-| `spec-validate` | Validate a spec's quality against structural checks before you build. |
+| `spec` | Generate a specification through a staged pipeline with review gates and depth auto-selection; its bundled validator checks a deep spec's structure before you build. |
 | `ubiquitous-language` | Extract domain terminology into a shared glossary (DDD). |
 | `grill-me` | Stress-test a plan or idea — poke holes before you commit. |
 | `parallel-explore` | Fan a design problem out into intentionally different agent runs, then synthesize a ranked decision. |
@@ -34,10 +33,9 @@ Grouped by what they're for:
 ### Execute
 | Skill | What it does |
 |-------|--------------|
-| `execute-wp` | Execute a work package from a spec, appending to a progress log as it goes. |
 | `handoff` | Compact a conversation into a handoff doc so a fresh agent can pick up the work. |
 | `burn-down` | Run an ordered queue of roadmap quests to landed, holding the disciplines that keep the board honest — scheduling `pickup` per item and `handoff` only for mid-item exits. |
-| `conduct` | Take a stated goal end to end — intake, an auto-depth spec, work packages built in parallel lanes, reviewed and merged, analyzed — in two operator touches, driven by `skills/conduct/scripts/conduct.mjs`'s next/record loop. Needs `git`, `gh` and a lane-agent CLI (`claude` or `codex`); the Spine, herdr, council and KB are optional adapters. |
+| `conduct` | Take a stated goal end to end — intake, an auto-depth spec, work packages built in parallel lanes, reviewed and merged, analyzed — in two operator touches, driven by `skills/conduct/scripts/conduct.mjs`'s next/record loop. One spec work package can also run by hand, appending to the spec's progress log (`skills/conduct/reference/execute-wp.md`). Needs `git`, `gh` and a lane-agent CLI (`claude` or `codex`); the Spine, herdr, council and KB are optional adapters. |
 | `pickup` | Resume the current project's top roadmap quest from the Spine — resume note + cartridge artifacts, claim the quest on the board, then continue. |
 | `commit-msg` | Commit via a file (`git commit -F`) so shell-active content — backticks, links, quotes — lands verbatim instead of breaking under HEREDOC parsing. |
 | `codex-delegate` | Route token-hungry grunt work (repo audits, large-doc extraction, broad scans) to `codex exec` with a self-contained prompt and a distilled-only handback, keeping bulk tokens out of the conductor's context. |
@@ -49,12 +47,11 @@ Grouped by what they're for:
 |-------|--------------|
 | `review` | Adaptive multi-reviewer pipeline over a PR, branch, working tree, file, or plan. |
 | `slim-review` | The light tier: two external reviewers at a PR boundary, findings posted as line-anchored GitHub review comments, then confirmed or refuted thread by thread. No synthesis pass — cheap enough to run on every PR. |
-| `babysit` | Converge a PR's paired review under bounds: claim the head, judge each finding, fix, push, repeat until a clean pass with threads resolved and CI green — or exit blocked naming what is owed. Never merges. |
 | `improve-architecture` | Find code smells and make a codebase more agent-friendly and testable. |
 | `diagnose` | Force environmental / process / config / code-path hypotheses into an explicit verification flow before editing. |
 | `blast-radius` | Pre-ship impact analysis: find what a change breaks beyond the diff, then prove the one fact it's safe because of by running real code — anything below that rung is marked unproven. Ported from [pstack's blast-radius](https://github.com/cursor/plugins/tree/main/pstack/skills/blast-radius). |
 | `failure-audit` | Delta failure-mode audit over archived agent-session transcripts: slice new sessions into digests, fan out calibrated auditor waves, then run the standing comparisons (guard treatment check, model drift, new-label emergence). Operator-pulled, never scheduled. |
-| `retro` | Retrospective on one to three sessions: read the real transcript, then propose changes to the agent's environment (checks over prose, steering-file no-ops, tool economy, information access), ranked with receipts, landed only when the operator picks. Ported from [Matt Pocock's retro](https://github.com/mattpocock/skills/tree/main/skills/engineering/retro). Operator-pulled, never scheduled. |
+| `retro` | Retrospective on one to three sessions: read the real transcript, then propose changes to the agent's environment (checks over prose, steering-file no-ops, tool economy, information access), ranked with receipts, landed only when the operator picks; `/retro reflect` is the quick pass for one-line `CLAUDE.md` corrections. Ported from [Matt Pocock's retro](https://github.com/mattpocock/skills/tree/main/skills/engineering/retro). Operator-pulled, never scheduled. |
 | `unslop` | Cut AI tells from prose (puffery, filler, hedging, chatbot phrases, metaphor jargon) and put a human voice back in. Ported from [pstack's unslop](https://github.com/cursor/plugins/tree/main/pstack/skills/unslop); rule 26's jargon cut is gated on the project's `UBIQUITOUS_LANGUAGE.md`. |
 
 ### Skill meta-tooling
@@ -86,7 +83,7 @@ This is a personal plugin, so a few skills assume my environment:
 
 - **The Spine (roadmap board).** `pickup` and `burn-down` are built around a persistent roadmap served by a `context-ledger` MCP server (Campaign → Quest → Seam) that is part of my personal infrastructure, **not** part of this plugin — without a board they have nothing to resume or burn down. Treat those two as worked examples unless you bring your own equivalent. A few others (`handoff`, `spec`, `improve-architecture`) reference the same tools where present and work fine without them.
 - **Output location.** Several skills write artifacts to `{workspace}/data/outputs/{category}/`, where `{workspace}` is the workspace root — the directory containing `projects/` and `data/`. It resolves from `--workspace-root` where a script takes one, else `WORKIT_WORKSPACE_ROOT`, else your current working directory; the skill states which rule it used before writing. Set the env var if you keep your artifacts somewhere other than the cwd. Full rule: [`reference/patterns/worktree-rooting.md`](reference/patterns/worktree-rooting.md) § Output Rooting.
-- **Pattern library.** The methodology these skills draw on is bundled in [`reference/`](./reference/) — patterns, checklists/conventions, templates, and heuristics. `spec`, `spec-validate`, and `execute-wp` read from it at runtime (`reference/patterns/`, `reference/templates/`). No external repo needed.
+- **Pattern library.** The methodology these skills draw on is bundled in [`reference/`](./reference/) — patterns, checklists/conventions, templates, and heuristics. `spec` (with its validator) and `conduct` (with its by-hand work-package procedure) read from it at runtime (`reference/patterns/`, `reference/templates/`). No external repo needed.
 - **`skills.db`.** `audit-skills` and `eval-loop` read/write a local SQLite inventory seeded by `scripts/init-skills-db.mjs` (uses Node's native `node:sqlite`, so Node 24+). The DB is git-ignored.
 - **Optional integrations.** `eval-loop`'s automation scripts can post to a Discord webhook (`DISCORD_WEBHOOK_URL`) and mirror results to a ledger endpoint (`LEDGER_URL`). Both are off unless you set those env vars.
 - **External CLIs on `PATH`.** The automation skills shell out to other tools: `parallel-explore`, `eval-loop`, and `audit-skills` invoke the [`claude`](https://docs.claude.com/en/docs/claude-code) CLI, and `eval-loop`'s nightly automation optionally calls `bws` (the Bitwarden Secrets CLI) to resolve `DISCORD_WEBHOOK_SECRET`. The specification, review, and markdown skills work without either.

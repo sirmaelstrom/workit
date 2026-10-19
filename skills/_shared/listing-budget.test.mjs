@@ -38,7 +38,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -149,6 +149,55 @@ test('the exclusion is not vacuous: the repo has user-invoked skills and the gua
   // delete this test; if it fails with that skill still present, the parser broke.
   const unlisted = skillFiles().map(readListingRow).filter((row) => !row.listed).map((row) => row.name);
   assert.ok(unlisted.length > 0, 'no disable-model-invocation skill detected under skills/');
+});
+
+// Codex ignores `disable-model-invocation` and lists the row anyway; it reads
+// its own per-skill policy file instead. Without the pair a user-invoked skill
+// is still implicitly loaded in Codex sessions (slim-review's lenses loaded
+// `review` on their own).
+const CODEX_POLICY_RE = /^\s*allow_implicit_invocation:\s*false\s*$/m;
+
+export function codexPolicyProblems(skillsDir) {
+  const problems = [];
+  for (const e of readdirSync(skillsDir, { withFileTypes: true })) {
+    if (!e.isDirectory() || e.name === '_shared') continue;
+    const file = join(skillsDir, e.name, 'SKILL.md');
+    if (!existsSync(file) || readListingRow(file).listed) continue;
+    const policy = join(skillsDir, e.name, 'agents', 'openai.yaml');
+    if (!existsSync(policy)) problems.push(`${e.name}: no agents/openai.yaml`);
+    else if (!CODEX_POLICY_RE.test(readFileSync(policy, 'utf8'))) problems.push(`${e.name}: agents/openai.yaml lacks allow_implicit_invocation: false`);
+  }
+  return problems;
+}
+
+test('a user-invoked skill is user-invoked in Codex too', () => {
+  assert.deepEqual(
+    codexPolicyProblems(SKILLS_DIR),
+    [],
+    'a disable-model-invocation skill needs skills/<id>/agents/openai.yaml with\n' +
+      '  policy:\n    allow_implicit_invocation: false\nor Codex still lists it.',
+  );
+});
+
+test('the Codex policy guard fails on a user-invoked skill with no policy or a true one', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-policy-'));
+  try {
+    const skill = (id, frontMatter, policy) => {
+      mkdirSync(join(dir, id, 'agents'), { recursive: true });
+      writeFileSync(join(dir, id, 'SKILL.md'), `---\nname: ${id}\ndescription: "Ten chars."\n${frontMatter}---\n\nbody\n`);
+      if (policy !== undefined) writeFileSync(join(dir, id, 'agents', 'openai.yaml'), policy);
+    };
+    skill('listed', '');
+    skill('paired', 'disable-model-invocation: true\n', 'policy:\n  allow_implicit_invocation: false\n');
+    skill('bare', 'disable-model-invocation: true\n');
+    skill('allowed', 'disable-model-invocation: true\n', 'policy:\n  allow_implicit_invocation: true\n');
+    assert.deepEqual(codexPolicyProblems(dir).sort(), [
+      'allowed: agents/openai.yaml lacks allow_implicit_invocation: false',
+      'bare: no agents/openai.yaml',
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('every description states when NOT to use the skill', () => {

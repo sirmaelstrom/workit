@@ -163,7 +163,7 @@ claude --resume false
 - **`grill-me` / `spec`** — common upstream. These are long-context sessions where the DIY sub-agent pattern shines.
 - **`prototype`** — common downstream target. "I have a question I can only answer by running code" → handoff → prototype → handoff back.
 - **`diagnose`** — common fire-and-forget target. Bug noticed mid-task; hand off, let a fresh window run the diagnosis flow.
-- **`execute-wp`** — usually NOT a handoff target; execute-wp already has its own context discipline via the progress log. Hand off *into* execute-wp only if you're switching to a long execution and want a clean window.
+- **`execute-wp`** (`conduct`'s by-hand work-package procedure) — usually NOT a handoff target; it already has its own context discipline via the progress log. Hand off *into* execute-wp only if you're switching to a long execution and want a clean window.
 
 ## Anti-patterns
 

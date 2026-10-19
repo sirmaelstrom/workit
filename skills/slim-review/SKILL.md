@@ -1,6 +1,6 @@
 ---
 name: slim-review
-description: "Run the slim PR-review loop — two external reviewers (GPT-6 Sol and Astra, plan-covered) at a PR boundary, findings posted as line-anchored GitHub review comments, then confirm or refute each and reply. Trigger on '/slim-review', 'slim review', 'review this PR before merge', or at any PR boundary in a burn-down. The LIGHT tier: two lenses, no synthesis. NOT for converging a reviewed PR (babysit), in-session multi-reviewer passes ('/review'), or complex PRs (review-council)."
+description: "Run the slim PR-review loop — two external reviewers (GPT-6 Sol and Astra, plan-covered) at a PR boundary, findings posted as line-anchored GitHub review comments, then confirm or refute each and reply. Trigger on '/slim-review', 'slim review', 'review this PR before merge', or at any PR boundary in a burn-down. The LIGHT tier: two lenses, no synthesis. NOT for in-session multi-reviewer passes ('/review') or complex PRs (review-council)."
 ---
 
 # Slim PR Review — two external lenses, on the PR, adjudicated
@@ -485,12 +485,11 @@ Fix the delta pass's findings with controls. Apply the T1 cap or its T2
 escalation under `burn-down` § Per item step 3.
 
 **Who follows the cap today.** Manual T1 follows it (this skill run by a
-session or conductor), and so does `babysit`. Babysit reads the rounds from the
-posted reviews' markers, claims round two as a delta pass, and claims nothing
-after a delta. Observatory's pr-review beat follows it too (observatory#765,
-deployed 2026-09-28): it asks `rounds` (under Managed repositories) before it
-claims, runs round two as a delta pass, and records a later head as `capped`
-without claiming it. All three callers read the rounds from the same code.
+session or conductor). Observatory's pr-review beat follows it too
+(observatory#765, deployed 2026-09-28): it asks `rounds` (under Managed
+repositories) before it claims, runs round two as a delta pass, and records a
+later head as `capped` without claiming it. Both callers read the rounds from
+the same code.
 
 When every thread has a verdict and CI is green, the PR is ready to merge. Inside
 a pre-approved run, the conductor merges; outside one, merging is the operator's

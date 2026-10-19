@@ -7,9 +7,8 @@
  * order), never from a caller's own state, so a review posted by the beat, a
  * session or by hand counts the same.
  *
- * Two callers ask: babysit's loop in process, and the scheduled beat through
- * `pr-review.mjs rounds`. Both read the answer from here, so the cap has one
- * implementation. Nothing in this module talks to the network except
+ * The caller asks through `pr-review.mjs rounds` (manual T1 and the scheduled
+ * beat), so the cap has one implementation. Nothing in this module talks to the network except
  * `readTail` / `readRoundTail` / `readRebase`, which are handed their `gh`
  * runner.
  *

@@ -1,0 +1,4 @@
+# Codex lists a skill whatever its SKILL.md front matter says; this policy is
+# its form of `disable-model-invocation: true` (user-invoked as $chart only).
+policy:
+  allow_implicit_invocation: false
