@@ -65,7 +65,7 @@ export const POST_ATTEMPTS = 3;
 // The asks issue is the run's own, on its repo, until the first post names its number.
 function githubAskSpec(state, touch, askReceiptId, question) {
   return {
-    askReceiptId, question, options: touch.options, allowFreeText: touch.allowFreeText === true,
+    askReceiptId, questId: state.intent.anchor, question, options: touch.options, allowFreeText: touch.allowFreeText === true,
     run: `conduct ${state.slug} run ${state.runId}`,
     target: state.githubAsks?.target ?? state.intent.repo?.remote ?? null,
     issue: { key: `conduct ${state.slug} ${state.runId}`, title: `conduct ${state.slug}: operator asks (run ${state.runId})` },
@@ -77,7 +77,7 @@ function writeGithubAskSpec(state, touch, deps, askReceiptId, question) {
   deps.write(githubAskSpecPath(state, touch), `${JSON.stringify(githubAskSpec(state, touch, askReceiptId, question), null, 2)}\n`);
 }
 
-const READ_BACK_EXITS = (state) => `Its exit: 0 (answered) or 7 (waiting): go on. 8 (no_operator: no operator login is configured): stop here. Call no spine_quest and record nothing. Tell the operator to set ${OPERATOR_ENV} to their GitHub login in the Claude Code settings.json \`env\` block, then end your turn; once it is set, resume with ${resumeCommand(state)}, which emits this read-back again. 3 (conflict: the ask is closed or replaced), 4 (not_operator), 5 (unconfigured), 6 (refused), 1 (error) or 2 (usage: a malformed spec or argument): tell the operator the printed status, code and error, then go on.`;
+const READ_BACK_EXITS = (state) => `Its exit: 0 (answered) or 7 (waiting): go on. 8 (no_operator: no operator login is configured): stop here. Call no spine_quest and record nothing. Tell the operator to set ${OPERATOR_ENV} to their GitHub login in the Claude Code settings.json \`env\` block, then end your turn; once it is set, resume with ${resumeCommand(state)}, which emits this read-back again. 3 (conflict: the ask is closed or replaced), 4 (not_operator), 5 (unconfigured), 6 (refused), 1 (error, or ask_comment_mismatch: the ask comment read is not this ask's) or 2 (usage: a malformed spec or argument): tell the operator the printed status, code and error, then go on.`;
 
 export function answerCommand(state, touch) {
   const keys = touch.options.map((option) => option.key).join('|');

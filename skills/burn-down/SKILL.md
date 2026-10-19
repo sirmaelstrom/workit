@@ -84,7 +84,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    Spine ask is for unattended runs, and it reaches the operator as a GitHub
    comment on the run's PR or issue, posted with
    `node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`
-   (`pickup` lists the spec's fields and what each exit code means). The
+   (`pickup` lists the spec's fields, the item's quest id among them, and
+   what each exit code means). The
    operator replies with the option letter alone on the first line, notes below
    it, from any device and with no agent running. A question with no choices is
    filed as one option, `a`, with `allowFreeText: true`, and the operator puts

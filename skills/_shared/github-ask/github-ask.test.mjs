@@ -8,17 +8,20 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { askBody, carriesUnquotedTag, EXIT, GRAMMAR, main, poll, post } from './github-ask.mjs';
+import { askArtifact, askBody, carriesUnquotedTag, EXIT, GRAMMAR, main, poll, post } from './github-ask.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'github-ask.mjs');
 const ASK = '6d0f1c3e-2b7a-4c55-9e1d-0a1b2c3d4e5f';
+const QUEST = '008747c2-0000-4000-8000-000000000001';
+// main's default Observatory in these tests: refused at once, so no test reaches the live one on :3100.
+const NOWHERE = 'http://observatory.invalid';
 const OTHER_ASK = '11111111-2222-4333-8444-555555555555';
 const OPERATOR = 'sirmaelstrom';
 const OPTIONS = [
   { key: 'a', label: 'Ship it', consequence: 'the run merges.' },
   { key: 'b', label: 'Hold', consequence: 'the run stops here.' },
 ];
-const SPEC = { askReceiptId: ASK, question: 'Merge the slim-down PR?', options: OPTIONS, recommended: 'a', target: 'o/r#7', run: 'burn-down lane w2b' };
+const SPEC = { askReceiptId: ASK, questId: QUEST, question: 'Merge the slim-down PR?', options: OPTIONS, recommended: 'a', target: 'o/r#7', run: 'burn-down lane w2b' };
 
 /**
  * Issues and their threads behind a fake `gh api`: lists, fetches, posts and
@@ -76,34 +79,50 @@ const askComment = (id = 500, body = askBody(SPEC)) => ({ id, body, created_at: 
 const reply = (id, body, extra = {}) => ({ id, body, created_at: `2026-10-19T14:${String(id - 500).padStart(2, '0')}:30Z`, ...extra });
 const askUrl = 'https://github.com/o/r/issues/7#issuecomment-500';
 
-/** A fake Observatory route: `respond(body)` returns [status, json] per request. */
-async function fakeObservatory(t, respond) {
+/**
+ * A fake Observatory. The answers route: `respond(body)` returns [status, json]
+ * per request, in `seen`. The quest update route: `link(body)` does, in `links`;
+ * by default it keeps one row per (type, locator, quest), as attachRef does.
+ */
+async function fakeObservatory(t, respond, { link = null } = {}) {
   const seen = [];
+  const links = [];
+  const rows = new Set();
+  const minted = (body, url) => {
+    const quest = /^\/api\/spine\/quests\/([^/]+)\/update$/.exec(url)[1];
+    for (const artifact of body.artifacts ?? []) rows.add(`${artifact.type} ${artifact.locator} ${quest}`);
+    return [200, { questId: quest, quest: null }];
+  };
   const server = createServer((req, res) => {
     let raw = '';
     req.on('data', (chunk) => { raw += chunk; });
     req.on('end', () => {
       const body = JSON.parse(raw);
-      seen.push({ method: req.method, url: req.url, body });
-      const [status, json] = respond(body, seen.length);
+      const isLink = /\/update$/.test(req.url);
+      (isLink ? links : seen).push({ method: req.method, url: req.url, body });
+      const [status, json] = isLink ? (link ?? minted)(body, req.url) : respond(body, seen.length);
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(json));
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  return { base: `http://127.0.0.1:${server.address().port}`, seen };
+  return { base: `http://127.0.0.1:${server.address().port}`, seen, links, rows };
 }
+
+const refused = (url, init) => (String(url).startsWith(NOWHERE)
+  ? Promise.reject(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }))
+  : globalThis.fetch(url, init));
 
 function deps(gh, extra = {}) {
   const logs = [];
   const sleeps = [];
   const d = {
-    gh, fetch: globalThis.fetch, logs, sleeps, clock: 0,
+    gh, fetch: refused, logs, sleeps, clock: 0,
     log: (line) => logs.push(line),
     sleep: async (ms) => { sleeps.push(ms); d.clock += ms; },
     now: () => d.clock,
-    env: {},
+    env: { OBSERVATORY_BASE_URL: NOWHERE },
     readFile: () => { throw new Error('no file'); },
     ...extra,
   };
@@ -246,6 +265,8 @@ test('post: a malformed spec is a usage error (exit 2) and posts nothing', async
     { ...SPEC, recommended: 'c' },
     { ...SPEC, allowFreeText: 'yes' },
     { ...SPEC, run: '' },
+    { ...SPEC, questId: 'quest-1' },
+    { ...SPEC, questId: 42 },
   ];
   for (const spec of cases) {
     const result = await main(['post', '--spec', 'x.json'], deps(fake.gh, { readFile: () => JSON.stringify(spec) }));
@@ -253,6 +274,102 @@ test('post: a malformed spec is a usage error (exit 2) and posts nothing', async
     assert.equal(EXIT[result.status], 2);
   }
   assert.equal(fake.posts().length, 0);
+});
+
+test('post mint: the ask comment is minted on the spec\'s quest with exactly one url evidence artifact', async (t) => {
+  const obs = await fakeObservatory(t, () => [500, {}]);
+  const result = await main(['post', '--spec', 's.json', '--observatory', obs.base], deps(fakeGh().gh, { readFile: () => JSON.stringify({ ...SPEC, askReceiptId: ASK.toUpperCase() }) }));
+  assert.deepEqual([result.status, result.existing, result.linked], ['posted', false, true]);
+  assert.equal(obs.links.length, 1);
+  assert.equal(obs.links[0].url, `/api/spine/quests/${QUEST}/update`);
+  assert.deepEqual(obs.links[0].body, { artifacts: [{ type: 'url', locator: 'https://github.com/o/r/issues/7#issuecomment-1001', label: `ask ${ASK}`, rel: 'evidence' }] });
+  assert.deepEqual(askArtifact(ASK.toUpperCase(), result.askCommentUrl), obs.links[0].body.artifacts[0]);
+  assert.equal(obs.seen.length, 0);
+});
+
+test('post mint: Observatory unreachable or refusing leaves the post posted (exit 0) with linked false', async (t) => {
+  const down = await main(['post', '--spec', 's.json'], deps(fakeGh().gh, { readFile: () => JSON.stringify(SPEC) }));
+  assert.deepEqual([down.status, EXIT[down.status], down.linked, down.linkError], ['posted', 0, false, 'ECONNREFUSED']);
+  const obs = await fakeObservatory(t, () => [500, {}], { link: () => [404, { error: 'quest_not_found' }] });
+  const refusing = await main(['post', '--spec', 's.json', '--observatory', obs.base], deps(fakeGh().gh, { readFile: () => JSON.stringify(SPEC) }));
+  assert.deepEqual([refusing.status, EXIT[refusing.status], refusing.linked, refusing.linkError], ['posted', 0, false, 'http_404: quest_not_found']);
+  const noBase = await post(SPEC, deps(fakeGh().gh));
+  assert.deepEqual([noBase.status, noBase.linked, noBase.linkError], ['posted', false, 'no_observatory']);
+});
+
+test('post mint: a re-post mints the same (type, locator) again, so a missed mint is retried and a made one adds no row', async (t) => {
+  const fake = fakeGh();
+  let up = false;
+  const obs = await fakeObservatory(t, () => [500, {}], { link: null });
+  const d = deps(fake.gh, { readFile: () => JSON.stringify(SPEC), fetch: (url, init) => (up ? globalThis.fetch(url, init) : refused(`${NOWHERE}/`, init)) });
+  const first = await main(['post', '--spec', 's.json', '--observatory', obs.base], d);
+  assert.deepEqual([first.existing, first.linked], [false, false]);
+  up = true;
+  const second = await main(['post', '--spec', 's.json', '--observatory', obs.base], d);
+  const third = await main(['post', '--spec', 's.json', '--observatory', obs.base], d);
+  assert.deepEqual([second.existing, second.linked, third.existing, third.linked], [true, true, true, true]);
+  assert.equal(fake.posts().length, 1);
+  assert.equal(obs.links.length, 2);
+  assert.deepEqual(obs.links[0].body, obs.links[1].body);
+  assert.deepEqual([...obs.rows], [`url https://github.com/o/r/issues/7#issuecomment-1001 ${QUEST}`]);
+});
+
+test('post legacy: a pending spec written before questId posts (exit 0) with linked false and the warning; a spec with questId still links', async (t) => {
+  const obs = await fakeObservatory(t, () => [500, {}]);
+  const { questId, ...legacy } = SPEC;
+  const fake = fakeGh();
+  const d = deps(fake.gh, { readFile: () => JSON.stringify(legacy) });
+  const result = await main(['post', '--spec', 's.json', '--observatory', obs.base], d);
+  assert.deepEqual([result.status, EXIT[result.status], result.linked, result.linkError, result.warning], ['posted', 0, false, 'no_quest', 'no questId in spec; ask link not recorded']);
+  assert.equal(fake.posts().length, 1);
+  assert.equal(obs.links.length, 0);
+  assert.ok(d.logs.includes('no questId in spec; ask link not recorded'));
+  const linked = await main(['post', '--spec', 's.json', '--observatory', obs.base], deps(fakeGh().gh, { readFile: () => JSON.stringify({ ...legacy, questId }) }));
+  assert.deepEqual([linked.status, linked.linked, obs.links.length], ['posted', true, 1]);
+});
+
+test('poll mint: an --ask-comment that 404s or is not this ask\'s mints nothing; this ask\'s comment mints once', async (t) => {
+  const obs = await fakeObservatory(t, () => recorded());
+  const missing = await poll(pollOpts(obs.base, { quest: QUEST, askComment: 'https://github.com/o/r/issues/7#issuecomment-999' }), deps(fakeGh([askComment()]).gh));
+  assert.deepEqual([missing.status, missing.linked, missing.linkError, obs.links.length], ['error', false, 'ask_comment_unread', 0]);
+  const other = await poll(pollOpts(obs.base, { quest: QUEST }), deps(fakeGh([askComment(500, askBody({ ...SPEC, askReceiptId: OTHER_ASK }))]).gh));
+  assert.deepEqual([other.status, other.linked, other.linkError, obs.links.length], ['ask_comment_mismatch', false, 'not_this_ask', 0]);
+  const plain = await poll(pollOpts(obs.base, { quest: QUEST }), deps(fakeGh([askComment(500, 'just a comment')]).gh));
+  assert.deepEqual([plain.status, plain.linked, plain.linkError, obs.links.length], ['ask_comment_mismatch', false, 'not_this_ask', 0]);
+  const real = await poll(pollOpts(obs.base, { quest: QUEST }), deps(fakeGh([askComment()]).gh));
+  assert.deepEqual([real.status, real.linked], ['waiting', true]);
+  assert.deepEqual(obs.links.map((l) => [l.url, l.body]), [[`/api/spine/quests/${QUEST}/update`, { artifacts: [askArtifact(ASK, askUrl)] }]]);
+});
+
+test('poll mismatch: a readable --ask-comment that is another ask\'s stops with ask_comment_mismatch (exit 1), never waiting; this ask\'s comment still polls', async (t) => {
+  const obs = await fakeObservatory(t, () => recorded());
+  const argv = ['poll', '--ask', ASK, '--ask-comment', askUrl, '--quest', QUEST, '--once', '--operator', OPERATOR, '--observatory', obs.base];
+  const mismatch = await main(argv, deps(fakeGh([askComment(500, askBody({ ...SPEC, askReceiptId: OTHER_ASK }))]).gh));
+  assert.deepEqual([mismatch.status, EXIT[mismatch.status], mismatch.linkError, obs.links.length], ['ask_comment_mismatch', 1, 'not_this_ask', 0]);
+  assert.match(mismatch.error, /is not the ask comment for/);
+  const replied = await main(argv, deps(fakeGh([askComment(500, askBody({ ...SPEC, askReceiptId: OTHER_ASK })), reply(501, 'b')]).gh));
+  assert.deepEqual([replied.status, obs.seen.length, obs.links.length], ['ask_comment_mismatch', 0, 0]);
+  const noQuest = await main(argv.filter((arg, i) => arg !== '--quest' && argv[i - 1] !== '--quest'), deps(fakeGh([askComment(500, askBody({ ...SPEC, askReceiptId: OTHER_ASK }))]).gh));
+  assert.deepEqual([noQuest.status, EXIT[noQuest.status], 'linkError' in noQuest], ['ask_comment_mismatch', 1, false]);
+  const real = await main(argv, deps(fakeGh([askComment()]).gh));
+  assert.deepEqual([real.status, EXIT[real.status], real.linked], ['waiting', 7, true]);
+});
+
+test('poll mint: with the spec\'s quest, poll mints the ask comment once before its pass, and a failed mint changes nothing else', async (t) => {
+  const fake = fakeGh([askComment(), reply(501, 'b')]);
+  const obs = await fakeObservatory(t, () => recorded());
+  const result = await main(['poll', '--spec', 's.json', '--once', '--operator', OPERATOR, '--observatory', obs.base], deps(fake.gh, { readFile: () => JSON.stringify(SPEC) }));
+  assert.deepEqual([result.status, result.linked], ['answered', true]);
+  assert.deepEqual(obs.links.map((l) => [l.url, l.body]), [[`/api/spine/quests/${QUEST}/update`, { artifacts: [askArtifact(ASK, askUrl)] }]]);
+  assert.equal(obs.seen.length, 1);
+
+  const failing = await fakeObservatory(t, () => recorded(), { link: () => [500, { error: 'boom' }] });
+  const still = await main(['poll', '--spec', 's.json', '--once', '--operator', OPERATOR, '--observatory', failing.base], deps(fakeGh([askComment(), reply(501, 'b')]).gh, { readFile: () => JSON.stringify(SPEC) }));
+  assert.deepEqual([still.status, EXIT[still.status], still.linked, still.linkError], ['answered', 0, false, 'http_500: boom']);
+
+  const noQuest = await poll(pollOpts(obs.base), deps(fakeGh([askComment()]).gh));
+  assert.deepEqual([noQuest.status, 'linked' in noQuest, obs.links.length], ['waiting', false, 1]);
+  await assert.rejects(poll(pollOpts(obs.base, { quest: 'nope' }), deps(fakeGh([askComment()]).gh)), /--quest is not a quest uuid/);
 });
 
 test('poll: the operator reply is recorded with exactly {askReceiptId, commentUrl}', async (t) => {

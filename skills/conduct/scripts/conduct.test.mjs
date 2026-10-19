@@ -953,6 +953,8 @@ test('github post: the receipt writes the ask spec in spine mode, a failed post 
   const specPath = join(first.runDir, 'touches', '1.github-ask.json');
   const spec = JSON.parse(readFileSync(specPath, 'utf8'));
   assert.deepEqual([spec.askReceiptId, spec.question, spec.options, spec.allowFreeText, spec.target], [receiptId, receipt.args.question, receipt.args.ask.options, receipt.args.ask.allowFreeText, 'sirmaelstrom/workit']);
+  // The quest the ask is filed on, which github-ask mints the ask comment on.
+  assert.deepEqual([spec.questId, receipt.args.questId], [ANCHOR_UUID, ANCHOR_UUID]);
   assert.match(spec.issue.key, /^conduct \S+ \S+$/);
   assert.deepEqual([post.kind, post.part, post.expects.type, post.command.slice(2)], ['shell', 'post', 'json', ['post', '--spec', specPath]]);
   assert.ok(post.command[1].endsWith(join('skills', '_shared', 'github-ask', 'github-ask.mjs')), post.command[1]);
