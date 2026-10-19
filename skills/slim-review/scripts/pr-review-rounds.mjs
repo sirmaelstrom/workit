@@ -7,10 +7,10 @@
  * order), never from a caller's own state, so a review posted by the beat, a
  * session or by hand counts the same.
  *
- * The cap has one implementation, this module, and four consumers. Three ask
- * through `pr-review.mjs rounds`: manual T1 (a session running slim-review § 4
- * by hand), Observatory's pr-review beat, and conduct's `recoverAction`
- * (`land.mjs`). Conduct also imports helpers in process: `land.mjs` takes
+ * The cap has one implementation, this module. Three callers ask through
+ * `pr-review.mjs rounds`: manual T1 (a session running slim-review § 4 by
+ * hand), Observatory's pr-review beat, and conduct's `recoverAction`
+ * (`land.mjs`). Separately, conduct imports helpers in process: `land.mjs` takes
  * `deltaEscalation`, `patchPlace` and `REBASE_FILE_READ_CAP`, and
  * `delta-recovery.mjs` takes `gitPatchId`, `patchPlace` and
  * `REBASE_FILE_READ_CAP`. Nothing in this module talks to the network except

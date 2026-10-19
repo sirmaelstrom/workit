@@ -160,18 +160,31 @@ test('the exclusion is not vacuous: the repo has user-invoked skills and the gua
 // direct child of a top-level `policy:` block. A root-level key, one under
 // another parent, or any `allow_implicit_invocation` under `policy:` whose
 // value is not `false` is a problem. There is no YAML parser in this repo, so
-// the block is read by indentation, and a flow mapping (`policy: {…}`) is
-// refused rather than parsed.
+// the block is read by indentation, and these forms are refused rather than
+// parsed: a tab in a line's indentation (invalid YAML), a dedent to a column no
+// open block starts at (invalid YAML), and a `policy:` header carrying anything
+// but a comment (a flow mapping `{…}`, an anchor `&a`, an alias `*a` or a tag).
+// Codex may drop an invalid file and fall back to implicit invocation.
 export function codexPolicyProblem(text) {
   const lines = text.split(/\r?\n/).filter((l) => l.trim() && !l.trimStart().startsWith('#'));
-  const tops = lines.flatMap((l, i) => (/^policy:\s*(#.*)?$/.test(l) ? [i] : []));
+  const indent = (l) => l.length - l.trimStart().length;
+  if (lines.some((l) => /^ *\t/.test(l))) return 'indents with a tab, which YAML does not allow';
+  const open = [0];
+  for (const l of lines) {
+    if (indent(l) > open.at(-1)) open.push(indent(l));
+    while (indent(l) < open.at(-1)) open.pop();
+    if (indent(l) !== open.at(-1)) return 'dedents to a column no open block starts at';
+  }
+  const tops = lines.flatMap((l, i) => (/^policy\s*:/.test(l) ? [i] : []));
   if (tops.length !== 1) return tops.length ? 'has more than one top-level policy:' : 'has no top-level policy: block';
+  if (!/^policy\s*:\s*(#.*)?$/.test(lines[tops[0]])) {
+    return 'writes policy: in an unsupported YAML form (a flow mapping, anchor, alias or tag)';
+  }
   const block = [];
   for (const l of lines.slice(tops[0] + 1)) {
     if (!/^\s/.test(l)) break;
     block.push(l);
   }
-  const indent = (l) => l.length - l.trimStart().length;
   const keys = block
     .filter((l) => /^\s*allow_implicit_invocation\s*:/.test(l))
     .map((l) => ({ at: indent(l), value: l.replace(/^\s*allow_implicit_invocation\s*:\s*/, '').replace(/\s+#.*$/, '').trim() }));
@@ -258,6 +271,21 @@ test('the Codex policy guard refuses a false that sits outside policy: or beside
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('the Codex policy guard refuses malformed YAML and names an unsupported form', () => {
+  const unsupported = 'writes policy: in an unsupported YAML form (a flow mapping, anchor, alias or tag)';
+  const cases = [
+    ['policy:\n\tallow_implicit_invocation: false\n', 'indents with a tab, which YAML does not allow'],
+    ['policy:\n  \tallow_implicit_invocation: false\n', 'indents with a tab, which YAML does not allow'],
+    ['policy:\n    allow_implicit_invocation: false\n  x: 1\n', 'dedents to a column no open block starts at'],
+    ['policy: {allow_implicit_invocation: false}\n', unsupported],
+    ['policy: &a\n  allow_implicit_invocation: false\n', unsupported],
+    ['base: &b\n  allow_implicit_invocation: false\npolicy: *b\n', unsupported],
+    ['policy: !!map\n  allow_implicit_invocation: false\n', unsupported],
+  ];
+  for (const [text, problem] of cases) assert.equal(codexPolicyProblem(text), problem, text);
+  assert.equal(codexPolicyProblem('policy:  # user-invoked\n    allow_implicit_invocation: false\n'), null);
 });
 
 test('every description states when NOT to use the skill', () => {
