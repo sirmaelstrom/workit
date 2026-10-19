@@ -7,8 +7,15 @@
  *          comment carries the question, the options, the run's identity, the
  *          reply grammar and the ask's tag, which Observatory binds a reply to.
  *          Re-running it for the same ask finds the comment already posted and
- *          returns it instead of posting again.
- *   poll — find the operator's reply after the ask and record it through
+ *          returns it instead of posting again. Either way it then mints the
+ *          comment's URL on the ask's quest (`type: 'url'`, `rel: 'evidence'`,
+ *          label `ask <askReceiptId>`) through Observatory's
+ *          `POST /api/spine/quests/:id/update`, which is what the Dogan's
+ *          read-only Asks list links to. The mint is idempotent per (type,
+ *          locator), so post and poll both run it; when Observatory is down
+ *          the post still succeeds with `linked: false`, and the next post or
+ *          poll mints it again.
+ *   poll —find the operator's reply after the ask and record it through
  *          Observatory's `POST /api/spine/answers/github` route, which fetches
  *          the comment itself and writes the `answered` receipt
  *          (`by: 'operator:github'`), the notes below the letter as its text.
@@ -16,8 +23,8 @@
  *          nothing else.
  *
  * Usage:
- *   node github-ask.mjs post --spec <file.json | ->
- *     spec: {"askReceiptId":"<needs_input receipt uuid>","question":"…",
+ *   node github-ask.mjs post --spec <file.json | -> [--observatory <base URL>]
+ *     spec: {"askReceiptId":"<needs_input receipt uuid>","questId":"<the quest the receipt is filed on>","question":"…",
  *            "options":[{"key":"a","label":"…","consequence":"…"},…],
  *            "allowFreeText":<bool, as filed; default false>,"recommended":"<key, optional>",
  *            "target":"<owner/repo>#<pr or issue number>" | "<owner/repo>",
@@ -38,11 +45,14 @@
  *     comment there by its tag. With `--spec -` there is no file to pin, so
  *     a re-run may open a second issue.
  *   node github-ask.mjs poll (--spec <file.json> | --ask <askReceiptId> --ask-comment <ask comment URL>)
- *     [--operator <login>] [--interval <s>] [--timeout <s>] [--once] [--observatory <base URL>]
+ *     [--quest <questId>] [--operator <login>] [--interval <s>] [--timeout <s>] [--once] [--observatory <base URL>]
  *     With --spec, the ask comment is the one `post` left on the spec's target.
+ *     With a quest (the spec's questId, or --quest), poll mints the ask
+ *     comment's URL on it once before its first pass, as post does.
  *
  * Prints one JSON line on stdout; progress goes to stderr. `status` and the
- * exit code are what a caller branches on:
+ * exit code are what a caller branches on. `linked` (and `linkError` when it
+ * is false) reports the quest mint and changes neither:
  *   0 posted (post) · answered (poll; `duplicate: true` when the route had it already)
  *   1 error: gh or the ask comment could not be read
  *   2 usage: bad arguments or spec
@@ -110,6 +120,8 @@ export const EXIT = { posted: 0, answered: 0, error: 1, usage: 2, conflict: 3, n
 export const OPERATOR_HOME = 'the Claude Code settings.json `env` block';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A quest uuid or an 8+ char short-id prefix: the shape Observatory resolves.
+const QUEST_RE = /^[0-9a-f]{8}[0-9a-f-]*$/i;
 const TARGET_RE = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#(\d+)$/;
 const REPO_RE = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)$/;
 const COMMENT_URL_RE = /^https:\/\/github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)\/(?:issues|pull)\/(\d+)#issuecomment-(\d+)$/;
@@ -180,10 +192,11 @@ export function followUpBody(askReceiptId, reply, code, { quote = false } = {}) 
 
 export function validateSpec(spec) {
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new UsageError('the spec is not a JSON object');
-  for (const field of ['askReceiptId', 'question', 'target', 'run']) {
+  for (const field of ['askReceiptId', 'questId', 'question', 'target', 'run']) {
     if (typeof spec[field] !== 'string' || spec[field].trim() === '') throw new UsageError(`spec.${field} is missing`);
   }
   if (!UUID_RE.test(spec.askReceiptId)) throw new UsageError('spec.askReceiptId is not a receipt uuid');
+  if (!QUEST_RE.test(spec.questId)) throw new UsageError('spec.questId is not a quest uuid or an 8+ char short id');
   if (!TARGET_RE.test(spec.target) && !REPO_RE.test(spec.target)) throw new UsageError('spec.target is not <owner/repo>#<number> or <owner/repo>');
   if (REPO_RE.test(spec.target) && (typeof spec.issue?.key !== 'string' || !spec.issue.key.trim() || typeof spec.issue?.title !== 'string' || !spec.issue.title.trim())) {
     throw new UsageError('an <owner/repo> target needs spec.issue {key, title}: the run\'s asks issue');
@@ -267,16 +280,20 @@ function asksFor(comment, askReceiptId) {
 }
 
 /**
- * Posts the ask, once. `pin(target)` runs when the target resolves to an asks
- * issue, before anything is posted there, so a re-run after a later failure
- * goes to that issue and finds the comment instead of opening another.
+ * Posts the ask, once, then mints its comment on the quest. `pin(target)` runs
+ * when the target resolves to an asks issue, before anything is posted there,
+ * so a re-run after a later failure goes to that issue and finds the comment
+ * instead of opening another. Without `observatory` nothing is minted.
  */
-export async function post(spec, deps, { pin = null } = {}) {
+export async function post(spec, deps, { pin = null, observatory = null } = {}) {
   validateSpec(spec);
   const where = resolveTarget(deps, spec.target, spec.issue, { create: true });
   const target = `${where.owner}/${where.repo}#${where.issue}`;
   if (target !== spec.target && pin) pin(target);
-  const result = (comment, existing) => ({ status: 'posted', existing, askReceiptId: spec.askReceiptId.toLowerCase(), target, askCommentUrl: comment.html_url ?? comment.url, askCommentId: comment.id });
+  const result = async (comment, existing) => {
+    const out = { status: 'posted', existing, askReceiptId: spec.askReceiptId.toLowerCase(), target, askCommentUrl: comment.html_url ?? comment.url, askCommentId: comment.id };
+    return { ...out, ...(await link(deps, observatory, spec.questId, out.askReceiptId, out.askCommentUrl)) };
+  };
   const carrying = () => listComments(deps, where.owner, where.repo, where.issue)
     .filter((comment) => asksFor(comment, spec.askReceiptId)).sort((x, y) => x.id - y.id);
   const existing = carrying()[0];
@@ -292,12 +309,12 @@ export async function post(spec, deps, { pin = null } = {}) {
   return result(posted, false);
 }
 
-async function record(deps, base, askReceiptId, commentUrl) {
+async function sendJson(deps, url, payload) {
   try {
-    const res = await deps.fetch(`${base.replace(/\/+$/, '')}/api/spine/answers/github`, {
+    const res = await deps.fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ askReceiptId, commentUrl }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     let body = null;
@@ -306,6 +323,24 @@ async function record(deps, base, askReceiptId, commentUrl) {
   } catch (err) {
     return { http: null, unreachable: err?.cause?.code ?? err?.name ?? 'fetch_failed' };
   }
+}
+
+const record = (deps, base, askReceiptId, commentUrl) => sendJson(deps, `${base.replace(/\/+$/, '')}/api/spine/answers/github`, { askReceiptId, commentUrl });
+
+/** The ask comment as a provenance pointer on its quest: what the Dogan's Asks list links to. */
+export function askArtifact(askReceiptId, askCommentUrl) {
+  return { type: 'url', locator: askCommentUrl, label: `ask ${askReceiptId.toLowerCase()}`, rel: 'evidence' };
+}
+
+// Mints the ask comment on its quest. A failure is reported, not thrown: the
+// ask is on GitHub either way, and the next post or poll mints it again.
+async function link(deps, base, questId, askReceiptId, askCommentUrl) {
+  if (!base) return { linked: false, linkError: 'no_observatory' };
+  const result = await sendJson(deps, `${base.replace(/\/+$/, '')}/api/spine/quests/${encodeURIComponent(questId)}/update`, { artifacts: [askArtifact(askReceiptId, askCommentUrl)] });
+  if (result.http === 200) return { linked: true };
+  const why = result.unreachable ?? `http_${result.http}${result.body?.error ? `: ${String(result.body.error).slice(0, 200)}` : ''}`;
+  deps.log?.(`ask comment not minted on quest ${questId}: ${why}`);
+  return { linked: false, linkError: why };
 }
 
 // A reply is bound to this ask when it quotes the ask's tag, or when the last
@@ -397,6 +432,7 @@ function findAskComment(deps, target, issueSpec, askReceiptId) {
 
 export async function poll(opts, deps) {
   if (!UUID_RE.test(opts.ask ?? '')) throw new UsageError('--ask is not a receipt uuid');
+  if (opts.quest !== undefined && !QUEST_RE.test(opts.quest)) throw new UsageError('--quest is not a quest uuid or an 8+ char short id');
   const operator = String(opts.operator || deps.env?.[OPERATOR_ENV] || '').trim().toLowerCase();
   if (!operator) throw new ConfigError(`no operator login: set ${OPERATOR_ENV} to the operator's GitHub login (the login Observatory checks) in ${OPERATOR_HOME}, or pass --operator <login>`);
   if (!opts.askComment && opts.target) {
@@ -413,13 +449,19 @@ export async function poll(opts, deps) {
   const ask = parseCommentUrl(opts.askComment);
   if (!ask) throw new UsageError('--ask-comment is not an issue comment URL (…/issues|pull/<n>#issuecomment-<id>)');
   opts = { ...opts, ask: opts.ask.toLowerCase() };
+  // The mint post may have missed, once per poll: a mint already made is a no-op.
+  const linked = opts.quest ? await link(deps, opts.observatory, opts.quest, opts.ask, opts.askComment) : {};
   let askComment;
   try {
     askComment = JSON.parse(deps.gh(['api', `repos/${ask.owner}/${ask.repo}/issues/comments/${ask.commentId}`]));
   } catch (err) {
-    return { status: 'error', error: `the ask comment could not be read: ${String(err?.stderr || err?.message || err).trim().slice(0, 300)}` };
+    return { status: 'error', error: `the ask comment could not be read: ${String(err?.stderr || err?.message || err).trim().slice(0, 300)}`, ...linked };
   }
   const state = { ask, askCreatedAt: askComment.created_at, operator, seen: new Set(), notFound: new Map() };
+  return { ...(await watch(opts, deps, state)), ...linked };
+}
+
+async function watch(opts, deps, state) {
   const deadline = deps.now() + opts.timeout * 1000;
   let failures = 0;
   for (;;) {
@@ -479,7 +521,7 @@ export async function main(argv, deps) {
       // GitHub's issue list trails a new issue by seconds, so a re-run could not find it there:
       // the spec file keeps the issue's number from before the comment is posted.
       const pin = flags.spec === '-' ? null : (target) => deps.writeFile(flags.spec, `${JSON.stringify({ ...spec, target }, null, 2)}\n`);
-      return await post(spec, deps, { pin });
+      return await post(spec, deps, { pin, observatory: flags.observatory || deps.env.OBSERVATORY_BASE_URL || DEFAULT_BASE });
     }
     if (command === 'poll') {
       let spec = {};
@@ -492,6 +534,7 @@ export async function main(argv, deps) {
       }
       return await poll({
         ask: flags.ask ?? spec.askReceiptId,
+        quest: flags.quest ?? spec.questId,
         askComment: flags['ask-comment'],
         target: spec.target,
         issue: spec.issue,
@@ -502,7 +545,7 @@ export async function main(argv, deps) {
         observatory: flags.observatory || deps.env.OBSERVATORY_BASE_URL || DEFAULT_BASE,
       }, deps);
     }
-    throw new UsageError('usage: github-ask.mjs post --spec <file> | poll (--spec <file> | --ask <uuid> --ask-comment <url>) [--operator <login>] [--once]');
+    throw new UsageError('usage: github-ask.mjs post --spec <file> [--observatory <url>] | poll (--spec <file> | --ask <uuid> --ask-comment <url>) [--quest <id>] [--operator <login>] [--once]');
   } catch (err) {
     if (err instanceof UsageError) return { status: 'usage', error: err.message };
     if (err instanceof ConfigError) return { status: 'no_operator', variable: OPERATOR_ENV, error: err.message };

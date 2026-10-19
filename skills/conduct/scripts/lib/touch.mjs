@@ -65,7 +65,7 @@ export const POST_ATTEMPTS = 3;
 // The asks issue is the run's own, on its repo, until the first post names its number.
 function githubAskSpec(state, touch, askReceiptId, question) {
   return {
-    askReceiptId, question, options: touch.options, allowFreeText: touch.allowFreeText === true,
+    askReceiptId, questId: state.intent.anchor, question, options: touch.options, allowFreeText: touch.allowFreeText === true,
     run: `conduct ${state.slug} run ${state.runId}`,
     target: state.githubAsks?.target ?? state.intent.repo?.remote ?? null,
     issue: { key: `conduct ${state.slug} ${state.runId}`, title: `conduct ${state.slug}: operator asks (run ${state.runId})` },
