@@ -259,7 +259,7 @@ test('refusal 8 (022d6fd9): with the Spine adapter, a touch 1 still over 2,000 c
 });
 
 test('refiling (022d6fd9): a refused answer\'s reason gives way to spine_receipt\'s cap, never the question', () => {
-  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR } };
+  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', pluginRoot: 'X:/fixture/plugin', touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR } };
   const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
   // The longest question intake lets through, measured by intake's own filedLength.
   const question = 'q'.repeat(2000 - filedLength(state, 1, ''));
@@ -932,6 +932,23 @@ test('the anchor step refuses a spine_quest id that is only a prefix (exit 2): t
   assert.equal(refused.code, 2, refused.stdout);
   assert.match(out(refused).error, /not a full quest uuid/);
   assert.deepEqual([readState(first.runDir).phase, readState(first.runDir).touches.length], ['intake', 0]);
+});
+
+test('spine read-back: a GitHub reply recorded as operator:github is the go, as a Dogan press is', async (t) => {
+  const f = fixture(t);
+  const { runDir, receipt, readBack } = await toSpineReadBack(f);
+  assert.match(receipt.instruction, /github-ask\.mjs'? post --spec '?[^ ]*1\.github-ask\.json/);
+  assert.match(readBack.instruction, /^First run node .*github-ask\.mjs'? poll --spec '?[^ ]*1\.github-ask\.json'? --once/);
+  const next = out(await record(f, runDir, readBack.id, answeredFor(runDir, 1, {}, 'spine-quest-answered-github.json')));
+  assert.equal(next.phase, 'spec');
+  assert.deepEqual([readState(runDir).touches[0].answer.by, readState(runDir).touches[0].answer.key], ['operator:github', 'a']);
+
+  // The same receipt stamped by a writer that is not an operator's is refused.
+  const g = fixture(t);
+  const flow = await toSpineReadBack(g);
+  const refused = await record(g, flow.runDir, flow.readBack.id, answeredFor(flow.runDir, 1, { by: 'github' }, 'spine-quest-answered-github.json'));
+  assert.equal(refused.code, 3);
+  assert.match(out(refused).refused, /by github is not operator-attributed/);
 });
 
 test('record refuses unattributed answer', async (t) => {

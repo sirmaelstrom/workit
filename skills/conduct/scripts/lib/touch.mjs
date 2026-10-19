@@ -41,6 +41,22 @@ export function shellLiteral(value, platform = process.platform) {
   return platform === 'win32' ? `'${text.replaceAll("'", "''")}'` : `'${text.replaceAll("'", "'\\''")}'`;
 }
 
+// The spine path's channel: the filed touch is posted as a comment on the run's
+// PR or issue, and the operator's reply there is recorded as the answer by the
+// shared github-ask script (quest 008747c2).
+export function githubAskSpecPath(state, touch) {
+  return join(state.runDir, 'touches', `${touch.n}.github-ask.json`);
+}
+
+export function githubAskCommand(state, touch, sub, extra = '') {
+  const script = join(state.pluginRoot, 'skills', '_shared', 'github-ask', 'github-ask.mjs');
+  return `node ${shellLiteral(script)} ${sub} --spec ${shellLiteral(githubAskSpecPath(state, touch))}${extra}`;
+}
+
+function githubPostStep(state, touch) {
+  return `Then post it where the operator answers it: write ${githubAskSpecPath(state, touch)} as JSON { "quest": "${state.intent.anchor}", "askReceiptId": "<the id spine_receipt returned>", "question": <args.question>, "options": <args.ask.options>, "run": "conduct ${state.slug} run ${state.runId}", "target": "<owner/repo>#<n>: the PR this touch is about, else the run's asks issue on its repo (open one the first time)" } and run: ${githubAskCommand(state, touch, 'post')}`;
+}
+
 export function answerCommand(state, touch) {
   const keys = touch.options.map((option) => option.key).join('|');
   return `node ${shellLiteral(conductScript(state))} answer --run ${shellLiteral(state.runDir)} --touch ${touch.n} --key <${keys}> [--text "<text>"]`;
@@ -87,13 +103,14 @@ export function touchAction(state, touch) {
   if (touch.status === 'filed') {
     return {
       ...base, kind: 'agent-tool', part: 'read-back', tool: 'spine_quest', args: { ids: [state.intent.anchor] },
-      expects: { type: 'json' }, instruction: 'Call spine_quest with these args and record its raw result.',
+      expects: { type: 'json' },
+      instruction: `First run ${githubAskCommand(state, touch, 'poll', ' --once')}: it records an operator reply to the touch's GitHub comment, if one has come. Then call spine_quest with these args and record its raw result.`,
     };
   }
   if (state.touches.some((other) => other !== touch && other.status === 'filed')) return null;
   return {
     ...base, kind: 'agent-tool', part: 'receipt', tool: 'spine_receipt', expects: { type: 'json' },
-    instruction: 'Call spine_receipt with these args and record its raw result.',
+    instruction: `Call spine_receipt with these args and record its raw result. ${githubPostStep(state, touch)}`,
     args: {
       questId: state.intent.anchor,
       outcome: 'needs_input',
@@ -117,10 +134,10 @@ export function handBackAction(state, touch) {
     step: touchStep(touch), kind: 'touch', part: 'hand-back', handBack: true,
     touch: { n: touch.n, question: touch.question, options: touch.options }, expects: { type: 'none' },
   };
-  const waiting = `${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action and do not poll.`;
+  const waiting = `${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action.`;
   return {
     ...base,
-    instruction: `Stop and end your turn: ${waiting} Tell the operator it waits for their answer in the Dogan. When they have answered, resume with: ${resumeCommand(state)} (its first action reads the answer back).`,
+    instruction: `Stop and end your turn: ${waiting} Tell the operator it waits for their reply to the touch's GitHub comment (the askCommentUrl that post printed). To pick the reply up, run ${githubAskCommand(state, touch, 'poll')}, which waits for it and records it, then resume with: ${resumeCommand(state)} (its first action reads the answer back).`,
   };
 }
 

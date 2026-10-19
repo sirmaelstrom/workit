@@ -28,7 +28,7 @@ on the board, and start moving.
    Highest salience wins. If the context-ledger MCP tools are unavailable, GET
    the Observatory atlas endpoint (`$OBSERVATORY_BASE_URL/api/atlas`, default
    `http://127.0.0.1:3100`) and apply the same filter; if that is also
-   unreachable, say the Spine is unreachable rather than guessing.
+   unreachable, read the mirror (§ Observatory down) and say so.
 4. **Nothing found?** Say so plainly and list the 2–3 nearest frontier quests as
    options. Do not invent a quest and do not author one — pickup resumes work
    that already exists on the board.
@@ -97,6 +97,37 @@ appears.
 Claim, then work. If the Spine is unreachable, say so once and continue from the
 resume note — an unclaimable quest is not a reason to stall.
 
+## Observatory down
+
+Probe once, cheaply: `GET $OBSERVATORY_BASE_URL/api/health` with a 3-second
+timeout. Anything but a 200, or an MCP call failing to connect, means work from
+the file mirror Observatory keeps for this case:
+`<data dir>/state/spine-mirror/` (`index.md`, `manifest.json`,
+`campaigns/<slug>.json`). Read `index.md` first, then the one campaign file
+that holds your quest; its entry carries the resume note verbatim, the refs and
+the latest receipt. If a campaign file's `exportId` differs from the index's,
+an export was mid-write: read both again once. A `schemaVersion` other than 1
+means don't use the mirror; say so.
+
+What degrades, exactly:
+- **The board is stale.** Observatory rewrites the mirror 5 s after each write
+  through its routes and every 15 minutes regardless, so it trails the live
+  board by up to 15 minutes, then stays frozen for the length of the outage.
+  Tell the operator the snapshot's age from its `exportedAt`.
+- **No writes except receipts.** No claim, lane move or closeout
+  (`spine_update`), no authoring and no answer recorded. Receipts go through
+  Observatory's `scripts/spine-receipt-spool.mjs --quest <uuid> --body <file>`:
+  it files them when Observatory answers and otherwise spools them for replay
+  on recovery (exit 0 either way; 1 is a refusal to fix). It takes `completed`,
+  `paused` and `needs_input`.
+- **Asks wait for recovery.** A spooled `needs_input` has no receipt id until
+  it replays, so its GitHub comment is posted after recovery. A reply to a
+  comment already posted stays on GitHub, and `github-ask.mjs poll` keeps
+  retrying it until Observatory records it.
+
+When the probe answers again, go back to the Spine and make the writes you
+held.
+
 ## Continue the work
 
 - One-line confirmation of what you are picking up (title + short-id + the
@@ -127,10 +158,18 @@ dropping the needle. Stopped because you are blocked rather than done? Use
 surfaces blocked-waiting instead of looking abandoned. When the question is a
 CHOICE, pass `ask.options` too — one entry per choice with a letter key
 (`a`..`f`), a short label, and a ONE-LINE consequence, plus `allowFreeText`
-when a typed answer is also acceptable. That Spine ask is for unattended runs:
-for now the Dogan's WAITING card renders the choices as buttons the operator
-presses with no agent running, and the press writes an `answered` receipt that
-supersedes the ask (quest 9a1ce903). In session, pose any ask or list of choices
+when a typed answer is also acceptable. That Spine ask is for unattended runs,
+and it reaches the operator as a GitHub comment on the run's PR or issue. Post
+it with `node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`,
+where the spec file holds the quest, the receipt's id, the question, the options
+(recommendation first), the target `<owner/repo>#<n>` and the run's name. The
+operator replies from any device with the option letter alone on the first
+line. Then run `github-ask.mjs poll --spec <file>`: it finds that reply and
+records it through Observatory as an `answered` receipt from `operator:github`
+that supersedes the ask. Exit 0 is recorded, 7 is no reply yet, and 3 to 6 stop
+with the status it prints (the ask was answered or replaced, the reply is not
+the operator's, Observatory is unconfigured, or the route refused it). The
+Dogan still lists waiting asks, read-only; it no longer answers them. In session, pose any ask or list of choices
 as a plain AskUserQuestion with the recommendation first: the recommended option
 listed first, its label ending "(Recommended)". Use at most four options per
 question. Record the ruling in your next Spine receipt: the chosen label
