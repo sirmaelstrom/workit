@@ -31,7 +31,9 @@
  *     Only the `recommended` key is marked "(Recommended)", unless its label
  *     already says so; no option is marked by its position.
  *     An <owner/repo> target is the run's asks issue on that repo: the issue
- *     whose body carries the spec's issue key, opened the first time.
+ *     whose body carries the spec's issue key, opened the first time. post
+ *     then writes the issue's number into the spec file's target, because
+ *     GitHub's issue list trails a new issue by seconds.
  *   node github-ask.mjs poll (--spec <file.json> | --ask <askReceiptId> --ask-comment <ask comment URL>)
  *     [--operator <login>] [--interval <s>] [--timeout <s>] [--once] [--observatory <base URL>]
  *     With --spec, the ask comment is the one `post` left on the spec's target.
@@ -79,7 +81,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const GRAMMAR = 'Reply with the letter alone on the first line; put any notes on the lines below.';
@@ -414,7 +416,11 @@ export async function main(argv, deps) {
       } catch (err) {
         throw new UsageError(`the spec could not be read: ${err.message}`);
       }
-      return await post(spec, deps);
+      const result = await post(spec, deps);
+      // GitHub's issue list trails a new issue by seconds, so a re-run could not find it there:
+      // the spec file keeps the issue's number from here on.
+      if (result.target !== spec.target && flags.spec !== '-') deps.writeFile(flags.spec, `${JSON.stringify({ ...spec, target: result.target }, null, 2)}\n`);
+      return result;
     }
     if (command === 'poll') {
       let spec = {};
@@ -453,6 +459,7 @@ if (invokedDirectly) {
     now: () => Date.now(),
     log: (line) => process.stderr.write(`[github-ask] ${line}\n`),
     readFile: (path) => readFileSync(path === '-' ? 0 : path, 'utf8'),
+    writeFile: (path, text) => writeFileSync(path, text),
     env: process.env,
   };
   const result = await main(process.argv.slice(2), deps);

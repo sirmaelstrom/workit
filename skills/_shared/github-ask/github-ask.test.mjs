@@ -189,6 +189,19 @@ test('post: an <owner/repo> target opens the run\'s asks issue once, and poll --
   assert.equal(obs.seen[0].body.commentUrl, 'https://github.com/o/r/issues/40#issuecomment-1500');
 });
 
+test('post --spec: the opened asks issue\'s number goes into the spec file, so a re-run finds it while GitHub\'s issue list still lags', async () => {
+  const fake = fakeGh();
+  // GitHub's issue list does not show a new issue yet.
+  const realGh = fake.gh;
+  const lagging = (args, opts) => (/issues\?state=all/.test(args.find((arg) => arg.startsWith('repos/')) ?? '') ? '' : realGh(args, opts));
+  let file = JSON.stringify({ ...SPEC, target: 'o/r', issue: { key: 'conduct demo abcd1234', title: 'asks' } });
+  const d = deps(lagging, { readFile: () => file, writeFile: (path, text) => { file = text; } });
+  const first = await main(['post', '--spec', 's.json'], d);
+  const second = await main(['post', '--spec', 's.json'], d);
+  assert.deepEqual([first.target, second.target, second.existing, fake.issues.length], ['o/r#40', 'o/r#40', true, 1]);
+  assert.equal(JSON.parse(file).target, 'o/r#40');
+});
+
 test('post: a malformed spec is a usage error (exit 2) and posts nothing', async () => {
   const fake = fakeGh();
   const cases = [
