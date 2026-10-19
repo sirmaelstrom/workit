@@ -333,12 +333,26 @@ test('poll mint: an --ask-comment that 404s or is not this ask\'s mints nothing;
   const missing = await poll(pollOpts(obs.base, { quest: QUEST, askComment: 'https://github.com/o/r/issues/7#issuecomment-999' }), deps(fakeGh([askComment()]).gh));
   assert.deepEqual([missing.status, missing.linked, missing.linkError, obs.links.length], ['error', false, 'ask_comment_unread', 0]);
   const other = await poll(pollOpts(obs.base, { quest: QUEST }), deps(fakeGh([askComment(500, askBody({ ...SPEC, askReceiptId: OTHER_ASK }))]).gh));
-  assert.deepEqual([other.status, other.linked, other.linkError, obs.links.length], ['waiting', false, 'not_this_ask', 0]);
+  assert.deepEqual([other.status, other.linked, other.linkError, obs.links.length], ['ask_comment_mismatch', false, 'not_this_ask', 0]);
   const plain = await poll(pollOpts(obs.base, { quest: QUEST }), deps(fakeGh([askComment(500, 'just a comment')]).gh));
-  assert.deepEqual([plain.linked, plain.linkError, obs.links.length], [false, 'not_this_ask', 0]);
+  assert.deepEqual([plain.status, plain.linked, plain.linkError, obs.links.length], ['ask_comment_mismatch', false, 'not_this_ask', 0]);
   const real = await poll(pollOpts(obs.base, { quest: QUEST }), deps(fakeGh([askComment()]).gh));
   assert.deepEqual([real.status, real.linked], ['waiting', true]);
   assert.deepEqual(obs.links.map((l) => [l.url, l.body]), [[`/api/spine/quests/${QUEST}/update`, { artifacts: [askArtifact(ASK, askUrl)] }]]);
+});
+
+test('poll mismatch: a readable --ask-comment that is another ask\'s stops with ask_comment_mismatch (exit 1), never waiting; this ask\'s comment still polls', async (t) => {
+  const obs = await fakeObservatory(t, () => recorded());
+  const argv = ['poll', '--ask', ASK, '--ask-comment', askUrl, '--quest', QUEST, '--once', '--operator', OPERATOR, '--observatory', obs.base];
+  const mismatch = await main(argv, deps(fakeGh([askComment(500, askBody({ ...SPEC, askReceiptId: OTHER_ASK }))]).gh));
+  assert.deepEqual([mismatch.status, EXIT[mismatch.status], mismatch.linkError, obs.links.length], ['ask_comment_mismatch', 1, 'not_this_ask', 0]);
+  assert.match(mismatch.error, /is not the ask comment for/);
+  const replied = await main(argv, deps(fakeGh([askComment(500, askBody({ ...SPEC, askReceiptId: OTHER_ASK })), reply(501, 'b')]).gh));
+  assert.deepEqual([replied.status, obs.seen.length, obs.links.length], ['ask_comment_mismatch', 0, 0]);
+  const noQuest = await main(argv.filter((arg, i) => arg !== '--quest' && argv[i - 1] !== '--quest'), deps(fakeGh([askComment(500, askBody({ ...SPEC, askReceiptId: OTHER_ASK }))]).gh));
+  assert.deepEqual([noQuest.status, EXIT[noQuest.status], 'linkError' in noQuest], ['ask_comment_mismatch', 1, false]);
+  const real = await main(argv, deps(fakeGh([askComment()]).gh));
+  assert.deepEqual([real.status, EXIT[real.status], real.linked], ['waiting', 7, true]);
 });
 
 test('poll mint: with the spec\'s quest, poll mints the ask comment once before its pass, and a failed mint changes nothing else', async (t) => {

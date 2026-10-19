@@ -53,13 +53,18 @@
  *     comment's URL on it once before its first pass, as post does, after it
  *     has read the comment and found this ask's marker or tag on it. A
  *     comment it cannot read or that is not this ask's mints nothing
- *     (`linkError` `ask_comment_unread` or `not_this_ask`).
+ *     (`linkError` `ask_comment_unread` or `not_this_ask`). A comment it can
+ *     read that is not this ask's stops poll at once with
+ *     `ask_comment_mismatch` (exit 1), with or without a quest: no reply to
+ *     this ask can follow it, so poll never reports `waiting` on it.
  *
  * Prints one JSON line on stdout; progress goes to stderr. `status` and the
  * exit code are what a caller branches on. `linked` (and `linkError` when it
  * is false) reports the quest mint and changes neither:
  *   0 posted (post) · answered (poll; `duplicate: true` when the route had it already)
  *   1 error: gh or the ask comment could not be read
+ *     ask_comment_mismatch (poll): the --ask-comment is readable but is
+ *     another ask's or no ask's; fix the URL, nothing was recorded
  *   2 usage: bad arguments or spec
  *   3 conflict: 409 `no_open_ask` or `stale_ask`, the ask itself is closed or replaced
  *   4 not_operator: 403
@@ -120,7 +125,7 @@ import { pathToFileURL } from 'node:url';
 export const GRAMMAR = 'Reply with the letter alone on the first line; put any notes on the lines below.';
 export const DEFAULT_BASE = 'http://127.0.0.1:3100';
 export const OPERATOR_ENV = 'OBSERVATORY_OPERATOR_GITHUB_LOGIN';
-export const EXIT = { posted: 0, answered: 0, error: 1, usage: 2, conflict: 3, not_operator: 4, unconfigured: 5, refused: 6, waiting: 7, timeout: 7, no_operator: 8 };
+export const EXIT = { posted: 0, answered: 0, error: 1, usage: 2, conflict: 3, not_operator: 4, unconfigured: 5, refused: 6, waiting: 7, timeout: 7, no_operator: 8, ask_comment_mismatch: 1 };
 // Where the operator login is configured for Claude sessions.
 export const OPERATOR_HOME = 'the Claude Code settings.json `env` block';
 
@@ -468,15 +473,16 @@ export async function poll(opts, deps) {
   } catch (err) {
     return { status: 'error', error: `the ask comment could not be read: ${String(err?.stderr || err?.message || err).trim().slice(0, 300)}`, ...(opts.quest ? { linked: false, linkError: 'ask_comment_unread' } : {}) };
   }
+  // A readable comment that is not this ask's can never carry this ask's
+  // reply, so a stale or mistyped --ask-comment stops here: polling on would
+  // report `waiting` and park the run on a reply that cannot come.
+  if (!asksFor(askComment, opts.ask)) {
+    return { status: 'ask_comment_mismatch', error: `${opts.askComment} is not the ask comment for ${opts.ask}: it carries neither its marker nor its tag`, askReceiptId: opts.ask, ...(opts.quest ? { linked: false, linkError: 'not_this_ask' } : {}) };
+  }
   // The mint post may have missed, once per poll: a mint already made is a no-op.
   // Minted only once the comment is read and is this ask's, so a stale or
   // mistyped --ask-comment leaves no pointer on the quest.
-  let linked = {};
-  if (opts.quest) {
-    linked = asksFor(askComment, opts.ask)
-      ? await link(deps, opts.observatory, opts.quest, opts.ask, askComment.html_url ?? opts.askComment)
-      : { linked: false, linkError: 'not_this_ask' };
-  }
+  const linked = opts.quest ? await link(deps, opts.observatory, opts.quest, opts.ask, askComment.html_url ?? opts.askComment) : {};
   const state = { ask, askCreatedAt: askComment.created_at, operator, seen: new Set(), notFound: new Map() };
   return { ...(await watch(opts, deps, state)), ...linked };
 }
