@@ -6,11 +6,13 @@ import { parseDesignDirection, skillsField, stripWrappingBackticks, visualRules 
 import { approvingTouch, runAuthority } from '../authority.mjs';
 
 // The record that carries the run's authority: a (c) answer's validated grant
-// (scope included), else the answering touch (scope = the goal verbatim).
+// (scope included), else the answering touch (scope = the goal verbatim). A
+// touch answered in session is its touch record; one answered on GitHub is
+// the anchor's answered receipt.
 export function preapprovedRef(state) {
   if (state.authority.record) return `core:${state.runDir}/${state.authority.record}`;
   const touch = approvingTouch(state);
-  if (state.adapters.spine?.on) return `spine:${state.intent.anchor}@${touch.answer.answeredAt} by ${touch.answer.by}`;
+  if (state.adapters.spine?.on && touch.answer.source !== 'session') return `spine:${state.intent.anchor}@${touch.answer.answeredAt} by ${touch.answer.by}`;
   return `core:${state.runDir}/touches/${touch.n}.json`;
 }
 

@@ -164,7 +164,10 @@ CHOICE, pass `ask.options` too — one entry per choice with a letter key
 when a typed answer is also acceptable. A question with no choices is filed as
 one option, `a` (label "Answer below"), with `allowFreeText: true`, because a
 GitHub answer needs a key. That Spine ask is for unattended runs, and it
-reaches the operator as a GitHub comment on the run's PR or issue. Post it with
+reaches the operator as a GitHub comment in the private asks repo
+`WORKIT_ASKS_REPO` names, on one issue per run that names the run's PR or
+issue. An ask carries the run's paths and budget, so `post` refuses a public
+target (exit 9, `public_target`) when no asks repo is set. Post it with
 `node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`,
 where the spec file holds the receipt's id, the id of the quest it is filed on
 (`questId`), the question, the options and
@@ -191,6 +194,9 @@ reply and records it through Observatory as an `answered` receipt from
 - 4 (not the operator's), 5 (Observatory unconfigured), 6 (the route refused
   it), 1 (gh failed) or 2 (a malformed spec or argument): report the printed
   status and error to the operator, and stop.
+- 9 (`post` only), public target: tell the operator to set `WORKIT_ASKS_REPO`
+  to a private `<owner/repo>` in the same `env` block, and stop. Nothing was
+  posted.
 
 poll counts only comments by the login in `OBSERVATORY_OPERATOR_GITHUB_LOGIN`
 (or `--operator`). That filter is a convenience; Observatory's own check of the

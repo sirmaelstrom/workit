@@ -1,6 +1,8 @@
-// Touches: the operator's asks. With the spine adapter a touch is a
-// needs_input receipt on the anchor quest, read back with spine_quest; without
-// it, a file pair under touches/ answered by `conduct.mjs answer` from a TTY.
+// Touches: the operator's asks. With the spine adapter a touch is first asked
+// in session; only when no operator is in the session is it a needs_input
+// receipt on the anchor quest, posted on GitHub and read back with
+// spine_quest. Without it, a file pair under touches/ answered by
+// `conduct.mjs answer` from a TTY.
 import { join } from 'node:path';
 import { ConductError, appendEvent } from './state.mjs';
 
@@ -59,6 +61,9 @@ export function githubAskCommand(state, touch, sub, extra = '') {
 
 // poll's operator login, the variable Observatory checks; poll exits 8 without one.
 export const OPERATOR_ENV = 'OBSERVATORY_OPERATOR_GITHUB_LOGIN';
+// Set to 1 by a runner that knows no operator is in the session (a scheduler,
+// claude -p): touches skip the session ask and go straight to the Spine and GitHub.
+export const UNATTENDED_ENV = 'WORKIT_UNATTENDED';
 // Failed posts in a row before the touch hands back; each resume then tries once more.
 export const POST_ATTEMPTS = 3;
 
@@ -147,6 +152,7 @@ export function touchAction(state, touch, deps = null) {
     };
   }
   if (state.touches.some((other) => other !== touch && other.status === 'filed')) return null;
+  if (touch.channel !== 'github' && touch.filings === 0 && deps?.env?.[UNATTENDED_ENV] !== '1') return sessionAskAction(state, touch, base);
   return {
     ...base, kind: 'agent-tool', part: 'receipt', tool: 'spine_receipt', expects: { type: 'json' },
     instruction: 'Call spine_receipt with these args and record its raw result. The next action posts it on GitHub.',
@@ -159,6 +165,39 @@ export function touchAction(state, touch, deps = null) {
       ask: { options: touch.options, allowFreeText: touch.allowFreeText },
     },
   };
+}
+
+// The spine path's first part: the operator is asked in this session. Only a
+// session with no operator in it files the touch on the Spine and posts it on
+// GitHub, which is what lets a successor session or a scheduler read the
+// answer back.
+function sessionAskAction(state, touch, base) {
+  const keys = touch.options.map((option) => option.key).join('|');
+  return {
+    ...base, kind: 'touch', part: 'ask', touch: { n: touch.n, question: touch.question, options: touch.options, allowFreeText: touch.allowFreeText },
+    expects: { type: 'json' },
+    instruction: `If the operator is in this session, pose this touch as a plain AskUserQuestion (rules above) and record { "key": "<${keys}>", "text": "<their typed text, or null>" } from their answer. Record only what they chose: never an answer you inferred, and never one for a session they are not in. If no operator is in this session (a headless run, a scheduled resume, a successor no operator has spoken to), record { "unattended": true }: the touch is then filed on the Spine and posted to the private asks repo for a reply.`,
+  };
+}
+
+function recordSessionAsk(state, touch, result, deps) {
+  if (result?.unattended === true) {
+    touch.channel = 'github';
+    appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'touch-unattended', data: { n: touch.n } });
+    return;
+  }
+  const answer = { key: result?.key, text: typeof result?.text === 'string' && result.text.trim() ? result.text : null };
+  answer.key = optionKey(touch, answer);
+  if (!touch.options.some((option) => option.key === answer.key)) {
+    throw new ConductError(2, `${touch.tag}: record { "key": "<${touch.options.map((option) => option.key).join('|')}>", "text": … } or { "unattended": true }, not ${JSON.stringify(result).slice(0, 200)}`);
+  }
+  touch.channel = 'session';
+  acceptAnswer(state, touch, { ...answer, by: 'operator:session', answeredAt: deps.timestamp(), source: 'session' });
+  // The record /spec --preapproved names (core:…/touches/<n>.json) and a
+  // successor session reads: what was asked and what the operator chose.
+  deps.mkdir(join(state.runDir, 'touches'));
+  deps.write(join(state.runDir, 'touches', `${touch.n}.json`), `${JSON.stringify(touch, null, 2)}\n`);
+  appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'answered', source: 'session', data: { n: touch.n, key: touch.answer.key } });
 }
 
 export function resumeCommand(state) {
@@ -263,11 +302,12 @@ function refuse(touch, refusal) {
 }
 
 // Refuses (exit 3) an answer that is not the operator's: a spine answer must
-// be stamped operator:…, a core answer needs the TTY-attested touch record.
+// be stamped operator:…, a session answer is the operator's AskUserQuestion
+// choice in this session, a core answer needs the TTY-attested touch record.
 export function acceptAnswer(state, touch, answer) {
   const attributed = answer.source === 'spine'
     ? String(answer.by ?? '').startsWith('operator:')
-    : touch.tty === true;
+    : answer.source === 'session' ? answer.by === 'operator:session' : touch.tty === true;
   if (!attributed) {
     throw new ConductError(3, `${touch.tag}: answer by ${answer.by ?? 'nobody'} is not attributed to the operator`);
   }
@@ -287,6 +327,7 @@ export function recordTouch(state, touch, action, result, deps) {
     touch.waiting = false;
     return;
   }
+  if (action.kind === 'touch' && action.part === 'ask') return recordSessionAsk(state, touch, result, deps);
   if (action.kind === 'shell' && action.part === 'post') {
     // A post is accepted only when it exited 0, printed status posted, and
     // names this filing's receipt. Anything else is a failure: counted (the
@@ -322,6 +363,7 @@ export function recordTouch(state, touch, action, result, deps) {
     touch.filedQuestion = action.args.question;
     touch.filings += 1;
     touch.status = 'filed';
+    touch.channel = 'github';
     touch.refusal = null;
     touch.post = { state: 'pending', spec: `touches/${touch.n}.github-ask.json` };
     return;
