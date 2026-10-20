@@ -74,6 +74,8 @@
  *   8 no_operator: poll has no operator login (--operator, or
  *     OBSERVATORY_OPERATOR_GITHUB_LOGIN in the Claude Code settings.json `env`
  *     block); `variable` names it. Configuration, not a bad spec: hand back.
+ *   9 public_target (post): the target repo is not private and no
+ *     WORKIT_ASKS_REPO routes it elsewhere; `variable` names it. Nothing posted.
  *
  * Who counts as the operator. poll submits comments by the configured
  * operator login (--operator, else OBSERVATORY_OPERATOR_GITHUB_LOGIN, the
@@ -108,14 +110,23 @@
  * the asks issue has no such check, so one run posts its asks from one process
  * at a time (conduct's actions run one at a time).
  *
- * Asks issues are not closed here. A run can post another ask after any
- * answer (conduct's build halts, showcase and release touches come later), so
- * no answer is known to be the issue's last, and the issue is the run's
- * record of its asks. With the target pinned in the spec, the issue-list scan
- * runs only at a run's first post.
+ * Where asks go. An ask carries the run's paths, budget and probes, so post
+ * refuses any target that is not a private repo (exit 9, `public_target`).
+ * With WORKIT_ASKS_REPO set to a private <owner/repo>, every ask goes there,
+ * whatever the spec's target: a run's asks share one issue in it, keyed by
+ * the spec's issue key (or its `run`), and the target the ask is about is
+ * named on it in a code span, which leaves no cross-reference on that PR.
+ *
+ * An asks issue is open while an ask in it waits: post reopens it, and an
+ * answer recorded by poll closes it, so the asks repo's open issues are the
+ * asks still waiting. A run posts its asks one at a time, so an answer is
+ * the issue's last until the next post reopens it. A PR, or an issue this
+ * script did not open, is never opened or closed. With the target pinned in
+ * the spec, the issue-list scan runs only at a run's first post.
  *
  * Env: OBSERVATORY_BASE_URL (default http://127.0.0.1:3100),
- * OBSERVATORY_OPERATOR_GITHUB_LOGIN (poll's operator login).
+ * OBSERVATORY_OPERATOR_GITHUB_LOGIN (poll's operator login), WORKIT_ASKS_REPO
+ * (the private repo every ask is posted to).
  */
 
 import { execFileSync } from 'node:child_process';
@@ -125,7 +136,9 @@ import { pathToFileURL } from 'node:url';
 export const GRAMMAR = 'Reply with the letter alone on the first line; put any notes on the lines below.';
 export const DEFAULT_BASE = 'http://127.0.0.1:3100';
 export const OPERATOR_ENV = 'OBSERVATORY_OPERATOR_GITHUB_LOGIN';
-export const EXIT = { posted: 0, answered: 0, error: 1, usage: 2, conflict: 3, not_operator: 4, unconfigured: 5, refused: 6, waiting: 7, timeout: 7, no_operator: 8, ask_comment_mismatch: 1 };
+// The one private repo every ask is posted to, whatever the run's target.
+export const ASKS_REPO_ENV = 'WORKIT_ASKS_REPO';
+export const EXIT = { posted: 0, answered: 0, error: 1, usage: 2, conflict: 3, not_operator: 4, unconfigured: 5, refused: 6, waiting: 7, timeout: 7, no_operator: 8, ask_comment_mismatch: 1, public_target: 9 };
 // Where the operator login is configured for Claude sessions.
 export const OPERATOR_HOME = 'the Claude Code settings.json `env` block';
 
@@ -151,13 +164,73 @@ const NO_QUEST_WARNING = 'no questId in spec; ask link not recorded';
 
 const askMarker = (askReceiptId) => `<!-- workit:github-ask ask=${askReceiptId.toLowerCase()} -->`;
 const followUpMarker = (askReceiptId, replyId) => `<!-- workit:github-ask follow-up ask=${askReceiptId.toLowerCase()} reply=${replyId} -->`;
-const issueMarker = (key) => `<!-- workit:github-ask issue=${key} -->`;
+const ISSUE_MARKER_PREFIX = '<!-- workit:github-ask issue=';
+const issueMarker = (key) => `${ISSUE_MARKER_PREFIX}${key} -->`;
 const MARKER_RE = /<!-- workit:github-ask /;
 const ASK_MARKER_RE = /<!-- workit:github-ask ask=/;
 
 class UsageError extends Error {}
 // Missing configuration: its own status, so a caller hands back instead of going on.
 class ConfigError extends Error {}
+// A target that is not a private repo: nothing is posted.
+class PublicTargetError extends Error {}
+
+const repoOf = (target) => String(target ?? '').split('#')[0];
+
+// With an asks repo, every ask goes there: an <owner/repo> or PR target
+// elsewhere becomes the asks repo, on an asks issue keyed by the spec's issue
+// key (or the run's name), and the original target is named on the ask as
+// `about`. A target already in the asks repo (a pinned issue) stays.
+export function routeToAsksRepo(spec, asksRepo) {
+  const repo = String(asksRepo ?? '').trim();
+  if (!repo) return spec;
+  if (!REPO_RE.test(repo)) throw new UsageError(`${ASKS_REPO_ENV} is not <owner/repo>: ${JSON.stringify(repo)}`);
+  if (repoOf(spec.target).toLowerCase() === repo.toLowerCase()) return spec;
+  return {
+    ...spec,
+    target: repo,
+    issue: spec.issue ?? { key: spec.run, title: `${spec.run}: operator asks` },
+    about: spec.about ?? spec.target,
+  };
+}
+
+// `private`, `public` or `internal`, from GitHub: an ask is posted only to a private repo.
+function repoVisibility(deps, target) {
+  const [owner, repo] = repoOf(target).split('/');
+  return String(deps.gh(['api', `repos/${owner}/${repo}`, '--jq', '.visibility'])).trim().toLowerCase();
+}
+
+// An asks issue this script opened: an issue (not a PR) whose body carries an issue marker.
+function asksIssueState(deps, where) {
+  const issue = JSON.parse(deps.gh(['api', `repos/${where.owner}/${where.repo}/issues/${where.issue}`, '--jq', '{state, body, pull: (.pull_request != null)}']));
+  return !issue.pull && String(issue.body ?? '').includes(ISSUE_MARKER_PREFIX) ? issue.state : null;
+}
+
+function setIssueState(deps, where, state) {
+  const body = state === 'closed' ? { state, state_reason: 'completed' } : { state };
+  deps.gh(['api', '--method', 'PATCH', `repos/${where.owner}/${where.repo}/issues/${where.issue}`, '--input', '-'], { input: JSON.stringify(body) });
+}
+
+// An asks issue is open while one of its asks waits: post reopens it. The
+// issue's state is a view, so a failed read or reopen is logged, never fatal.
+function reopenAsksIssue(deps, where) {
+  try {
+    if (asksIssueState(deps, where) === 'closed') setIssueState(deps, where, 'open');
+  } catch (err) {
+    deps.log?.(`asks issue ${where.owner}/${where.repo}#${where.issue} not reopened: ${String(err?.stderr || err?.message || err).trim().slice(0, 200)}`);
+  }
+}
+
+// ... and an answer closes it. Returns whether it closed; a failure is reported, not thrown.
+function closeAsksIssue(deps, where) {
+  try {
+    if (asksIssueState(deps, where) !== 'open') return { closed: false };
+    setIssueState(deps, where, 'closed');
+    return { closed: true };
+  } catch (err) {
+    return { closed: false, closeError: String(err?.stderr || err?.message || err).trim().slice(0, 300) };
+  }
+}
 
 // What the reply grammar means for this ask's shape, after GRAMMAR.
 function shapeLine(spec) {
@@ -180,6 +253,8 @@ export function askBody(spec) {
   return [
     askMarker(spec.askReceiptId),
     `**Operator ask** from \`${spec.run}\``,
+    // In a code span, so the ask leaves no cross-reference on the PR or issue it is about.
+    ...(spec.about ? [`About: \`${spec.about}\``] : []),
     '',
     spec.question,
     '',
@@ -301,9 +376,15 @@ function asksFor(comment, askReceiptId) {
  */
 export async function post(spec, deps, { pin = null, observatory = null } = {}) {
   validateSpec(spec);
+  spec = routeToAsksRepo(spec, deps.env?.[ASKS_REPO_ENV]);
+  const visibility = repoVisibility(deps, spec.target);
+  if (visibility !== 'private') {
+    throw new PublicTargetError(`${repoOf(spec.target)} is ${visibility}: an ask carries the run's paths and budget, so it is posted only to a private repo. Set ${ASKS_REPO_ENV} to a private <owner/repo> in ${OPERATOR_HOME}.`);
+  }
   const where = resolveTarget(deps, spec.target, spec.issue, { create: true });
+  reopenAsksIssue(deps, where);
   const target = `${where.owner}/${where.repo}#${where.issue}`;
-  if (target !== spec.target && pin) pin(target);
+  if (target !== spec.target && pin) pin(target, spec);
   const result = async (comment, existing) => {
     const out = { status: 'posted', existing, askReceiptId: spec.askReceiptId.toLowerCase(), target, askCommentUrl: comment.html_url ?? comment.url, askCommentId: comment.id };
     return { ...out, ...(await link(deps, observatory, spec.questId, out.askReceiptId, out.askCommentUrl)) };
@@ -484,7 +565,10 @@ export async function poll(opts, deps) {
   // mistyped --ask-comment leaves no pointer on the quest.
   const linked = opts.quest ? await link(deps, opts.observatory, opts.quest, opts.ask, askComment.html_url ?? opts.askComment) : {};
   const state = { ask, askCreatedAt: askComment.created_at, operator, seen: new Set(), notFound: new Map() };
-  return { ...(await watch(opts, deps, state)), ...linked };
+  const result = await watch(opts, deps, state);
+  // Answered: its asks issue closes, so the asks repo's open issues are the asks still waiting.
+  const closed = result.status === 'answered' ? closeAsksIssue(deps, { owner: ask.owner, repo: ask.repo, issue: ask.issue }) : {};
+  return { ...result, ...closed, ...linked };
 }
 
 async function watch(opts, deps, state) {
@@ -546,7 +630,8 @@ export async function main(argv, deps) {
       }
       // GitHub's issue list trails a new issue by seconds, so a re-run could not find it there:
       // the spec file keeps the issue's number from before the comment is posted.
-      const pin = flags.spec === '-' ? null : (target) => deps.writeFile(flags.spec, `${JSON.stringify({ ...spec, target }, null, 2)}\n`);
+      // The routed spec is what is pinned, so a re-run keeps the asks repo's issue and `about`.
+      const pin = flags.spec === '-' ? null : (target, routed) => deps.writeFile(flags.spec, `${JSON.stringify({ ...routed, target }, null, 2)}\n`);
       return await post(spec, deps, { pin, observatory: flags.observatory || deps.env.OBSERVATORY_BASE_URL || DEFAULT_BASE });
     }
     if (command === 'poll') {
@@ -575,6 +660,7 @@ export async function main(argv, deps) {
   } catch (err) {
     if (err instanceof UsageError) return { status: 'usage', error: err.message };
     if (err instanceof ConfigError) return { status: 'no_operator', variable: OPERATOR_ENV, error: err.message };
+    if (err instanceof PublicTargetError) return { status: 'public_target', variable: ASKS_REPO_ENV, error: err.message };
     return { status: 'error', error: String(err?.stderr || err?.message || err).trim().slice(0, 300) };
   }
 }

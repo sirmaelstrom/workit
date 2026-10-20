@@ -310,6 +310,8 @@ function tool(h, action) {
 async function perform(h, action) {
   const custom = h.answer?.(action);
   if (custom !== undefined) return custom;
+  // A session ask: no operator in these runs unless a test answers it, so the touch goes to GitHub.
+  if (action.kind === 'touch' && action.part === 'ask') return { unattended: true };
   switch (action.kind) {
     case 'wait': return {};
     case 'author': return author(h, action);

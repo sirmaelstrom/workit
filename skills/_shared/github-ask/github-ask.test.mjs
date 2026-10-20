@@ -29,7 +29,7 @@ const SPEC = { askReceiptId: ASK, questId: QUEST, question: 'Merge the slim-down
  * comment is posted (a racer can add its own there); `failPosts` makes the
  * next N comment posts fail.
  */
-function fakeGh(initial = [], { issues = [], onPost = null, failPosts = 0, visible = () => true } = {}) {
+function fakeGh(initial = [], { issues = [], onPost = null, failPosts = 0, visible = () => true, visibility = {} } = {}) {
   const comments = initial.map((comment) => ({ type: 'User', app: false, login: OPERATOR, issue: 7, ...comment }));
   const issueList = [...issues];
   const calls = [];
@@ -40,8 +40,20 @@ function fakeGh(initial = [], { issues = [], onPost = null, failPosts = 0, visib
     calls.push({ args, input });
     const method = args.includes('--method') ? args[args.indexOf('--method') + 1] : 'GET';
     const path = args.find((arg) => arg.startsWith('repos/'));
+    // A repo's visibility: private unless the test names it otherwise.
+    if (args.includes('.visibility')) return `${visibility[path.slice('repos/'.length)] ?? 'private'}\n`;
+    const issueOne = /^repos\/o\/r\/issues\/(\d+)$/.exec(path);
+    if (issueOne) {
+      const issue = issueList.find((candidate) => candidate.number === Number(issueOne[1]));
+      if (method === 'PATCH') {
+        Object.assign(issue, JSON.parse(input));
+        return '';
+      }
+      // Anything not opened here (o/r#7) is a PR.
+      return JSON.stringify(issue ? { state: issue.state ?? 'open', body: issue.body, pull: false } : { state: 'open', body: '', pull: true });
+    }
     if (method === 'POST' && /^repos\/o\/r\/issues$/.test(path)) {
-      const issue = { number: 40 + issueList.length, ...JSON.parse(input) };
+      const issue = { number: 40 + issueList.length, state: 'open', ...JSON.parse(input) };
       issueList.push(issue);
       return JSON.stringify(issue);
     }
@@ -208,6 +220,56 @@ test('post: an <owner/repo> target opens the run\'s asks issue once, and poll --
   const polled = await main(['poll', '--spec', 's.json', '--once', '--operator', OPERATOR, '--observatory', obs.base], deps(fake.gh, { readFile: () => JSON.stringify(spec) }));
   assert.equal(polled.status, 'answered');
   assert.equal(obs.seen[0].body.commentUrl, 'https://github.com/o/r/issues/40#issuecomment-1500');
+});
+
+test('post: a public or internal target is refused (exit 9, public_target) naming WORKIT_ASKS_REPO, and nothing is posted or opened', async () => {
+  for (const visibility of ['public', 'internal']) {
+    const fake = fakeGh([], { visibility: { 'o/r': visibility } });
+    const result = await main(['post', '--spec', 's.json'], deps(fake.gh, { readFile: () => JSON.stringify(SPEC) }));
+    assert.equal(result.status, 'public_target');
+    assert.equal(EXIT[result.status], 9);
+    assert.equal(result.variable, 'WORKIT_ASKS_REPO');
+    assert.match(result.error, new RegExp(`o/r is ${visibility}`));
+    assert.deepEqual([fake.posts().length, fake.issues.length], [0, 0]);
+  }
+});
+
+test('post: with WORKIT_ASKS_REPO every ask goes to that repo\'s asks issue, naming its PR in a code span; a public target is fine then, and the pinned spec keeps the route', async (t) => {
+  const fake = fakeGh([], { visibility: { 'pub/lic': 'public' } });
+  let file = JSON.stringify({ ...SPEC, target: 'pub/lic#12' });
+  const d = deps(fake.gh, { env: { OBSERVATORY_BASE_URL: NOWHERE, WORKIT_ASKS_REPO: 'o/r' }, readFile: () => file, writeFile: (path, text) => { file = text; } });
+  const first = await main(['post', '--spec', 's.json'], d);
+  assert.deepEqual([first.status, first.target, fake.issues.length], ['posted', 'o/r#40', 1]);
+  assert.equal(fake.issues[0].title, 'burn-down lane w2b: operator asks');
+  const body = JSON.parse(fake.posts()[0].input).body;
+  assert.ok(body.includes('About: `pub/lic#12`'), body);
+  // Only the asks repo's visibility is read: the public target is never posted to.
+  assert.ok(fake.calls.every((call) => !call.args.some((arg) => arg.startsWith('repos/pub/lic/'))));
+  const pinned = JSON.parse(file);
+  assert.deepEqual([pinned.target, pinned.about, pinned.issue.key], ['o/r#40', 'pub/lic#12', 'burn-down lane w2b']);
+  const again = await main(['post', '--spec', 's.json'], d);
+  assert.deepEqual([again.target, again.existing, fake.posts().length], ['o/r#40', true, 1]);
+  // Unset, the same public target is refused.
+  const plain = await main(['post', '--spec', 's.json'], deps(fake.gh, { readFile: () => JSON.stringify({ ...SPEC, target: 'pub/lic#12' }) }));
+  assert.equal(plain.status, 'public_target');
+  assert.equal((await main(['post', '--spec', 's.json'], deps(fake.gh, { env: { WORKIT_ASKS_REPO: 'not a repo' }, readFile: () => JSON.stringify(SPEC) }))).status, 'usage');
+});
+
+test('asks issue: an answer closes it, the next post reopens it, and a PR target is never opened or closed', async (t) => {
+  const spec = { ...SPEC, target: 'o/r', issue: { key: 'conduct demo abcd1234', title: 'asks' } };
+  const fake = fakeGh();
+  await post(spec, deps(fake.gh));
+  fake.comments.push({ id: 1500, body: 'b', created_at: '2026-10-19T16:00:00Z', login: OPERATOR, type: 'User', app: false, issue: 40 });
+  const obs = await fakeObservatory(t, () => recorded());
+  const polled = await main(['poll', '--spec', 's.json', '--once', '--operator', OPERATOR, '--observatory', obs.base], deps(fake.gh, { readFile: () => JSON.stringify(spec) }));
+  assert.deepEqual([polled.status, polled.closed, fake.issues[0].state, fake.issues[0].state_reason], ['answered', true, 'closed', 'completed']);
+  await post({ ...spec, askReceiptId: OTHER_ASK }, deps(fake.gh));
+  assert.equal(fake.issues[0].state, 'open');
+  // o/r#7 is a PR: an answer there leaves it as it is.
+  const pr = fakeGh([askComment(), reply(501, 'a')]);
+  const answered = await poll(pollOpts(obs.base), deps(pr.gh));
+  assert.deepEqual([answered.status, answered.closed], ['answered', false]);
+  assert.equal(pr.calls.filter((call) => call.args.includes('PATCH')).length, 0);
 });
 
 test('post --spec: the opened asks issue\'s number goes into the spec file, so a re-run finds it while GitHub\'s issue list still lags', async () => {

@@ -76,7 +76,8 @@ function fixture(t, deps = {}) {
   };
   let clock = Date.parse('2026-10-04T18:00:00.000Z');
   const base = {
-    exec, env: {}, platform: 'linux', home: join(dir, 'home'), stdinIsTTY: false, pluginRoot: join(dir, 'plugin'),
+    // No operator in these runs: touches go straight to the Spine and GitHub (a test asks in session explicitly).
+    exec, env: { WORKIT_UNATTENDED: '1' }, platform: 'linux', home: join(dir, 'home'), stdinIsTTY: false, pluginRoot: join(dir, 'plugin'),
     resolveCodex: () => 'codex', now: () => clock, timestamp: () => new Date((clock += 1000)).toISOString(),
     newRunId: () => RUN_ID, lockWaitMs: 0, importModule: testLoader, ...deps,
   };
@@ -97,6 +98,8 @@ function answeredFor(runDir, n = 1, answerPatch = {}, name = 'spine-quest-answer
   return result;
 }
 const SPINE = ['--adapter', 'spine', '--anchor', ANCHOR];
+// No operator in the session: a touch skips the session ask and is filed on the Spine.
+const UNATTENDED = { WORKIT_UNATTENDED: '1' };
 
 function intake(f, extra = [], more = {}, goal = GOAL) {
   return f.run(['intake', '--goal', goal, '--repo', f.repo, '--runs-root', f.runs, ...extra], more);
@@ -268,7 +271,7 @@ test('refusal 8 (022d6fd9): with the Spine adapter, a touch 1 still over 2,000 c
 
 test('refiling (022d6fd9): a refused answer\'s reason gives way to spine_receipt\'s cap, never the question', () => {
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', pluginRoot: 'X:/fixture/plugin', touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR } };
-  const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
+  const deps = { env: UNATTENDED, append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
   // The longest question intake lets through, measured by intake's own filedLength.
   const question = 'q'.repeat(2000 - filedLength(state, 1, ''));
   const touch = openTouch(state, { kind: 'preapproval', question, options: [{ key: 'a', label: 'a', consequence: 'a' }] }, deps);
@@ -349,7 +352,7 @@ test('showcase (022d6fd9): 30 held WPs are cited by count and where they are lis
     slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', pluginRoot: 'X:/fixture/plugin', touches: [], wps, adapters: { spine: { on: true } },
     intent: { anchor: ANCHOR, repo: { path: 'X:/fixture/repo', remote: 'o/r', defaultBranch: 'main' } }, release: { state: 'not-exercised', reason: 'incomplete build' },
   };
-  const deps = { append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
+  const deps = { env: UNATTENDED, append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
   // A briefing at every field's maximum, on a workspace-length run path: the
   // briefing, the answer line and every status line still fit, uncut.
   const full = (lead) => `${lead} ${'x'.repeat(200)}`.slice(0, 200);
@@ -394,7 +397,7 @@ test('showcase briefing: the conductor writes it before the touch; the question 
     wps: [{ id: 'WP-01', state: 'merged', pr: { number: 7 } }, { id: 'WP-02', state: 'blocked', pr: { number: 8 }, reason: 'check failed again after an amendment' }],
     intent: { anchor: ANCHOR, repo: { path: 'X:/fixture/repo', remote: 'o/r', defaultBranch: 'main' } }, release: { state: 'not-exercised', reason: 'no recipe' },
   };
-  const deps = { append: () => {}, timestamp: () => '2026-10-08T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: existsSync, read: (path) => readFileSync(path, 'utf8') };
+  const deps = { env: UNATTENDED, append: () => {}, timestamp: () => '2026-10-08T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: existsSync, read: (path) => readFileSync(path, 'utf8') };
   const author = showcase.next(state, deps);
   assert.deepEqual([author.kind, author.step, author.outPath], ['author', 'showcase-brief', join(dir, 'showcase-brief.json')]);
   assert.match(author.instruction, /name every one of WP-02/);
@@ -533,7 +536,7 @@ test('recipe at intake: stored verbatim and shown in touch 1', async (t) => {
 function repoConfigFixture(t, { workspace, legacy } = {}) {
   const f = fixture(t);
   const root = join(f.dir, 'ws');
-  const env = { WORKIT_WORKSPACE_ROOT: root };
+  const env = { WORKIT_UNATTENDED: '1', WORKIT_WORKSPACE_ROOT: root };
   f.deps.env = env;
   const wsPath = join(root, 'data', 'config', 'conduct', 'sirmaelstrom', 'workit.json');
   if (workspace !== undefined) {
@@ -730,10 +733,10 @@ test('read-back (U1): the filed question verbatim is this filing\'s answer; a qu
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-verbatim-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
-  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
+  const deps = { env: UNATTENDED, append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
   const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
   const touch = openTouch(state, { kind: 'preapproval', question: 'Approve $25 run?', options }, deps);
-  const filing = touchAction(state, touch);
+  const filing = touchAction(state, touch, deps);
   recordTouch(state, touch, filing, { id: '00000000-0000-4000-8000-0000000000f3' }, deps);
   recordTouch(state, touch, touchAction(state, touch), posted({ askReceiptId: '00000000-0000-4000-8000-0000000000f3' }), deps);
   assert.equal(touch.filedQuestion, filing.args.question);
@@ -759,7 +762,7 @@ test('read-back (U2, M1, round 2): touch.filed.question is matched verbatim; a t
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-legacy-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
-  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
+  const deps = { env: UNATTENDED, append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
   const options = [{ key: 'a', label: 'yes', consequence: 'go' }];
   const reply = (question) => {
     const result = fixtureJson('spine-quest-answered.json');
@@ -1038,7 +1041,7 @@ test('github post: a touch filed by a conduct that did not post gets its spec an
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-legacy-post-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID, repo: { remote: 'o/r' } }, pluginRoot: dir };
-  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
+  const deps = { env: UNATTENDED, append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
   const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
   const touch = openTouch(state, { kind: 'preapproval', question: 'Approve $25 run?', options }, deps);
   // As a pre-upgrade conduct left it: filed, waiting, with no post and no spec.
@@ -1137,7 +1140,7 @@ test('touch 1 budget label (D19.28)', async (t) => {
   assert.match(off.action.touch.question, /unmetered/);
   assert.match(off.action.touch.question, /lane-only lower bound/);
   // WORKIT_SPEND_CMD no longer meters a run: the budget stays the lane-only lower bound.
-  const g = fixture(t, { env: { WORKIT_SPEND_CMD: 'spend-usd --since' } });
+  const g = fixture(t, { env: { WORKIT_UNATTENDED: '1', WORKIT_SPEND_CMD: 'spend-usd --since' } });
   g.table['sh -c command -v "$1" sh spend-usd'] = { code: 0, stdout: '/usr/local/bin/spend-usd\n', stderr: '' };
   const on = out(await intake(g));
   assert.match(on.action.touch.question, /unmetered/);
@@ -1202,6 +1205,49 @@ test('preapproved ref (D19.6)', async (t) => {
   const core = await toCoreSpec(g);
   assert.ok(core.spec.skillArgs.endsWith(`--preapproved "core:${core.runDir}/touches/1.json"`), core.spec.skillArgs);
   assert.ok(core.spec.skillArgs.startsWith(`${GOAL} --workshop ${readState(core.runDir).workshopDir} `));
+});
+
+test('session ask (spine): touch 1 is asked in session first; the operator\'s choice is the go, with no receipt and no GitHub post, and /spec gets its touch record', async (t) => {
+  const f = fixture(t, { env: {} });
+  const first = out(await intake(f, SPINE));
+  const ask = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  assert.deepEqual([ask.kind, ask.part, ask.expects.type], ['touch', 'ask', 'json']);
+  assert.match(ask.instruction, /AskUserQuestion/);
+  assert.match(ask.instruction, /\{ "unattended": true \}/);
+  // A result that is neither a choice nor "unattended" is refused, and the ask stays pending.
+  const bad = await record(f, first.runDir, ask.id, { key: 'z' });
+  assert.equal(bad.code, 2);
+  assert.equal(readState(first.runDir).pending.id, ask.id);
+  const spec = out(await record(f, first.runDir, ask.id, { key: 'a', text: null })).action;
+  assert.equal(spec.kind, 'skill');
+  assert.ok(spec.skillArgs.endsWith(`--preapproved "core:${first.runDir}/touches/1.json"`), spec.skillArgs);
+  const touch = JSON.parse(readFileSync(join(first.runDir, 'touches', '1.json'), 'utf8'));
+  assert.deepEqual([touch.status, touch.kind, touch.channel, touch.answer.by, touch.answer.source, touch.receiptId], ['answered', 'preapproval', 'session', 'operator:session', 'session', null]);
+  assert.equal(existsSync(join(first.runDir, 'touches', '1.github-ask.json')), false);
+  assert.equal(readState(first.runDir).authority.merge, true);
+  assert.deepEqual(events(first.runDir).filter((line) => line.event === 'answered').map((line) => line.source), ['session']);
+});
+
+test('session ask (spine): keyless typed text is (c); "unattended" files the touch on the Spine and posts it; WORKIT_UNATTENDED=1 skips the ask', async (t) => {
+  const f = fixture(t, { env: {} });
+  const first = out(await intake(f, SPINE));
+  const ask = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  const grant = out(await record(f, first.runDir, ask.id, { text: 'budget 10, hold every PR' })).action;
+  assert.deepEqual([grant.kind, grant.step], ['author', 'grant']);
+  assert.match(grant.instruction, /budget 10, hold every PR/);
+
+  const g = fixture(t, { env: {} });
+  const second = out(await intake(g, SPINE));
+  const asked = out(await record(g, second.runDir, second.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  const receipt = out(await record(g, second.runDir, asked.id, { unattended: true })).action;
+  assert.deepEqual([receipt.tool, receipt.args.outcome], ['spine_receipt', 'needs_input']);
+  const readBack = await recordFiled(g, second.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' });
+  assert.equal(readBack.part, 'read-back');
+  assert.equal(readState(second.runDir).touches[0].channel, 'github');
+
+  const u = fixture(t, { env: { WORKIT_UNATTENDED: '1' } });
+  const third = out(await intake(u, SPINE));
+  assert.equal(out(await record(u, third.runDir, third.action.id, fixtureJson('spine-quest-answered.json'))).action.tool, 'spine_receipt');
 });
 
 test('touch-opened event: one per touch, spine on and off', async (t) => {
@@ -1307,11 +1353,11 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-touch-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
-  const deps = { append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
+  const deps = { env: UNATTENDED, append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
   const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
   const first = openTouch(state, { kind: 'preapproval', question: 'Q1', options }, deps);
   const second = openTouch(state, { kind: 'blocked', question: 'Q2', options }, deps);
-  const filing = touchAction(state, first);
+  const filing = touchAction(state, first, deps);
   assert.equal(filing.tool, 'spine_receipt');
   recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' }, deps);
   assert.equal(touchAction(state, second), null);
@@ -1322,7 +1368,7 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   answered.quests[0].latestReceipt.question = filing.args.question;
   recordTouch(state, first, touchAction(state, first), answered);
   assert.equal(first.status, 'answered');
-  const secondFiling = touchAction(state, second);
+  const secondFiling = touchAction(state, second, deps);
   assert.equal(secondFiling.tool, 'spine_receipt');
   assert.ok(secondFiling.args.question.startsWith('[conduct fixture-run touch 2]'));
 });

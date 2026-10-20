@@ -397,8 +397,9 @@ async function record(tokens, deps) {
     const result = readResult(flags, deps);
     if (action.kind === 'shell') checkShellResult(action, result);
     // A core touch the operator has not answered yet, or a spine hand-back,
-    // stays pending: recording it does not mint a new action.
-    if (action.kind === 'touch' && state.touches[action.touch.n - 1]?.status !== 'answered') {
+    // stays pending: recording it does not mint a new action. A session ask
+    // is recorded: its result is the operator's answer, or that none is here.
+    if (action.kind === 'touch' && action.part !== 'ask' && state.touches[action.touch.n - 1]?.status !== 'answered') {
       return { out: { ok: true, phase: state.phase, action, answered: false } };
     }
     const handler = await loadModule(deps, `lib/phases/${action.phase}.mjs`, `phase handler ${action.phase}`);

@@ -82,7 +82,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    ONE-LINE consequence — plus `allowFreeText` when a typed answer is also
    acceptable (`question` stays alongside it as the prompt fallback). That
    Spine ask is for unattended runs, and it reaches the operator as a GitHub
-   comment on the run's PR or issue, posted with
+   comment in the private asks repo (`WORKIT_ASKS_REPO`; never a public
+   repo, so `post` refuses one), posted with
    `node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`
    (`pickup` lists the spec's fields, the item's quest id among them, and
    what each exit code means). The

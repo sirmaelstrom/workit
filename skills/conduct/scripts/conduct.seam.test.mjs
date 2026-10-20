@@ -80,7 +80,8 @@ function seam(t, opts = {}) {
   h.bump = (id) => (h.heads[id] = sha('c', (h.seq += 1) * 100 + num(id)));
   h.deps = {
     exec: (program, args, options = {}) => fakeExec(h, program, args, options),
-    env: { HOME: home, ...(opts.herdr ? { HERDR_ENV: '1' } : {}), ...opts.env }, platform: 'linux', home, stdinIsTTY: false, pluginRoot: plugin,
+    // No operator in session unless a test says so: touches are filed on the Spine and posted.
+    env: { HOME: home, ...(opts.session ? {} : { WORKIT_UNATTENDED: '1' }), ...(opts.herdr ? { HERDR_ENV: '1' } : {}), ...opts.env }, platform: 'linux', home, stdinIsTTY: false, pluginRoot: plugin,
     now: () => h.clock, timestamp: () => new Date((h.clock += 1000)).toISOString(), newRunId: () => 'abcd1234', lockWaitMs: 0,
     sleep: async () => {}, resolveCodex: () => 'codex', spawnDetached: (program, args, options) => fakeSpawn(h, options),
     pidAlive: (pid) => (h.life[`WP-${String(pid - 4200).padStart(2, '0')}`] ?? 0) > 0,
@@ -319,9 +320,15 @@ async function perform(h, action) {
   const custom = h.custom?.(action);
   if (custom !== undefined) return custom;
   switch (action.kind) {
-    case 'touch':
+    case 'touch': {
+      // The session ask: the operator's AskUserQuestion choice.
+      if (action.part === 'ask') {
+        const { key, text } = h.answers[h.state().touches[action.touch.n - 1].kind];
+        return { key, text: text ?? null };
+      }
       await answerTouch(h, action.touch.n);
       return {};
+    }
     case 'wait':
       if (h.waitClock) h.clock += action.waitMs ?? 0;
       if (action.part === 'announce') {
@@ -1083,6 +1090,7 @@ test('E6 hand-back (spine): the release anomaly\'s touch hands back with seam re
   assert.deepEqual([spec.options.length, spec.allowFreeText], [1, true]);
   const bodies = [];
   const gh = (args, { input } = {}) => {
+    if (args.includes('.visibility')) return 'private\n';
     if (!args.includes('POST')) return '';
     bodies.push(JSON.parse(input).body);
     return JSON.stringify({ id: 1, html_url: 'https://github.com/o/r/issues/9#issuecomment-1' });
@@ -1426,6 +1434,20 @@ test('runtime exercise (slim): a spine run, plain and with a two-round council, 
     assert.ok(wps.every((wp) => wp.state === 'merged'), name);
     assert.equal(squashes.length, wps.length, name);
   }
+});
+
+test('session asks (spine): with the operator in session, touch 1 and the showcase are asked in session and the run closes with no needs_input filing, no GitHub post and no read-back', async (t) => {
+  const h = seam(t, { session: true });
+  await start(h, SPINE_ONLY);
+  assert.equal((await drive(h)).kind, 'done');
+  const state = h.state();
+  assert.deepEqual(state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  assert.equal(state.phase, 'closed');
+  assert.deepEqual(state.touches.map((touch) => [touch.kind, touch.answer.by, touch.channel]), [['preapproval', 'operator:session', 'session'], ['showcase', 'operator:session', 'session']]);
+  assert.equal(h.trace.filter((a) => a.kind === 'touch' && a.part === 'ask').length, 2);
+  assert.equal(h.trace.filter((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input').length, 0);
+  assert.equal(h.trace.filter((a) => a.command?.some((arg) => String(arg).endsWith('github-ask.mjs')) || a.part === 'read-back').length, 0);
+  assert.ok(h.trace.find((a) => a.kind === 'skill').skillArgs.includes(`--preapproved "core:${h.runDir}/touches/1.json"`));
 });
 
 test('fixture paths: no file under __fixtures__/seam matches either Must 8 regex', () => {
