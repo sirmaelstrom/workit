@@ -788,7 +788,8 @@ export function replanShape(plan) {
   return { why, delta };
 }
 
-export function replan(state, plan, deps) {
+// `record` is the id of the action whose record filed it (record --replan).
+export function replan(state, plan, deps, { record = null } = {}) {
   if (state.phase !== 'build') throw new ConductError(5, `replan: the run is in phase ${state.phase}; a re-plan is made mid-build`);
   // An emitted action runs before anything a re-plan queues: re-plan only at a
   // wait (slim review on #250), or with the record that would emit it (record --replan).
@@ -809,7 +810,8 @@ export function replan(state, plan, deps) {
   } catch {
     rests = `the authority in ${join(state.runDir, 'state.json')} (no approving touch recorded)`;
   }
-  const row = { n, why, delta: items, rests, file, at: deps.timestamp(), mode: wider.length ? 'asked' : 'autonomous' };
+  const row = { n, why, delta: items, rests, file, at: deps.timestamp(), mode: wider.length ? 'asked' : 'autonomous', ...(record ? { record } : {}) };
+  const source = record ? 'record' : 'verb';
   // The operator decides from the question alone, so it carries the whole delta-plan or is refused before anything is written.
   let question = null;
   if (wider.length) {
@@ -825,7 +827,7 @@ export function replan(state, plan, deps) {
     // Receipted on the anchor once applied (spine), else the event and the analysis carry it.
     row.receipt = spineOn(state) && state.intent?.anchor ? 'owed' : null;
     state.replans.push(row);
-    appendEvent(state, deps, { step: 'replan', event: 'replanned', source: 'verb', data: { n, mode: 'autonomous', changes: items.length, rests: row.rests } });
+    appendEvent(state, deps, { step: 'replan', event: 'replanned', source, data: { n, mode: 'autonomous', changes: items.length, rests: row.rests } });
     return { n, mode: 'autonomous', rests: row.rests, file: join(state.runDir, file) };
   }
   const touch = buildTouch(state, deps, 'replan', {
@@ -841,7 +843,7 @@ export function replan(state, plan, deps) {
   state.replans.push(row);
   (state.build.halts ??= []).push({ kind: 'replan', reason: `re-plan ${n} waits on the operator (touch ${touch.n})`, touch: touch.n });
   syncHalt(state, deps);
-  appendEvent(state, deps, { step: 'replan', event: 'replan-asked', source: 'verb', data: { n, touch: touch.n, changes: items.length, wider: wider.length } });
+  appendEvent(state, deps, { step: 'replan', event: 'replan-asked', source, data: { n, touch: touch.n, changes: items.length, wider: wider.length } });
   return { n, mode: 'asked', touch: touch.n, file: join(state.runDir, file) };
 }
 

@@ -370,11 +370,13 @@ function checkShellResult(action, result) {
 
 // `record --replan <file>`: the re-plan is filed after the record and before
 // anything is emitted, so a WP's final result can drop the WP its record would
-// otherwise dispatch (quest 4e7311a7). The plan's shape is checked before the
-// record; a refusal that rests on the run's state comes after it, so the record
-// stands, nothing is emitted, and `replan` is open at an empty pending.
+// otherwise dispatch (quest 4e7311a7). The plan's shape, the build phase and
+// the action's kind are checked before the record. A refusal that rests on
+// state the record changed comes after it: the record stands, the output
+// carries `recorded`, nothing is emitted, and `replan` is open at an empty
+// pending. A replay files nothing: it returns the re-plan this record filed,
+// if any, and re-emits as any replay does.
 async function readReplanPlan(flags, deps) {
-  if (flags.replan === undefined) return null;
   const path = stringFlag(flags, 'replan');
   let plan;
   try {
@@ -389,31 +391,43 @@ async function readReplanPlan(flags, deps) {
 
 function fileReplan(state, deps, id, replan) {
   try {
-    const out = replan.module.replan(state, replan.plan, deps);
+    const out = replan.module.replan(state, replan.plan, deps, { record: id });
     saveState(state, deps);
     return out;
   } catch (error) {
-    const refused = new ConductError(error instanceof ConductError ? error.code : 1, `recorded ${id}; the re-plan was refused: ${error.message}. Nothing was emitted: fix the plan and run replan, then next.`, { cause: error });
+    const known = error instanceof ConductError;
+    const refused = new ConductError(known ? 5 : 1, `recorded ${id}; ${known ? 'the re-plan was refused' : 'filing the re-plan failed'}: ${error.message}. Nothing was emitted, so no action is pending: fix the plan and run replan, then next.`, { cause: error });
     refused.details = { recorded: id };
     throw refused;
   }
+}
+
+// The re-plan a record filed, as `record --replan` reported it.
+function filedBy(state, id) {
+  const row = (state.replans ?? []).find((entry) => entry.record === id);
+  return row ? { n: row.n, mode: row.mode, ...(row.touch ? { touch: row.touch } : {}), file: join(state.runDir, row.file) } : null;
 }
 
 async function record(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
     const id = stringFlag(flags, 'action');
-    const replan = await readReplanPlan(flags, deps);
+    const wantsReplan = flags.replan !== undefined;
     // A replay of the last record changes nothing and re-emits the next action.
     // From the rotated-out conductor's pane it is refused: its re-emit would
     // cancel the open rotation, and a replay must not change custody.
     if (id === state.lastRecorded && rotatedOut(state, deps)) throw new ConductError(5, `rotation ${openRotation(state).attempt} is open: a replay changes nothing; cancel it with next from your own pane, or end your turn`);
-    if (replan && openRotation(state)) throw new ConductError(5, `rotation ${openRotation(state).attempt} is open: custody comes first; re-plan after it is taken`);
     if (id === state.lastRecorded) {
-      // A replay may carry the re-plan a refused --replan left unfiled; replan's own guard refuses it once an action is pending.
-      const filed = replan ? fileReplan(state, deps, id, replan) : null;
+      // A replay with --replan files nothing (a lost response is retried here): it reports the re-plan this record filed.
+      const filed = wantsReplan ? filedBy(state, id) : null;
+      if (wantsReplan && !filed) throw new ConductError(5, `action ${id} is already recorded and filed no re-plan; a replay files none. Run replan --plan <file> at a wait, then next`);
       return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id), noop: true, ...(filed ? { replan: filed } : {}) } };
     }
+    if (wantsReplan && openRotation(state)) throw new ConductError(5, `rotation ${openRotation(state).attempt} is open: custody comes first; re-plan after it is taken`);
+    // Checked before anything is recorded: a re-plan is made mid-build, and a touch's record is no WP's result.
+    if (wantsReplan && state.phase !== 'build') throw new ConductError(5, `record --replan: the run is in phase ${state.phase}; a re-plan is made mid-build. Nothing was recorded`);
+    if (wantsReplan && state.pending?.id === id && (state.pending.kind === 'touch' || state.pending.touch)) throw new ConductError(5, `record --replan: action ${id} is a touch's step, not a WP's result. Nothing was recorded; record it without --replan`);
+    const replan = wantsReplan ? await readReplanPlan(flags, deps) : null;
     // While a rotation is open only its custody step can be recorded.
     const rotation = openRotation(state);
     if (rotation) {
@@ -437,7 +451,6 @@ async function record(tokens, deps) {
     // stays pending: recording it does not mint a new action. A session ask
     // is recorded: its result is the operator's answer, or that none is here.
     if (action.kind === 'touch' && action.part !== 'ask' && state.touches[action.touch.n - 1]?.status !== 'answered') {
-      if (replan) throw new ConductError(5, `action ${id} is a touch the operator has not answered: nothing was recorded, so no re-plan was filed`);
       return { out: { ok: true, phase: state.phase, action, answered: false } };
     }
     const handler = await loadModule(deps, `lib/phases/${action.phase}.mjs`, `phase handler ${action.phase}`);
