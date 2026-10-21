@@ -204,25 +204,21 @@ export function gateEnvFor(state, wp, config) {
     throw new ConductError(2, `${pinnedConfig(state) ? state.intent.repoConfig.path : '.workit/conduct.json'} gateEnv must be an object of string values`);
   }
   const ident = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  const run = ident(state.slug), id = ident(wp.id);
-  return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, fitRun(key, value, run, id)]));
+  const run = runIdent(ident(state.slug)), id = ident(wp.id);
+  return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.replaceAll('{run}', run).replaceAll('{wp}', id)]));
 }
 
-// A gateEnv value names a database more often than not, and Postgres cuts an
-// identifier at 63 bytes (deploy-truth probation H9: a 74-char name failed
-// 115 suites). When `{run}` would take a value past 63, the run is shortened
-// to fit and a hash of the whole run keeps two runs with one prefix apart.
-const IDENT_MAX = 63;
-function fitRun(key, value, run, wp) {
-  const full = value.replaceAll('{run}', run).replaceAll('{wp}', wp);
-  const uses = value.split('{run}').length - 1;
-  if (full.length <= IDENT_MAX || !uses) return full;
-  const hash = createHash('sha256').update(run).digest('hex').slice(0, 6);
-  const fixed = value.replaceAll('{run}', '').replaceAll('{wp}', wp).length;
-  const room = Math.floor((IDENT_MAX - fixed) / uses) - hash.length - 1;
-  if (room < 1) throw new ConductError(2, `gateEnv ${key} cannot fit 63 characters with any {run} in it; shorten its fixed part`);
-  const short = `${run.slice(0, room).replace(/_+$/, '')}_${hash}`;
-  return value.replaceAll('{run}', short).replaceAll('{wp}', wp);
+// `{run}` is at most RUN_IDENT_MAX ASCII characters, the same in every key, so
+// a database name of up to 39 fixed characters plus {run} fits Postgres's
+// 63-byte identifier limit (deploy-truth probation H9: the whole slug made a
+// 74-char name, and 115 suites failed). A longer run keeps its head and a
+// 12-hex sha256 of the whole normalized run, which keeps runs that share a
+// head apart. A run that fits is unchanged.
+export const RUN_IDENT_MAX = 24;
+function runIdent(run) {
+  if (run.length <= RUN_IDENT_MAX) return run;
+  const hash = createHash('sha256').update(run).digest('hex').slice(0, 12);
+  return `${run.slice(0, RUN_IDENT_MAX - hash.length - 1).replace(/_+$/, '')}_${hash}`;
 }
 
 // A gate command that cannot run as written is never run mis-quoted (D18, D19).

@@ -1280,13 +1280,20 @@ test('mint from the workshop: parseWorkPackages supplies the WPs, each keeping i
   const mint = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir })).action;
   assert.equal(mint.tool, 'spine_author');
   // H5 (deploy-truth probation): the place is the checkout's directory (`repo`), not the GitHub name (`workit`).
+  // git does not answer in this fixture, so this is the fallback: the run's path.
   assert.ok(mint.args.quests.every((quest) => quest.project === basename(f.repo)), mint.args.quests[0].project);
-  // A linked worktree names its main checkout, read from git's common dir.
-  f.table[`git -C ${f.repo} rev-parse --path-format=absolute --git-common-dir`] = { code: 0, stdout: `${join(f.dir, 'heathdev-observatory', '.git')}\n`, stderr: '' };
   const mintPhase = await import(pathToFileURL(join(HERE, 'lib', 'phases', 'mint.mjs')).href);
   const files = { exists: existsSync, read: (path) => readFileSync(path, 'utf8'), list: readdirSync };
-  const relinked = mintPhase.next({ ...readState(runDir), phase: 'mint' }, { ...f.deps, ...files });
-  assert.ok(relinked.args.quests.every((quest) => quest.project === 'heathdev-observatory'), relinked.args.quests[0].project);
+  const projectFor = (stdout, code = 0) => {
+    f.table[`git -C ${f.repo} rev-parse --path-format=absolute --git-common-dir`] = { code, stdout, stderr: '' };
+    return [...new Set(mintPhase.next({ ...readState(runDir), phase: 'mint' }, { ...f.deps, ...files }).args.quests.map((quest) => quest.project))];
+  };
+  // A plain checkout, a linked worktree (its main checkout's name), and git answers mint cannot use.
+  assert.deepEqual(projectFor(`${join(f.repo, '.git')}\n`), ['repo']);
+  assert.deepEqual(projectFor(`${join(f.dir, 'heathdev-observatory', '.git')}\n`), ['heathdev-observatory']);
+  assert.deepEqual(projectFor('.git\n'), ['repo'], 'a relative answer falls back to the run\'s path');
+  assert.deepEqual(projectFor(`${join(f.dir, 'bare.git')}\n`), ['repo'], 'a common dir not named .git falls back');
+  assert.deepEqual(projectFor('', 128), ['repo']);
   assert.deepEqual(mint.args.campaign, { title: fixtureJson('spine-quest-answered.json').quests[0].campaign.title });
   assert.deepEqual(mint.args.quests.map((quest) => quest.key), keys);
   assert.deepEqual(mint.args.seams.map((seam) => seam.to), keys);

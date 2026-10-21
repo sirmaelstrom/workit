@@ -201,7 +201,7 @@ The workspace file may carry:
 - `contractPaths`: globs that raise a WP to T2. Conduct also raises agent-action
   hook and command-gate paths without a repo config entry; see `burn-down` § Per item step 3.
 - `trivialExclude`: globs a tail never counts as trivial.
-- `gateEnv`: env for the conductor's gate command. `{run}` and `{wp}` become the run slug and the WP id as lowercase identifiers. Use it for a repo whose suite needs its own database per runner. When `{run}` would take a value past 63 characters (Postgres's identifier limit), the run is shortened and suffixed with a 6-hex hash of the whole slug, so the value fits and two runs sharing a prefix stay distinct. A fixed part too long to leave room is refused like a malformed `gateEnv`: the WP blocks at its gate.
+- `gateEnv`: env for the conductor's gate command. `{run}` and `{wp}` become the run slug and the WP id as lowercase identifiers. Use it for a repo whose suite needs its own database per runner. `{run}` is at most 24 characters and the same in every key: a longer run keeps its first 11 characters and a 12-hex sha256 of the whole normalized run. So a database name of up to 39 fixed ASCII characters plus `{run}` fits Postgres's 63-byte identifier limit, and runs that share a head stay apart.
 - `gateBackground: true`: the gate command's action carries `background: true`.
 - `laneEstimateUsd`: what the budget gate counts for each live lane and the next WP until a lane has closed (then the mean of closed lanes is used); default 15.
 
