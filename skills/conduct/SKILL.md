@@ -136,6 +136,7 @@ conduct.mjs reset-wp --run <dir> --wp <id> --to <target> --why "<what you fixed>
 | `prompt` | blocked | the same, at `wait`, its brief queued | the brief is fixed; a herdr lane whose agent exited is started first, an exec lane resumes its session |
 | `wait` | blocked, herdr lane | the same, at `wait`, the lane's deadline renewed | you restarted the herdr lane agent and sent its brief yourself |
 | `land` | blocked or held, PR not merged | `gate` at `land` | the PR is ready; rebase, gate and merge again |
+| `setup` | blocked, exec lane, its agent never started | `dispatched`, the repo's `laneSetup` queued in the existing worktree, then brief and start | you fixed what made `laneSetup` fail (a lockfile, a registry, the command) |
 | `pending` | dropped (by a re-plan) | `pending`, no lane | the plan wants it again; the scheduler dispatches it under its usual rules |
 | `delta` | blocked or held, PR not merged | `pr` at `delta` | review an uncovered tail; requires `--baseline <sha>` verified against the latest full review |
 

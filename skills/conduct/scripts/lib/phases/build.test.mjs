@@ -2330,6 +2330,32 @@ test('lane setup (H4): the repo\'s laneSetup runs in each new exec lane worktree
   assert.equal(failing.wp('WP-02').state, 'blocked');
   assert.match(failing.wp('WP-02').reason, /missing lockfile/);
   assert.ok(!of(failing, 'WP-02').some((a) => a.step === 'start'), 'no agent started in a worktree whose setup failed');
+  // Council r1 on 453b360: the cause fixed, reset-wp --to setup reruns it in the same worktree, and the WP goes on.
+  failing.answer = null;
+  const worktree = failing.wp('WP-02').lane.worktree;
+  mkdirSync(worktree, { recursive: true });
+  const reset = build.resetWp(failing.state, { wpId: 'WP-02', to: 'setup', why: 'lockfile committed' }, failing.deps);
+  assert.deepEqual([reset.state, reset.stage, reset.queue], ['dispatched', 'brief', ['create/setup']]);
+  assert.equal(await drive(failing), null);
+  assert.equal(failing.wp('WP-02').state, 'merged');
+  const runs = of(failing, 'WP-02').filter((a) => a.part === 'setup');
+  assert.deepEqual(runs.map((a) => a.cwd), [worktree, worktree], 'the second setup ran in the worktree create made');
+  assert.throws(() => build.resetWp(h.state, { wpId: 'WP-02', to: 'setup', why: 'x' }, h.deps), (error) => error.code === 5 && /is merged; --to setup resets a WP that is blocked/.test(error.message));
+});
+
+test('lane setup (H4, council r1): an invalid legacy laneSetup blocks the WP naming it; a pinned workspace laneSetup wins, and a pin without one turns the legacy key off', async (t) => {
+  const bad = harness(t, { config: JSON.stringify({ laneSetup: 42 }), wps: [TWO[0], TWO[1]] });
+  assert.equal(await drive(bad), null);
+  assert.deepEqual([bad.wp('WP-02').state, /laneSetup must be a non-empty command string/.test(bad.wp('WP-02').reason)], ['blocked', true], bad.wp('WP-02').reason);
+  assert.ok(!of(bad, 'WP-02').some((a) => a.step === 'start'));
+  const pinned = harness(t, { config: JSON.stringify({ laneSetup: 'legacy setup' }), wps: [TWO[0], TWO[1]] });
+  pinWorkspace(pinned, { laneSetup: 'pnpm install' });
+  assert.equal(await drive(pinned), null);
+  assert.deepEqual(of(pinned, 'WP-02').filter((a) => a.part === 'setup').map((a) => a.command), [shellArgv('pnpm install', 'linux')]);
+  const off = harness(t, { config: JSON.stringify({ laneSetup: 'legacy setup' }), wps: [TWO[0], TWO[1]] });
+  pinWorkspace(off, {});
+  assert.equal(await drive(off), null);
+  assert.ok(!of(off, 'WP-02').some((a) => a.part === 'setup'), 'the pin replaces the legacy file whole');
 });
 
 // Deploy-truth probation H3: the repo's laneSuite told lanes to run the full
@@ -2347,6 +2373,17 @@ test('lane suite (H3): the spec\'s _orchestrator.md ## Lane suite overrides the 
   writeFileSync(first.outPath, fillTemplate(first));
   await recordPending(h, {});
   assert.equal(h.state.build.laneSuiteFrom, 'the spec\'s `work-packages/_orchestrator.md` `## Lane suite`');
+  // Council r1 on 453b360: the rendered analysis names the spec as the source.
+  assert.equal(await drive(h), null);
+  await analyzeRun(h.runDir, h.deps);
+  assert.match(readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8'), /laneSuite from the spec's `work-packages\/_orchestrator\.md` `## Lane suite`/);
+  // A spec that is not deep has no orchestrator: the repo's text stands.
+  const lite = harness(t, { depth: 'lite', config: JSON.stringify({ contractPaths: [] }), gateCommand: 'npm test' });
+  pinWorkspace(lite, {});
+  writeFileSync(join(lite.repo, 'AGENTS.md'), '## Lane suite\n\nRun the full database suite.\n');
+  writeFileSync(join(lite.workshopDir, 'work-packages', '_orchestrator.md'), '## Lane suite\n\nignored outside deep\n');
+  const contract = await step(lite);
+  assert.equal(Object.entries(contract.slots).find(([slot]) => slot.startsWith('<Per-repo lane isolation'))[1], 'Run the full database suite.');
 });
 
 test('repo config split (e2b54cd3): a run whose state predates the split keeps the legacy laneSuite even when AGENTS.md has a ## Lane suite', async (t) => {

@@ -35,7 +35,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   status --run <dir>
   analyze --run <dir>
   ratify --run <dir> --wp <id> --paths <path,path> --why <text>
-  reset-wp --run <dir> --wp <id> --to check|checked|prompt|wait|land|delta [--baseline <sha>] --why <text>
+  reset-wp --run <dir> --wp <id> --to check|checked|prompt|wait|land|setup|pending|delta [--baseline <sha>] --why <text>
   ci-checks --run <dir> --wp <id> --head <sha> --checks <name,name> --why <text>
   replan --run <dir> --plan <json file>
   upgrade-root --run <dir> --why <text> (invoke from destination root at an author/wait action)

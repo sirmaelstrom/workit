@@ -601,6 +601,18 @@ export const RESET_TARGETS = Object.freeze({
       // The gate does not read the owed adjudication; only the checked stage settles it.
       () => (wp.owed?.adjudicate ? `${wp.id}'s review round ${wp.owed.round ?? '?'} findings are not adjudicated; reset it --to checked` : null)),
   },
+  // A failed laneSetup (deploy-truth probation H4) blocks before the agent
+  // starts. Once its cause is fixed, the setup runs again in the worktree
+  // create made, and the WP goes on to its brief and start.
+  setup: {
+    from: ['blocked'], state: () => 'dispatched', stage: 'brief',
+    needs: (state, wp, deps) => firstProblem(
+      () => (wp.lane?.backend === 'exec' ? null : `${wp.id} is not an exec lane; only exec lanes run laneSetup`),
+      () => (wp.lane?.worktree && deps.exists(wp.lane.worktree) ? null : `${wp.id} has no lane worktree to set up`),
+      () => (wp.lane?.pid || wp.lane?.startedAt ? `${wp.id}'s lane agent has started; laneSetup runs only before the first start` : null),
+      () => (backendOf(state, wp, deps).setup(wp).length ? null : 'the repo config declares no laneSetup')),
+    queue: (state, wp, deps) => backendOf(state, wp, deps).setup(wp),
+  },
   // A WP a re-plan dropped goes back into the plan: the scheduler dispatches it
   // again like any pending WP, so it takes no lane here (Amendment 1, e830d835).
   pending: { from: ['dropped'], state: () => 'pending', stage: null, needs: () => null, queue: () => [] },
@@ -1257,7 +1269,17 @@ function expand(state, wp, deps) {
   switch (wp.stage) {
     case 'admit': return go(backend.admit(wp), 'flip');
     case 'flip': return go(flipActs(state, wp), 'create');
-    case 'create': return go(backend.create(wp), 'brief');
+    case 'create': {
+      // An unusable laneSetup throws ConductError: the WP blocks naming it, before any worktree exists.
+      let acts;
+      try {
+        acts = backend.create(wp);
+      } catch (error) {
+        if (!(error instanceof ConductError)) throw error;
+        return block(state, wp, deps, error.message);
+      }
+      return go(acts, 'brief');
+    }
     case 'brief': return go([briefAction(state, wp, deps)], 'start');
     case 'start': return go(backend.start(wp), 'prompt');
     case 'prompt': return go(backend.prompt(wp), 'wait');
