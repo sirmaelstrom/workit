@@ -26,8 +26,8 @@ import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
-import { LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
-import { isTopListItem, markLines, sectionLines } from '../markdown.mjs';
+import { LANE_SUITE_HEADING, LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
+import { isTopListItem, markLines, sectionLines, sectionText } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import { bootstrapBrief } from '../bootstrap.mjs';
 import {
@@ -171,11 +171,19 @@ function repoConfig(state, deps) {
   return pinnedConfig(state) ?? legacyConfig(state, deps);
 }
 
-// The lane-facing laneSuite: the checkout's AGENTS.md `## Lane suite`
+// The lane-facing laneSuite: the spec's own `## Lane suite` (a deep spec's
+// _orchestrator.md) when it has one, so a run can narrow what its lanes run
+// (deploy-truth probation H3); else the checkout's AGENTS.md `## Lane suite`
 // section, else the legacy file's laneSuite. { text, from } or null. A run
 // whose state predates the split (no intent.repoConfig) reads only the legacy
-// file, as it did when it started.
+// file, as it did when it started. The conductor's own gate is unchanged.
+export const SPEC_LANE_FROM = 'the spec\'s `work-packages/_orchestrator.md` `## Lane suite`';
 function laneSuiteOf(state, deps) {
+  if (state.spec?.depth === 'deep') {
+    const text = readText(deps, join(state.workshopDir, 'work-packages', '_orchestrator.md'));
+    const section = text === null ? null : sectionText(text, LANE_SUITE_HEADING);
+    if (section) return { text: section, from: SPEC_LANE_FROM };
+  }
   const legacy = () => laneSuiteFrom({ agentsText: null, legacyConfig: legacyConfig(state, deps) });
   if (!state.intent.repoConfig) return legacy();
   const agentsText = readText(deps, join(state.intent.repo.path, 'AGENTS.md'));
@@ -593,9 +601,29 @@ export const RESET_TARGETS = Object.freeze({
       // The gate does not read the owed adjudication; only the checked stage settles it.
       () => (wp.owed?.adjudicate ? `${wp.id}'s review round ${wp.owed.round ?? '?'} findings are not adjudicated; reset it --to checked` : null)),
   },
+  // A failed laneSetup (deploy-truth probation H4) blocks before the agent
+  // starts. Once its cause is fixed, the setup runs again in the worktree
+  // create made, and the WP goes on to its brief and start.
+  setup: {
+    from: ['blocked'], state: () => 'dispatched', stage: 'brief',
+    needs: (state, wp, deps) => firstProblem(
+      () => (wp.lane?.backend === 'exec' ? null : `${wp.id} is not an exec lane; only exec lanes run laneSetup`),
+      () => (wp.lane?.worktree && deps.exists(wp.lane.worktree) ? null : `${wp.id} has no lane worktree to set up`),
+      () => (wp.lane?.pid || wp.lane?.startedAt ? `${wp.id}'s lane agent has started; laneSetup runs only before the first start` : null),
+      () => (backendOf(state, wp, deps).setup(wp).length ? null : 'the repo config declares no laneSetup')),
+    queue: (state, wp, deps) => backendOf(state, wp, deps).setup(wp),
+  },
   // A WP a re-plan dropped goes back into the plan: the scheduler dispatches it
   // again like any pending WP, so it takes no lane here (Amendment 1, e830d835).
-  pending: { from: ['dropped'], state: () => 'pending', stage: null, needs: () => null, queue: () => [] },
+  // A WP blocked before its lane worktree existed (an unusable laneSetup in
+  // the repo config) has nothing to resume either: once fixed, it is
+  // dispatched afresh (challenge on db3a8f8).
+  pending: {
+    from: ['dropped', 'blocked'], state: () => 'pending', stage: null, queue: () => [],
+    needs: (state, wp) => (wp.state === 'blocked' && (wp.lane?.worktree || wp.lane?.pid || wp.pr?.number)
+      ? `${wp.id} has a lane already (${wp.lane?.worktree ?? `pid ${wp.lane?.pid}`}); --to pending takes back only a WP blocked before its worktree existed`
+      : null),
+  },
   delta: {
     from: ['blocked', 'held'], state: () => 'pr', stage: 'delta', queue: keepStops,
     needs: (state, wp, deps) => firstProblem(() => hasLane(wp),
@@ -1249,7 +1277,17 @@ function expand(state, wp, deps) {
   switch (wp.stage) {
     case 'admit': return go(backend.admit(wp), 'flip');
     case 'flip': return go(flipActs(state, wp), 'create');
-    case 'create': return go(backend.create(wp), 'brief');
+    case 'create': {
+      // An unusable laneSetup throws ConductError: the WP blocks naming it, before any worktree exists.
+      let acts;
+      try {
+        acts = backend.create(wp);
+      } catch (error) {
+        if (!(error instanceof ConductError)) throw error;
+        return block(state, wp, deps, error.message);
+      }
+      return go(acts, 'brief');
+    }
     case 'brief': return go([briefAction(state, wp, deps)], 'start');
     case 'start': return go(backend.start(wp), 'prompt');
     case 'prompt': return go(backend.prompt(wp), 'wait');

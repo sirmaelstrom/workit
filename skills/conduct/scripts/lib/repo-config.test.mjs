@@ -43,10 +43,10 @@ test('resolveRepoConfig: workspace wins and is hashed and parsed; the legacy fil
 });
 
 test('resolveRepoConfig: an invalid workspace file is a ConductError(2) naming every problem', () => {
-  const bad = { laneSuite: 'x', bogus: 1, trivialExclude: [''], gateBackground: 'yes', laneEstimateUsd: -1 };
+  const bad = { laneSuite: 'x', bogus: 1, trivialExclude: [''], gateBackground: 'yes', laneEstimateUsd: -1, laneSetup: 'npm run "x"' };
   assert.throws(() => resolveRepoConfig({ remote: 'o/r', repoPath: REPO, env: {}, ...disk({ [WS_FILE]: JSON.stringify(bad) }) }), (error) => {
     assert.equal(error.code, 2);
-    for (const part of ['laneSuite is lane-facing text', 'unknown key: bogus', 'trivialExclude must be', 'gateBackground must be', 'laneEstimateUsd must be']) {
+    for (const part of ['laneSuite is lane-facing text', 'unknown key: bogus', 'trivialExclude must be', 'gateBackground must be', 'laneEstimateUsd must be', 'laneSetup must be']) {
       assert.ok(error.message.includes(part), `${part}: ${error.message}`);
     }
     return true;

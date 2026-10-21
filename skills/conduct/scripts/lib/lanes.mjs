@@ -37,7 +37,8 @@
 //   whose pid was reused: a lower bound, not the lane's spend.
 import { basename, dirname, join, resolve } from 'node:path';
 import { LANE_MODELS, laneModel } from './adapters.mjs';
-import { resolveProgram } from './exec.mjs';
+import { resolveProgram, shellArgv } from './exec.mjs';
+import { pinnedConfig } from './repo-config.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, LIVE_STATES, laneOccupied } from './schedule.mjs';
@@ -157,9 +158,40 @@ export function allowedMissing(state, wp) {
   return [...new Set([...own, ...createdElsewhere])];
 }
 
+// The repo's laneSetup command (deploy-truth probation H4: a new worktree has
+// no dependencies): the pinned workspace config's, else the legacy repo
+// file's. { command } or { problem }: a legacy file that cannot be read, or a
+// laneSetup that is not a usable command, is named, never read as "none".
+function laneSetupOf(state, deps) {
+  let config = pinnedConfig(state);
+  if (!config) {
+    const path = join(state.intent.repo.path, '.workit', 'conduct.json');
+    try {
+      config = deps.exists?.(path) ? JSON.parse(deps.read(path)) : null;
+    } catch (error) {
+      return { problem: `${path} cannot be read for laneSetup: ${error.message}` };
+    }
+  }
+  if (!config || !Object.hasOwn(config, 'laneSetup')) return { command: null };
+  const setup = config.laneSetup;
+  if (typeof setup !== 'string' || !setup.trim() || setup.includes('"')) return { problem: 'laneSetup must be a non-empty command string with no double quote' };
+  return { command: setup };
+}
+
 export function laneBackend(state, deps, backend) {
   const repo = resolve(state.intent.repo.path);
   const fallbackBranch = state.intent.repo.defaultBranch ?? 'main';
+  // Run in each new exec lane worktree before the agent starts: a real
+  // install, so removing the worktree unlinks nothing. A herdr lane's path is
+  // known only once lane.mjs create prints it, so herdr lanes run none yet.
+  // A config problem throws when the setup is queued, so the WP blocks naming it.
+  const setupActs = (cwd) => {
+    const setup = laneSetupOf(state, deps);
+    if (setup.problem) throw new ConductError(2, setup.problem);
+    return setup.command ? [shellAction('create', {
+      part: 'setup', instruction: 'Run the repo\'s laneSetup in the new lane worktree.', command: shellArgv(setup.command, deps.platform), cwd,
+    })] : [];
+  };
   // A recorder's deps are { exec, read, exists, now, … }; it re-arms steps from the run's root.
   const pluginRoot = deps.pluginRoot ?? state.pluginRoot;
   const conduct = (sub, wp, extra = []) => ['node', join(pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs'), 'lane', sub, '--run', state.runDir, '--wp', wp.id, ...extra];
@@ -207,6 +239,7 @@ export function laneBackend(state, deps, backend) {
           (b) => b.wait(wp), (b) => b.check(wp), (b) => b.stop(running), (b) => b.remove(wp), () => deletes(wp), fallback]);
       },
       name: 'herdr',
+      setup: () => [],
       admit: () => [admitAction()],
       create: (wp) => {
         const lane = laneLayout(state, wp);
@@ -270,6 +303,8 @@ export function laneBackend(state, deps, backend) {
         (b) => b.wait(wp), (b) => b.check(wp), (b) => b.stop(running), (b) => b.reap(wp), (b) => b.kill(wp), (b) => b.remove(wp), () => deletes(wp)]);
     },
     name: 'exec',
+    // reset-wp --to setup: the repo's laneSetup again, in the worktree create made.
+    setup: (wp) => setupActs(worktreeOf(wp)),
     // A 3rd or 4th live lane is admitted on measured free commit memory: room is
     // the gate's whole point, so a host that cannot measure it does not get one.
     admit: (wp) => (state.wps.filter((other) => other !== wp && (LIVE_STATES.includes(other.state) || laneOccupied(other))).length >= GATED_FROM_LANE - 1 ? [admitAction(['--require-reading'])] : []),
@@ -278,7 +313,7 @@ export function laneBackend(state, deps, backend) {
       return [...base(), shellAction('create', {
         part: 'worktree', instruction: 'Add the lane worktree beside the repo.',
         command: ['git', '-C', repo, 'worktree', 'add', lane.worktree, '-b', lane.branch, `origin/${fallbackBranch}`],
-      })];
+      }), ...setupActs(lane.worktree)];
     },
     // The first prompt rides the spawn; an amendment resumes the session.
     start: (wp) => [shellAction('start', { instruction: 'Start the lane agent, detached.', command: conduct('spawn', wp) })],
@@ -529,7 +564,7 @@ export function recordLaneStep(state, wp, action, result, deps) {
     }
     case 'create': {
       if (!ok) return block(said(result));
-      if (action.part === 'fetch') return proceed();
+      if (action.part === 'fetch' || action.part === 'setup') return proceed();
       if (action.part === 'lane') {
         const created = parseStdout(result);
         if (!created?.paneId || !created?.path) return block(`lane.mjs create printed no paneId/path: ${said(result)}`);
