@@ -137,7 +137,7 @@ conduct.mjs reset-wp --run <dir> --wp <id> --to <target> --why "<what you fixed>
 | `wait` | blocked, herdr lane | the same, at `wait`, the lane's deadline renewed | you restarted the herdr lane agent and sent its brief yourself |
 | `land` | blocked or held, PR not merged | `gate` at `land` | the PR is ready; rebase, gate and merge again |
 | `setup` | blocked, exec lane, its agent never started | `dispatched`, the repo's `laneSetup` queued in the existing worktree, then brief and start | you fixed what made `laneSetup` fail (a lockfile, a registry, the command) |
-| `pending` | dropped (by a re-plan) | `pending`, no lane | the plan wants it again; the scheduler dispatches it under its usual rules |
+| `pending` | dropped (by a re-plan), or blocked before its lane worktree existed (an unusable `laneSetup`) | `pending`, no lane | the plan wants it again; the scheduler dispatches it under its usual rules |
 | `delta` | blocked or held, PR not merged | `pr` at `delta` | review an uncovered tail; requires `--baseline <sha>` verified against the latest full review |
 
 For `delta`, use `--to delta --baseline <sha>`. On the original commit line the baseline must be the reviewed head. After a recorded rebase, the supplied commit must carry exactly the reviewed prefix from the recorded new base. Verification reuses the review-round mapper's patch identity and location checks: changed parent files, ambiguous hunks, missing history or a baseline that includes unreviewed fixes are refused. The worktree must be clean and its HEAD must match the recorded PR head. Unsettled findings and a latest review already marked `delta` are refused too; a reset does not grant another review past the cap.

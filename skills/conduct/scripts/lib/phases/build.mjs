@@ -615,7 +615,15 @@ export const RESET_TARGETS = Object.freeze({
   },
   // A WP a re-plan dropped goes back into the plan: the scheduler dispatches it
   // again like any pending WP, so it takes no lane here (Amendment 1, e830d835).
-  pending: { from: ['dropped'], state: () => 'pending', stage: null, needs: () => null, queue: () => [] },
+  // A WP blocked before its lane worktree existed (an unusable laneSetup in
+  // the repo config) has nothing to resume either: once fixed, it is
+  // dispatched afresh (challenge on db3a8f8).
+  pending: {
+    from: ['dropped', 'blocked'], state: () => 'pending', stage: null, queue: () => [],
+    needs: (state, wp) => (wp.state === 'blocked' && (wp.lane?.worktree || wp.lane?.pid || wp.pr?.number)
+      ? `${wp.id} has a lane already (${wp.lane?.worktree ?? `pid ${wp.lane?.pid}`}); --to pending takes back only a WP blocked before its worktree existed`
+      : null),
+  },
   delta: {
     from: ['blocked', 'held'], state: () => 'pr', stage: 'delta', queue: keepStops,
     needs: (state, wp, deps) => firstProblem(() => hasLane(wp),

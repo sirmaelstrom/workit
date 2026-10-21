@@ -2348,6 +2348,15 @@ test('lane setup (H4, council r1): an invalid legacy laneSetup blocks the WP nam
   assert.equal(await drive(bad), null);
   assert.deepEqual([bad.wp('WP-02').state, /laneSetup must be a non-empty command string/.test(bad.wp('WP-02').reason)], ['blocked', true], bad.wp('WP-02').reason);
   assert.ok(!of(bad, 'WP-02').some((a) => a.step === 'start'));
+  // Challenge on db3a8f8: blocked before any worktree, the WP goes back to pending once the config is fixed, and runs.
+  assert.throws(() => build.resetWp(bad.state, { wpId: 'WP-02', to: 'setup', why: 'x' }, bad.deps), (error) => error.code === 5 && /has no lane worktree to set up/.test(error.message));
+  writeFileSync(join(bad.repo, '.workit', 'conduct.json'), JSON.stringify({ laneSetup: 'npm ci' }));
+  const back = build.resetWp(bad.state, { wpId: 'WP-02', to: 'pending', why: 'laneSetup fixed' }, bad.deps);
+  assert.deepEqual([back.from.state, back.state], ['blocked', 'pending']);
+  assert.equal(await drive(bad), null);
+  assert.equal(bad.wp('WP-02').state, 'merged');
+  assert.ok(of(bad, 'WP-02').some((a) => a.part === 'setup'));
+  assert.throws(() => build.resetWp(bad.state, { wpId: 'WP-02', to: 'pending', why: 'x' }, bad.deps), (error) => error.code === 5 && /is merged; --to pending resets a WP that is dropped or blocked/.test(error.message));
   const pinned = harness(t, { config: JSON.stringify({ laneSetup: 'legacy setup' }), wps: [TWO[0], TWO[1]] });
   pinWorkspace(pinned, { laneSetup: 'pnpm install' });
   assert.equal(await drive(pinned), null);
