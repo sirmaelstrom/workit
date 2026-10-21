@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,31 +12,37 @@ import { runCustody, entries, readLedger } from './custody.mjs';
 
 const node = (code) => JSON.stringify([process.execPath, '-e', code]);
 const exitWith = (n) => node(`process.exit(${n})`);
+// A dispose that appends one line to <file> per run, then exits 0.
+const counting = (file) => node(`require('fs').appendFileSync(${JSON.stringify(file)}, 'x\\n')`);
+const runs = (file) => (existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').length : 0);
 
-function sandbox(t) {
+function sandbox(t, overrides = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'workit-custody-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const ledger = join(dir, 'run', 'custody.jsonl');
-  const run = (...argv) => runCustody([argv[0], '--ledger', ledger, ...argv.slice(1)]);
+  const run = (...argv) => runCustody([argv[0], '--ledger', ledger, ...argv.slice(1)], overrides);
   return { dir, ledger, run };
 }
+
+const git = (cwd, ...args) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, stdio: 'pipe', encoding: 'utf8' });
 
 function repoWithWorktree(dir, name) {
   const repo = join(dir, 'repo');
   if (!existsSync(repo)) {
     mkdirSync(repo);
-    const git = (...args) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' });
-    git('init', '-q', '-b', 'main');
-    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'root');
+    git(repo, 'init', '-q', '-b', 'main');
+    git(repo, 'commit', '-q', '--allow-empty', '-m', 'root');
   }
   const worktree = join(dir, name);
-  execFileSync('git', ['worktree', 'add', '-q', '--detach', worktree], { cwd: repo, stdio: 'pipe' });
+  git(repo, 'worktree', 'add', '-q', '--detach', worktree);
   return { repo, worktree };
 }
 
 function linkTo(target, link) {
   symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
 }
+
+const byId = (out) => Object.fromEntries(out.output.results.map((row) => [row.id, row]));
 
 test('custody: a junction is unlinked and its target keeps its files; a real directory recorded as one is kept', (t) => {
   const { dir, run } = sandbox(t);
@@ -52,29 +58,31 @@ test('custody: a junction is unlinked and its target keeps its files; a real dir
   assert.equal(run('add', '--kind', 'junction', '--id', real).exit, 0);
   const out = run('close');
   assert.equal(out.exit, 3, JSON.stringify(out.output));
-  const byId = Object.fromEntries(out.output.results.map((row) => [row.id, row]));
-  assert.equal(byId[link].state, 'disposed');
+  const state = byId(out);
+  assert.equal(state[link].state, 'disposed');
   assert.equal(existsSync(link), false, 'the link is gone');
   assert.deepEqual(readdirSync(target), ['package.json'], 'the target was not followed');
-  assert.equal(byId[real].state, 'kept');
-  assert.match(byId[real].reason, /is not a link; custody never deletes a real directory/);
+  assert.equal(state[real].state, 'kept');
+  assert.match(state[real].reason, /is not a link; custody never deletes a real directory/);
   assert.deepEqual(readdirSync(real), ['keep.txt']);
 });
 
-test('custody: a clean worktree is removed; a dirty one and one holding an unrecorded link are kept', (t) => {
+test('custody: a clean worktree is removed; a dirty one, one holding an unrecorded link, and one whose HEAD is on no ref are kept', (t) => {
   const { dir, run } = sandbox(t);
   const clean = repoWithWorktree(dir, 'wt-clean');
   const dirty = repoWithWorktree(dir, 'wt-dirty');
   const linked = repoWithWorktree(dir, 'wt-linked');
+  const orphan = repoWithWorktree(dir, 'wt-orphan');
   writeFileSync(join(dirty.worktree, 'work.txt'), 'unsaved');
   const target = join(dir, 'install');
   mkdirSync(target);
   writeFileSync(join(target, 'a.js'), '1');
   linkTo(target, join(linked.worktree, 'deps'));
-  for (const wt of [clean, dirty, linked]) assert.equal(run('add', '--kind', 'worktree', '--id', wt.worktree, '--repo', wt.repo).exit, 0);
+  git(orphan.worktree, 'commit', '-q', '--allow-empty', '-m', 'only here');
+  for (const wt of [clean, dirty, linked, orphan]) assert.equal(run('add', '--kind', 'worktree', '--id', wt.worktree, '--repo', wt.repo).exit, 0);
   const out = run('close');
   assert.equal(out.exit, 3);
-  const state = Object.fromEntries(out.output.results.map((row) => [row.id, row]));
+  const state = byId(out);
   assert.equal(state[clean.worktree].state, 'disposed');
   assert.equal(existsSync(clean.worktree), false);
   assert.equal(state[dirty.worktree].state, 'kept');
@@ -83,6 +91,8 @@ test('custody: a clean worktree is removed; a dirty one and one holding an unrec
   assert.equal(state[linked.worktree].state, 'kept');
   assert.match(state[linked.worktree].reason, /still holds a link/);
   assert.deepEqual(readdirSync(target), ['a.js']);
+  assert.equal(state[orphan.worktree].state, 'kept');
+  assert.match(state[orphan.worktree].reason, /is on no ref; removing it would orphan the commit/);
 });
 
 test('custody: links close before the worktree that holds them, whatever order they were added in', (t) => {
@@ -94,7 +104,7 @@ test('custody: links close before the worktree that holds them, whatever order t
   const link = join(wt.worktree, 'node_modules');
   linkTo(target, link);
   // Ignored, as a real node_modules is, so git status stays clean.
-  execFileSync('git', ['config', 'core.excludesFile', join(dir, 'ignore')], { cwd: wt.worktree });
+  git(wt.worktree, 'config', 'core.excludesFile', join(dir, 'ignore'));
   writeFileSync(join(dir, 'ignore'), 'node_modules\n');
   assert.equal(run('add', '--kind', 'worktree', '--id', wt.worktree, '--repo', wt.repo).exit, 0);
   assert.equal(run('add', '--kind', 'junction', '--id', link).exit, 0);
@@ -108,19 +118,94 @@ test('custody: links close before the worktree that holds them, whatever order t
 test('custody: a database with a live owner is left alone, an occupied one is kept, an idle one is disposed; a second close retries only the kept', (t) => {
   const { dir, ledger, run } = sandbox(t);
   const marker = join(dir, 'dropped');
-  assert.equal(run('add', '--kind', 'db', '--id', 'test_live', '--dispose', node(`require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')`), '--live', exitWith(0)).exit, 0);
+  assert.equal(run('add', '--kind', 'db', '--id', 'test_live', '--dispose', counting(marker), '--live', exitWith(0)).exit, 0);
   assert.equal(run('add', '--kind', 'db', '--id', 'test_busy', '--dispose', exitWith(3)).exit, 0);
   assert.equal(run('add', '--kind', 'db', '--id', 'test_idle', '--dispose', exitWith(0), '--live', exitWith(1)).exit, 0);
   const first = run('close');
   assert.equal(first.exit, 3);
-  const state = Object.fromEntries(first.output.results.map((row) => [row.id, row]));
+  const state = byId(first);
   assert.deepEqual([state.test_live.state, state.test_busy.state, state.test_idle.state], ['kept', 'kept', 'disposed']);
   assert.match(state.test_live.reason, /owner is live/);
-  assert.equal(existsSync(marker), false, 'the live database\'s dispose never ran');
+  assert.equal(runs(marker), 0, 'the live database\'s dispose never ran');
   assert.match(state.test_busy.reason, /^dispose exited 3/);
   const second = run('close');
   assert.deepEqual(second.output.results.map((row) => row.id).sort(), ['test_busy', 'test_live']);
-  assert.deepEqual(entries(readLedger({ exists: existsSync, read: (p) => readFileSync(p, 'utf8') }, ledger)).map((row) => row.state).sort(), ['disposed', 'kept', 'kept']);
+  const read = { read: (p) => readFileSync(p, 'utf8') };
+  assert.deepEqual(entries(readLedger(read, ledger).lines).map((row) => row.state).sort(), ['disposed', 'kept', 'kept']);
+});
+
+test('custody (council r1 M1/M2): --live guards every kind, and a check that does not exit 1 keeps the entry', (t) => {
+  const { dir, run } = sandbox(t);
+  const marker = join(dir, 'dropped');
+  const target = join(dir, 'install');
+  mkdirSync(target);
+  const link = join(dir, 'link');
+  linkTo(target, link);
+  const wt = repoWithWorktree(dir, 'wt');
+  assert.equal(run('add', '--kind', 'junction', '--id', link, '--live', exitWith(0)).exit, 0);
+  assert.equal(run('add', '--kind', 'worktree', '--id', wt.worktree, '--repo', wt.repo, '--live', exitWith(0)).exit, 0);
+  assert.equal(run('add', '--kind', 'db', '--id', 'unlaunchable', '--dispose', counting(marker), '--live', JSON.stringify([join(dir, 'no-such-checker.exe')])).exit, 0);
+  assert.equal(run('add', '--kind', 'db', '--id', 'unclear', '--dispose', counting(marker), '--live', exitWith(2)).exit, 0);
+  const out = run('close');
+  const state = byId(out);
+  assert.deepEqual([link, wt.worktree, 'unlaunchable', 'unclear'].map((id) => state[id].state), ['kept', 'kept', 'kept', 'kept']);
+  assert.match(state.unlaunchable.reason, /did not run to an exit: could not launch/);
+  assert.match(state.unclear.reason, /exited 2; only 1 means free/);
+  assert.equal(existsSync(link), true);
+  assert.equal(existsSync(wt.worktree), true);
+  assert.equal(runs(marker), 0, 'no dispose ran');
+});
+
+test('custody (council r1 M4/U2): a disposed entry added again is a new generation; an open one added with different fields is refused', (t) => {
+  const { dir, run } = sandbox(t);
+  const marker = join(dir, 'dropped');
+  assert.equal(run('add', '--kind', 'db', '--id', 'lane_db', '--dispose', counting(marker)).exit, 0);
+  assert.equal(run('add', '--kind', 'db', '--id', 'lane_db', '--dispose', exitWith(0)).exit, 2, 'a different --dispose for an open entry');
+  assert.equal(run('close').exit, 0);
+  const again = run('add', '--kind', 'db', '--id', 'lane_db', '--dispose', counting(marker));
+  assert.deepEqual([again.exit, again.output.added, again.output.generation], [0, true, 'new']);
+  assert.deepEqual(run('list').output.entries.map((row) => row.state), ['open']);
+  assert.equal(run('close').exit, 0);
+  assert.equal(runs(marker), 2, 'both generations were disposed');
+});
+
+test('custody (council r1 U1/M5): close --by disposes of one item\'s entries; a worktree a kept entry runs from is kept', (t) => {
+  const { dir, run } = sandbox(t);
+  const marker = join(dir, 'dropped');
+  const wt = repoWithWorktree(dir, 'wt-cond');
+  assert.equal(run('add', '--kind', 'db', '--id', 'item1_db', '--dispose', counting(marker), '--by', 'item-1').exit, 0);
+  assert.equal(run('add', '--kind', 'db', '--id', 'item2_db', '--dispose', counting(marker), '--by', 'item-2').exit, 0);
+  const one = run('close', '--by', 'item-1');
+  assert.deepEqual(one.output.results.map((row) => row.id), ['item1_db']);
+  assert.deepEqual(run('list').output.entries.map((row) => [row.id, row.state]), [['item1_db', 'disposed'], ['item2_db', 'open']]);
+  // The dropper runs from inside the checkout and refuses (occupied): the checkout stays so a retry can launch.
+  assert.equal(run('add', '--kind', 'db', '--id', 'cond_db', '--dispose', exitWith(3), '--cwd', wt.worktree, '--by', 'cond').exit, 0);
+  assert.equal(run('add', '--kind', 'worktree', '--id', wt.worktree, '--repo', wt.repo, '--by', 'cond').exit, 0);
+  const cond = byId(run('close', '--by', 'cond'));
+  assert.equal(cond.cond_db.state, 'kept');
+  assert.equal(cond[wt.worktree].state, 'kept');
+  assert.match(cond[wt.worktree].reason, /kept db cond_db still runs from inside it/);
+  assert.equal(existsSync(wt.worktree), true);
+});
+
+test('custody (council r1 M6/M7/U3): an lstat error keeps a junction; a fresh lock refuses a second close; a torn last line is reported and survives the next append', (t) => {
+  const denied = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+  const { dir, ledger, run } = sandbox(t, { lstat: () => { throw denied; } });
+  const link = join(dir, 'link');
+  assert.equal(run('add', '--kind', 'junction', '--id', link).exit, 0);
+  const out = run('close');
+  assert.deepEqual([out.exit, out.output.results[0].state], [3, 'kept']);
+  assert.match(out.output.results[0].reason, /EACCES/);
+  writeFileSync(`${ledger}.lock`, '1\n');
+  const locked = run('close');
+  assert.equal(locked.exit, 1);
+  assert.match(locked.output.error, /another close holds/);
+  rmSync(`${ledger}.lock`);
+  appendFileSync(ledger, '{"op":"add","kind":"db"');
+  assert.deepEqual(run('list').output.skippedLines, [3]);
+  assert.equal(run('add', '--kind', 'db', '--id', 'after', '--dispose', exitWith(0)).exit, 0);
+  const listed = run('list').output;
+  assert.deepEqual([listed.skippedLines, listed.entries.map((row) => row.id)], [[3], [link, 'after']]);
 });
 
 test('custody: add is idempotent, list shows state, dry-run writes nothing; usage is refused before any write', (t) => {
@@ -137,8 +222,10 @@ test('custody: add is idempotent, list shows state, dry-run writes nothing; usag
     ['add', '--kind', 'junction', '--id', 'relative/path'],
     ['add', '--kind', 'junction', '--id', join(dir, 'j'), '--dispose', exitWith(0)],
     ['add', '--kind', 'db', '--id', 'z', '--dispose', '"not an array"'],
+    ['add', '--kind', 'db', '--id', 'z', '--dispose', exitWith(0), '--repo', dir],
     ['add', '--kind', 'vm', '--id', 'z'],
     ['list', '--dry-run'],
+    ['close', '--kind', 'db'],
   ];
   for (const argv of refusals) assert.equal(run(...argv).exit, 2, argv.join(' '));
   assert.equal(runCustody(['list', '--ledger', 'relative.jsonl']).exit, 2);

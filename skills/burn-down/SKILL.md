@@ -359,16 +359,21 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    in a ledger beside the run doc. That includes the `_cond` database and
    checkout, a `node_modules` junction, a database a council seat names for you
    to drop, and a verify guest:
-   `node ${CLAUDE_PLUGIN_ROOT}/scripts/custody.mjs add --ledger <run dir>/custody.jsonl --kind <junction|worktree|db|process|dir> --id <path|name|pid> [--repo <abs>] [--dispose <json argv>] [--live <json argv>]`.
+   `node ${CLAUDE_PLUGIN_ROOT}/scripts/custody.mjs add --ledger <run dir>/custody.jsonl --kind <junction|worktree|db|process|dir> --id <path|name|pid> --by <item> [--repo <abs>] [--dispose <json argv>] [--live <json argv>] [--cwd <abs>]`.
    A database or process needs `--dispose`, the repo's own dropper, which must
-   refuse an occupied resource with a non-zero exit (Observatory:
-   `["npm","run","test:dbs","--","--drop","--name","<db>"]` with `--cwd` at the
-   checkout). Run `custody.mjs close` when an item's resources are done (the
-   `_cond` pair after its merge) and again at run close. It unlinks junctions
-   before it removes worktrees. It keeps a dirty or locked worktree, a path
-   that is not a link, and anything whose `--live` check exits 0 or whose
-   dropper refuses. Exit 3 lists what was kept: each kept entry is a row
-   in the run close, never a forced removal.
+   refuse an occupied resource with a non-zero exit. Argvs run without a shell,
+   so name an executable, never an npm script (Observatory:
+   `["node","--import","tsx/esm","scripts/prune-test-dbs.ts","--drop","--name","<db>"]`
+   with `--cwd` at a checkout that outlives the close; it exits 3 on an
+   occupied database). `--live` exits 0 for owned and 1 for free; anything
+   else keeps the entry. Run `custody.mjs close --by <item>` when an item's
+   resources are done (the `_cond` pair after its merge), and `close` with no
+   `--by` at run close. It unlinks junctions before it removes worktrees. It
+   keeps a locked or dirty worktree, one whose HEAD is on no ref, and one a
+   kept entry runs from. It keeps a path that is not a link, and anything
+   whose `--live` check does not exit 1 or whose dropper refuses. Exit 3 lists
+   what was kept: each kept entry is a row in the run close, never a forced
+   removal.
 
 ## Stopping
 
