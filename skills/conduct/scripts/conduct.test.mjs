@@ -5,7 +5,7 @@ import {
   linkSync, truncateSync,
 } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -1279,6 +1279,14 @@ test('mint from the workshop: parseWorkPackages supplies the WPs, each keeping i
   minted.quests.forEach((quest, i) => { quest.key = keys[i]; });
   const mint = out(await record(f, runDir, spec.id, { depth: 'deep', workshopDir })).action;
   assert.equal(mint.tool, 'spine_author');
+  // H5 (deploy-truth probation): the place is the checkout's directory (`repo`), not the GitHub name (`workit`).
+  assert.ok(mint.args.quests.every((quest) => quest.project === basename(f.repo)), mint.args.quests[0].project);
+  // A linked worktree names its main checkout, read from git's common dir.
+  f.table[`git -C ${f.repo} rev-parse --path-format=absolute --git-common-dir`] = { code: 0, stdout: `${join(f.dir, 'heathdev-observatory', '.git')}\n`, stderr: '' };
+  const mintPhase = await import(pathToFileURL(join(HERE, 'lib', 'phases', 'mint.mjs')).href);
+  const files = { exists: existsSync, read: (path) => readFileSync(path, 'utf8'), list: readdirSync };
+  const relinked = mintPhase.next({ ...readState(runDir), phase: 'mint' }, { ...f.deps, ...files });
+  assert.ok(relinked.args.quests.every((quest) => quest.project === 'heathdev-observatory'), relinked.args.quests[0].project);
   assert.deepEqual(mint.args.campaign, { title: fixtureJson('spine-quest-answered.json').quests[0].campaign.title });
   assert.deepEqual(mint.args.quests.map((quest) => quest.key), keys);
   assert.deepEqual(mint.args.seams.map((seam) => seam.to), keys);

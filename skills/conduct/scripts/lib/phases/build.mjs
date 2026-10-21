@@ -19,6 +19,7 @@
 // touches[] build (why the build opened it), applied, announced, waitLeftMs,
 // waitDueAt, guard, spendUsd; a queued wait's remainingMs and dueAt; an
 // emitted action's wpId and, on a yielding wait, `yield: true`.
+import { createHash } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
@@ -203,7 +204,25 @@ export function gateEnvFor(state, wp, config) {
     throw new ConductError(2, `${pinnedConfig(state) ? state.intent.repoConfig.path : '.workit/conduct.json'} gateEnv must be an object of string values`);
   }
   const ident = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.replaceAll('{run}', ident(state.slug)).replaceAll('{wp}', ident(wp.id))]));
+  const run = ident(state.slug), id = ident(wp.id);
+  return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, fitRun(key, value, run, id)]));
+}
+
+// A gateEnv value names a database more often than not, and Postgres cuts an
+// identifier at 63 bytes (deploy-truth probation H9: a 74-char name failed
+// 115 suites). When `{run}` would take a value past 63, the run is shortened
+// to fit and a hash of the whole run keeps two runs with one prefix apart.
+const IDENT_MAX = 63;
+function fitRun(key, value, run, wp) {
+  const full = value.replaceAll('{run}', run).replaceAll('{wp}', wp);
+  const uses = value.split('{run}').length - 1;
+  if (full.length <= IDENT_MAX || !uses) return full;
+  const hash = createHash('sha256').update(run).digest('hex').slice(0, 6);
+  const fixed = value.replaceAll('{run}', '').replaceAll('{wp}', wp).length;
+  const room = Math.floor((IDENT_MAX - fixed) / uses) - hash.length - 1;
+  if (room < 1) throw new ConductError(2, `gateEnv ${key} cannot fit 63 characters with any {run} in it; shorten its fixed part`);
+  const short = `${run.slice(0, room).replace(/_+$/, '')}_${hash}`;
+  return value.replaceAll('{run}', short).replaceAll('{wp}', wp);
 }
 
 // A gate command that cannot run as written is never run mis-quoted (D18, D19).

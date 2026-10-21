@@ -2230,6 +2230,23 @@ test('repo config gateEnv and gateBackground: the gate command carries the expan
   assert.deepEqual([Object.hasOwn(bare, 'env'), Object.hasOwn(bare, 'background')], [false, false]);
 });
 
+// Deploy-truth probation H9: `{run}` for that run's slug made a 74-char
+// database name, past Postgres's 63, and 115 suites failed.
+test('gateEnv (H9): a value that {run} would take past 63 chars gets a shortened, hashed run; a short one is unchanged', () => {
+  const config = { gateEnv: { OBSERVATORY_TEST_DB: 'heathdev_observatory_test_conduct_{run}', LANE: '{wp}', SHORT: 'db_{run}' } };
+  const wp = { id: 'WP-02' };
+  const long = build.gateEnvFor({ slug: 'deploy-truth-in-heathdev-observatory-thi' }, wp, config);
+  const sibling = build.gateEnvFor({ slug: 'deploy-truth-in-heathdev-observatory-the-other' }, wp, config);
+  assert.equal('heathdev_observatory_test_conduct_deploy_truth_in_heathdev_observatory_thi'.length, 74, 'the measured overflow');
+  assert.ok(long.OBSERVATORY_TEST_DB.length <= 63, long.OBSERVATORY_TEST_DB);
+  assert.match(long.OBSERVATORY_TEST_DB, /^heathdev_observatory_test_conduct_deploy_truth_in_\w*_[0-9a-f]{6}$/);
+  assert.notEqual(long.OBSERVATORY_TEST_DB, sibling.OBSERVATORY_TEST_DB, 'two runs sharing a prefix stay distinct');
+  assert.deepEqual(build.gateEnvFor({ slug: 'deploy-truth-in-heathdev-observatory-thi' }, wp, config), long, 'stable within a run');
+  assert.equal(long.SHORT, 'db_deploy_truth_in_heathdev_observatory_thi', 'a value that fits keeps the whole run');
+  assert.equal(long.LANE, 'wp_02');
+  assert.throws(() => build.gateEnvFor({ slug: 'a-run' }, wp, { gateEnv: { DB: `${'p'.repeat(60)}_{run}` } }), (error) => error.code === 2 && /cannot fit 63 characters/.test(error.message));
+});
+
 // e2b54cd3: the split. A workspace config pinned at intake replaces the
 // checkout's .workit/conduct.json; laneSuite comes from AGENTS.md.
 function pinWorkspace(h, config) {
