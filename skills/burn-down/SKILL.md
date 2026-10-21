@@ -170,7 +170,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    own test database, never the lane's (name it after the lane's with a
    `_cond` suffix), and its own detached checkout of that head, never the
    lane's worktree (`git worktree add --detach <repo>-wt-<lane>-cond <head>`,
-   then the repo's install and build there; remove it after the merge): a
+   then the repo's install and build there; record both in the run's custody
+   ledger, standing rule 9, and close them after the merge): a
    build in the lane's tree cleans what the lane is running, and a lane turn
    would stop the suite. So it never blocks the lane: start it in parallel with
    the lane's amendment or with the challenge on the amended tree, and record
@@ -349,8 +350,36 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    why, and which pre-approval receipt it rests on. Anything wider, such as a
    one-way door, new scope, or a dropped item the operator asked for, halts with
    a `needs_input` whose `ask.options` carry the delta-plan. `/conduct` does
-   this with its `replan` verb (`skills/conduct/SKILL.md` § Re-planning
+   this with its `replan` verb, or with `record --replan` when an action's own
+   result is the new information (`skills/conduct/SKILL.md` § Re-planning
    mid-flight). Quest e830d835.
+
+9. **The run owns what it creates, and disposes of it at close.** Record each
+   test database, worktree, junction or process the moment the run creates it,
+   in a ledger beside the run doc. That includes the `_cond` database and
+   checkout, a `node_modules` junction, a database a council seat names for you
+   to drop, and a verify guest:
+   `node ${CLAUDE_PLUGIN_ROOT}/scripts/custody.mjs add --ledger <run dir>/custody.jsonl --kind <junction|worktree|db|process|dir> --id <path|name|pid> --by <item> [--repo <abs>] [--ignored disposable] [--dispose <json argv>] [--live <json argv>] [--cwd <abs>]`.
+   A database or process needs `--dispose`, the repo's own dropper, which must
+   refuse an occupied resource with a non-zero exit. Argvs run without a shell,
+   so name an executable, never an npm script (Observatory:
+   `["node","--import","tsx/esm","scripts/prune-test-dbs.ts","--drop","--name","<db>"]`
+   with `--cwd` at a checkout that outlives the close; it exits 3 on an
+   occupied database). `--live` exits 0 for owned and 1 for free; anything
+   else keeps the entry. Run `custody.mjs close --by <item>` when an item's
+   resources are done (the `_cond` pair after its merge), and `close` with no
+   `--by` at run close. A checkout the run installed and built in is added
+   with `--ignored disposable`. Without that flag, ignored files keep a
+   worktree. Droppers run first, then links, then worktrees. Close keeps:
+   - a locked or dirty worktree, one whose HEAD is on no ref, and one that an
+     entry not yet disposed runs from;
+   - a path that is not a link;
+   - anything whose `--live` check does not exit 1, or whose dropper refuses.
+
+   Exit 3 lists what was kept. Each kept entry is a row in the run close,
+   never a forced removal. One writer holds the ledger at a time. An `add`
+   made while a close runs exits 4, so retry it; a lock left by a dead process
+   is removed with `custody.mjs unlock`.
 
 ## Stopping
 
