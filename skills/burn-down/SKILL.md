@@ -368,12 +368,17 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    occupied database). `--live` exits 0 for owned and 1 for free; anything
    else keeps the entry. Run `custody.mjs close --by <item>` when an item's
    resources are done (the `_cond` pair after its merge), and `close` with no
-   `--by` at run close. It unlinks junctions before it removes worktrees. It
-   keeps a locked or dirty worktree, one whose HEAD is on no ref, and one a
-   kept entry runs from. It keeps a path that is not a link, and anything
-   whose `--live` check does not exit 1 or whose dropper refuses. Exit 3 lists
-   what was kept: each kept entry is a row in the run close, never a forced
-   removal.
+   `--by` at run close. A checkout the run installed and built in is added
+   with `--ignored disposable`. Without that flag, ignored files keep a
+   worktree. Droppers run first, then links, then worktrees. Close keeps:
+   - a locked or dirty worktree, one whose HEAD is on no ref, and one that an
+     entry not yet disposed runs from;
+   - a path that is not a link;
+   - anything whose `--live` check does not exit 1, or whose dropper refuses.
+
+   Exit 3 lists what was kept. Each kept entry is a row in the run close,
+   never a forced removal. One writer holds the ledger at a time; a lock left
+   by a dead process is removed with `custody.mjs unlock`.
 
 ## Stopping
 

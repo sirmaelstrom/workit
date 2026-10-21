@@ -13,7 +13,8 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -24,21 +25,24 @@ import { findLinks, removeWorktree } from '../skills/parallel-explore/scripts/wo
 //   · 3 close kept at least one entry
 const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, KEPT: 3 });
 
-// Close order: links before the trees they sit in, processes before the
-// worktrees they hold open, worktrees last.
-export const KINDS = Object.freeze(['junction', 'process', 'db', 'dir', 'worktree']);
+// Close order: processes and droppers first, while the checkouts and links
+// they run from still stand; then links, before the trees they sit in;
+// worktrees last.
+export const KINDS = Object.freeze(['process', 'db', 'dir', 'junction', 'worktree']);
 const BUILT_IN = new Set(['junction', 'worktree']);
 const LIVE_MS = 60_000;
 const DISPOSE_MS = 600_000;
-const LOCK_STALE_MS = 30 * 60_000;
 
 export const USAGE_TEXT = `custody <verb> --ledger <abs> [options] — one ledger operation per invocation, JSON on stdout.
 
   add   --kind <${KINDS.join('|')}> --id <name|abs path|pid> [--repo <abs>]
         [--dispose <json argv>] [--live <json argv>] [--cwd <abs>] [--by <tag>]
+        [--ignored disposable]
         Records a resource the run just created. junction: --id is the link's
         absolute path. worktree: --id is its absolute path and --repo the repo
-        it belongs to. Any other kind needs --dispose, the argv that removes it:
+        it belongs to; --ignored disposable says the run's own install and build
+        output are the only ignored files in it (otherwise ignored files keep
+        it). Any other kind needs --dispose, the argv that removes it:
         the repo's own dropper, which must refuse an occupied resource with a
         non-zero exit. Argvs run without a shell, so name an executable (node,
         git), never an npm script: on Windows "npm" does not launch.
@@ -54,29 +58,38 @@ export const USAGE_TEXT = `custody <verb> --ledger <abs> [options] — one ledge
         --by), in the order ${KINDS.join(' → ')}.
         junction: unlinked without entering it; a path that is not a link is kept.
         worktree: kept when locked, when it holds a link, when it has uncommitted
-        changes, when its HEAD is on no ref, or when a kept entry still runs
-        from inside it; otherwise removed with workit's junction-safe teardown.
+        changes or ignored files not declared disposable, when its HEAD is on
+        no ref, or when an entry not yet disposed runs from inside it;
+        otherwise removed with workit's junction-safe teardown.
         Others: --dispose after the --live check; exit 0 is disposed, anything
         else is kept with its exit and first stderr line.
-        Exit 3 when anything was kept. One close at a time per ledger.`;
+        Exit 3 when anything was kept; exit 1 when a link's target came back
+        empty, whatever else was kept.
+  unlock
+        Removes <ledger>.lock when the pid it names is not running.
+
+  add and close hold <ledger>.lock: one writer at a time. A held lock is
+  refused (exit 1) and never taken over; a lock left by a dead process is
+  removed with unlock.`;
 
 class CustodyError extends Error {
-  constructor(code, message) {
+  constructor(code, message, { showUsage = false } = {}) {
     super(message);
     this.code = code;
+    this.showUsage = showUsage;
   }
 }
 
 const usage = (message) => {
-  throw new CustodyError(EXIT.USAGE, message);
+  throw new CustodyError(EXIT.USAGE, message, { showUsage: true });
 };
 
-const VALUE_FLAGS = new Set(['ledger', 'kind', 'id', 'repo', 'dispose', 'live', 'cwd', 'by']);
+const VALUE_FLAGS = new Set(['ledger', 'kind', 'id', 'repo', 'dispose', 'live', 'cwd', 'by', 'ignored']);
 const BOOLEAN_FLAGS = new Set(['dry-run']);
 
 export function parseArgs(argv) {
   const [verb, ...rest] = argv;
-  if (!['add', 'list', 'close'].includes(verb)) usage(`unknown verb: ${verb ?? '(none)'}`);
+  if (!['add', 'list', 'close', 'unlock'].includes(verb)) usage(`unknown verb: ${verb ?? '(none)'}`);
   const opts = { verb };
   for (let i = 0; i < rest.length; i += 1) {
     const token = rest[i];
@@ -86,13 +99,16 @@ export function parseArgs(argv) {
       continue;
     }
     if (!name || !VALUE_FLAGS.has(name)) usage(`unexpected argument: ${token}`);
-    if (rest[i + 1] === undefined) usage(`--${name} needs a value`);
+    // An empty value would read as absent: --by "" would close every item, --live "" would skip the check.
+    if (rest[i + 1] === undefined || !rest[i + 1].trim()) usage(`--${name} needs a non-empty value`);
     opts[name] = rest[i + 1];
     i += 1;
   }
   if (!opts.ledger || !isAbsolute(opts.ledger)) usage('--ledger <absolute path> is required');
   if (opts['dry-run'] && verb !== 'close') usage('--dry-run belongs to close');
-  if (verb === 'close' && Object.keys(opts).some((key) => !['verb', 'ledger', 'by', 'dry-run'].includes(key))) usage('close takes only --by and --dry-run');
+  const allowed = { add: null, list: ['verb', 'ledger'], close: ['verb', 'ledger', 'by', 'dry-run'], unlock: ['verb', 'ledger'] }[verb];
+  if (allowed && Object.keys(opts).some((key) => !allowed.includes(key))) usage(`${verb} takes only ${allowed.slice(2).map((key) => `--${key}`).join(' and ') || '--ledger'}`);
+  if (opts.ignored !== undefined && opts.ignored !== 'disposable') usage('--ignored takes only "disposable"');
   return opts;
 }
 
@@ -169,9 +185,10 @@ function appendLine(deps, path, value) {
   deps.append(path, `${prefix}${JSON.stringify(value)}\n`);
 }
 
-const FIELDS = ['repo', 'dispose', 'live', 'cwd', 'by'];
+const FIELDS = ['repo', 'dispose', 'live', 'cwd', 'by', 'ignored'];
 
 function add(opts, deps) {
+  if (opts.ignored && opts.kind !== 'worktree') usage('--ignored belongs to a worktree');
   if (!KINDS.includes(opts.kind)) usage(`--kind must be one of ${KINDS.join(', ')}`);
   if (!opts.id) usage('--id is required');
   const entry = { op: 'add', kind: opts.kind, id: opts.id };
@@ -195,17 +212,20 @@ function add(opts, deps) {
     entry.cwd = resolve(opts.cwd);
   }
   if (opts.by) entry.by = opts.by;
-  const { lines } = readLedger(deps, opts.ledger);
-  const known = entries(lines, deps.platform).find((row) => keyOf(row, deps.platform) === keyOf(entry, deps.platform));
-  if (known && known.state !== 'disposed') {
-    const differs = FIELDS.filter((field) => JSON.stringify(known[field] ?? null) !== JSON.stringify(entry[field] ?? null));
-    if (differs.length) usage(`${keyOf(entry, deps.platform)} is already recorded (${known.state}) with a different ${differs.join(', ')}; close it first, or add it as it was`);
-    return { exit: EXIT.OK, output: { ok: true, added: false, entry: known, note: 'already in the ledger' } };
-  }
-  entry.at = new Date(deps.now()).toISOString();
+  if (opts.ignored) entry.ignored = opts.ignored;
   deps.mkdir(dirname(opts.ledger));
-  appendLine(deps, opts.ledger, entry);
-  return { exit: EXIT.OK, output: { ok: true, added: true, generation: known ? 'new' : 'first', entry } };
+  return withLock(deps, opts.ledger, () => {
+    const { lines } = readLedger(deps, opts.ledger);
+    const known = entries(lines, deps.platform).find((row) => keyOf(row, deps.platform) === keyOf(entry, deps.platform));
+    if (known && known.state !== 'disposed') {
+      const differs = FIELDS.filter((field) => JSON.stringify(known[field] ?? null) !== JSON.stringify(entry[field] ?? null));
+      if (differs.length) throw new CustodyError(EXIT.USAGE, `${keyOf(entry, deps.platform)} is already recorded (${known.state}) with a different ${differs.join(', ')}; close it first, or add it as it was`);
+      return { exit: EXIT.OK, output: { ok: true, added: false, entry: known, note: 'already in the ledger' } };
+    }
+    entry.at = new Date(deps.now()).toISOString();
+    appendLine(deps, opts.ledger, entry);
+    return { exit: EXIT.OK, output: { ok: true, added: true, generation: known ? 'new' : 'first', entry } };
+  });
 }
 
 const firstLine = (text) => String(text ?? '').trim().split(/\r?\n/)[0] ?? '';
@@ -247,27 +267,29 @@ function closeJunction(entry, deps) {
 }
 
 function closeWorktree(entry, deps, held) {
+  // Absence first: a worktree gone from disk is disposed whatever its repo's
+  // state. A registration it left is reported, never pruned here (prune is
+  // repo-wide).
+  if (linkState(deps, entry.id) === null) return { op: 'disposed', reason: 'already gone' };
   const listed = deps.git(['-C', entry.repo, 'worktree', 'list', '--porcelain']);
   if (listed.code !== 0) return { op: 'kept', reason: `git worktree list failed: ${firstLine(listed.stderr) || listed.error}` };
   const block = listed.stdout.split(/\r?\n\r?\n/).find((chunk) => {
     const path = /^worktree (.+)$/m.exec(chunk)?.[1];
     return path && samePath(resolve(path), entry.id, deps.platform);
   });
-  const present = linkState(deps, entry.id) !== null;
-  if (!present) {
-    // Gone from disk: a registration left behind is git's to prune, which touches only missing worktrees.
-    if (block) deps.git(['-C', entry.repo, 'worktree', 'prune']);
-    return { op: 'disposed', reason: 'already gone' };
-  }
   if (!block) return { op: 'kept', reason: `${entry.id} is not a worktree of ${entry.repo}` };
   if (/^locked\b/m.test(block)) return { op: 'kept', reason: 'the worktree is locked' };
   const holder = held.find((other) => other.cwd && inside(other.cwd, entry.id, deps.platform));
-  if (holder) return { op: 'kept', reason: `kept ${holder.kind} ${holder.id} still runs from inside it (--cwd ${holder.cwd})` };
+  if (holder) return { op: 'kept', reason: `${holder.kind} ${holder.id} is not disposed and runs from inside it (--cwd ${holder.cwd})` };
   const links = deps.findLinks(entry.id);
   if (links.length) return { op: 'kept', reason: `it still holds a link (${links[0]}); record links as junctions so close unlinks them first` };
-  const status = deps.git(['-C', entry.id, 'status', '--porcelain', '--untracked-files=normal']);
+  const status = deps.git(['-C', entry.id, 'status', '--porcelain', '--untracked-files=normal', '--ignored=traditional']);
   if (status.code !== 0) return { op: 'kept', reason: `git status failed: ${firstLine(status.stderr) || status.error}` };
-  if (status.stdout.trim()) return { op: 'kept', reason: `uncommitted changes: ${firstLine(status.stdout)}` };
+  const lines = status.stdout.split(/\r?\n/).filter((line) => line.trim());
+  const changed = lines.filter((line) => !line.startsWith('!! '));
+  if (changed.length) return { op: 'kept', reason: `uncommitted changes: ${changed[0]}` };
+  const ignored = lines.filter((line) => line.startsWith('!! '));
+  if (ignored.length && entry.ignored !== 'disposable') return { op: 'kept', reason: `ignored files the run did not declare disposable (add --ignored disposable): ${ignored[0].slice(3)}` };
   const head = deps.git(['-C', entry.id, 'rev-parse', 'HEAD']);
   const sha = head.code === 0 ? head.stdout.trim() : null;
   if (!sha) return { op: 'kept', reason: `git rev-parse HEAD failed: ${firstLine(head.stderr) || head.error}` };
@@ -284,35 +306,71 @@ function closeByCommand(entry, deps) {
   return out.code === 0 ? { op: 'disposed', reason: 'dispose exited 0' } : { op: 'kept', reason: `dispose exited ${out.code}: ${firstLine(out.stderr) || firstLine(out.stdout)}` };
 }
 
-// One close at a time per ledger: a second would dispose of the same entries.
+// One writer at a time per ledger. The lock names its holder (pid and a
+// per-call token) and is released only while it still carries that token. A
+// held lock is refused, never taken over: a close can outlast any fixed
+// staleness, so only `unlock` removes one, and only when its pid is dead.
 function withLock(deps, ledger, fn) {
   const lock = `${ledger}.lock`;
+  const token = `${deps.pid} ${deps.token()}`;
   try {
-    deps.writeNew(lock, `${deps.pid}\n`);
+    deps.writeNew(lock, `${token}\n`);
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    const age = deps.now() - deps.mtime(lock);
-    if (age < LOCK_STALE_MS) throw new CustodyError(EXIT.ERROR, `another close holds ${lock} (${Math.round(age / 1000)} s old); run close again when it is done`);
-    deps.remove(lock);
-    deps.writeNew(lock, `${deps.pid}\n`);
+    let holder = '?';
+    try {
+      holder = deps.read(lock).trim().split(' ')[0];
+    } catch {
+      // Released between the two calls; the refusal stands, and a retry will take it.
+    }
+    throw new CustodyError(EXIT.ERROR, `pid ${holder} holds ${lock}; run again when it is done, or unlock if that pid is not running`);
   }
   try {
     return fn();
   } finally {
-    deps.remove(lock);
+    try {
+      if (deps.read(lock).trim() === token) deps.remove(lock);
+    } catch {
+      // Already gone.
+    }
   }
 }
 
+function unlock(opts, deps) {
+  const lock = `${opts.ledger}.lock`;
+  let text;
+  try {
+    text = deps.read(lock);
+  } catch (error) {
+    if (error.code === 'ENOENT') return { exit: EXIT.OK, output: { ok: true, removed: false, note: 'no lock' } };
+    throw error;
+  }
+  const pid = Number(text.trim().split(' ')[0]);
+  if (Number.isInteger(pid) && pid > 0 && deps.pidAlive(pid)) throw new CustodyError(EXIT.ERROR, `pid ${pid} is running and holds ${lock}; nothing removed`);
+  deps.remove(lock);
+  return { exit: EXIT.OK, output: { ok: true, removed: true, holder: text.trim() } };
+}
+
 function close(opts, deps) {
-  const { lines, skipped } = readLedger(deps, opts.ledger);
-  const open = entries(lines, deps.platform).filter((entry) => entry.state !== 'disposed' && (!opts.by || entry.by === opts.by));
-  open.sort((a, b) => KINDS.indexOf(a.kind) - KINDS.indexOf(b.kind));
-  const extra = skipped.length ? { skippedLines: skipped } : {};
-  if (opts['dry-run']) return { exit: EXIT.OK, output: { ok: true, dryRun: true, wouldClose: open.map(({ kind, id }) => ({ kind, id })), ...extra } };
+  // A ledger never written has nothing to close, and no directory to lock in.
+  if (!deps.exists(opts.ledger)) return { exit: EXIT.OK, output: { ok: true, closed: 0, disposed: 0, kept: 0, results: [], note: 'no ledger' } };
+  const select = () => {
+    const { lines, skipped } = readLedger(deps, opts.ledger);
+    const all = entries(lines, deps.platform).filter((entry) => entry.state !== 'disposed');
+    const open = all.filter((entry) => !opts.by || entry.by === opts.by).sort((a, b) => KINDS.indexOf(a.kind) - KINDS.indexOf(b.kind));
+    return { all, open, extra: skipped.length ? { skippedLines: skipped } : {} };
+  };
+  if (opts['dry-run']) {
+    const { open, extra } = select();
+    return { exit: EXIT.OK, output: { ok: true, dryRun: true, wouldClose: open.map(({ kind, id }) => ({ kind, id })), ...extra } };
+  }
   return withLock(deps, opts.ledger, () => {
+    // Read under the lock: a selection made before it could be another close's leftovers.
+    const { all, open, extra } = select();
     const results = [];
-    // Kept entries from other items count too: a worktree is never removed from under one.
-    const held = entries(lines, deps.platform).filter((entry) => entry.state !== 'disposed' && !open.includes(entry));
+    // Every entry outside this close that is not disposed (another item's,
+    // open or kept) holds what it runs from; a selected one joins when kept.
+    const held = all.filter((entry) => !open.includes(entry));
     for (const entry of open) {
       let outcome;
       try {
@@ -385,7 +443,16 @@ export function runCustody(argv, overrides = {}) {
         // Already gone.
       }
     },
-    mtime: (path) => statSync(path).mtimeMs,
+    exists: existsSync,
+    token: () => randomBytes(8).toString('hex'),
+    pidAlive: (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (error) {
+        return error.code === 'EPERM';
+      }
+    },
     mkdir: (path) => mkdirSync(path, { recursive: true }),
     lstat: (path) => lstatSync(path),
     unlink: unlinkOne,
@@ -399,6 +466,7 @@ export function runCustody(argv, overrides = {}) {
   try {
     const opts = parseArgs(argv);
     if (opts.verb === 'add') return add(opts, deps);
+    if (opts.verb === 'unlock') return unlock(opts, deps);
     if (opts.verb === 'list') {
       const { lines, skipped } = readLedger(deps, opts.ledger);
       return { exit: EXIT.OK, output: { ok: true, entries: entries(lines, deps.platform), ...(skipped.length ? { skippedLines: skipped } : {}) } };
@@ -406,7 +474,7 @@ export function runCustody(argv, overrides = {}) {
     return close(opts, deps);
   } catch (error) {
     const code = error instanceof CustodyError ? error.code : EXIT.ERROR;
-    return { exit: code, output: { ok: false, error: error.message, ...(code === EXIT.USAGE ? { usage: USAGE_TEXT } : {}) } };
+    return { exit: code, output: { ok: false, error: error.message, ...(error.showUsage ? { usage: USAGE_TEXT } : {}) } };
   }
 }
 

@@ -184,8 +184,59 @@ test('custody (council r1 U1/M5): close --by disposes of one item\'s entries; a 
   const cond = byId(run('close', '--by', 'cond'));
   assert.equal(cond.cond_db.state, 'kept');
   assert.equal(cond[wt.worktree].state, 'kept');
-  assert.match(cond[wt.worktree].reason, /kept db cond_db still runs from inside it/);
+  assert.match(cond[wt.worktree].reason, /db cond_db is not disposed and runs from inside it/);
   assert.equal(existsSync(wt.worktree), true);
+});
+
+test('custody (council r2 U1/U4/C2): a disposed dropper does not pin its checkout; droppers run before links close; a lock another writer replaced is not released', (t) => {
+  const { dir, ledger, run } = sandbox(t);
+  const wt = repoWithWorktree(dir, 'wt');
+  git(wt.worktree, 'config', 'core.excludesFile', join(dir, 'ignore'));
+  writeFileSync(join(dir, 'ignore'), 'node_modules\n');
+  const target = join(dir, 'install');
+  mkdirSync(target);
+  writeFileSync(join(target, 'a.js'), '1');
+  const link = join(wt.worktree, 'node_modules');
+  linkTo(target, link);
+  // The dropper needs the checkout's node_modules link (exit 3 without it), and replaces the lock as a second writer would.
+  const lock = `${ledger}.lock`;
+  const dropper = node(`const fs = require('fs'); fs.writeFileSync(${JSON.stringify(lock)}, 'other writer\\n'); process.exit(fs.existsSync(${JSON.stringify(link)}) ? 0 : 3)`);
+  assert.equal(run('add', '--kind', 'worktree', '--id', wt.worktree, '--repo', wt.repo, '--by', 'cond').exit, 0);
+  assert.equal(run('add', '--kind', 'junction', '--id', link, '--by', 'cond').exit, 0);
+  assert.equal(run('add', '--kind', 'db', '--id', 'cond_db', '--dispose', dropper, '--cwd', wt.worktree, '--by', 'cond').exit, 0);
+  const out = run('close', '--by', 'cond');
+  assert.deepEqual(out.output.results.map((row) => [row.kind, row.state]), [['db', 'disposed'], ['junction', 'disposed'], ['worktree', 'disposed']], JSON.stringify(out.output));
+  assert.equal(readFileSync(lock, 'utf8'), 'other writer\n', 'the replaced lock was left to its writer');
+  assert.deepEqual(readdirSync(target), ['a.js']);
+});
+
+test('custody (council r2 M2/M3/M4/U2): ignored files keep a worktree unless declared disposable; a never-written ledger closes clean; a worktree gone with its repo is disposed; empty values are refused', (t) => {
+  const { dir, run } = sandbox(t);
+  const kept = repoWithWorktree(dir, 'wt-env');
+  const built = repoWithWorktree(dir, 'wt-built');
+  for (const wt of [kept, built]) {
+    git(wt.worktree, 'config', 'core.excludesFile', join(dir, 'ignore'));
+  }
+  writeFileSync(join(dir, 'ignore'), '.env\ndist/\n');
+  writeFileSync(join(kept.worktree, '.env'), 'SECRET=1');
+  mkdirSync(join(built.worktree, 'dist'));
+  writeFileSync(join(built.worktree, 'dist', 'out.js'), '1');
+  assert.equal(run('add', '--kind', 'worktree', '--id', kept.worktree, '--repo', kept.repo).exit, 0);
+  assert.equal(run('add', '--kind', 'worktree', '--id', built.worktree, '--repo', built.repo, '--ignored', 'disposable').exit, 0);
+  const state = byId(run('close'));
+  assert.equal(state[kept.worktree].state, 'kept');
+  assert.match(state[kept.worktree].reason, /ignored files the run did not declare disposable .*\.env/);
+  assert.equal(existsSync(join(kept.worktree, '.env')), true);
+  assert.equal(state[built.worktree].state, 'disposed');
+  const fresh = join(dir, 'never', 'written', 'custody.jsonl');
+  const none = runCustody(['close', '--ledger', fresh]);
+  assert.deepEqual([none.exit, none.output.closed], [0, 0]);
+  const gone = join(dir, 'gone-wt');
+  assert.equal(run('add', '--kind', 'worktree', '--id', gone, '--repo', join(dir, 'gone-repo')).exit, 0);
+  assert.equal(byId(run('close'))[gone].state, 'disposed');
+  for (const argv of [['close', '--by', ''], ['add', '--kind', 'db', '--id', 'q', '--dispose', exitWith(0), '--live', ' '], ['add', '--kind', 'db', '--id', 'q', '--dispose', exitWith(0), '--ignored', 'disposable']]) {
+    assert.equal(run(...argv).exit, 2, argv.join(' '));
+  }
 });
 
 test('custody (council r1 M6/M7/U3): an lstat error keeps a junction; a fresh lock refuses a second close; a torn last line is reported and survives the next append', (t) => {
@@ -196,11 +247,16 @@ test('custody (council r1 M6/M7/U3): an lstat error keeps a junction; a fresh lo
   const out = run('close');
   assert.deepEqual([out.exit, out.output.results[0].state], [3, 'kept']);
   assert.match(out.output.results[0].reason, /EACCES/);
-  writeFileSync(`${ledger}.lock`, '1\n');
+  // A held lock refuses close and add alike; unlock removes it only when its pid is not running.
+  writeFileSync(`${ledger}.lock`, `${process.pid} abc\n`);
   const locked = run('close');
   assert.equal(locked.exit, 1);
-  assert.match(locked.output.error, /another close holds/);
-  rmSync(`${ledger}.lock`);
+  assert.match(locked.output.error, new RegExp(`pid ${process.pid} holds .*run again when it is done, or unlock`));
+  assert.equal(run('add', '--kind', 'db', '--id', 'while-locked', '--dispose', exitWith(0)).exit, 1);
+  assert.equal(run('unlock').exit, 1, 'a running holder is not unlocked');
+  const dead = runCustody(['unlock', '--ledger', ledger], { pidAlive: () => false });
+  assert.deepEqual([dead.exit, dead.output.removed], [0, true]);
+  assert.equal(existsSync(`${ledger}.lock`), false);
   appendFileSync(ledger, '{"op":"add","kind":"db"');
   assert.deepEqual(run('list').output.skippedLines, [3]);
   assert.equal(run('add', '--kind', 'db', '--id', 'after', '--dispose', exitWith(0)).exit, 0);
