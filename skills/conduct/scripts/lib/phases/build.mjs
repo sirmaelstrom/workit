@@ -205,8 +205,19 @@ export function gateEnvFor(state, wp, config) {
   }
   const ident = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   const run = runIdent(ident(state.slug)), id = ident(wp.id);
-  return Object.fromEntries(Object.entries(env).map(([key, value]) => [key, value.replaceAll('{run}', run).replaceAll('{wp}', id)]));
+  return Object.fromEntries(Object.entries(env).map(([key, value]) => {
+    const expanded = value.replaceAll('{run}', run).replaceAll('{wp}', id);
+    // An identifier-shaped value (no path or URL separator) past 63 bytes would
+    // be cut by Postgres, hash tail first: refused, so the WP blocks at its gate.
+    const templated = value !== expanded;
+    if (templated && !/[/\\]/.test(expanded) && Buffer.byteLength(expanded, 'utf8') > IDENT_MAX_BYTES) {
+      throw new ConductError(2, `gateEnv ${key} expands to ${Buffer.byteLength(expanded, 'utf8')} bytes, past Postgres's ${IDENT_MAX_BYTES}-byte identifier limit; shorten its fixed part to ${IDENT_MAX_BYTES - RUN_IDENT_MAX} ASCII characters or fewer`);
+    }
+    return [key, expanded];
+  }));
 }
+
+const IDENT_MAX_BYTES = 63;
 
 // `{run}` is at most RUN_IDENT_MAX ASCII characters, the same in every key, so
 // a database name of up to 39 fixed characters plus {run} fits Postgres's

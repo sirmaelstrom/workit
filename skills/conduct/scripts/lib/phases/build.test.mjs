@@ -2253,6 +2253,11 @@ test('gateEnv (H9): {run} is at most 24 characters, the same in every key; a lon
   assert.notEqual(a, b);
   const short = build.gateEnvFor({ slug: 'demo-run' }, wp, config);
   assert.deepEqual([short.OBSERVATORY_TEST_DB, short.LANE], ['heathdev_observatory_test_conduct_demo_run', 'wp_02'], 'a run that fits is unchanged');
+  // Challenge on 17293a4 (N1): an identifier still past 63 bytes, by a long or non-ASCII fixed part, is refused, never cut by Postgres.
+  const refused = (value) => assert.throws(() => build.gateEnvFor({ slug: 'deploy-truth-in-heathdev-observatory-thi' }, wp, { gateEnv: { DB: value } }), (error) => error.code === 2 && /past Postgres's 63-byte identifier limit/.test(error.message));
+  refused(`${'p'.repeat(40)}_{run}`);
+  refused(`${'é'.repeat(20)}_{run}`);
+  assert.equal(build.gateEnvFor({ slug: 'demo' }, wp, { gateEnv: { URL: `postgresql://u:p@localhost:5432/${'p'.repeat(60)}_{run}` } }).URL.endsWith('_demo'), true, 'a URL is not measured');
 });
 
 // e2b54cd3: the split. A workspace config pinned at intake replaces the
