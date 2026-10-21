@@ -633,6 +633,25 @@ test('replan (4e7311a7): record --replan refuses a bad plan before recording, an
   assert.equal(state.replans.length, 1);
 });
 
+test('replan (4e7311a7, challenge on 31e1416): --replan on a touch\'s step is refused before anything is recorded', async (t) => {
+  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1], TWO[2]], lanes: 1 });
+  h.disk = true;
+  await drive(h, { until: (a) => a.kind === 'wait' });
+  const wider = join(h.dir, 'wider.json');
+  writeFileSync(wider, JSON.stringify({ why: REPLAN_WHY, delta: [{ change: 'migrate the state format', door: 'one-way', inScope: true }] }));
+  assert.equal((await runConduct(['replan', '--run', h.runDir, '--plan', wider], h.overrides())).code, 0);
+  const touchStep = await drive(h, { until: (a) => a.kind !== 'wait' && (a.kind === 'touch' || Boolean(a.touch)) });
+  assert.ok(touchStep, 'the re-plan touch emits a step');
+  const plan = join(h.dir, 'plan.json');
+  writeFileSync(plan, JSON.stringify(DROP_PLAN));
+  const before = loadState(h.runDir, h.deps).lastRecorded;
+  const onTouch = await runConduct(['record', '--run', h.runDir, '--action', touchStep.id, '--result', '{}', '--replan', plan], h.overrides());
+  assert.equal(onTouch.code, 5, onTouch.stdout);
+  assert.match(JSON.parse(onTouch.stdout).error, /is a touch's step, not a WP's result\. Nothing was recorded/);
+  const state = loadState(h.runDir, h.deps);
+  assert.deepEqual([state.pending.id, state.lastRecorded], [touchStep.id, before], 'nothing recorded');
+});
+
 test('lane contract: the first action; run-level slots refused (exit 2); per-lane placeholders stay; laneSuite fills the isolation slot', async (t) => {
   const h = harness(t);
   const first = await step(h);
