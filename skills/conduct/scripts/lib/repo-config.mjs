@@ -20,7 +20,7 @@ import { ConductError, workspaceAncestor } from './state.mjs';
 import { sectionText } from './markdown.mjs';
 import { validateRecipe } from './recipe.mjs';
 
-export const WORKSPACE_KEYS = Object.freeze(['release', 'contractPaths', 'trivialExclude', 'gateEnv', 'gateBackground', 'laneEstimateUsd']);
+export const WORKSPACE_KEYS = Object.freeze(['release', 'contractPaths', 'trivialExclude', 'gateEnv', 'gateBackground', 'laneEstimateUsd', 'laneSetup']);
 export const LEGACY_RELPATH = '.workit/conduct.json';
 export const LANE_SUITE_HEADING = 'Lane suite';
 const NAME = /^[A-Za-z0-9._-]+$/;
@@ -68,6 +68,9 @@ export function workspaceConfigProblems(config) {
     problems.push('gateEnv must be an object of string values');
   }
   if (Object.hasOwn(config, 'gateBackground') && typeof config.gateBackground !== 'boolean') problems.push('gateBackground must be true or false');
+  if (Object.hasOwn(config, 'laneSetup') && (typeof config.laneSetup !== 'string' || !config.laneSetup.trim() || config.laneSetup.includes('"'))) {
+    problems.push('laneSetup must be a non-empty command string with no double quote (cmd.exe /s /c would mis-quote it)');
+  }
   const estimate = config.laneEstimateUsd;
   if (Object.hasOwn(config, 'laneEstimateUsd') && (typeof estimate !== 'number' || !Number.isFinite(estimate) || estimate < 0)) {
     problems.push('laneEstimateUsd must be a non-negative number');

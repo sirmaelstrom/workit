@@ -2313,6 +2313,42 @@ test('repo config split (e2b54cd3): the pinned contractPaths set the tier; a run
   assert.match(analysis, /^- repo config: \.workit\/conduct\.json in the product repo; laneSuite from `\.workit\/conduct\.json` laneSuite\. Deprecated location \(it still works\): move its conduct-only keys to \/ws\/data\/config\/conduct\/o\/r\.json and move laneSuite to the repo's AGENTS\.md under "## Lane suite"\.$/m);
 });
 
+// Deploy-truth probation H4: a lane worktree had no node_modules, and the
+// conductor junctioned one by hand for each lane.
+test('lane setup (H4): the repo\'s laneSetup runs in each new exec lane worktree, after it is added and before the agent starts; a failed setup blocks the WP', async (t) => {
+  const h = harness(t, { config: JSON.stringify({ laneSetup: 'npm ci --no-audit' }), wps: [TWO[0], TWO[1]] });
+  assert.equal(await drive(h), null);
+  const lane = of(h, 'WP-02').filter((a) => a.kind !== 'wait').map((a) => `${a.step}/${a.part ?? ''}`);
+  const at = (name) => lane.indexOf(name);
+  assert.ok(at('create/worktree') >= 0 && at('create/worktree') < at('create/setup') && at('create/setup') < at('start/'), lane.join(' '));
+  const setup = of(h, 'WP-02').find((a) => a.part === 'setup');
+  assert.deepEqual([setup.command, setup.cwd], [shellArgv('npm ci --no-audit', 'linux'), h.wp('WP-02').lane.worktree]);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  const failing = harness(t, { config: JSON.stringify({ laneSetup: 'npm ci' }), wps: [TWO[0], TWO[1]] });
+  failing.answer = (a) => (a.part === 'setup' ? { code: 1, stdout: '', stderr: 'npm ERR! missing lockfile' } : undefined);
+  assert.equal(await drive(failing), null);
+  assert.equal(failing.wp('WP-02').state, 'blocked');
+  assert.match(failing.wp('WP-02').reason, /missing lockfile/);
+  assert.ok(!of(failing, 'WP-02').some((a) => a.step === 'start'), 'no agent started in a worktree whose setup failed');
+});
+
+// Deploy-truth probation H3: the repo's laneSuite told lanes to run the full
+// database suite against an operator's no-load rule, and nothing in the spec
+// could narrow it. The workshop's _orchestrator.md `## Lane suite` wins.
+test('lane suite (H3): the spec\'s _orchestrator.md ## Lane suite overrides the repo\'s for this run, in the contract and its recorded source', async (t) => {
+  const h = harness(t, { config: JSON.stringify({ laneSuite: 'legacy suite', contractPaths: [] }), gateCommand: 'npm test', wps: [TWO[0], TWO[1]] });
+  pinWorkspace(h, {});
+  writeFileSync(join(h.repo, 'AGENTS.md'), '## Lane suite\n\nRun the full database suite.\n');
+  appendFileSync(join(h.workshopDir, 'work-packages', '_orchestrator.md'), '\n## Lane suite\n\nRun only the named test files;\nno database suite (operator rule: no load on this host).\n');
+  const first = await step(h);
+  const isolation = Object.entries(first.slots).find(([slot]) => slot.startsWith('<Per-repo lane isolation'))[1];
+  assert.equal(isolation, 'Run only the named test files; no database suite (operator rule: no load on this host).');
+  assert.match(first.append, /- \*\*Suite ownership \(the spec's `work-packages\/_orchestrator\.md` `## Lane suite`\):\*\* Run only the named test files;/);
+  writeFileSync(first.outPath, fillTemplate(first));
+  await recordPending(h, {});
+  assert.equal(h.state.build.laneSuiteFrom, 'the spec\'s `work-packages/_orchestrator.md` `## Lane suite`');
+});
+
 test('repo config split (e2b54cd3): a run whose state predates the split keeps the legacy laneSuite even when AGENTS.md has a ## Lane suite', async (t) => {
   const h = harness(t);
   assert.equal(h.state.intent.repoConfig, undefined, 'the harness state is a pre-split state');
