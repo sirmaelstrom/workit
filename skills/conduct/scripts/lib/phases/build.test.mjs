@@ -2230,6 +2230,36 @@ test('repo config gateEnv and gateBackground: the gate command carries the expan
   assert.deepEqual([Object.hasOwn(bare, 'env'), Object.hasOwn(bare, 'background')], [false, false]);
 });
 
+// Deploy-truth probation H9: `{run}` for that run's slug made a 74-char
+// database name, past Postgres's 63, and 115 suites failed.
+test('gateEnv (H9): {run} is at most 24 characters, the same in every key; a long run keeps its head and a hash, a short one is unchanged', () => {
+  const config = { gateEnv: {
+    OBSERVATORY_TEST_DB: 'heathdev_observatory_test_conduct_{run}', LANE: '{wp}', PGDATABASE: 'app_test_{run}',
+    DATABASE_URL: 'postgresql://postgres:postgres@localhost:5432/app_test_{run}',
+  } };
+  const wp = { id: 'WP-02' };
+  const long = build.gateEnvFor({ slug: 'deploy-truth-in-heathdev-observatory-thi' }, wp, config);
+  assert.equal('heathdev_observatory_test_conduct_deploy_truth_in_heathdev_observatory_thi'.length, 74, 'the measured overflow');
+  assert.ok(Buffer.byteLength(long.OBSERVATORY_TEST_DB) <= 63, long.OBSERVATORY_TEST_DB);
+  assert.match(long.OBSERVATORY_TEST_DB, /^heathdev_observatory_test_conduct_deploy_trut_[0-9a-f]{12}$/);
+  // Council r1 U2/U3: every key gets the same run, and a URL is never refused for its length.
+  const run = long.OBSERVATORY_TEST_DB.slice('heathdev_observatory_test_conduct_'.length);
+  assert.equal(run.length, build.RUN_IDENT_MAX);
+  assert.deepEqual([long.PGDATABASE, long.DATABASE_URL], [`app_test_${run}`, `postgresql://postgres:postgres@localhost:5432/app_test_${run}`]);
+  assert.deepEqual(build.gateEnvFor({ slug: 'deploy-truth-in-heathdev-observatory-thi' }, wp, config), long, 'stable within a run');
+  // Council r1 U1: the pair that collided under a 6-hex suffix stays apart.
+  const a = build.gateEnvFor({ slug: 'deploy-truth-in-heathdev-002938' }, wp, config).OBSERVATORY_TEST_DB;
+  const b = build.gateEnvFor({ slug: 'deploy-truth-in-heathdev-005002' }, wp, config).OBSERVATORY_TEST_DB;
+  assert.notEqual(a, b);
+  const short = build.gateEnvFor({ slug: 'demo-run' }, wp, config);
+  assert.deepEqual([short.OBSERVATORY_TEST_DB, short.LANE], ['heathdev_observatory_test_conduct_demo_run', 'wp_02'], 'a run that fits is unchanged');
+  // Challenge on 17293a4 (N1): an identifier still past 63 bytes, by a long or non-ASCII fixed part, is refused, never cut by Postgres.
+  const refused = (value) => assert.throws(() => build.gateEnvFor({ slug: 'deploy-truth-in-heathdev-observatory-thi' }, wp, { gateEnv: { DB: value } }), (error) => error.code === 2 && /past Postgres's 63-byte identifier limit/.test(error.message));
+  refused(`${'p'.repeat(40)}_{run}`);
+  refused(`${'é'.repeat(20)}_{run}`);
+  assert.equal(build.gateEnvFor({ slug: 'demo' }, wp, { gateEnv: { URL: `postgresql://u:p@localhost:5432/${'p'.repeat(60)}_{run}` } }).URL.endsWith('_demo'), true, 'a URL is not measured');
+});
+
 // e2b54cd3: the split. A workspace config pinned at intake replaces the
 // checkout's .workit/conduct.json; laneSuite comes from AGENTS.md.
 function pinWorkspace(h, config) {

@@ -2,7 +2,7 @@
 // parseWorkPackages; with spine on, one spine_author call then mints a
 // confident quest per WP under the anchor's campaign. Depth none|lite reuses
 // the anchor as WP-00's quest; spine off mints nothing.
-import { basename, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { parseDesignDirection, parseWorkPackages } from '../schedule.mjs';
 import { wpRecord } from './spec.mjs';
@@ -59,6 +59,18 @@ function bindGreenfield(state, deps) {
   appendEvent(state, deps, { step: 'mint', event: 'bootstrap-bound', data: bound });
 }
 
+// The quest's place is projects/<the checkout's directory name>, never the
+// GitHub repo's name, which can differ (heathdev-observatory's remote is
+// `observatory`; deploy-truth probation H5). A linked worktree names its main
+// checkout, read from git's common dir. Without an absolute `.git` answer
+// (git failed, or a layout with no `.git` dir), the run's own path names it.
+function projectOf(state, deps) {
+  const path = state.intent.repo.path;
+  const common = deps.exec('git', ['-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+  const dir = common.code === 0 ? common.stdout.trim() : '';
+  return basename(isAbsolute(dir) && basename(dir) === '.git' ? dirname(dir) : path);
+}
+
 export function next(state, deps) {
   if (state.spec.depth === 'deep') workshopWps(state, deps);
   bindGreenfield(state, deps);
@@ -67,7 +79,7 @@ export function next(state, deps) {
     state.phase = 'build';
     return null;
   }
-  const project = basename(state.intent.repo.remote ?? state.intent.repo.path);
+  const project = projectOf(state, deps);
   return {
     kind: 'agent-tool', step: 'mint', tool: 'spine_author', expects: { type: 'json' },
     instruction: 'Call spine_author with these args and record its raw result.',
