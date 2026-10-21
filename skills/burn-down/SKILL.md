@@ -170,7 +170,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    own test database, never the lane's (name it after the lane's with a
    `_cond` suffix), and its own detached checkout of that head, never the
    lane's worktree (`git worktree add --detach <repo>-wt-<lane>-cond <head>`,
-   then the repo's install and build there; remove it after the merge): a
+   then the repo's install and build there; record both in the run's custody
+   ledger, standing rule 9, and close them after the merge): a
    build in the lane's tree cleans what the lane is running, and a lane turn
    would stop the suite. So it never blocks the lane: start it in parallel with
    the lane's amendment or with the challenge on the amended tree, and record
@@ -349,8 +350,25 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    why, and which pre-approval receipt it rests on. Anything wider, such as a
    one-way door, new scope, or a dropped item the operator asked for, halts with
    a `needs_input` whose `ask.options` carry the delta-plan. `/conduct` does
-   this with its `replan` verb (`skills/conduct/SKILL.md` § Re-planning
+   this with its `replan` verb, or with `record --replan` when an action's own
+   result is the new information (`skills/conduct/SKILL.md` § Re-planning
    mid-flight). Quest e830d835.
+
+9. **The run owns what it creates, and disposes of it at close.** Record each
+   test database, worktree, junction or process the moment the run creates it,
+   in a ledger beside the run doc. That includes the `_cond` database and
+   checkout, a `node_modules` junction, a database a council seat names for you
+   to drop, and a verify guest:
+   `node ${CLAUDE_PLUGIN_ROOT}/scripts/custody.mjs add --ledger <run dir>/custody.jsonl --kind <junction|worktree|db|process|dir> --id <path|name|pid> [--repo <abs>] [--dispose <json argv>] [--live <json argv>]`.
+   A database or process needs `--dispose`, the repo's own dropper, which must
+   refuse an occupied resource with a non-zero exit (Observatory:
+   `["npm","run","test:dbs","--","--drop","--name","<db>"]` with `--cwd` at the
+   checkout). Run `custody.mjs close` when an item's resources are done (the
+   `_cond` pair after its merge) and again at run close. It unlinks junctions
+   before it removes worktrees. It keeps a dirty or locked worktree, a path
+   that is not a link, and anything whose `--live` check exits 0 or whose
+   dropper refuses. Exit 3 lists what was kept: each kept entry is a row
+   in the run close, never a forced removal.
 
 ## Stopping
 
