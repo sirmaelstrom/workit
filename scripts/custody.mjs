@@ -14,7 +14,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -127,6 +127,16 @@ function argvOf(text, flag) {
 
 // Paths compare case-insensitively where the filesystem does.
 const samePath = (a, b, platform) => (platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+// One spelling per directory: an 8.3 short name (C:\Users\RUNNER~1, which a
+// Windows tmpdir can return) and the long name git prints are the same path.
+// A path that does not exist keeps its resolved spelling.
+const canonical = (deps, path) => {
+  try {
+    return deps.realpath(path);
+  } catch {
+    return resolve(path);
+  }
+};
 const pathKey = (path, platform) => (platform === 'win32' ? path.toLowerCase() : path);
 const inside = (child, parent, platform) => {
   const rel = relative(pathKey(parent, platform), pathKey(child, platform));
@@ -277,11 +287,11 @@ function closeWorktree(entry, deps, held) {
   if (listed.code !== 0) return { op: 'kept', reason: `git worktree list failed: ${firstLine(listed.stderr) || listed.error}` };
   const block = listed.stdout.split(/\r?\n\r?\n/).find((chunk) => {
     const path = /^worktree (.+)$/m.exec(chunk)?.[1];
-    return path && samePath(resolve(path), entry.id, deps.platform);
+    return path && samePath(canonical(deps, path), canonical(deps, entry.id), deps.platform);
   });
   if (!block) return { op: 'kept', reason: `${entry.id} is not a worktree of ${entry.repo}` };
   if (/^locked\b/m.test(block)) return { op: 'kept', reason: 'the worktree is locked' };
-  const holder = held.find((other) => other.cwd && inside(other.cwd, entry.id, deps.platform));
+  const holder = held.find((other) => other.cwd && inside(canonical(deps, other.cwd), canonical(deps, entry.id), deps.platform));
   if (holder) return { op: 'kept', reason: `${holder.kind} ${holder.id} is not disposed and runs from inside it (--cwd ${holder.cwd})` };
   const links = deps.findLinks(entry.id);
   if (links.length) return { op: 'kept', reason: `it still holds a link (${links[0]}); record links as junctions so close unlinks them first` };
@@ -457,6 +467,7 @@ export function runCustody(argv, overrides = {}) {
     },
     mkdir: (path) => mkdirSync(path, { recursive: true }),
     lstat: (path) => lstatSync(path),
+    realpath: (path) => realpathSync.native(path),
     unlink: unlinkOne,
     findLinks,
     removeWorktree,

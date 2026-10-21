@@ -264,6 +264,20 @@ test('custody (council r1 M6/M7/U3): an lstat error keeps a junction; a fresh lo
   assert.deepEqual([listed.skippedLines, listed.entries.map((row) => row.id)], [[3], [link, 'after']]);
 });
 
+// Windows CI on dc9a5e8: tmpdir() was C:\Users\RUNNER~1\..., git printed the
+// long name, and every worktree read as "not a worktree of" its repo.
+test('custody (Windows CI): a worktree recorded by its 8.3 short path is still matched to git\'s long one', (t) => {
+  if (process.platform !== 'win32') return t.skip('8.3 short names exist only on Windows');
+  const { dir, run } = sandbox(t);
+  const wt = repoWithWorktree(dir, 'worktree-with-a-long-name');
+  const short = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${wt.worktree}').ShortPath`], { encoding: 'utf8' }).trim();
+  if (short.toLowerCase() === wt.worktree.toLowerCase()) return t.skip('8.3 names are disabled on this volume: the control did not run');
+  assert.equal(run('add', '--kind', 'worktree', '--id', short, '--repo', wt.repo).exit, 0);
+  const out = run('close');
+  assert.equal(out.exit, 0, JSON.stringify(out.output));
+  assert.equal(existsSync(wt.worktree), false);
+});
+
 test('custody: add is idempotent, list shows state, dry-run writes nothing; usage is refused before any write', (t) => {
   const { dir, ledger, run } = sandbox(t);
   assert.equal(run('add', '--kind', 'db', '--id', 'x', '--dispose', exitWith(0)).output.added, true);
