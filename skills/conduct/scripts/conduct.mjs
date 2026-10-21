@@ -30,7 +30,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   intake --goal <text> --repo <abs> [--anchor <quest id>] [--budget <usd>] [--lanes 1-4] [--agent claude|codex]
          [--adapter <name>]... [--no-adapter <name>]... [--release <json file>] [--runs-root <dir>]
   next --run <dir> [--custody <n>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
-  record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual]
+  record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
   status --run <dir>
   analyze --run <dir>
@@ -49,7 +49,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan']);
+  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -368,15 +368,52 @@ function checkShellResult(action, result) {
   }
 }
 
+// `record --replan <file>`: the re-plan is filed after the record and before
+// anything is emitted, so a WP's final result can drop the WP its record would
+// otherwise dispatch (quest 4e7311a7). The plan's shape is checked before the
+// record; a refusal that rests on the run's state comes after it, so the record
+// stands, nothing is emitted, and `replan` is open at an empty pending.
+async function readReplanPlan(flags, deps) {
+  if (flags.replan === undefined) return null;
+  const path = stringFlag(flags, 'replan');
+  let plan;
+  try {
+    plan = JSON.parse(deps.read(path));
+  } catch (error) {
+    throw new ConductError(2, `record: --replan ${path} is not a readable JSON file: ${error.message}`);
+  }
+  const module = await loadModule(deps, 'lib/phases/build.mjs', 'module');
+  module.replanShape(plan);
+  return { plan, module };
+}
+
+function fileReplan(state, deps, id, replan) {
+  try {
+    const out = replan.module.replan(state, replan.plan, deps);
+    saveState(state, deps);
+    return out;
+  } catch (error) {
+    const refused = new ConductError(error instanceof ConductError ? error.code : 1, `recorded ${id}; the re-plan was refused: ${error.message}. Nothing was emitted: fix the plan and run replan, then next.`, { cause: error });
+    refused.details = { recorded: id };
+    throw refused;
+  }
+}
+
 async function record(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
     const id = stringFlag(flags, 'action');
+    const replan = await readReplanPlan(flags, deps);
     // A replay of the last record changes nothing and re-emits the next action.
     // From the rotated-out conductor's pane it is refused: its re-emit would
     // cancel the open rotation, and a replay must not change custody.
     if (id === state.lastRecorded && rotatedOut(state, deps)) throw new ConductError(5, `rotation ${openRotation(state).attempt} is open: a replay changes nothing; cancel it with next from your own pane, or end your turn`);
-    if (id === state.lastRecorded) return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id), noop: true } };
+    if (replan && openRotation(state)) throw new ConductError(5, `rotation ${openRotation(state).attempt} is open: custody comes first; re-plan after it is taken`);
+    if (id === state.lastRecorded) {
+      // A replay may carry the re-plan a refused --replan left unfiled; replan's own guard refuses it once an action is pending.
+      const filed = replan ? fileReplan(state, deps, id, replan) : null;
+      return { out: { ok: true, phase: state.phase, action: await emitAfterRecord(state, deps, id), noop: true, ...(filed ? { replan: filed } : {}) } };
+    }
     // While a rotation is open only its custody step can be recorded.
     const rotation = openRotation(state);
     if (rotation) {
@@ -400,6 +437,7 @@ async function record(tokens, deps) {
     // stays pending: recording it does not mint a new action. A session ask
     // is recorded: its result is the operator's answer, or that none is here.
     if (action.kind === 'touch' && action.part !== 'ask' && state.touches[action.touch.n - 1]?.status !== 'answered') {
+      if (replan) throw new ConductError(5, `action ${id} is a touch the operator has not answered: nothing was recorded, so no re-plan was filed`);
       return { out: { ok: true, phase: state.phase, action, answered: false } };
     }
     const handler = await loadModule(deps, `lib/phases/${action.phase}.mjs`, `phase handler ${action.phase}`);
@@ -412,14 +450,16 @@ async function record(tokens, deps) {
       data: state.phase === action.phase ? {} : { phase: state.phase },
     });
     saveState(state, deps);
+    const filed = replan ? fileReplan(state, deps, id, replan) : null;
     const next = await emitAfterRecord(state, deps, id);
+    const filedOut = filed ? { replan: filed } : {};
     // A refused answer (not operator-attributed) is recorded as a refusal:
     // exit 3, no authority, and the next action re-files the touch.
-    if (outcome?.refused) return { code: 3, out: { ok: false, refused: outcome.refused, recorded: id, phase: state.phase, action: next } };
+    if (outcome?.refused) return { code: 3, out: { ok: false, refused: outcome.refused, recorded: id, phase: state.phase, action: next, ...filedOut } };
     // A failed step recorded as a failure (a touch's post): its count is
     // saved, the exit is 2, and the next action retries or hands back.
-    if (outcome?.failed) return { code: 2, out: { ok: false, error: outcome.failed, recorded: id, phase: state.phase, action: next } };
-    return { out: { ok: true, phase: state.phase, action: next } };
+    if (outcome?.failed) return { code: 2, out: { ok: false, error: outcome.failed, recorded: id, phase: state.phase, action: next, ...filedOut } };
+    return { out: { ok: true, phase: state.phase, action: next, ...filedOut } };
   }, { duringRotation: true });
 }
 

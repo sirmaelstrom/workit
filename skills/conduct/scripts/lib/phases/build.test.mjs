@@ -390,7 +390,7 @@ test('replan (e830d835): two-way changes inside the scope proceed on the pre-app
   const refused = (plan, code, pattern) => assert.throws(() => build.replan(h.state, plan, h.deps), (error) => error.code === code && pattern.test(error.message));
   // Slim review on #250: an emitted action would run before the re-plan; re-plan only at a wait.
   await drive(h, { until: (a) => a.step === 'brief' && a.wpId === 'WP-02' });
-  refused({ why: REPLAN_WHY, delta: [{ change: 'x', door: 'two-way', inScope: true }] }, 5, /is pending; perform and record it, and re-plan at a wait/);
+  refused({ why: REPLAN_WHY, delta: [{ change: 'x', door: 'two-way', inScope: true }] }, 5, /is pending; perform it, then file the re-plan with its record \(record --replan\), or re-plan at a wait/);
   await drive(h, { until: (a) => a.kind === 'wait' });
   assert.equal(h.wp('WP-03').state, 'pending');
   refused({ why: ' ', delta: [] }, 2, /needs "why"/);
@@ -534,6 +534,64 @@ test('replan (e830d835): the verb reads the plan file under the run lock; an unr
   assert.deepEqual([out.ok, out.n, out.mode], [true, 1, 'autonomous']);
   assert.match(out.then, /ratify, reset-wp, a ruling/);
   assert.equal(loadState(h.runDir, h.deps).replans[0].receipt, null, 'core path: no anchor receipt owed');
+});
+
+// Quest 4e7311a7: WP-02's final record emits WP-03's dispatch at once, so a
+// re-plan filed after that record finds a non-wait action pending and is
+// refused. `record --replan <file>` files the re-plan inside the record's
+// transaction, before anything is emitted.
+test('replan (4e7311a7): a re-plan filed with the record of WP-02\'s final action drops WP-03 before it dispatches', async (t) => {
+  const chain = [TWO[0], TWO[1], { id: 'WP-03', files: ['lib/land.mjs'], dependsOn: ['WP-02'] }];
+  const h = harness(t, { wps: chain, lanes: 1 });
+  h.disk = true;
+  const plan = join(h.dir, 'plan.json');
+  writeFileSync(plan, JSON.stringify({ why: REPLAN_WHY, delta: [{ change: 'drop WP-03; WP-02 already covers it', door: 'two-way', inScope: true }] }));
+  // WP-02's final action is deleting its remote branch; recorded plainly, it
+  // emits WP-03's dispatch (create/fetch), and `replan` is then refused.
+  const final = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'stop' && a.part === 'branch-remote' });
+  assert.ok(final, 'reached WP-02\'s final action');
+  const result = await perform(h, final);
+  const out = await runConduct(['record', '--run', h.runDir, '--action', final.id, '--result', JSON.stringify(result), '--replan', plan], h.overrides());
+  assert.equal(out.code, 0, out.stdout + out.stderr);
+  const body = JSON.parse(out.stdout);
+  assert.deepEqual([body.action.step, body.action.part], ['replan', 'apply'], 'the record emits the re-plan\'s apply step, not WP-03\'s dispatch');
+  assert.deepEqual([body.replan.n, body.replan.mode], [1, 'autonomous']);
+  assert.equal(h.wp('WP-03').state, 'pending', 'WP-03 has not dispatched');
+  h.answer = (a) => {
+    if (a.step !== 'replan' || a.part !== 'apply') return undefined;
+    writeFileSync(a.outPath, JSON.stringify({ applied: true, what: 'dropped WP-03', drop: ['WP-03'] }));
+    return {};
+  };
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-03').state, 'dropped');
+  assert.ok(!h.trace.some((a) => a.wpId === 'WP-03'), 'no WP-03 action was ever emitted');
+});
+
+test('replan (4e7311a7): record --replan refuses a bad plan before recording, and a state-dependent refusal after the record emits nothing', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1], TWO[2]], lanes: 1 });
+  h.disk = true;
+  const wait = await drive(h, { until: (a) => a.kind === 'wait' });
+  const bad = join(h.dir, 'bad.json');
+  writeFileSync(bad, JSON.stringify({ why: REPLAN_WHY, delta: [] }));
+  const before = readFileSync(join(h.runDir, 'state.json'), 'utf8');
+  const refused = await runConduct(['record', '--run', h.runDir, '--action', wait.id, '--result', '{}', '--replan', bad], h.overrides());
+  assert.equal(refused.code, 2);
+  assert.match(JSON.parse(refused.stdout).error, /non-empty "delta"/);
+  assert.equal(readFileSync(join(h.runDir, 'state.json'), 'utf8'), before, 'nothing recorded');
+  // A plan the state refuses after the record (a re-plan already waits on the operator): the record stands, nothing is emitted.
+  const wider = join(h.dir, 'wider.json');
+  writeFileSync(wider, JSON.stringify({ why: REPLAN_WHY, delta: [{ change: 'migrate the state format', door: 'one-way', inScope: true }] }));
+  const asked = await runConduct(['replan', '--run', h.runDir, '--plan', wider], h.overrides());
+  assert.equal(asked.code, 0, asked.stdout);
+  const again = join(h.dir, 'again.json');
+  writeFileSync(again, JSON.stringify({ why: 'again', delta: [{ change: 'x', door: 'two-way', inScope: true }] }));
+  const late = await runConduct(['record', '--run', h.runDir, '--action', wait.id, '--result', '{}', '--replan', again], h.overrides());
+  assert.equal(late.code, 5);
+  const lateOut = JSON.parse(late.stdout);
+  assert.match(lateOut.error, /recorded .*; the re-plan was refused: .*already waits on the operator/);
+  const state = loadState(h.runDir, h.deps);
+  assert.deepEqual([state.lastRecorded, state.pending], [wait.id, null], 'the record landed and nothing was emitted');
+  assert.equal(state.replans.length, 1);
 });
 
 test('lane contract: the first action; run-level slots refused (exit 2); per-lane placeholders stay; laneSuite fills the isolation slot', async (t) => {

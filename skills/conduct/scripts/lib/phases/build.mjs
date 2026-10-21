@@ -773,11 +773,9 @@ function haltTouch(state, deps, reason, why, spendUsd = null) {
 // on the anchor. rulings/replan-<n>.json is the proposal as filed; state.json
 // and the run analysis carry what became of it.
 const REPLAN_DOORS = ['two-way', 'one-way'];
-export function replan(state, plan, deps) {
-  if (state.phase !== 'build') throw new ConductError(5, `replan: the run is in phase ${state.phase}; a re-plan is made mid-build`);
-  // An emitted action runs before anything a re-plan queues: re-plan only at a wait (slim review on #250).
-  if (state.pending && state.pending.kind !== 'wait') throw new ConductError(5, `replan: action ${state.pending.id} (${state.pending.kind}) is pending; perform and record it, and re-plan at a wait`);
-  state.build ??= { contract: null, halts: [] };
+// The plan's own shape, which no run state changes: `record --replan` checks
+// it before recording anything (quest 4e7311a7).
+export function replanShape(plan) {
   const why = typeof plan?.why === 'string' ? plan.why.trim() : '';
   if (!why) throw new ConductError(2, 'replan: the plan needs "why", the information that invalidated the plan');
   const delta = Array.isArray(plan.delta) ? plan.delta : [];
@@ -787,6 +785,16 @@ export function replan(state, plan, deps) {
     if (!REPLAN_DOORS.includes(item.door)) throw new ConductError(2, `replan: delta[${i}].door must be two-way or one-way (in doubt, one-way)`);
     if (typeof item.inScope !== 'boolean') throw new ConductError(2, `replan: delta[${i}].inScope must be true or false: is the change inside the approved scope?`);
   });
+  return { why, delta };
+}
+
+export function replan(state, plan, deps) {
+  if (state.phase !== 'build') throw new ConductError(5, `replan: the run is in phase ${state.phase}; a re-plan is made mid-build`);
+  // An emitted action runs before anything a re-plan queues: re-plan only at a
+  // wait (slim review on #250), or with the record that would emit it (record --replan).
+  if (state.pending && state.pending.kind !== 'wait') throw new ConductError(5, `replan: action ${state.pending.id} (${state.pending.kind}) is pending; perform it, then file the re-plan with its record (record --replan), or re-plan at a wait`);
+  const { why, delta } = replanShape(plan);
+  state.build ??= { contract: null, halts: [] };
   state.replans ??= [];
   if (state.replans.some((row) => row.mode === 'asked')) throw new ConductError(5, 'replan: a re-plan already waits on the operator; answer it first');
   const unapplied = state.replans.find((row) => ['autonomous', 'operator'].includes(row.mode) && !row.applied);
