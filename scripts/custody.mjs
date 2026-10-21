@@ -22,8 +22,9 @@ import { findLinks, removeWorktree } from '../skills/parallel-explore/scripts/wo
 
 //   0 ok, every selected entry disposed (or nothing to do) · 1 infrastructure,
 //   or a link whose target came back empty · 2 usage, refused before any write
-//   · 3 close kept at least one entry
-const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, KEPT: 3 });
+//   · 3 close kept at least one entry · 4 another writer holds the ledger
+//   (retry; nothing was read or written)
+const EXIT = Object.freeze({ OK: 0, ERROR: 1, USAGE: 2, KEPT: 3, BUSY: 4 });
 
 // Close order: processes and droppers first, while the checkouts and links
 // they run from still stand; then links, before the trees they sit in;
@@ -69,8 +70,9 @@ export const USAGE_TEXT = `custody <verb> --ledger <abs> [options] — one ledge
         Removes <ledger>.lock when the pid it names is not running.
 
   add and close hold <ledger>.lock: one writer at a time. A held lock is
-  refused (exit 1) and never taken over; a lock left by a dead process is
-  removed with unlock.`;
+  refused with exit 4 (retry: an add made while a close runs is refused, not
+  queued) and never taken over; a lock left by a dead process is removed with
+  unlock.`;
 
 class CustodyError extends Error {
   constructor(code, message, { showUsage = false } = {}) {
@@ -323,7 +325,7 @@ function withLock(deps, ledger, fn) {
     } catch {
       // Released between the two calls; the refusal stands, and a retry will take it.
     }
-    throw new CustodyError(EXIT.ERROR, `pid ${holder} holds ${lock}; run again when it is done, or unlock if that pid is not running`);
+    throw new CustodyError(EXIT.BUSY, `pid ${holder} holds ${lock}; run again when it is done, or unlock if that pid is not running`);
   }
   try {
     return fn();
@@ -346,7 +348,7 @@ function unlock(opts, deps) {
     throw error;
   }
   const pid = Number(text.trim().split(' ')[0]);
-  if (Number.isInteger(pid) && pid > 0 && deps.pidAlive(pid)) throw new CustodyError(EXIT.ERROR, `pid ${pid} is running and holds ${lock}; nothing removed`);
+  if (Number.isInteger(pid) && pid > 0 && deps.pidAlive(pid)) throw new CustodyError(EXIT.BUSY, `pid ${pid} is running and holds ${lock}; nothing removed`);
   deps.remove(lock);
   return { exit: EXIT.OK, output: { ok: true, removed: true, holder: text.trim() } };
 }

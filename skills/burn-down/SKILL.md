@@ -359,7 +359,7 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    in a ledger beside the run doc. That includes the `_cond` database and
    checkout, a `node_modules` junction, a database a council seat names for you
    to drop, and a verify guest:
-   `node ${CLAUDE_PLUGIN_ROOT}/scripts/custody.mjs add --ledger <run dir>/custody.jsonl --kind <junction|worktree|db|process|dir> --id <path|name|pid> --by <item> [--repo <abs>] [--dispose <json argv>] [--live <json argv>] [--cwd <abs>]`.
+   `node ${CLAUDE_PLUGIN_ROOT}/scripts/custody.mjs add --ledger <run dir>/custody.jsonl --kind <junction|worktree|db|process|dir> --id <path|name|pid> --by <item> [--repo <abs>] [--ignored disposable] [--dispose <json argv>] [--live <json argv>] [--cwd <abs>]`.
    A database or process needs `--dispose`, the repo's own dropper, which must
    refuse an occupied resource with a non-zero exit. Argvs run without a shell,
    so name an executable, never an npm script (Observatory:
@@ -377,8 +377,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    - anything whose `--live` check does not exit 1, or whose dropper refuses.
 
    Exit 3 lists what was kept. Each kept entry is a row in the run close,
-   never a forced removal. One writer holds the ledger at a time; a lock left
-   by a dead process is removed with `custody.mjs unlock`.
+   never a forced removal. One writer holds the ledger at a time. An `add`
+   made while a close runs exits 4, so retry it; a lock left by a dead process
+   is removed with `custody.mjs unlock`.
 
 ## Stopping
 

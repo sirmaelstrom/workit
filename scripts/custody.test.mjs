@@ -250,10 +250,10 @@ test('custody (council r1 M6/M7/U3): an lstat error keeps a junction; a fresh lo
   // A held lock refuses close and add alike; unlock removes it only when its pid is not running.
   writeFileSync(`${ledger}.lock`, `${process.pid} abc\n`);
   const locked = run('close');
-  assert.equal(locked.exit, 1);
+  assert.equal(locked.exit, 4);
   assert.match(locked.output.error, new RegExp(`pid ${process.pid} holds .*run again when it is done, or unlock`));
-  assert.equal(run('add', '--kind', 'db', '--id', 'while-locked', '--dispose', exitWith(0)).exit, 1);
-  assert.equal(run('unlock').exit, 1, 'a running holder is not unlocked');
+  assert.equal(run('add', '--kind', 'db', '--id', 'while-locked', '--dispose', exitWith(0)).exit, 4);
+  assert.equal(run('unlock').exit, 4, 'a running holder is not unlocked');
   const dead = runCustody(['unlock', '--ledger', ledger], { pidAlive: () => false });
   assert.deepEqual([dead.exit, dead.output.removed], [0, true]);
   assert.equal(existsSync(`${ledger}.lock`), false);
