@@ -529,10 +529,12 @@ function applyCite(state, wp, action, cite, why, deps) {
   const rows = fixedRows(wp);
   const gates = gateRows(state, wp, deps);
   const cited = new Map();
-  for (const [sha, comment] of entries) {
+  for (const [sha, raw] of entries) {
     const held = shas.find((full) => /^[0-9a-f]{7,40}$/i.test(sha) && full.toLowerCase().startsWith(sha.toLowerCase()));
     if (!held) throw new ConductError(2, `cite ruling ${action.outPath}: ${sha} is not one of the held commits ${shas.join(', ')}`);
-    if (!rows.some((row) => row.comment === String(comment)) && !gates.some((row) => row.comment === String(comment))) {
+    // As the report shows it: `#4337483247` names row 4337483247.
+    const comment = String(raw).trim().replace(/^#/, '');
+    if (!rows.some((row) => row.comment === comment) && !gates.some((row) => row.comment === comment)) {
       const named = [...rows, ...gates].map((row) => row.comment).join(', ') || 'none';
       throw new ConductError(2, `cite ruling ${action.outPath}: ${comment} is not a fixed row of ${wp.id}'s latest review or of a gate amendment (${named})`);
     }
@@ -545,10 +547,12 @@ function applyCite(state, wp, action, cite, why, deps) {
     const add = [...cited].filter(([, comment]) => comment === row.comment && row.verdict === 'fixed').map(([sha]) => sha);
     return add.length ? { ...row, commit: [row.commit, ...add].filter(Boolean).join(',') } : row;
   });
-  // A review row of the same id wins; the land gate counts a gate row's commits as that amendment's (land.mjs gateFixCommits).
+  // A review row of the same id wins, then the latest gate amendment's (a later
+  // table row replaces an earlier one); the land gate counts a gate row's
+  // commits as that amendment's (land.mjs gateFixCommits).
   for (const [sha, comment] of cited) {
     if (rows.some((row) => row.comment === comment)) continue;
-    const { fix } = gates.find((row) => row.comment === comment);
+    const { fix } = gates.findLast((row) => row.comment === comment);
     fix.cited = [...new Set([...(fix.cited ?? []), sha])];
   }
   wp.cited = [...(wp.cited ?? []), { shas: Object.fromEntries(cited), why, at: deps.timestamp() }];

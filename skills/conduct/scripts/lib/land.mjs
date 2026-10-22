@@ -568,7 +568,8 @@ export function recordRebase(state, wp, { from, to, newBase }, deps) {
   if (from === to) return entry;
   const images = rebaseImages(wt, { from, to, oldBase, newBase }, deps.exec);
   if (!Object.keys(images).length) return entry;
-  const heads = [...new Set((wp.reviews ?? []).map((review) => String(review.head ?? '').toLowerCase()))].filter((head) => images[head] && head !== from);
+  // A head an earlier rebase moved is looked up at that rebase's image of it.
+  const heads = [...new Set((wp.reviews ?? []).filter((review) => review.head).map((review) => imageOf(wp, review.head)))].filter((head) => images[head] && head !== from);
   const anchors = heads.map((head) => measureRebase(wt, { from: head, to: images[head], oldBase, newBase }, deps.exec));
   return { ...entry, images, ...(anchors.length ? { anchors } : {}) };
 }
@@ -796,28 +797,31 @@ const fixedCommits = (review) => (review.verdicts ?? [])
 // The commits gate amendments added after the review cap: each gate amendment
 // records the head it started from (build.mjs gateAmend) and, once its lane
 // work is back, the head it ended at; its commits are from..end (end = `to`
-// while it is still open). Ends a later rebase rewrote are read at their
-// images; a range whose ends are still not on the line to `to` names nothing.
-// A commit the conductor cited on one of the amendment's rows (`cited`) is
-// one of its commits too. Returns the commits and the gate failures they
-// repair; null is an unreadable range.
+// while it is still open). The range is read on the line the tail is on: as
+// recorded, else at the images a later rebase made of its ends (a tail mapped
+// back before that rebase is still on the recorded line). A range on neither
+// line to `to` names nothing. A commit the conductor cited on one of the
+// amendment's rows (`cited`) is one of its commits too. Returns the commits
+// and the gate failures they repair; null is an unreadable range.
 function gateFixCommits(wp, to, exec) {
   const wt = wp.lane.worktree;
   const commits = new Set();
   const reasons = [];
   for (const fix of wp.gateFixes ?? []) {
     const shas = carried(wp, fix?.cited ?? []);
-    const from = fix?.from ? imageOf(wp, fix.from) : null;
-    const end = fix?.to ? imageOf(wp, fix.to) : to;
-    if (from && from !== end) {
+    const recorded = [fix?.from ?? null, fix?.to ?? to];
+    const imaged = [fix?.from ? imageOf(wp, fix.from) : null, fix?.to ? imageOf(wp, fix.to) : to];
+    const ranges = recorded[0] === imaged[0] && recorded[1] === imaged[1] ? [recorded] : [recorded, imaged];
+    for (const [from, end] of ranges) {
+      if (!from || from === end) continue;
       const fromOnLine = ancestor(wt, from, end, exec);
       const endOnLine = end === to ? true : ancestor(wt, end, to, exec);
       if (fromOnLine === null || endOnLine === null) return null;
-      if (fromOnLine && endOnLine) {
-        const listed = exec('git', ['-C', wt, 'rev-list', `${from}..${end}`]);
-        if (listed.code !== 0) return null;
-        shas.push(...lines(listed.stdout).map((sha) => sha.toLowerCase()));
-      }
+      if (!fromOnLine || !endOnLine) continue;
+      const listed = exec('git', ['-C', wt, 'rev-list', `${from}..${end}`]);
+      if (listed.code !== 0) return null;
+      shas.push(...lines(listed.stdout).map((sha) => sha.toLowerCase()));
+      break;
     }
     shas.forEach((sha) => commits.add(sha));
     if (shas.length && fix.reason) reasons.push({ reason: fix.reason, shas });
