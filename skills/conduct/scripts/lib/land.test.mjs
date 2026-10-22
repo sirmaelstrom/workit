@@ -1331,17 +1331,41 @@ test('gate amendment threads: the gate lists open threads by first comment id; t
   const fresh = threadReplyActions(state, makeWp(), rows, ['4177234272', '4177261828', '4177261832']);
   assert.deepEqual(fresh.rows.map((row) => row.comment), ['4177234272', '4177261828']);
   assert.deepEqual([ids(fresh.actions, 'reply'), ids(fresh.actions, 'lookup')], [['4177234272', '4177261828'], [['4177234272', '4177261828']]]);
-  // A thread already replied to is resolved again, never replied to twice.
-  const again = threadReplyActions(state, makeWp({ threadReplies: ['4177234272'] }), rows, ['4177234272', '4177261828']);
-  assert.deepEqual([ids(again.actions, 'reply'), ids(again.actions, 'lookup')], [['4177261828'], [['4177234272', '4177261828']]]);
-  assert.deepEqual(threadReplyActions(state, makeWp({ threadReplies: ['4177234272'] }), rows, ['4177234272']).actions.map((a) => `${a.step}/${a.part}`), ['thread-ids/lookup']);
-  assert.deepEqual(threadReplyActions(state, makeWp(), rows, ['999']).actions, []);
-  // A posted reply records its comment id; a failed one records nothing and blocks.
+  // A posted reply records its comment id and the answer it posted; a failed one records nothing and blocks.
   const reply = fresh.actions.find((a) => a.part === 'reply');
-  assert.deepEqual(recordLandStep(state, makeWp({ threadReplies: ['1'] }), reply, ok('replied'), {}).patch, { threadReplies: ['1', '4177234272'] });
+  const posted = recordLandStep(state, makeWp({ threadReplies: { 1: 'x' } }), reply, ok('replied'), {}).patch.threadReplies;
+  assert.deepEqual(Object.keys(posted), ['1', '4177234272']);
+  assert.equal(posted['4177234272'], reply.land.answer);
   const failed = recordLandStep(state, makeWp(), reply, { code: 1, stdout: '', stderr: 'gh: Bad credentials (HTTP 401)' }, {});
   assert.deepEqual([failed.outcome, failed.reason, failed.patch.threadReplies], ['block', 'reply failed (exit 1): gh: Bad credentials (HTTP 401)', undefined]);
+  // The same answer again is resolved without a second reply; a new answer to the thread is posted.
+  const again = threadReplyActions(state, makeWp({ threadReplies: posted }), rows, ['4177234272', '4177261828']);
+  assert.deepEqual([ids(again.actions, 'reply'), ids(again.actions, 'lookup')], [['4177261828'], [['4177234272', '4177261828']]]);
+  assert.deepEqual(threadReplyActions(state, makeWp({ threadReplies: posted }), rows, ['4177234272']).actions.map((a) => `${a.step}/${a.part}`), ['thread-ids/lookup']);
+  assert.deepEqual(threadReplyActions(state, makeWp(), rows, ['999']).actions, []);
   assert.throws(() => threadReplyActions(state, makeWp(), [{ comment: '4177234272', verdict: 'fixed', commit: null }], ['4177234272']), /a fixed row needs its commit sha/);
+});
+
+const replyIds = (actions) => actions.filter((a) => a.part === 'reply').map((a) => a.land.comment);
+const ROW = { comment: '4177234272', verdict: 'fixed', evidence: 'x', commit: '1111111' };
+
+test('gate amendment threads (C1-2): a new answer to a thread already replied to is posted; the same answer is not', () => {
+  const state = makeState();
+  const reply = threadReplyActions(state, makeWp(), [ROW], [ROW.comment]).actions.find((a) => a.part === 'reply');
+  const posted = recordLandStep(state, makeWp(), reply, ok('replied'), {}).patch.threadReplies;
+  assert.deepEqual(replyIds(threadReplyActions(state, makeWp({ threadReplies: posted }), [ROW], [ROW.comment]).actions), []);
+  const revised = { ...ROW, evidence: 'a new control after the thread reopened', commit: '2222222' };
+  assert.deepEqual(replyIds(threadReplyActions(state, makeWp({ threadReplies: posted }), [revised], [ROW.comment]).actions), [ROW.comment]);
+});
+
+test('gate amendment threads (C1-3): a malformed row for a thread the gate did not list does not fail the listed threads\' answers', () => {
+  const unrelated = [ROW, { comment: '4177261832', verdict: 'fixed', evidence: 'x', commit: null }];
+  assert.deepEqual(replyIds(threadReplyActions(makeState(), makeWp(), unrelated, [ROW.comment]).actions), [ROW.comment]);
+});
+
+test('gate amendment threads (C1-1): one thread answered twice (`123` and `#123`) is refused before any reply is queued', () => {
+  const twice = [ROW, { comment: `#${ROW.comment}`, verdict: 'refuted', evidence: 'y', commit: null }];
+  assert.throws(() => threadReplyActions(makeState(), makeWp(), twice, [ROW.comment]), /the ## Amendment table lists 4177234272 more than once/);
 });
 
 const GATE_ACTION = { kind: 'shell', step: 'gate', part: 'gate', command: ['node', 'conduct.mjs', 'land', 'gate'] };

@@ -372,7 +372,7 @@ function briefAction(state, wp, deps) {
 const AMEND_TEXT = {
   check: (a) => `its last check failed: ${a.reason}. Fix exactly that, push, and update the report.`,
   gate: (a) => `landing stopped: ${a.reason}. Fix it on the branch at the current head, push, and update the report.${a.threads?.length
-    ? ` The unresolved review threads, by first comment id: ${a.threads.join(', ')}. Read each with gh api repos/<owner>/<repo>/pulls/comments/<id>, and answer each one this amendment settles in its ## Amendment table, keyed by that id. Conduct posts each row's reply and resolves its thread before the next gate; a thread with no row stays open and the gate stops on it again. ${VERDICT_TEXT}`
+    ? ` The unresolved review threads, by first comment id: ${a.threads.join(', ')}. Read each with gh api repos/${a.repo}/pulls/comments/<id>, and answer each one this amendment settles in its ## Amendment table, keyed by that id. Conduct posts each row's reply and resolves its thread before the next gate; a thread with no row stays open and the gate stops on it again. ${VERDICT_TEXT}`
     : ''}`,
   ruling: (a) => (a.rulings
     ? `the conductor ruled on each question of its ## Needs conductor: ${a.rulings.map((r) => `${r.question ?? 'the ask'} → (${r.ruled}); evidence, verbatim: ${r.evidence}`).join('. ')}. Carry on under those rulings.`
@@ -1160,7 +1160,7 @@ function gateAmend(state, wp, deps, reason, threads = []) {
   wp.gateAmends = (wp.gateAmends ?? 0) + 1;
   // The land gate reads this amendment's commits (from..head) as a gate-fix tail, not as unreviewed work.
   wp.gateFixes = [...(wp.gateFixes ?? []), { from: wp.pr?.head ?? null, reason }];
-  startAmendment(state, wp, deps, { kind: 'gate', reason, ...(threads.length ? { threads } : {}) });
+  startAmendment(state, wp, deps, { kind: 'gate', reason, ...(threads.length ? { threads, repo: state.intent.repo.remote } : {}) });
   // The report section whose table answers it: its rows are cite targets.
   wp.gateFixes.at(-1).n = wp.amendment.n;
   wp.gateThreads = threads.length ? { ids: threads, since: wp.amendment.n } : null;

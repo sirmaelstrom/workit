@@ -416,9 +416,13 @@ function replyActions(state, wp, rows) {
       outPath: replies, files: replyRows.map((row) => ({ path: body(row), ...row })), expects: { type: 'file' } },
     ...replyRows.map((row) => shell('reply', 'reply', ['node', prReview(state), 'reply', '--pr', String(wp.pr.number), '--repo', repoOf(state),
       '--comment-id', row.comment, '--body-file', body(row), '--verdict', REPLY_VERDICT[row.verdict], '--adjudicator', row.adjudicator ?? 'lane',
-      '--measure-log', join(state.runDir, 't1.jsonl')], { land: { comment: row.comment } })),
+      '--measure-log', join(state.runDir, 't1.jsonl')], { land: { comment: row.comment, answer: answerKey(row) } })),
   ];
 }
+
+// What a reply says: its verdict, evidence and commit. A thread is replied to
+// again only when its answer changes.
+const answerKey = (row) => createHash('sha256').update(JSON.stringify([row.verdict, row.evidence ?? '', row.commit ?? null])).digest('hex');
 
 export function recordAdjudication(state, wp, verdicts) {
   const reviews = wp.reviews ?? [];
@@ -431,15 +435,21 @@ export function recordAdjudication(state, wp, verdicts) {
 
 // A gate amendment's table answers the threads its gate listed (`threads`, by
 // first comment id): each answered row is replied to as an adjudication's is,
-// then its thread is resolved. A row for an id the gate did not list, and a
-// conductor row, is left alone, so its thread stays open and the gate stops on
-// it again. A thread already replied to (`wp.threadReplies`) is resolved
-// without a second reply. The review's verdicts are not touched.
+// then its thread is resolved. Only the listed threads' rows are read and
+// validated; a thread answered twice is refused. A row for an id the gate did
+// not list, and a conductor row, is left alone, so its thread stays open and
+// the gate stops on it again. A thread whose posted reply (`wp.threadReplies`)
+// carried the same answer is resolved without a second reply. The review's
+// verdicts are not touched.
 export function threadReplyActions(state, wp, verdicts, threads) {
   const listed = new Set(threads.map(String));
-  const rows = adjudicationRows(verdicts).filter((row) => listed.has(row.comment) && row.verdict !== 'conductor');
-  const replied = new Set(wp.threadReplies ?? []);
-  return { rows, actions: rows.length ? [...replyActions(state, wp, rows.filter((row) => !replied.has(row.comment))), ...resolveThreadActions(state, wp, rows.map((row) => row.comment))] : [] };
+  const id = (row) => String(row.comment ?? '').trim().replace(/^#/, '');
+  const mine = verdicts.filter((row) => listed.has(id(row)));
+  const twice = [...new Set(mine.map(id).filter((comment, i, all) => all.indexOf(comment) !== i))];
+  if (twice.length) throw new ConductError(2, `the ## Amendment table lists ${twice.join(', ')} more than once`);
+  const rows = adjudicationRows(mine).filter((row) => row.verdict !== 'conductor');
+  const posted = wp.threadReplies ?? {};
+  return { rows, actions: rows.length ? [...replyActions(state, wp, rows.filter((row) => posted[row.comment] !== answerKey(row))), ...resolveThreadActions(state, wp, rows.map((row) => row.comment))] : [] };
 }
 
 // A council round leaves no thread on the PR, so its adjudication is posted as
@@ -1467,8 +1477,8 @@ function landOutcome(state, wp, action, r, deps, authority) {
       }
       if (action.kind === 'author') return result('continue');
       if (r.code !== 0) return result('block', `reply failed (exit ${r.code}): ${first(r.stderr)}`);
-      // A posted reply is recorded by its comment id; threadReplyActions skips it on a later answer.
-      return action.land?.comment ? result('continue', null, { threadReplies: [...new Set([...(wp.threadReplies ?? []), action.land.comment])] }) : result('continue');
+      // A posted reply is recorded by its comment id with the answer it carried; threadReplyActions skips the same answer later.
+      return action.land?.comment ? result('continue', null, { threadReplies: { ...(wp.threadReplies ?? {}), [action.land.comment]: action.land.answer } }) : result('continue');
     case 'thread-ids': return recordThreadIds(state, wp, action, r);
     case 'resolve':
       if (r.code !== 0) return result('block', `resolve failed: ${first(r.stderr)}`);

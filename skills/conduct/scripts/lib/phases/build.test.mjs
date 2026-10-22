@@ -3650,7 +3650,8 @@ test('gate amendment threads (07f0def3): the gate names its open threads, and th
   const gates = of(h, 'WP-02').map((a, i) => (a.step === 'gate' && a.part === 'gate' ? i : -1)).filter((i) => i >= 0);
   const lastResolve = of(h, 'WP-02').findLastIndex((a) => a.step === 'resolve');
   assert.ok(gates[0] < of(h, 'WP-02').findIndex((a) => a.part === 'reply') && lastResolve < gates[1]);
-  assert.deepEqual(h.wp('WP-02').threadReplies, ['4177234272', '4177234275', '4177261828']);
+  assert.deepEqual(Object.keys(h.wp('WP-02').threadReplies), ['4177234272', '4177234275', '4177261828']);
+  assert.match(brief.instruction, /gh api repos\/o\/r\/pulls\/comments\/<id>/);
   assert.equal(h.open.size, 0);
 });
 
@@ -3666,6 +3667,16 @@ test('gate amendment threads (07f0def3): a T0 WP (no review on record) answers i
   assert.deepEqual(threadTail(h, 'WP-02'), ['reply/bodies', 'reply/reply', 'reply/reply', 'thread-ids/lookup', 'resolve/resolve', 'resolve/resolve']);
   const steps = of(h, 'WP-02').map((a) => `${a.step}/${a.part}`);
   assert.ok(steps.lastIndexOf('resolve/resolve') < steps.lastIndexOf('review/diff'));
+});
+
+test('gate amendment threads (C1-1): a table answering a listed thread twice re-prompts the lane with the reason and posts nothing', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.reports = { 'WP-02': ['report-built.md', 'report-duplicate-ids.md'] };
+  beatThreads(h, ['123']);
+  const retry = await drive(h, { until: (a) => a.part === 'amendment' && a.amendment.n === 2 });
+  assert.match(retry.instruction, /its last check failed: the ## Amendment table lists 123 more than once/);
+  assert.ok(!h.trace.some((a) => a.part === 'reply'));
+  assert.deepEqual(h.wp('WP-02').gateThreads, { ids: ['123'], since: 1 });
 });
 
 test('gate amendment threads (07f0def3): a thread the table does not answer stays open and the gate stops on it again; no answered thread is replied to twice', async (t) => {
@@ -3693,7 +3704,7 @@ test('gate amendment threads (07f0def3): a reply that fails to post blocks the W
   assert.equal(h.wp('WP-02').state, 'blocked');
   assert.equal(h.wp('WP-02').reason, 'reply failed (exit 1): gh: Not Found (HTTP 404)');
   assert.ok(!of(h, 'WP-02').some((a) => a.step === 'resolve' || a.step === 'thread-ids'));
-  assert.deepEqual(h.wp('WP-02').threadReplies, ['4177234272']);
+  assert.deepEqual(Object.keys(h.wp('WP-02').threadReplies), ['4177234272']);
   assert.equal(h.open.size, 3);
 });
 
