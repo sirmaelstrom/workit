@@ -38,6 +38,18 @@ test('gate-env (6f3a6194): CRLF and colour do not change the reading; a cut-shor
   assert.equal(gateFailureKind(out, `${err}\n⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯\n\nError: ECONNREFUSED\n`), null);
 });
 
+test('gate-env (6f3a6194, council r1 S1, U2): a listing cut before an entry or before its last footer, or two runners in one output, is unclassified', () => {
+  // node:test: cut just before the assertion's entry; its leaf was printed above the summary.
+  const nodeMixed = read('node-mixed.out');
+  assert.equal(gateFailureKind(nodeMixed.slice(0, nodeMixed.indexOf('test at b.test.mjs'))), null);
+  // vitest: cut after the last timeout's error line, before its [2/2] footer.
+  const [out, err] = output('vitest-timeouts');
+  assert.equal(gateFailureKind(out, err.slice(0, err.lastIndexOf('[2/2]'))), null);
+  // A vitest run and a node:test run in one gate command's output.
+  assert.equal(gateFailureKind(`${out}${read('node-mixed.out')}`, err), null);
+  assert.equal(gateFailureKind(`${out}${read('node-timeouts.out')}`, err), null);
+});
+
 test('quiet probe (6f3a6194): busy percent of every core over each interval; quiet only when every interval is under the limit', async () => {
   const core = (busy, idle) => ({ times: { user: busy, nice: 0, sys: 0, idle, irq: 0 } });
   // 20 of 200 ticks busy, then 40 of 100: one core at 60 %, the other at 20 %.

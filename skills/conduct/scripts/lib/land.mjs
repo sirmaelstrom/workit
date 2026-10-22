@@ -615,8 +615,11 @@ function readRuns(state, sha, exec) {
 }
 
 // The events whose workflow runs a PR head gets: its own pull_request runs,
-// and push runs from pushes to its branch.
-const PR_EVENTS = new Set(['pull_request', 'pull_request_target', 'push']);
+// and push runs from pushes to its branch. A pull_request_target run checks
+// the base branch's commit, so the head does not carry it. A push workflow
+// filtered to the default branch still reads as expected: the run's event
+// does not show its branch filter.
+const PR_EVENTS = new Set(['pull_request', 'push']);
 
 // What triggered each workflow run at one sha, by check-suite id, every page
 // read and complete. No access to the Actions API (403, 404) reads as no runs,

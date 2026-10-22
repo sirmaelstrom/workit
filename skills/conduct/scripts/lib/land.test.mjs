@@ -318,6 +318,9 @@ test('H12 expected checks: an unprotected base expects the checks its push or pu
   // A check no workflow run accounts for keeps today's rule: it is expected.
   const unjoined = derived((page) => { page.workflow_runs = page.workflow_runs.filter((run) => run.event !== 'schedule'); page.total_count = page.workflow_runs.length; }, 'workflow-runs-observatory-base.json');
   assert.deepEqual(gate(makeState(), late, { ...observatory, actionRuns: unjoined }).failures, ['expected check missing at head: db-tests']);
+  // Council r1 U1: a pull_request_target run checks the base branch's commit, never the PR head.
+  const target = derived((page) => { page.workflow_runs[0].event = 'pull_request_target'; }, 'workflow-runs-observatory-base.json');
+  assert.deepEqual(gate(makeState(), late, { ...observatory, actionRuns: target }).failures, []);
   // The read is the base's workflow runs, every page; 403 or 404 reads as no
   // workflow runs; any other failure, or an incomplete read, is infra.
   const exec = gateExec(observatory);
