@@ -17,6 +17,7 @@ import { RUN_SLOTS } from './build.mjs';
 import { preapprovedRef, wpRecord } from './spec.mjs';
 import { STEPS, STEP_SEAM, saveState, readEvents, loadState } from '../state.mjs';
 import { runLaneVerb } from '../lanes.mjs';
+import { laneOccupied } from '../schedule.mjs';
 import { runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
@@ -52,6 +53,9 @@ const TWO = [
   { id: 'WP-03', files: ['lib/land.mjs'], dependsOn: ['WP-01'] },
 ];
 const withFour = [...TWO, { id: 'WP-04', files: ['lib/phases/build.mjs'], wave: 3, dependsOn: ['WP-02', 'WP-03'] }];
+// A WP that shares WP-02's Files waits for WP-02 to merge: a landing WP holds
+// no lane slot but still reserves its Files (190c9a18).
+const behindWp02 = (id) => ({ id, files: TWO[1].files, dependsOn: ['WP-01'] });
 
 function harness(t, opts = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'workit-build-'));
@@ -386,7 +390,7 @@ const firstNonWait = (h, from, id) => h.trace.slice(from + 1).find((a) => a.wpId
 // Quest e830d835: a mid-flight re-plan inside the pre-approval.
 const REPLAN_WHY = 'WP-02 found the parser already handles the case WP-03 was to add';
 test('replan (e830d835): two-way changes inside the scope proceed on the pre-approval, receipted on the anchor; a bad plan or the wrong phase is refused', async (t) => {
-  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1], TWO[2]], lanes: 1 });
+  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1], behindWp02('WP-03')], lanes: 1 });
   const refused = (plan, code, pattern) => assert.throws(() => build.replan(h.state, plan, h.deps), (error) => error.code === code && pattern.test(error.message));
   // Slim review on #250: an emitted action would run before the re-plan; re-plan only at a wait.
   await drive(h, { until: (a) => a.step === 'brief' && a.wpId === 'WP-02' });
@@ -451,7 +455,7 @@ test('replan (e830d835): two-way changes inside the scope proceed on the pre-app
 });
 
 test('replan (e830d835): a one-way or out-of-scope change halts dispatch on a touch carrying the delta-plan; the build waits for it; (b) keeps the plan and dispatch resumes', async (t) => {
-  const h = harness(t, { wps: [TWO[0], TWO[1], TWO[2]], lanes: 1 });
+  const h = harness(t, { wps: [TWO[0], TWO[1], behindWp02('WP-03')], lanes: 1 });
   await drive(h, { until: (a) => a.kind === 'wait' });
   const out = build.replan(h.state, { why: REPLAN_WHY, delta: [
     { change: 'drop WP-03', door: 'two-way', inScope: true },
@@ -1308,7 +1312,7 @@ test('reset-wp (61d817db): the refused transitions, one row each', (t) => {
     ['wait on an exec lane', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42 }); return h.reset('wait'); }, 5, /exec lane; restart it with --to prompt/],
     ['prompt on an exec lane with no session', (h) => { h.wp('WP-02').lane = h.lane({ backend: 'exec', pid: 42 }); return h.reset('prompt'); }, 5, /no session id to resume/],
     ['Files a live WP holds', (h) => { Object.assign(h.wp('WP-03'), { state: 'dispatched', files: ['lib/lanes.mjs'] }); return h.reset('check'); }, 5, /WP-03 \(dispatched\) holds a path in WP-02's Files/],
-    ...['prompt', 'check', 'land'].map((to) => [`no lane slot for ${to}`, (h) => { h.state.intent.lanesCap = 1; Object.assign(h.wp('WP-03'), { state: 'dispatched' }); return h.reset(to); }, 5, /1 lane\(s\) are live \(WP-03\) against the run's cap of 1/]),
+    ...['prompt', 'check'].map((to) => [`no lane slot for ${to}`, (h) => { h.state.intent.lanesCap = 1; Object.assign(h.wp('WP-03'), { state: 'dispatched' }); return h.reset(to); }, 5, /1 lane\(s\) are live \(WP-03\) against the run's cap of 1/]),
     ['a merged-tree halt', (h) => { h.state.build = { halts: [{ kind: 'merged', reason: 'WP-01 merged tree differs', touch: 3 }] }; return h.reset('land'); }, 5, /dispatch is halted \(WP-01 merged tree differs\); answer touch 3 first/],
     ['an unverified lane', (h) => { h.wp('WP-02').lane.livenessHeld = true; return h.reset('check'); }, 5, /liveness is unverified/],
     ['an open touch on the WP', (h) => { h.state.touches = [{ n: 1, wpId: 'WP-02', status: 'filed' }]; return h.reset('check'); }, 5, /touch 1 open/],
@@ -1327,6 +1331,57 @@ test('reset-wp (61d817db): the refused transitions, one row each', (t) => {
     assert.throws(() => call(h), { code, message }, name);
     assert.equal(snapshot, 0, `${name}: no snapshot is written for a refusal`);
   }
+});
+
+// Quest 190c9a18 (H14): a land runs in the conductor, so a WP at gate holds
+// no lane slot; only an amendment the land starts takes one.
+test('reset-wp --to land (190c9a18): admitted with every slot taken; Files a live WP holds still refuse it', (t) => {
+  const h = resetFixture(t);
+  h.state.intent.lanesCap = 1;
+  Object.assign(h.wp('WP-03'), { state: 'dispatched' });
+  const out = h.reset('land');
+  assert.deepEqual([out.state, out.stage], ['gate', 'land']);
+  const overlap = resetFixture(t);
+  overlap.state.intent.lanesCap = 1;
+  Object.assign(overlap.wp('WP-03'), { state: 'dispatched', files: ['lib/lanes.mjs'] });
+  assert.throws(() => overlap.reset('land'), { code: 5, message: /WP-03 \(dispatched\) holds a path in WP-02's Files/ });
+});
+
+const FOUR = [TWO[0], TWO[1], TWO[2], { id: 'WP-04', files: ['lib/x.mjs'], dependsOn: ['WP-01'] }];
+const firstOf = (h, id, fn = () => true) => h.trace.findIndex((a) => a.wpId === id && fn(a));
+
+test('lane cap (190c9a18): a WP landing frees its slot, so the next WP is dispatched before it merges', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1], TWO[2]], lanes: 1 });
+  assert.equal(await drive(h), null);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  const landing = firstOf(h, 'WP-02', (a) => a.step === 'rebase');
+  const dispatched = firstOf(h, 'WP-03');
+  assert.ok(landing >= 0 && landing < dispatched, 'WP-03 waits for WP-02 to leave its lane');
+  assert.ok(dispatched < firstOf(h, 'WP-02', (a) => a.step === 'merge'), 'WP-03 is dispatched while WP-02 lands');
+});
+
+test('lane cap (190c9a18): a gate amendment waits for a lane slot, and takes the next one before a new dispatch', async (t) => {
+  const h = harness(t, { wps: [...FOUR, { id: 'WP-05', files: ['lib/y.mjs'], dependsOn: ['WP-01'] }], lanes: 1 });
+  h.gateCmdCode = { 'WP-02': [1] };
+  // WP-04's lane is still running when WP-02's gate fails.
+  h.life = { 'WP-04': 12 };
+  // At every emitted action, the lane agents running fit the cap.
+  const over = [];
+  h.onEmit = (a) => {
+    const running = h.state.wps.filter(laneOccupied).map((wp) => wp.id);
+    if (running.length > 1) over.push(`${a.id}: ${running.join(', ')}`);
+  };
+  assert.equal(await drive(h, { max: 1200 }), null);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged', 'merged']);
+  assert.deepEqual(over, []);
+  const brief = firstOf(h, 'WP-02', (a) => a.part === 'amendment');
+  const relaunch = h.trace.findIndex((a, i) => i > brief && a.wpId === 'WP-02' && ['start', 'prompt'].includes(a.step));
+  assert.ok(brief >= 0 && relaunch > brief);
+  assert.ok(h.trace.slice(brief, relaunch).some((a) => a.kind === 'wait' && /WP-02 waits for a lane slot: WP-04 hold/.test(a.instruction)), 'the amendment waited for WP-04\'s slot');
+  // The waiting amendment holds the next slot: no WP is dispatched while it waits.
+  const firsts = ['WP-03', 'WP-04', 'WP-05'].map((id) => firstOf(h, id));
+  assert.deepEqual(firsts.filter((i) => i > brief && i < relaunch), [], 'no dispatch between the amendment and its restart');
+  assert.ok(firstOf(h, 'WP-05') > relaunch, 'WP-05 is dispatched after the amendment restarts WP-02');
 });
 
 test('reset-wp (61d817db): each target\'s stage, state and queue; a lane that exited is started before its prompt; wait renews the deadline; deferrals through a chain are lifted', async (t) => {
@@ -1458,6 +1513,16 @@ test('lanes 3-4 (b443eca6): with --lanes 3 on the exec backend, only the 3rd liv
   assert.ok(admits[0].command.includes('admit') && admits[0].command[1].endsWith('lane.mjs'));
   assert.ok(admits[0].command.includes('--require-reading'), 'an unmeasured host gets no 3rd lane');
   assert.ok(held, 'WP-04 was held back while WP-02 and WP-03 ran');
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged']);
+});
+
+test('lanes 3-4 (190c9a18): a WP landing is not counted toward the 3rd lane, so the 2nd agent beside it asks no admit', async (t) => {
+  const h = harness(t, { lanes: 2, wps: [TWO[0], TWO[1], TWO[2], { id: 'WP-04', files: ['lib/schedule.mjs'], dependsOn: ['WP-01'] }] });
+  h.life = { 'WP-03': 40 };
+  assert.equal(await drive(h, { max: 1200 }), null);
+  const dispatched = firstOf(h, 'WP-04');
+  assert.ok(dispatched >= 0 && dispatched < firstOf(h, 'WP-02', (a) => a.step === 'merge'), 'WP-04 is dispatched while WP-02 lands and WP-03 runs');
+  assert.deepEqual(h.trace.filter((a) => a.step === 'admit' && a.kind === 'shell').map((a) => a.wpId), []);
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged']);
 });
 
@@ -2086,7 +2151,7 @@ test('stale base (D19.8): land gate reporting staleBase → rebaseActions again,
 });
 
 test('merged anomaly (D19.8): land merged code 5 → dispatchHalt, no new dispatch while set, a run touch whose (a) clears it', async (t) => {
-  const h = harness(t, { wps: [...TWO, { id: 'WP-04', files: ['lib/x.mjs'], dependsOn: ['WP-01'] }] });
+  const h = harness(t, { wps: [...TWO, behindWp02('WP-04')] });
   h.life = { 'WP-02': 1, 'WP-03': 8 };
   h.treeMismatch = 'WP-02';
   await drive(h, { until: () => h.state.touches.length > 0 });
@@ -3005,7 +3070,7 @@ test('owed adjudication (C1-3): findings → needs conductor → ruling → buil
 });
 
 test('halt reasons (C1-12): a budget answer clears only the budget halt; dispatch waits for the merged-tree anomaly\'s own answer', async (t) => {
-  const h = harness(t, { budget: 1.5, wps: [...TWO, { id: 'WP-04', files: ['lib/x.mjs'], dependsOn: ['WP-01'] }] });
+  const h = harness(t, { budget: 1.5, wps: [...TWO, behindWp02('WP-04')] });
   h.life = { 'WP-02': 1, 'WP-03': 1 };
   h.treeMismatch = 'WP-02';
   h.gateCmdCode = { 'WP-03': [1] };
@@ -3222,7 +3287,7 @@ test('budget (b) (C2-1, C2-2): no prompt after (b) for a second WP, which blocks
 
 test('touch announce (C2-7): a touch opened while scheduling is announced next, before a yield, another action or the release', async (t) => {
   for (const lanes of [1, 2]) {
-    const h = harness(t, { budget: 0.5, lanes });
+    const h = harness(t, { budget: 0.5, lanes, ...(lanes === 1 ? { wps: [TWO[0], TWO[1], behindWp02('WP-03')] } : {}) });
     h.life = { 'WP-02': 0, 'WP-03': 0 };
     let seen = 0;
     const late = [];

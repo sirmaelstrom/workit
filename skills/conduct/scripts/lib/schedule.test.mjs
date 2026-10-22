@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseDesignDirection, parseWorkPackages, filesDisjoint, dispatchable } from './schedule.mjs';
+import { parseDesignDirection, parseWorkPackages, filesDisjoint, dispatchable, slotHolders, SLOT_WAIT } from './schedule.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKSHOP = join(HERE, '..', '__fixtures__', 'lanes', 'workshop');
@@ -237,6 +237,46 @@ test('dispatchable: held and blocked WPs hold no slot (D12)', () => {
   for (const state of ['deferred', 'merged', 'refuted']) {
     assert.deepEqual(ids(dispatchable(run([wp('WP-01', state, ['a']), wp('WP-02', 'pending', ['b'])], 1))), ['WP-02'], state);
   }
+});
+
+test('dispatchable (190c9a18): a WP at gate reserves its Files but holds no lane slot once its lane has exited', () => {
+  const gating = { ...wp('WP-01', 'gate', ['a']), lane: { startedAt: 't0', exitedAt: 't1' } };
+  assert.deepEqual(ids(dispatchable(run([gating, wp('WP-02', 'pending', ['b'])], 1))), ['WP-02']);
+  assert.deepEqual(ids(dispatchable(run([gating, wp('WP-02', 'pending', ['a'])], 1))), [], 'its Files stay reserved');
+  // A lane process not yet observed to exit holds its slot, whatever the state.
+  const running = { ...gating, lane: { startedAt: 't0', exitedAt: null } };
+  assert.deepEqual(ids(dispatchable(run([running, wp('WP-02', 'pending', ['b'])], 1))), []);
+  // Every other live state still holds a slot.
+  for (const state of ['dispatched', 'pr', 'review', 'amending']) {
+    assert.deepEqual(ids(dispatchable(run([{ ...gating, state }, wp('WP-02', 'pending', ['b'])], 1))), [], state);
+  }
+  // A WP waiting on the merge lock is at stage land, not yet at gate: it is landing too.
+  for (const state of ['pr', 'review']) {
+    const queued = { ...gating, state, stage: 'land' };
+    assert.deepEqual(ids(dispatchable(run([queued, wp('WP-02', 'pending', ['b'])], 1))), ['WP-02'], `${state} at land`);
+    assert.deepEqual(ids(dispatchable(run([queued, wp('WP-02', 'pending', ['a'])], 1))), [], `${state} at land keeps its Files`);
+  }
+});
+
+test('slotHolders (190c9a18): two amendments waiting on a slot do not hold each other off; a waiting one still holds against dispatch', () => {
+  const exited = { startedAt: 't0', exitedAt: 't1' };
+  const slotWait = { kind: 'wait', step: 'admit', waitMs: 60000, waitFor: SLOT_WAIT };
+  const prompt = { kind: 'shell', step: 'prompt' };
+  const a = { ...wp('WP-02', 'amending', ['a']), lane: exited, queue: [slotWait, prompt] };
+  const b = { ...wp('WP-03', 'amending', ['b']), lane: exited, queue: [prompt] };
+  const state = run([a, b, wp('WP-04', 'pending', ['c'])], 1);
+  assert.deepEqual(ids(slotHolders(state, b)), [], 'WP-02 waits on a slot, so it does not keep WP-03 out');
+  assert.deepEqual(ids(slotHolders(state, a)), ['WP-03']);
+  assert.deepEqual(ids(dispatchable(state)), [], 'WP-04 waits behind the amendments');
+  // A dispatched lane and a lane still running hold their slots.
+  const busy = run([a, { ...b, state: 'dispatched', queue: [] }, { ...wp('WP-05', 'blocked', ['e']), lane: { startedAt: 't0', exitedAt: null } }], 2);
+  assert.deepEqual(ids(slotHolders(busy, a)), ['WP-03', 'WP-05']);
+  // Cap 2: the waiting amendment keeps its claim, so a new WP takes only the other slot and the amendment still fits.
+  const two = run([a, { ...wp('WP-03', 'gate', ['b']), lane: exited }, wp('WP-04', 'pending', ['c']), wp('WP-05', 'pending', ['d'])], 2);
+  assert.deepEqual(ids(dispatchable(two)), ['WP-04']);
+  two.wps[2] = { ...two.wps[2], state: 'dispatched' };
+  assert.deepEqual(ids(slotHolders(two, a)), ['WP-04'], 'one holder against a cap of 2: the amendment starts');
+  assert.deepEqual(ids(dispatchable(two)), [], 'no other WP takes the amendment\'s slot');
 });
 
 test('dispatchable: a WP depending on a held, blocked or refuted WP is never dispatchable', () => {

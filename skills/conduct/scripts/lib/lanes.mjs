@@ -41,7 +41,7 @@ import { resolveProgram, shellArgv } from './exec.mjs';
 import { pinnedConfig } from './repo-config.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, loadState, saveState } from './state.mjs';
-import { GATED_FROM_LANE, LIVE_STATES, laneOccupied } from './schedule.mjs';
+import { GATED_FROM_LANE, holdsSlot } from './schedule.mjs';
 import { EXIT_CODES as LANE_EXIT, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems } from '../../../../scripts/lane.mjs';
 
 const DEADLINE_MS = 120 * 60 * 1000;
@@ -305,9 +305,10 @@ export function laneBackend(state, deps, backend) {
     name: 'exec',
     // reset-wp --to setup: the repo's laneSetup again, in the worktree create made.
     setup: (wp) => setupActs(worktreeOf(wp)),
-    // A 3rd or 4th live lane is admitted on measured free commit memory: room is
+    // A 3rd or 4th lane agent is admitted on measured free commit memory: room is
     // the gate's whole point, so a host that cannot measure it does not get one.
-    admit: (wp) => (state.wps.filter((other) => other !== wp && (LIVE_STATES.includes(other.state) || laneOccupied(other))).length >= GATED_FROM_LANE - 1 ? [admitAction(['--require-reading'])] : []),
+    // A landing WP runs no agent and is not counted (holdsSlot).
+    admit: (wp) => (state.wps.filter((other) => other !== wp && holdsSlot(other)).length >= GATED_FROM_LANE - 1 ? [admitAction(['--require-reading'])] : []),
     create: (wp) => {
       const lane = laneLayout(state, wp);
       return [...base(), shellAction('create', {

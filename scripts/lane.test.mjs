@@ -4462,6 +4462,26 @@ test('e4ad108b rule 6: an amendment\'s fixed row has a control of its own, or sa
   assert.deepEqual(reportEvidenceProblems(amendment(['| C1-3 | refuted | `grep` prints 0 | — |', '| C1-4 | judgment | style | — |'], [])), []);
 });
 
+test('31eddaa3 rule 6: a control named with a sub-letter before its suffix (C3a-<id>) parses; one that does not parse is named', () => {
+  const table = (rows) => ['| Comment | Verdict | Evidence | Commit |', '|---|---|---|---|', ...rows].join('\n');
+  const amendment = (n, rows, controls) => evidenceReport(`## Amendment ${n}`, table(rows), '### Negative controls', ...controls);
+  // Every label form, each named only in the Evidence cell (the row id is in no lead).
+  for (const label of ['C1', 'A1b', 'C1-5a', 'NC4', 'C3-4347887798', 'C3a-4347887798', 'C1a-5b']) {
+    const report = amendment(1, [`| r9 | fixed | Control **${label}** below is red | \`66ea1c1\` |`], [`**${label}: the flip moved before the note**`, failingRun]);
+    assert.deepEqual(reportEvidenceProblems(report), [], label);
+  }
+  // WP-07 amendment 3's layout: four sub-lettered controls of one row.
+  const wp07 = amendment(3, ['| `4347887798` | fixed | Controls **C3a-4347887798**, **C3b-4347887798**, **C3c-4347887798** and **C3d-4347887798** below are all red | `66ea1c12` |'],
+    ['a', 'b', 'c', 'd'].flatMap((letter) => [`**C3${letter}-4347887798: outcome ${letter}**`, failingRun]));
+  assert.deepEqual(reportEvidenceProblems(wp07), []);
+  // A later amendment that re-cites the same controls at the same commit inherits them (labels compare case-folded).
+  const again = evidenceReport(wp07, amendment(4, ['| `4347887798` | fixed | still **C3A-4347887798** and **C3b-4347887798**, unchanged | `66ea1c12` |'], []));
+  assert.deepEqual(reportEvidenceProblems(again), []);
+  // A control whose name does not parse is named, not reported as missing.
+  const unparsed = amendment(3, ['| `4347887798` | fixed | Control **C3ab-4347887798** below is red | `66ea1c12` |'], ['**C3ab-4347887798: outcome a**', failingRun]);
+  assert.deepEqual(reportEvidenceProblems(unparsed), ['Amendment 3: fixed row 4347887798\'s Evidence names C3ab-4347887798, which appears in a control\'s lead under its Negative controls but does not parse as a control name (A1b, C1-5a, C3a-<id>); rename it (rule 6)']);
+});
+
 test('e4ad108b rule 14: a cited screenshot is a lane-<id>-<claim> file beside the report', (t) => {
   const f = fixture(t);
   const run = join(f.dir, 'workshop', 'run');

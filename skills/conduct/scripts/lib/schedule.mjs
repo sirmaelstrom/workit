@@ -6,11 +6,28 @@ import { join, posix } from 'node:path';
 import { LANE_MODELS, laneModel } from './adapters.mjs';
 import { ConductError } from './state.mjs';
 
-// These states hold a lane slot (D12). So does a lane whose process has not
-// been observed to exit, whatever its WP's state (laneOccupied).
+// These states are live: each reserves its WP's Files, and all but `gate` hold
+// a lane slot (D12). So does a lane whose process has not been observed to
+// exit, whatever its WP's state (laneOccupied).
 export const LIVE_STATES = Object.freeze(['dispatched', 'pr', 'review', 'amending', 'gate']);
 
 export const laneOccupied = (wp) => Boolean(wp.lane?.startedAt) && !wp.lane?.exitedAt;
+
+// The lane cap counts lane agents. A landing WP (at `gate`, or at stage `land`
+// while it waits on the merge lock) is landed by the conductor (rebase, gate
+// command, merge) with no agent, so it takes no slot; a gate amendment starts
+// the lane again and waits for one (build.mjs slotWait).
+const landing = (wp) => wp.state === 'gate' || wp.stage === 'land';
+export const holdsSlot = (wp) => laneOccupied(wp) || (LIVE_STATES.includes(wp.state) && !landing(wp));
+
+// The wait a lane start takes while every slot is held carries this marker.
+export const SLOT_WAIT = 'lane-slot';
+const waitsForSlot = (wp) => wp.queue?.[0]?.waitFor === SLOT_WAIT;
+
+// The WPs whose slots keep `wp`'s lane from starting again: every other slot
+// holder but those waiting on a slot themselves, so two waiting amendments do
+// not hold each other off.
+export const slotHolders = (state, wp) => (state.wps ?? []).filter((other) => other !== wp && holdsSlot(other) && !waitsForSlot(other));
 
 // `--lanes` runs up to MAX_LANES at once; from this lane on, a lane is admitted
 // only on free commit memory (lane.mjs admit, the 10 GB threshold). Four lanes
@@ -315,12 +332,15 @@ export function dispatchable(state, { now = Date.now() } = {}) {
   if (state.dispatchHalt) return [];
   const wps = state.wps ?? [];
   const running = wps.filter((wp) => LIVE_STATES.includes(wp.state) || laneOccupied(wp));
+  // An amendment waiting for a slot is `amending`, so it holds one here: the
+  // next slot to free goes to it, not to a new WP.
+  const slots = running.filter(holdsSlot).length;
   const merged = new Set(wps.filter((wp) => wp.state === 'merged').map((wp) => wp.id));
   const picked = [];
   const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const ready = (wp) => !wp.notBefore || Date.parse(wp.notBefore) <= now;
   for (const wp of wps.filter((candidate) => candidate.state === 'pending' && ready(candidate) && !laneOccupied(candidate)).sort(byId)) {
-    if (running.length + picked.length >= (state.intent?.lanesCap ?? 1)) break;
+    if (slots + picked.length >= (state.intent?.lanesCap ?? 1)) break;
     if (!(wp.dependsOn ?? []).every((id) => merged.has(id))) continue;
     if ([...running, ...picked].every((other) => filesDisjoint(wp.files, other.files))) picked.push(wp);
   }
