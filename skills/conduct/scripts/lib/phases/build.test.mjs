@@ -3618,6 +3618,101 @@ test('gate cap on the landing route (C2-10): repeated lane-fixable land gate fai
   assert.equal(h.wp('WP-02').reason, 'unresolved review threads (after 2 gate amendments)');
 });
 
+// Review threads a pipeline beat left on the PR after the review (07f0def3):
+// `threads --unresolved` lists the open ones as pr-review.mjs prints them, and
+// a resolve closes the thread its node id names (review-threads-145.json).
+const THREAD_OF_NODE = { PRRT_kwDOS_8yoc6oxjYH: '4177234272', PRRT_kwDOS_8yoc6oxjYK: '4177234275', PRRT_kwDOS_8yoc6oxnvx: '4177261828', PRRT_kwDOS_8yoc6oxnvz: '4177261832' };
+function beatThreads(h, ids) {
+  h.open = new Set(ids);
+  h.rules.unshift([/^node \S+pr-review\.mjs threads --pr \d+ --repo o\/r --unresolved$/, () => (h.open.size
+    ? { code: 8, stdout: `${h.open.size} of 4 thread(s) (unresolved)\n\n${[...h.open].map((id) => `#${id}  lib/lanes.mjs:3  [OPEN]  replies:0\n   astra: a beat finding\n`).join('\n')}`, stderr: 'not merge-ready (exit 8).' }
+    : ok('no unresolved review threads\n'))]);
+  h.onPerform = (action, result) => {
+    if (action.step === 'resolve' && result.code === 0) h.open.delete(THREAD_OF_NODE[action.land.threadId]);
+  };
+}
+const threadTail = (h, id) => of(h, id).filter((a) => ['reply', 'thread-ids', 'resolve'].includes(a.step)).map((a) => `${a.step}/${a.part}`);
+const repliedTo = (h, id) => of(h, id).filter((a) => a.part === 'reply').map((a) => flagOf(a.command, 'comment-id'));
+
+test('gate amendment threads (07f0def3): the gate names its open threads, and the amendment\'s table rows are replied to and resolved before the next gate', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.declineRecover = true;
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+  beatThreads(h, ['4177234272', '4177234275', '4177261828']);
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.equal(h.wp('WP-02').gateAmends, 1, 'one gate amendment: no no-code amendment to clear its own threads');
+  const brief = of(h, 'WP-02').find((a) => a.part === 'amendment');
+  assert.match(brief.instruction, /review threads, by first comment id: 4177234272, 4177234275, 4177261828/);
+  assert.deepEqual(threadTail(h, 'WP-02'), ['reply/bodies', 'reply/reply', 'reply/reply', 'reply/reply', 'thread-ids/lookup', 'resolve/resolve', 'resolve/resolve', 'resolve/resolve']);
+  assert.deepEqual(of(h, 'WP-02').filter((a) => a.part === 'reply').map((a) => flagOf(a.command, 'verdict')), ['confirmed', 'refuted', 'judgment']);
+  // Every reply and resolve comes before the gate that reads the threads again.
+  const gates = of(h, 'WP-02').map((a, i) => (a.step === 'gate' && a.part === 'gate' ? i : -1)).filter((i) => i >= 0);
+  const lastResolve = of(h, 'WP-02').findLastIndex((a) => a.step === 'resolve');
+  assert.ok(gates[0] < of(h, 'WP-02').findIndex((a) => a.part === 'reply') && lastResolve < gates[1]);
+  assert.deepEqual(h.wp('WP-02').threadReplies, ['4177234272', '4177234275', '4177261828']);
+  assert.equal(h.open.size, 0);
+});
+
+test('gate amendment threads (07f0def3): a T0 WP (no review on record) answers its threads before the review diff that follows a gate amendment', async (t) => {
+  const h = harness(t, { wps: [TWO[0], { ...TWO[1], tier: 'T0' }] });
+  h.declineRecover = true;
+  h.diff = { 'WP-02': 'docs/notes.md\n' };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+  beatThreads(h, ['4177234272', '4177261828']);
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').reviews?.length ?? 0, 0, 'T0: no review');
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.deepEqual(threadTail(h, 'WP-02'), ['reply/bodies', 'reply/reply', 'reply/reply', 'thread-ids/lookup', 'resolve/resolve', 'resolve/resolve']);
+  const steps = of(h, 'WP-02').map((a) => `${a.step}/${a.part}`);
+  assert.ok(steps.lastIndexOf('resolve/resolve') < steps.lastIndexOf('review/diff'));
+});
+
+test('gate amendment threads (07f0def3): a thread the table does not answer stays open and the gate stops on it again; no answered thread is replied to twice', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.declineRecover = true;
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+  beatThreads(h, ['4177234272', '4177234275', '4177261828', '4177261832']);
+  assert.equal(await drive(h), null);
+  assert.deepEqual([...h.open], ['4177261832']);
+  assert.deepEqual(repliedTo(h, 'WP-02'), ['4177234272', '4177234275', '4177261828']);
+  const briefs = of(h, 'WP-02').filter((a) => a.part === 'amendment');
+  assert.equal(briefs.length, 2);
+  assert.match(briefs[1].instruction, /review threads, by first comment id: 4177261832\./);
+  assert.equal(h.wp('WP-02').state, 'blocked');
+  assert.equal(h.wp('WP-02').reason, 'unresolved review threads (after 2 gate amendments)');
+});
+
+test('gate amendment threads (07f0def3): a reply that fails to post blocks the WP naming it, and no thread is resolved', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.declineRecover = true;
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+  beatThreads(h, ['4177234272', '4177234275', '4177261828']);
+  h.answer = (a) => (a.part === 'reply' && flagOf(a.command, 'comment-id') === '4177234275' ? { code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' } : undefined);
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'blocked');
+  assert.equal(h.wp('WP-02').reason, 'reply failed (exit 1): gh: Not Found (HTTP 404)');
+  assert.ok(!of(h, 'WP-02').some((a) => a.step === 'resolve' || a.step === 'thread-ids'));
+  assert.deepEqual(h.wp('WP-02').threadReplies, ['4177234272']);
+  assert.equal(h.open.size, 3);
+});
+
+test('gate amendment threads (07f0def3): re-sending a reply\'s record posts nothing twice', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.disk = true;
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+  beatThreads(h, ['4177234272', '4177234275', '4177261828']);
+  const first = await drive(h, { until: (a) => a.part === 'reply' || a.step === 'touch' });
+  assert.equal(first.part, 'reply', `the build reached ${first.step}/${first.part} with no reply`);
+  const result = await perform(h, first);
+  await recordPending(h, result);
+  const again = await runConduct(['record', '--run', h.runDir, '--action', first.id, '--result', JSON.stringify(result)], h.overrides());
+  assert.equal(again.code, 0, again.stderr);
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.deepEqual(repliedTo(h, 'WP-02'), ['4177234272', '4177234275', '4177261828']);
+});
+
 const strip = (h, value) => JSON.parse(JSON.stringify(value).replaceAll(JSON.stringify(h.dir).slice(1, -1), '<dir>'));
 
 test('resume mid-build: a fresh runConduct on the run dir after WP-01 merged emits what the uninterrupted run emits, a half-emitted array included', async (t) => {

@@ -20,7 +20,7 @@
 //   { head, frames, rules }; council tools as their JSON.
 // - Patch: `mergeLock` and `dispatchHalt` are run-level; every other key is a
 //   WP field, applied as given: `reviewMode`, `rebaseFrom`, `rebases`,
-//   `threadIds`, `reviews`, `inspections`, `visualReads`, `councilStage`, `retries`, `gate`
+//   `threadIds`, `threadReplies`, `reviews`, `inspections`, `visualReads`, `councilStage`, `retries`, `gate`
 //   (with `pendingSince`), `merge`, `pr`.
 // - WP-04 sets: `wps[].commit` (the WP's Commit line), `wps[].agent` (the
 //   lane's effective author), `wps[].files`, `wps[].tier` (tierFor's raise
@@ -396,29 +396,50 @@ function commentId(raw) {
   throw new ConductError(2, `comment id ${JSON.stringify(raw)} is neither a PR comment id nor a council id C<round>-<n>`);
 }
 
-export function recordAdjudication(state, wp, verdicts) {
-  const reviews = wp.reviews ?? [];
-  if (!reviews.length) throw new ConductError(2, `${wp.id} has no review to adjudicate`);
-  const rows = verdicts.map((row) => {
+function adjudicationRows(verdicts) {
+  return verdicts.map((row) => {
     const comment = commentId(row.comment);
     if (!VERDICTS.includes(row.verdict)) throw new ConductError(2, `comment ${comment}: verdict must be one of ${VERDICTS.join(', ')} (got ${row.verdict})`);
     if (row.verdict === 'fixed' && !rowCommits(row.commit)) throw new ConductError(2, `comment ${comment}: a fixed row needs its commit sha (several are comma-separated)`);
     return { comment, verdict: row.verdict, evidence: row.evidence ?? '', commit: row.commit ?? null, ...(row.adjudicator ? { adjudicator: row.adjudicator } : {}) };
   });
-  const replaced = new Set(rows.map((row) => row.comment));
-  const latest = { ...reviews.at(-1), verdicts: [...(reviews.at(-1).verdicts ?? []).filter((row) => !replaced.has(row.comment)), ...rows] };
-  // Council ids have no PR thread; conductor rows go to a ruling first.
+}
+
+// One reply body per PR-comment row, then one reply each. Council ids have no
+// PR thread; conductor rows go to a ruling first.
+function replyActions(state, wp, rows) {
   const replyRows = rows.filter((row) => /^\d+$/.test(row.comment) && row.verdict !== 'conductor');
   const replies = join(reviewsDir(state, wp), 'replies');
   const body = (row) => join(replies, `${row.comment}.md`);
-  const actions = replyRows.length === 0 ? [] : [
+  return replyRows.length === 0 ? [] : [
     { kind: 'author', step: 'reply', seam: STEP_SEAM.reply, part: 'bodies', instruction: 'Write one reply body per file: the verdict and its evidence, quoted from the lane\'s amendment row.',
       outPath: replies, files: replyRows.map((row) => ({ path: body(row), ...row })), expects: { type: 'file' } },
     ...replyRows.map((row) => shell('reply', 'reply', ['node', prReview(state), 'reply', '--pr', String(wp.pr.number), '--repo', repoOf(state),
       '--comment-id', row.comment, '--body-file', body(row), '--verdict', REPLY_VERDICT[row.verdict], '--adjudicator', row.adjudicator ?? 'lane',
-      '--measure-log', join(state.runDir, 't1.jsonl')])),
+      '--measure-log', join(state.runDir, 't1.jsonl')], { land: { comment: row.comment } })),
   ];
-  return { patch: { reviews: [...reviews.slice(0, -1), latest] }, actions, conductorRows: rows.filter((row) => row.verdict === 'conductor') };
+}
+
+export function recordAdjudication(state, wp, verdicts) {
+  const reviews = wp.reviews ?? [];
+  if (!reviews.length) throw new ConductError(2, `${wp.id} has no review to adjudicate`);
+  const rows = adjudicationRows(verdicts);
+  const replaced = new Set(rows.map((row) => row.comment));
+  const latest = { ...reviews.at(-1), verdicts: [...(reviews.at(-1).verdicts ?? []).filter((row) => !replaced.has(row.comment)), ...rows] };
+  return { patch: { reviews: [...reviews.slice(0, -1), latest] }, actions: replyActions(state, wp, rows), conductorRows: rows.filter((row) => row.verdict === 'conductor') };
+}
+
+// A gate amendment's table answers the threads its gate listed (`threads`, by
+// first comment id): each answered row is replied to as an adjudication's is,
+// then its thread is resolved. A row for an id the gate did not list, and a
+// conductor row, is left alone, so its thread stays open and the gate stops on
+// it again. A thread already replied to (`wp.threadReplies`) is resolved
+// without a second reply. The review's verdicts are not touched.
+export function threadReplyActions(state, wp, verdicts, threads) {
+  const listed = new Set(threads.map(String));
+  const rows = adjudicationRows(verdicts).filter((row) => listed.has(row.comment) && row.verdict !== 'conductor');
+  const replied = new Set(wp.threadReplies ?? []);
+  return { rows, actions: rows.length ? [...replyActions(state, wp, rows.filter((row) => !replied.has(row.comment))), ...resolveThreadActions(state, wp, rows.map((row) => row.comment))] : [] };
 }
 
 // A council round leaves no thread on the PR, so its adjudication is posted as
@@ -977,6 +998,8 @@ export function gateCheck(state, wp, { exec, now }) {
   const flight = head ? inflightCondition(state, wp, head, { exec, now }) : {};
   if (flight.failure) fail(flight.failure, flight.cause);
   const threads = exec('node', [prReview(state), 'threads', '--pr', String(wp.pr.number), '--repo', repoOf(state), '--unresolved']);
+  // The open threads by first comment id, as the listing prints them: a gate amendment answers them by these ids.
+  const open = threads.code === 8 ? [...String(threads.stdout ?? '').matchAll(/^#(\d+)\s/gm)].map((m) => m[1]) : [];
   if (threads.code === 8) fail('unresolved review threads', 'threads');
   else if (threads.code !== 0) fail(`threads unreadable (exit ${threads.code}): ${first(threads.stderr)}`, 'infra');
   // (2a) the greenfield bootstrap WP: the manifest check on its worktree (quest 977d3efb).
@@ -994,6 +1017,7 @@ export function gateCheck(state, wp, { exec, now }) {
     ok, pending: !ok && failures.length === 0, pendingOn, blocked: ci.blocked === true || flight.blocked === true, head, failures, causes: [...causes],
     unreviewedTail: review.tail ?? null, needsFullReview: review.needsFullReview === true, staleBase: causes.has('stale-base'),
     ...(danger ? { door: danger.door, doorProblems: danger.problems } : {}),
+    ...(open.length ? { threads: open } : {}),
     ...(review.inspect ? { inspect: review.inspect } : {}),
     ...(review.outside ? { outside: review.outside } : {}),
     ...(review.uncited ? { uncited: review.uncited } : {}),
@@ -1441,10 +1465,15 @@ function landOutcome(state, wp, action, r, deps, authority) {
           ? result('continue', null, { reviews: withLatest(wp, (review) => ({ ...review, record: { url } })) })
           : result('continue', `council review record not posted (exit ${r.code}): ${first(r.stderr) || 'missing html_url'}`, { reviews: withLatest(wp, (review) => ({ ...review, record: { failed: first(r.stderr) || (r.code === 0 ? 'missing html_url' : `exit ${r.code}`) } })) });
       }
-      return action.kind === 'author' || r.code === 0 ? result('continue') : result('block', `reply failed (exit ${r.code}): ${first(r.stderr)}`);
+      if (action.kind === 'author') return result('continue');
+      if (r.code !== 0) return result('block', `reply failed (exit ${r.code}): ${first(r.stderr)}`);
+      // A posted reply is recorded by its comment id; threadReplyActions skips it on a later answer.
+      return action.land?.comment ? result('continue', null, { threadReplies: [...new Set([...(wp.threadReplies ?? []), action.land.comment])] }) : result('continue');
     case 'thread-ids': return recordThreadIds(state, wp, action, r);
     case 'resolve':
       if (r.code !== 0) return result('block', `resolve failed: ${first(r.stderr)}`);
+      // A T0 WP's gate amendment resolves threads with no review on record to note them on.
+      if (!wp.reviews?.length) return result('continue');
       return result('continue', null, { reviews: withLatest(wp, (review) => ({ ...review, resolved: [...(review.resolved ?? []), action.land.threadId] })) });
     case 'rebase': return recordRebaseStep(state, wp, action, r, deps);
     case 'gate': return recordGate(state, wp, action, r, deps, authority);

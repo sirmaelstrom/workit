@@ -12,7 +12,7 @@
 //
 // Fields this phase adds (optional; every reader tolerates their absence):
 // state.build { contract, halts }; authority.budgetSource; wps[]
-// stage, amendment, checkAmends, gateAmends, owed, asks, replyIds, rulingSeq,
+// stage, amendment, checkAmends, gateAmends, gateThreads, owed, asks, replyIds, rulingSeq,
 // deferredBy, changedPaths, councilScope, gateCmd, noCi, cleanup, lane.uncertain,
 // lane.livenessHeld; halts[] kinds budget | merged | replan;
 // state.replans[] (n, why, delta, rests, file, mode, touch, receipt, answer);
@@ -34,7 +34,7 @@ import { gateFailureKind } from '../gate-env.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
   priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions,
-  t2Actions, tierDecision, visualReadProblem,
+  t2Actions, threadReplyActions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
   QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
@@ -371,7 +371,9 @@ function briefAction(state, wp, deps) {
 
 const AMEND_TEXT = {
   check: (a) => `its last check failed: ${a.reason}. Fix exactly that, push, and update the report.`,
-  gate: (a) => `landing stopped: ${a.reason}. Fix it on the branch at the current head, push, and update the report.`,
+  gate: (a) => `landing stopped: ${a.reason}. Fix it on the branch at the current head, push, and update the report.${a.threads?.length
+    ? ` The unresolved review threads, by first comment id: ${a.threads.join(', ')}. Read each with gh api repos/<owner>/<repo>/pulls/comments/<id>, and answer each one this amendment settles in its ## Amendment table, keyed by that id. Conduct posts each row's reply and resolves its thread before the next gate; a thread with no row stays open and the gate stops on it again. ${VERDICT_TEXT}`
+    : ''}`,
   ruling: (a) => (a.rulings
     ? `the conductor ruled on each question of its ## Needs conductor: ${a.rulings.map((r) => `${r.question ?? 'the ask'} → (${r.ruled}); evidence, verbatim: ${r.evidence}`).join('. ')}. Carry on under those rulings.`
     : `the conductor ruled (${a.ruled}) on its ## Needs conductor ask. The ruling's evidence, verbatim: ${a.evidence}. Carry on under that ruling.`),
@@ -1150,15 +1152,37 @@ function checkFailed(state, wp, deps, reason) {
 
 // At most GATE_AMENDS gate-driven amendments per WP (gate command, land gate
 // and rebase-conflict amendments alike); the next blocks with the last gate
-// cause as its reason.
-function gateAmend(state, wp, deps, reason) {
+// cause as its reason. `threads` are the open review threads the land gate
+// listed (first comment ids): the amendment's table answers them from its
+// own ## Amendment section on (gateThreads).
+function gateAmend(state, wp, deps, reason, threads = []) {
   if ((wp.gateAmends ?? 0) >= GATE_AMENDS) return block(state, wp, deps, `${reason} (after ${GATE_AMENDS} gate amendments)`);
   wp.gateAmends = (wp.gateAmends ?? 0) + 1;
   // The land gate reads this amendment's commits (from..head) as a gate-fix tail, not as unreviewed work.
   wp.gateFixes = [...(wp.gateFixes ?? []), { from: wp.pr?.head ?? null, reason }];
-  startAmendment(state, wp, deps, { kind: 'gate', reason });
+  startAmendment(state, wp, deps, { kind: 'gate', reason, ...(threads.length ? { threads } : {}) });
   // The report section whose table answers it: its rows are cite targets.
   wp.gateFixes.at(-1).n = wp.amendment.n;
+  wp.gateThreads = threads.length ? { ids: threads, since: wp.amendment.n } : null;
+}
+
+// The returned gate amendment's table rows for the threads its gate listed:
+// their replies, then their resolves, ahead of the next gate. A malformed row
+// is a failed check, as an adjudication's is.
+function gateThreadActions(state, wp, deps) {
+  const owed = wp.gateThreads;
+  const rows = parseAmendmentTable(readText(deps, laneLayout(state, wp).reportPath) ?? '', { since: owed.since });
+  let answered;
+  try {
+    answered = threadReplyActions(state, wp, rows, owed.ids);
+  } catch (error) {
+    if (!(error instanceof ConductError)) throw error;
+    checkFailed(state, wp, deps, error.message);
+    return null;
+  }
+  wp.gateThreads = null;
+  appendEvent(state, deps, { step: 'reply', event: 'gate-threads-answered', data: { wpId: wp.id, listed: owed.ids, rows: answered.rows.map((row) => ({ comment: row.comment, verdict: row.verdict })) } });
+  return answered.actions;
 }
 
 // A blocked WP keeps only its owed cleanup (the lane's stop); failed work is
@@ -1398,15 +1422,18 @@ function expand(state, wp, deps) {
       if (open.length) return go([rulingAction(state, wp, { asks: open.filter((ask) => (ask.question ?? null) === (open[0].question ?? null)) })], 'checked');
       const findings = Boolean(wp.reviews?.length && wp.owed?.adjudicate);
       if (findings && !adjudicate(state, wp, deps)) return undefined;
+      // A gate amendment's answered threads are replied to and resolved before the next gate reads them.
+      const threads = !findings && wp.gateThreads ? gateThreadActions(state, wp, deps) : [];
+      if (threads === null) return undefined;
       wp.checkAmends = 0;
       if (wp.state !== 'pr') setState(state, wp, 'pr', null, deps);
       if (findings) return undefined;
       if (!wp.reviews?.length) {
         // A full review covers every amendment before it.
         wp.deltaFrom = null;
-        return go([prDiff(state)], null);
+        return go([...threads, prDiff(state)], null);
       }
-      return go([], 'delta');
+      return go(threads, 'delta');
     }
     case 'reviewed': {
       if ((wp.reviews ?? []).at(-1)?.findings === 0) {
@@ -2247,7 +2274,8 @@ function route(state, wp, action, out, deps) {
       if (wp.heldUncited?.length) wp.queue.push(citeAction(state, wp));
       return;
     case 'amend':
-      return LANE_STEPS.has(action.step) ? checkFailed(state, wp, deps, out.reason) : gateAmend(state, wp, deps, out.reason);
+      // A land gate's record carries the open threads it listed (patch.gate.threads).
+      return LANE_STEPS.has(action.step) ? checkFailed(state, wp, deps, out.reason) : gateAmend(state, wp, deps, out.reason, patch.gate?.threads ?? []);
     case 'block':
       // A cleanup action's record never changes the WP's state.
       if (cleanup) {

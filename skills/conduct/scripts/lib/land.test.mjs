@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   tierFor, tierDecision, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
-  resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions as mergeActionsWith, recordLandStep as recordLandStepWith, runLandVerb,
+  resolveThreadActions, threadReplyActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions as mergeActionsWith, recordLandStep as recordLandStepWith, runLandVerb,
   parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord, visualReadProblem,
 } from './land.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
@@ -87,7 +87,7 @@ const TWO_WAY = '## Merge danger\n\nDoor: two-way\nBlast radius: the fixture WP\
 // `tailFiles` answers the tail diffs: with --no-renames each entry is its own
 // row; without it, a `renames` pair collapses to its destination (git's default).
 function gateExec(o = {}) {
-  const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, actionRuns = NO_WORKFLOW_RUNS, threads = 0, inflight = 0,
+  const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, actionRuns = NO_WORKFLOW_RUNS, threads = 0, threadsOut = '', inflight = 0,
     config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], revLists = {}, logs = {}, diffQuiet = 0, patchIds = {}, diffs = {}, pr = {},
     bootstrap = null, bootStatus = ok('') } = o;
   const calls = [];
@@ -111,7 +111,7 @@ function gateExec(o = {}) {
     if (program === 'gh' && /\/actions\/runs\?head_sha=/.test(args[1])) return actionRuns;
     if (program === 'gh' && /\/status\?/.test(args[1])) return status;
     if (program === 'gh' && /required_status_checks$/.test(args[1])) return required;
-    if (program === 'node' && args[1] === 'threads') return { code: threads, stdout: '', stderr: threads ? 'open threads' : '' };
+    if (program === 'node' && args[1] === 'threads') return { code: threads, stdout: threadsOut, stderr: threads ? 'open threads' : '' };
     if (program === 'node' && args[1] === 'inflight') {
       return { code: inflight, stdout: '', stderr: inflight === 9 ? '1 review attempt(s) of 1111111 still in flight (beat #1 lens_running); merge after it posts.' : inflight ? 'coordinator-unreachable' : '' };
     }
@@ -1316,6 +1316,32 @@ test('threads get resolved (D19.9): table → replies → thread ids → resolve
   assert.deepEqual(wp.reviews.at(-1).resolved, ['PRRT_kwDOS_8yoc6oxjYH', 'PRRT_kwDOS_8yoc6oxjYK', 'PRRT_kwDOS_8yoc6oxnvx']);
   assert.equal(gate(state, wp, { threads: 0 }).ok, true);
   assert.equal(recordLandStep(state, wp, resolves[0], { code: 1, stdout: '', stderr: 'gh: Could not resolve' }, {}).outcome, 'block');
+});
+
+// 07f0def3: a gate amendment answers the threads its gate listed, by the ids the gate gave it.
+test('gate amendment threads: the gate lists open threads by first comment id; the table\'s listed rows are replied to once and resolved', () => {
+  const listing = '2 of 4 thread(s) (unresolved)\n\n#4177234272  lib/x.mjs:3  [OPEN]  replies:0\n   astra: a beat finding\n\n#4177261832  lib/x.mjs:9  [OPEN, outdated]  replies:1\n   codex: another\n\nreply with:  node pr-review.mjs reply --pr 7 --repo o/r --comment-id <id> --body-file <file>\n';
+  const out = gate(makeState(), makeWp(), { threads: 8, threadsOut: listing });
+  assert.deepEqual([out.failures, out.threads], [['unresolved review threads'], ['4177234272', '4177261832']]);
+  assert.equal(Object.hasOwn(gate(makeState(), makeWp(), { threads: 0 }), 'threads'), false);
+  const state = makeState();
+  const rows = parseAmendmentTable(fixtureText('lane-report-amendment.md'));
+  const ids = (actions, part) => actions.filter((a) => a.part === part).map((a) => (part === 'reply' ? a.land.comment : a.land.commentIds));
+  // Only listed ids are answered: 4177234275 has a row but no open thread; 4177261832 is open with no row.
+  const fresh = threadReplyActions(state, makeWp(), rows, ['4177234272', '4177261828', '4177261832']);
+  assert.deepEqual(fresh.rows.map((row) => row.comment), ['4177234272', '4177261828']);
+  assert.deepEqual([ids(fresh.actions, 'reply'), ids(fresh.actions, 'lookup')], [['4177234272', '4177261828'], [['4177234272', '4177261828']]]);
+  // A thread already replied to is resolved again, never replied to twice.
+  const again = threadReplyActions(state, makeWp({ threadReplies: ['4177234272'] }), rows, ['4177234272', '4177261828']);
+  assert.deepEqual([ids(again.actions, 'reply'), ids(again.actions, 'lookup')], [['4177261828'], [['4177234272', '4177261828']]]);
+  assert.deepEqual(threadReplyActions(state, makeWp({ threadReplies: ['4177234272'] }), rows, ['4177234272']).actions.map((a) => `${a.step}/${a.part}`), ['thread-ids/lookup']);
+  assert.deepEqual(threadReplyActions(state, makeWp(), rows, ['999']).actions, []);
+  // A posted reply records its comment id; a failed one records nothing and blocks.
+  const reply = fresh.actions.find((a) => a.part === 'reply');
+  assert.deepEqual(recordLandStep(state, makeWp({ threadReplies: ['1'] }), reply, ok('replied'), {}).patch, { threadReplies: ['1', '4177234272'] });
+  const failed = recordLandStep(state, makeWp(), reply, { code: 1, stdout: '', stderr: 'gh: Bad credentials (HTTP 401)' }, {});
+  assert.deepEqual([failed.outcome, failed.reason, failed.patch.threadReplies], ['block', 'reply failed (exit 1): gh: Bad credentials (HTTP 401)', undefined]);
+  assert.throws(() => threadReplyActions(state, makeWp(), [{ comment: '4177234272', verdict: 'fixed', commit: null }], ['4177234272']), /a fixed row needs its commit sha/);
 });
 
 const GATE_ACTION = { kind: 'shell', step: 'gate', part: 'gate', command: ['node', 'conduct.mjs', 'land', 'gate'] };
