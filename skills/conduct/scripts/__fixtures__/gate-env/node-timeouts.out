@@ -1,0 +1,27 @@
+✖ times out (112.3712ms)
+✔ passes (0.6941ms)
+▶ hook suite
+  ✖ never runs
+✖ hook suite (103.9584ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 1
+ℹ fail 0
+ℹ cancelled 2
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 604.7979
+
+✖ failing tests:
+
+test at a.test.mjs:4:1
+✖ times out (112.3712ms)
+  'test timed out after 100ms'
+
+test at a.test.mjs:16:3
+✖ never runs
+  'test did not finish before its parent and was cancelled'
+
+test at a.test.mjs:12:1
+✖ hook suite (103.9584ms)
+  'test timed out after 100ms'

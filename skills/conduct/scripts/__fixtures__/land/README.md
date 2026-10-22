@@ -15,6 +15,14 @@ Program output the landing tests hand back from a fake executor, so no test need
 - `commit-status-green.json`: `gh api repos/sirmaelstrom/workit/commits/934d875…/status` (legacy commit statuses: none, `total_count` 0; the combined `state` reads `pending` with no statuses, which is why the gate reads `statuses[]`, never `state`).
 - `review-threads-145.json`: `gh api graphql` with `land.mjs`'s `THREADS_QUERY` for workit#145 (4 threads, each with its node `id` and first comment `databaseId`).
 
+## Captured, projected (2026-10-22)
+
+Read from the real API, then projected with `--jq` to the fields the gate reads (the raw objects also carry repository, owner and URL blocks):
+
+- `check-runs-observatory-base.json`: `gh api repos/heathdev-me/observatory/commits/45c42f0a8e6df732cc97cafdef41141ff66c6936/check-runs?per_page=100 --paginate --jq '{total_count, check_runs: [.check_runs[] | {id, name, head_sha, status, conclusion, check_suite: {id: .check_suite.id}, app: {slug: .app.slug}}]}'`. A main commit that a scheduled `db-tests` run and a pushed `CI` run (`verify`, `audit`) both checked.
+- `workflow-runs-observatory-base.json`: `gh api "repos/heathdev-me/observatory/actions/runs?head_sha=45c42f0a…&per_page=100" --paginate --jq '{total_count, workflow_runs: [.workflow_runs[] | {id, name, path, event, head_sha, check_suite_id, status, conclusion}]}'`: the same commit's workflow runs, `schedule` and `push`, joined to the check-runs by `check_suite_id`.
+- `check-runs-observatory-head.json`: the same check-runs read for `f5d5a7f16e74cebaab76a80f8d893e3fb7a43d43`, a PR head: `verify`, `audit` and a skipped `auto-merge`, all from `pull_request` runs, and no `db-tests`.
+
 ## Derived or authored (not program output)
 
 - The failed-run, pending (`in_progress`), incomplete (`total_count` raised, duplicate id, a page without `check_runs`, trailing text) and missing-expected-check cases are derived in the tests from `check-runs-green.json` by editing it; the legacy-status cases from `commit-status-green.json` by adding one status.

@@ -1,0 +1,12 @@
+
+ RUN  v5.0.5 <tmp>/l1-samples/vt
+
+ ❯ a.test.ts (3 tests | 1 failed | 1 skipped) 210ms
+   ❯ slow suite (2)
+     × times out 104ms
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed | 1 skipped (3)
+   Start at  08:29:05
+   Duration  427ms (tests 87%, import 8%, worker 3%, transform 2%)
+

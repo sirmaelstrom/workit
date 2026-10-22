@@ -1,0 +1,24 @@
+▶ outer
+  ✖ inner times out (113.9988ms)
+✖ outer (115.5261ms)
+▶ parent
+  ✖ child times out (106.5842ms)
+✖ parent (107.1855ms)
+ℹ tests 3
+ℹ suites 1
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 2
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 598.3699
+
+✖ failing tests:
+
+test at c.test.mjs:4:3
+✖ inner times out (113.9988ms)
+  'test timed out after 100ms'
+
+test at c.test.mjs:10:11
+✖ child times out (106.5842ms)
+  'test timed out after 100ms'

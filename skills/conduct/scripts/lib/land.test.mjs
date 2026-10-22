@@ -47,6 +47,7 @@ const UNKNOWN = captured('unknown-sha.json');
 const STATUS = ok(fixtureText('commit-status-green.json'));
 const REQUIRED = ok(fixtureText('required-checks.json'));
 const UNPROTECTED = captured('required-checks-unprotected.json');
+const NO_WORKFLOW_RUNS = ok(JSON.stringify({ total_count: 0, workflow_runs: [] }));
 // Derived from the green captures by editing them (fixture README).
 function derived(edit, name = 'check-runs-green.json') {
   const page = JSON.parse(fixtureText(name));
@@ -86,7 +87,7 @@ const TWO_WAY = '## Merge danger\n\nDoor: two-way\nBlast radius: the fixture WP\
 // `tailFiles` answers the tail diffs: with --no-renames each entry is its own
 // row; without it, a `renames` pair collapses to its destination (git's default).
 function gateExec(o = {}) {
-  const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, threads = 0, inflight = 0,
+  const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, actionRuns = NO_WORKFLOW_RUNS, threads = 0, inflight = 0,
     config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], revLists = {}, diffQuiet = 0, patchIds = {}, diffs = {}, pr = {},
     bootstrap = null, bootStatus = ok('') } = o;
   const calls = [];
@@ -107,6 +108,7 @@ function gateExec(o = {}) {
       return { code: ancestry[`${args[4]}..${args[5]}`] ?? 0, stdout: '', stderr: '' };
     }
     if (program === 'gh' && /\/check-runs\?/.test(args[1])) return args[1].includes(BASE_TIP) ? baseRuns : ci;
+    if (program === 'gh' && /\/actions\/runs\?head_sha=/.test(args[1])) return actionRuns;
     if (program === 'gh' && /\/status\?/.test(args[1])) return status;
     if (program === 'gh' && /required_status_checks$/.test(args[1])) return required;
     if (program === 'node' && args[1] === 'threads') return { code: threads, stdout: '', stderr: threads ? 'open threads' : '' };
@@ -301,6 +303,35 @@ test('C1-2 expected checks: an unprotected base falls back to the checks that ra
   assert.deepEqual(out.failures, ['expected check missing at head: Deploy']);
   assert.equal(gate(makeState(), makeWp(), { required: UNPROTECTED }).ok, true);
   assert.deepEqual(gate(makeState(), makeWp(), { required: { code: 1, stdout: '', stderr: 'gh: Server Error (HTTP 502)' } }).causes, ['infra']);
+});
+
+test('H12 expected checks: an unprotected base expects the checks its push or pull_request runs made, not a scheduled run\'s', () => {
+  const late = makeWp({ gate: { head: HEAD, pendingSince: minutesAgo(11) } });
+  const observatory = { required: UNPROTECTED, baseRuns: ok(fixtureText('check-runs-observatory-base.json')),
+    ci: ok(fixtureText('check-runs-observatory-head.json')), actionRuns: ok(fixtureText('workflow-runs-observatory-base.json')) };
+  // The base's db-tests came from a `schedule` run; the PR head gets none.
+  const out = gate(makeState(), late, observatory);
+  assert.deepEqual([out.ok, out.failures], [true, []]);
+  // The pushed CI's checks are still expected.
+  const noVerify = derived((page) => { page.check_runs = page.check_runs.filter((run) => run.name !== 'verify'); page.total_count = page.check_runs.length; }, 'check-runs-observatory-head.json');
+  assert.deepEqual(gate(makeState(), late, { ...observatory, ci: noVerify }).failures, ['expected check missing at head: verify']);
+  // A check no workflow run accounts for keeps today's rule: it is expected.
+  const unjoined = derived((page) => { page.workflow_runs = page.workflow_runs.filter((run) => run.event !== 'schedule'); page.total_count = page.workflow_runs.length; }, 'workflow-runs-observatory-base.json');
+  assert.deepEqual(gate(makeState(), late, { ...observatory, actionRuns: unjoined }).failures, ['expected check missing at head: db-tests']);
+  // The read is the base's workflow runs, every page; 403 or 404 reads as no
+  // workflow runs; any other failure, or an incomplete read, is infra.
+  const exec = gateExec(observatory);
+  gateCheck(makeState(), late, { exec, now: () => NOW });
+  assert.deepEqual(exec.calls.find((call) => /actions\/runs/.test(call.args[1] ?? '')).args, ['api', `repos/sirmaelstrom/workit/actions/runs?head_sha=${BASE_TIP}&per_page=100`, '--paginate']);
+  const forbidden = { code: 1, stdout: '', stderr: 'gh: Resource not accessible by integration (HTTP 403)' };
+  assert.deepEqual(gate(makeState(), late, { ...observatory, actionRuns: forbidden }).failures, ['expected check missing at head: db-tests']);
+  assert.deepEqual(gate(makeState(), late, { ...observatory, actionRuns: { code: 1, stdout: '', stderr: 'gh: Server Error (HTTP 502)' } }).causes, ['infra']);
+  const short = derived((page) => { page.total_count = 3; }, 'workflow-runs-observatory-base.json');
+  assert.match(gate(makeState(), late, { ...observatory, actionRuns: short }).failures.join(), /workflow runs incomplete/);
+  // With readable protection the workflow runs are not read.
+  const protectedExec = gateExec({ ...observatory, required: REQUIRED });
+  gateCheck(makeState(), late, { exec: protectedExec, now: () => NOW });
+  assert.ok(!protectedExec.calls.some((call) => /actions\/runs/.test(call.args[1] ?? '')));
 });
 
 test('a 403 CI migration policy is head-bound and cannot hide required or failed checks', () => {
