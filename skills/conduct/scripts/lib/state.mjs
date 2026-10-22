@@ -48,6 +48,13 @@ export const STEPS = Object.freeze(Object.keys(STEP_SEAM));
 
 export const TERMINAL_PHASES = Object.freeze(['closed', 'declined', 'sent-back']);
 
+// The base a WP's own diff starts from: its last land rebase's new base, else
+// the base its lane was created on. `lane.base` stays the dispatch record and
+// `rebases[]` the rebase log, so every reader of "the WP's diff" goes through
+// here; read alone, `lane.base` counts a sibling merged under a rebase as the
+// WP's own change.
+export const laneBase = (wp) => (wp.rebases ?? []).at(-1)?.newBase ?? wp.lane?.base ?? null;
+
 // The touch and halt kinds the passkey, spend and answer adapters opened and
 // this conduct no longer opens or clears. A kind not named here passes.
 export const RETIRED_TOUCH_KINDS = Object.freeze(['preapproval-confirm']);

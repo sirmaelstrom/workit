@@ -33,7 +33,7 @@
 // base reads as a tree mismatch and halts dispatch, never as a pass.
 import { isAbsolute, join, sep } from 'node:path';
 import { createHash } from 'node:crypto';
-import { ConductError, STEP_SEAM, loadState } from './state.mjs';
+import { ConductError, STEP_SEAM, laneBase, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
 import { pinnedConfig } from './repo-config.mjs';
 import { mergeDanger } from '../../../../scripts/lane.mjs';
@@ -360,13 +360,15 @@ const TABLE_HEADER = /^\|\s*Comment\s*\|\s*Verdict\s*\|\s*Evidence\s*\|\s*Commit
 
 // The rows of an `## Amendment N` table, which ends at the first line after its
 // header that is not a table row. Without `since`, the latest section's table;
-// with it, compose tables numbered `since` or later by finding id. A later
-// ruling replaces only its own row; an earlier round never answers this one.
+// with it, compose tables numbered `since` or later by finding id; with
+// `only`, the table of that one section. A later ruling replaces only its own
+// row; an earlier round never answers this one.
 // A table quoted inside a code fence is never the table.
-export function parseAmendmentTable(reportText, { since = null } = {}) {
+export function parseAmendmentTable(reportText, { since = null, only = null } = {}) {
   const headerAt = (section) => section.lines.findIndex((line) => !line.fenced && TABLE_HEADER.test(line.text.trim()));
   const sections = amendmentSections(reportText);
-  const candidates = since === null ? sections.slice(-1) : sections.filter((section) => section.n >= since && headerAt(section) >= 0);
+  const candidates = only !== null ? sections.filter((section) => section.n === only)
+    : since === null ? sections.slice(-1) : sections.filter((section) => section.n >= since && headerAt(section) >= 0);
   const body = [];
   for (const section of candidates) {
    const header = headerAt(section);
@@ -530,10 +532,62 @@ function measureRebase(wt, { from, to, oldBase, newBase }, exec) {
     ...(placeHash ? { equivalenceProof: { version: 1, from, to, oldBase, newBase, placeHash } } : {}) };
 }
 
+// Each commit of a range by its own patch-id (`git log -p` read by `git
+// patch-id`, as for the whole diff). A patch two commits share names neither;
+// null is an unreadable range.
+function commitPatchIds(wt, range, exec) {
+  const log = exec('git', ['-C', wt, 'log', '-p', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', '--full-index', '--format=commit %H', range]);
+  if (log.code !== 0) return null;
+  if (!log.stdout.trim()) return new Map();
+  const ids = exec('git', ['-C', wt, 'patch-id', '--verbatim'], { input: log.stdout });
+  if (ids.code !== 0) return null;
+  const byId = new Map();
+  for (const [id, sha] of lines(ids.stdout).map((line) => line.split(/\s+/))) byId.set(id, byId.has(id) ? null : sha?.toLowerCase());
+  return byId;
+}
+
+// The rebase's image of each commit it moved: the commit on the new line with
+// the same patch-id. An image locates a commit; it proves no coverage.
+function rebaseImages(wt, { from, to, oldBase, newBase }, exec) {
+  const before = commitPatchIds(wt, `${oldBase}..${from}`, exec);
+  const after = commitPatchIds(wt, `${newBase}..${to}`, exec);
+  if (!before || !after) return {};
+  const images = {};
+  for (const [id, sha] of before) if (sha && after.get(id)) images[sha] = after.get(id);
+  return images;
+}
+
 // Patch identity alone does not preserve coverage when parent files changed.
+// A rebase that moves commits also records their images, and measures each
+// review head it moved below its own head at that head's image (`anchors`), so
+// coverage and citations cross it from a reviewed head later amendments buried.
 export function recordRebase(state, wp, { from, to, newBase }, deps) {
-  const oldBase = (wp.rebases ?? []).at(-1)?.newBase ?? wp.lane.base;
-  return measureRebase(wp.lane.worktree, { from, to, oldBase, newBase }, deps.exec);
+  const oldBase = laneBase(wp);
+  const wt = wp.lane.worktree;
+  const entry = measureRebase(wt, { from, to, oldBase, newBase }, deps.exec);
+  if (from === to) return entry;
+  const images = rebaseImages(wt, { from, to, oldBase, newBase }, deps.exec);
+  if (!Object.keys(images).length) return entry;
+  const heads = [...new Set((wp.reviews ?? []).map((review) => String(review.head ?? '').toLowerCase()))].filter((head) => images[head] && head !== from);
+  const anchors = heads.map((head) => measureRebase(wt, { from: head, to: images[head], oldBase, newBase }, deps.exec));
+  return { ...entry, images, ...(anchors.length ? { anchors } : {}) };
+}
+
+// A commit's image after every later rebase (itself when none moved it).
+function imageOf(wp, sha) {
+  let at = String(sha).toLowerCase();
+  for (const rebase of wp.rebases ?? []) at = rebase.images?.[at] ?? at;
+  return at;
+}
+
+// Commits (full shas or the abbreviations a Commit cell holds) and their
+// images: a row that names a commit names its rebased image too.
+function carried(wp, shas) {
+  const known = new Set(shas.map((sha) => String(sha).toLowerCase()));
+  for (const rebase of wp.rebases ?? []) {
+    for (const [old, image] of Object.entries(rebase.images ?? {})) if ([...known].some((sha) => old.startsWith(sha))) known.add(image);
+  }
+  return [...known];
 }
 
 function verifiedRebase(wp, rebase, exec) {
@@ -742,23 +796,29 @@ const fixedCommits = (review) => (review.verdicts ?? [])
 // The commits gate amendments added after the review cap: each gate amendment
 // records the head it started from (build.mjs gateAmend) and, once its lane
 // work is back, the head it ended at; its commits are from..end (end = `to`
-// while it is still open). A range whose ends are no longer on the line to
-// `to` (a later rebase rewrote them) names nothing. Returns the commits and
-// the gate failures they repair; null is an unreadable range.
+// while it is still open). Ends a later rebase rewrote are read at their
+// images; a range whose ends are still not on the line to `to` names nothing.
+// A commit the conductor cited on one of the amendment's rows (`cited`) is
+// one of its commits too. Returns the commits and the gate failures they
+// repair; null is an unreadable range.
 function gateFixCommits(wp, to, exec) {
   const wt = wp.lane.worktree;
   const commits = new Set();
   const reasons = [];
   for (const fix of wp.gateFixes ?? []) {
-    const end = fix?.to ?? to;
-    if (!fix?.from || fix.from === end) continue;
-    const fromOnLine = ancestor(wt, fix.from, end, exec);
-    const endOnLine = end === to ? true : ancestor(wt, end, to, exec);
-    if (fromOnLine === null || endOnLine === null) return null;
-    if (!fromOnLine || !endOnLine) continue;
-    const listed = exec('git', ['-C', wt, 'rev-list', `${fix.from}..${end}`]);
-    if (listed.code !== 0) return null;
-    const shas = lines(listed.stdout).map((sha) => sha.toLowerCase());
+    const shas = carried(wp, fix?.cited ?? []);
+    const from = fix?.from ? imageOf(wp, fix.from) : null;
+    const end = fix?.to ? imageOf(wp, fix.to) : to;
+    if (from && from !== end) {
+      const fromOnLine = ancestor(wt, from, end, exec);
+      const endOnLine = end === to ? true : ancestor(wt, end, to, exec);
+      if (fromOnLine === null || endOnLine === null) return null;
+      if (fromOnLine && endOnLine) {
+        const listed = exec('git', ['-C', wt, 'rev-list', `${from}..${end}`]);
+        if (listed.code !== 0) return null;
+        shas.push(...lines(listed.stdout).map((sha) => sha.toLowerCase()));
+      }
+    }
     shas.forEach((sha) => commits.add(sha));
     if (shas.length && fix.reason) reasons.push({ reason: fix.reason, shas });
   }
@@ -800,7 +860,7 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
   if (anchor.scope !== 'delta') return { failure: `review does not cover head: tail ${key} changes ${changes}`, cause: 'review-uncovered' };
   const listed = exec('git', ['-C', wt, 'rev-list', key]);
   if (listed.code !== 0) return { failure: `tail ${key} commits unreadable: ${first(listed.stderr)}`, cause: 'infra' };
-  const fixed = fixedCommits(anchor);
+  const fixed = carried(wp, fixedCommits(anchor));
   const shas = lines(listed.stdout);
   const gateFixed = gateFixCommits(wp, to, exec);
   if (gateFixed === null) return { failure: `tail ${key}: a gate amendment's commits are unreadable`, cause: 'infra' };
@@ -837,15 +897,18 @@ function classifyTail(wp, anchor, from, to, head, exec, notTrivial) {
 // Condition (3): the latest review covers head, through equivalent rebases in
 // either direction, or its tail qualifies; or the WP is T0.
 function reviewCondition(wp, head, exec, notTrivial) {
-  if (effectiveTier(wp) === 'T0') return { tail: `${wp.lane.base}..${head} (T0)` };
+  if (effectiveTier(wp) === 'T0') return { tail: `${laneBase(wp)}..${head} (T0)` };
   const anchor = (wp.reviews ?? []).at(-1);
   if (!anchor) return { failure: 'no review of this WP', cause: 'review-uncovered' };
   const rebases = (wp.rebases ?? []).map((rebase) => verifiedRebase(wp, rebase, exec));
   if (rebases.filter((rebase) => !rebase.equivalent).length >= 2) return { failure: 'a second rebase changed the WP\'s diff: held for the operator', cause: 'tail-out-of-bounds' };
   if (anchor.head === head) return {};
   const changed = { failure: 'rebase changed the WP\'s diff: full review of the rebased head', cause: 'full-review', needsFullReview: true };
+  // Forward from the anchor, a rebase also carries the review heads it moved
+  // below its own head; they are not counted as a second rebase.
+  const moves = (wp.rebases ?? []).flatMap((rebase, i) => [...(rebase.anchors ?? []).map((entry) => verifiedRebase(wp, entry, exec)), rebases[i]]);
   let after = anchor.head;
-  for (const rebase of rebases) {
+  for (const rebase of moves) {
     if (rebase.from !== after) continue;
     if (!rebase.equivalent) return changed;
     after = rebase.to;
