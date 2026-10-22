@@ -18,6 +18,15 @@ export const laneOccupied = (wp) => Boolean(wp.lane?.startedAt) && !wp.lane?.exi
 // amendment starts the lane again and waits for one (build.mjs slotWait).
 export const holdsSlot = (wp) => laneOccupied(wp) || (LIVE_STATES.includes(wp.state) && wp.state !== 'gate');
 
+// The wait a lane start takes while every slot is held carries this marker.
+export const SLOT_WAIT = 'lane-slot';
+const waitsForSlot = (wp) => wp.queue?.[0]?.waitFor === SLOT_WAIT;
+
+// The WPs whose slots keep `wp`'s lane from starting again: every other slot
+// holder but those waiting on a slot themselves, so two waiting amendments do
+// not hold each other off.
+export const slotHolders = (state, wp) => (state.wps ?? []).filter((other) => other !== wp && holdsSlot(other) && !waitsForSlot(other));
+
 // `--lanes` runs up to MAX_LANES at once; from this lane on, a lane is admitted
 // only on free commit memory (lane.mjs admit, the 10 GB threshold). Four lanes
 // and two councils exhausted it once.

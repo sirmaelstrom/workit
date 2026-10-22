@@ -23,7 +23,7 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
-import { LIVE_STATES, dispatchable, filesDisjoint, holdsSlot, laneOccupied, normalizePath } from '../schedule.mjs';
+import { LIVE_STATES, SLOT_WAIT, dispatchable, filesDisjoint, holdsSlot, laneOccupied, normalizePath, slotHolders } from '../schedule.mjs';
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
 import { LANE_SUITE_HEADING, LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
@@ -1496,14 +1496,11 @@ function dispatch(state, wp, deps) {
 
 // A paid action of a WP whose lane has exited starts that lane again, so it
 // takes a slot under the lane cap. A gate amendment can find every slot taken,
-// since its land held none: it waits. WPs already waiting on a slot are not
-// counted against it, so two waiting amendments do not hold each other off.
-const SLOT_WAIT = 'lane-slot';
-const waitsForSlot = (wp) => wp.queue?.[0]?.waitFor === SLOT_WAIT;
+// since its land held none: it waits (schedule.mjs slotHolders).
 function slotWait(state, wp) {
   if (laneOccupied(wp)) return null;
   const cap = state.intent?.lanesCap ?? 1;
-  const holding = state.wps.filter((other) => other !== wp && holdsSlot(other) && !waitsForSlot(other));
+  const holding = slotHolders(state, wp);
   if (holding.length < cap) return null;
   return { ...waitSpec('admit', WAIT_MS, `${wp.id} waits for a lane slot: ${holding.map((other) => other.id).join(', ')} hold the run's cap of ${cap}.`), waitFor: SLOT_WAIT };
 }
