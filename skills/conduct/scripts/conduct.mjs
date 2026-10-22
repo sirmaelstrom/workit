@@ -42,6 +42,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   rotate --run <dir> --why <text> [--model <id> --effort <level>] [--name <successor>]
   lane <spawn|alive|check|reap> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]
+  quiet [--samples <n>] [--interval-ms <ms>] [--max-busy <percent>]   (no run: is this host's CPU quiet enough to re-run a gate)
   bootstrap --repo <abs> [--write] [--offline]   (no run: check a repo against the greenfield manifest)`;
 
 const BOOLEAN_FLAGS = new Set(['manual', 'write', 'offline']);
@@ -667,6 +668,25 @@ async function rotateVerb(tokens, deps) {
   }, { duringRotation: true });
 }
 
+// The quiet-host probe a gate retry runs first (lib/gate-env.mjs): exit 0
+// quiet, 1 busy, the samples printed either way.
+async function quietVerb(tokens, deps) {
+  const flags = parseFlags(tokens);
+  const { QUIET_DEFAULTS, quietProbe } = await loadModule(deps, 'lib/gate-env.mjs', 'module');
+  const number = (name, fallback, min, max) => {
+    if (flags[name] === undefined) return fallback;
+    const value = Number(flags[name]);
+    if (!Number.isInteger(value) || value < min || value > max) throw new ConductError(2, `--${name} must be a whole number from ${min} to ${max}`);
+    return value;
+  };
+  const out = await quietProbe({
+    samples: number('samples', QUIET_DEFAULTS.samples, 1, 10),
+    intervalMs: number('interval-ms', QUIET_DEFAULTS.intervalMs, 100, 600000),
+    maxBusy: number('max-busy', QUIET_DEFAULTS.maxBusy, 1, 100),
+  }, { cpus: deps.cpus, sleep: deps.sleep });
+  return { code: out.quiet ? 0 : 1, out };
+}
+
 const VERBS = {
   intake, next, record, answer, status, analyze, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
   'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb, rotate: rotateVerb, replan: replanVerb,
@@ -677,6 +697,7 @@ const VERBS = {
     const { code, report } = runBootstrapVerb(parseFlags(tokens), deps);
     return { code, out: report };
   },
+  quiet: quietVerb,
 };
 
 // overrides is the in-process test seam; main() passes none.

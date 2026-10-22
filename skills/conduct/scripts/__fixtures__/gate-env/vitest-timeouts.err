@@ -1,0 +1,32 @@
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > hook suite
+Error: Hook timed out in 100ms.
+If this is a long-running hook, pass a timeout value as the last argument or configure it globally with "hookTimeout".
+ ❯ a.test.ts:13:3
+     11|
+     12| describe('hook suite', () => {
+     13|   beforeAll(async () => {
+       |   ^
+     14|     await new Promise((r) => setTimeout(r, 400));
+     15|   }, 100);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  a.test.ts > slow suite > times out
+Error: Test timed out in 100ms.
+If this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".
+ ❯ a.test.ts:4:3
+      2|
+      3| describe('slow suite', () => {
+      4|   it('times out', async () => {
+       |   ^
+      5|     await new Promise((r) => setTimeout(r, 400));
+      6|   }, 100);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+

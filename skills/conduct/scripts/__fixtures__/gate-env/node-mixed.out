@@ -1,0 +1,47 @@
+✖ times out (104.4675ms)
+✔ passes (1.162ms)
+▶ hook suite
+  ✖ never runs
+✖ hook suite (106.8373ms)
+✖ asserts wrongly (1.2593ms)
+ℹ tests 4
+ℹ suites 1
+ℹ pass 1
+ℹ fail 1
+ℹ cancelled 2
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 593.7398
+
+✖ failing tests:
+
+test at a.test.mjs:4:1
+✖ times out (104.4675ms)
+  'test timed out after 100ms'
+
+test at a.test.mjs:16:3
+✖ never runs
+  'test did not finish before its parent and was cancelled'
+
+test at a.test.mjs:12:1
+✖ hook suite (106.8373ms)
+  'test timed out after 100ms'
+
+test at b.test.mjs:4:1
+✖ asserts wrongly (1.2593ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+
+  1 !== 2
+
+      at TestContext.<anonymous> (file:///<tmp>/l1-samples/nt/b.test.mjs:5:10)
+      at Test.runInAsyncScope (node:async_hooks:214:14)
+      at Test.run (node:internal/test_runner/test:1106:25)
+      at Test.start (node:internal/test_runner/test:1003:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:358:17) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: 1,
+    expected: 2,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }

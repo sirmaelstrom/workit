@@ -30,6 +30,7 @@ import { LANE_SUITE_HEADING, LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } fro
 import { isTopListItem, markLines, sectionLines, sectionText } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import { bootstrapBrief } from '../bootstrap.mjs';
+import { gateFailureKind } from '../gate-env.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
   priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions,
@@ -53,6 +54,13 @@ const LAND_STEPS = new Set(['review', 'post', 'council', 'reply', 'thread-ids', 
 const WAIT_MS = 60000;
 const CLEANUP_RETRY_MS = 300000;
 const GATE_AMENDS = 2;
+// An all-timeout gate failure is retried this many times per head and in all
+// per WP (each retry rebases, which can move the head), each after a
+// quiet-host probe; a busy probe waits and probes again, up to QUIET_PROBES.
+const ENV_RETRIES = 2;
+const ENV_RETRIES_WP = 4;
+const QUIET_PROBES = 6;
+const QUIET_WAIT_MS = 5 * 60000;
 const UNCERTAIN_BLOCK = 3;
 const NO_CI_WINDOW_MS = 30 * 60000;
 const STALL_FAILS = 3;
@@ -687,8 +695,9 @@ function rewindPhase(state, deps) {
 // table does not allow, a target whose needs fail, a WP whose action is the
 // pending one, an open touch or an unverified lane on the WP, or a phase that
 // cannot go back to build (exit 5). `beforeChange` runs after every check and
-// before the first change (the verb writes its snapshot there).
-export function resetWp(state, { wpId, to, why, baseline = null }, deps, { beforeChange = () => null } = {}) {
+// before the first change (the verb writes its snapshot there). `source` is
+// the event's: `manual` for the verb, `touch` for a recover touch's (a).
+export function resetWp(state, { wpId, to, why, baseline = null }, deps, { beforeChange = () => null, source = 'manual' } = {}) {
   const wp = (state.wps ?? []).find((candidate) => candidate.id === wpId);
   if (!wp) throw new ConductError(2, `reset-wp: no WP ${wpId} in this run`);
   const target = Object.hasOwn(RESET_TARGETS, to ?? '') ? RESET_TARGETS[to] : null;
@@ -722,6 +731,7 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   wp.queue = nextQueue;
   wp.failStreak = null;
   wp.stall = null;
+  wp.recoverDeclined = null;
   if (recovery) {
     wp.deltaRecovery = recovery;
     wp.gate = null;
@@ -748,7 +758,7 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   // The seam row the run analysis counts: one per reset, by hand.
   state.seq += 1;
   appendEvent(state, deps, {
-    actionId: `${state.seq}-reset`, step: 'reset', kind: 'reset', event: 'wp-reset', source: 'manual',
+    actionId: `${state.seq}-reset`, step: 'reset', kind: 'reset', event: 'wp-reset', source,
     data: { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, why: why.trim(), snapshot, ...(recovery ? { deltaRecovery: recovery } : {}) },
   });
   return { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, snapshot, ...(recovery ? { deltaRecovery: recovery } : {}) };
@@ -1076,7 +1086,8 @@ function applyAnswers(state, deps) {
       continue;
     }
     if (!wp || wp.state !== 'blocked' || (touch.build === 'dialog' && key === 'b')) continue;
-    if (touch.build === 'guard') answerGuard(state, wp, touch, deps);
+    if (touch.build === 'recover') answerRecover(state, wp, touch, deps);
+    else if (touch.build === 'guard') answerGuard(state, wp, touch, deps);
     else {
       // Rulings held for this WP's other questions go to the lane with the answer.
       const rulings = wp.heldRulings?.length ? { rulings: wp.heldRulings } : {};
@@ -1122,8 +1133,10 @@ function gateAmend(state, wp, deps, reason) {
   return startAmendment(state, wp, deps, { kind: 'gate', reason });
 }
 
-// A blocked WP keeps only its owed cleanup (the lane's stop); failed work is dropped.
+// A blocked WP keeps only its owed cleanup (the lane's stop); failed work is
+// dropped. `blockedFrom` is the state it blocked in (a recover touch needs `gate`).
 function block(state, wp, deps, reason) {
+  if (wp.state !== 'blocked') wp.blockedFrom = wp.state;
   setState(state, wp, 'blocked', reason, deps);
   wp.stage = null;
   wp.queue = (wp.queue ?? []).filter((action) => action.step === 'stop');
@@ -1246,16 +1259,71 @@ const flipActs = (state, wp) => (spineOn(state) && wp.questId ? [{ kind: 'agent-
   expects: { type: 'json' }, instruction: 'Call spine_update with these args (the pickup flip) and record its raw result.' }] : []);
 
 // The gate command (when it can run as written) and the land gate. An
-// unusable gateEnv throws ConductError: expand blocks the WP on it.
+// unusable gateEnv throws ConductError: expand blocks the WP on it. The
+// command carries the head it runs at and the key of what it runs (argv and
+// env), so its pass is recorded for that head.
 function gateActs(state, wp, deps) {
   const command = gateCommandFor(state, wp, deps);
   const gate = shell('gate', 'gate', ['node', conductScript(state), 'land', 'gate', '--run', state.runDir, '--wp', wp.id]);
   if (notRunnable(command, deps.platform)) return [gate];
   const config = repoConfig(state, deps);
   const env = gateEnvFor(state, wp, config);
+  const argv = shellArgv(command, deps.platform);
   // A suite longer than a foreground shell allows runs in the background (gateBackground).
-  const extra = { cwd: wp.lane.worktree, ...(Object.keys(env).length ? { env } : {}), ...(config.gateBackground === true ? { background: true } : {}) };
-  return [shell('gate-cmd', 'gate-cmd', shellArgv(command, deps.platform), extra), gate];
+  const extra = { cwd: wp.lane.worktree, ...(Object.keys(env).length ? { env } : {}), ...(config.gateBackground === true ? { background: true } : {}),
+    gateHead: wp.pr?.head ?? null, gateKey: createHash('sha256').update(JSON.stringify({ argv, env })).digest('hex') };
+  return [shell('gate-cmd', 'gate-cmd', argv, extra), gate];
+}
+
+// The probe an environment retry runs before the gate command again. Its three
+// one-minute samples can outlast a foreground shell.
+const quietAction = (state) => shell('gate-cmd', 'quiet', ['node', conductScript(state), 'quiet'], { background: true });
+
+// A gate command whose every failure is a timeout failed on the host: it is
+// retried (under the lock again, after a quiet-host probe) up to ENV_RETRIES
+// times per head, and is no gate amendment. Returns true when it retries, or
+// the reason the failure is the lane's after all.
+function envRetry(state, wp, action, result, deps) {
+  const kind = gateFailureKind(result.stdout, result.stderr);
+  if (!kind?.allTimeout) return null;
+  const head = action.gateHead ?? wp.pr?.head ?? null;
+  const n = head && wp.gateRetry?.head === head ? wp.gateRetry.n : 0;
+  const total = wp.gateRetry?.total ?? 0;
+  if (n >= ENV_RETRIES) return `every failure a timeout, after ${ENV_RETRIES} environment retries at this head`;
+  if (total >= ENV_RETRIES_WP) return `every failure a timeout, after ${ENV_RETRIES_WP} environment retries for ${wp.id}`;
+  wp.gateRetry = { head, n: n + 1, total: total + 1, probes: 0 };
+  appendEvent(state, deps, { step: 'gate-cmd', event: 'gate-env-retry', data: { wpId: wp.id, head, n: n + 1, total: total + 1, runner: kind.runner, failures: kind.failures } });
+  wp.queue = [quietAction(state)];
+  wp.stage = 'land';
+  return true;
+}
+
+// Whether the lane worktree holds `head` and nothing uncommitted.
+function testedAt(wp, head, deps) {
+  const at = deps.exec('git', ['-C', wp.lane.worktree, 'rev-parse', 'HEAD']);
+  const dirty = deps.exec('git', ['-C', wp.lane.worktree, 'status', '--porcelain']);
+  return at.code === 0 && at.stdout.trim() === head && dirty.code === 0 && dirty.stdout.trim() === '';
+}
+
+// The probe's record: quiet, an unreadable probe, or the last probe runs the
+// retry; a busy host waits QUIET_WAIT_MS and is probed again.
+function quietRecord(state, wp, result, deps) {
+  wp.queue.shift();
+  let out = null;
+  try {
+    out = JSON.parse(result.stdout);
+  } catch { /* an unreadable probe does not hold the retry */ }
+  const retry = wp.gateRetry ?? {};
+  retry.probes = (retry.probes ?? 0) + 1;
+  wp.gateRetry = retry;
+  const busy = result.code === 1 && out?.quiet === false;
+  if (busy && retry.probes < QUIET_PROBES) {
+    const why = `${wp.id}'s gate re-runs when the host is quiet (busy ${(out.busy ?? []).join('/')}% against ${out.maxBusy}%): wait, then probe again.`;
+    wp.queue = [{ ...waitSpec('gate-cmd', QUIET_WAIT_MS, why), part: 'quiet' }, quietAction(state), ...wp.queue];
+    return true;
+  }
+  if (result.code !== 0) appendEvent(state, deps, { step: 'gate-cmd', event: 'quiet-not-reached', data: { wpId: wp.id, probes: retry.probes, code: result.code, busy: out?.busy ?? null } });
+  return true;
 }
 
 // The files an amendment changed since the delta baseline, a commit sha.
@@ -1374,10 +1442,23 @@ function expand(state, wp, deps) {
         if (mergeLockFor(state, wp) === 'mine') state.mergeLock = null;
         return block(state, wp, deps, error.message);
       }
+      // A pass at this head of this argv and env is not run again: a land
+      // reset after a CI-check policy change goes straight to the land gate.
+      const [run] = acts, pass = wp.gateCmdPass;
+      if (run.gateHead && pass?.head === run.gateHead && pass.key === run.gateKey) {
+        wp.gateCmd = { state: 'reused', command, head: pass.head, passedAt: pass.at };
+        appendEvent(state, deps, { step: 'gate-cmd', event: 'gate-cmd-reused', data: { wpId: wp.id, head: pass.head, passedAt: pass.at } });
+        return go(acts.slice(1), 'merge');
+      }
       return go(acts, 'merge');
     }
     case 'merge': {
       if (!wp.gate?.ok) return go([], 'gate');
+      // A reused pass covers its own head: a gate that passed at another runs the suite.
+      if (wp.gateCmd?.state === 'reused' && wp.gate.head !== wp.gateCmd.head) {
+        wp.gateCmdPass = null;
+        return go([], 'gate');
+      }
       // A merge the authority refuses queues nothing and goes back through land.
       const actions = mergeActions(state, wp, wp.gate.head, runAuthority(state));
       return actions.length ? go(actions, null) : go([], 'land');
@@ -1521,6 +1602,8 @@ function workAction(state, deps) {
       const gate = budgetGate(state, deps, wp.id);
       if (gate === 'ended') {
         block(state, wp, deps, 'the budget was reached and the operator stopped new paid lane work');
+        // The operator's (b) on the budget touch already declined the paid work a re-land would need.
+        wp.recoverDeclined = 'budget';
         continue;
       }
       if (gate === 'halted') continue;
@@ -1648,7 +1731,8 @@ function watchStalls(state, deps) {
       } catch { /* A consumer without progress artifacts uses the action clock. */ }
     }
     const at = `${wp.state}|${wp.stage ?? ''}${reviewing ? `|${head.step}|${head.part ?? ''}|${head.command?.join(' ') ?? head.tool ?? ''}|${seats}` : ''}`;
-    const laneAtWork = Boolean(wp.queue?.some((action) => action.step === 'wait'));
+    // A quiet-host probe and its waits are work too: a busy host is probed for up to ~48 minutes.
+    const laneAtWork = Boolean(wp.queue?.some((action) => action.step === 'wait' || (action.step === 'gate-cmd' && action.part === 'quiet')));
     if (!watched || wp.progress?.at !== at || laneAtWork) {
       wp.progress = watched ? { at, since: new Date(now).toISOString() } : null;
       if (wp.stall && !laneAtWork) wp.stall = null;
@@ -1695,6 +1779,49 @@ function release(y) {
     y.touch.waitLeftMs = null;
     y.touch.waitDueAt = null;
     y.touch.waiting = false;
+  }
+}
+
+// A blocked WP the build would leave behind that `reset-wp --to land` would
+// take back: it blocked at its gate (not in a lane check or a review), its PR
+// is open and not squashed, no adjudication is owed, its lane is verified,
+// dispatch is not halted on a merged tree, and no touch of its own is open.
+// The operator declines it once per block.
+function recoverable(state, wp, deps) {
+  if (wp.state !== 'blocked' || wp.blockedFrom !== 'gate' || wp.squashed || wp.recoverDeclined || wp.lane?.livenessHeld) return false;
+  if ((state.build?.halts ?? []).some((halt) => halt.kind === 'merged')) return false;
+  if ((state.touches ?? []).some((touch) => touch.wpId === wp.id && touch.status !== 'answered')) return false;
+  return RESET_TARGETS.land.needs(state, wp, deps) === null;
+}
+
+// One recover touch per recoverable WP; the count opened.
+function recoverTouches(state, deps) {
+  const opened = state.wps.filter((wp) => recoverable(state, wp, deps));
+  for (const wp of opened) {
+    const waiting = state.wps.filter((other) => other.state === 'deferred' && other.deferredBy === wp.id).map((other) => other.id);
+    const waits = waiting.length ? `${waiting.join(', ')} ${waiting.length > 1 ? 'wait' : 'waits'} on it` : 'nothing waits on it';
+    buildTouch(state, deps, 'recover', {
+      question: `DO: decide whether conduct ${state.slug} lands ${wp.id} again before its build ends. ${wp.id} is blocked at its gate: ${String(wp.reason ?? '').slice(0, 900)}. ${waits}, and nothing else is left to run. Once the showcase is filed no reset takes the run back, so fix the cause first if it will not pass by itself (the host's load, a CI-check policy). EXPECT: (a) conduct resets ${wp.id} to land (rebase, gate and merge again) and what waits on it returns to pending; (b) ${wp.id} stays blocked and the build ends: the showcase names it not done.`,
+      options: [option('a', `Land ${wp.id} again`, `conduct runs reset-wp --to land for ${wp.id}; its deferred dependents return to pending.`),
+        option('b', `End the build without ${wp.id}`, `${wp.id} stays blocked; the build ends and the showcase names it not done.`)],
+      wpId: wp.id, suspendedStep: 'land',
+    });
+  }
+  return opened.length;
+}
+
+// (a) is the land reset, on the operator's word; a reset the run refuses now
+// re-opens the touch with why. (b) leaves the WP blocked for this block.
+function answerRecover(state, wp, touch, deps) {
+  if (touch.answer.key !== 'a') {
+    wp.recoverDeclined = touch.n;
+    return;
+  }
+  try {
+    resetWp(state, { wpId: wp.id, to: 'land', why: `operator answer (a) to touch ${touch.n}` }, deps, { source: 'touch' });
+  } catch (error) {
+    if (!(error instanceof ConductError)) throw error;
+    refuse(state, touch, error.message, deps);
   }
 }
 
@@ -1748,7 +1875,12 @@ function chooseAction(state, deps) {
     // that is un-deferred instead is dispatchable, and the build goes on.
     deferrals(state, deps);
     // A run touch (no wpId) still open stays open into the showcase (D16).
-    if (settled(state, deps)) break;
+    // A WP a land reset can still take back holds the build on its recover
+    // touch: once the showcase is filed, no reset moves the run back.
+    if (settled(state, deps)) {
+      if (!recoverTouches(state, deps)) break;
+      continue;
+    }
     const waiting = yielders(state, deps);
     const due = waiting.filter((y) => y.ms <= 0);
     if (due.length) {
@@ -1908,11 +2040,21 @@ function recordOwn(state, wp, action, result, deps) {
         appendEvent(state, deps, { step: 'alarm', event: 'alarm-failed', data: { wpId: wp.id, part: action.part, code: result?.code ?? null, error: toolError(result) } });
       }
       return ok();
-    case 'gate-cmd':
-      if (result.code === 0) return ok();
+    case 'gate-cmd': {
+      if (action.part === 'quiet') return quietRecord(state, wp, result, deps);
+      if (result.code === 0) {
+        // A pass is reusable for the commit the worktree holds, with nothing
+        // uncommitted, when the suite ends: otherwise it is not recorded.
+        if (action.gateHead && action.gateKey && testedAt(wp, action.gateHead, deps)) wp.gateCmdPass = { head: action.gateHead, key: action.gateKey, at: deps.timestamp() };
+        return ok();
+      }
       if (mergeLockFor(state, wp) === 'mine') state.mergeLock = null;
       wp.queue = [];
-      return gateAmend(state, wp, deps, `the gate command exited ${result.code} at the rebased head: ${lines(result.stderr || result.stdout)[0] ?? ''}`) ?? true;
+      const env = envRetry(state, wp, action, result, deps);
+      if (env === true) return true;
+      const reason = `the gate command exited ${result.code} at the rebased head: ${lines(result.stderr || result.stdout)[0] ?? ''}`;
+      return gateAmend(state, wp, deps, env ? `${reason} (${env})` : reason) ?? true;
+    }
     case 'review/diff':
     case 'review/amend-diff': {
       if (result.code !== 0) return block(state, wp, deps, `${action.command.slice(0, 3).join(' ')} failed: ${lines(result.stderr)[0] ?? `exit ${result.code}`}`) ?? true;

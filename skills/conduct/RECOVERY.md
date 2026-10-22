@@ -33,7 +33,13 @@ conduct.mjs reset-wp --run <dir> --wp WP-01 --to land --why "Recorded the CI mig
 
 This policy applies only to that head. Readable branch protection takes
 precedence. Every check present at the head must still pass, and every named
-check must be present. Never manufacture a legacy success status.
+check must be present. Never manufacture a legacy success status. When the
+land reset finds the head where the gate command last passed, run with the
+same command and env, the suite is not run again.
+
+Without a policy, the gate already leaves out checks that the base commit got
+only from a `schedule` or `workflow_dispatch` run. A WP blocked at its gate
+when nothing else can run opens a `recover` touch: its (a) is this land reset.
 
 To move a run to a repaired plugin, pause at an author or wait action, then
 invoke the destination plugin's `conduct.mjs upgrade-root --run <dir> --why

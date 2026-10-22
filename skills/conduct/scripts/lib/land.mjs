@@ -614,9 +614,40 @@ function readRuns(state, sha, exec) {
   return { runs: [...runs, ...legacy] };
 }
 
+// The events whose workflow runs a PR head gets: its own pull_request runs,
+// and push runs from pushes to its branch. A pull_request_target run checks
+// the base branch's commit, so the head does not carry it. A push workflow
+// filtered to the default branch still reads as expected: the run's event
+// does not show its branch filter.
+const PR_EVENTS = new Set(['pull_request', 'push']);
+
+// What triggered each workflow run at one sha, by check-suite id, every page
+// read and complete. No access to the Actions API (403, 404) reads as no runs,
+// so every check stays expected.
+function readTriggers(state, sha, exec) {
+  const read = exec('gh', ['api', `repos/${repoOf(state)}/actions/runs?head_sha=${sha}&per_page=100`, '--paginate']);
+  if (read.code !== 0) return /HTTP 40[34]/.test(read.stderr) ? { events: new Map() } : { failure: `workflow runs unreadable: ${first(read.stderr)}` };
+  let pages;
+  try {
+    pages = parsePages(read.stdout);
+  } catch (error) {
+    return { failure: `workflow runs unreadable: ${error.message}` };
+  }
+  const runOk = (run) => run && run.id != null && run.check_suite_id != null && typeof run.event === 'string';
+  if (!pages.length || pages.some((page) => typeof page?.total_count !== 'number' || !Array.isArray(page.workflow_runs) || !page.workflow_runs.every(runOk))) {
+    return { failure: 'workflow runs unreadable: a page is malformed' };
+  }
+  const runs = pages.flatMap((page) => page.workflow_runs);
+  if (runs.length !== pages[0].total_count || new Set(runs.map((run) => run.id)).size !== runs.length) {
+    return { failure: `workflow runs incomplete: ${runs.length} distinct runs read of total_count ${pages[0].total_count}` };
+  }
+  return { events: new Map(runs.map((run) => [run.check_suite_id, run.event])) };
+}
+
 // The checks the head must carry: the branch's required status checks (the
 // union of `contexts` and `checks`) when readable, else the names that ran on
-// the base commit.
+// the base commit from a trigger a PR head also gets. A check-run that no
+// workflow run accounts for (another app, a legacy status) stays expected.
 function expectedChecks(state, wt, exec, wp, head) {
   const def = defaultOf(state);
   const required = exec('gh', ['api', `repos/${repoOf(state)}/branches/${encodeURIComponent(def)}/protection/required_status_checks`]);
@@ -637,7 +668,13 @@ function expectedChecks(state, wt, exec, wp, head) {
   if (base.code !== 0) return { failure: `base commit unreadable: ${first(base.stderr)}` };
   const ran = readRuns(state, base.stdout.trim(), exec);
   if (ran.failure) return ran;
-  return { names: [...new Set((ran.runs ?? []).map((run) => run.name))] };
+  const triggers = readTriggers(state, base.stdout.trim(), exec);
+  if (triggers.failure) return triggers;
+  const prTriggered = (run) => {
+    const event = triggers.events.get(run.check_suite?.id);
+    return event === undefined || PR_EVENTS.has(event);
+  };
+  return { names: [...new Set((ran.runs ?? []).filter(prTriggered).map((run) => run.name))] };
 }
 
 function ciCondition(state, wp, head, { exec, now }) {

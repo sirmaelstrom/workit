@@ -238,6 +238,8 @@ function herdrVerb(h, action) {
 function shellResult(h, action) {
   const id = action.wpId;
   const { command } = action;
+  // The quiet-host probe reads this host's CPU: a test scripts its answers.
+  if (action.step === 'gate-cmd' && action.part === 'quiet') return h.quiet?.length ? h.quiet.shift() : ok(JSON.stringify({ quiet: true, busy: [5, 5, 5], maxBusy: 30 }));
   if (command[0] === 'node' && command[1].endsWith('conduct.mjs')) return conductVerb(h, action);
   if (command[0] === 'node' && command[1].endsWith('lane.mjs')) return herdrVerb(h, action);
   // github-ask post: the touch's comment on the run's asks issue.
@@ -265,7 +267,10 @@ function shellResult(h, action) {
     case 'rebase/pre-head': return ok(`${h.head(id)}\n`);
     case 'rebase/post-heads': return ok(`${h.bump(id)}\n${'e'.repeat(40)}\n`);
     case 'merge/merge-commit': return ok(JSON.stringify({ mergeCommit: { oid: mergeSha(id) } }));
-    case 'gate-cmd/gate-cmd': return { code: h.gateCmdCode?.[id]?.length ? h.gateCmdCode[id].shift() : 0, stdout: '', stderr: 'gate output' };
+    case 'gate-cmd/gate-cmd': {
+      const out = h.gateCmdOut?.[id]?.length ? h.gateCmdOut[id].shift() : null;
+      return { code: h.gateCmdCode?.[id]?.length ? h.gateCmdCode[id].shift() : 0, stdout: out?.stdout ?? '', stderr: out?.stderr ?? 'gate output' };
+    }
     default: return ok();
   }
 }
@@ -316,6 +321,12 @@ async function perform(h, action) {
   if (custom !== undefined) return custom;
   // A session ask: no operator in these runs unless a test answers it, so the touch goes to GitHub.
   if (action.kind === 'touch' && action.part === 'ask') return { unattended: true };
+  // A test of why a WP blocks lets its build end: the recover touch is answered (b).
+  if (h.declineRecover && action.step === 'touch' && action.part === 'announce') {
+    const recover = h.state.touches.findLast((touch) => touch.build === 'recover' && touch.status !== 'answered');
+    if (recover) answerCore(h, recover.n, 'b');
+    return {};
+  }
   switch (action.kind) {
     case 'wait': return {};
     case 'author': return author(h, action);
@@ -1148,8 +1159,9 @@ test('ratify (c58b3a51): coverage follows the merge gate (a directory ends in /)
 
 // ---- reset-wp (61d817db) ----
 
-test('reset-wp verb (61d817db): a WP blocked at its gate ends the build; reset --to land is refused while another writer holds the lock, then writes the snapshot, moves the run back to build, logs one recovery row, and every WP merges', async (t) => {
+test('reset-wp verb (61d817db): a WP blocked at its gate ends the build once its recover touch is declined; reset --to land is refused while another writer holds the lock, then writes the snapshot, moves the run back to build, logs one recovery row, and every WP merges', async (t) => {
   const h = harness(t, { config: JSON.stringify({ gateEnv: { DB: 7 } }), wps: RATIFY_WPS });
+  h.declineRecover = true;
   assert.equal(await drive(h), null);
   assert.deepEqual([h.wp('WP-02').state, h.state.phase], ['blocked', 'release']);
   // 5a848b95: WP-02 blocks inside the final `next`, after that call's
@@ -2241,6 +2253,7 @@ test('CI pending (D18): pendingSince is set at the first pending, kept at the sa
   assert.equal(gates.gate.pendingSince, null, 'cleared on ok');
 
   const b = harness(t);
+  b.declineRecover = true;
   b.life = { 'WP-02': 1, 'WP-03': 1 };
   b.checkRuns = pendingRuns(b, 'WP-03', 99);
   b.onPerform = (a, r) => { if (a.wpId === 'WP-03' && a.step === 'gate' && r.code === 6) b.tick(31 * 60000); };
@@ -2953,6 +2966,7 @@ test('liveness (C2-9): an error read between uncertain reads does not reset the 
 
 test('gate cap (C1-2): the third gate-driven amendment blocks the WP with the last gate cause as its reason', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.declineRecover = true;
   h.gateCmdCode = { 'WP-02': [1, 1, 1] };
   assert.equal(await drive(h), null);
   assert.equal(of(h, 'WP-02').filter((a) => a.part === 'amendment').length, 2);
@@ -2960,9 +2974,172 @@ test('gate cap (C1-2): the third gate-driven amendment blocks the WP with the la
   assert.match(h.wp('WP-02').reason, /^the gate command exited 1 at the rebased head: gate output \(after 2 gate amendments\)$/);
 });
 
+// ---- deploy-truth probation H12 and H17 (quests 8710f724, 6f3a6194) ----
+
+const gateEnvOut = (name) => ({ stdout: fixture('gate-env', `${name}.out`), stderr: existsSync(join(FIXTURES, 'gate-env', `${name}.err`)) ? fixture('gate-env', `${name}.err`) : '' });
+// The land rebase finds the base where it was, so the head does not move.
+const keepHead = (h) => (a) => (a.step === 'rebase' && a.part === 'post-heads' ? ok(`${h.head(a.wpId)}\n${'e'.repeat(40)}\n`) : undefined);
+const missingCheck = (h, id) => ({ code: 5, stderr: '', stdout: JSON.stringify({ ok: false, pending: false, blocked: false, head: h.head(id),
+  failures: ['expected check missing at head: db-tests'], causes: ['ci-missing-check'], door: 'two-way', doorProblems: [] }) });
+const gateCmds = (h, id) => of(h, id).filter((a) => a.step === 'gate-cmd' && a.part === 'gate-cmd');
+
+test('H12 (8710f724): a land reset at the head whose gate command passed reuses the pass; a changed command or a moved head runs the suite again', async (t) => {
+  const landTwice = async (change = () => {}, before = () => {}) => {
+    const h = harness(t, { wps: [TWO[0], TWO[1]] });
+    h.answer = keepHead(h);
+    before(h);
+    // The suite passes; the land gate then blocks on a check the PR does not get.
+    await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'gate' && a.part === 'gate' });
+    await recordPending(h, missingCheck(h, 'WP-02'));
+    assert.equal(h.wp('WP-02').state, 'blocked');
+    change(h);
+    build.resetWp(h.state, { wpId: 'WP-02', to: 'land', why: 'ci-checks audit,verify declared for this head' }, h.deps);
+    assert.equal(await drive(h), null);
+    assert.equal(h.wp('WP-02').state, 'merged');
+    return h;
+  };
+  const same = await landTwice();
+  assert.equal(gateCmds(same, 'WP-02').length, 1, 'the suite ran once: the re-land reused its pass at the same head');
+  const reused = same.events().filter((e) => e.step === 'gate-cmd' && e.event === 'gate-cmd-reused');
+  assert.deepEqual(reused.map((e) => e.data.head), [same.head('WP-02')]);
+  const command = await landTwice((h) => writeFileSync(join(h.workshopDir, 'work-packages', '_orchestrator.md'), '# Orchestrator\n\n## Gate Commands\n\nWave 2: node --test\n'));
+  assert.equal(gateCmds(command, 'WP-02').length, 2, 'a changed gate command runs again');
+  const moved = await landTwice((h) => { h.answer = undefined; });
+  assert.equal(gateCmds(moved, 'WP-02').length, 2, 'a rebase that moves the head runs again');
+  // Council r1 L7: a changed gateEnv is a changed key.
+  const env = await landTwice((h) => writeFileSync(join(h.repo, '.workit', 'conduct.json'), JSON.stringify({ ...JSON.parse(fixture('build', 'conduct.json')), gateEnv: { DB: 'other' } })));
+  assert.equal(gateCmds(env, 'WP-02').length, 2, 'a changed gateEnv runs again');
+  // Council r1 M1: a suite that ends with uncommitted changes in the worktree records no pass.
+  const dirty = await landTwice(() => {}, (h) => h.rules.unshift([/^git -C \S+ status --porcelain$/, () => ok(' M src/fix.mjs\n')]));
+  assert.equal(gateCmds(dirty, 'WP-02').length, 2, 'a pass from a dirty worktree is not reused');
+  assert.equal(dirty.wp('WP-02').gateCmdPass ?? null, null);
+});
+
+test('H12 (8710f724, council r1 U3): a land gate that passes at another head than the reused pass sends the WP back to run the suite', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  const keep = keepHead(h);
+  let reused = false;
+  h.answer = (a) => {
+    // After the reuse, the land gate reports a head the suite never ran at.
+    if (reused && a.wpId === 'WP-02' && a.step === 'gate' && a.part === 'gate') {
+      reused = false;
+      return ok(JSON.stringify({ ok: true, pending: false, pendingOn: [], blocked: false, head: sha('f', 2), failures: [], causes: [], door: 'two-way', doorProblems: [] }));
+    }
+    return keep(a);
+  };
+  await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'gate' && a.part === 'gate' });
+  await recordPending(h, missingCheck(h, 'WP-02'));
+  build.resetWp(h.state, { wpId: 'WP-02', to: 'land', why: 'ci-checks declared' }, h.deps);
+  h.onEmit = (a) => { if (a.wpId === 'WP-02' && a.step === 'gate' && h.wp('WP-02').gateCmd?.state === 'reused') reused = true; };
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.equal(gateCmds(h, 'WP-02').length, 2, 'the suite ran again for the head the gate passed at');
+});
+
+test('H17 (6f3a6194, council r1 M2, M3): no recover touch for a WP blocked outside its gate, or one whose squash already landed', async (t) => {
+  // The gate amendment's lane fails its check twice: blocked in the lane, not at the gate.
+  const lane = harness(t, { wps: [TWO[0], TWO[1]] });
+  lane.gateCmdCode = { 'WP-02': [1] };
+  lane.reports = { 'WP-02': ['report-built.md', 'report-no-verdict.md', 'report-no-verdict.md'] };
+  assert.equal(await drive(lane), null);
+  assert.match(lane.wp('WP-02').reason, /^check failed again after an amendment/);
+  assert.deepEqual([lane.state.phase, lane.state.touches.length], ['release', 0]);
+  // The squash landed and the merge-commit read failed.
+  const squashed = harness(t, { wps: [TWO[0], TWO[1]] });
+  squashed.answer = (a) => (a.step === 'merge' && a.part === 'merge-commit' ? ok('{}') : undefined);
+  assert.equal(await drive(squashed), null);
+  assert.deepEqual([squashed.wp('WP-02').state, squashed.wp('WP-02').squashed, squashed.state.touches.length], ['blocked', true, 0]);
+});
+
+test('H17 (6f3a6194): a gate command whose every failure is a timeout retries after a quiet-host probe, not as a gate amendment; one assertion failure among the timeouts still amends', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.gateCmdCode = { 'WP-02': [1, 1, 0] };
+  h.gateCmdOut = { 'WP-02': [gateEnvOut('vitest-timeouts'), gateEnvOut('node-timeouts')] };
+  // Busy at the first probe; quiet after a wait.
+  h.quiet = [{ code: 1, stdout: JSON.stringify({ quiet: false, busy: [95, 90, 40], maxBusy: 30 }), stderr: '' }];
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.equal(of(h, 'WP-02').filter((a) => a.part === 'amendment').length, 0, 'no gate amendment');
+  assert.equal(gateCmds(h, 'WP-02').length, 3);
+  assert.equal(of(h, 'WP-02').filter((a) => a.part === 'quiet').length, 3, 'a busy probe, a re-probe after its wait, a probe before the second retry');
+  const retries = h.events().filter((e) => e.event === 'gate-env-retry');
+  assert.deepEqual(retries.map((e) => [e.data.runner, e.data.failures, e.data.n]), [['vitest', 2, 1], ['node', 3, 1]]);
+
+  const mixed = harness(t, { wps: [TWO[0], TWO[1]] });
+  mixed.gateCmdCode = { 'WP-02': [1, 0] };
+  mixed.gateCmdOut = { 'WP-02': [gateEnvOut('vitest-mixed')] };
+  assert.equal(await drive(mixed), null);
+  assert.equal(of(mixed, 'WP-02').filter((a) => a.part === 'amendment').length, 1, 'the assertion failure is the lane\'s to fix');
+  assert.ok(!of(mixed, 'WP-02').some((a) => a.part === 'quiet'));
+});
+
+test('H17 (6f3a6194): environment retries are bounded per head: the third all-timeout failure at one head is a gate amendment', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.answer = keepHead(h);
+  h.gateCmdCode = { 'WP-02': [1, 1, 1, 0] };
+  h.gateCmdOut = { 'WP-02': [1, 2, 3].map(() => gateEnvOut('vitest-timeouts')) };
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.equal(of(h, 'WP-02').filter((a) => a.part === 'amendment').length, 1);
+  assert.match(h.wp('WP-02').gateFixes[0].reason, /every failure a timeout, after 2 environment retries at this head/);
+  assert.equal(of(h, 'WP-02').filter((a) => a.part === 'quiet').length, 2);
+  // Council r1 U4: the probe outlasts a foreground shell.
+  assert.ok(of(h, 'WP-02').filter((a) => a.part === 'quiet').every((a) => a.background === true));
+
+  // Council r1 M5: each retry rebases; a base that moves every time still stops at 4 per WP.
+  const moving = harness(t, { wps: [TWO[0], TWO[1]] });
+  moving.gateCmdCode = { 'WP-02': [1, 1, 1, 1, 1, 0] };
+  moving.gateCmdOut = { 'WP-02': [1, 2, 3, 4, 5].map(() => gateEnvOut('vitest-timeouts')) };
+  assert.equal(await drive(moving), null);
+  assert.equal(of(moving, 'WP-02').filter((a) => a.part === 'quiet').length, 4);
+  assert.match(moving.wp('WP-02').gateFixes[0].reason, /every failure a timeout, after 4 environment retries for WP-02/);
+});
+
+test('H17 (6f3a6194, council r1 S2): a WP probing a busy host for ~48 minutes raises no stall alarm', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.gateCmdCode = { 'WP-02': [1, 0] };
+  h.gateCmdOut = { 'WP-02': [gateEnvOut('vitest-timeouts')] };
+  const busy = { code: 1, stdout: JSON.stringify({ quiet: false, busy: [95, 90, 90], maxBusy: 30 }), stderr: '' };
+  h.quiet = [busy, busy, busy, busy, busy, busy];
+  // Each probe samples for 3 minutes and its wait is 5 more.
+  h.onPerform = (a) => { if (a.part === 'quiet') h.tick(8 * 60000); };
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.equal(of(h, 'WP-02').filter((a) => a.part === 'quiet').length, 6);
+  assert.deepEqual(h.events().filter((e) => e.event === 'stalled').map((e) => e.data.wpId), []);
+  assert.ok(h.events().some((e) => e.event === 'quiet-not-reached' && e.data.probes === 6));
+});
+
+test('H17 (6f3a6194): a WP blocked at its gate holds the build on a recover touch instead of ending it; (a) re-lands it and its deferred dependent follows; (b) ends the build', async (t) => {
+  const wps = [TWO[0], TWO[1], { id: 'WP-03', files: ['lib/land.mjs'], dependsOn: ['WP-02'] }];
+  const h = harness(t, { wps });
+  h.gateCmdCode = { 'WP-02': [1, 1, 1] };
+  const held = await drive(h, { until: (a) => a.step === 'touch' });
+  assert.ok(held, 'the build ended without a recover touch');
+  assert.deepEqual([h.state.phase, h.wp('WP-02').state, h.wp('WP-03').state], ['build', 'blocked', 'deferred']);
+  const touch = h.state.touches.at(-1);
+  assert.deepEqual([touch.wpId, touch.build], ['WP-02', 'recover']);
+  assert.match(touch.question, /WP-02 is blocked at its gate: the gate command exited 1 at the rebased head: gate output \(after 2 gate amendments\)/);
+  assert.match(touch.question, /WP-03 waits on it/);
+  h.state.pending = null;
+  answerCore(h, touch.n, 'a');
+  assert.equal(await drive(h), null);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
+  assert.deepEqual(h.events().filter((e) => e.event === 'wp-reset').map((e) => [e.data.wpId, e.data.to, e.source, e.data.undeferred]), [['WP-02', 'land', 'touch', ['WP-03']]]);
+
+  const ended = harness(t, { wps });
+  ended.gateCmdCode = { 'WP-02': [1, 1, 1] };
+  await drive(ended, { until: (a) => a.step === 'touch' });
+  ended.state.pending = null;
+  answerCore(ended, ended.state.touches.at(-1).n, 'b');
+  assert.equal(await drive(ended), null);
+  assert.deepEqual([ended.state.phase, ended.wp('WP-02').state, ended.wp('WP-03').state, ended.state.touches.length], ['release', 'blocked', 'deferred', 1]);
+});
+
 test('no CI at head (C1-2): with CI the gate waits out the window, then blocks "CI did not complete at head"; with none it blocks at once; never an amendment', async (t) => {
   const noRuns = [/^gh api repos\/o\/r\/commits\/\w+\/check-runs/, () => ({ code: 1, stdout: '', stderr: 'gh: No commit found for SHA (HTTP 422)' })];
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.declineRecover = true;
   h.rules.unshift(noRuns);
   h.onPerform = (a) => { if (a.part === 'gate') h.tick(10 * 60000); };
   assert.equal(await drive(h), null);
@@ -2972,6 +3149,7 @@ test('no CI at head (C1-2): with CI the gate waits out the window, then blocks "
   assert.equal(h.trace.filter((a) => a.part === 'gate').length, 4, 'gated at 0, 10, 20 and 30 minutes');
   assert.equal(h.state.mergeLock, null);
   const none = harness(t, { wps: [TWO[0], TWO[1]] });
+  none.declineRecover = true;
   none.state.intent.ciWorkflows = 0;
   none.rules.unshift(noRuns);
   assert.equal(await drive(none), null);
@@ -3358,6 +3536,7 @@ test('council guard rows (C2-6): an answered escalation on C1-2 is recorded as a
 test('no CI (C2-8): an unread workflow count waits, then blocks as unknown; the window is 30 minutes from the first absent-or-pending read; hold authority holds', async (t) => {
   const noRuns = [/^gh api repos\/o\/r\/commits\/\w+\/check-runs/, () => ({ code: 1, stdout: '', stderr: 'gh: No commit found for SHA (HTTP 422)' })];
   const unknown = harness(t, { wps: [TWO[0], TWO[1]] });
+  unknown.declineRecover = true;
   unknown.state.intent.ciWorkflows = null;
   unknown.rules.unshift(noRuns);
   unknown.onPerform = (a) => { if (a.part === 'gate') unknown.tick(10 * 60000); };
@@ -3366,6 +3545,7 @@ test('no CI (C2-8): an unread workflow count waits, then blocks as unknown; the 
   assert.equal(unknown.trace.filter((a) => a.part === 'gate').length, 4);
 
   const empty = harness(t, { wps: [TWO[0], TWO[1]] });
+  empty.declineRecover = true;
   empty.checkRuns = () => JSON.stringify({ total_count: 0, check_runs: [] });
   const times = [];
   empty.onPerform = (a) => {
@@ -3389,6 +3569,7 @@ test('no CI (C2-8): an unread workflow count waits, then blocks as unknown; the 
 
 test('gate cap on the landing route (C2-10): repeated lane-fixable land gate failures block at the third', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.declineRecover = true;
   h.unresolved = () => true;
   assert.equal(await drive(h), null);
   assert.equal(of(h, 'WP-02').filter((a) => a.part === 'amendment').length, 2);
