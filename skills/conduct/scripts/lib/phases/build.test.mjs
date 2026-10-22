@@ -1122,6 +1122,44 @@ test('cite (61f67554): a declined ruling keeps the WP held and lets the build en
   assert.equal(h.events().filter((e) => e.event === 'cite-declined').length, 1);
 });
 
+// ff3c8a76 (H18): a gate amendment that answered review threads has rows of its
+// own, in its `## Amendment <n>` table; a tail commit can be cited on one.
+test('cite (ff3c8a76): a fixed row of a gate amendment\'s table is a cite target; the cited commit joins that amendment\'s gate-fix commits, not the review\'s rows', async (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  heldOnUncited(h);
+  const ruling = await drive(h, { until: (a) => a.step === 'cite' });
+  const wp = h.wp('WP-02');
+  wp.gateFixes = [{ from: '1'.repeat(40), to: '2'.repeat(40), reason: 'unresolved review threads', n: 3 }];
+  const report = join(h.runDir, 'lane-wp-02-report.md');
+  appendFileSync(report, ['', '## Amendment 3', '', '| Comment | Verdict | Evidence | Commit |', '|---|---|---|---|',
+    '| `4337483247` | fixed | control A3-R1 red then green | `3333333` |', '| `4337483264` | refuted | the trigger reads its own clause | — |', ''].join('\n'));
+  writeRuling(ruling, { cite: { [UNCITED]: '4337483264' }, why: 'x' });
+  await assert.rejects(recordPending(h, {}), { code: 2, message: /4337483264 is not a fixed row/ });
+  writeRuling(ruling, { cite: { [UNCITED]: '4337483247' }, why: 'the beat-thread fix\'s second commit' });
+  await recordPending(h, {});
+  assert.deepEqual([wp.state, wp.stage], ['gate', 'land']);
+  assert.deepEqual(wp.gateFixes[0].cited, [UNCITED]);
+  assert.equal(wp.reviews.at(-1).verdicts.find((row) => row.comment === 'C1-1').commit, '1111111', 'the review\'s own rows are unchanged');
+  assert.deepEqual(h.events().filter((e) => e.event === 'cited').map((e) => e.data.shas), [{ [UNCITED]: '4337483247' }]);
+});
+
+// Council C1 M3 and U2: a thread two gate amendments answered is cited on the
+// later one, as a later table row replaces an earlier one; a ruling may write
+// the id as the report shows it (`#`, spaces).
+test('cite (ff3c8a76 C1 M3/U2): a row id two gate amendments share cites the later one; "#<id>" names the same row', async (t) => {
+  const h = harness(t, { wps: RATIFY_WPS });
+  heldOnUncited(h);
+  const ruling = await drive(h, { until: (a) => a.step === 'cite' });
+  const wp = h.wp('WP-02');
+  wp.gateFixes = [{ from: '1'.repeat(40), to: '2'.repeat(40), reason: 'threads at 1', n: 3 }, { from: '2'.repeat(40), to: '4'.repeat(40), reason: 'threads at 2', n: 4 }];
+  const table = (n, commit) => ['', `## Amendment ${n}`, '', '| Comment | Verdict | Evidence | Commit |', '|---|---|---|---|', `| \`4337483247\` | fixed | control red then green | \`${commit}\` |`, ''];
+  appendFileSync(join(h.runDir, 'lane-wp-02-report.md'), [...table(3, '3333333'), ...table(4, '5555555')].join('\n'));
+  writeRuling(ruling, { cite: { [UNCITED]: ' #4337483247' }, why: 'the second fix of the same thread' });
+  await recordPending(h, {});
+  assert.deepEqual(wp.gateFixes.map((fix) => fix.cited ?? null), [null, [UNCITED]]);
+  assert.deepEqual([wp.state, wp.stage], ['gate', 'land']);
+});
+
 test('ratify verb (c58b3a51): extends a live WP\'s Files with the ruling; refuses a path another unfinished WP owns (exit 5), a missing --why (exit 2) and a path outside the repo (exit 2)', async (t) => {
   const h = harness(t, { wps: RATIFY_WPS });
   await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'wait' });
@@ -2568,6 +2606,8 @@ test('gate command: exit 1 at the rebased head → an amendment and no merge act
   const wp = h.wp('WP-02');
   assert.deepEqual(wp.gateFixes.map((fix) => fix.from), [wp.rebases.at(-1).to]);
   assert.equal(wp.amendment.since, wp.rebases.at(-1).to);
+  // ff3c8a76: and the number of the report section whose table answers it.
+  assert.deepEqual([wp.gateFixes[0].n, wp.amendment.kind], [wp.amendment.n, 'gate']);
 });
 
 test('gate command after a no-op rebase: the amended head gets its delta review (the fixed land.mjs predicate), never a block', async (t) => {

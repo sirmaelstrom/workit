@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   tierFor, tierDecision, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions as mergeActionsWith, recordLandStep as recordLandStepWith, runLandVerb,
@@ -88,7 +88,7 @@ const TWO_WAY = '## Merge danger\n\nDoor: two-way\nBlast radius: the fixture WP\
 // row; without it, a `renames` pair collapses to its destination (git's default).
 function gateExec(o = {}) {
   const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, actionRuns = NO_WORKFLOW_RUNS, threads = 0, inflight = 0,
-    config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], revLists = {}, diffQuiet = 0, patchIds = {}, diffs = {}, pr = {},
+    config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], revLists = {}, logs = {}, diffQuiet = 0, patchIds = {}, diffs = {}, pr = {},
     bootstrap = null, bootStatus = ok('') } = o;
   const calls = [];
   const exec = (program, args, options = {}) => {
@@ -127,6 +127,8 @@ function gateExec(o = {}) {
     if (program === 'git' && args[2] === 'patch-id') return ok(Object.hasOwn(patchIds, options.input) ? patchIds[options.input] : `p0 ${sha('0')}\n`);
     // A range named in `revLists` answers its own commits; any other range answers the tail's.
     if (program === 'git' && args[2] === 'rev-list') return ok((revLists[args[3]] ?? tailCommits).join('\n'));
+    // A rebase record's per-commit patches: none unless a test names the range.
+    if (program === 'git' && args[2] === 'log') return ok(logs[args.at(-1)] ?? '');
     throw new Error(`unexpected exec: ${program} ${args.join(' ')}`);
   };
   exec.calls = calls;
@@ -596,6 +598,9 @@ test('f424b70b gate-fix inspection: the inspection carries the gate failure it r
   const later = makeWp({ pr: { number: 7, head: D2 }, reviews: [{ ...anchor, head: C }], gateFixes: [{ from: B, to: C, reason }] });
   const tail = { head: D2, tailFiles: ['lib/x.mjs'], tailCommits: [D2], revLists: { [`${B}..${C}`]: [C] } };
   assert.deepEqual(gate(makeState(), later, tail).uncited, [D2], 'D is neither a fixed row nor the gate fix');
+  // ff3c8a76: cited on one of that gate amendment's rows, D is one of its commits, read against its failure.
+  const cited = gate(makeState(), makeWp({ ...later, gateFixes: [{ from: B, to: C, reason, n: 3, cited: [D2] }] }), tail);
+  assert.deepEqual([cited.causes, cited.uncited, cited.inspect?.gateFailures], [['inspect'], undefined, [reason]], cited.failures.join('; '));
 
   // A second gate failure R2 fixed by C..HEAD after the review at C: the inspector reads only R2.
   const second = makeWp({ reviews: [{ ...anchor, head: C }], gateFixes: [{ from: B, to: C, reason }, { from: C, reason: 'R2: the land gate saw red CI at the head' }] });
@@ -1582,6 +1587,143 @@ test('rebaseActions on a worktree a review lens left detached at the PR head: th
   assert.notEqual(to, prHead, 'the branch moved onto the new base');
   assert.equal(git(origin, 'rev-parse', `refs/heads/${branch}`), to, 'the pushed branch is the post-rebase head');
   assert.equal(git(wt, 'rev-parse', '--symbolic-full-name', 'HEAD'), `refs/heads/${branch}`, 'the worktree is back on the branch');
+});
+
+// Council C1 L6: an anchor whose image the rebase changed carries no coverage;
+// the walk sends the WP to a full review, as for the head's own rebase.
+test('rebase coverage (6f3a6194 C1 L6): a non-equivalent anchor image is a full review, not coverage', () => {
+  const [A, A2, H1, H2] = [sha('4'), sha('5'), sha('6'), sha('7')];
+  const anchor = { round: 2, scope: 'delta', since: sha('f'), head: A, reviewId: 'review-2', verdicts: [] };
+  const rebase = provedRebase({ from: H1, to: H2, equivalent: true, anchors: [{ from: A, to: A2, oldBase: BASE, newBase: BASE_TIP, equivalent: false }] });
+  const out = gate(makeState(), makeWp({ pr: { number: 7, head: sha('8') }, reviews: [anchor], rebases: [rebase] }), { head: sha('8'), tailFiles: ['lib/x.mjs'], tailCommits: [sha('8')] });
+  assert.deepEqual([out.causes, out.needsFullReview], [['full-review'], true], out.failures.join('; '));
+});
+
+// The deploy-truth WP-04 shape (6f3a6194 H17, ff3c8a76 H18), on a real
+// repository: a full review, a delta review (the anchor), the commit its fixed
+// row cites, a gate amendment's two commits, a land rebase onto a main that
+// moved, then a second gate amendment on top of the rebased head.
+function buriedAnchor(t) {
+  const root = mkdtempSync(join(tmpdir(), 'conduct-rebase-anchors-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const real = (args, options = {}) => {
+    const r = spawnSync('git', args, { encoding: 'utf8', input: options.input });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+  const origin = join(root, 'origin.git');
+  const seed = join(root, 'seed');
+  const wt = join(root, 'lane');
+  const branch = 'conduct/fixture/wp-01';
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+  const configure = (cwd) => { for (const [key, value] of [['user.name', 't'], ['user.email', 't@t'], ['core.autocrlf', 'false']]) git(cwd, 'config', key, value); };
+  const commit = (cwd, file, text, message = file) => {
+    mkdirSync(dirname(join(cwd, file)), { recursive: true });
+    writeFileSync(join(cwd, file), text);
+    git(cwd, 'add', file);
+    git(cwd, 'commit', '-q', '-m', message);
+    return git(cwd, 'rev-parse', 'HEAD');
+  };
+  // No line-ending conversion: a checkout converted under the host's
+  // core.autocrlf would read as unstaged changes once it is turned off.
+  execFileSync('git', ['clone', '-q', '-c', 'core.autocrlf=false', origin, seed], { stdio: 'ignore' });
+  configure(seed);
+  commit(seed, 'base.txt', 'base\n');
+  git(seed, 'push', '-q', 'origin', 'HEAD:main');
+  execFileSync('git', ['clone', '-q', '-c', 'core.autocrlf=false', origin, wt], { stdio: 'ignore' });
+  configure(wt);
+  git(wt, 'switch', '-q', '-c', branch);
+  const oldBase = git(wt, 'rev-parse', 'HEAD');
+  const full = commit(wt, 'lib/x.mjs', 'one\n', 'full');
+  const anchor = commit(wt, 'lib/x.mjs', 'one\ntwo\n', 'anchor');
+  const fixed = commit(wt, 'lib/fix.mjs', 'fix\n', 'fixed');
+  commit(wt, 'lib/x.test.mjs', 'test a\n', 'gate-a');
+  const gateB = commit(wt, 'lib/fix.mjs', 'fix\nfix b\n', 'gate-b');
+  git(wt, 'push', '-q', 'origin', branch);
+
+  const state = makeState();
+  const wp = makeWp({
+    lane: { worktree: wt, branch, base: oldBase }, pr: { number: 7, head: gateB },
+    reviews: [{ round: 1, scope: 'full', head: full, verdicts: [] },
+      { round: 2, scope: 'delta', since: full, head: anchor, verdicts: [{ comment: 'C2-1', verdict: 'fixed', evidence: 'red then green', commit: fixed.slice(0, 8) }] }],
+    gateFixes: [{ from: fixed, to: gateB, reason: 'unresolved review threads', n: 3 }],
+  });
+  const exec = (program, args, options) => (program === 'git' ? real(args, options) : gateExec({ head: wp.pr.head })(program, args, options));
+  // main moves (a sibling merges), then the land rebase runs exactly as conduct queues it.
+  const landRebase = (sibling) => {
+    commit(seed, sibling, `merged ${sibling}\n`);
+    git(seed, 'push', '-q', 'origin', 'HEAD:main');
+    const before = wp.pr.head;
+    for (const action of rebaseActions(state, wp).filter((a) => a.kind === 'shell' && a.part !== 'ready')) {
+      const r = exec(action.command[0], action.command.slice(1));
+      const out = recordLandStep(state, wp, action, r, { exec, now: () => NOW });
+      // A conflicted rebase also continues (to its abort), with a reason.
+      assert.deepEqual([out.outcome, out.reason], ['continue', null], `${action.part}: ${r.stderr}`);
+      const { queue, mergeLock, retries, ...patch } = out.patch;
+      Object.assign(wp, patch);
+    }
+    assert.notEqual(wp.pr.head, before, 'the land rebase moved the branch');
+  };
+  // A gate amendment from the current head: one commit, pushed, its range closed.
+  const amend = (text, message, n) => {
+    wp.gateFixes.push({ from: wp.pr.head, reason: 'unresolved review threads', n });
+    wp.pr.head = commit(wt, 'lib/x.mjs', text, message);
+    git(wt, 'push', '-q', 'origin', branch);
+    wp.gateFixes.at(-1).to = wp.pr.head;
+  };
+  const image = (message) => git(wt, 'log', '--format=%H', `--grep=^${message}$`, `${wp.rebases.at(-1).newBase}..${wp.pr.head}`);
+  return { state, wp, exec, anchor, gateB, image, landRebase, amend, get head() { return wp.pr.head; }, gate: () => gateCheck(state, wp, { exec, now: () => NOW }) };
+}
+
+// The WP-04 run: one land rebase, then gate amendment 4 on top of the rebased head.
+function rebasedBelowAmendments(t) {
+  const s = buriedAnchor(t);
+  s.landRebase('sibling.txt');
+  s.amend('one\ntwo\nthree\n', 'gate-c', 4);
+  return s;
+}
+
+test('rebase coverage (6f3a6194): a land rebase records its image of every reviewed head it moved, so the walk crosses it from an anchor below later amendments', (t) => {
+  const s = rebasedBelowAmendments(t);
+  const out = s.gate();
+  assert.doesNotMatch(out.failures.join('\n'), /through no recorded rebase/);
+  assert.match(out.failures.join('\n'), new RegExp(`tail ${s.image('anchor')}\\.\\.${s.head}`), out.failures.join('\n'));
+  const moved = s.wp.rebases.at(-1).anchors.map((entry) => [entry.from, entry.to, entry.equivalent]);
+  assert.ok(moved.some(([from, to, equivalent]) => from === s.anchor && to === s.image('anchor') && equivalent), JSON.stringify(moved));
+});
+
+test('rebase citation (ff3c8a76): a land rebase\'s patch-identical image of a cited commit, or of a gate amendment\'s commit, is cited; the tail goes to its inspection, then passes', (t) => {
+  const s = rebasedBelowAmendments(t);
+  const out = s.gate();
+  assert.deepEqual([out.causes, out.uncited], [['inspect'], undefined], out.failures.join('\n'));
+  assert.equal(out.inspect.tail, `${s.image('anchor')}..${s.head}`);
+  s.wp.inspections = [{ ...out.inspect, verdict: 'addresses-findings' }];
+  const passed = s.gate();
+  assert.deepEqual([passed.ok, passed.failures, passed.unreviewedTail], [true, [], `${s.image('anchor')}..${s.head} (gate-fix)`]);
+});
+
+// Council C1 M2: at the rebased head itself, before any later amendment, the
+// walk maps the head back and reads the tail on the pre-rebase line, where the
+// gate amendment's own range still lies.
+test('rebase citation (ff3c8a76 C1 M2): at the rebased head, a gate amendment\'s range is read on the line the tail is on', (t) => {
+  const s = buriedAnchor(t);
+  s.landRebase('sibling.txt');
+  const out = s.gate();
+  assert.deepEqual([out.causes, out.uncited], [['inspect'], undefined], out.failures.join('\n'));
+  assert.equal(out.inspect.tail, `${s.anchor}..${s.gateB}`);
+});
+
+// Council C1 M1: a second moving rebase, with an amendment between the two and
+// one after, still crosses from the anchor's image of the first rebase.
+test('rebase coverage (6f3a6194 C1 M1): a second moving rebase records the image of the anchor\'s first image', (t) => {
+  const s = rebasedBelowAmendments(t);
+  s.landRebase('sibling-2.txt');
+  s.amend('one\ntwo\nthree\nfour\n', 'gate-d', 5);
+  const out = s.gate();
+  assert.deepEqual([out.causes, out.uncited], [['inspect'], undefined], out.failures.join('\n'));
+  assert.equal(out.inspect.tail, `${s.image('anchor')}..${s.head}`);
+  s.wp.inspections = [{ ...out.inspect, verdict: 'addresses-findings' }];
+  assert.equal(s.gate().ok, true);
 });
 
 test('the ready step: an already-ready PR continues; any other failure blocks', () => {

@@ -21,7 +21,7 @@
 // emitted action's wpId and, on a yielding wait, `yield: true`.
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
-import { ConductError, appendEvent } from '../state.mjs';
+import { ConductError, appendEvent, laneBase } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, SLOT_WAIT, dispatchable, filesDisjoint, holdsSlot, laneOccupied, normalizePath, slotHolders } from '../schedule.mjs';
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
@@ -359,7 +359,7 @@ function briefAction(state, wp, deps) {
     kind: 'author', step: 'brief', part: 'brief', template, outPath, expects: { type: 'file' },
     slots: {
       '<lane id>': lane.name, '<quest id>': wp.questId ?? 'none', '<lane contract path>': contractPath(state), '<report path>': lane.reportPath,
-      '<worktree path>': wp.lane?.worktree ?? lane.worktree, '<branch name>': wp.lane?.branch ?? lane.branch, '<base sha>': wp.lane?.base ?? '',
+      '<worktree path>': wp.lane?.worktree ?? lane.worktree, '<branch name>': wp.lane?.branch ?? lane.branch, '<base sha>': laneBase(wp) ?? '',
       '<wp spec path>': wp.specPath ?? '', '<runtime exercise>': wp.runtimeExercise || '',
       '<skills>': (wp.skills ?? []).length ? wp.skills.join(', ') : 'none',
       '<visual rules>': (wp.visualRules ?? []).length ? `${wp.visualRules.join(', ')} of ${state.design?.source ?? 'the spec\'s ## Design direction'}` : 'none',
@@ -495,30 +495,48 @@ function applyRatify(state, wp, paths, why, deps) {
 // The fixed rows of the WP's latest review: the rows a tail commit can be cited on.
 const fixedRows = (wp) => ((wp.reviews ?? []).at(-1)?.verdicts ?? []).filter((row) => row.verdict === 'fixed');
 
+// A gate amendment that answered review threads has rows of its own: the
+// fixed rows of its `## Amendment <n>` table in the lane's report. They are
+// cite targets beside the latest review's rows.
+function gateRows(state, wp, deps) {
+  const fixes = (wp.gateFixes ?? []).filter((fix) => Number.isInteger(fix?.n));
+  if (!fixes.length) return [];
+  const report = readText(deps, laneLayout(state, wp).reportPath) ?? '';
+  return fixes.flatMap((fix) => parseAmendmentTable(report, { only: fix.n })
+    .filter((row) => row.verdict === 'fixed').map((row) => ({ comment: String(row.comment).trim().replace(/^#/, ''), fix })));
+}
+
 // A WP held only because its tail has commits no fixed row cites (a fix that
 // took a second commit) is the conductor's ruling, not the end of the build.
 function citeAction(state, wp) {
   const outPath = join(state.runDir, 'rulings', `${lower(wp)}-cite-${(wp.cited ?? []).length + 1}.json`);
   const shas = [...(wp.heldUncited ?? [])];
   const rows = fixedRows(wp).map((row) => `${row.comment} (${row.commit})`).join(', ') || 'none';
+  const gates = (wp.gateFixes ?? []).filter((fix) => Number.isInteger(fix?.n)).map((fix) => `## Amendment ${fix.n}`);
+  const gateText = gates.length ? ` A fixed row of a gate amendment's table (${gates.join(', ')} in ${laneLayout(state, wp).reportPath}) is a target too.` : '';
   return {
     kind: 'author', step: 'cite', part: 'ruling', outPath, shas, expects: { type: 'file' },
-    instruction: `${wp.id} is held: its tail has commits no fixed row of the latest review cites: ${shas.join(', ')}. Read each (\`git -C ${wp.lane.worktree} show <sha>\`). The fixed rows are ${rows}. Rule: write ${outPath} = { "cite": { "<sha>": "<the fixed row's comment id>", … }, "why": "<why each commit belongs to that fix>" }, citing every sha listed, to add them to those rows and send ${wp.id} back to the gate, where the post-cap inspection reads the tail again; or { "cite": false, "why": "<why not>" } to keep it held (create the directory). Record {}.`,
+    instruction: `${wp.id} is held: its tail has commits no fixed row of the latest review cites: ${shas.join(', ')}. Read each (\`git -C ${wp.lane.worktree} show <sha>\`). The fixed rows are ${rows}.${gateText} Rule: write ${outPath} = { "cite": { "<sha>": "<the fixed row's comment id>", … }, "why": "<why each commit belongs to that fix>" }, citing every sha listed, to add them to those rows and send ${wp.id} back to the gate, where the post-cap inspection reads the tail again; or { "cite": false, "why": "<why not>" } to keep it held (create the directory). Record {}.`,
   };
 }
 
-// Appends each cited sha to its fixed row's Commit cell. Every held sha must
-// be cited, on a fixed row of the latest review.
+// Appends each cited sha to its fixed row's Commit cell, or, for a gate
+// amendment's row, to that amendment's commits. Every held sha must be cited,
+// on a fixed row of the latest review or of a gate amendment.
 function applyCite(state, wp, action, cite, why, deps) {
   const shas = action.shas ?? [];
   const entries = Object.entries(cite);
   const rows = fixedRows(wp);
+  const gates = gateRows(state, wp, deps);
   const cited = new Map();
-  for (const [sha, comment] of entries) {
+  for (const [sha, raw] of entries) {
     const held = shas.find((full) => /^[0-9a-f]{7,40}$/i.test(sha) && full.toLowerCase().startsWith(sha.toLowerCase()));
     if (!held) throw new ConductError(2, `cite ruling ${action.outPath}: ${sha} is not one of the held commits ${shas.join(', ')}`);
-    if (!rows.some((row) => row.comment === String(comment))) {
-      throw new ConductError(2, `cite ruling ${action.outPath}: ${comment} is not a fixed row of ${wp.id}'s latest review (${rows.map((row) => row.comment).join(', ') || 'none'})`);
+    // As the report shows it: `#4337483247` names row 4337483247.
+    const comment = String(raw).trim().replace(/^#/, '');
+    if (!rows.some((row) => row.comment === comment) && !gates.some((row) => row.comment === comment)) {
+      const named = [...rows, ...gates].map((row) => row.comment).join(', ') || 'none';
+      throw new ConductError(2, `cite ruling ${action.outPath}: ${comment} is not a fixed row of ${wp.id}'s latest review or of a gate amendment (${named})`);
     }
     cited.set(held, String(comment));
   }
@@ -529,6 +547,14 @@ function applyCite(state, wp, action, cite, why, deps) {
     const add = [...cited].filter(([, comment]) => comment === row.comment && row.verdict === 'fixed').map(([sha]) => sha);
     return add.length ? { ...row, commit: [row.commit, ...add].filter(Boolean).join(',') } : row;
   });
+  // A review row of the same id wins, then the latest gate amendment's (a later
+  // table row replaces an earlier one); the land gate counts a gate row's
+  // commits as that amendment's (land.mjs gateFixCommits).
+  for (const [sha, comment] of cited) {
+    if (rows.some((row) => row.comment === comment)) continue;
+    const { fix } = gates.findLast((row) => row.comment === comment);
+    fix.cited = [...new Set([...(fix.cited ?? []), sha])];
+  }
   wp.cited = [...(wp.cited ?? []), { shas: Object.fromEntries(cited), why, at: deps.timestamp() }];
   appendEvent(state, deps, { event: 'cited', data: { wpId: wp.id, shas: Object.fromEntries(cited), why } });
   wp.heldUncited = null;
@@ -1130,7 +1156,9 @@ function gateAmend(state, wp, deps, reason) {
   wp.gateAmends = (wp.gateAmends ?? 0) + 1;
   // The land gate reads this amendment's commits (from..head) as a gate-fix tail, not as unreviewed work.
   wp.gateFixes = [...(wp.gateFixes ?? []), { from: wp.pr?.head ?? null, reason }];
-  return startAmendment(state, wp, deps, { kind: 'gate', reason });
+  startAmendment(state, wp, deps, { kind: 'gate', reason });
+  // The report section whose table answers it: its rows are cite targets.
+  wp.gateFixes.at(-1).n = wp.amendment.n;
 }
 
 // A blocked WP keeps only its owed cleanup (the lane's stop); failed work is

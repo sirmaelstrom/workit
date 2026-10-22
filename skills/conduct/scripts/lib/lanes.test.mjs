@@ -6,6 +6,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   allowedMissing, chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
 } from './lanes.mjs';
@@ -937,6 +938,43 @@ test('LANE_MODELS: a claude opus lane carries claude-opus-5-5; no production mod
   assert.ok(production.some((path) => path.endsWith('lanes.mjs')));
   const naming = production.filter((path) => /claude-opus-5-5|claude-sonnet-5-5|gpt-6\.1-sol/.test(readFileSync(path, 'utf8')));
   assert.deepEqual(naming.map((path) => path.slice(SCRIPTS.length + 1).replace(/\\/g, '/')), ['lib/adapters.mjs']);
+});
+
+// 7df6d47c (H16): after a land rebase onto a main that merged a sibling WP, the
+// evidence checks read the WP's own diff, from the rebase's new base, and not
+// the sibling's merged tests as the lane's own.
+test('exec: lane check after a land rebase diffs from the rebase\'s new base, not the stale lane.base (7df6d47c)', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'workit-lanes-rebased-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const real = (args) => {
+    const r = spawnSync('git', args, { encoding: 'utf8' });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git('init', '-q', '-b', 'main');
+  for (const [key, value] of [['user.name', 't'], ['user.email', 't@t'], ['core.autocrlf', 'false']]) git('config', key, value);
+  const commit = (file, text) => {
+    writeFileSync(join(root, file), text);
+    git('add', file);
+    git('commit', '-q', '-m', file);
+    return git('rev-parse', 'HEAD');
+  };
+  const oldBase = commit('base.txt', 'base\n');
+  git('switch', '-q', '-c', 'conduct/demo/wp-00');
+  const from = commit('a.mjs', 'export const a = 1;\n');
+  git('switch', '-q', 'main');
+  const newBase = commit('sibling.test.mjs', "test('a sibling WP\\'s merged test', () => {});\n");
+  git('rebase', '-q', 'main', 'conduct/demo/wp-00');
+  const to = git('rev-parse', 'HEAD');
+  const f = lanes(t, { wpLane: { worktree: root, branch: 'conduct/demo/wp-00', base: oldBase } });
+  f.wp.rebases = [{ from, to, oldBase, newBase, equivalent: true }];
+  writeFileSync(join(f.runDir, 'state.json'), JSON.stringify(f.state));
+  const table = f.deps.exec;
+  f.deps.exec = (program, args) => (program === 'git' ? real(args) : table(program, args));
+  f.report(report());
+  const result = await runLaneVerb('check', { runDir: f.runDir, wpId: 'WP-00', flags: {} }, f.deps);
+  const out = JSON.parse(result.out);
+  assert.deepEqual([result.code, out.failures], [0, []], out.failures.join('; '));
 });
 
 test('exec: lane check passes a good report and fails a missing Debrief heading or runtime exercise', async (t) => {

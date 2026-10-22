@@ -23,6 +23,12 @@ rebase. Patch identity and unchanged parent files must both agree. An unproved
 prefix requires a new full review; a dirty or mismatched worktree blocks it.
 Every reset snapshots state and records its reason.
 
+A land rebase records each moved commit's image by patch-id, and proves the
+image of every review head it moved, so a later gate crosses it from a reviewed
+head that amendments since buried, with no hand-recorded image. The WP's own
+diff starts at the last rebase's new base; `lane.base` stays the dispatch
+record, so leave it as it is.
+
 When GitHub returns 403 or 404 reading required checks and a WP deliberately
 renames CI jobs, use:
 

@@ -40,7 +40,7 @@ import { LANE_MODELS, laneModel } from './adapters.mjs';
 import { resolveProgram, shellArgv } from './exec.mjs';
 import { pinnedConfig } from './repo-config.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
-import { ConductError, STEPS, STEP_SEAM, appendEvent, loadState, saveState } from './state.mjs';
+import { ConductError, STEPS, STEP_SEAM, appendEvent, laneBase, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, holdsSlot } from './schedule.mjs';
 import { EXIT_CODES as LANE_EXIT, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems } from '../../../../scripts/lane.mjs';
 
@@ -856,11 +856,13 @@ function checkLane(state, wp, flags, deps) {
   if (problem) failures.push(`runtime exercise ${verdict}: ${problem}`);
   if (!flags.runtimeOnly) {
     failures.push(...reportShapeProblems(text));
-    const ahead = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'rev-list', '--count', `${wp.lane?.base}..HEAD`]);
-    if (ahead.code !== 0 || !(Number(ahead.stdout.trim()) >= 1)) failures.push(`the branch has no commit past base ${wp.lane?.base} (${ahead.code === 0 ? `${ahead.stdout.trim()} commits` : said(ahead)})`);
+    // From the last land rebase's new base: the lane's own commits, not a sibling's merged ones.
+    const base = laneBase(wp);
+    const ahead = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'rev-list', '--count', `${base}..HEAD`]);
+    if (ahead.code !== 0 || !(Number(ahead.stdout.trim()) >= 1)) failures.push(`the branch has no commit past base ${base} (${ahead.code === 0 ? `${ahead.stdout.trim()} commits` : said(ahead)})`);
     // The lane contract's evidence rules, against the report and the lane's diff.
-    const diff = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', `${wp.lane?.base}...HEAD`]);
-    if (diff.code !== 0) failures.push(`the evidence checks did not run: git diff from base ${wp.lane?.base}: ${said(diff)}`);
+    const diff = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', `${base}...HEAD`]);
+    if (diff.code !== 0) failures.push(`the evidence checks did not run: git diff from base ${base}: ${said(diff)}`);
     failures.push(...reportEvidenceProblems(text, { diff: diff.code === 0 ? diff.stdout : null, reportPath: lane.reportPath, exists: deps.exists,
       readSource: (_file, blob) => { if (!blob) return null; const source = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'show', blob]); return source.code === 0 ? source.stdout : null; } }));
     if (flags.pr !== undefined) {
