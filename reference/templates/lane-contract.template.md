@@ -85,7 +85,7 @@ List the callers of any function you add a check to, and every construct in your
 
    Every commit you push after the review is cited on the row of the fix it belongs to, docs-only commits included. After any push, name the new head: update the top-level `## PR`, or give this amendment a `### PR` subsection (number + head SHA). The check passes when either one names the PR's current head.
 
-   An amendment that only fixes a failed check needs no table: the conductor reads the latest table at or after the amendment that carried the findings.
+   An amendment that only fixes a failed check needs no table: the conductor reads the latest table at or after the amendment that carried the findings. A gate amendment whose brief names unresolved review threads by comment id answers each thread it settles with a row keyed by that id; the conductor replies to and resolves those threads, and a thread with no row stays open.
 
    **A guard thread is the conductor's, never yours.** The writer's test-weakening check lists test-file changes in the review body; that section needs no row. An older review may still carry a comment tagged `**lens:** guard`, the check's former inline form. Its row's verdict reads `conductor`, never `fixed`. Put in the evidence the reason the removal is legitimate, or the commit that restores the test. The conductor gives the verdict; the writer refuses `--adjudicator lane` on it. Never sign as anyone else: you never pass `--adjudicator conductor` or `--adjudicator operator`, on any thread. A lane started by `lane.mjs` carries `WORKIT_LANE`, and `pr-review.mjs reply` refuses both while it is set. Never unset it. A lane started any other way is bound by this sentence alone.
 
