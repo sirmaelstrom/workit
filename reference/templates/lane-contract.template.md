@@ -81,7 +81,7 @@ List the callers of any function you add a check to, and every construct in your
    |---|---|---|---|
    | `<id>` | fixed / refuted / judgment | the control's red line, the quoted observation, or why nothing can settle it | `<sha>`, several comma-separated, or — |
 
-   **(checked)** Each `fixed` row's control is a control under this amendment's own `### Negative controls`, in the step 2 form, whose label or lead names the row's id (`**C1-5a** …`) or the control the Evidence cell names; a control quoted only in the table cell is a fragment. A fix no control can cross (a docs correction) says `no control: <why>`, with the reason, in its Evidence cell.
+   **(checked)** Each `fixed` row's control is a control under this amendment's own `### Negative controls`, in the step 2 form, whose label or lead names the row's id (`**C1-5a** …`) or the control the Evidence cell names. A control's name starts with a capital and holds a digit, in hyphenated parts, each part ending in at most one lowercase sub-letter (`C1`, `A1b`, `C1-5a`, `C3a-<id>`); a name outside that shape is reported as unparsed. A control quoted only in the table cell is a fragment. A fix no control can cross (a docs correction) says `no control: <why>`, with the reason, in its Evidence cell.
 
    Every commit you push after the review is cited on the row of the fix it belongs to, docs-only commits included. After any push, name the new head: update the top-level `## PR`, or give this amendment a `### PR` subsection (number + head SHA). The check passes when either one names the PR's current head.
 

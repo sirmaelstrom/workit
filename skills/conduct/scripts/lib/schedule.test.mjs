@@ -239,6 +239,19 @@ test('dispatchable: held and blocked WPs hold no slot (D12)', () => {
   }
 });
 
+test('dispatchable (190c9a18): a WP at gate reserves its Files but holds no lane slot once its lane has exited', () => {
+  const gating = { ...wp('WP-01', 'gate', ['a']), lane: { startedAt: 't0', exitedAt: 't1' } };
+  assert.deepEqual(ids(dispatchable(run([gating, wp('WP-02', 'pending', ['b'])], 1))), ['WP-02']);
+  assert.deepEqual(ids(dispatchable(run([gating, wp('WP-02', 'pending', ['a'])], 1))), [], 'its Files stay reserved');
+  // A lane process not yet observed to exit holds its slot, whatever the state.
+  const running = { ...gating, lane: { startedAt: 't0', exitedAt: null } };
+  assert.deepEqual(ids(dispatchable(run([running, wp('WP-02', 'pending', ['b'])], 1))), []);
+  // Every other live state still holds a slot.
+  for (const state of ['dispatched', 'pr', 'review', 'amending']) {
+    assert.deepEqual(ids(dispatchable(run([{ ...gating, state }, wp('WP-02', 'pending', ['b'])], 1))), [], state);
+  }
+});
+
 test('dispatchable: a WP depending on a held, blocked or refuted WP is never dispatchable', () => {
   for (const state of ['held', 'blocked', 'refuted']) {
     const wps = [wp('WP-01', 'merged', ['a']), wp('WP-02', state, ['b']), wp('WP-03', 'pending', ['c'], ['WP-01', 'WP-02'])];

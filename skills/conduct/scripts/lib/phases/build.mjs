@@ -23,7 +23,7 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { ConductError, appendEvent } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
-import { LIVE_STATES, dispatchable, filesDisjoint, laneOccupied, normalizePath } from '../schedule.mjs';
+import { LIVE_STATES, dispatchable, filesDisjoint, holdsSlot, laneOccupied, normalizePath } from '../schedule.mjs';
 import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
 import { LANE_SUITE_HEADING, LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
@@ -633,19 +633,21 @@ export const RESET_TARGETS = Object.freeze({
   },
 });
 
-// Every target but `pending` puts the WP in a live state, so it takes a lane under the
+// Every target but `pending` puts the WP in a live state, under the
 // scheduler's rules (schedule.mjs dispatchable): Files disjoint from every
-// live or lane-holding WP, and a slot under the run's lane cap. A WP whose own
-// lane still holds its slot already has one. A merged-tree halt is the
-// operator's to clear first.
-function admissionRefusal(state, wp) {
+// live or lane-holding WP, and, unless the target is `gate` (a land holds no
+// slot; its amendment waits for one), a slot under the run's lane cap. A WP
+// whose own lane still holds its slot already has one. A merged-tree halt is
+// the operator's to clear first.
+function admissionRefusal(state, wp, toState) {
   const halt = (state.build?.halts ?? []).find((entry) => entry.kind === 'merged');
   if (halt) return `dispatch is halted (${halt.reason}); answer touch ${halt.touch} first`;
   const running = state.wps.filter((other) => other !== wp && (LIVE_STATES.includes(other.state) || laneOccupied(other)));
   const overlap = running.find((other) => !filesDisjoint(wp.files ?? [], other.files ?? []));
   if (overlap) return `${overlap.id} (${overlap.state}) holds a path in ${wp.id}'s Files; lanes run on disjoint Files, so reset ${wp.id} after it finishes`;
   const cap = state.intent?.lanesCap ?? 1;
-  if (!laneOccupied(wp) && running.length >= cap) return `${running.length} lane(s) are live (${running.map((other) => other.id).join(', ')}) against the run's cap of ${cap}; reset ${wp.id} when one finishes`;
+  const holding = running.filter(holdsSlot);
+  if (!laneOccupied(wp) && holdsSlot({ ...wp, state: toState }) && holding.length >= cap) return `${holding.length} lane(s) are live (${holding.map((other) => other.id).join(', ')}) against the run's cap of ${cap}; reset ${wp.id} when one finishes`;
   return null;
 }
 
@@ -702,7 +704,7 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   if (touch) refuse(`${wp.id} has touch ${touch.n} open; its answer resumes the WP`);
   if (state.pending?.wpId === wp.id) refuse(`${wp.id}'s action ${state.pending.id} is pending; perform and record it first`);
   // `--to pending` takes no lane: the scheduler admits the WP when it dispatches it.
-  const blocker = rewindRefusal(state) ?? (to === 'pending' ? null : admissionRefusal(state, wp));
+  const blocker = rewindRefusal(state) ?? (to === 'pending' ? null : admissionRefusal(state, wp, target.state(wp)));
   if (blocker) refuse(blocker);
   const recovery = to === 'delta' ? verifyDeltaRecovery(wp, baseline, deps) : null;
   // Built before the snapshot: an emitter that throws leaves nothing behind.
@@ -1492,6 +1494,20 @@ function dispatch(state, wp, deps) {
   return wp.queue.length ? emitHead(wp) : null;
 }
 
+// A paid action of a WP whose lane has exited starts that lane again, so it
+// takes a slot under the lane cap. A gate amendment can find every slot taken,
+// since its land held none: it waits. WPs already waiting on a slot are not
+// counted against it, so two waiting amendments do not hold each other off.
+const SLOT_WAIT = 'lane-slot';
+const waitsForSlot = (wp) => wp.queue?.[0]?.waitFor === SLOT_WAIT;
+function slotWait(state, wp) {
+  if (laneOccupied(wp)) return null;
+  const cap = state.intent?.lanesCap ?? 1;
+  const holding = state.wps.filter((other) => other !== wp && holdsSlot(other) && !waitsForSlot(other));
+  if (holding.length < cap) return null;
+  return { ...waitSpec('admit', WAIT_MS, `${wp.id} waits for a lane slot: ${holding.map((other) => other.id).join(', ')} hold the run's cap of ${cap}.`), waitFor: SLOT_WAIT };
+}
+
 function workAction(state, deps) {
   // An approved re-plan is applied, then receipted, before any other build work.
   const replanStep = replanApply(state) ?? (spineOn(state) ? replanReceipt(state) : null);
@@ -1500,6 +1516,11 @@ function workAction(state, deps) {
     fill(state, wp, deps);
     if (!wp.queue.length || wp.queue[0].kind === 'wait' || wp.lane?.livenessHeld) continue;
     if (paid(wp.queue[0])) {
+      const wait = slotWait(state, wp);
+      if (wait) {
+        wp.queue.unshift(wait);
+        continue;
+      }
       const gate = budgetGate(state, deps, wp.id);
       if (gate === 'ended') {
         block(state, wp, deps, 'the budget was reached and the operator stopped new paid lane work');
