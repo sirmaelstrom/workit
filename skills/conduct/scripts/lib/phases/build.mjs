@@ -639,7 +639,7 @@ export const RESET_TARGETS = Object.freeze({
 // slot; its amendment waits for one), a slot under the run's lane cap. A WP
 // whose own lane still holds its slot already has one. A merged-tree halt is
 // the operator's to clear first.
-function admissionRefusal(state, wp, toState) {
+function admissionRefusal(state, wp, after) {
   const halt = (state.build?.halts ?? []).find((entry) => entry.kind === 'merged');
   if (halt) return `dispatch is halted (${halt.reason}); answer touch ${halt.touch} first`;
   const running = state.wps.filter((other) => other !== wp && (LIVE_STATES.includes(other.state) || laneOccupied(other)));
@@ -647,7 +647,7 @@ function admissionRefusal(state, wp, toState) {
   if (overlap) return `${overlap.id} (${overlap.state}) holds a path in ${wp.id}'s Files; lanes run on disjoint Files, so reset ${wp.id} after it finishes`;
   const cap = state.intent?.lanesCap ?? 1;
   const holding = running.filter(holdsSlot);
-  if (!laneOccupied(wp) && holdsSlot({ ...wp, state: toState }) && holding.length >= cap) return `${holding.length} lane(s) are live (${holding.map((other) => other.id).join(', ')}) against the run's cap of ${cap}; reset ${wp.id} when one finishes`;
+  if (!laneOccupied(wp) && holdsSlot({ ...wp, ...after }) && holding.length >= cap) return `${holding.length} lane(s) are live (${holding.map((other) => other.id).join(', ')}) against the run's cap of ${cap}; reset ${wp.id} when one finishes`;
   return null;
 }
 
@@ -704,7 +704,7 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   if (touch) refuse(`${wp.id} has touch ${touch.n} open; its answer resumes the WP`);
   if (state.pending?.wpId === wp.id) refuse(`${wp.id}'s action ${state.pending.id} is pending; perform and record it first`);
   // `--to pending` takes no lane: the scheduler admits the WP when it dispatches it.
-  const blocker = rewindRefusal(state) ?? (to === 'pending' ? null : admissionRefusal(state, wp, target.state(wp)));
+  const blocker = rewindRefusal(state) ?? (to === 'pending' ? null : admissionRefusal(state, wp, { state: target.state(wp), stage: target.stage }));
   if (blocker) refuse(blocker);
   const recovery = to === 'delta' ? verifyDeltaRecovery(wp, baseline, deps) : null;
   // Built before the snapshot: an emitter that throws leaves nothing behind.

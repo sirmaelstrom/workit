@@ -13,10 +13,12 @@ export const LIVE_STATES = Object.freeze(['dispatched', 'pr', 'review', 'amendin
 
 export const laneOccupied = (wp) => Boolean(wp.lane?.startedAt) && !wp.lane?.exitedAt;
 
-// The lane cap counts lane agents. A WP at `gate` is landed by the conductor
-// (rebase, gate command, merge) with no agent, so it takes no slot; a gate
-// amendment starts the lane again and waits for one (build.mjs slotWait).
-export const holdsSlot = (wp) => laneOccupied(wp) || (LIVE_STATES.includes(wp.state) && wp.state !== 'gate');
+// The lane cap counts lane agents. A landing WP (at `gate`, or at stage `land`
+// while it waits on the merge lock) is landed by the conductor (rebase, gate
+// command, merge) with no agent, so it takes no slot; a gate amendment starts
+// the lane again and waits for one (build.mjs slotWait).
+const landing = (wp) => wp.state === 'gate' || wp.stage === 'land';
+export const holdsSlot = (wp) => laneOccupied(wp) || (LIVE_STATES.includes(wp.state) && !landing(wp));
 
 // The wait a lane start takes while every slot is held carries this marker.
 export const SLOT_WAIT = 'lane-slot';

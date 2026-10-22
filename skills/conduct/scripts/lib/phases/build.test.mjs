@@ -17,6 +17,7 @@ import { RUN_SLOTS } from './build.mjs';
 import { preapprovedRef, wpRecord } from './spec.mjs';
 import { STEPS, STEP_SEAM, saveState, readEvents, loadState } from '../state.mjs';
 import { runLaneVerb } from '../lanes.mjs';
+import { laneOccupied } from '../schedule.mjs';
 import { runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
@@ -1360,19 +1361,27 @@ test('lane cap (190c9a18): a WP landing frees its slot, so the next WP is dispat
 });
 
 test('lane cap (190c9a18): a gate amendment waits for a lane slot, and takes the next one before a new dispatch', async (t) => {
-  const h = harness(t, { wps: FOUR, lanes: 1 });
+  const h = harness(t, { wps: [...FOUR, { id: 'WP-05', files: ['lib/y.mjs'], dependsOn: ['WP-01'] }], lanes: 1 });
   h.gateCmdCode = { 'WP-02': [1] };
-  assert.equal(await drive(h), null);
-  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged']);
+  // WP-04's lane is still running when WP-02's gate fails.
+  h.life = { 'WP-04': 12 };
+  // At every emitted action, the lane agents running fit the cap.
+  const over = [];
+  h.onEmit = (a) => {
+    const running = h.state.wps.filter(laneOccupied).map((wp) => wp.id);
+    if (running.length > 1) over.push(`${a.id}: ${running.join(', ')}`);
+  };
+  assert.equal(await drive(h, { max: 1200 }), null);
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged', 'merged']);
+  assert.deepEqual(over, []);
   const brief = firstOf(h, 'WP-02', (a) => a.part === 'amendment');
   const relaunch = h.trace.findIndex((a, i) => i > brief && a.wpId === 'WP-02' && ['start', 'prompt'].includes(a.step));
   assert.ok(brief >= 0 && relaunch > brief);
-  // WP-03 took the slot WP-02's land left; WP-02's lane starts again only once WP-03 is landing.
-  assert.ok(firstOf(h, 'WP-03') < brief);
-  assert.ok(relaunch > firstOf(h, 'WP-03', (a) => a.step === 'rebase'), 'the amendment waited for the slot');
-  assert.ok(h.trace.slice(brief, relaunch).some((a) => a.kind === 'wait' && /WP-02 waits for a lane slot/.test(a.instruction)));
-  // The waiting amendment holds the next slot against WP-04.
-  assert.ok(firstOf(h, 'WP-04') > relaunch, 'WP-04 is dispatched after the amendment restarts WP-02');
+  assert.ok(h.trace.slice(brief, relaunch).some((a) => a.kind === 'wait' && /WP-02 waits for a lane slot: WP-04 hold/.test(a.instruction)), 'the amendment waited for WP-04\'s slot');
+  // The waiting amendment holds the next slot: no WP is dispatched while it waits.
+  const firsts = ['WP-03', 'WP-04', 'WP-05'].map((id) => firstOf(h, id));
+  assert.deepEqual(firsts.filter((i) => i > brief && i < relaunch), [], 'no dispatch between the amendment and its restart');
+  assert.ok(firstOf(h, 'WP-05') > relaunch, 'WP-05 is dispatched after the amendment restarts WP-02');
 });
 
 test('reset-wp (61d817db): each target\'s stage, state and queue; a lane that exited is started before its prompt; wait renews the deadline; deferrals through a chain are lifted', async (t) => {
@@ -1504,6 +1513,16 @@ test('lanes 3-4 (b443eca6): with --lanes 3 on the exec backend, only the 3rd liv
   assert.ok(admits[0].command.includes('admit') && admits[0].command[1].endsWith('lane.mjs'));
   assert.ok(admits[0].command.includes('--require-reading'), 'an unmeasured host gets no 3rd lane');
   assert.ok(held, 'WP-04 was held back while WP-02 and WP-03 ran');
+  assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged']);
+});
+
+test('lanes 3-4 (190c9a18): a WP landing is not counted toward the 3rd lane, so the 2nd agent beside it asks no admit', async (t) => {
+  const h = harness(t, { lanes: 2, wps: [TWO[0], TWO[1], TWO[2], { id: 'WP-04', files: ['lib/schedule.mjs'], dependsOn: ['WP-01'] }] });
+  h.life = { 'WP-03': 40 };
+  assert.equal(await drive(h, { max: 1200 }), null);
+  const dispatched = firstOf(h, 'WP-04');
+  assert.ok(dispatched >= 0 && dispatched < firstOf(h, 'WP-02', (a) => a.step === 'merge'), 'WP-04 is dispatched while WP-02 lands and WP-03 runs');
+  assert.deepEqual(h.trace.filter((a) => a.step === 'admit' && a.kind === 'shell').map((a) => a.wpId), []);
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged']);
 });
 

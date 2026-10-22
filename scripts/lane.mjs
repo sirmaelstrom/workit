@@ -2364,7 +2364,7 @@ export function reportEvidenceProblems(text, { diff = null, reportPath = null, e
       const unparsed = [...new Set(row[2].match(CONTROL_LIKE) ?? [])].filter((token) => !(token.match(CONTROL_LABEL) ?? []).includes(token) && leads(token));
       if (!named && !copied && !inherited) {
         problems.push(unparsed.length
-          ? `${amendment.heading.title}: fixed row ${id}'s Evidence names ${unparsed.join(', ')}, which leads a control under its Negative controls but does not parse as a control name (A1b, C1-5a, C3a-<id>); rename it (rule 6)`
+          ? `${amendment.heading.title}: fixed row ${id}'s Evidence names ${unparsed.join(', ')}, which appears in a control's lead under its Negative controls but does not parse as a control name (A1b, C1-5a, C3a-<id>); rename it (rule 6)`
           : `${amendment.heading.title}: fixed row ${id} has no control under its Negative controls or a cited earlier amendment, and its Evidence does not say "no control: <why>" (rule 6)`);
       }
       if (named || copied || inherited) priorRows.set(id, { row: line.text.trim(), commit,

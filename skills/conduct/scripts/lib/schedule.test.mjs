@@ -250,6 +250,12 @@ test('dispatchable (190c9a18): a WP at gate reserves its Files but holds no lane
   for (const state of ['dispatched', 'pr', 'review', 'amending']) {
     assert.deepEqual(ids(dispatchable(run([{ ...gating, state }, wp('WP-02', 'pending', ['b'])], 1))), [], state);
   }
+  // A WP waiting on the merge lock is at stage land, not yet at gate: it is landing too.
+  for (const state of ['pr', 'review']) {
+    const queued = { ...gating, state, stage: 'land' };
+    assert.deepEqual(ids(dispatchable(run([queued, wp('WP-02', 'pending', ['b'])], 1))), ['WP-02'], `${state} at land`);
+    assert.deepEqual(ids(dispatchable(run([queued, wp('WP-02', 'pending', ['a'])], 1))), [], `${state} at land keeps its Files`);
+  }
 });
 
 test('slotHolders (190c9a18): two amendments waiting on a slot do not hold each other off; a waiting one still holds against dispatch', () => {
@@ -265,6 +271,12 @@ test('slotHolders (190c9a18): two amendments waiting on a slot do not hold each 
   // A dispatched lane and a lane still running hold their slots.
   const busy = run([a, { ...b, state: 'dispatched', queue: [] }, { ...wp('WP-05', 'blocked', ['e']), lane: { startedAt: 't0', exitedAt: null } }], 2);
   assert.deepEqual(ids(slotHolders(busy, a)), ['WP-03', 'WP-05']);
+  // Cap 2: the waiting amendment keeps its claim, so a new WP takes only the other slot and the amendment still fits.
+  const two = run([a, { ...wp('WP-03', 'gate', ['b']), lane: exited }, wp('WP-04', 'pending', ['c']), wp('WP-05', 'pending', ['d'])], 2);
+  assert.deepEqual(ids(dispatchable(two)), ['WP-04']);
+  two.wps[2] = { ...two.wps[2], state: 'dispatched' };
+  assert.deepEqual(ids(slotHolders(two, a)), ['WP-04'], 'one holder against a cap of 2: the amendment starts');
+  assert.deepEqual(ids(dispatchable(two)), [], 'no other WP takes the amendment\'s slot');
 });
 
 test('dispatchable: a WP depending on a held, blocked or refuted WP is never dispatchable', () => {

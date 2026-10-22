@@ -4479,7 +4479,7 @@ test('31eddaa3 rule 6: a control named with a sub-letter before its suffix (C3a-
   assert.deepEqual(reportEvidenceProblems(again), []);
   // A control whose name does not parse is named, not reported as missing.
   const unparsed = amendment(3, ['| `4347887798` | fixed | Control **C3ab-4347887798** below is red | `66ea1c12` |'], ['**C3ab-4347887798: outcome a**', failingRun]);
-  assert.deepEqual(reportEvidenceProblems(unparsed), ['Amendment 3: fixed row 4347887798\'s Evidence names C3ab-4347887798, which leads a control under its Negative controls but does not parse as a control name (A1b, C1-5a, C3a-<id>); rename it (rule 6)']);
+  assert.deepEqual(reportEvidenceProblems(unparsed), ['Amendment 3: fixed row 4347887798\'s Evidence names C3ab-4347887798, which appears in a control\'s lead under its Negative controls but does not parse as a control name (A1b, C1-5a, C3a-<id>); rename it (rule 6)']);
 });
 
 test('e4ad108b rule 14: a cited screenshot is a lane-<id>-<claim> file beside the report', (t) => {
