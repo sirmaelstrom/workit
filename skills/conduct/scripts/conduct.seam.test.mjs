@@ -25,10 +25,9 @@ import { fileURLToPath } from 'node:url';
 import { runConduct } from './conduct.mjs';
 import { STEPS, readEvents } from './lib/state.mjs';
 import { shellArgv } from './lib/exec.mjs';
-import { correlation, shellLiteral } from './lib/touch.mjs';
+import { shellLiteral } from './lib/touch.mjs';
 import { SEAM_ROWS } from './lib/analyze.mjs';
 import { namedSeam } from './lib/phases/showcase.mjs';
-import { post as postGithubAsk } from '../../_shared/github-ask/github-ask.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIX = join(HERE, '__fixtures__');
@@ -80,7 +79,7 @@ function seam(t, opts = {}) {
   h.bump = (id) => (h.heads[id] = sha('c', (h.seq += 1) * 100 + num(id)));
   h.deps = {
     exec: (program, args, options = {}) => fakeExec(h, program, args, options),
-    // No operator in session unless a test says so: touches are filed on the Spine and posted.
+    // No operator in session unless a test says so: touches are filed on the Spine as needs_input.
     env: { HOME: home, ...(opts.session ? {} : { WORKIT_UNATTENDED: '1' }), ...(opts.herdr ? { HERDR_ENV: '1' } : {}), ...opts.env }, platform: 'linux', home, stdinIsTTY: false, pluginRoot: plugin,
     now: () => h.clock, timestamp: () => new Date((h.clock += 1000)).toISOString(), newRunId: () => 'abcd1234', lockWaitMs: 0,
     sleep: async () => {}, resolveCodex: () => 'codex', spawnDetached: (program, args, options) => fakeSpawn(h, options),
@@ -291,11 +290,8 @@ function tool(h, action) {
   const state = h.state();
   switch (action.tool) {
     case 'spine_quest': {
-      if (action.step === 'anchor') return { quests: [{ id: ANCHOR, campaign: { slug: 'seam', title: 'Seam campaign' }, latestReceipt: null }] };
-      const touch = state.touches.find((candidate) => candidate.status === 'filed');
-      const { key, text: words = null } = h.answers[touch.kind];
-      return { quests: [{ id: ANCHOR, latestReceipt: { outcome: 'answered', question: touch.filedQuestion,
-        answer: { key, text: words, by: 'operator:seam', answeredAt: new Date(h.clock).toISOString() } } }] };
+      assert.equal(action.step, 'anchor', 'the anchor read is the only spine_quest conduct calls');
+      return { quests: [{ id: ANCHOR, campaign: { slug: 'seam', title: 'Seam campaign' }, latestReceipt: null }] };
     }
     case 'spine_receipt': return { id: `00000000-0000-4000-8000-${String((h.seq += 1)).padStart(12, '0')}`, questId: action.args.questId, outcome: action.args.outcome };
     case 'spine_update': return { ok: true, questId: action.args.questId };
@@ -342,12 +338,6 @@ async function perform(h, action) {
     default: {
       const { command } = action;
       if (command[0] === 'node' && command[1].endsWith('conduct.mjs')) return conductVerb(h, action);
-      // github-ask post: the touch's comment on the run's asks issue.
-      if (command[0] === 'node' && command[1].endsWith('github-ask.mjs')) {
-        h.calls.push(command.join(' '));
-        const { askReceiptId } = JSON.parse(readFileSync(command.at(-1), 'utf8'));
-        return { code: 0, stdout: JSON.stringify({ status: 'posted', existing: false, askReceiptId, target: 'o/r#9', askCommentUrl: `https://github.com/o/r/issues/9#issuecomment-${900 + action.touch.n}`, askCommentId: 900 + action.touch.n }), stderr: '' };
-      }
       if (command[0] === 'node' && command[1].endsWith('lane.mjs')) {
         h.calls.push(command.join(' '));
         return herdrVerb(h, action);
@@ -379,8 +369,11 @@ async function drive(h, { until = () => false, max = 3000 } = {}) {
     }
     // A probe of the pending act, run against the run dir before it is performed.
     if (h.beforePerform) await h.beforePerform(action);
-    // A spine hand-back ends the conductor's turn; the next turn resumes it.
+    // A spine hand-back ends the conductor's turn: the operator answers the
+    // filed touch from their terminal (unless a test answers it otherwise),
+    // and the next turn resumes the run.
     if (action.handBack) {
+      if (!h.holdAnswers && h.state().touches[action.touch.n - 1].status === 'filed') await answerTouch(h, action.touch.n);
       const resumed = await h.run(['next', '--resume', h.runDir]);
       assert.equal(resumed.code, 0, resumed.stdout + resumed.stderr);
       action = out(resumed).action;
@@ -938,7 +931,7 @@ test('herdr from outside (T3 Code): with no HERDR_ENV the herdr adapter is on wh
   }
 });
 
-test('spine + herdr: spine_author once, a receipt per WP stop, touches filed once and read back, lane steps through lane.mjs --log, the runtime-only check; notify env (D20); seams keyed on seam (D19.15)', async (t) => {
+test('spine + herdr: spine_author once, a receipt per WP stop, touches filed once, handed back and superseded once answered, lane steps through lane.mjs --log, the runtime-only check; notify env (D20); seams keyed on seam (D19.15)', async (t) => {
   const notify = 'notify-cmd --channel conduct';
   const h = seam(t, { herdr: true, env: { WORKIT_NOTIFY_CMD: notify } });
   await start(h, ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8)]);
@@ -955,10 +948,13 @@ test('spine + herdr: spine_author once, a receipt per WP stop, touches filed onc
   for (const touch of state.touches) {
     const filings = h.trace.filter((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' && a.args.question.startsWith(touch.tag));
     assert.equal(filings.length, 1, touch.tag);
-    const [post, next] = h.trace.slice(h.trace.indexOf(filings[0]) + 1);
-    assert.deepEqual([post.part, post.command.at(-1)], ['post', join(h.runDir, 'touches', `${touch.n}.github-ask.json`)]);
-    assert.deepEqual([next.tool, next.args.ids], ['spine_quest', [ANCHOR]]);
+    assert.equal(filings[0].args.ask, undefined, `${touch.tag} carries no structured ask`);
+    const [next] = h.trace.slice(h.trace.indexOf(filings[0]) + 1);
+    assert.deepEqual([next.part, next.touch.n], ['hand-back', touch.n]);
+    const supersedes = h.trace.filter((a) => a.part === 'supersede' && a.touch.n === touch.n);
+    assert.deepEqual(supersedes.map((a) => [a.tool, a.args.questId]), [['spine_receipt', ANCHOR]], touch.tag);
   }
+  assert.ok(!h.trace.some((a) => a.part === 'post' && a.touch) && !h.trace.some((a) => a.tool === 'spine_quest' && a.step !== 'anchor'), 'no ask post and no read-back');
   // A merged lane's branch deletes are git cleanup, not lane steps.
   const herdr = h.trace.filter((a) => a.wpId && ['admit', 'start', 'prompt', 'wait', 'stop'].includes(a.step) && a.kind === 'shell' && !['branch-holder', 'branch', 'branch-remote'].includes(a.part));
   assert.ok(herdr.length > 0 && herdr.every((a) => a.command[1].endsWith('lane.mjs') && a.command.includes('--log')));
@@ -1002,106 +998,67 @@ test('spine + herdr: spine_author once, a receipt per WP stop, touches filed onc
   assert.ok(h.events().every((e) => 'step' in e && 'seam' in e));
 });
 
-// E6: the spine read-back's no-answer cases. `reply` picks what the next
-// touch read-back returns; 'operator' falls through to the scripted answer.
-function spineReplies(h) {
-  h.reply = 'none';
-  h.custom = (action) => {
-    if (action.tool !== 'spine_quest' || action.step === 'anchor' || h.reply === 'operator') return undefined;
-    const state = h.state();
-    const touch = state.touches.find((candidate) => candidate.status === 'filed');
-    const answer = { key: 'a', text: null, by: 'operator:seam', answeredAt: new Date(h.clock).toISOString() };
-    const latest = {
-      none: { outcome: 'needs_input', question: touch.filedQuestion, answer: null },
-      stale: { outcome: 'answered', question: touch.filedQuestion.replace(correlation(state, touch), `${touch.tag} (run 00000000/${touch.filings})`), answer },
-      agent: { outcome: 'answered', question: touch.filedQuestion, answer: { ...answer, by: 'agent:claude' } },
-    }[h.reply];
-    return { quests: [{ id: ANCHOR, latestReceipt: latest }] };
-  };
-}
+// E6: an unattended touch. The run files one needs_input and hands back; it
+// never waits, posts or reads an answer back. The operator answers later.
 const SPINE_ONLY = ['--adapter', 'spine', '--anchor', ANCHOR.slice(0, 8), '--no-adapter', 'herdr', '--no-adapter', 'notify'];
 const isHandBack = (a) => a.handBack === true;
 const needsInput = (h) => h.trace.filter((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input');
 
-test('E6 hand-back (spine): no attributed answer → a touch-kind hand-back, never a wait; record leaves it pending; next --resume reads back; stale or unattributed answers hand back again; the operator\'s answer reaches /spec', async (t) => {
+test('E6 hand-back (spine, quest 8acce86e): with no operator, one needs_input and a touch-kind hand-back, never a wait, post or read-back; record leaves it pending; a resume with no answer hands back again; the operator\'s terminal answer is superseded and reaches /spec', async (t) => {
   const h = seam(t);
-  spineReplies(h);
+  h.holdAnswers = true;
   await start(h, SPINE_ONLY);
   const back = await drive(h, { until: isHandBack, max: 10 });
-  assert.deepEqual(h.trace.map((a) => `${a.tool ?? a.kind}/${a.part ?? ''}`), ['spine_quest/', 'spine_receipt/receipt', 'shell/post', 'spine_quest/read-back', 'touch/hand-back']);
+  assert.deepEqual(h.trace.map((a) => `${a.tool ?? a.kind}/${a.part ?? ''}`), ['spine_quest/', 'spine_receipt/receipt', 'touch/hand-back']);
   assert.deepEqual([back.kind, back.step, back.touch.n, back.seam], ['touch', 'preapproval', 1, 'operator-touch']);
-  assert.match(back.instruction, /^Stop and end your turn: \[conduct seam-run touch 1\] is filed on quest a0a0a0a0-/);
+  assert.match(back.instruction, /^Stop and end your turn: \[conduct seam-run touch 1\] is filed on quest a0a0a0a0-[^ ]+ as a needs_input receipt/);
   assert.ok(back.instruction.includes(`next --resume ${shellLiteral(h.runDir)}`), back.instruction);
+  assert.ok(needsInput(h)[0].args.stoppedAt.includes(`next --resume ${shellLiteral(h.runDir)}`), 'the receipt says how to resume');
   // Recording a hand-back changes nothing: the same action, answered: false.
   const recorded = await h.run(['record', '--run', h.runDir, '--action', back.id, '--result', '{}']);
   assert.deepEqual([recorded.code, out(recorded).answered, out(recorded).action.id], [0, false, back.id]);
-  // The resume: the hand-back is consumed and the touch is read back, not re-filed.
+  // A resume with no answer yet (WORKIT_UNATTENDED=1): the hand-back is consumed and emitted again, nothing re-filed.
   const resumed = out(await h.run(['next', '--resume', h.runDir])).action;
-  assert.deepEqual([resumed.tool, resumed.part], ['spine_quest', 'read-back']);
+  assert.deepEqual([resumed.kind, resumed.part], ['touch', 'hand-back']);
   assert.ok(h.events().some((e) => e.event === 'resumed' && e.actionId === back.id && e.seam === 'operator-touch'));
-  // Another run's answer to the same tag: hand back again, no new filing.
-  h.reply = 'stale';
-  h.pending = resumed;
-  assert.equal((await drive(h, { until: isHandBack, max: 5 })).part, 'hand-back');
   assert.equal(needsInput(h).length, 1);
-  // An answer not stamped operator: is refused (exit 3) and re-filed; unanswered, it hands back.
-  h.reply = 'agent';
-  const read = out(await h.run(['next', '--resume', h.runDir])).action;
-  const refused = await h.run(['record', '--run', h.runDir, '--action', read.id, '--result', JSON.stringify(await perform(h, read))]);
-  assert.equal(refused.code, 3);
-  assert.equal(out(refused).action.tool, 'spine_receipt');
-  h.reply = 'none';
-  h.pending = out(refused).action;
-  assert.equal((await drive(h, { until: isHandBack, max: 5 })).part, 'hand-back');
-  assert.equal(h.state().touches[0].filings, 2);
-  // The operator answers: the next resume reads it back and the run reaches /spec.
-  h.reply = 'operator';
+  // The operator answers from their terminal; the next resume files the superseding receipt and reaches /spec.
+  await answerTouch(h, 1);
+  h.holdAnswers = false;
+  const supersede = out(await h.run(['next', '--resume', h.runDir])).action;
+  assert.deepEqual([supersede.part, supersede.tool, supersede.args.outcome], ['supersede', 'spine_receipt', 'paused']);
+  h.pending = supersede;
   const spec = await drive(h, { until: (a) => a.kind === 'skill', max: 5 });
   assert.equal(spec.step, 'spec');
-  assert.equal(h.state().touches[0].answer.by, 'operator:seam');
+  assert.equal(h.state().touches[0].answer.by, 'operator:tty');
+  assert.equal(h.state().touches[0].filings, 1);
   assert.ok(!h.trace.some((a) => a.kind === 'wait'), 'no wait at any touch');
 });
 
-test('E6 hand-back (spine): the showcase touch hands back the same way; the resumed read-back closes the run', async (t) => {
+test('E6 hand-back (spine): the showcase touch hands back the same way; answered, its superseding receipt is completed and the run closes', async (t) => {
   const h = seam(t);
-  spineReplies(h);
-  h.reply = 'operator';
   await start(h, SPINE_ONLY);
-  h.onEmit = (a) => { if (a.step === 'showcase' && a.part === 'receipt') h.reply = 'none'; };
-  const back = await drive(h, { until: isHandBack });
+  const back = await drive(h, { until: (a) => isHandBack(a) && a.step === 'showcase' });
   assert.deepEqual([back.kind, back.step, back.part], ['touch', 'showcase', 'hand-back']);
-  assert.equal(h.trace.filter(isHandBack).length, 1, 'touch 1 was answered at its first read-back');
-  h.reply = 'operator';
+  assert.equal(h.trace.filter(isHandBack).length, 2, 'touch 1 handed back once, then the showcase');
   assert.equal((await drive(h)).kind, 'done');
   assert.equal(h.state().phase, 'closed');
+  const closing = h.trace.filter((a) => a.part === 'supersede').at(-1);
+  assert.deepEqual([closing.touch.n, closing.args.outcome], [back.touch.n, 'completed']);
   assert.ok(!h.trace.some((a) => a.kind === 'wait' && a.touch), 'no touch-tagged wait');
 });
 
-test('E6 hand-back (spine): the release anomaly\'s touch hands back with seam release (its action and its resumed event); the resume reads back; any operator answer fails the release', async (t) => {
+test('E6 hand-back (spine): the release anomaly\'s touch hands back with seam release (its action and its resumed event); its one option is a text line; any operator answer fails the release', async (t) => {
   const h = await nonePath(t, { h: { treeMismatch: sha('d', 99) } }, SPINE_ONLY);
-  spineReplies(h);
-  h.reply = 'operator';
-  h.onEmit = (a) => { if (a.step === 'touch' && a.part === 'receipt') h.reply = 'none'; };
-  const back = await drive(h, { until: isHandBack });
+  const back = await drive(h, { until: (a) => isHandBack(a) && a.step === 'touch' });
   assert.deepEqual([back.kind, back.step, back.part, back.seam], ['touch', 'touch', 'hand-back', 'release']);
   assert.deepEqual([h.state().touches[back.touch.n - 1].kind, h.state().touches[back.touch.n - 1].wpId], ['blocked', null]);
-  // Its spec, as conduct wrote it, has one option, and the real github-ask posts it.
-  const spec = JSON.parse(readFileSync(join(h.runDir, 'touches', `${back.touch.n}.github-ask.json`), 'utf8'));
-  assert.deepEqual([spec.options.length, spec.allowFreeText], [1, true]);
-  const bodies = [];
-  const gh = (args, { input } = {}) => {
-    if (args.includes('.visibility')) return 'private\n';
-    if (!args.includes('POST')) return '';
-    bodies.push(JSON.parse(input).body);
-    return JSON.stringify({ id: 1, html_url: 'https://github.com/o/r/issues/9#issuecomment-1' });
-  };
-  const postedAsk = await postGithubAsk({ ...spec, target: 'o/r#9' }, { gh });
-  assert.equal(postedAsk.status, 'posted');
-  assert.match(bodies[0], /This ask has one option: reply with `a` on the first line, then your answer on the lines below\./);
+  // Its needs_input lists the one option as a text line: its EXPECT does not letter it.
+  assert.match(needsInput(h).at(-1).args.question, /\nOptions:\n\(a\) Record the release as failed\nAnswer: /);
+  await answerTouch(h, back.touch.n);
   const resumed = out(await h.run(['next', '--resume', h.runDir])).action;
-  assert.deepEqual([resumed.tool, resumed.part, resumed.seam], ['spine_quest', 'read-back', 'release']);
-  assert.deepEqual(h.events().filter((e) => e.event === 'resumed').map((e) => [e.actionId, e.seam]), [[back.id, 'release']]);
-  h.reply = 'operator';
+  assert.deepEqual([resumed.part, resumed.tool], ['supersede', 'spine_receipt']);
+  assert.deepEqual(h.events().filter((e) => e.event === 'resumed').map((e) => e.seam).at(-1), 'release');
   h.pending = resumed;
   await drive(h, { until: (a) => a.step === 'analyze' });
   assert.equal(h.state().release.state, 'failed');
@@ -1176,7 +1133,7 @@ test('touch filings (C1-2): a showcase filing acknowledged with ok:false, succes
   }
   // C2-10: `error: null` is no error.
   const filed = out(await h.run(['record', '--run', h.runDir, '--action', filing.id, '--result', JSON.stringify({ ...good, error: null })]));
-  assert.equal(filed.action.part, 'post');
+  assert.equal(filed.action.part, 'hand-back');
   assert.deepEqual([h.state().touches[1].status, h.state().touches[1].receiptId], ['filed', good.id]);
 });
 
@@ -1436,7 +1393,7 @@ test('runtime exercise (slim): a spine run, plain and with a two-round council, 
   }
 });
 
-test('session asks (spine): with the operator in session, touch 1 and the showcase are asked in session and the run closes with no needs_input filing, no GitHub post and no read-back', async (t) => {
+test('session asks (spine): with the operator in session, touch 1 and the showcase are asked in session and the run closes with no needs_input filing and no superseding receipt', async (t) => {
   const h = seam(t, { session: true });
   await start(h, SPINE_ONLY);
   assert.equal((await drive(h)).kind, 'done');
@@ -1446,7 +1403,7 @@ test('session asks (spine): with the operator in session, touch 1 and the showca
   assert.deepEqual(state.touches.map((touch) => [touch.kind, touch.answer.by, touch.channel]), [['preapproval', 'operator:session', 'session'], ['showcase', 'operator:session', 'session']]);
   assert.equal(h.trace.filter((a) => a.kind === 'touch' && a.part === 'ask').length, 2);
   assert.equal(h.trace.filter((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input').length, 0);
-  assert.equal(h.trace.filter((a) => a.command?.some((arg) => String(arg).endsWith('github-ask.mjs')) || a.part === 'read-back').length, 0);
+  assert.equal(h.trace.filter((a) => a.part === 'supersede' || a.handBack).length, 0);
   assert.ok(h.trace.find((a) => a.kind === 'skill').skillArgs.includes(`--preapproved "core:${h.runDir}/touches/1.json"`));
 });
 

@@ -14,7 +14,7 @@ import { STEPS, STEP_SEAM, ConductError, resolveRunDir, readEvents, saveState, a
 import { detectAdapters, laneModel } from './lib/adapters.mjs';
 import { resolveRecipe, recipeArgv } from './lib/recipe.mjs';
 import { shellArgv, spawnDetached, pidAlive } from './lib/exec.mjs';
-import { openTouch, touchAction, recordTouch, answersFiling, handBackAction, answerCommand, resumeCommand, shellLiteral, filedLength, QUESTION_MAX } from './lib/touch.mjs';
+import { openTouch, touchAction, recordTouch, handBackAction, answerCommand, resumeCommand, shellLiteral, filedLength, QUESTION_MAX } from './lib/touch.mjs';
 import { validateGrant } from './lib/phases/preapproval.mjs';
 import { samePath, next as specNext } from './lib/phases/spec.mjs';
 import { questKey } from './lib/phases/mint.mjs';
@@ -76,7 +76,7 @@ function fixture(t, deps = {}) {
   };
   let clock = Date.parse('2026-10-04T18:00:00.000Z');
   const base = {
-    // No operator in these runs: touches go straight to the Spine and GitHub (a test asks in session explicitly).
+    // No operator in these runs: touches go straight to the Spine (a test asks in session explicitly).
     exec, env: { WORKIT_UNATTENDED: '1' }, platform: 'linux', home: join(dir, 'home'), stdinIsTTY: false, pluginRoot: join(dir, 'plugin'),
     resolveCodex: () => 'codex', now: () => clock, timestamp: () => new Date((clock += 1000)).toISOString(),
     newRunId: () => RUN_ID, lockWaitMs: 0, importModule: testLoader, ...deps,
@@ -89,14 +89,6 @@ const readState = (runDir) => JSON.parse(readFileSync(join(runDir, 'state.json')
 const fsDeps = { exists: existsSync, read: (path) => readFileSync(path, 'utf8') };
 const events = (runDir) => readEvents(runDir, fsDeps, readState(runDir));
 const rawEvents = (runDir) => readFileSync(join(runDir, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
-// A spine read-back result answering this run's current filing of touch n.
-function answeredFor(runDir, n = 1, answerPatch = {}, name = 'spine-quest-answered.json') {
-  const result = fixtureJson(name);
-  const touch = readState(runDir).touches[n - 1];
-  result.quests[0].latestReceipt.question = touch.filedQuestion;
-  Object.assign(result.quests[0].latestReceipt.answer, answerPatch);
-  return result;
-}
 const SPINE = ['--adapter', 'spine', '--anchor', ANCHOR];
 // No operator in the session: a touch skips the session ask and is filed on the Spine.
 const UNATTENDED = { WORKIT_UNATTENDED: '1' };
@@ -107,29 +99,33 @@ function intake(f, extra = [], more = {}, goal = GOAL) {
 function record(f, runDir, id, result, more = {}) {
   return f.run(['record', '--run', runDir, '--action', id, '--result', JSON.stringify(result)], more);
 }
-function answer(f, runDir, key, { text, tty = true } = {}) {
-  return f.run(['answer', '--run', runDir, '--touch', '1', '--key', key, ...(text ? ['--text', text] : [])], { stdinIsTTY: tty });
+function answer(f, runDir, key, { text, tty = true, n = 1 } = {}) {
+  return f.run(['answer', '--run', runDir, '--touch', String(n), '--key', key, ...(text ? ['--text', text] : [])], { stdinIsTTY: tty });
 }
 
-// intake → anchor → touch 1 filed; returns the read-back action.
-// The filing's second half: conduct's post action, performed by a github-ask that posted.
-const ASK_COMMENT = 'https://github.com/o/r/issues/9#issuecomment-901';
-const posted = (extra = {}) => ({ code: 0, stdout: JSON.stringify({ status: 'posted', existing: false, askReceiptId: '00000000-0000-4000-8000-0000000000f1', target: 'o/r#9', askCommentUrl: ASK_COMMENT, askCommentId: 901, ...extra }), stderr: '' });
-async function recordFiled(f, runDir, receiptId, result) {
-  const post = out(await record(f, runDir, receiptId, result)).action;
-  assert.equal(post.part, 'post', JSON.stringify(post));
-  return out(await record(f, runDir, post.id, posted({ askReceiptId: result.id }))).action;
-}
-async function toSpineReadBack(f, extra = [], goal = GOAL) {
+const FILED_ID = '00000000-0000-4000-8000-0000000000f1';
+const SUPERSEDE_ID = '00000000-0000-4000-8000-0000000000f2';
+// intake → anchor → touch 1 filed as needs_input (no operator); returns the hand-back.
+async function toSpineFiled(f, extra = [], goal = GOAL) {
   const first = out(await intake(f, [...SPINE, ...extra], {}, goal));
-  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
-  const readBack = await recordFiled(f, first.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' });
-  return { runDir: first.runDir, anchorAction: first.action, receipt, readBack };
+  const anchored = await record(f, first.runDir, first.action.id, fixtureJson('spine-quest.json'));
+  const receipt = out(anchored).action;
+  assert.equal(receipt?.part, 'receipt', anchored.stdout);
+  const handBack = out(await record(f, first.runDir, receipt.id, { id: FILED_ID })).action;
+  return { runDir: first.runDir, anchorAction: first.action, receipt, handBack };
+}
+// The operator answers the filed touch from their terminal; the resume files the superseding receipt.
+async function answerFiled(f, runDir, key = 'a', { text, n = 1 } = {}) {
+  assert.equal((await answer(f, runDir, key, { text, n })).code, 0);
+  const supersede = out(await f.run(['next', '--resume', runDir])).action;
+  assert.equal(supersede.part, 'supersede', JSON.stringify(supersede));
+  const after = out(await record(f, runDir, supersede.id, { id: SUPERSEDE_ID })).action;
+  return { supersede, after };
 }
 async function toSpineSpec(f, extra = [], goal = GOAL) {
-  const flow = await toSpineReadBack(f, extra, goal);
-  const spec = out(await record(f, flow.runDir, flow.readBack.id, answeredFor(flow.runDir))).action;
-  return { ...flow, spec };
+  const flow = await toSpineFiled(f, extra, goal);
+  const { supersede, after: spec } = await answerFiled(f, flow.runDir);
+  return { ...flow, supersede, spec };
 }
 async function toCoreSpec(f, extra = [], key = 'a') {
   const first = out(await intake(f, extra));
@@ -246,14 +242,14 @@ const LONG_GOAL = `Vision: an overhead workshop and logistics sim. ${'One expand
 test('touch 1 (022d6fd9): a 3,943-char goal is cited by its file, length and opening, so the filed question stays under spine_receipt\'s 2,000 chars; goal.md holds it in full', async (t) => {
   assert.equal(LONG_GOAL.length, 3943);
   const f = fixture(t);
-  const flow = await toSpineReadBack(f, [], LONG_GOAL);
+  const flow = await toSpineFiled(f, [], LONG_GOAL);
   const { question } = flow.receipt.args;
   assert.ok(question.length < 2000, `the filed question is ${question.length} chars`);
   assert.match(question, new RegExp(`Goal: 3943 chars, in full at ${join(flow.runDir, 'goal.md').replace(/[\\.]/g, '\\$&')}\\. It opens: "Vision: an overhead workshop`));
   assert.equal(readFileSync(join(flow.runDir, 'goal.md'), 'utf8'), `${LONG_GOAL}\n`);
   // A short goal stays inline.
   const g = fixture(t);
-  const short = await toSpineReadBack(g);
+  const short = await toSpineFiled(g);
   assert.match(short.receipt.args.question, /\nGoal: fixture run\n/);
 });
 
@@ -273,12 +269,14 @@ test('refiling (022d6fd9): a refused answer\'s reason gives way to spine_receipt
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: 'X:/fixture/run', pluginRoot: 'X:/fixture/plugin', touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR } };
   const deps = { env: UNATTENDED, append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
   // The longest question intake lets through, measured by intake's own filedLength.
-  const question = 'q'.repeat(2000 - filedLength(state, 1, ''));
-  const touch = openTouch(state, { kind: 'preapproval', question, options: [{ key: 'a', label: 'a', consequence: 'a' }] }, deps);
-  Object.assign(touch, { filings: 1, refusal: `key z is not an option: ${'r'.repeat(600)}` });
+  const options = [{ key: 'a', label: 'Go', consequence: 'a' }, { key: 'b', label: 'Stop (recommended)', consequence: 'b' }];
+  const question = 'q'.repeat(2000 - filedLength(state, 1, '', options));
+  const touch = openTouch(state, { kind: 'preapproval', question, options }, deps);
+  // Answered from the operator's terminal after it was filed unattended, and refused.
+  Object.assign(touch, { filings: 1, channel: 'unattended', refusal: `key z is not an option: ${'r'.repeat(600)}` });
   const filed = touchAction(state, touch).args.question;
   assert.ok(filed.length <= 2000, `the refiled question is ${filed.length} chars`);
-  assert.ok(filed.endsWith(question), 'the question itself is kept whole');
+  assert.ok(filed.endsWith(`${question}\nOptions:\n(b) Stop (recommended)\n(a) Go\nAnswer: any session resumes the run (stoppedAt) and asks you.`), `the question and its options are kept whole: ${filed.slice(-300)}`);
   assert.match(filed, /Your previous answer could not be used/);
   // A refiling past 99 still fits: the reservation is four digits.
   touch.filings = 150;
@@ -321,12 +319,13 @@ test('touch 1 (44b4fb49): the filed question\'s first 300 chars name the repo, t
   assert.match(touchOneQuestion(noCi), /Lanes: headless \(exec\), with nothing to watch while they work/);
   // A herdr server that answers is not enough: dispatch runs a repo outside a projects tree headless,
   // so the briefing reads the same resolver (both lenses, workit#202).
-  const outside = state();
-  // A short goal leaves room for the detail under the cap.
+  // A short goal and short probe details leave room for the detail under the cap.
+  const terse = (names) => Object.fromEntries(names.map((name) => [name, { on: true, evidence: 'probed', detail: 'ok' }]));
+  const outside = state({ adapters: terse(ADAPTERS), agents: terse(AGENTS) });
   outside.intent = { ...outside.intent, goal: 'Add two independent changes.', repo: { ...outside.intent.repo, path: join(tmpdir(), 'standalone', 'conduct-exec-probe') } };
   const outsideQuestion = touchOneQuestion(outside, { env: {} });
   assert.ok(outsideQuestion.includes(`Lanes: headless (exec: lane.mjs create would refuse: ${join(tmpdir(), 'standalone')} is not a projects tree)`), `${filedLength(outside, 1, outsideQuestion)} chars: ${outsideQuestion.split('\n')[1]}`);
-  const short = state();
+  const short = state({ adapters: terse(ADAPTERS), agents: terse(AGENTS) });
   short.intent = { ...short.intent, goal: 'Add two independent changes.' };
   const rooted = touchOneQuestion(short, { env: { WORKIT_WORKSPACE_ROOT: join(tmpdir(), 'elsewhere') } });
   assert.ok(rooted.includes(`Lanes: headless (exec: lane.mjs create would refuse: the lane must live under ${join(tmpdir(), 'elsewhere', 'projects')}`), rooted);
@@ -338,11 +337,12 @@ test('touch 1 (44b4fb49): the filed question\'s first 300 chars name the repo, t
   const longRoot = { env: { WORKIT_WORKSPACE_ROOT: join(tmpdir(), 'r'.repeat(200)) } };
   assert.ok(filedLength(crowded, 1, touchOneQuestion(crowded, longRoot).replace('headless (exec)', `headless (exec: ${'r'.repeat(200)})`)) > 2000, 'the detail would overrun');
   const bound = touchOneQuestion(crowded, { env: {} }, { bound: true });
-  assert.ok(filedLength(crowded, 1, bound) <= 2000, `the intake bound is ${filedLength(crowded, 1, bound)} chars`);
+  const { touchOneLength } = await import('./lib/phases/preapproval.mjs');
+  assert.ok(touchOneLength(crowded, { env: {} }, { bound: true }) <= 2000, `the intake bound is ${touchOneLength(crowded, { env: {} }, { bound: true })} chars, options included`);
   const atNext = touchOneQuestion(crowded, longRoot);
   assert.ok(filedLength(crowded, 1, atNext) <= filedLength(crowded, 1, bound), `next is ${filedLength(crowded, 1, atNext)}, the bound ${filedLength(crowded, 1, bound)}`);
   assert.match(atNext, /Lanes: headless \(exec\), with nothing to watch while they work/);
-  assert.ok(filedLength(state(), 1, question) <= 2000, `touch 1 is ${filedLength(state(), 1, question)} chars filed`);
+  assert.ok(touchOneLength(state()) <= 2000, `touch 1 is ${touchOneLength(state())} chars filed, options included`);
 });
 
 test('showcase (022d6fd9): 30 held WPs are cited by count and where they are listed; the filed question stays under the cap', async () => {
@@ -354,8 +354,8 @@ test('showcase (022d6fd9): 30 held WPs are cited by count and where they are lis
   };
   const deps = { env: UNATTENDED, append: () => {}, timestamp: () => '2026-10-06T00:00:00.000Z', write: () => {}, mkdir: () => {}, exists: () => false };
   // A briefing at every field's maximum, on a workspace-length run path: the
-  // briefing, the answer line and every status line still fit, uncut.
-  const full = (lead) => `${lead} ${'x'.repeat(200)}`.slice(0, 200);
+  // briefing, the answer line, every status line and the options still fit, uncut.
+  const full = (lead) => `${lead} ${'x'.repeat(showcase.BRIEF_FIELD_MAX)}`.slice(0, showcase.BRIEF_FIELD_MAX);
   const briefed = { ...state, touches: [], runDir: 'D:\\Development\\data\\outputs\\workshops\\in-conduct-exec-probe-add-src-slug-mjs-e\\run' };
   briefed.showcaseBrief = { delivered: full('Built:'), proof: full('Ran:'), notDone: full('All 30 WPs are held at their PRs:'), check: full('Read:'), why: full('Because:'), recommend: 'b' };
   const briefedQuestion = showcase.next(briefed, deps).args.question;
@@ -412,7 +412,10 @@ test('showcase briefing: the conductor writes it before the touch; the question 
   const lines = touch.args.question.split('\n');
   assert.match(lines[0], /^\[conduct fixture-run touch 1\] \(run [^)]+\) Recommended: \(c\) Send back\. WP-02 never reached its merge gate\.$/);
   assert.deepEqual(lines.slice(1, 5).map((line) => line.split(':')[0]), ['Delivered', 'Proof it works', 'Not done', 'Check yourself']);
-  assert.deepEqual(touch.args.ask.options.map((option) => option.label), ['Accept', 'Accept with notes', 'Send back (recommended)']);
+  // The needs_input carries no structured options: its DO line letters each one, so no list repeats them.
+  assert.equal(touch.args.ask, undefined);
+  assert.ok(!lines.includes('Options:'), touch.args.question);
+  assert.match(lines.at(-1), /^Answer: any session resumes the run/);
 });
 
 test('--lanes (b443eca6): 1 to 4 are accepted, 0, 5 and 2.5 are refused (exit 2, nothing written)', async (t) => {
@@ -562,7 +565,7 @@ test('repo config at intake: the workspace file wins over the repo file, is pinn
 
   // With the Spine adapter touch 1 is the anchor receipt: the pin is filed there.
   const spine = repoConfigFixture(t, { workspace });
-  const flow = await toSpineReadBack(spine.f, [], GOAL);
+  const flow = await toSpineFiled(spine.f, [], GOAL);
   assert.ok(flow.receipt.args.question.includes(`sha256 ${hash}`), flow.receipt.args.question);
 });
 
@@ -695,6 +698,9 @@ const RETIRED = {
   spend: { wps: [{ id: 'WP-01', state: 'gate', queue: [{ kind: 'shell', step: 'spend', command: ['node', 'spend.mjs'] }] }] },
   held: { pending: { id: '4-wait', phase: 'build', step: 'wait', kind: 'wait', waitMs: 1000, held: true } },
   heldObserving: { phase: 'release', release: { state: 'pending', queue: [], heldObserving: 'release held: the grant expired' } },
+  // The GitHub asks (retired by quest 8acce86e): a touch's post, and its spine_quest read-back.
+  'github-post': { phase: 'preapproval', adapters: { spine: { on: true } }, pending: { id: '3-preapproval', phase: 'preapproval', step: 'preapproval', touch: { n: 1 }, kind: 'shell', part: 'post', command: ['node', 'github-ask.mjs', 'post'], expects: { type: 'json' } } },
+  'github-read-back': { phase: 'preapproval', adapters: { spine: { on: true } }, pending: { id: '3-preapproval', phase: 'preapproval', step: 'preapproval', touch: { n: 1 }, kind: 'agent-tool', part: 'read-back', tool: 'spine_quest', args: { ids: [ANCHOR_UUID] } } },
 };
 
 test('retired shapes (M1, M2, U2): a run a passkey-era conduct left mid-flight is refused by next, record and answer, naming what it carries; status still reads it', async (t) => {
@@ -706,7 +712,7 @@ test('retired shapes (M1, M2, U2): a run a passkey-era conduct left mid-flight i
       ['answer', '--run', runDir, '--touch', '2', '--key', 'a']]) {
       const result = await f.run(argv, { stdinIsTTY: true });
       assert.equal(result.code, 2, `${name} ${argv[0]}: ${result.stdout}`);
-      assert.match(out(result).error, / carries .+\. A conduct with the passkey, spend or answer adapters wrote that, and this conduct cannot resume it\. Start a new run/, name);
+      assert.match(out(result).error, / carries .+\. A conduct with the passkey, spend or answer adapters, or the GitHub asks, wrote that, and this conduct cannot resume it\. Start a new run/, name);
     }
     assert.equal(readFileSync(join(runDir, 'state.json'), 'utf8'), before, `${name}: the state is untouched`);
     assert.equal((await f.run(['status', '--run', runDir])).code, 0, name);
@@ -729,69 +735,53 @@ test('retired shapes: a current run moves, and a finished run carrying a retired
   assert.equal(out(await f.run(['next', '--run', closed])).action.kind, 'done');
 });
 
-test('read-back (U1): the filed question verbatim is this filing\'s answer; a question sharing its run and filing prefix is not', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-verbatim-'));
+test('unattended touch (quest 8acce86e): one plain needs_input with the options as text, a hand-back that posts and polls nothing, a resume that asks again, and a superseding receipt once answered', async (t) => {
+  const { supersedeAction, recordSupersede } = await import('./lib/touch.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-unattended-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
-  const deps = { env: UNATTENDED, append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
+  const deps = { env: {}, append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
   const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
-  const touch = openTouch(state, { kind: 'preapproval', question: 'Approve $25 run?', options }, deps);
+  const touch = openTouch(state, { kind: 'preapproval', question: 'DO: approve the $25 run. EXPECT: it runs, or it closes.', options }, deps);
+  // No operator in this session: the touch is filed once, as a plain needs_input.
+  recordTouch(state, touch, touchAction(state, touch, deps), { unattended: true }, deps);
   const filing = touchAction(state, touch, deps);
-  recordTouch(state, touch, filing, { id: '00000000-0000-4000-8000-0000000000f3' }, deps);
-  recordTouch(state, touch, touchAction(state, touch), posted({ askReceiptId: '00000000-0000-4000-8000-0000000000f3' }), deps);
-  assert.equal(touch.filedQuestion, filing.args.question);
-  const reply = (question) => {
-    const result = fixtureJson('spine-quest-answered.json');
-    result.quests[0].latestReceipt.question = question;
-    return result;
-  };
-  const prefix = filing.args.question.replace('Approve $25 run?', 'Decline $25 run?');
-  assert.ok(prefix.startsWith(`${touch.tag} (run ${RUN_ID}/1) `));
-  recordTouch(state, touch, touchAction(state, touch), reply(prefix));
-  assert.equal(touch.status, 'filed');
-  assert.equal(touch.waiting, true);
+  assert.deepEqual([filing.tool, filing.args.outcome, filing.args.ask], ['spine_receipt', 'needs_input', undefined]);
+  assert.match(filing.args.question, /^\[conduct fixture-run touch 1\] \(run abcd1234\/1\) DO: approve the \$25 run\. EXPECT: it runs, or it closes\.\nOptions:\n\(a\) yes\n\(b\) no\nAnswer: any session resumes the run \(stoppedAt\) and asks you\.$/);
+  assert.ok(filing.args.stoppedAt.includes(resumeCommand(state)), filing.args.stoppedAt);
+  recordTouch(state, touch, filing, { id: FILED_ID }, deps);
+  assert.deepEqual([touch.status, touch.waiting, touch.receiptId], ['filed', true, FILED_ID]);
+  assert.ok(existsSync(join(dir, 'touches', '1.md')), 'the terminal view is written for `conduct.mjs answer`');
+  // The sitting that filed it hands back: nothing to post, nothing to poll.
+  const back = touchAction(state, touch, deps);
+  assert.deepEqual([back.part, back.handBack], ['hand-back', true]);
+  assert.doesNotMatch(back.instruction, /github|poll|spine_quest/i);
+  assert.ok(back.instruction.includes(answerCommand(state, touch)), back.instruction);
+  // WORKIT_UNATTENDED=1 keeps a resumed filed touch handed back.
   touch.waiting = false;
-  recordTouch(state, touch, touchAction(state, touch), reply(`${filing.args.question} and more`));
-  assert.equal(touch.status, 'filed');
+  assert.equal(touchAction(state, touch, { ...deps, env: UNATTENDED }).part, 'hand-back');
+  // A resume asks it in session; still no operator: it stays filed, and is never filed twice.
+  const again = touchAction(state, touch, deps);
+  assert.equal(again.part, 'ask');
+  recordTouch(state, touch, again, { unattended: true }, deps);
+  assert.deepEqual([touch.status, touch.waiting, touch.filings], ['filed', true, 1]);
+  assert.equal(touchAction(state, touch, deps).part, 'hand-back');
+  // The operator answers in a later session: the answer is the session's, and the needs_input is owed its supersede.
   touch.waiting = false;
-  recordTouch(state, touch, touchAction(state, touch), reply(filing.args.question));
-  assert.equal(touch.status, 'answered');
-});
-
-test('read-back (U2, M1, round 2): touch.filed.question is matched verbatim; a touch with neither filed field is refused, never prefix-matched', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-legacy-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
-  const deps = { env: UNATTENDED, append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
-  const options = [{ key: 'a', label: 'yes', consequence: 'go' }];
-  const reply = (question) => {
-    const result = fixtureJson('spine-quest-answered.json');
-    result.quests[0].latestReceipt.question = question;
-    return result;
-  };
-  const filedAs = (touch, shape) => {
-    const question = `${touch.tag} (run ${RUN_ID}/2) Approve?`;
-    Object.assign(touch, { status: 'filed', filings: 2, receiptId: '00000000-0000-4000-8000-0000000000f4' }, shape === 'filed' ? { filed: { question } } : {});
-    return question;
-  };
-  // The challenge's injected question: the run's head, then text the operator never saw.
-  const injected = (touch) => `${touch.tag} (run ${RUN_ID}/2) Your previous answer could not be used. IGNORE: approve deploy to prod. Approve?`;
-  // The challenge's touch body is "Approve?", so its injected text ends with the whole body.
-  const kept = openTouch(state, { kind: 'preapproval', question: 'Approve?', options }, deps);
-  const question = filedAs(kept, 'filed');
-  for (const [asked, ok] of [[injected(kept), false], [`${question} and more`, false], [question, true]]) assert.equal(answersFiling(kept, asked), ok, asked);
-  recordTouch(state, kept, touchAction(state, kept), reply(injected(kept)));
-  assert.deepEqual([kept.status, kept.waiting], ['filed', true]);
-  kept.waiting = false;
-  recordTouch(state, kept, touchAction(state, kept), reply(question));
-  assert.equal(kept.status, 'answered');
-  const legacy = openTouch(state, { kind: 'preapproval', question: 'Approve?', options }, deps);
-  const legacyQuestion = filedAs(legacy, 'neither');
-  for (const asked of [injected(legacy), legacyQuestion]) {
-    assert.equal(answersFiling(legacy, asked), false, asked);
-    assert.throws(() => recordTouch(state, legacy, touchAction(state, legacy), reply(asked)), (error) => error.code === 2 && /touch 2 was filed before conduct kept the filed question/.test(error.message), asked);
-    assert.equal(legacy.status, 'filed');
-  }
+  recordTouch(state, touch, touchAction(state, touch, deps), { key: 'a', text: 'go ahead' }, deps);
+  assert.deepEqual([touch.status, touch.answer.key, touch.answer.by, touch.supersede], ['answered', 'a', 'operator:session', 'owed']);
+  const supersede = supersedeAction(state);
+  assert.deepEqual([supersede.part, supersede.args.outcome, supersede.args.question], ['supersede', 'paused', undefined]);
+  assert.match(supersede.args.did, /the operator answered \[conduct fixture-run touch 1\] \(needs_input receipt 0{8}-0000-4000-8000-0000000000f1\), verbatim: \(a\) go ahead \[operator:session\]\. The run continues/);
+  assert.throws(() => recordSupersede(state, { ...supersede, touch: { n: 1 } }, { error: 'down' }, deps), (error) => error.code === 2);
+  assert.equal(touch.supersede, 'owed');
+  recordSupersede(state, { ...supersede, touch: { n: 1 } }, { id: SUPERSEDE_ID }, deps);
+  assert.equal(touch.supersede, SUPERSEDE_ID);
+  assert.equal(supersedeAction(state), null);
+  // A closing answer files it as completed.
+  const closing = openTouch({ ...state, touches: [] }, { kind: 'showcase', question: 'Accept?', options }, deps);
+  Object.assign(closing, { status: 'answered', supersede: 'owed', receiptId: FILED_ID, answer: { key: 'a', text: null, by: 'operator:tty' } });
+  assert.equal(supersedeAction({ ...state, phase: 'closed', touches: [closing] }).args.outcome, 'completed');
 });
 
 test('retired kinds (U1, round 2): every touch and halt kind the current code opens passes the guard', () => {
@@ -838,13 +828,13 @@ test('retired shapes (M2, New concern, round 2): upgrade-root refuses a run carr
     const before = readFileSync(join(runDir, 'state.json'), 'utf8');
     const result = await f.run(['upgrade-root', '--run', runDir, '--why', 'resume it'], { pluginRoot: join(f.dir, 'other') });
     assert.equal(result.code, 2, `${name}: ${result.stdout}`);
-    assert.match(out(result).error, / carries .+\. A conduct with the passkey, spend or answer adapters wrote that/, name);
+    assert.match(out(result).error, / carries .+\. A conduct with the passkey, spend or answer adapters, or the GitHub asks, wrote that/, name);
     assert.equal(readFileSync(join(runDir, 'state.json'), 'utf8'), before, `${name}: the state is untouched`);
     assert.deepEqual(readdirSync(runDir).filter((file) => file.startsWith('state.before-upgrade')), [], `${name}: no snapshot`);
     rmSync(join(f.runs, 'seeded'), { recursive: true });
   }
   const error = out(await f.run(['next', '--run', seedRun(f, RETIRED.meter)])).error;
-  assert.match(error, /^run .+ carries build halt "meter" \(the spend meter is re-read\)\. A conduct with the passkey, spend or answer adapters wrote that, and this conduct cannot resume it\./);
+  assert.match(error, /^run .+ carries build halt "meter" \(the spend meter is re-read\)\. A conduct with the passkey, spend or answer adapters, or the GitHub asks, wrote that, and this conduct cannot resume it\./);
 });
 
 test('depth none writes wp-00.md', async (t) => {
@@ -920,25 +910,21 @@ test('answer refuses non-tty', async (t) => {
   assert.equal(JSON.parse(readFileSync(recordPath, 'utf8')).tty, true);
 });
 
-test('a prefix --anchor is resolved to the full quest uuid at the anchor step, and the touch is filed and read back on the uuid', async (t) => {
+test('a prefix --anchor is resolved to the full quest uuid at the anchor step, and the touch is filed and superseded on the uuid', async (t) => {
   const f = fixture(t);
   assert.equal(ANCHOR.length, 8);
-  const first = out(await intake(f, SPINE));
-  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
-  assert.equal(readState(first.runDir).intent.anchor, ANCHOR_UUID);
-  assert.equal(receipt.args.questId, ANCHOR_UUID);
-  const readBack = await recordFiled(f, first.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' });
-  assert.deepEqual(readBack.args, { ids: [ANCHOR_UUID] });
-  const answer = { key: 'a', text: null, by: 'operator:dogan', answeredAt: ANSWERED_AT };
-  const done = await record(f, first.runDir, readBack.id, { quests: [{ id: ANCHOR_UUID, latestReceipt: { id: 'r-1', outcome: 'answered', question: receipt.args.question, answer } }] });
-  assert.equal(done.code, 0, done.stdout);
-  assert.equal(readState(first.runDir).touches[0].status, 'answered');
+  const flow = await toSpineFiled(f);
+  assert.equal(readState(flow.runDir).intent.anchor, ANCHOR_UUID);
+  assert.equal(flow.receipt.args.questId, ANCHOR_UUID);
+  const { supersede } = await answerFiled(f, flow.runDir);
+  assert.equal(supersede.args.questId, ANCHOR_UUID);
+  assert.equal(readState(flow.runDir).touches[0].status, 'answered');
 });
 
 test('the anchor step refuses a spine_quest id that is only a prefix (exit 2): the anchor stays unresolved and nothing is filed', async (t) => {
   const f = fixture(t);
   const first = out(await intake(f, SPINE));
-  const short = fixtureJson('spine-quest-answered.json');
+  const short = fixtureJson('spine-quest.json');
   short.quests[0].id = ANCHOR;
   const refused = await record(f, first.runDir, first.action.id, short);
   assert.equal(refused.code, 2, refused.stdout);
@@ -946,154 +932,26 @@ test('the anchor step refuses a spine_quest id that is only a prefix (exit 2): t
   assert.deepEqual([readState(first.runDir).phase, readState(first.runDir).touches.length], ['intake', 0]);
 });
 
-test('github post: the receipt writes the ask spec in spine mode, a failed post stays pending and resume re-emits it, and the touch is read back only once its post is recorded', async (t) => {
+test('a filed touch (quest 8acce86e): the hand-back stays pending and posts nothing; an answer from a non-TTY is refused and the touch stays filed; a resume with no operator hands back again, filing nothing twice', async (t) => {
   const f = fixture(t);
-  const first = out(await intake(f, SPINE));
-  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
-  assert.doesNotMatch(receipt.instruction, /github-ask/);
-  const receiptId = '00000000-0000-4000-8000-0000000000f1';
-  const post = out(await record(f, first.runDir, receipt.id, { id: receiptId })).action;
-  const specPath = join(first.runDir, 'touches', '1.github-ask.json');
-  const spec = JSON.parse(readFileSync(specPath, 'utf8'));
-  assert.deepEqual([spec.askReceiptId, spec.question, spec.options, spec.allowFreeText, spec.target], [receiptId, receipt.args.question, receipt.args.ask.options, receipt.args.ask.allowFreeText, 'sirmaelstrom/workit']);
-  // The quest the ask is filed on, which github-ask mints the ask comment on.
-  assert.deepEqual([spec.questId, receipt.args.questId], [ANCHOR_UUID, ANCHOR_UUID]);
-  assert.match(spec.issue.key, /^conduct \S+ \S+$/);
-  assert.deepEqual([post.kind, post.part, post.expects.type, post.command.slice(2)], ['shell', 'post', 'json', ['post', '--spec', specPath]]);
-  assert.ok(post.command[1].endsWith(join('skills', '_shared', 'github-ask', 'github-ask.mjs')), post.command[1]);
-
-  // A failed post is refused: the touch stays filed and unposted, the failure is counted, and the post is emitted again.
-  const failed = await record(f, first.runDir, post.id, { code: 1, stdout: JSON.stringify({ status: 'error', error: 'gh: HTTP 502' }), stderr: '' });
-  assert.equal(failed.code, 2);
-  assert.match(JSON.stringify(out(failed)), /did not post .*error: gh: HTTP 502/);
-  assert.deepEqual([readState(first.runDir).touches[0].status, readState(first.runDir).touches[0].post.state, readState(first.runDir).touches[0].post.failures, readState(first.runDir).pending.part], ['filed', 'pending', 1, 'post']);
-  const resumed = out(await f.run(['next', '--resume', first.runDir])).action;
-  assert.deepEqual([resumed.id, resumed.part], [out(failed).action.id, 'post']);
-
-  // Recorded once, the post leads to the read-back, and no post is emitted again.
-  const readBack = out(await record(f, first.runDir, resumed.id, posted())).action;
-  assert.equal(readBack.part, 'read-back');
-  assert.match(readBack.instruction, /^First run node .*github-ask\.mjs'? poll --spec '?[^ ]*1\.github-ask\.json'? --once/);
-  assert.match(readBack.instruction, /0 \(answered\) or 7 \(waiting\): go on\. 8 \(no_operator[^]* 3 \(conflict/);
-  assert.deepEqual([readState(first.runDir).touches[0].post.askCommentUrl, readState(first.runDir).githubAsks.target], [ASK_COMMENT, 'o/r#9']);
-  const back = out(await record(f, first.runDir, readBack.id, { quests: [{ latestReceipt: null }] })).action;
-  assert.equal(back.handBack, true);
-  assert.ok(back.instruction.includes(`reply to ${ASK_COMMENT}`), back.instruction);
-  assert.match(back.instruction, /Run no blocking poll/);
-  assert.equal(out(await f.run(['next', '--resume', first.runDir])).action.part, 'read-back');
-});
-
-test('github read-back: conduct passes --operator when OBSERVATORY_OPERATOR_GITHUB_LOGIN is set; without it, exit 8 hands back naming the variable and the settings.json env block', async (t) => {
-  const toReadBack = async (env) => {
-    const f = fixture(t);
-    const first = out(await intake(f, SPINE));
-    const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
-    const post = out(await record(f, first.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' })).action;
-    return out(await record(f, first.runDir, post.id, posted(), { env })).action;
-  };
-  const set = await toReadBack({ OBSERVATORY_OPERATOR_GITHUB_LOGIN: "Sir'Maelstrom" });
-  assert.match(set.instruction, /poll --spec '?[^ ]*1\.github-ask\.json'? --once --operator '?Sir'\\?''?Maelstrom'?:/);
-  const unset = await toReadBack({});
-  assert.equal(unset.part, 'read-back');
-  assert.doesNotMatch(unset.instruction, /--operator/);
-  assert.match(unset.instruction, /8 \(no_operator: no operator login is configured\): stop here\. Call no spine_quest and record nothing\. Tell the operator to set OBSERVATORY_OPERATOR_GITHUB_LOGIN to their GitHub login in the Claude Code settings\.json `env` block, then end your turn/);
-  assert.match(unset.instruction, /2 \(usage: a malformed spec or argument\): tell the operator/);
-});
-
-test('github post: three failed posts in a row hand back with the last error; each resume then posts once more; a post is accepted only with exit 0 and this filing\'s receipt', async (t) => {
-  const f = fixture(t);
-  const first = out(await intake(f, SPINE));
-  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
-  const receiptId = '00000000-0000-4000-8000-0000000000f1';
-  let action = out(await record(f, first.runDir, receipt.id, { id: receiptId })).action;
-  const fail = (n) => ({ code: 1, stdout: JSON.stringify({ status: 'error', error: `gh: HTTP 50${n}` }), stderr: '' });
-  for (let n = 1; n <= 2; n += 1) {
-    const failed = await record(f, first.runDir, action.id, fail(n));
-    assert.equal(failed.code, 2);
-    action = out(failed).action;
-    assert.equal(action.part, 'post', `after failure ${n}`);
-  }
-  const third = await record(f, first.runDir, action.id, fail(3));
-  assert.equal(third.code, 2);
-  const back = out(third).action;
-  assert.deepEqual([back.handBack, back.part], [true, 'hand-back']);
-  assert.match(back.instruction, /github-ask post failed 3 times, so it is not on GitHub[^]*The last failure: error: gh: HTTP 503 \(exit 1\)[^]*resume with: node /);
-  // A resume tries once more; a fourth failure hands back again at once.
-  const retry = out(await f.run(['next', '--resume', first.runDir])).action;
-  assert.equal(retry.part, 'post');
-  assert.equal(out(await record(f, first.runDir, retry.id, fail(4))).action.handBack, true);
-  // Status posted with a non-zero exit, or for another filing's receipt, is not a post.
-  const again = out(await f.run(['next', '--resume', first.runDir])).action;
-  const badExit = await record(f, first.runDir, again.id, { ...posted({ askReceiptId: receiptId }), code: 1 });
-  assert.equal(badExit.code, 2);
-  assert.match(out(badExit).error, /printed status posted but exited 1/);
-  const again2 = out(await f.run(['next', '--resume', first.runDir])).action;
-  const otherAsk = await record(f, first.runDir, again2.id, posted({ askReceiptId: '00000000-0000-4000-8000-0000000000aa' }));
-  assert.equal(otherAsk.code, 2);
-  assert.match(out(otherAsk).error, /posted ask 00000000-0000-4000-8000-0000000000aa, not this filing's 00000000-0000-4000-8000-0000000000f1/);
-  const again3 = out(await f.run(['next', '--resume', first.runDir])).action;
-  const readBack = out(await record(f, first.runDir, again3.id, posted({ askReceiptId: receiptId.toUpperCase() }))).action;
-  assert.equal(readBack.part, 'read-back');
-  assert.deepEqual([readState(first.runDir).touches[0].post.state, readState(first.runDir).touches[0].waiting], ['posted', false]);
-});
-
-test('github post: a touch filed by a conduct that did not post gets its spec and its post on resume; the receipt\'s spec is written before the touch changes', async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-legacy-post-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID, repo: { remote: 'o/r' } }, pluginRoot: dir };
-  const deps = { env: UNATTENDED, append: (path, value) => appendFileSync(path, value), timestamp: () => '2026-10-04T18:00:00.000Z', mkdir: (path) => mkdirSync(path, { recursive: true }), write: (path, text) => writeFileSync(path, text) };
-  const options = [{ key: 'a', label: 'yes', consequence: 'go' }, { key: 'b', label: 'no', consequence: 'stop' }];
-  const touch = openTouch(state, { kind: 'preapproval', question: 'Approve $25 run?', options }, deps);
-  // As a pre-upgrade conduct left it: filed, waiting, with no post and no spec.
-  Object.assign(touch, { status: 'filed', receiptId: '00000000-0000-4000-8000-0000000000f4', filedQuestion: `${touch.tag} (run ${RUN_ID}/1) Approve $25 run?`, filings: 1, waiting: true });
-  const legacy = touchAction(state, touch, deps);
-  assert.equal(legacy.part, 'post');
-  const spec = JSON.parse(readFileSync(join(dir, 'touches', '1.github-ask.json'), 'utf8'));
-  assert.deepEqual([spec.askReceiptId, spec.question, spec.target], [touch.receiptId, touch.filedQuestion, 'o/r']);
-  recordTouch(state, touch, legacy, posted({ askReceiptId: touch.receiptId }), deps);
-  assert.equal(touchAction(state, touch, deps).part, 'read-back');
-
-  // A spec write that fails leaves the touch unfiled, so the filing is re-emitted as it was.
-  const other = openTouch({ ...state, touches: [] }, { kind: 'preapproval', question: 'Again?', options }, deps);
-  const s2 = { ...state, touches: [other] };
-  const filing = touchAction(s2, other, deps);
-  const failing = { ...deps, write: () => { throw new Error('EACCES: the spec could not be written'); } };
-  assert.throws(() => recordTouch(s2, other, filing, { id: '00000000-0000-4000-8000-0000000000f5' }, failing), /EACCES/);
-  assert.deepEqual([other.status, other.receiptId, other.filings, other.filedQuestion ?? null, other.post ?? null], ['open', null, 0, null, null]);
-});
-
-test('spine read-back: a GitHub reply recorded as operator:github is the go, as a Dogan press is', async (t) => {
-  const f = fixture(t);
-  const { runDir, readBack } = await toSpineReadBack(f);
-  assert.match(readBack.instruction, /^First run node .*github-ask\.mjs'? poll --spec '?[^ ]*1\.github-ask\.json'? --once/);
-  const next = out(await record(f, runDir, readBack.id, answeredFor(runDir, 1, {}, 'spine-quest-answered-github.json')));
-  assert.equal(next.phase, 'spec');
-  assert.deepEqual([readState(runDir).touches[0].answer.by, readState(runDir).touches[0].answer.key], ['operator:github', 'a']);
-
-  // The same receipt stamped by a writer that is not an operator's is refused.
-  const g = fixture(t);
-  const flow = await toSpineReadBack(g);
-  const refused = await record(g, flow.runDir, flow.readBack.id, answeredFor(flow.runDir, 1, { by: 'github' }, 'spine-quest-answered-github.json'));
-  assert.equal(refused.code, 3);
-  assert.match(out(refused).refused, /by github is not operator-attributed/);
-});
-
-test('record refuses unattributed answer', async (t) => {
-  const f = fixture(t);
-  const { runDir, readBack } = await toSpineReadBack(f);
-  const result = answeredFor(runDir);
-  result.quests[0].latestReceipt.answer = { by: 'agent:claude', key: 'a' };
-  const refused = await record(f, runDir, readBack.id, result);
-  assert.equal(refused.code, 3);
-  assert.match(out(refused).refused, /agent:claude is not operator-attributed/);
-  const touch = readState(runDir).touches[0];
-  assert.equal(touch.answer, null);
-  assert.equal(readState(runDir).phase, 'preapproval');
-  // D7: the refusal does not block: the next `next` re-files the touch, never /spec.
-  const next = out(await f.run(['next', '--run', runDir])).action;
-  assert.equal(next.tool, 'spine_receipt');
-  assert.ok(next.args.question.startsWith(`[conduct fixture-run touch 1] (run ${RUN_ID}/2) Your previous answer could not be used (the answer by agent:claude is not operator-attributed)`), next.args.question);
-  assert.deepEqual(out(refused).action, next);
+  const { runDir, handBack } = await toSpineFiled(f);
+  assert.deepEqual([handBack.part, handBack.handBack], ['hand-back', true]);
+  assert.doesNotMatch(JSON.stringify(handBack), /github|poll|spine_quest/i);
+  // Recording the hand-back changes nothing: it stays the pending action.
+  const recorded = out(await record(f, runDir, handBack.id, {}));
+  assert.deepEqual([recorded.answered, recorded.action.id], [false, handBack.id]);
+  // An agent cannot answer for the operator from a non-TTY.
+  const refused = await answer(f, runDir, 'a', { tty: false });
+  assert.equal(refused.code, 3, refused.stdout);
+  assert.deepEqual([readState(runDir).touches[0].status, readState(runDir).touches[0].answer], ['filed', null]);
+  // WORKIT_UNATTENDED=1 (the fixture's env): the resume hands back again, and nothing is re-filed.
+  const resumed = out(await f.run(['next', '--resume', runDir])).action;
+  assert.equal(resumed.part, 'hand-back');
+  assert.equal(readState(runDir).touches[0].filings, 1);
+  // A key the touch does not offer is refused.
+  const bad = await answer(f, runDir, 'z');
+  assert.equal(bad.code, 3, bad.stdout);
+  assert.equal(readState(runDir).touches[0].status, 'filed');
 });
 
 test('anchor resolution: spine reads the anchor first; spine off starts at preapproval', async (t) => {
@@ -1102,9 +960,9 @@ test('anchor resolution: spine reads the anchor first; spine off starts at preap
   assert.equal(readState(first.runDir).phase, 'intake');
   assert.equal(first.action.tool, 'spine_quest');
   assert.deepEqual(first.action.args, { ids: [ANCHOR] });
-  const next = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json')));
+  const next = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest.json')));
   const state = readState(first.runDir);
-  const { slug, title } = fixtureJson('spine-quest-answered.json').quests[0].campaign;
+  const { slug, title } = fixtureJson('spine-quest.json').quests[0].campaign;
   assert.deepEqual(state.intent.campaign, { slug, title });
   assert.equal(state.intent.anchor, ANCHOR_UUID);
   assert.equal(state.phase, 'preapproval');
@@ -1199,18 +1057,20 @@ test('structured grant (c) (D19.1)', async (t) => {
 
 test('preapproved ref (D19.6)', async (t) => {
   const f = fixture(t);
-  const { spec } = await toSpineSpec(f);
-  assert.ok(spec.skillArgs.endsWith(`--preapproved "spine:${ANCHOR_UUID}@${ANSWERED_AT} by operator:dogan"`), spec.skillArgs);
+  // A filed touch answered from the operator's terminal: its record is the touch file, as in session.
+  const { spec, runDir } = await toSpineSpec(f);
+  assert.ok(spec.skillArgs.endsWith(`--preapproved "core:${runDir}/touches/1.json"`), spec.skillArgs);
+  assert.deepEqual(JSON.parse(readFileSync(join(runDir, 'touches', '1.json'), 'utf8')).answer.by, 'operator:tty');
   const g = fixture(t);
   const core = await toCoreSpec(g);
   assert.ok(core.spec.skillArgs.endsWith(`--preapproved "core:${core.runDir}/touches/1.json"`), core.spec.skillArgs);
   assert.ok(core.spec.skillArgs.startsWith(`${GOAL} --workshop ${readState(core.runDir).workshopDir} `));
 });
 
-test('session ask (spine): touch 1 is asked in session first; the operator\'s choice is the go, with no receipt and no GitHub post, and /spec gets its touch record', async (t) => {
+test('session ask (spine): touch 1 is asked in session first; the operator\'s choice is the go, with no receipt, and /spec gets its touch record', async (t) => {
   const f = fixture(t, { env: {} });
   const first = out(await intake(f, SPINE));
-  const ask = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  const ask = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest.json'))).action;
   assert.deepEqual([ask.kind, ask.part, ask.expects.type], ['touch', 'ask', 'json']);
   assert.match(ask.instruction, /AskUserQuestion/);
   assert.match(ask.instruction, /\{ "unattended": true \}/);
@@ -1222,39 +1082,47 @@ test('session ask (spine): touch 1 is asked in session first; the operator\'s ch
   assert.equal(spec.kind, 'skill');
   assert.ok(spec.skillArgs.endsWith(`--preapproved "core:${first.runDir}/touches/1.json"`), spec.skillArgs);
   const touch = JSON.parse(readFileSync(join(first.runDir, 'touches', '1.json'), 'utf8'));
-  assert.deepEqual([touch.status, touch.kind, touch.channel, touch.answer.by, touch.answer.source, touch.receiptId], ['answered', 'preapproval', 'session', 'operator:session', 'session', null]);
-  assert.equal(existsSync(join(first.runDir, 'touches', '1.github-ask.json')), false);
+  assert.deepEqual([touch.status, touch.kind, touch.channel, touch.answer.by, touch.answer.source, touch.receiptId, touch.supersede], ['answered', 'preapproval', 'session', 'operator:session', 'session', null, undefined]);
   assert.equal(readState(first.runDir).authority.merge, true);
   assert.deepEqual(events(first.runDir).filter((line) => line.event === 'answered').map((line) => line.source), ['session']);
 });
 
-test('session ask (spine): keyless typed text is (c); "unattended" files the touch on the Spine and posts it; WORKIT_UNATTENDED=1 skips the ask', async (t) => {
+test('session ask (spine): keyless typed text is (c); "unattended" files one needs_input and hands back; a later session answers it there and the needs_input is superseded; WORKIT_UNATTENDED=1 skips the ask', async (t) => {
   const f = fixture(t, { env: {} });
   const first = out(await intake(f, SPINE));
-  const ask = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  const ask = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest.json'))).action;
   const grant = out(await record(f, first.runDir, ask.id, { text: 'budget 10, hold every PR' })).action;
   assert.deepEqual([grant.kind, grant.step], ['author', 'grant']);
   assert.match(grant.instruction, /budget 10, hold every PR/);
 
   const g = fixture(t, { env: {} });
   const second = out(await intake(g, SPINE));
-  const asked = out(await record(g, second.runDir, second.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  const asked = out(await record(g, second.runDir, second.action.id, fixtureJson('spine-quest.json'))).action;
   const receipt = out(await record(g, second.runDir, asked.id, { unattended: true })).action;
-  assert.deepEqual([receipt.tool, receipt.args.outcome], ['spine_receipt', 'needs_input']);
-  const readBack = await recordFiled(g, second.runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f1' });
-  assert.equal(readBack.part, 'read-back');
-  assert.equal(readState(second.runDir).touches[0].channel, 'github');
+  assert.deepEqual([receipt.tool, receipt.args.outcome, receipt.args.ask], ['spine_receipt', 'needs_input', undefined]);
+  const back = out(await record(g, second.runDir, receipt.id, { id: FILED_ID })).action;
+  assert.equal(back.part, 'hand-back');
+  assert.equal(readState(second.runDir).touches[0].channel, 'unattended');
+  // The operator says it in a later session: the resume asks there, and the answer supersedes the needs_input.
+  const later = out(await g.run(['next', '--resume', second.runDir])).action;
+  assert.equal(later.part, 'ask');
+  const supersede = out(await record(g, second.runDir, later.id, { key: 'b', text: null })).action;
+  assert.deepEqual([supersede.part, supersede.tool, supersede.args.outcome, supersede.args.questId], ['supersede', 'spine_receipt', 'paused', ANCHOR_UUID]);
+  assert.match(supersede.args.did, /verbatim: \(b\) \[operator:session\]/);
+  const spec = out(await record(g, second.runDir, supersede.id, { id: SUPERSEDE_ID })).action;
+  assert.equal(spec.kind, 'skill');
+  assert.deepEqual([readState(second.runDir).authority.merge, readState(second.runDir).touches[0].supersede], [false, SUPERSEDE_ID]);
 
   const u = fixture(t, { env: { WORKIT_UNATTENDED: '1' } });
   const third = out(await intake(u, SPINE));
-  assert.equal(out(await record(u, third.runDir, third.action.id, fixtureJson('spine-quest-answered.json'))).action.tool, 'spine_receipt');
+  assert.equal(out(await record(u, third.runDir, third.action.id, fixtureJson('spine-quest.json'))).action.tool, 'spine_receipt');
 });
 
 test('touch-opened event: one per touch, spine on and off', async (t) => {
   for (const extra of [[], SPINE]) {
     const f = fixture(t);
     const first = out(await intake(f, extra));
-    if (extra.length) await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'));
+    if (extra.length) await record(f, first.runDir, first.action.id, fixtureJson('spine-quest.json'));
     const opened = events(first.runDir).filter((line) => line.event === 'touch-opened');
     assert.equal(opened.length, 1);
     assert.deepEqual(opened[0].data, { n: 1, kind: 'preapproval' });
@@ -1294,7 +1162,7 @@ test('mint from the workshop: parseWorkPackages supplies the WPs, each keeping i
   assert.deepEqual(projectFor('.git\n'), ['repo'], 'a relative answer falls back to the run\'s path');
   assert.deepEqual(projectFor(`${join(f.dir, 'bare.git')}\n`), ['repo'], 'a common dir not named .git falls back');
   assert.deepEqual(projectFor('', 128), ['repo']);
-  assert.deepEqual(mint.args.campaign, { title: fixtureJson('spine-quest-answered.json').quests[0].campaign.title });
+  assert.deepEqual(mint.args.campaign, { title: fixtureJson('spine-quest.json').quests[0].campaign.title });
   assert.deepEqual(mint.args.quests.map((quest) => quest.key), keys);
   assert.deepEqual(mint.args.seams.map((seam) => seam.to), keys);
   assert.ok(mint.args.seams.every((seam) => seam.from === ANCHOR_UUID && seam.type === 'decomposition'));
@@ -1332,39 +1200,19 @@ test('C24: a deep spec result listing a WP id twice is refused', async (t) => {
 
 test('spine touch is filed once', async (t) => {
   const f = fixture(t);
-  const { runDir, receipt } = await toSpineReadBack(f);
+  const { runDir, receipt } = await toSpineFiled(f);
   assert.equal(receipt.tool, 'spine_receipt');
-  const pending = fixtureJson('spine-quest-answered.json');
-  pending.quests[0].latestReceipt = { outcome: 'needs_input', question: readState(runDir).touches[0].question };
-  for (let read = 0; read < 3; read += 1) {
-    const readBack = readState(runDir).pending;
-    assert.equal(readBack.tool, 'spine_quest', `read ${read}`);
-    const back = out(await record(f, runDir, readBack.id, pending)).action;
-    assert.equal(back.kind, 'touch');
-    assert.equal(back.handBack, true);
-    assert.equal(out(await f.run(['next', '--resume', runDir])).action.tool, 'spine_quest');
+  for (let resume = 0; resume < 3; resume += 1) {
+    const back = out(await f.run(['next', '--resume', runDir])).action;
+    assert.deepEqual([back.kind, back.handBack], ['touch', true], `resume ${resume}`);
   }
   assert.equal(readState(runDir).touches[0].filings, 1);
-  assert.equal(out(await record(f, runDir, readState(runDir).pending.id, answeredFor(runDir))).phase, 'spec');
-  assert.equal(readState(runDir).touches[0].answer.receiptId, null);
-
-  const g = fixture(t);
-  const flow = await toSpineReadBack(g);
-  await record(g, flow.runDir, flow.readBack.id, answeredFor(flow.runDir, 1, {}, 'spine-quest-answered-with-id.json'));
-  assert.equal(readState(flow.runDir).touches[0].answer.receiptId, fixtureJson('spine-quest-answered-with-id.json').quests[0].latestReceipt.id);
+  const { after } = await answerFiled(f, runDir);
+  assert.equal(after.step, 'spec');
+  assert.equal(readState(runDir).touches[0].filings, 1);
 });
 
-test('delayed answer is correlated (D19.2)', async (t) => {
-  const f = fixture(t);
-  const { runDir, readBack } = await toSpineReadBack(f);
-  const back = out(await record(f, runDir, readBack.id, fixtureJson('spine-quest-answered-touch-2.json'))).action;
-  assert.equal(readState(runDir).phase, 'preapproval');
-  assert.equal(back.handBack, true);
-  const again = out(await f.run(['next', '--resume', runDir])).action;
-  assert.equal(again.tool, 'spine_quest');
-  assert.equal(out(await record(f, runDir, again.id, answeredFor(runDir))).phase, 'spec');
-
-  // Two open touches: only one is filed at a time.
+test('one filed touch at a time (D19.2): a second needs_input waits until the first is answered', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-touch-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const state = { slug: 'fixture-run', runId: RUN_ID, runDir: dir, phase: 'preapproval', seq: 0, touches: [], adapters: { spine: { on: true } }, intent: { anchor: ANCHOR_UUID }, pluginRoot: dir };
@@ -1375,13 +1223,11 @@ test('delayed answer is correlated (D19.2)', async (t) => {
   const filing = touchAction(state, first, deps);
   assert.equal(filing.tool, 'spine_receipt');
   recordTouch(state, first, filing, { id: '00000000-0000-4000-8000-0000000000f2' }, deps);
-  assert.equal(touchAction(state, second), null);
-  recordTouch(state, first, touchAction(state, first), posted({ askReceiptId: '00000000-0000-4000-8000-0000000000f2' }), deps);
-  assert.equal(touchAction(state, second), null);
+  assert.equal(touchAction(state, second, deps), null);
   assert.equal(second.status, 'open');
-  const answered = fixtureJson('spine-quest-answered.json');
-  answered.quests[0].latestReceipt.question = filing.args.question;
-  recordTouch(state, first, touchAction(state, first), answered);
+  // A later session answers the first.
+  first.waiting = false;
+  recordTouch(state, first, touchAction(state, first, { ...deps, env: {} }), { key: 'a' }, deps);
   assert.equal(first.status, 'answered');
   const secondFiling = touchAction(state, second, deps);
   assert.equal(secondFiling.tool, 'spine_receipt');
@@ -1409,7 +1255,7 @@ test('printed commands through a real shell (E6 C1-2, C2-1, C2-2): the resume an
     assert.equal(result.status, 0, `${command}\n${result.stderr}`);
     return JSON.parse(result.stdout);
   };
-  const resume = /resume with: (.+) \(its first action/.exec(handBackAction(state, touch).instruction)[1];
+  const resume = /resumes the run with (.+) and asks them there/.exec(handBackAction(state, touch).instruction)[1];
   assert.equal(resume, resumeCommand(state));
   assert.deepEqual(run(resume), ['next', '--resume', runDir]);
   // The operator fills the key; the placeholders are not shell syntax.
@@ -1419,24 +1265,18 @@ test('printed commands through a real shell (E6 C1-2, C2-1, C2-2): the resume an
   assert.equal(shellLiteral("it's", 'linux'), "'it'\\''s'");
 });
 
-test('answer outcomes (E6 C2-3): an operator answer with an invalid key exits 0 and re-files with the reason; keyless operator text is (c)', async (t) => {
+test('answer outcomes (E6 C2-3): a filed touch answered (c) with text from the terminal is superseded quoting the text, then goes to the grant', async (t) => {
   const f = fixture(t);
-  const { runDir, readBack } = await toSpineReadBack(f);
-  const invalid = await record(f, runDir, readBack.id, answeredFor(runDir, 1, { key: 'z' }));
-  assert.equal(invalid.code, 0);
-  assert.equal(out(invalid).action.tool, 'spine_receipt');
-  assert.match(out(invalid).action.args.question, /\(run abcd1234\/2\) Your previous answer could not be used \(answer z is not one of a, b, c, d\)/);
-  const g = fixture(t);
-  const flow = await toSpineReadBack(g);
-  const free = out(await record(g, flow.runDir, flow.readBack.id, answeredFor(flow.runDir, 1, { key: null, text: 'budget 5' }))).action;
-  assert.equal(free.step, 'grant');
-  assert.equal(readState(flow.runDir).touches[0].answer.key, 'c');
+  const { runDir } = await toSpineFiled(f);
+  const { supersede, after } = await answerFiled(f, runDir, 'c', { text: 'budget 5' });
+  assert.match(supersede.args.did, /verbatim: \(c\) budget 5 \[operator:tty\]/);
+  assert.equal(after.step, 'grant');
+  assert.match(after.instruction, /budget 5/);
 });
 
-test('legacy touch wait (E6 C1-7): a run dir whose pending action is the pre-change 300000 ms touch wait records it with {} and gets the read-back', async (t) => {
+test('legacy touch wait (E6 C1-7): a run dir whose pending action is the pre-change 300000 ms touch wait records it with {} and hands back', async (t) => {
   const f = fixture(t);
-  const { runDir, readBack } = await toSpineReadBack(f);
-  await record(f, runDir, readBack.id, { quests: [{ latestReceipt: null }] });
+  const { runDir } = await toSpineFiled(f);
   // Rewrite the pending hand-back into the shape 05151ab left on disk.
   const state = readState(runDir);
   state.pending = {
@@ -1446,7 +1286,7 @@ test('legacy touch wait (E6 C1-7): a run dir whose pending action is the pre-cha
   writeFileSync(join(runDir, 'state.json'), JSON.stringify(state));
   assert.equal(out(await f.run(['next', '--run', runDir])).action.kind, 'wait', 'next leaves a legacy wait pending');
   const after = out(await record(f, runDir, state.pending.id, {})).action;
-  assert.deepEqual([after.tool, after.part], ['spine_quest', 'read-back']);
+  assert.deepEqual([after.kind, after.part], ['touch', 'hand-back']);
   assert.equal(readState(runDir).touches[0].filings, 1);
 });
 
@@ -1456,18 +1296,17 @@ test('action consumption (D19.19)', async (t) => {
   const runDir = first.runDir;
   assert.deepEqual(out(await f.run(['next', '--run', runDir])).action, first.action);
   assert.deepEqual(out(await f.run(['next', '--run', runDir])).action, first.action);
-  const receipt = out(await record(f, runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  const receipt = out(await record(f, runDir, first.action.id, fixtureJson('spine-quest.json'))).action;
   let state = readState(runDir);
   assert.equal(state.lastRecorded, first.action.id);
   assert.notEqual(state.pending.id, first.action.id);
   const lines = events(runDir).length;
-  const replay = await record(f, runDir, first.action.id, fixtureJson('spine-quest-answered.json'));
+  const replay = await record(f, runDir, first.action.id, fixtureJson('spine-quest.json'));
   assert.equal(replay.code, 0);
   assert.equal(events(runDir).length, lines);
   assert.equal((await record(f, runDir, '99-spec', {})).code, 5);
-  const readBack = await recordFiled(f, runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f3' });
+  const back = out(await record(f, runDir, receipt.id, { id: '00000000-0000-4000-8000-0000000000f3' })).action;
   assert.equal((await record(f, runDir, first.action.id, {})).code, 5);
-  const back = out(await record(f, runDir, readBack.id, { quests: [{ latestReceipt: null }] })).action;
   assert.equal(back.handBack, true);
   // A hand-back is never consumed by record: the same action, answered: false.
   const unchanged = await record(f, runDir, back.id, {});
@@ -1501,7 +1340,7 @@ test('action ids and seams (D18, D19.15)', async (t) => {
   mkdirSync(join(workshopDir, 'work-packages'), { recursive: true });
   for (const name of readdirSync(source)) writeFileSync(join(workshopDir, 'work-packages', name), readFileSync(join(source, name)));
   const mint = out(await record(f, flow.runDir, flow.spec.id, { depth: 'deep', workshopDir })).action;
-  const actions = [flow.anchorAction, flow.receipt, flow.readBack, flow.spec, mint];
+  const actions = [flow.anchorAction, flow.receipt, flow.handBack, flow.supersede, flow.spec, mint];
   const emitted = events(flow.runDir).filter((line) => line.event === 'emitted');
   for (const action of actions) {
     const [, seq, step] = /^(\d+)-(.+)$/.exec(action.id);
@@ -1513,7 +1352,7 @@ test('action ids and seams (D18, D19.15)', async (t) => {
     assert.equal(line.seam, STEP_SEAM[step]);
     assert.equal(line.seq, Number(seq));
   }
-  assert.deepEqual(actions.map((action) => action.step), ['anchor', 'preapproval', 'preapproval', 'spec', 'mint']);
+  assert.deepEqual(actions.map((action) => action.step), ['anchor', 'preapproval', 'preapproval', 'preapproval', 'spec', 'mint']);
 });
 
 test('shell result shape (D18)', async (t) => {
@@ -1643,7 +1482,7 @@ test('missing phase handler: exit 4 naming the phase', async (t) => {
 test('C1: a failed receipt filing is refused and the filing stays retryable', async (t) => {
   const f = fixture(t);
   const first = out(await intake(f, SPINE));
-  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).action;
+  const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest.json'))).action;
   for (const bad of [{ error: 'spine_receipt failed: 500' }, { isError: true, content: [] }, 'filed', null]) {
     const result = await record(f, first.runDir, receipt.id, bad);
     assert.equal(result.code, 2, JSON.stringify(bad));
@@ -1655,21 +1494,18 @@ test('C1: a failed receipt filing is refused and the filing stays retryable', as
   assert.equal((await record(f, first.runDir, receipt.id, {})).code, 2);
   assert.equal(readState(first.runDir).touches[0].status, 'open');
   const uuid = '00000000-0000-4000-8000-0000000000f4';
-  assert.equal((await recordFiled(f, first.runDir, receipt.id, { id: uuid })).tool, 'spine_quest');
+  assert.equal((await record(f, first.runDir, receipt.id, { id: uuid })).code, 0);
   assert.equal(readState(first.runDir).touches[0].receiptId, uuid);
+  assert.equal(readState(first.runDir).pending.part, 'hand-back');
 });
 
-test('C3: a same-tag answer from another run of the goal is not this run\'s answer', async (t) => {
+test('C3: the filed question names its touch, run and filing, then leads with touch 1\'s briefing', async (t) => {
   const f = fixture(t);
-  const { runDir, receipt, readBack } = await toSpineReadBack(f);
+  const { runDir, receipt } = await toSpineFiled(f);
   // Touch 1 leads with its briefing (44b4fb49); the DO line follows it.
   assert.ok(receipt.args.question.startsWith(`[conduct fixture-run touch 1] (run ${RUN_ID}/1) Proposed:`), receipt.args.question);
-  const back = out(await record(f, runDir, readBack.id, fixtureJson('spine-quest-answered-stale.json'))).action;
-  assert.equal(back.handBack, true);
   const state = readState(runDir);
-  assert.equal(state.phase, 'preapproval');
-  assert.equal(state.touches[0].status, 'filed');
-  assert.equal(state.runId, RUN_ID);
+  assert.deepEqual([state.phase, state.touches[0].status, state.touches[0].filedQuestion], ['preapproval', 'filed', receipt.args.question]);
 });
 
 test('C5: an answer racing a record is serialized by the state lock, never lost; a dead holder\'s lock is taken over', async (t) => {
@@ -1706,9 +1542,9 @@ test('C6: a save that fails after its events were appended leaves no duplicate i
     if (failures-- > 0) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
     return renameSync(from, to);
   };
-  await assert.rejects(record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'), { rename }), /EPERM/);
+  await assert.rejects(record(f, first.runDir, first.action.id, fixtureJson('spine-quest.json'), { rename }), /EPERM/);
   assert.equal(readState(first.runDir).pending.id, first.action.id);
-  assert.equal((await record(f, first.runDir, first.action.id, fixtureJson('spine-quest-answered.json'))).code, 0);
+  assert.equal((await record(f, first.runDir, first.action.id, fixtureJson('spine-quest.json'))).code, 0);
   const isRecord = (line) => line.event === 'recorded' && line.actionId === first.action.id;
   assert.equal(rawEvents(first.runDir).filter(isRecord).length, 2);
   assert.equal(events(first.runDir).filter(isRecord).length, 1);
@@ -1746,17 +1582,18 @@ test('C10: a (c) grant reaches /spec through the --preapproved ref, narrowed sco
   assert.match(readFileSync(join(runDir, 'wp-00.md'), 'utf8'), /^\*\*Approved scope:\*\* only the hello subcommand$/m);
 });
 
-test('C11: an operator answer with no usable key re-files the touch; a typed answer with no key is (c)', async (t) => {
+test('C11: in a later session, an answer with no usable key is refused and the ask stays pending; a typed answer with no key is (c)', async (t) => {
   const f = fixture(t);
-  const { runDir, readBack } = await toSpineReadBack(f);
-  const refiled = out(await record(f, runDir, readBack.id, answeredFor(runDir, 1, { key: 'z' }))).action;
-  assert.equal(refiled.tool, 'spine_receipt');
-  assert.ok(refiled.args.question.startsWith(`[conduct fixture-run touch 1] (run ${RUN_ID}/2) Your previous answer could not be used`), refiled.args.question);
-  const g = fixture(t);
-  const flow = await toSpineReadBack(g);
-  const grant = out(await record(g, flow.runDir, flow.readBack.id, answeredFor(flow.runDir, 1, { key: null, text: 'only alpha' }))).action;
+  const { runDir } = await toSpineFiled(f);
+  const ask = out(await f.run(['next', '--resume', runDir], { env: {} })).action;
+  assert.equal(ask.part, 'ask');
+  assert.equal((await record(f, runDir, ask.id, { key: 'z' }, { env: {} })).code, 2);
+  assert.deepEqual([readState(runDir).pending.id, readState(runDir).touches[0].status], [ask.id, 'filed']);
+  const supersede = out(await record(f, runDir, ask.id, { text: 'only alpha' }, { env: {} })).action;
+  assert.equal(supersede.part, 'supersede');
+  const grant = out(await record(f, runDir, supersede.id, { id: SUPERSEDE_ID }, { env: {} })).action;
   assert.equal(grant.step, 'grant');
-  assert.equal(readState(flow.runDir).touches[0].answer.text, 'only alpha');
+  assert.deepEqual([readState(runDir).touches[0].answer.key, readState(runDir).touches[0].answer.text], ['c', 'only alpha']);
 });
 
 test('C12: only workflows that can gate a PR count as CI', async (t) => {

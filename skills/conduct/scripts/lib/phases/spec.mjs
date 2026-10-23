@@ -6,14 +6,11 @@ import { parseDesignDirection, skillsField, stripWrappingBackticks, visualRules 
 import { approvingTouch, runAuthority } from '../authority.mjs';
 
 // The record that carries the run's authority: a (c) answer's validated grant
-// (scope included), else the answering touch (scope = the goal verbatim). A
-// touch answered in session is its touch record; one answered on GitHub is
-// the anchor's answered receipt.
+// (scope included), else the answering touch's record, touches/<n>.json
+// (scope = the goal verbatim), however the operator answered it.
 export function preapprovedRef(state) {
   if (state.authority.record) return `core:${state.runDir}/${state.authority.record}`;
-  const touch = approvingTouch(state);
-  if (state.adapters.spine?.on && touch.answer.source !== 'session') return `spine:${state.intent.anchor}@${touch.answer.answeredAt} by ${touch.answer.by}`;
-  return `core:${state.runDir}/touches/${touch.n}.json`;
+  return `core:${state.runDir}/touches/${approvingTouch(state).n}.json`;
 }
 
 // Equal paths, allowing win32's case-insensitivity and Git Bash's /d/… form.

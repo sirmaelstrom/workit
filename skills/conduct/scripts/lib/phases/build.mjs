@@ -6,7 +6,7 @@
 //
 // A WP's position is `wps[].stage`: the step expanded into `wps[].queue` when
 // the queue runs dry. `next` emits one queued action at a time: the oldest
-// dispatched WP's first non-wait action, then a blocked touch's read, then a
+// dispatched WP's first non-wait action, then a blocked touch's ask, then a
 // dispatch; only when everything waits, one `wait` with the smallest
 // remaining time (waits yield, D17).
 //
@@ -37,7 +37,7 @@ import {
   t2Actions, threadReplyActions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
-  QUESTION_MAX, READ_BACK_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, writeTouchFiles,
+  QUESTION_MAX, TOUCH_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, touchParked, writeTouchFiles,
 } from '../touch.mjs';
 import { budgetAmount, runAuthority } from '../authority.mjs';
 import { preapprovedRef } from './spec.mjs';
@@ -908,11 +908,16 @@ export function replan(state, plan, deps, { record = null } = {}) {
   const source = record ? 'record' : 'verb';
   // The operator decides from the question alone, so it carries the whole delta-plan or is refused before anything is written.
   let question = null;
+  const options = [
+    option('a', 'Apply the delta-plan', `The conductor applies the ${items.length} change(s) before any other build work.`),
+    option('b', 'Keep the original plan', 'Nothing changes; dispatch resumes on the plan you approved.'),
+    option('c', 'Apply it with my changes', 'Type the changes; the conductor applies the plan as your text amends it.'),
+  ];
   if (wider.length) {
     const list = items.map((item, i) => `${i + 1}. ${item.change} (${item.door}${item.inScope ? '' : ', outside the approved scope'})`).join(' ');
     const reasons = wider.map((item) => `change ${items.indexOf(item) + 1} is ${item.inScope ? 'a one-way door' : 'outside the approved scope'}`).join('; ');
     question = `DO: rule on conduct ${state.slug}'s re-plan. New information: ${why}. The delta-plan: ${list} It needs you because ${reasons}; the pre-approval (${rests}) covers only two-way changes inside its scope. EXPECT: (a) the conductor applies these changes before any other build work; (b) the run keeps its original plan; (c) the conductor applies the plan as your text amends it (type the changes). Dispatch stays halted until you answer.`;
-    const length = filedLength(state, state.touches.length + 1, question);
+    const length = filedLength(state, state.touches.length + 1, question, options);
     if (length > QUESTION_MAX) throw new ConductError(2, `replan: the delta-plan's question would be ${length} chars, over spine_receipt's ${QUESTION_MAX}-char cap; shorten "why" or the changes so the operator sees the whole plan`);
   }
   deps.mkdir(join(state.runDir, 'rulings'));
@@ -926,11 +931,7 @@ export function replan(state, plan, deps, { record = null } = {}) {
   }
   const touch = buildTouch(state, deps, 'replan', {
     question,
-    options: [
-      option('a', 'Apply the delta-plan', `The conductor applies the ${items.length} change(s) before any other build work.`),
-      option('b', 'Keep the original plan', 'Nothing changes; dispatch resumes on the plan you approved.'),
-      option('c', 'Apply it with my changes', 'Type the changes; the conductor applies the plan as your text amends it.'),
-    ],
+    options,
     allowFreeText: true,
   });
   row.touch = touch.n;
@@ -1050,9 +1051,7 @@ function answerRunTouch(state, touch, deps) {
   }
   if (touch.build === 'budget') {
     const usd = budgetAmount(text);
-    // A GitHub reply's text is the notes below its letter.
-    const where = touch.answer.by === 'operator:github' ? ' (on GitHub: on the line below the letter a)' : '';
-    if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, `(a) needs the text "budget <USD>"${where} above the current spend of $${touch.spendUsd ?? 'unknown'}`, deps);
+    if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, `(a) needs the text "budget <USD>" above the current spend of $${touch.spendUsd ?? 'unknown'}`, deps);
     state.authority.budgetUsd = usd;
     state.authority.budgetSource = { touch: touch.n, by: touch.answer.by, answeredAt: touch.answer.answeredAt, text };
   }
@@ -1669,7 +1668,7 @@ function workAction(state, deps) {
   if (spineOn(state)) {
     for (const touch of openBuildTouches(state)) {
       const spec = touchAction(state, touch, deps);
-      // A waiting touch is re-read by the yield below, or handed back when idle.
+      // A filed touch waits on the operator: it is handed back once nothing else can run.
       if (spec && !spec.handBack) return spec;
     }
   }
@@ -1685,7 +1684,9 @@ function workAction(state, deps) {
 // poll's 0 ms re-wait is always due, so the build never yields while a lane
 // runs, and every other wait would sit until that lane stopped.
 const leftMs = (creditMs, dueAt, now) => Math.min(creditMs, dueAt ? Date.parse(dueAt) - now : Infinity);
-const touchWaits = (state, touch) => !spineOn(state) || touch.waiting;
+// Only a core touch is waited on by the clock (the operator's terminal answer
+// is read at the next `next`); a filed spine touch is handed back instead.
+const touchWaits = (state) => !spineOn(state);
 
 function stampWaits(state, deps) {
   const now = deps.now();
@@ -1695,7 +1696,7 @@ function stampWaits(state, deps) {
     if (head?.kind === 'wait' && !head.dueAt) head.dueAt = due(head.remainingMs ?? head.waitMs ?? 0);
   }
   for (const touch of openBuildTouches(state)) {
-    if (touchWaits(state, touch) && !touch.waitDueAt) touch.waitDueAt = due(touch.waitLeftMs ?? READ_BACK_WAIT_MS);
+    if (touchWaits(state) && !touch.waitDueAt) touch.waitDueAt = due(touch.waitLeftMs ?? TOUCH_WAIT_MS);
   }
 }
 
@@ -1811,11 +1812,10 @@ function yielders(state, deps) {
     if (until > 0) out.push({ ms: until, step: 'admit', note: `${wp.id} may be dispatched again at ${wp.notBefore}` });
   }
   for (const touch of openBuildTouches(state)) {
-    if (touchWaits(state, touch)) {
-      const core = !spineOn(state);
+    if (touchWaits(state)) {
       const refused = touch.refusal ? ` (their last answer could not be used: ${touch.refusal})` : '';
-      const note = core ? `${touch.tag} is open: show the operator ${join(state.runDir, touch.file)}; they answer from their own terminal${refused}` : `${touch.tag}: no answer yet`;
-      out.push({ ms: leftMs(touch.waitLeftMs ?? READ_BACK_WAIT_MS, touch.waitDueAt, now), touch, step: 'touch', note });
+      const note = `${touch.tag} is open: show the operator ${join(state.runDir, touch.file)}; they answer from their own terminal${refused}`;
+      out.push({ ms: leftMs(touch.waitLeftMs ?? TOUCH_WAIT_MS, touch.waitDueAt, now), touch, step: 'touch', note });
     }
   }
   return out;
@@ -1942,11 +1942,11 @@ function chooseAction(state, deps) {
       due.forEach(release);
       continue;
     }
-    // Nothing but spine touches to wait on (no lane poll or re-admission that
-    // can act): only the operator can move the build, so it hands back.
-    const touchYield = waiting.find((y) => y.touch);
-    if (spineOn(state) && touchYield && waiting.every((y) => y.touch)) return handBackAction(state, touchYield.touch);
     if (waiting.length) return yieldWait(waiting);
+    // Nothing left to wait on but a filed spine touch: only the operator can
+    // move the build, so it hands back.
+    const parked = openBuildTouches(state).find((touch) => touchParked(state, touch, deps.env));
+    if (parked) return handBackAction(state, parked);
     break;
   }
   if (!settled(state, deps)) {
@@ -1969,8 +1969,8 @@ function recordYield(state, action) {
     else head.remainingMs = left;
   }
   for (const touch of openBuildTouches(state)) {
-    if (spineOn(state) && !touch.waiting) continue;
-    const left = (touch.waitLeftMs ?? READ_BACK_WAIT_MS) - action.waitMs;
+    if (!touchWaits(state)) continue;
+    const left = (touch.waitLeftMs ?? TOUCH_WAIT_MS) - action.waitMs;
     if (left > 0) touch.waitLeftMs = left;
     else release({ touch });
   }

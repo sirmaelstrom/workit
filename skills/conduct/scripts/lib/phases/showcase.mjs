@@ -29,12 +29,12 @@ export function namedSeam(text) {
 
 // ---- the briefing ----
 
-// The operator answers the showcase from its question alone (its GitHub comment), so
+// The operator answers the showcase from its question alone (an AskUserQuestion, or the needs_input), so
 // the question leads with the conductor's briefing: what was delivered, the
 // proof it works, what did not happen, the one thing to check, and the
 // recommended answer. The conductor writes it before the touch is filed.
 export const BRIEF_FIELDS = ['delivered', 'proof', 'notDone', 'check', 'why'];
-export const BRIEF_FIELD_MAX = 200;
+export const BRIEF_FIELD_MAX = 180;
 // Up to this many unfinished WPs are named in notDone; above it, their count is.
 const NAMED_MAX = 6;
 const briefPath = (state) => join(state.runDir, 'showcase-brief.json');
@@ -45,7 +45,7 @@ function briefAction(state) {
   const stopped = unfinished(state).map((wp) => `${wp.id} (${wp.state}: ${wp.reason ?? 'no reason recorded'})`);
   return {
     kind: 'author', step: 'showcase-brief', outPath, expects: { type: 'file' },
-    instruction: `Before the showcase is filed, write ${outPath}. The operator answers from this briefing alone, in a GitHub reply, so it carries your judgment in plain words, not process vocabulary. JSON: { "delivered": "<what now exists that did not before>", "proof": "<the runtime evidence that it works: the command and what it showed, quoted from a lane report's ## Runtime exercise; or why there is none>", "notDone": "<what the goal asked that did not happen, and why${stopped.length > NAMED_MAX ? `; say that ${stopped.length} WPs did not finish` : stopped.length ? `; name every one of ${unfinished(state).map((wp) => wp.id).join(', ')}` : '; \\"nothing\\" when everything landed'}>", "check": "<the one thing worth checking yourself, and where>", "recommend": "a" | "b" | "c", "why": "<one sentence: why that answer>" }. Each text field is one or two sentences, at most ${BRIEF_FIELD_MAX} characters. (a) accept, (b) accept with notes, (c) send back. Sources: ${join(state.runDir, 'run-analysis.md')}, each WP's report and PR.${stopped.length ? ` Not finished: ${stopped.join('; ')}.` : ''} Record {}.`,
+    instruction: `Before the showcase is filed, write ${outPath}. The operator answers from this briefing alone, so it carries your judgment in plain words, not process vocabulary. JSON: { "delivered": "<what now exists that did not before>", "proof": "<the runtime evidence that it works: the command and what it showed, quoted from a lane report's ## Runtime exercise; or why there is none>", "notDone": "<what the goal asked that did not happen, and why${stopped.length > NAMED_MAX ? `; say that ${stopped.length} WPs did not finish` : stopped.length ? `; name every one of ${unfinished(state).map((wp) => wp.id).join(', ')}` : '; \\"nothing\\" when everything landed'}>", "check": "<the one thing worth checking yourself, and where>", "recommend": "a" | "b" | "c", "why": "<one sentence: why that answer>" }. Each text field is one or two sentences, at most ${BRIEF_FIELD_MAX} characters. (a) accept, (b) accept with notes, (c) send back. Sources: ${join(state.runDir, 'run-analysis.md')}, each WP's report and PR.${stopped.length ? ` Not finished: ${stopped.join('; ')}.` : ''} Record {}.`,
   };
 }
 
@@ -126,13 +126,14 @@ function question(state) {
   // Lists are cited by count, in order, until the question fits; whatever still
   // overruns (a very long repo path or reason) is cut at the cap, pointing at the analysis.
   const n = (state.touches ?? []).length + 1;
+  const filed = (text) => filedLength(state, n, text, options(state));
   for (let cited = 0; cited <= lists.length; cited += 1) {
     const text = lines(cited);
-    if (filedLength(state, n, text) <= QUESTION_MAX) return text;
+    if (filed(text) <= QUESTION_MAX) return text;
   }
   const cut = `… (cut at spine_receipt's cap; read ${analysis})`;
   const text = lines(lists.length);
-  return `${text.slice(0, text.length - (filedLength(state, n, text) - QUESTION_MAX) - cut.length)}${cut}`;
+  return `${text.slice(0, text.length - (filed(text) - QUESTION_MAX) - cut.length)}${cut}`;
 }
 
 const OPTIONS = [
@@ -146,6 +147,13 @@ const showcaseTouch = (state) => (state.touches ?? []).find((touch) => touch.kin
 // The recommended option says so on its button.
 const options = (state) => OPTIONS.map((option) => (option.key === state.showcaseBrief?.recommend ? { ...option, label: `${option.label} (recommended)` } : option));
 
+// A showcase answered outside a record (from the operator's terminal, then a
+// resume) closes the run here, before its superseding receipt is written.
+export function settle(state, deps) {
+  const touch = showcaseTouch(state);
+  if (touch?.status === 'answered') apply(state, touch, deps);
+}
+
 export function next(state, deps) {
   const filed = showcaseTouch(state);
   if (!filed && !state.showcaseBrief) return briefAction(state);
@@ -153,7 +161,7 @@ export function next(state, deps) {
     kind: 'showcase', question: question(state), options: options(state), allowFreeText: true, did: `conduct ${state.slug}: built, released and analyzed`,
   }, deps);
   if (touch.status === 'answered') return apply(state, touch, deps);
-  // One filed touch at a time (spine): a touch filed earlier is read back first.
+  // One filed touch at a time (spine): a touch filed earlier is answered first.
   const spec = touchAction(state, touch, deps) ?? touchAction(state, state.touches.find((other) => other !== touch && other.status === 'filed'), deps);
   if (!spec) throw new ConductError(2, `the showcase touch ${touch.n} has no action to emit`);
   return spec;

@@ -120,13 +120,6 @@ What degrades, exactly:
   it files them when Observatory answers and otherwise spools them for replay
   on recovery (exit 0 either way; 1 is a refusal to fix). It takes `completed`,
   `paused` and `needs_input`.
-- **Asks wait for recovery.** A spooled `needs_input` has no receipt id until
-  it replays, so its GitHub comment is posted at the first re-entry after the
-  probe answers again: read the replayed receipt's id from `spine_quest`, write
-  the spec and run `post` (it finds a comment already posted rather than
-  posting twice). A reply to a
-  comment already posted stays on GitHub, and `github-ask.mjs poll` keeps
-  retrying it until Observatory records it.
 
 When the probe answers again, go back to the Spine and make the writes you
 held.
@@ -158,65 +151,19 @@ pre-validated at submit — an unresolvable artifact rejects the whole receipt w
 a per-artifact fix hint and nothing is persisted, so fix and resubmit rather than
 dropping the needle. Stopped because you are blocked rather than done? Use
 `outcome: "needs_input"` with the exact blocking question — the quest then
-surfaces blocked-waiting instead of looking abandoned. When the question is a
-CHOICE, pass `ask.options` too — one entry per choice with a letter key
-(`a`..`f`), a short label, and a ONE-LINE consequence, plus `allowFreeText`
-when a typed answer is also acceptable. A question with no choices is filed as
-one option, `a` (label "Answer below"), with `allowFreeText: true`, because a
-GitHub answer needs a key. That Spine ask is for unattended runs, and it
-reaches the operator as a GitHub comment in the private asks repo
-`WORKIT_ASKS_REPO` names, on one issue per run that names the run's PR or
-issue. An ask carries the run's paths and budget, so `post` refuses a public
-target (exit 9, `public_target`) when no asks repo is set. Post it with
-`node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`,
-where the spec file holds the receipt's id, the id of the quest it is filed on
-(`questId`), the question, the options and
-`allowFreeText` exactly as filed, the recommended option's key (`recommended`),
-the target `<owner/repo>#<n>` and the run's name. `post` also mints the
-comment's URL on that quest as an `evidence` url labelled `ask <receipt id>`,
-which the Dogan's Asks list links to; `linked: false` in its output means
-Observatory missed the mint, and the next `post` or `poll` mints it again,
-except with `linkError: "no_quest"`: the spec has no `questId`, so nothing is
-minted until you add it. The operator replies from any
-device with the option letter alone on the first line; notes, a typed answer
-included, go on the lines below and become the answer's `text`. Then run
-`github-ask.mjs poll --spec <file> --once`, once per re-entry: it finds that
-reply and records it through Observatory as an `answered` receipt from
-`operator:github` that supersedes the ask. Its exit says what to do next:
-- 0, recorded: read the answer back (below).
-- 7, no reply yet: end the turn, and run it again on the next re-entry. Never
-  run the blocking form in a turn that should end.
-- 3, the ask was answered another way or replaced: read it back.
-- 8, no operator login: tell the operator to set
-  `OBSERVATORY_OPERATOR_GITHUB_LOGIN` to their GitHub login in the Claude Code
-  `settings.json` `env` block, and stop. It is configuration, not a reply, so
-  nothing moves until it is set.
-- 4 (not the operator's), 5 (Observatory unconfigured), 6 (the route refused
-  it), 1 (gh failed) or 2 (a malformed spec or argument): report the printed
-  status and error to the operator, and stop.
-- 9 (`post` only), public target: tell the operator to set `WORKIT_ASKS_REPO`
-  to a private `<owner/repo>` in the same `env` block, and stop. Nothing was
-  posted.
-
-poll counts only comments by the login in `OBSERVATORY_OPERATOR_GITHUB_LOGIN`
-(or `--operator`). That filter is a convenience; Observatory's own check of the
-login on the comment it fetches is the authority. A run holding the operator's
-gh token can post as the operator, and nothing tells that comment apart, so
-never reply to an ask comment yourself. The Dogan still lists waiting asks,
-read-only; it no longer answers them. In session, pose any ask or list of choices
-as a plain AskUserQuestion with the recommendation first: the recommended option
-listed first, its label ending "(Recommended)". Use at most four options per
-question. Record the ruling in your next Spine receipt: the chosen label
-verbatim, plus the session id. In session, the operator's message is the go.
-Unattended, on re-entry, `spine_quest`'s `latestReceipt.answer` (`key` / `text`)
-IS the go when that receipt is `answered`, its `question` is your ask's,
-verbatim, and its `answer.by` begins `operator:`. Never assume the go from the
-quest having returned to the frontier. A later receipt hides the answer there,
-so before concluding there is none, read the newest answered receipt from
-Observatory's `GET /api/spine/quests/<quest uuid>/receipts/latest-answer?questionPrefix=<your ask's whole question, URL-encoded>`
-route. It searches every receipt and returns one row, or `null`. The row IS the
-go when its `question` passes the same verbatim check and its `answer.by`
-begins `operator:`.
+surfaces blocked-waiting instead of looking abandoned. In session, ask
+instead: pose any ask or list of choices as a plain AskUserQuestion with the
+recommendation first: the recommended option listed first, its label ending
+"(Recommended)". Use at most four options per question. Record the ruling in
+your next Spine receipt: the chosen label verbatim, plus the session id.
+Unattended (no operator in the session), finish everything else, then file ONE
+`needs_input` whose question is in DO/EXPECT form (a choice lists its options
+as text lines, recommendation first) and end the run: post nothing, wait for
+nothing. A `needs_input` quest is not pullable. When the operator answers one
+in this session, record the answer in an ordinary receipt (`completed` or
+`paused`, `did` quoting it), which supersedes the needs_input, and continue.
+The operator's message is the go; never assume it from the quest having
+returned to the frontier.
 
 Work-state and attention are orthogonal: `dismissed` is not `done`, and a quest
 you finished is not closed until `workState` says so.

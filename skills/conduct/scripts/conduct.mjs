@@ -18,7 +18,7 @@ import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from '
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
-import { QUESTION_MAX, acceptAnswer, filedLength, resumeHandBack, touchStep, writeTouchFiles } from './lib/touch.mjs';
+import { QUESTION_MAX, acceptAnswer, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
 import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -141,6 +141,21 @@ async function emit(state, deps, { custody = null } = {}) {
     const phase = state.phase === 'build' ? await loadModule(deps, 'lib/phases/build.mjs', 'phase handler build') : null;
     if (phase?.observePending) { phase.observePending(state, deps); saveState(state, deps); }
     return state.pending;
+  }
+  // A filed touch's answer is receipted on the anchor before anything else,
+  // in any phase (a closing answer too), so its needs_input stops blocking.
+  // The phase settles the answer first, so the receipt says where it left the run.
+  if (supersedeAction(state) && !TERMINAL_PHASES.includes(state.phase)) {
+    const handler = await loadModule(deps, `lib/phases/${state.phase}.mjs`, `phase handler ${state.phase}`);
+    handler.settle?.(state, deps);
+  }
+  const supersede = supersedeAction(state);
+  if (supersede) {
+    const action = stamp(state, supersede);
+    state.pending = action;
+    appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'emitted' });
+    saveState(state, deps);
+    return action;
   }
   for (let hop = 0; hop < 8; hop += 1) {
     if (TERMINAL_PHASES.includes(state.phase)) return { kind: 'done', phase: state.phase };
@@ -307,7 +322,7 @@ async function intake(tokens, deps) {
   if (options.spine) {
     const preapproval = await loadModule(deps, 'lib/phases/preapproval.mjs', 'module');
     const projected = draft();
-    const length = filedLength(projected, 1, preapproval.touchOneQuestion(projected, deps, { bound: true }));
+    const length = preapproval.touchOneLength(projected, deps, { bound: true });
     if (length > QUESTION_MAX) {
       refuse(8, `touch 1's question would be ${length} chars, over spine_receipt's ${QUESTION_MAX}-char cap: shorten the release recipe, the repo path${repoConfig.source === 'workspace' ? ' or the workspace config path' : ''} (a long goal is already cited by file)`);
     }
@@ -326,7 +341,8 @@ async function intake(tokens, deps) {
 }
 
 // `next` (and `--resume`) on a pending spine hand-back is the resume: the
-// hand-back is consumed and the touch is read back again.
+// hand-back is consumed and the touch is asked again (or, answered from the
+// operator's terminal meanwhile, receipted and acted on).
 // `--custody <n>` is a rotated-in successor's first call: refused when
 // rotation n was cancelled or superseded (lib/rotate.mjs custodyFence).
 async function next(tokens, deps) {
@@ -454,8 +470,9 @@ async function record(tokens, deps) {
     if (action.kind === 'touch' && action.part !== 'ask' && state.touches[action.touch.n - 1]?.status !== 'answered') {
       return { out: { ok: true, phase: state.phase, action, answered: false } };
     }
-    const handler = await loadModule(deps, `lib/phases/${action.phase}.mjs`, `phase handler ${action.phase}`);
-    const outcome = await handler.record(state, action, result, deps);
+    // A superseding receipt belongs to no phase: it may follow a closing answer.
+    if (action.part === 'supersede') recordSupersede(state, action, result, deps);
+    else await (await loadModule(deps, `lib/phases/${action.phase}.mjs`, `phase handler ${action.phase}`)).record(state, action, result, deps);
     state.pending = null;
     state.lastRecorded = id;
     appendEvent(state, deps, {
@@ -466,26 +483,20 @@ async function record(tokens, deps) {
     saveState(state, deps);
     const filed = replan ? fileReplan(state, deps, id, replan) : null;
     const next = await emitAfterRecord(state, deps, id);
-    const filedOut = filed ? { replan: filed } : {};
-    // A refused answer (not operator-attributed) is recorded as a refusal:
-    // exit 3, no authority, and the next action re-files the touch.
-    if (outcome?.refused) return { code: 3, out: { ok: false, refused: outcome.refused, recorded: id, phase: state.phase, action: next, ...filedOut } };
-    // A failed step recorded as a failure (a touch's post): its count is
-    // saved, the exit is 2, and the next action retries or hands back.
-    if (outcome?.failed) return { code: 2, out: { ok: false, error: outcome.failed, recorded: id, phase: state.phase, action: next, ...filedOut } };
-    return { out: { ok: true, phase: state.phase, action: next, ...filedOut } };
+    return { out: { ok: true, phase: state.phase, action: next, ...(filed ? { replan: filed } : {}) } };
   }, { duringRotation: true });
 }
 
-// An operator's answer to a core touch. stdinIsTTY comes from isatty(0) and
-// no flag or env var sets it: a procedural approval boundary, not proof of
-// the operator's identity (MN5).
+// An operator's answer to a touch: a core touch, or a spine touch filed as
+// needs_input (its superseding receipt is then owed). stdinIsTTY comes from
+// isatty(0) and no flag or env var sets it: a procedural approval boundary,
+// not proof of the operator's identity (MN5).
 async function answer(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
     if (deps.stdinIsTTY !== true) throw new ConductError(3, 'stdin is not a TTY: the operator answers a touch from their own terminal');
     const touch = state.touches.find((candidate) => String(candidate.n) === String(flags.touch));
-    if (!touch || touch.status !== 'open' || state.adapters.spine?.on) throw new ConductError(5, `no open core touch ${flags.touch}`);
+    if (!touch || !['open', 'filed'].includes(touch.status)) throw new ConductError(5, `no open touch ${flags.touch}`);
     touch.tty = true;
     acceptAnswer(state, touch, { key: flags.key, text: typeof flags.text === 'string' ? flags.text : null, by: 'operator:tty', answeredAt: deps.timestamp(), source: 'tty' });
     writeTouchFiles(state, touch, deps);

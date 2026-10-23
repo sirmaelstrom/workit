@@ -1,10 +1,11 @@
 // Asks and gos in /spec, /burn-down and /pickup. In session an ask is a plain
 // AskUserQuestion with the recommendation first, and the ruling goes in the
-// next Spine receipt; a Spine `needs_input` ask is for unattended runs, and its
-// go is an `answered` receipt stamped `operator:` to the ask's question. No
-// proof or verifier check remains. Every acceptance sentence is checked for
-// each requirement on its own, and a mutation control strips each requirement
-// from an in-memory copy of the sentences to show the check then fails.
+// next Spine receipt; unattended, the run files one plain `needs_input` and
+// ends, and an answer given later is recorded in an ordinary receipt (quest
+// 8acce86e retired the GitHub asks and `answered` receipts). No proof or
+// verifier check remains. Every acceptance sentence is checked for each
+// requirement on its own, and a mutation control strips each requirement from
+// an in-memory copy of the sentences to show the check then fails.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -23,14 +24,11 @@ const sentences = (body) => body
   .flatMap((block) => block.split(/(?<=[.!?]\**)\s+(?=[A-Z*`(])/));
 
 const STAMP = [/`answer\.by`/, /\bbegins `operator:`/];
-const QUESTION = /`question` (?:is (?:your|the) ask's, verbatim|passes the same verbatim check)/;
 
-// Where each skill accepts a go, how many paths it has (primary and resolver,
-// or spine: and core:), and what each path must say.
+// Where each skill accepts a go, how many paths it has (/spec: the core: record),
+// and what each path must say.
 const GATES = {
-  spec: { accepts: /\b[Tt]he ref is valid only when\b/, paths: 2, required: STAMP },
-  'burn-down': { accepts: /\bIS the go\b/, paths: 2, required: [...STAMP, QUESTION] },
-  pickup: { accepts: /\bIS the go\b/, paths: 2, required: [...STAMP, QUESTION] },
+  spec: { accepts: /\b[Tt]he ref is valid only when\b/, paths: 1, required: STAMP },
 };
 
 const ASKERS = ['pickup', 'burn-down', 'spec'];
@@ -83,16 +81,21 @@ for (const id of ASKERS) {
     assertMutationsFail(id, found, RULING);
   });
 
-  test(`/${id}: a Spine ask is for unattended runs`, () => {
-    assert.match(sentences(text(id)).join(' '), /Spine (?:`needs_input` )?ask is for unattended runs/, id);
+  test(`/${id}: unattended, the run files ONE plain needs_input and ends, posting and waiting for nothing`, () => {
+    const found = sentences(text(id)).filter((sentence) => /file ONE\s+(?:plain )?`needs_input`/.test(sentence));
+    assert.equal(found.length, 1, id);
+    const required = [/DO\/EXPECT/, /end the run: post nothing, wait for nothing/];
+    assert.deepEqual(missing(found, required), [], id);
+    assertMutationsFail(id, found, required);
   });
 
-  test(`/${id} carries no retired proof or ask-tag mechanism`, () => {
+  test(`/${id} carries no retired proof, ask-tag or GitHub-ask mechanism`, () => {
     const body = text(id);
     for (const retired of [
       /\[ask </, /verify-receipt/, /verify-record/, /operator-proof/, /passkey/i, /ask-mirror/, /operator:t3/,
       /on the phone|Confirm on phone/, /sitting grant/i, /\bscopeOk\b/, /statement_mismatch/, /askReceiptId/,
       /"mode":"unconfigured"/, /`mode` is `verified`/, /answers not signed/,
+      /github-ask/, /WORKIT_ASKS_REPO/, /asks repo/, /ask\.options/, /allowFreeText/, /latest-answer/, /operator:github/, /letter alone/,
     ]) {
       assert.doesNotMatch(body, retired, `${id}: ${retired}`);
     }
@@ -104,6 +107,7 @@ test('/conduct carries no retired proof, ask-tag, spend-meter or answer-adapter 
   for (const retired of [
     /\[ask </, /verify-receipt/, /operator-proof/, /passkey/i, /ask-mirror/, /operator:t3/, /on the phone|Confirm on phone/,
     /sitting grant/i, /WORKIT_SPEND_CMD/, /WORKIT_TOUCH_ANSWER_CMD/, /await-answer/, /Signed authority/, /spend adapter/,
+    /github-ask/, /WORKIT_ASKS_REPO/, /asks repo/, /operator:github/, /OBSERVATORY_OPERATOR_GITHUB_LOGIN/, /read-back/,
   ]) {
     assert.doesNotMatch(body, retired, `conduct: ${retired}`);
   }
@@ -121,9 +125,10 @@ const markdown = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((ent
   if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : markdown(path);
   return entry.name.endsWith('.md') ? [path] : [];
 });
-const RETIRED_EVERYWHERE = [/spend adapter/i, /verify-receipt/, /operator-proof/, /passkey/i, /\[ask </, /WORKIT_TOUCH_ANSWER_CMD/, /sitting grant/i];
+const RETIRED_EVERYWHERE = [/spend adapter/i, /verify-receipt/, /operator-proof/, /passkey/i, /\[ask </, /WORKIT_TOUCH_ANSWER_CMD/, /sitting grant/i,
+  /github-ask/, /WORKIT_ASKS_REPO/, /latest-answer/, /answers\/github/, /ask\.options/];
 
-test('no skill or reference doc names a retired proof, ask-tag, spend-adapter or answer-resolver mechanism', () => {
+test('no skill or reference doc names a retired proof, ask-tag, spend-adapter, answer-resolver or GitHub-ask mechanism', () => {
   const files = [...markdown(skills), ...markdown(join(skills, '..', 'reference'))].filter((path) => !HISTORY(path));
   assert.ok(files.length > 50, `walked ${files.length} files`);
   const hits = files.flatMap((path) => {
@@ -133,24 +138,19 @@ test('no skill or reference doc names a retired proof, ask-tag, spend-adapter or
   assert.deepEqual(hits, []);
 });
 
-test('/burn-down and /pickup: in session, the operator\'s message is the go', () => {
+test('/burn-down and /pickup: the go is the operator\'s own answer, recorded later in an ordinary receipt that supersedes the needs_input', () => {
   for (const id of ['burn-down', 'pickup']) {
-    assert.match(sentences(text(id)).join(' '), /In session, (?:the operator's message is the go|the go is the operator's message)/, id);
+    const body = sentences(text(id)).join(' ');
+    assert.match(body, /A `needs_input` quest is not pullable/, id);
+    assert.match(body, /an ordinary receipt \(`completed` or `paused`, `did` quoting it\),? (?:that|which) supersedes the needs_input/, id);
+    assert.match(body, /never (?:assume|infer) it from the quest having (?:returned to the frontier|left WAITING)/i, id);
   }
 });
 
-test('/burn-down: the latest-answer route names Observatory\'s base URL and default as /pickup\'s atlas line does', () => {
-  const base = /`\$OBSERVATORY_BASE_URL\/api\/atlas`, default `(http[^`]+)`/.exec(sentences(text('pickup')).join(' '));
-  assert.ok(base, 'pickup names $OBSERVATORY_BASE_URL and its default');
-  const route = sentences(text('burn-down')).join(' ');
-  assert.match(route, /`GET \$OBSERVATORY_BASE_URL\/api\/spine\/quests\/<quest uuid>\/receipts\/latest-answer\?/);
-  assert.ok(route.includes(`\`OBSERVATORY_BASE_URL\` default \`${base[1]}\``), 'burn-down gives the same default');
-});
-
-test('/spec keeps the run-prefix check on a spine: ref', () => {
+test('/spec: a spine: ref is retired, so a core: record is the only approval', () => {
   const spec = sentences(text('spec')).join(' ');
-  assert.match(spec, /this run's correlation prefix `\(run <runId>\/`/);
-  assert.match(spec, /the bare tag isn't enough/);
+  assert.match(spec, /A `spine:` ref is retired\./);
+  assert.match(spec, /A `spine:<…>` ref fails this step/);
 });
 
 test('/spec: an authority record approves on its own (c) and binds its scope', () => {
@@ -178,11 +178,16 @@ test('/spec: a decision lists its Limits with IDs, and the shipping PR carries t
   assert.match(lite, /`Limits:` \(`L1: does not establish <what>`\)/);
 });
 
-// conduct's read-back takes an answered receipt to its filing, stamped `operator:`.
-test('/conduct: the read-back accepts only an answered receipt to that filing, stamped operator:', () => {
-  const found = sentences(text('conduct')).filter((sentence) => sentence.includes('read-back accepts') && sentence.includes('that filing'));
-  assert.ok(found.length > 0);
-  const required = [/only an answered receipt to that filing/, /stamped `operator:`/];
-  assert.deepEqual(missing(found, required), []);
-  assertMutationsFail('conduct', found, required);
+// conduct: an answer is the operator's own; unattended, a touch is one plain needs_input and a hand-back.
+test('/conduct: only the operator\'s session choice or terminal answer is a go; unattended, one plain needs_input, then a hand-back with no wait or poll', () => {
+  const body = sentences(text('conduct'));
+  const go = body.filter((sentence) => sentence.startsWith('An answer is their AskUserQuestion choice'));
+  assert.equal(go.length, 1);
+  const required = [/in a session they are in/, /their terminal `answer`/, /nothing else confers authority/];
+  assert.deepEqual(missing(go, required), []);
+  assertMutationsFail('conduct', go, required);
+  const joined = body.join(' ');
+  assert.match(joined, /the touch is filed once, as a plain `needs_input` receipt on the anchor/);
+  assert.match(joined, /never wait or poll for an answer/);
+  assert.match(joined, /the next action is a `supersede` receipt/);
 });

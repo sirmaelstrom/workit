@@ -60,11 +60,12 @@ export const laneBase = (wp) => (wp.rebases ?? []).at(-1)?.newBase ?? wp.lane?.b
 export const RETIRED_TOUCH_KINDS = Object.freeze(['preapproval-confirm']);
 export const RETIRED_HALT_KINDS = Object.freeze(['meter', 'authority', 'authority-ended']);
 
-// What a run written by a conduct with the passkey, spend or answer adapters
-// can carry that this conduct no longer handles: resumed, each would take a
-// path that is gone (a confirm answer widens a narrowed grant, the await-answer
-// read-back wedges, a meter or authority halt holds dispatch and nothing
-// clears it). A finished run carries nothing to resume.
+// What a run written by a conduct with the passkey, spend or answer adapters,
+// or the GitHub asks, can carry that this conduct no longer handles: resumed,
+// each would take a path that is gone (a confirm answer widens a narrowed
+// grant, the await-answer read-back wedges, a GitHub ask's post or read-back
+// has no handler, a meter or authority halt holds dispatch and nothing clears
+// it). A finished run carries nothing to resume.
 export function retiredShapes(state) {
   if (TERMINAL_PHASES.includes(state.phase)) return [];
   const found = [];
@@ -83,6 +84,7 @@ export function retiredShapes(state) {
     if (!action || typeof action !== 'object') continue;
     const name = `${where} action ${action.id ?? action.step}`;
     if (action.kind === 'shell' && action.part === 'read-back') found.push(`${name} is the await-answer read-back`);
+    else if (action.touch && (action.part === 'post' || (action.part === 'read-back' && action.kind === 'agent-tool'))) found.push(`${name} is the retired GitHub ask's ${action.part}`);
     else if (typeof action.step === 'string' && !STEPS.includes(action.step)) found.push(`${name} has the retired step ${action.step}`);
     else if (action.held === true) found.push(`${name} is held by a refused passkey authority`);
   }
@@ -96,7 +98,7 @@ export function retiredShapes(state) {
 export function refuseRetired(state) {
   const found = retiredShapes(state);
   if (!found.length) return;
-  throw new ConductError(2, `run ${state.runDir} carries ${found.join('; ')}. A conduct with the passkey, spend or answer adapters wrote that, and this conduct cannot resume it. Start a new run with \`conduct.mjs intake\`; status and analyze still read this one.`);
+  throw new ConductError(2, `run ${state.runDir} carries ${found.join('; ')}. A conduct with the passkey, spend or answer adapters, or the GitHub asks, wrote that, and this conduct cannot resume it. Start a new run with \`conduct.mjs intake\`; status and analyze still read this one.`);
 }
 
 export function slugify(goal) {

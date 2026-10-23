@@ -1,5 +1,5 @@
 // Phase intake (spine on only): read the anchor quest, store its campaign and
-// full uuid, then hand over to preapproval, which owns every touch read-back.
+// full uuid, then hand over to preapproval, which opens touch 1.
 import { ConductError } from '../state.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

@@ -242,11 +242,6 @@ function shellResult(h, action) {
   if (action.step === 'gate-cmd' && action.part === 'quiet') return h.quiet?.length ? h.quiet.shift() : ok(JSON.stringify({ quiet: true, busy: [5, 5, 5], maxBusy: 30 }));
   if (command[0] === 'node' && command[1].endsWith('conduct.mjs')) return conductVerb(h, action);
   if (command[0] === 'node' && command[1].endsWith('lane.mjs')) return herdrVerb(h, action);
-  // github-ask post: the touch's comment on the run's asks issue.
-  if (command[0] === 'node' && command[1].endsWith('github-ask.mjs')) {
-    const { askReceiptId } = JSON.parse(readFileSync(command.at(-1), 'utf8'));
-    return ok(JSON.stringify({ status: 'posted', existing: false, askReceiptId, target: 'o/r#9', askCommentUrl: `https://github.com/o/r/issues/9#issuecomment-${900 + action.touch.n}`, askCommentId: 900 + action.touch.n }));
-  }
   switch (action.part ? `${action.step}/${action.part}` : action.step) {
     case 'base': return ok(`${BASE}\n`);
     case 'pr-lookup': return ok(JSON.stringify([{ number: prNumber(id), headRefOid: h.head(id), state: 'OPEN' }]));
@@ -308,7 +303,7 @@ function tool(h, action) {
   switch (action.tool) {
     case 'spine_receipt': return { ...structuredClone(RECEIPT), questId: action.args.questId, outcome: action.args.outcome };
     case 'spine_update': return { ok: true, applied: Object.keys(action.args) };
-    case 'spine_quest': return h.spineQuest ? h.spineQuest(action) : { quests: [{ id: ANCHOR, latestReceipt: null }] };
+    case 'spine_quest': return { quests: [{ id: ANCHOR, latestReceipt: null }] };
     case 'council_review': return { models: { 'gpt-6.1-sol': { status: 'success' } } };
     case 'council_synthesize': return h.synth.length ? h.synth.shift() : { findings: 0, seats: ['gpt-6.1-sol'] };
     case 'council_challenge': return { success: true };
@@ -319,7 +314,7 @@ function tool(h, action) {
 async function perform(h, action) {
   const custom = h.answer?.(action);
   if (custom !== undefined) return custom;
-  // A session ask: no operator in these runs unless a test answers it, so the touch goes to GitHub.
+  // A session ask: no operator in these runs unless a test answers it, so the touch is filed as needs_input.
   if (action.kind === 'touch' && action.part === 'ask') return { unattended: true };
   // A test of why a WP blocks lets its build end: the recover touch is answered (b).
   if (h.declineRecover && action.step === 'touch' && action.part === 'announce') {
@@ -1861,39 +1856,38 @@ test('blocked recovery (D19.4): an answer amends the blocked lane verbatim; its 
   assert.deepEqual(afterBrief.slice(0, 4), ['prompt', 'wait', 'stop', 'check']);
 });
 
-test('blocked recovery (D19.4), spine, idle build (E6): with no lane work left the build files the touch, reads it back and hands back, never a 300000 ms poll; next resumes at the read-back; the answer merges', async (t) => {
+test('blocked recovery (D19.4), spine, idle build (E6): with no lane work left the build files the touch and hands back, never a 300000 ms poll or a read-back; a resume with no operator hands back again; the terminal answer is superseded and merges', async (t) => {
   const h = harness(t, { spine: true, wps: [TWO[0], TWO[1], { id: 'WP-04', files: ['x.mjs'], wave: 3, dependsOn: ['WP-02'] }] });
   h.reports = { 'WP-02': ['report-needs-conductor.md', 'report-built.md'] };
   h.rulings = [{ escalate: true, why: 'operator call' }];
   await drive(h, { until: (a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input' });
   const from = h.trace.length - 1;
   const back = await drive(h, { until: (a) => a.handBack === true, max: 10 });
-  assert.deepEqual(h.trace.slice(from).map((a) => a.tool ?? a.part), ['spine_receipt', 'post', 'spine_quest', 'hand-back']);
+  assert.deepEqual(h.trace.slice(from).map((a) => a.tool ?? a.part), ['spine_receipt', 'hand-back']);
   assert.deepEqual([back.kind, back.step, back.touch.n], ['touch', 'touch', 1]);
   assert.equal(h.state.phase, 'build');
   assert.equal(h.wp('WP-04').state, 'deferred');
-  // A fresh runConduct `next` is the resume: the read-back, not a new filing; unanswered, it hands back again.
+  // A fresh runConduct `next` is the resume: the touch is asked in session, not re-filed; no operator, it hands back again.
   h.disk = true;
   const resumed = await step(h);
-  assert.deepEqual([resumed.tool, resumed.part], ['spine_quest', 'read-back']);
+  assert.deepEqual([resumed.kind, resumed.part], ['touch', 'ask']);
   assert.ok(h.events().some((e) => e.event === 'resumed' && e.actionId === back.id));
   h.trace.push(resumed);
   await recordPending(h, await perform(h, resumed));
   assert.equal(h.current().pending.part, 'hand-back');
   assert.equal(h.current().touches[0].filings, 1);
-  // The operator answers (a) on the spine: the next resume reads it back.
-  h.spineQuest = () => {
-    const result = JSON.parse(fixture('intake', 'spine-quest-answered.json'));
-    result.quests[0].latestReceipt.question = h.current().touches[0].filedQuestion;
-    result.quests[0].latestReceipt.answer.key = 'a';
-    return result;
-  };
+  // The operator answers (a) from their terminal: the next resume supersedes the needs_input and the build goes on.
+  const answered = await runConduct(['answer', '--run', h.runDir, '--touch', '1', '--key', 'a'], { ...h.overrides(), stdinIsTTY: true });
+  assert.equal(answered.code, 0, answered.stdout);
+  const supersede = await step(h);
+  assert.deepEqual([supersede.part, supersede.tool, supersede.args.outcome], ['supersede', 'spine_receipt', 'paused']);
   assert.equal(await drive(h), null);
   assert.deepEqual(h.current().wps.map((wp) => wp.state), ['merged', 'merged', 'merged']);
   assert.ok(!h.trace.some((a) => a.kind === 'wait' && a.waitMs === 300000), 'no 300000 ms poll');
+  assert.ok(!h.trace.some((a) => a.tool === 'spine_quest'), 'no read-back');
 });
 
-test('blocked recovery (D19.4), spine, live lane (E6): while WP-03 runs, the waiting touch is re-read on the yield cadence between WP-03\'s actions and never handed back; once WP-03 merges the build hands back', async (t) => {
+test('blocked recovery (D19.4), spine, live lane (E6): while WP-03 runs, the filed touch is neither re-read nor handed back; once WP-03 merges the build hands back', async (t) => {
   const h = harness(t, { spine: true });
   h.reports = { 'WP-02': ['report-needs-conductor.md', 'report-built.md'] };
   h.rulings = [{ escalate: true, why: 'operator call' }];
@@ -1904,8 +1898,8 @@ test('blocked recovery (D19.4), spine, live lane (E6): while WP-03 runs, the wai
   assert.deepEqual(backs, ['merged'], 'the only hand-back comes after WP-03 merged');
   const filed = indexWhere(h, (a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input');
   const during = h.trace.slice(filed, h.trace.indexOf(back));
-  assert.ok(during.filter((a) => a.tool === 'spine_quest').length >= 2, 'the touch was read back again while WP-03 ran');
-  assert.ok(during.some((a) => a.kind === 'wait' && a.yield === true && /touch 1\]: no answer yet/.test(a.instruction)), 'yield waits name the touch');
+  assert.equal(during.filter((a) => a.tool === 'spine_quest' || a.part === 'ask').length, 0, 'nothing re-reads or re-asks the touch while WP-03 runs');
+  assert.ok(!during.some((a) => a.kind === 'wait' && /touch 1\]/.test(a.instruction)), 'no wait is held for the touch');
   assert.ok(during.some((a) => a.wpId === 'WP-03'), 'WP-03 kept going');
   assert.equal(h.wp('WP-02').state, 'blocked');
 });
@@ -3229,27 +3223,22 @@ test('budget before amendment prompts (C1-2, C1-5): an over-budget amendment is 
   assert.equal(h.wp('WP-02').state, 'merged');
 });
 
-test('budget on GitHub: an operator:github (a) whose notes say "budget 25" raises the ceiling to 25; without the amount it is refused, saying where the amount goes', async (t) => {
+test('budget in session (spine): an (a) without "budget <USD>" is refused and asked again saying why; (a) with "budget 25" raises the ceiling to 25', async (t) => {
   const h = harness(t, { spine: true, wps: [TWO[0], TWO[1]], budget: 1.5 });
   h.gateCmdCode = { 'WP-02': [1] };
   let text = null;
-  h.spineQuest = () => {
-    const result = JSON.parse(fixture('intake', 'spine-quest-answered-github.json'));
-    const touch = h.state.touches[0];
-    Object.assign(result.quests[0].latestReceipt, { question: touch.filedQuestion, ask: { options: touch.options, allowFreeText: touch.allowFreeText } });
-    Object.assign(result.quests[0].latestReceipt.answer, { key: 'a', text });
-    return result;
-  };
-  const refiled = await drive(h, { until: (a) => a.tool === 'spine_receipt' && h.state.touches[0]?.filings === 1 });
+  h.answer = (action) => (action.kind === 'touch' && action.part === 'ask' && h.state.touches[action.touch.n - 1].build === 'budget' ? { key: 'a', text } : undefined);
+  const again = await drive(h, { until: (a) => a.part === 'ask' && Boolean(h.state.touches[0]?.refusal) });
   assert.equal(h.state.touches[0].build, 'budget');
   assert.equal(h.state.touches[0].answer, null);
-  assert.match(refiled.args.question, /\(a\) needs the text "budget <USD>" \(on GitHub: on the line below the letter a\) above the current spend/);
+  assert.match(again.instruction, /Their last answer could not be used \(\(a\) needs the text "budget <USD>" above the current spend/);
   assert.equal(h.state.authority.budgetUsd, 1.5);
   text = 'budget 25';
   assert.equal(await drive(h), null);
   assert.equal(h.state.authority.budgetUsd, 25);
-  assert.deepEqual([h.state.authority.budgetSource.by, h.state.authority.budgetSource.text], ['operator:github', 'budget 25']);
+  assert.deepEqual([h.state.authority.budgetSource.by, h.state.authority.budgetSource.text], ['operator:session', 'budget 25']);
   assert.equal(h.wp('WP-02').state, 'merged');
+  assert.ok(!h.trace.some((a) => a.tool === 'spine_receipt' && a.args.outcome === 'needs_input'), 'answered in session: nothing filed');
 });
 
 test('owed adjudication (C1-3): findings → guard escalation → answer (b) → the conductor replies refuted, then every thread resolves', async (t) => {
