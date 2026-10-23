@@ -128,7 +128,7 @@ export function handoffText(state, rotation) {
     '',
     `1. Read \`${join(state.pluginRoot, 'skills', 'conduct', 'SKILL.md')}\` (§ The loop, § Rotating the conductor).`,
     `2. Run \`node ${shellLiteral(script)} next --run ${shellLiteral(state.runDir)} --custody ${rotation.attempt}\`. If it exits 5, this rotation was cancelled or superseded: you are not the run's conductor, so end your turn. Otherwise its first actions are custody, emitted by the run: ${custody.join('; then ')}. Perform and record each as § The loop says.`,
-    `3. The run then emits its pending action again${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''}, or, when that was a hand-back, reads the touch back as any resume does. r${rotation.from} ran \`rotate\` before performing it, so perform it as given, then keep looping with plain \`next\`.`,
+    `3. The run then emits its pending action again${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''}, or, when that was a hand-back, asks the touch again as any resume does. r${rotation.from} ran \`rotate\` before performing it, so perform it as given, then keep looping with plain \`next\`.`,
     '',
     'Never edit state.json. Never run `rotate` before custody is taken.',
     '',
@@ -239,8 +239,8 @@ export function custodyNext(state, rotation, deps, { custody = null } = {}) {
   if (['exit-close-failed', null].includes(rotation.retire)) return confirmAction(state, rotation);
   if (rotation.receipt === null && state.adapters?.spine?.on && state.intent?.anchor) {
     // A touch filed on the anchor waits on the operator: a later receipt
-    // would supersede its needs_input on the board and hide an answer from
-    // the latest-receipt read-back. Custody then files nothing.
+    // would supersede its needs_input and take the question off the board.
+    // Custody then files nothing.
     const filed = (state.touches ?? []).filter((touch) => touch.status === 'filed');
     if (!filed.length) return receiptAction(state, rotation);
     rotation.receipt = 'skipped';

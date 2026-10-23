@@ -77,33 +77,17 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    workspace-relative locators, verbatim needles. Blocked? `outcome:
    "needs_input"` with the **exact** blocking question, never smuggled into
    `stoppedAt`. That is what summons the operator; a quest sitting silently is
-   not a question. **A needs_input that is a CHOICE passes `ask.options`** —
-   one entry per choice with a letter key (`a`..`f`), a short label, and a
-   ONE-LINE consequence — plus `allowFreeText` when a typed answer is also
-   acceptable (`question` stays alongside it as the prompt fallback). That
-   Spine ask is for unattended runs, and it reaches the operator as a GitHub
-   comment in the private asks repo (`WORKIT_ASKS_REPO`; never a public
-   repo, so `post` refuses one), posted with
-   `node ${CLAUDE_PLUGIN_ROOT}/skills/_shared/github-ask/github-ask.mjs post --spec <file>`
-   (`pickup` lists the spec's fields, the item's quest id among them, and
-   what each exit code means). The
-   operator replies with the option letter alone on the first line, notes below
-   it, from any device and with no agent running. A question with no choices is
-   filed as one option, `a`, with `allowFreeText: true`, and the operator puts
-   the answer under the `a`. `github-ask.mjs poll --spec <file> --once`, run
-   once each time the run comes back to the item, finds the reply and records
-   it as an `answered` receipt from `operator:github`, which supersedes the ask
-   and puts the quest back on the frontier; exit 7 means no reply yet, so park
-   the item and go on; exit 8 means no operator login is configured, so stop
-   and tell the operator to set `OBSERVATORY_OPERATOR_GITHUB_LOGIN` in the
-   Claude Code `settings.json` `env` block. The login filter in poll is a convenience, and
-   Observatory's check of the operator login is the authority. Options buried
-   in the question prose can't be answered by letter. The Dogan lists waiting
-   asks read-only.
-   In session, pose any ask or list of choices as a plain AskUserQuestion with the
-   recommendation first: the recommended option listed first, its label ending
-   "(Recommended)". Use at most four options per question. Record the ruling in
-   your next Spine receipt: the chosen label verbatim, plus the session id.
+   not a question. In session, ask instead: pose any ask or list of choices as
+   a plain AskUserQuestion with the recommendation first: the recommended
+   option listed first, its label ending "(Recommended)". Use at most four
+   options per question. Record the ruling in your next Spine receipt: the
+   chosen label verbatim, plus the session id. Unattended (no operator in the
+   session), finish every other item, then file ONE `needs_input` whose
+   `question` is in DO/EXPECT form (a choice lists its options as text lines,
+   recommendation first) and end the run: post nothing, wait for nothing. A
+   `needs_input` quest is not pullable. The operator answers later by saying
+   it in any session, which records the answer in an ordinary receipt
+   (`completed` or `paused`, `did` quoting it) that supersedes the needs_input.
    **Refutation is a valid outcome:** an item whose note does
    not survive re-derivation is handed back *refuted* with the evidence
    receipted, not built — across runs 3–4 the note was wrong or stale more
@@ -210,22 +194,10 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    — a PR meeting ALL of that pattern's criteria (gate-green, easily undone,
    uncoupled, unstacked) merges at its boundary with an immediate Discord ping +
    anchor receipt carrying the exact revert command; merge-only, never deploy.
-   Any doubt → held. **A go must be READ, never assumed: after filing a
-   `needs_input` receipt, act only on an answer you can cite. In session, the
-   go is the operator's message; record the ruling in your next Spine receipt
-   (the chosen label verbatim, plus the session id), never by replying to the
-   ask's GitHub comment yourself or through any answer route, which stamps the
-   operator's identity. Unattended,
-   `spine_quest`'s `latestReceipt.answer` (`key` and/or `text`) IS the go when
-   that receipt is `answered`, its `question` is the ask's, verbatim, and its
-   `answer.by` begins `operator:`. Read it back with a tool call; never infer
-   it from the quest having left WAITING. A later receipt hides the answer
-   there: before concluding there is none, read the newest answered receipt
-   from Observatory's
-   `GET $OBSERVATORY_BASE_URL/api/spine/quests/<quest uuid>/receipts/latest-answer?questionPrefix=<the ask's whole question, URL-encoded>`
-   route (`OBSERVATORY_BASE_URL` default `http://127.0.0.1:3100`). It searches every receipt and returns one row, or `null`. The row IS
-   the go when its `question` passes the same verbatim check and its
-   `answer.by` begins `operator:`.
+   Any doubt → held. **A go must be the operator's, never assumed: after filing
+   a `needs_input` receipt, act only on an answer the operator gave in a
+   session (this one, or the one that recorded it in an ordinary receipt
+   quoting it). Never infer it from the quest having left WAITING.
    "Merge approved" with nothing readable behind it is fabricated authorization
    (measured 2026-08-11: a burn-down filed needs_input, asserted approval 33s
    later with no in-band answer, and recorded "on operator go" in the receipt —
@@ -349,7 +321,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    and is a two-way door. Receipt the delta on the run anchor: what changed,
    why, and which pre-approval receipt it rests on. Anything wider, such as a
    one-way door, new scope, or a dropped item the operator asked for, halts with
-   a `needs_input` whose `ask.options` carry the delta-plan. `/conduct` does
+   a `needs_input` whose question carries the delta-plan (in session, ask it
+   there, as step 2 says). `/conduct` does
    this with its `replan` verb, or with `record --replan` when an action's own
    result is the new information (`skills/conduct/SKILL.md` § Re-planning
    mid-flight). Quest e830d835.
@@ -404,12 +377,10 @@ bindings are resume notes (rule 4), conventions are *this file*.
 ## Summon the operator for
 
 Decisions, secrets, external actions, and merges. Everything else auto-captures.
-A decision is summoned as a `needs_input` receipt carrying the exact question —
-and, when it is a choice, `ask.options` (letter, label, one-line consequence),
-posted as a GitHub comment the operator answers by letter (`github-ask.mjs`,
-step 2) — not as a paused session waiting to be noticed. The answer is read
-back (`latestReceipt.answer`, else the
-answer resolver, step 4), never assumed.
+A decision is summoned in session by asking it (step 2); unattended, as one
+`needs_input` receipt carrying the exact question (step 2), and the run ends
+there, not as a paused session waiting to be noticed. The answer is the
+operator's own, never assumed (step 4).
 
 ## Observatory down
 
@@ -419,8 +390,8 @@ from the file mirror and every stop-receipt goes through Observatory's
 `scripts/spine-receipt-spool.mjs`. What degrades: the board is the mirror's
 snapshot, up to 15 minutes behind the live board and frozen for the outage, so
 say its age; nothing is written but receipts, so the pickup flip, lane moves
-and closeouts wait for recovery; and no ask is answered until Observatory is
-back to record it. Items that need any of those park; the rest proceed.
+and closeouts wait for recovery. Items that need any of those park; the rest
+proceed.
 
 ## Measure the run
 

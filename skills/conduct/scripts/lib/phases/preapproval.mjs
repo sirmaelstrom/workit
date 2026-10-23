@@ -54,6 +54,11 @@ function goalLine(state) {
 // Touch 1's question, as intake projects it before it writes anything. Intake
 // checks the cap against `bound`: the longest lane wording, with no detail.
 export const touchOneQuestion = (state, deps = {}, { bound = false } = {}) => touchOne(state, deps, { bound }).question;
+// Its filed length, options included, as spine_receipt measures it.
+export const touchOneLength = (state, deps = {}, { bound = false } = {}) => {
+  const touch = touchOne(state, deps, { bound });
+  return filedLength(state, 1, touch.question, touch.options);
+};
 
 function touchOne(state, deps = {}, { bound = false } = {}) {
   const { intent } = state;
@@ -101,15 +106,15 @@ function touchOne(state, deps = {}, { bound = false } = {}) {
     ...(intent.greenfield?.on ? [`Greenfield (${intent.greenfield.why.join('; ')}): WP-01 (WP-00 in a one-WP run) also adds the bootstrap manifest's missing files, and its gate holds until \`conduct bootstrap --offline\` passes.`] : []),
     budget,
   ].join('\n');
-  const fits = (text) => filedLength(state, 1, text) <= QUESTION_MAX;
-  const candidates = [why && legacyLine ? render(why, legacyLine) : null, why ? render(why, null) : null, legacyLine ? render(null, legacyLine) : null];
-  const question = candidates.find((text) => text && fits(text)) ?? render(null, null);
   const options = [
     { key: 'a', label: 'Approve as proposed', consequence: `Merge each PR at the gate, ${release ? 'run the release recipe' : 'no release (no recipe)'}, budget $${intent.budgetUsd}.` },
     { key: 'b', label: 'Approve, but hold at PR boundaries', consequence: 'The run builds and reviews; every PR stays open for the showcase, and nothing merges or releases.' },
     { key: 'c', label: 'Approve with changes', consequence: 'Type the changes (scope, budget, authority); they become a grant checked against (a).' },
     { key: 'd', label: 'Decline', consequence: 'The run closes with no writes to the repo.' },
   ].filter((option) => !(noCi && option.key === 'a'));
+  const fits = (text) => filedLength(state, 1, text, options) <= QUESTION_MAX;
+  const candidates = [why && legacyLine ? render(why, legacyLine) : null, why ? render(why, null) : null, legacyLine ? render(null, legacyLine) : null];
+  const question = candidates.find((text) => text && fits(text)) ?? render(null, null);
   return { kind: 'preapproval', question, options, allowFreeText: true, did: `conduct ${state.slug}: intake done on ${intent.repo.remote}; nothing specced or built yet` };
 }
 
@@ -117,7 +122,16 @@ function grantPath(state, touch) {
   return join(state.runDir, 'touches', `${touch.n}-grant.json`);
 }
 
+// A touch answered outside a record (from the operator's terminal, then a
+// resume) is applied here, before the run's next action or receipt.
+export function settle(state) {
+  const touch = state.touches.at(-1);
+  if (touch?.status === 'answered' && touch.answer.key !== 'c') applyAnswer(state, touch);
+}
+
 export function next(state, deps) {
+  settle(state);
+  if (state.phase !== 'preapproval') return null;
   const touch = state.touches.at(-1) ?? openTouch(state, touchOne(state, deps), deps);
   if (touch.status === 'answered' && touch.answer.key === 'c') {
     const outPath = grantPath(state, touch);

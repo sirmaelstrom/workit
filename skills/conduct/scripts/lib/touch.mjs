@@ -1,12 +1,15 @@
-// Touches: the operator's asks. With the spine adapter a touch is first asked
-// in session; only when no operator is in the session is it a needs_input
-// receipt on the anchor quest, posted on GitHub and read back with
-// spine_quest. Without it, a file pair under touches/ answered by
-// `conduct.mjs answer` from a TTY.
+// Touches: the operator's asks. With the spine adapter a touch is asked in
+// session; when no operator is in the session it is filed once as a plain
+// needs_input receipt on the anchor quest (the options as text lines in its
+// question) and the run hands back, waiting on the operator. A resumed session
+// asks it again, or the operator answers it with `conduct.mjs answer` from a
+// TTY; once answered, an ordinary receipt supersedes the needs_input. Without
+// the spine adapter, a file pair under touches/ answered by `conduct.mjs answer`.
 import { join } from 'node:path';
-import { ConductError, appendEvent } from './state.mjs';
+import { ConductError, TERMINAL_PHASES, appendEvent } from './state.mjs';
 
-export const READ_BACK_WAIT_MS = 300000;
+// How long a core touch's wait lasts before the build looks at it again.
+export const TOUCH_WAIT_MS = 300000;
 // spine_receipt refuses a question longer than this.
 export const QUESTION_MAX = 2000;
 
@@ -16,12 +19,6 @@ export function touchTag(slug, n) {
 
 // A refiling names its refusal; when room is short the reason is cut, down to this.
 const REFUSED_SHORT = 'Your previous answer could not be used. ';
-
-// The longest question a touch's filing carries, as spine_receipt measures it:
-// a refiling (filing 9999) with the short refusal sentence, which always fits
-// once this does (filedQuestion cuts the reason to the room left, and drops it
-// when even the short sentence would not fit).
-export const filedLength = (state, n, question) => `${touchTag(state.slug, n)} (run ${state.runId}/9999) ${REFUSED_SHORT}${question}`.length;
 
 export function touchStep(touch) {
   return touch.kind === 'preapproval' || touch.kind === 'showcase' ? touch.kind : 'touch';
@@ -43,51 +40,35 @@ export function shellLiteral(value, platform = process.platform) {
   return platform === 'win32' ? `'${text.replaceAll("'", "''")}'` : `'${text.replaceAll("'", "'\\''")}'`;
 }
 
-// The spine path's channel: the filed touch is posted as a comment on the run's
-// asks issue, and the operator's reply there is recorded as the answer by the
-// shared github-ask script. Filing is the receipt, then the post: the touch is
-// read back only once the post is recorded.
-export function githubAskScript(state) {
-  return join(state.pluginRoot, 'skills', '_shared', 'github-ask', 'github-ask.mjs');
-}
-
-export function githubAskSpecPath(state, touch) {
-  return join(state.runDir, 'touches', `${touch.n}.github-ask.json`);
-}
-
-export function githubAskCommand(state, touch, sub, extra = '') {
-  return `node ${shellLiteral(githubAskScript(state))} ${sub} --spec ${shellLiteral(githubAskSpecPath(state, touch))}${extra}`;
-}
-
-// poll's operator login, the variable Observatory checks; poll exits 8 without one.
-export const OPERATOR_ENV = 'OBSERVATORY_OPERATOR_GITHUB_LOGIN';
 // Set to 1 by a runner that knows no operator is in the session (a scheduler,
-// claude -p): touches skip the session ask and go straight to the Spine and GitHub.
+// claude -p): touches skip the session ask and are filed on the Spine.
 export const UNATTENDED_ENV = 'WORKIT_UNATTENDED';
-// Failed posts in a row before the touch hands back; each resume then tries once more.
-export const POST_ATTEMPTS = 3;
 
-// The asks issue is the run's own, on its repo, until the first post names its number.
-function githubAskSpec(state, touch, askReceiptId, question) {
-  return {
-    askReceiptId, questId: state.intent.anchor, question, options: touch.options, allowFreeText: touch.allowFreeText === true,
-    run: `conduct ${state.slug} run ${state.runId}`,
-    target: state.githubAsks?.target ?? state.intent.repo?.remote ?? null,
-    issue: { key: `conduct ${state.slug} ${state.runId}`, title: `conduct ${state.slug}: operator asks (run ${state.runId})` },
-  };
+export function resumeCommand(state) {
+  return `node ${shellLiteral(conductScript(state))} next --resume ${shellLiteral(state.runDir)}`;
 }
-
-function writeGithubAskSpec(state, touch, deps, askReceiptId, question) {
-  deps.mkdir(join(state.runDir, 'touches'));
-  deps.write(githubAskSpecPath(state, touch), `${JSON.stringify(githubAskSpec(state, touch, askReceiptId, question), null, 2)}\n`);
-}
-
-const READ_BACK_EXITS = (state) => `Its exit: 0 (answered) or 7 (waiting): go on. 8 (no_operator: no operator login is configured): stop here. Call no spine_quest and record nothing. Tell the operator to set ${OPERATOR_ENV} to their GitHub login in the Claude Code settings.json \`env\` block, then end your turn; once it is set, resume with ${resumeCommand(state)}, which emits this read-back again. 3 (conflict: the ask is closed or replaced), 4 (not_operator), 5 (unconfigured), 6 (refused), 1 (error, or ask_comment_mismatch: the ask comment read is not this ask's) or 2 (usage: a malformed spec or argument): tell the operator the printed status, code and error, then go on.`;
 
 export function answerCommand(state, touch) {
   const keys = touch.options.map((option) => option.key).join('|');
   return `node ${shellLiteral(conductScript(state))} answer --run ${shellLiteral(state.runDir)} --touch ${touch.n} --key <${keys}> [--text "<text>"]`;
 }
+
+// What the filed question adds to the touch's own: its options as text lines,
+// the recommended one first, unless its EXPECT already letters every one, and
+// how the operator answers. A needs_input carries no structured options.
+function optionsBlock(question, options) {
+  const recommended = (option) => /\(recommended\)\s*$/.test(String(option.label));
+  const ordered = [...options.filter(recommended), ...options.filter((option) => !recommended(option))];
+  const lettered = options.every((option) => question.includes(`(${option.key})`));
+  return ['', ...(lettered ? [] : ['Options:', ...ordered.map((option) => `(${option.key}) ${option.label}`)]),
+    'Answer: any session resumes the run (stoppedAt) and asks you.'].join('\n');
+}
+
+// The longest question a touch's filing carries, as spine_receipt measures it:
+// a refiling (filing 9999) with the short refusal sentence and its options,
+// which always fits once this does (filedQuestion cuts the reason to the room
+// left, and drops it when even the short sentence would not fit).
+export const filedLength = (state, n, question, options = []) => `${touchTag(state.slug, n)} (run ${state.runId}/9999) ${REFUSED_SHORT}${question}${optionsBlock(question, options)}`.length;
 
 // touches/<n>.json is the record; touches/<n>.md is the operator's view.
 export function writeTouchFiles(state, touch, deps) {
@@ -114,12 +95,15 @@ export function openTouch(state, { kind, question, options, allowFreeText = true
   return touch;
 }
 
-const postExhausted = (touch) => touch.post?.state === 'pending' && (touch.post.failures ?? 0) >= POST_ATTEMPTS;
+// A filed touch the run cannot move: it waits on the operator in a later
+// session or their terminal. Its hand-back is the run's resumable stop.
+export function touchParked(state, touch, env = {}) {
+  return spineOn(state) && touch.status === 'filed' && (touch.waiting === true || env?.[UNATTENDED_ENV] === '1');
+}
 
 // The next action for a touch, or null when it has none: answered, or (spine)
-// queued behind another touch that is filed and not yet answered. With deps,
-// a touch filed by a conduct that did not post (no touch.post) gets its spec
-// and its post here, and the read-back passes the operator login conduct sees.
+// queued behind another touch that is filed and not yet answered. One
+// needs_input waits on the anchor at a time: a second would hide the first.
 export function touchAction(state, touch, deps = null) {
   const step = touchStep(touch);
   const base = { step, touch: { n: touch.n } };
@@ -130,59 +114,46 @@ export function touchAction(state, touch, deps = null) {
       instruction: `Stop. Show the operator ${join(state.runDir, touch.file)} and ask them to run, in their own terminal: ${answerCommand(state, touch)}. Then record this action with {}.`,
     };
   }
-  if (deps && touch.status === 'filed' && !touch.post && touch.receiptId && filedQuestionOf(touch) !== null) {
-    writeGithubAskSpec(state, touch, deps, touch.receiptId, filedQuestionOf(touch));
-    touch.post = { state: 'pending', spec: `touches/${touch.n}.github-ask.json` };
-  }
-  if (touch.status === 'filed' && touch.post?.state === 'pending' && !(touch.waiting && postExhausted(touch))) {
-    return {
-      ...base, kind: 'shell', part: 'post', command: ['node', githubAskScript(state), 'post', '--spec', githubAskSpecPath(state, touch)],
-      expects: { type: 'json' },
-      instruction: `Run this exact argv (no shell) and record its { code, stdout, stderr }. It posts ${touch.tag} on the run's asks issue, or finds the comment a previous run of it posted; until it prints status posted, the touch is not read back and this action is emitted again, up to ${POST_ATTEMPTS} times in a row before it hands back.`,
-    };
-  }
-  if (touch.waiting) return handBackAction(state, touch);
-  if (touch.status === 'filed') {
-    const login = String(deps?.env?.[OPERATOR_ENV] ?? '').trim();
-    const extra = ` --once${login ? ` --operator ${shellLiteral(login)}` : ''}`;
-    return {
-      ...base, kind: 'agent-tool', part: 'read-back', tool: 'spine_quest', args: { ids: [state.intent.anchor] },
-      expects: { type: 'json' },
-      instruction: `First run ${githubAskCommand(state, touch, 'poll', extra)}: it records an operator reply to the touch's GitHub comment, if one has come. ${READ_BACK_EXITS(state)} Then call spine_quest with these args and record its raw result: the answer is what spine_quest shows, never what poll printed.`,
-    };
-  }
+  const unattended = deps?.env?.[UNATTENDED_ENV] === '1';
+  // Filed: a resumed session asks it again; in the sitting that filed it, or with no operator, the run hands back.
+  if (touch.status === 'filed') return touchParked(state, touch, deps?.env) ? handBackAction(state, touch) : sessionAskAction(state, touch, base);
   if (state.touches.some((other) => other !== touch && other.status === 'filed')) return null;
-  if (touch.channel !== 'github' && touch.filings === 0 && deps?.env?.[UNATTENDED_ENV] !== '1') return sessionAskAction(state, touch, base);
+  if (touch.channel !== 'unattended' && !unattended) return sessionAskAction(state, touch, base);
   return {
     ...base, kind: 'agent-tool', part: 'receipt', tool: 'spine_receipt', expects: { type: 'json' },
-    instruction: 'Call spine_receipt with these args and record its raw result. The next action posts it on GitHub.',
+    instruction: 'Call spine_receipt with these args and record its raw result. The run then hands back: post nothing anywhere and wait for nothing.',
     args: {
       questId: state.intent.anchor,
       outcome: 'needs_input',
       did: touch.did ?? `conduct ${state.slug} ran up to touch ${touch.n}`,
-      stoppedAt: `touch ${touch.n} (${touch.kind}): waiting on the operator's answer`,
+      stoppedAt: `touch ${touch.n} (${touch.kind}): waiting on the operator's answer. Resume: ${resumeCommand(state)}`,
       question: filedQuestion(state, touch, touch.filings + 1),
-      ask: { options: touch.options, allowFreeText: touch.allowFreeText },
     },
   };
 }
 
 // The spine path's first part: the operator is asked in this session. Only a
-// session with no operator in it files the touch on the Spine and posts it on
-// GitHub, which is what lets a successor session or a scheduler read the
-// answer back.
+// session with no operator in it files the touch on the Spine, where it waits
+// until a later session or the operator's terminal answers it.
 function sessionAskAction(state, touch, base) {
   const keys = touch.options.map((option) => option.key).join('|');
+  const refused = touch.refusal ? ` Their last answer could not be used (${touch.refusal}): say so when you ask.` : '';
+  const filed = touch.status === 'filed'
+    ? 'record { "unattended": true }: the touch stays filed and the run hands back again.'
+    : 'record { "unattended": true }: the touch is then filed on the Spine as one needs_input receipt and the run hands back.';
   return {
     ...base, kind: 'touch', part: 'ask', touch: { n: touch.n, question: touch.question, options: touch.options, allowFreeText: touch.allowFreeText },
     expects: { type: 'json' },
-    instruction: `If the operator is in this session, pose this touch as a plain AskUserQuestion (rules above) and record { "key": "<${keys}>", "text": "<their typed text, or null>" } from their answer. Record only what they chose: never an answer you inferred, and never one for a session they are not in. If no operator is in this session (a headless run, a scheduled resume, a successor no operator has spoken to), record { "unattended": true }: the touch is then filed on the Spine and posted to the private asks repo for a reply.`,
+    instruction: `If the operator is in this session, pose this touch as a plain AskUserQuestion (rules above) and record { "key": "<${keys}>", "text": "<their typed text, or null>" } from their answer.${refused} Record only what they chose: never an answer you inferred, and never one for a session they are not in. If no operator is in this session (a headless run, a scheduled resume, a successor no operator has spoken to), ${filed}`,
   };
 }
 
 function recordSessionAsk(state, touch, result, deps) {
+  // Answered from the operator's terminal while the ask was pending.
+  if (touch.status === 'answered') return;
   if (result?.unattended === true) {
-    touch.channel = 'github';
+    if (touch.status === 'filed') touch.waiting = true;
+    else touch.channel = 'unattended';
     appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'touch-unattended', data: { n: touch.n } });
     return;
   }
@@ -200,32 +171,18 @@ function recordSessionAsk(state, touch, result, deps) {
   appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'answered', source: 'session', data: { n: touch.n, key: touch.answer.key } });
 }
 
-export function resumeCommand(state) {
-  return `node ${shellLiteral(conductScript(state))} next --resume ${shellLiteral(state.runDir)}`;
-}
-
-// The spine hand-back: the read-back found no attributed answer, so the
+// The spine hand-back: a filed touch waits on the operator, so the
 // conductor's turn ends here. It is never recorded (`record` returns it with
-// `answered: false`); `next` consumes it on resume and emits the read-back.
+// `answered: false`); `next` consumes it on resume and asks the touch again.
 export function handBackAction(state, touch) {
-  const base = {
+  return {
     step: touchStep(touch), kind: 'touch', part: 'hand-back', handBack: true,
     touch: { n: touch.n, question: touch.question, options: touch.options }, expects: { type: 'none' },
-  };
-  if (postExhausted(touch)) {
-    return {
-      ...base,
-      instruction: `Stop and end your turn: ${touch.tag} is filed on quest ${state.intent.anchor}, but github-ask post failed ${touch.post.failures} times, so it is not on GitHub and the operator cannot answer it there. The last failure: ${touch.post.lastError}. Do not record this action. Tell the operator that error. Once it is fixed, you or a scheduler resume with: ${resumeCommand(state)}, which posts it once more.`,
-    };
-  }
-  const waiting = `${touch.tag} is filed on quest ${state.intent.anchor} and has no operator-attributed answer yet. Do not record this action.`;
-  return {
-    ...base,
-    instruction: `Stop and end your turn: ${waiting} Tell the operator it waits for their reply to ${touch.post?.askCommentUrl ?? 'the touch\'s GitHub comment'}. Run no blocking poll. Later, you or a scheduler resume with: ${resumeCommand(state)} (its first action, the read-back, runs poll --once and reads the answer back).`,
+    instruction: `Stop and end your turn: ${touch.tag} is filed on quest ${state.intent.anchor} as a needs_input receipt and waits on the operator. Do not record this action, post it anywhere or wait for an answer. The operator answers in a later session, which resumes the run with ${resumeCommand(state)} and asks them there, or from their own terminal with ${answerCommand(state, touch)} and then the resume.`,
   };
 }
 
-// `next` on a pending hand-back: the touch is read back again. The `resumed`
+// `next` on a pending hand-back: the touch is asked again. The `resumed`
 // event carries the hand-back's own seam, as its emitted event does
 // (`release` for the release anomaly's touch, else TOUCH_SEAM).
 export function resumeHandBack(state, deps) {
@@ -238,34 +195,26 @@ export function resumeHandBack(state, deps) {
   appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'resumed', phase: action.phase, data: { n: touch.n } });
 }
 
-// A spine answer belongs to this run's filing only when its question starts
-// with the tag plus the run id and filing number: a same-tag answer from an
-// earlier run of the same goal, or to an earlier filing, does not match.
-export function correlation(state, touch, filing = touch.filings) {
-  return `${touch.tag} (run ${state.runId}/${filing})`;
-}
-
 function filedQuestion(state, touch, filing) {
+  const head = `${touch.tag} (run ${state.runId}/${filing}) `;
   const body = touch.question.slice(touch.tag.length + 1);
-  const head = `${correlation(state, touch, filing)} `;
-  if (!touch.refusal) return `${head}${body}`;
-  // The refusal is the one part a refiling adds: it gives way to the cap, never the question.
-  const full = `Your previous answer could not be used (${touch.refusal}). `;
-  const room = QUESTION_MAX - head.length - body.length;
-  if (full.length <= room) return `${head}${full}${body}`;
-  const reasonRoom = room - 'Your previous answer could not be used (…). '.length;
-  const refused = reasonRoom > 0 ? `Your previous answer could not be used (${touch.refusal.slice(0, reasonRoom)}…). ` : room >= REFUSED_SHORT.length ? REFUSED_SHORT : '';
-  return `${head}${refused}${body}`;
-}
-
-// The answered receipt's question is the filed one, verbatim: touch.filedQuestion,
-// or touch.filed.question on a touch filed by a conduct that kept only that.
-export function filedQuestionOf(touch) {
-  const filed = touch.filedQuestion ?? touch.filed?.question;
-  return typeof filed === 'string' ? filed : null;
-}
-export function answersFiling(touch, question) {
-  return typeof question === 'string' && question === filedQuestionOf(touch);
+  const tail = optionsBlock(body, touch.options);
+  let refused = '';
+  if (touch.refusal) {
+    // The refusal is the one part a refiling adds: it gives way to the cap before the question does.
+    const full = `Your previous answer could not be used (${touch.refusal}). `;
+    const room = QUESTION_MAX - head.length - body.length - tail.length;
+    const reasonRoom = room - 'Your previous answer could not be used (…). '.length;
+    refused = full.length <= room ? full
+      : reasonRoom > 0 ? `Your previous answer could not be used (${touch.refusal.slice(0, reasonRoom)}…). ` : room >= REFUSED_SHORT.length ? REFUSED_SHORT : '';
+  }
+  const text = `${head}${refused}${body}${tail}`;
+  if (text.length <= QUESTION_MAX) return text;
+  // A question that still overruns is cut, never its options or how to answer:
+  // the cut may take its EXPECT, so the options are listed.
+  const listed = optionsBlock('', touch.options);
+  const keep = QUESTION_MAX - head.length - refused.length - listed.length - 1;
+  return `${head}${refused}${body.slice(0, Math.max(0, keep))}…${listed}`;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -296,30 +245,52 @@ function optionKey(touch, answer) {
   return answer.key;
 }
 
-function refuse(touch, refusal) {
-  touch.status = 'open';
-  touch.refusal = refusal;
-}
-
-// Refuses (exit 3) an answer that is not the operator's: a spine answer must
-// be stamped operator:…, a session answer is the operator's AskUserQuestion
-// choice in this session, a core answer needs the TTY-attested touch record.
+// Refuses (exit 3) an answer that is not the operator's: a session answer is
+// the operator's AskUserQuestion choice in this session, a terminal answer
+// needs the TTY-attested touch record. A filed touch's answer owes the anchor
+// the ordinary receipt that supersedes its needs_input.
 export function acceptAnswer(state, touch, answer) {
-  const attributed = answer.source === 'spine'
-    ? String(answer.by ?? '').startsWith('operator:')
-    : answer.source === 'session' ? answer.by === 'operator:session' : touch.tty === true;
+  const attributed = answer.source === 'session' ? answer.by === 'operator:session' : touch.tty === true;
   if (!attributed) {
     throw new ConductError(3, `${touch.tag}: answer by ${answer.by ?? 'nobody'} is not attributed to the operator`);
   }
   if (!touch.options.some((option) => option.key === answer.key)) {
     throw new ConductError(3, `${touch.tag}: answer key ${answer.key} is not one of ${touch.options.map((option) => option.key).join(', ')}`);
   }
-  touch.answer = {
-    key: answer.key, text: answer.text ?? null, by: answer.by, answeredAt: answer.answeredAt,
-    source: answer.source, receiptId: answer.receiptId ?? null,
-  };
+  if (touch.status === 'filed') touch.supersede = 'owed';
+  touch.answer = { key: answer.key, text: answer.text ?? null, by: answer.by, answeredAt: answer.answeredAt, source: answer.source };
   touch.status = 'answered';
   touch.waiting = false;
+}
+
+// The ordinary receipt a filed touch owes once answered: it quotes the answer
+// and supersedes the needs_input, so the anchor is no longer blocked-waiting.
+// Emitted before any phase's next action (conduct.mjs emit).
+export function supersedeAction(state) {
+  if (!spineOn(state)) return null;
+  const touch = (state.touches ?? []).find((candidate) => candidate.status === 'answered' && candidate.supersede === 'owed');
+  if (!touch) return null;
+  const { key, text, by } = touch.answer;
+  const ended = TERMINAL_PHASES.includes(state.phase);
+  return {
+    step: touchStep(touch), kind: 'agent-tool', part: 'supersede', touch: { n: touch.n }, tool: 'spine_receipt', expects: { type: 'json' },
+    instruction: 'Call spine_receipt with these args and record its raw result.',
+    args: {
+      questId: state.intent.anchor,
+      outcome: ended ? 'completed' : 'paused',
+      did: `conduct ${state.slug} (run ${state.runId}): the operator answered ${touch.tag} (needs_input receipt ${touch.receiptId}), verbatim: (${key})${text ? ` ${text}` : ''} [${by}]. ${ended ? `The run ended ${state.phase}.` : 'The run continues under that answer.'}`.slice(0, 4000),
+      stoppedAt: `touch ${touch.n} answered; conduct ${state.slug} ${ended ? `ended ${state.phase}` : 'continues'}`,
+    },
+  };
+}
+
+// A failed or unbound acknowledgement is refused: the receipt stays owed and is emitted again.
+export function recordSupersede(state, action, result, deps) {
+  const touch = state.touches[action.touch.n - 1];
+  const failure = spineAckFailure(action, result);
+  if (failure) throw new ConductError(2, `spine_receipt did not supersede ${touch.tag}'s needs_input: ${failure}`);
+  touch.supersede = result.id;
+  appendEvent(state, deps, { step: action.step, kind: 'touch', event: 'touch-superseded', data: { n: touch.n, receipt: result.id } });
 }
 
 export function recordTouch(state, touch, action, result, deps) {
@@ -328,72 +299,17 @@ export function recordTouch(state, touch, action, result, deps) {
     return;
   }
   if (action.kind === 'touch' && action.part === 'ask') return recordSessionAsk(state, touch, result, deps);
-  if (action.kind === 'shell' && action.part === 'post') {
-    // A post is accepted only when it exited 0, printed status posted, and
-    // names this filing's receipt. Anything else is a failure: counted (the
-    // record is saved), reported (exit 2), and the post is emitted again, up
-    // to POST_ATTEMPTS in a row, then the touch hands back. The touch is not
-    // read back until a post is accepted.
-    let out = null;
-    try { out = JSON.parse(result?.stdout ?? ''); } catch { out = null; }
-    const failure = out?.status !== 'posted' ? `${out?.status ?? 'no JSON'}${out?.error ? `: ${out.error}` : ''}`
-      : result?.code !== 0 ? `it printed status posted but exited ${result?.code}`
-        : String(out.askReceiptId ?? '').toLowerCase() !== String(touch.receiptId ?? '').toLowerCase() ? `it posted ask ${out.askReceiptId}, not this filing's ${touch.receiptId}`
-          : null;
-    if (failure) {
-      touch.post = { ...touch.post, failures: (touch.post?.failures ?? 0) + 1, lastError: `${failure} (exit ${result?.code})` };
-      if (postExhausted(touch)) touch.waiting = true;
-      return { failed: `github-ask post did not post ${touch.tag} (exit ${result?.code}): ${failure}` };
-    }
-    touch.post = { state: 'posted', target: out.target, askCommentUrl: out.askCommentUrl, askCommentId: out.askCommentId, existing: out.existing === true };
-    touch.waiting = false;
-    state.githubAsks = { ...state.githubAsks, target: out.target };
-    return;
-  }
-  if (action.kind !== 'agent-tool') return;
-  if (action.part === 'receipt') {
-    // A failed or unbound acknowledgement is refused: the touch stays open and
-    // the filing action stays pending, so it is re-emitted and never filed.
-    const failure = spineAckFailure(action, result);
-    if (failure) throw new ConductError(2, `spine_receipt did not file ${touch.tag}: ${failure}`);
-    // The filing's second half: the spec is written first, so a failed write
-    // leaves the touch as it was, and the post action comes next.
-    writeGithubAskSpec(state, touch, deps, result.id, action.args.question);
-    touch.receiptId = result.id;
-    touch.filedQuestion = action.args.question;
-    touch.filings += 1;
-    touch.status = 'filed';
-    touch.channel = 'github';
-    touch.refusal = null;
-    touch.post = { state: 'pending', spec: `touches/${touch.n}.github-ask.json` };
-    return;
-  }
-  // The read-back: accept only an answered receipt to THIS run's filing.
-  // spine_quest shows only the latest receipt, so a later receipt on the
-  // anchor hides it there.
-  if (filedQuestionOf(touch) === null) throw new ConductError(2, `touch ${touch.n} was filed before conduct kept the filed question (touch.filedQuestion), so no answer can be matched to it verbatim. Answer it in a new run (\`conduct.mjs intake\`); status and analyze still read this one.`);
-  const latest = result?.quests?.[0]?.latestReceipt;
-  const answered = latest?.outcome === 'answered' && latest.answer && answersFiling(touch, latest.question);
-  if (!answered) {
-    touch.waiting = true;
-    return;
-  }
-  const answer = {
-    key: latest.answer.key, text: latest.answer.text, by: latest.answer.by, answeredAt: latest.answer.answeredAt,
-    source: 'spine', receiptId: typeof latest.id === 'string' ? latest.id : null,
-  };
-  // Not the operator's: refused as an answer (no authority), and the touch is
-  // re-filed so it stays answerable. The caller exits 3 for this read.
-  if (!String(answer.by ?? '').startsWith('operator:')) {
-    refuse(touch, `the answer by ${answer.by ?? 'nobody'} is not operator-attributed`);
-    return { refused: touch.refusal };
-  }
-  answer.key = optionKey(touch, answer);
-  if (!touch.options.some((option) => option.key === answer.key)) {
-    // The operator answered, but not with a usable option: re-file the touch
-    // saying why, so it stays answerable.
-    refuse(touch, `answer ${answer.key ?? '(no key)'} is not one of ${touch.options.map((option) => option.key).join(', ')}`);
-    return;
-  }
-  acceptAnswer(state, touch, answer);
+  if (action.kind !== 'agent-tool' || action.part !== 'receipt') return;
+  // A failed or unbound acknowledgement is refused: the touch stays open and
+  // the filing action stays pending, so it is re-emitted and never filed.
+  const failure = spineAckFailure(action, result);
+  if (failure) throw new ConductError(2, `spine_receipt did not file ${touch.tag}: ${failure}`);
+  touch.receiptId = result.id;
+  touch.filedQuestion = action.args.question;
+  touch.filings += 1;
+  touch.status = 'filed';
+  touch.refusal = null;
+  touch.waiting = true;
+  // The operator's terminal view: the question and the answer command.
+  writeTouchFiles(state, touch, deps);
 }

@@ -4754,7 +4754,7 @@ function amendmentFixture(t) {
   writeFileSync(prompt, 'fix the review findings', 'utf8');
   // A claude lane: the codex load/read-back choreography is not what this gate is about.
   seedLane(f, { kind: 'claude', model: 'opus', promptFile: prompt });
-  const receipt = (fields) => ({ code: 0, stdout: `${JSON.stringify({ id: RECEIPT, questId: QUEST, outcome: 'answered', ...fields })}\n`, stderr: '' });
+  const receipt = (fields) => ({ code: 0, stdout: `${JSON.stringify({ id: RECEIPT, questId: QUEST, outcome: 'completed', ...fields })}\n`, stderr: '' });
   const resolver = JSON.stringify(['resolve-receipt', '--id', '{id}']);
   const run = (extra, env = { WORKIT_RECEIPT_RESOLVER: resolver }) => runLane(['prompt', 'lane-a', '--file', prompt, '--amendment', ...extra, '--log', f.log], { exec: f.exec, env });
   return { f, prompt, receipt, run };
@@ -4768,12 +4768,12 @@ test('207dbaf1 / C5: an amendment with neither --ruling-receipt nor --no-ruling 
   assert.equal(f.calls.length, 0);
 });
 
-test('207dbaf1 / C5: a paused receipt, or an answered one on another quest, is refused; nothing reaches herdr', async (t) => {
+test('207dbaf1 / C5: a needs_input receipt (an ask, not a ruling), or a ruling on another quest, is refused; nothing reaches herdr', async (t) => {
   const { f, receipt, run } = amendmentFixture(t);
-  f.responses.push(receipt({ outcome: 'paused' }));
-  const paused = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST.slice(0, 8)]);
-  assert.equal(paused.exit, 2);
-  assert.match(paused.output.error, /outcome "paused", not "answered"/);
+  f.responses.push(receipt({ outcome: 'needs_input' }));
+  const asked = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST.slice(0, 8)]);
+  assert.equal(asked.exit, 2);
+  assert.match(asked.output.error, /outcome "needs_input", not one that records a ruling \(completed, paused, answered\)/);
 
   f.responses.push(receipt({ questId: OTHER_QUEST }));
   const elsewhere = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST.slice(0, 8)]);
@@ -4782,7 +4782,7 @@ test('207dbaf1 / C5: a paused receipt, or an answered one on another quest, is r
   assert.equal(f.calls.every((call) => call.program === 'resolve-receipt'), true, 'only the resolver ran');
 });
 
-test('207dbaf1 / C5: an answered receipt on the named quest sends, and the row records the ruling', async (t) => {
+test('207dbaf1 / C5: a completed receipt on the named quest (the session that recorded the operator\'s answer) sends, and the row records the ruling', async (t) => {
   const { f, prompt, receipt, run } = amendmentFixture(t);
   f.responses.push(receipt({}), AGENT_IDLE, PROMPT_WORKING);
   const result = await run(['--ruling-receipt', RECEIPT.toUpperCase(), '--quest', QUEST.slice(0, 6)]);
@@ -4913,7 +4913,7 @@ test('207dbaf1 amend-1 / item 7: a Debrief subsection whose only body is a headi
 test('207dbaf1: resolver shapes and failures — trailing id, snake_case quest_id, not found, wrong id, crash, bad input', async (t) => {
   const { f, receipt, run } = amendmentFixture(t);
   const bare = { WORKIT_RECEIPT_RESOLVER: 'resolve-receipt' };
-  f.responses.push({ code: 0, stdout: JSON.stringify({ id: RECEIPT, quest_id: QUEST, outcome: 'answered' }), stderr: '' }, AGENT_IDLE, PROMPT_WORKING);
+  f.responses.push({ code: 0, stdout: JSON.stringify({ id: RECEIPT, quest_id: QUEST, outcome: 'paused' }), stderr: '' }, AGENT_IDLE, PROMPT_WORKING);
   const snake = await run(['--ruling-receipt', RECEIPT, '--quest', QUEST], bare);
   assert.equal(snake.exit, 0, JSON.stringify(snake.output));
   assert.deepEqual(f.calls[0].args, [RECEIPT], 'a bare program gets the id as its one argument');

@@ -67,8 +67,9 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            [--amendment (--ruling-receipt <uuid> --quest <id> | --no-ruling)]
            Any prompt after the lane's first is an amendment, --amendment or not,
            and states whether it acts on an operator ruling. A named receipt must
-           resolve through WORKIT_RECEIPT_RESOLVER to an answered receipt on that
-           quest; with no resolver configured it is refused.
+           resolve through WORKIT_RECEIPT_RESOLVER to a completed or paused
+           receipt on that quest (the one recording the ruling); with no
+           resolver configured it is refused.
            [--allow-missing <rel>]... Every backticked repo-relative path in
            the file (outside fenced blocks and - Create bullets) must exist in
            the lane's worktree or the workspace root, or the prompt is refused
@@ -1514,10 +1515,15 @@ export function resolverArgv(spec, id) {
   return placeholder ? filled : [...filled, id];
 }
 
+// The receipt outcomes that can record an operator ruling: the ordinary receipt
+// a session files with the operator's answer quoted, or `answered`, which the
+// retired GitHub answer route wrote. A needs_input asks; it never rules.
+const RULING_OUTCOMES = Object.freeze(['completed', 'paused', 'answered']);
+
 // An amendment says, in the command, whether it acts on an operator ruling. Any
 // prompt after the lane's first (the sidecar's `promptFile`, written by this verb
 // on every send) is an amendment whether or not `--amendment` is passed. A ruling
-// it names must resolve to an `answered` receipt on the named quest; with no
+// it names must resolve to a ruling receipt on the named quest; with no
 // resolver there is nothing to resolve against, so the send is refused. Every
 // refusal here happens before the first herdr call. `fallback` replays the
 // lane's own last prompt, so it is not gated.
@@ -1565,9 +1571,9 @@ function rulingGate(opts, deps, lane) {
   if (!questId.startsWith(opts.quest.toLowerCase())) {
     usage(`ruling receipt ${opts.rulingReceipt} belongs to quest ${questId || '<none>'}, not ${opts.quest}`);
   }
-  if (outcome !== 'answered') usage(`ruling receipt ${opts.rulingReceipt} has outcome ${JSON.stringify(outcome)}, not "answered"`);
+  if (!RULING_OUTCOMES.includes(outcome)) usage(`ruling receipt ${opts.rulingReceipt} has outcome ${JSON.stringify(outcome)}, not one that records a ruling (${RULING_OUTCOMES.join(', ')})`);
   // Freshness is the resolver's to report: without `latestReceiptId` the gate
-  // proves an answered receipt exists on the quest, not that it is the latest.
+  // proves a ruling receipt exists on the quest, not that it is the latest.
   const latest = receipt.latestReceiptId ?? receipt.latest_receipt_id ?? null;
   if (latest !== null && String(latest).toLowerCase() !== id) {
     usage(`ruling receipt ${id} is not the latest receipt on quest ${questId} (latest: ${latest}); a later stop superseded it`);
@@ -1936,8 +1942,8 @@ export const DEBRIEF_HEADINGS = Object.freeze([
   'Claims no control measures',
 ]);
 // A letter marker at the start of a line, after an optional list marker or bold
-// opener. Letters identify options, and `(a)`…`(f)` is the cap: six is
-// spine_receipt's `ask.options` maximum.
+// opener. Letters identify options, and `(a)`…`(f)` is the cap: six letters,
+// a..f, as conduct's touches key their options.
 const LETTER_MARKER = /^(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__)?\(([A-Za-z])\)/;
 const ASK_LETTER = /^[a-f]$/;
 
