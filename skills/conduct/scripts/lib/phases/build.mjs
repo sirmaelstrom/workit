@@ -24,7 +24,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { ConductError, appendEvent, laneBase } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, SLOT_WAIT, dispatchable, filesDisjoint, holdsSlot, laneOccupied, normalizePath, slotHolders } from '../schedule.mjs';
-import { allowedMissing, chooseBackend, freshStart, laneBackend, laneLayout, recordLaneStep } from '../lanes.mjs';
+import { allowedMissing, chooseBackend, freshStart, laneBackend, laneDeadlineMs, laneLayout, recordLaneStep } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
 import { LANE_SUITE_HEADING, LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
 import { isTopListItem, markLines, sectionLines, sectionText } from '../markdown.mjs';
@@ -628,7 +628,7 @@ export const RESET_TARGETS = Object.freeze({
     // An exec lane is polled by its recorded pid, which a restart outside `lane spawn` does not update.
     needs: (state, wp) => firstProblem(() => hasLane(wp), () => (wp.lane.backend !== 'herdr' ? `${wp.id} is an exec lane; restart it with --to prompt` : null),
       () => (wp.lane.paneId ? null : `${wp.id}'s herdr lane has no pane`)),
-    lane: (deps) => freshStart(deps),
+    lane: (deps, state) => freshStart(deps, null, laneDeadlineMs(state)),
   },
   land: {
     from: ['blocked', 'held'], state: () => 'gate', stage: 'land', queue: keepStops,
@@ -753,7 +753,7 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   const dropped = (wp.queue ?? []).filter((action) => !nextQueue.includes(action)).map(label);
   const phase = rewindPhase(state, deps);
   const reason = `reset-wp --to ${to}: ${why.trim()}`;
-  if (target.lane) wp.lane = { ...wp.lane, ...target.lane(deps) };
+  if (target.lane) wp.lane = { ...wp.lane, ...target.lane(deps, state) };
   setState(state, wp, target.state(wp), reason, deps);
   wp.stage = target.stage;
   wp.queue = nextQueue;
@@ -2286,6 +2286,13 @@ function route(state, wp, action, out, deps) {
         return;
       }
       if (out.cause === 'needs-conductor') {
+        // A lane that stops again on questions it already has rulings for has
+        // nothing for the checked stage to rule, and the check queue it cut
+        // short never looked up its PR: re-prompt it like any failed check.
+        if (!(wp.asks ?? []).some((ask) => !askRuled(wp, ask))) {
+          const ruled = (wp.rulings ?? []).map((r) => `${r.file}: (${r.ruled ?? 'escalated'})`).join(', ');
+          return checkFailed(state, wp, deps, `the report is still "stopped: needs conductor", but every question under ## Needs conductor is already ruled${ruled ? ` (${ruled})` : ''}: act on the rulings, set ## Outcome to built or refuted, and finish`);
+        }
         // The checked stage rules its asks one question at a time, as for a built report.
         wp.stage = 'checked';
         return;

@@ -1781,6 +1781,27 @@ test('rulings before escalation (D19.3): needs conductor → a ruling author, no
   assert.equal(h.wp('WP-02').state, 'merged');
 });
 
+test('fd50a09c (3): a report still stopped on asks that are all ruled is a check failure: the lane is re-prompted, never sent to review with no PR', async (t) => {
+  const h = harness(t);
+  h.reports = { 'WP-02': ['report-needs-conductor.md', 'report-needs-conductor.md', 'report-built.md'] };
+  h.rulings = [{ ruled: 'b', evidence: 'grep -n since lib/x.mjs → 12: --since' }];
+  assert.equal(await drive(h), null);
+  assert.equal(h.wp('WP-02').state, 'merged');
+  const amendments = of(h, 'WP-02').filter((a) => a.step === 'brief' && a.part === 'amendment');
+  assert.equal(amendments.length, 2);
+  // The re-prompt is checkFailed's retry: the ruling amendment again, with the failure as its retryReason.
+  assert.match(amendments[1].amendment.retryReason, /every question under ## Needs conductor is already ruled \(rulings\/wp-02-1\.json: \(b\)\)/);
+  assert.match(amendments[1].instruction, /already ruled/);
+
+  // A lane that keeps stopping on ruled asks blocks once its one check re-prompt is spent; reset-wp --to check recovers it.
+  const stuck = harness(t);
+  stuck.reports = { 'WP-02': ['report-needs-conductor.md', 'report-needs-conductor.md', 'report-needs-conductor.md'] };
+  stuck.rulings = [{ ruled: 'b', evidence: 'x' }];
+  await drive(stuck, { until: () => stuck.wp('WP-02').state === 'blocked' });
+  assert.match(stuck.wp('WP-02').reason, /^check failed again after an amendment: the report is still "stopped: needs conductor", but every question .* is already ruled/);
+  assert.equal(stuck.wp('WP-02').pr?.number ?? null, null, 'blocked, not sent to review without a PR');
+});
+
 test('rulings before escalation (D19.3): an escalation opens one blocked touch with the lane\'s letters, wpId and check; WP-03 still merges', async (t) => {
   const h = harness(t);
   h.reports = { 'WP-02': ['report-needs-conductor.md'] };

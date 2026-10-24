@@ -20,7 +20,9 @@ import { ConductError, workspaceAncestor } from './state.mjs';
 import { sectionText } from './markdown.mjs';
 import { validateRecipe } from './recipe.mjs';
 
-export const WORKSPACE_KEYS = Object.freeze(['release', 'contractPaths', 'trivialExclude', 'gateEnv', 'gateBackground', 'laneEstimateUsd', 'laneSetup']);
+export const WORKSPACE_KEYS = Object.freeze(['release', 'contractPaths', 'trivialExclude', 'gateEnv', 'gateBackground', 'laneEstimateUsd', 'laneSetup', 'laneDeadlineMinutes']);
+// A lane deadline past this is a lane nobody is watching.
+export const LANE_DEADLINE_MAX_MINUTES = 12 * 60;
 export const LEGACY_RELPATH = '.workit/conduct.json';
 export const LANE_SUITE_HEADING = 'Lane suite';
 const NAME = /^[A-Za-z0-9._-]+$/;
@@ -74,6 +76,10 @@ export function workspaceConfigProblems(config) {
   const estimate = config.laneEstimateUsd;
   if (Object.hasOwn(config, 'laneEstimateUsd') && (typeof estimate !== 'number' || !Number.isFinite(estimate) || estimate < 0)) {
     problems.push('laneEstimateUsd must be a non-negative number');
+  }
+  const deadline = config.laneDeadlineMinutes;
+  if (Object.hasOwn(config, 'laneDeadlineMinutes') && !(Number.isInteger(deadline) && deadline > 0 && deadline <= LANE_DEADLINE_MAX_MINUTES)) {
+    problems.push(`laneDeadlineMinutes must be a whole number of minutes from 1 to ${LANE_DEADLINE_MAX_MINUTES}`);
   }
   return problems;
 }

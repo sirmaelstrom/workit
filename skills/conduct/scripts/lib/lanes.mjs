@@ -546,11 +546,18 @@ const amend = (reason, patch = {}) => ({ outcome: 'amend', reason, patch: { queu
 const done = (reason, patch = {}) => ({ outcome: 'done', reason, patch: { queue: [], ...patch } });
 const iso = (ms) => new Date(ms).toISOString();
 
+// How long a lane may run from its start or amendment: the repo config's
+// laneDeadlineMinutes (a slow-build repo), else DEADLINE_MS.
+export function laneDeadlineMs(state) {
+  const minutes = pinnedConfig(state)?.laneDeadlineMinutes;
+  return Number.isInteger(minutes) && minutes > 0 ? minutes * 60 * 1000 : DEADLINE_MS;
+}
+
 // A successful start or conductor amendment: a fresh deadline, the exit
 // marker cleared, every retry counter reset.
-export function freshStart(deps, startedAt = null) {
+export function freshStart(deps, startedAt = null, deadlineMs = DEADLINE_MS) {
   const at = startedAt ? Date.parse(startedAt) : deps.now();
-  return { startedAt: iso(at), deadline: iso(at + DEADLINE_MS), exitedAt: null, dialogPolls: 0, capacityResent: false, startRearms: 0, stopConfirms: 0 };
+  return { startedAt: iso(at), deadline: iso(at + deadlineMs), exitedAt: null, dialogPolls: 0, capacityResent: false, startRearms: 0, stopConfirms: 0 };
 }
 
 // A dialog (wait or start exit 3) gets one re-poll after 60 s (it may clear
@@ -604,13 +611,13 @@ export function recordLaneStep(state, wp, action, result, deps) {
         return { outcome: 'wait', reason: `start refused: ${said(result)}`, patch: { lane: { startRearms: rearms }, queue: [waitAction(POLL_MS), ...backend.start(wp), ...(wp.queue ?? []).slice(1)] } };
       }
       if (result.code === LANE_EXIT.blocked) return dialogRoute(wp, result, backend.wait(wp));
-      return ok ? proceed({ lane: freshStart(deps, parseStdout(result)?.startedAt) }) : block(said(result));
+      return ok ? proceed({ lane: freshStart(deps, parseStdout(result)?.startedAt, laneDeadlineMs(state)) }) : block(said(result));
     }
     case 'prompt':
       if (!ok) return block(said(result));
       // Only a conductor amendment renews the deadline and the counters.
       if (action.part === 'resend') return proceed();
-      return proceed({ lane: freshStart(deps, parseStdout(result)?.startedAt) });
+      return proceed({ lane: freshStart(deps, parseStdout(result)?.startedAt, laneDeadlineMs(state)) });
     case 'fallback':
       return ok ? proceed({ lane: { fallback: 'claude' } }) : block(said(result));
     case 'wait':

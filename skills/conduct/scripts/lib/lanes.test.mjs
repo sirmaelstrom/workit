@@ -9,8 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   allowedMissing, chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
-  STOP_CHECK_BLOCKS, stopHookCommand,
+  STOP_CHECK_BLOCKS, stopHookCommand, laneDeadlineMs,
 } from './lanes.mjs';
+import { RESET_TARGETS } from './phases/build.mjs';
 import { dispatchable } from './schedule.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
 import { reportShapeProblems, runLane } from '../../../../scripts/lane.mjs';
@@ -296,6 +297,21 @@ test('recordLaneStep: start sets startedAt and a deadline 120 minutes later (D19
   const lane = f.record(f.backend().start(f.wp)[0], ok('{}')).patch.lane;
   assert.equal(lane.startedAt, new Date(T0).toISOString());
   assert.equal(Date.parse(lane.deadline) - Date.parse(lane.startedAt), 120 * 60 * 1000);
+});
+
+test('fd50a09c (1): the pinned repo config\'s laneDeadlineMinutes sets the deadline at start, at an amendment and at reset-wp --to wait', (t) => {
+  const f = lanes(t, { backend: 'herdr', wpLane: { paneId: 'w1:p1' } });
+  f.state.intent.repoConfig = { source: 'workspace', config: { laneDeadlineMinutes: 240 } };
+  const span = (lane) => Date.parse(lane.deadline) - Date.parse(lane.startedAt);
+  assert.equal(span(f.record(f.backend().start(f.wp)[0], ok('{}')).patch.lane), 240 * 60 * 1000);
+  assert.equal(span(f.record(f.backend().prompt(f.wp, { amendment: true })[0], ok('{}')).patch.lane), 240 * 60 * 1000);
+  // A resend is a retry: it renews nothing, whatever the config says.
+  assert.equal(f.record(f.backend().prompt(f.wp, { amendment: true, resend: true })[0], ok('{}')).patch.lane, undefined);
+  assert.equal(span(RESET_TARGETS.wait.lane(f.deps, f.state)), 240 * 60 * 1000);
+  // A legacy or absent config keeps 120 minutes.
+  for (const repoConfig of [undefined, { source: 'repo', config: null }, { source: 'workspace', config: {} }]) {
+    assert.equal(laneDeadlineMs({ ...f.state, intent: { ...f.state.intent, repoConfig } }), 120 * 60 * 1000);
+  }
 });
 
 test('lane deadline (D19.17): past it, a running lane blocks on either backend', (t) => {

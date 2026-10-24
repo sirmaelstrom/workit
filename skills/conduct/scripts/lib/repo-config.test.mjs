@@ -54,6 +54,12 @@ test('resolveRepoConfig: an invalid workspace file is a ConductError(2) naming e
   assert.throws(() => resolveRepoConfig({ remote: 'o/r', repoPath: REPO, env: {}, ...disk({ [WS_FILE]: '[]' }) }), /must be a JSON object/);
 });
 
+test('fd50a09c (1): laneDeadlineMinutes is a whole number of minutes from 1 to 720', () => {
+  const read = (value) => () => resolveRepoConfig({ remote: 'o/r', repoPath: REPO, env: {}, ...disk({ [WS_FILE]: JSON.stringify({ laneDeadlineMinutes: value }) }) });
+  for (const good of [1, 240, 720]) assert.equal(read(good)().config.laneDeadlineMinutes, good);
+  for (const bad of [0, -5, 90.5, '240', 721, null]) assert.throws(read(bad), /laneDeadlineMinutes must be a whole number of minutes from 1 to 720/, String(bad));
+});
+
 test('sectionText: the first ## or ### heading by title, case ignored, up to the next heading; fenced headings are text', () => {
   const doc = [
     '# Lane suite', 'level one is not it', '',

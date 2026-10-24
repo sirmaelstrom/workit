@@ -1834,14 +1834,24 @@ test('COUNCIL RECOVER: externally posted qualifying delta preserves council obli
   const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 2 }] });
   const action = { step: 'review', part: 'recover', land: { round: 2, scope: 'delta', since: BASE, head: HEAD, lenses: ['codex', 'astra'] } };
   const receipt = ok(JSON.stringify({ outcome: 'ok', round: 'reviewed', last: { head: HEAD, scope: 'delta', review_id: 88 }, major_findings: 2, escalate: 't2-council' }));
-  const out = recordLandStep(makeState(), wp, action, receipt, {});
+  const out = recordLandStep(makeState({ adapters: { council: { on: true } } }), wp, action, receipt, {});
   assert.equal(out.outcome, 'continue');
   assert.equal(out.patch.tier, 'T2');
   assert.equal(out.patch.deltaEscalation?.reviewId, 88);
+  // fd50a09c (8): with no council adapter there is nothing to escalate to; the entry says so.
+  const off = recordLandStep(makeState(), wp, action, receipt, {});
+  assert.deepEqual([off.outcome, off.patch.tier, off.patch.deltaEscalation], ['continue', undefined, undefined]);
+  assert.match(off.patch.reviews.at(-1).escalation, /not escalated: no council adapter/);
 });
 
 test('a T1 delta post escalates at two new P1/P2 findings, but one keeps the cap', () => {
-  const state = makeState();
+  const state = makeState({ adapters: { council: { on: true } } });
+  // fd50a09c (8): the same post in a run with no council adapter stays T1 and owes no round.
+  const offWp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 3 }] });
+  const offAction = { step: 'post', part: 'post', land: { round: 2, scope: 'delta', since: BASE, head: HEAD, lenses: ['codex', 'astra'] } };
+  const off = recordLandStep(makeState(), offWp, offAction, ok(`findings 2\nposted-review-id 88\ndelta-major 2 head=${HEAD}\n`), {});
+  assert.deepEqual([off.outcome, off.patch.tier, off.patch.deltaEscalation], ['continue', undefined, undefined]);
+  assert.match(off.patch.reviews.at(-1).escalation, /no council adapter/);
   for (const [major, expected] of [[0, 'T1'], [1, 'T1'], [2, 'T2']]) {
     const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 3 }] });
     const action = { step: 'post', part: 'post', land: { round: 2, scope: 'delta', since: BASE, head: HEAD, lenses: ['codex', 'astra'] } };
@@ -1866,17 +1876,20 @@ test('COUNCIL RED: conduct gate cannot pass a qualifying delta without a later r
     ],
     deltaEscalation: { round: 2, head: HEAD, majorFindings: 2 },
   });
-  const verdict = gateCheck(makeState(), wp, { exec: gateExec(), now: () => NOW });
+  const verdict = gateCheck(makeState({ adapters: { council: { on: true } } }), wp, { exec: gateExec(), now: () => NOW });
   assert.equal(verdict.ok, false);
   assert.ok(verdict.causes.includes('t2-council'));
+  // fd50a09c (8): a run with no council adapter owes no council round, so this can never deadlock the gate.
+  assert.equal(gateCheck(makeState(), wp, { exec: gateExec(), now: () => NOW }).causes.includes('t2-council'), false);
 });
 
 test('a recorded full T2 council on the delta head clears the conduct merge gate', () => {
   const delta = { round: 2, scope: 'delta', tier: 'T1', head: HEAD, reviewId: 88, findings: 2, majorFindings: 2 };
   const council = { round: 3, scope: 'full', tier: 'T2', head: HEAD, reviewId: 'run/council/WP-01/3', escalatedDeltaReviewId: 88, record: { url: 'https://github.com/o/r/pull/7#pullrequestreview-99' }, findings: 0 };
   const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE }, delta, council], deltaEscalation: null });
-  assert.equal(gate(makeState(), wp).ok, true);
-  assert.equal(gate(makeState(), makeWp({ ...wp, reviews: [wp.reviews[0], delta, { ...council, record: null }] })).causes.includes('t2-council'), true);
+  const councilRun = makeState({ adapters: { council: { on: true } } });
+  assert.equal(gate(councilRun, wp).ok, true);
+  assert.equal(gate(councilRun, makeWp({ ...wp, reviews: [wp.reviews[0], delta, { ...council, record: null }] })).causes.includes('t2-council'), true);
 });
 
 test('post-adjudication dup-of recount keeps one defect at T1 and two at T2', () => {
