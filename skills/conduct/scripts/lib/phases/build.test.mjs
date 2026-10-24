@@ -1342,9 +1342,10 @@ test('reset-wp (61d817db): the refused transitions, one row each', (t) => {
     ['an unknown WP', (h) => build.resetWp(h.state, { wpId: 'WP-09', to: 'check', why: 'x' }, h.deps), 2, /no WP WP-09/],
     ['an unknown target', (h) => h.reset('start'), 2, /--to must be one of check, checked, prompt, wait, land/],
     ['no why', (h) => h.reset('check', { why: ' ' }), 2, /--why/],
-    ...['pending', 'dispatched', 'amending', 'pr', 'review', 'gate', 'deferred', 'merged', 'refuted'].map((from) => [
-      `a WP that is ${from}`, (h) => { h.wp('WP-02').state = from; return h.reset('check'); }, 5, new RegExp(`WP-02 is ${from}; --to check resets a WP that is blocked`)]),
-    ...['check', 'checked', 'prompt', 'wait'].map((to) => [`held --to ${to}`, (h) => { h.wp('WP-02').state = 'held'; return h.reset(to); }, 5, /is held; --to \w+ resets a WP that is blocked$/]),
+    ...['pending', 'dispatched', 'pr', 'review', 'gate', 'deferred', 'merged', 'refuted'].map((from) => [
+      `a WP that is ${from}`, (h) => { h.wp('WP-02').state = from; return h.reset('check'); }, 5, new RegExp(`WP-02 is ${from}; --to check resets a WP that is blocked or amending$`)]),
+    ['an amending WP whose amendment is not a check\'s re-prompt', (h) => { h.wp('WP-02').state = 'amending'; return h.reset('check'); }, 5, /amendment 1 \(check\) is not a failed check's re-prompt/],
+    ...['check', 'checked', 'prompt', 'wait'].map((to) => [`held --to ${to}`, (h) => { h.wp('WP-02').state = 'held'; return h.reset(to); }, 5, /is held; --to \w+ resets a WP that is blocked( or amending)?$/]),
     ['a WP never dispatched', (h) => { h.wp('WP-02').lane = null; return h.reset('check'); }, 5, /no lane worktree/],
     ['checked with no report', (h) => { rmSync(join(h.runDir, 'lane-wp-02-report.md')); return h.reset('checked'); }, 5, /no report at/],
     ['prompt with no brief', (h) => { rmSync(join(h.runDir, 'lane-wp-02.md')); return h.reset('prompt'); }, 5, /no brief at/],
@@ -1936,6 +1937,42 @@ test('runtime exercise required: a report with no Verdict line → an amendment 
   assert.ok(steps.indexOf(brief) < steps.findIndex((a) => a.step === 'review'));
   assert.equal(steps.filter((a) => a.step === 'review').length, 1, 'no review before the amendment');
   assert.equal(h.wp('WP-03').runtimeVerdict, 'exercised');
+});
+
+test('fd50a09c (6): reset-wp --to check takes a failed check\'s amendment back before the lane hears it; the conductor\'s report fix is checked with no lane round', async (t) => {
+  for (const herdr of [false, true]) {
+    const h = harness(t, { herdr, wps: [TWO[0], TWO[2]] });
+    h.reports = { 'WP-03': ['report-no-verdict.md'] };
+    const brief = await drive(h, { until: (a) => a.wpId === 'WP-03' && a.part === 'amendment' });
+    assert.deepEqual([h.wp('WP-03').state, h.wp('WP-03').stage, h.wp('WP-03').amendment.n, h.state.pending.id], ['amending', 'wait', 1, brief.id]);
+    const prompts = h.spawns['WP-03'];
+    // The conductor adds the missing Verdict line itself.
+    writeFileSync(join(h.runDir, 'lane-wp-03-report.md'), fixture('build', 'report-built.md').replaceAll('{pr}', '103').replaceAll('{head}', h.head('WP-03')));
+    const out = build.resetWp(h.state, { wpId: 'WP-03', to: 'check', why: 'the conductor added the Verdict line' }, h.deps);
+    // Amendment 1 never reached the lane: the WP is back where its first check ran.
+    assert.deepEqual([out.state, out.stage, out.droppedPending, h.state.pending, h.wp('WP-03').amendment], ['dispatched', 'check', brief.id, null, null], `herdr ${herdr}`);
+    assert.ok(out.dropped.includes('brief/amendment'), out.dropped.join(', '));
+    assert.equal(await drive(h), null);
+    assert.equal(h.wp('WP-03').state, 'merged', `herdr ${herdr}`);
+    assert.equal(h.spawns['WP-03'], prompts, `herdr ${herdr}: no lane round`);
+    const after = h.trace.slice(h.trace.findIndex((a) => a.id === brief.id) + 1);
+    assert.deepEqual(after.filter((a) => a.wpId === 'WP-03' && ['start', 'prompt', 'brief'].includes(a.step)).map((a) => a.id), [], `herdr ${herdr}`);
+  }
+});
+
+test('fd50a09c (6): reset-wp --to check refuses an amending WP whose lane has its amendment, or whose amendment is not a failed check\'s', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[2]] });
+  h.reports = { 'WP-03': ['report-no-verdict.md'] };
+  await drive(h, { until: (a) => a.wpId === 'WP-03' && a.part === 'amendment' });
+  await recordPending(h, await perform(h, h.state.pending));
+  const prompt = await step(h);
+  assert.equal(prompt.step, 'prompt');
+  assert.throws(() => build.resetWp(h.state, { wpId: 'WP-03', to: 'check', why: 'x' }, h.deps), { code: 5, message: /WP-03's amendment 1 brief is recorded, so the lane has it or is about to; reset it --to check once it blocks/ });
+  const findings = resetFixture(t);
+  Object.assign(findings.wp('WP-02'), { state: 'amending', stage: 'wait', amendment: { n: 2, kind: 'findings' }, queue: [{ kind: 'author', step: 'brief', part: 'amendment' }] });
+  assert.throws(() => findings.reset('check'), { code: 5, message: /WP-02's amendment 2 \(findings\) is not a failed check's re-prompt; --to check takes an amending WP back only from one, before its brief is recorded/ });
+  // Every other target still takes only a blocked (or held) WP.
+  for (const to of ['checked', 'prompt', 'wait', 'land', 'delta']) assert.throws(() => findings.reset(to), { code: 5, message: new RegExp(`WP-02 is amending; --to ${to} resets a WP that is blocked`) }, to);
 });
 
 test('threads in the loop (D19.9): findings → amendment → its table → adjudicate, three replies, one thread-ids, three resolves → the gate passes → merge', async (t) => {
@@ -3432,6 +3469,26 @@ test('spine acknowledgements (C1-10): another quest, another outcome or state, o
   await recordPending(h, { questId: update.args.questId, workState: 'done', horizon: 'landed' });
 });
 
+test('fd50a09c (7): a Spine acknowledgement that failed stops as "Spine unreachable" or "Spine refused", naming the pending action to call again', async (t) => {
+  const h = harness(t, { spine: true, wps: [TWO[0], TWO[1]] });
+  const receipt = await drive(h, { until: (a) => a.tool === 'spine_receipt' && a.step === 'receipt' });
+  const retry = `${receipt.id} stays pending: call spine_receipt again with the same args`;
+  for (const down of [{ error: 'fetch failed: connect ECONNREFUSED 127.0.0.1:3100' }, { isError: true, content: [{ type: 'text', text: 'MCP error -32000: Connection closed' }] }, null, 'MCP server context-ledger is not connected']) {
+    const failure = await recordPending(h, down).then(() => null, (error) => error);
+    assert.equal(failure?.code, 2, JSON.stringify(down));
+    assert.match(failure.message, /^Spine unreachable: spine_receipt got no acknowledgement \(/, JSON.stringify(down));
+    assert.ok(failure.message.includes(retry), failure.message);
+    assert.equal(h.state.pending.id, receipt.id);
+  }
+  const refused = await recordPending(h, { isError: true, content: [{ type: 'text', text: 'needle not found in data/outputs/x.md' }] }).then(() => null, (error) => error);
+  assert.match(refused?.message ?? '', /^Spine refused spine_receipt: needle not found in data\/outputs\/x\.md\./);
+  assert.ok(refused.message.includes(retry), refused.message);
+  // A wrong acknowledgement keeps its reason.
+  const wrong = await recordPending(h, { ...structuredClone(RECEIPT), questId: receipt.args.questId, outcome: 'paused' }).then(() => null, (error) => error);
+  assert.match(wrong?.message ?? '', /^Spine refused spine_receipt: outcome is paused, not completed\./);
+  await recordPending(h, { ...structuredClone(RECEIPT), questId: receipt.args.questId, outcome: 'completed' });
+});
+
 test('retry reason and amendment marker (C1-11, C1-13): a missing table re-prompts with its reason; an unchanged brief is refused', async (t) => {
   const h = harness(t, { wps: [TWO[0], TWO[1]] });
   h.findings = { 'WP-02': [3] };
@@ -3540,7 +3597,7 @@ test('spine acknowledgements (C2-4): ok:false, success:false, an empty or too-sh
   }
   await recordPending(h, { ...good, questId: receipt.args.questId.slice(0, 8) });
   const update = await step(h);
-  await assert.rejects(recordPending(h, { ok: false, questId: update.args.questId, workState: 'done', horizon: 'landed' }), { code: 2, message: /failed/ });
+  await assert.rejects(recordPending(h, { ok: false, questId: update.args.questId, workState: 'done', horizon: 'landed' }), { code: 2, message: /^Spine refused spine_update: \{"ok":false,/ });
   await recordPending(h, { questId: update.args.questId, workState: 'done', horizon: 'landed' });
 });
 

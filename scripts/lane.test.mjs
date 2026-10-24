@@ -4508,7 +4508,21 @@ test('31eddaa3 rule 6: a control named with a sub-letter before its suffix (C3a-
   assert.deepEqual(reportEvidenceProblems(again), []);
   // A control whose name does not parse is named, not reported as missing.
   const unparsed = amendment(3, ['| `4347887798` | fixed | Control **C3ab-4347887798** below is red | `66ea1c12` |'], ['**C3ab-4347887798: outcome a**', failingRun]);
-  assert.deepEqual(reportEvidenceProblems(unparsed), ['Amendment 3: fixed row 4347887798\'s Evidence names C3ab-4347887798, which appears in a control\'s lead under its Negative controls but does not parse as a control name (A1b, C1-5a, C3a-<id>); rename it (rule 6)']);
+  assert.deepEqual(reportEvidenceProblems(unparsed), ['Amendment 3: fixed row 4347887798\'s Evidence names C3ab-4347887798, which appears in a control\'s lead under its Negative controls but does not parse as a control name (A1b, C1-5a, C3a-<id>, A3-follow); rename it (rule 6)']);
+});
+
+test('fd50a09c (5) rule 6: a control named with a lowercase word after its label (A3-follow) parses', () => {
+  const table = (rows) => ['| Comment | Verdict | Evidence | Commit |', '|---|---|---|---|', ...rows].join('\n');
+  const amendment = (rows, controls) => evidenceReport('## Amendment 2', table(rows), '### Negative controls', ...controls);
+  for (const label of ['A3-follow', 'C2-revert-guard', 'C3a-follow', 'NC4-x', 'C1-5a-retry']) {
+    const report = amendment([`| r9 | fixed | Control **${label}** below is red | \`66ea1c1\` |`], [`**${label}: the follow-up guard removed**`, failingRun]);
+    assert.deepEqual(reportEvidenceProblems(report), [], label);
+  }
+  // A3 does not stand for A3-follow, nor A3-follow for A3.
+  const shorter = amendment(['| r9 | fixed | Control **A3** below is red | `66ea1c1` |'], ['**A3-follow: the follow-up guard removed**', failingRun]);
+  assert.match(reportEvidenceProblems(shorter).join('\n'), /fixed row r9 has no control/);
+  const longer = amendment(['| r9 | fixed | Control **A3-follow** below is red | `66ea1c1` |'], ['**A3: the guard removed**', failingRun]);
+  assert.match(reportEvidenceProblems(longer).join('\n'), /fixed row r9 has no control/);
 });
 
 test('e4ad108b rule 14: a cited screenshot is a lane-<id>-<claim> file beside the report', (t) => {
@@ -4525,6 +4539,21 @@ test('e4ad108b rule 14: a cited screenshot is a lane-<id>-<claim> file beside th
   assert.match(check('Screenshot: `lane-wp-02-missing.png`.').join('\n'), /lane-wp-02-missing\.png .* does not exist/);
   // Outside Runtime exercise an image path is not a runtime claim.
   assert.deepEqual(reportEvidenceProblems(evidenceReport('## What changed', '`docs/shot.png` added'), { reportPath, exists: existsSync }), []);
+});
+
+test('fd50a09c (4) rule 14: a screenshot cited elsewhere is refused with the copy to make: the directory and the name', (t) => {
+  const f = fixture(t);
+  const run = join(f.dir, 'workshop', 'run');
+  mkdirSync(run, { recursive: true });
+  const reportPath = join(run, 'lane-wp-04-report.md');
+  const check = (line) => reportEvidenceProblems(evidenceReport('## Runtime exercise', line), { reportPath, exists: existsSync });
+  const want = `copy it into ${run} as lane-wp-04-<claim>.png and cite that path`;
+  // The WP-04 field case: a bare name the smoke script wrote to its temp dir, and the same file by its temp path.
+  for (const cited of ['smoke.png', join(f.dir, 'Temp', 'shopfloor-smoke-5eb6eaed', 'smoke.png')]) {
+    const problems = check(`Screenshot: ${cited} shows the title screen.`);
+    assert.equal(problems.length, 1, cited);
+    assert.ok(problems[0].includes(want), problems[0]);
+  }
 });
 
 test('e4ad108b rule 7: a new test is named in a control run or under Claims; without a diff the check does not run', () => {

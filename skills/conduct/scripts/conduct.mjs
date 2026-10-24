@@ -18,7 +18,7 @@ import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from '
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
-import { QUESTION_MAX, acceptAnswer, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
+import { QUESTION_MAX, acceptAnswer, dropRetiredFiling, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
 import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -136,6 +136,7 @@ async function emit(state, deps, { custody = null } = {}) {
     saveState(state, deps);
     if (spec) return rotation.action;
   }
+  dropRetiredFiling(state, deps);
   if (state.pending) {
     // The build watches for stalls even while an action is pending.
     const phase = state.phase === 'build' ? await loadModule(deps, 'lib/phases/build.mjs', 'phase handler build') : null;

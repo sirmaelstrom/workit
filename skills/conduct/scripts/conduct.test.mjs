@@ -1499,6 +1499,29 @@ test('C1: a failed receipt filing is refused and the filing stays retryable', as
   assert.equal(readState(first.runDir).pending.part, 'hand-back');
 });
 
+// fd50a09c (9): the shopfloor-3d pre-alpha run's touch 2, emitted by conduct
+// 1.27.52 as a spine_receipt carrying `ask` (the GitHub ask's options) and
+// never recorded. Observatory now refuses `ask`, so re-emitting it wedges.
+test('fd50a09c (9): a GitHub-ask-era touch filing left pending is dropped on next; the touch is asked in session, or filed without ask', async (t) => {
+  for (const [env, part] of [[{}, 'ask'], [UNATTENDED, 'receipt']]) {
+    const f = fixture(t);
+    const first = out(await intake(f, SPINE));
+    const receipt = out(await record(f, first.runDir, first.action.id, fixtureJson('spine-quest.json'))).action;
+    assert.equal(receipt.part, 'receipt');
+    const state = readState(first.runDir);
+    state.pending.args.ask = { options: state.touches[0].options.map(({ key, label }) => ({ key, label })), allowFreeText: false };
+    state.pending.instruction = 'Call spine_receipt with these args and record its raw result. The next action posts it on GitHub.';
+    writeFileSync(join(first.runDir, 'state.json'), JSON.stringify(state));
+    const next = out(await f.run(['next', '--run', first.runDir], { env }));
+    assert.equal(next.action.part, part, JSON.stringify(next.action).slice(0, 200));
+    assert.notEqual(next.action.id, receipt.id);
+    assert.equal(Object.hasOwn(next.action.args ?? {}, 'ask'), false);
+    const dropped = events(first.runDir).filter((e) => e.event === 'pending-dropped');
+    assert.deepEqual(dropped.map((e) => [e.actionId, e.data.n]), [[receipt.id, 1]]);
+    assert.match(dropped[0].data.why, /retired GitHub ask/);
+  }
+});
+
 test('C3: the filed question names its touch, run and filing, then leads with touch 1\'s briefing', async (t) => {
   const f = fixture(t);
   const { runDir, receipt } = await toSpineFiled(f);

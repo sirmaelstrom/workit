@@ -23,6 +23,18 @@ rebase. Patch identity and unchanged parent files must both agree. An unproved
 prefix requires a new full review; a dirty or mismatched worktree blocks it.
 Every reset snapshots state and records its reason.
 
+A failed check re-prompts the lane through an amendment brief. If the fix is
+the conductor's (a screenshot copied beside the report, a stale `## PR` line),
+make it and run `reset-wp --to check` while that brief is still the pending
+action: the brief is dropped, the amendment is withdrawn, and the check runs
+again with no lane round. Once the brief is recorded the lane has the
+amendment; wait for it. A second failure blocks the WP as before.
+
+A Spine call that fails (`spine_receipt`, `spine_update`) stops `record` with
+`Spine unreachable` (no answer, or a connection error) or `Spine refused` (an
+error or the wrong acknowledgement). Nothing is recorded; when Observatory
+answers, make the same call and record its result.
+
 A land rebase records each moved commit's image by patch-id, and proves the
 image of every review head it moved, so a later gate crosses it from a reviewed
 head that amendments since buried, with no hand-recorded image. The WP's own

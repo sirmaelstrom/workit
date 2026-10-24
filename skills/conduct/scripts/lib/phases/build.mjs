@@ -37,7 +37,7 @@ import {
   t2Actions, threadReplyActions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
-  QUESTION_MAX, TOUCH_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, touchAction, touchParked, writeTouchFiles,
+  QUESTION_MAX, TOUCH_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, spineAckStop, touchAction, touchParked, writeTouchFiles,
 } from '../touch.mjs';
 import { budgetAmount, runAuthority } from '../authority.mjs';
 import { preapprovedRef } from './spec.mjs';
@@ -595,9 +595,23 @@ const hasLane = (wp) => (wp.lane?.backend && wp.lane?.worktree ? null : `${wp.id
 const laneExited = (wp) => !wp.lane?.startedAt || Boolean(wp.lane?.exitedAt);
 const keepStops = (state, wp) => (wp.queue ?? []).filter((action) => action.step === 'stop');
 const firstProblem = (...checks) => checks.reduce((found, check) => found ?? check(), null);
+// An amending WP goes back --to check only while its amendment is a failed
+// check's re-prompt whose brief is not recorded yet: the lane has not heard
+// it, so the conductor's own fix of what the check found is checked instead.
+const unsentCheckAmendment = (wp) => {
+  if (wp.state !== 'amending') return null;
+  const n = wp.amendment?.n ?? '?';
+  if (!wp.amendment || !Object.hasOwn(wp.amendment, 'retryOf')) return `${wp.id}'s amendment ${n} (${wp.amendment?.kind ?? 'unknown'}) is not a failed check's re-prompt; --to check takes an amending WP back only from one, before its brief is recorded`;
+  const head = (wp.queue ?? [])[0];
+  if (wp.stage !== 'wait' || head?.step !== 'brief' || head?.part !== 'amendment') return `${wp.id}'s amendment ${n} brief is recorded, so the lane has it or is about to; reset it --to check once it blocks`;
+  return null;
+};
+// The pending action reset-wp may drop: an unsent check amendment's brief.
+const withdrawsBrief = (state, wp, to) => to === 'check' && wp.state === 'amending' && state.pending?.wpId === wp.id
+  && state.pending.step === 'brief' && state.pending.part === 'amendment';
 
 export const RESET_TARGETS = Object.freeze({
-  check: { from: ['blocked'], state: laneWork, stage: 'check', needs: (state, wp) => hasLane(wp), queue: keepStops },
+  check: { from: ['blocked', 'amending'], state: laneWork, stage: 'check', needs: (state, wp) => firstProblem(() => hasLane(wp), () => unsentCheckAmendment(wp)), queue: keepStops },
   checked: {
     from: ['blocked'], state: laneWork, stage: 'checked', queue: keepStops,
     // The review the checked stage starts reads the PR, which only the check's pr-lookup records.
@@ -739,7 +753,8 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   if (wp.lane?.livenessHeld) refuse(`${wp.id}'s lane liveness is unverified; answer its liveness touch first`);
   const touch = (state.touches ?? []).find((candidate) => candidate.wpId === wp.id && candidate.status !== 'answered');
   if (touch) refuse(`${wp.id} has touch ${touch.n} open; its answer resumes the WP`);
-  if (state.pending?.wpId === wp.id) refuse(`${wp.id}'s action ${state.pending.id} is pending; perform and record it first`);
+  const withdrawn = withdrawsBrief(state, wp, to) ? state.pending.id : null;
+  if (state.pending?.wpId === wp.id && !withdrawn) refuse(`${wp.id}'s action ${state.pending.id} is pending; perform and record it first`);
   // `--to pending` takes no lane: the scheduler admits the WP when it dispatches it.
   const blocker = rewindRefusal(state) ?? (to === 'pending' ? null : admissionRefusal(state, wp, { state: target.state(wp), stage: target.stage }));
   if (blocker) refuse(blocker);
@@ -753,6 +768,10 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   const dropped = (wp.queue ?? []).filter((action) => !nextQueue.includes(action)).map(label);
   const phase = rewindPhase(state, deps);
   const reason = `reset-wp --to ${to}: ${why.trim()}`;
+  // An unsent check amendment is withdrawn: its brief, never recorded, is
+  // dropped, and the amendment it replaced is the WP's again.
+  if (withdrawn) state.pending = null;
+  if (from.state === 'amending') wp.amendment = wp.amendment.retryOf;
   if (target.lane) wp.lane = { ...wp.lane, ...target.lane(deps, state) };
   setState(state, wp, target.state(wp), reason, deps);
   wp.stage = target.stage;
@@ -787,9 +806,9 @@ export function resetWp(state, { wpId, to, why, baseline = null }, deps, { befor
   state.seq += 1;
   appendEvent(state, deps, {
     actionId: `${state.seq}-reset`, step: 'reset', kind: 'reset', event: 'wp-reset', source,
-    data: { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, why: why.trim(), snapshot, ...(recovery ? { deltaRecovery: recovery } : {}) },
+    data: { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, why: why.trim(), snapshot, ...(recovery ? { deltaRecovery: recovery } : {}), ...(withdrawn ? { droppedPending: withdrawn } : {}) },
   });
-  return { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, snapshot, ...(recovery ? { deltaRecovery: recovery } : {}) };
+  return { wpId: wp.id, to, from, state: wp.state, stage: wp.stage, queue, dropped, undeferred, phase, snapshot, ...(recovery ? { deltaRecovery: recovery } : {}), ...(withdrawn ? { droppedPending: withdrawn } : {}) };
 }
 
 function guardReply(state, wp, row, ruled) {
@@ -1143,10 +1162,15 @@ function startAmendment(state, wp, deps, { retry = false, answer = null, ...fiel
 }
 
 // One re-prompt per failed check expectation; a second failure blocks.
+// `retryOf` is the amendment it replaces, which `reset-wp --to check` puts
+// back when the conductor fixes the check before the lane is prompted.
 function checkFailed(state, wp, deps, reason) {
   if ((wp.checkAmends ?? 0) >= 1) return block(state, wp, deps, `check failed again after an amendment: ${reason}`);
   wp.checkAmends = 1;
+  const prior = wp.amendment ? { ...wp.amendment } : null;
+  if (prior) delete prior.retryOf;
   startAmendment(state, wp, deps, { retry: true, kind: 'check', reason });
+  wp.amendment.retryOf = prior;
 }
 
 // At most GATE_AMENDS gate-driven amendments per WP (gate command, land gate
@@ -2028,8 +2052,8 @@ function recordOwn(state, wp, action, result, deps) {
   switch (action.step === 'review' || action.step === 'council' ? `${action.step}/${action.part}` : action.step) {
     case 'flip':
     case 'receipt': {
-      const failed = spineAckFailure(action, result);
-      if (failed) throw new ConductError(2, `${action.tool}: ${failed}`);
+      const stop = spineAckStop(action, result);
+      if (stop) throw new ConductError(2, stop);
       return ok();
     }
     case 'brief':
