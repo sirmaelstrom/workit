@@ -2194,9 +2194,10 @@ const COMMENT_STYLES = [
 ];
 // Rule 7's boundary words, as they appear in a code comment.
 const ASSERTION_WORD = /(?<![\w-])(?:every|always|never|only|cannot|can't)(?![\w-])/i;
-// A control's name as a report writes it: A1b, C1-5a, NC4, C3a-4347887798.
-// Each part may end in one lowercase sub-letter.
-const CONTROL_LABEL = /(?<![\w-])(?=[A-Z0-9-]*\d)[A-Z][A-Z0-9]*[a-z]?(?:-[A-Z0-9]+[a-z]?)*(?![\w-])/g;
+// A control's name as a report writes it: A1b, C1-5a, NC4, C3a-4347887798,
+// A3-follow. Each part may end in one lowercase sub-letter; a part after a
+// hyphen may instead be a lowercase word.
+const CONTROL_LABEL = /(?<![\w-])(?=[A-Z0-9-]*\d)[A-Z][A-Z0-9]*[a-z]?(?:-(?:[A-Z0-9]+[a-z]?|[a-z][a-z0-9]*))*(?![\w-])/g;
 // A token shaped like a control's name: a capital first, a digit somewhere.
 const CONTROL_LIKE = /(?<![\w-])[A-Z][\w-]*\d[\w-]*/g;
 // A line that opens a control: a heading; a top-level bold list item or
@@ -2385,7 +2386,7 @@ export function reportEvidenceProblems(text, { diff = null, reportPath = null, e
       const unparsed = [...new Set(row[2].match(CONTROL_LIKE) ?? [])].filter((token) => !(token.match(CONTROL_LABEL) ?? []).includes(token) && leads(token));
       if (!named && !copied && !inherited) {
         problems.push(unparsed.length
-          ? `${amendment.heading.title}: fixed row ${id}'s Evidence names ${unparsed.join(', ')}, which appears in a control's lead under its Negative controls but does not parse as a control name (A1b, C1-5a, C3a-<id>); rename it (rule 6)`
+          ? `${amendment.heading.title}: fixed row ${id}'s Evidence names ${unparsed.join(', ')}, which appears in a control's lead under its Negative controls but does not parse as a control name (A1b, C1-5a, C3a-<id>, A3-follow); rename it (rule 6)`
           : `${amendment.heading.title}: fixed row ${id} has no control under its Negative controls or a cited earlier amendment, and its Evidence does not say "no control: <why>" (rule 6)`);
       }
       if (named || copied || inherited) priorRows.set(id, { row: line.text.trim(), commit,
@@ -2409,7 +2410,7 @@ export function reportEvidenceProblems(text, { diff = null, reportPath = null, e
           const path = candidates.find((candidate) => fold(dirname(candidate)) === fold(dir)) ?? candidates[0];
           const name = basename(path).toLowerCase();
           if (fold(dirname(path)) !== fold(dir) || !name.startsWith(own) || !/^.+\.(?:png|jpe?g|webp)$/.test(name.slice(own.length))) {
-            problems.push(`screenshot ${match} (line ${line.number}) is not beside the report as ${own}<claim>.png (rule 14): the worktree is deleted after the merge`);
+            problems.push(`screenshot ${match} (line ${line.number}) is not beside the report as ${own}<claim>.png (rule 14): copy it into ${dir} as ${own}<claim>.png and cite that path; the worktree and any temp dir are gone after the merge`);
           } else if (!exists(path)) {
             problems.push(`screenshot ${match} (line ${line.number}) does not exist (rule 14)`);
           }

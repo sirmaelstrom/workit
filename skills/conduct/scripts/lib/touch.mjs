@@ -171,6 +171,21 @@ function recordSessionAsk(state, touch, result, deps) {
   appendEvent(state, deps, { step: touchStep(touch), kind: 'touch', event: 'answered', source: 'session', data: { n: touch.n, key: touch.answer.key } });
 }
 
+// A touch filing a conduct with the GitHub asks emitted and nobody recorded:
+// its spine_receipt carries `ask`, which Observatory now refuses. `next`
+// drops it and the touch takes today's path (asked in session, or filed
+// without `ask`). Returns the dropped action, or null.
+export function dropRetiredFiling(state, deps) {
+  const action = state.pending;
+  if (action?.kind !== 'agent-tool' || action.part !== 'receipt' || !action.touch || !Object.hasOwn(action.args ?? {}, 'ask')) return null;
+  const touch = state.touches?.[action.touch.n - 1];
+  if (!touch || touch.status === 'answered') return null;
+  state.pending = null;
+  appendEvent(state, deps, { actionId: action.id, step: action.step, seam: action.seam, kind: action.kind, event: 'pending-dropped', phase: action.phase,
+    data: { n: touch.n, why: 'an unrecorded touch filing with the retired GitHub ask\'s `ask` field' } });
+  return action;
+}
+
 // The spine hand-back: a filed touch waits on the operator, so the
 // conductor's turn ends here. It is never recorded (`record` returns it with
 // `answered: false`); `next` consumes it on resume and asks the touch again.
@@ -237,6 +252,35 @@ export function spineAckFailure(action, result) {
   }
   if (action.tool === 'spine_receipt' && !UUID.test(String(result.id ?? ''))) return `no receipt uuid in the result (id ${JSON.stringify(result.id)})`;
   return null;
+}
+
+// A call that never reached the Spine, as fetch or an MCP client words it.
+const UNREACHABLE = /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|fetch failed|socket hang up|timed? ?out|not connected|connection closed|-32000/i;
+
+// The text a failed tool result carries: a bare string, an error, or an MCP error's text content.
+function ackText(result) {
+  if (typeof result === 'string') return result;
+  if (!result || typeof result !== 'object') return '';
+  if (result.error != null) return String(result.error?.message ?? (typeof result.error === 'string' ? result.error : JSON.stringify(result.error)));
+  const content = Array.isArray(result.content) ? result.content.filter((part) => part?.type === 'text').map((part) => part.text).join(' ') : '';
+  // An MCP error with no text is no answer; an `ok: false` body is one.
+  return content || (result.isError ? '' : JSON.stringify(result));
+}
+
+// The stop a refused acknowledgement makes, or null: "Spine unreachable" when
+// the call got no answer (nothing, or a connection error), "Spine refused"
+// when it answered with an error or the wrong thing. Either way nothing is
+// recorded and the action stays pending, so the same call is made again.
+export function spineAckStop(action, result) {
+  const failure = spineAckFailure(action, result);
+  if (!failure) return null;
+  const again = `Nothing was recorded; ${action.id} stays pending: call ${action.tool} again with the same args`;
+  if (!failure.startsWith('failed: ')) return `Spine refused ${action.tool}: ${failure}. ${again} and record its raw result.`;
+  const text = ackText(result).replace(/\s+/g, ' ').trim().slice(0, 300);
+  if (!text || UNREACHABLE.test(text)) {
+    return `Spine unreachable: ${action.tool} got no acknowledgement (${text || 'no result'}). ${again} once Observatory answers (GET /api/health), and record its raw result.`;
+  }
+  return `Spine refused ${action.tool}: ${text}. ${again} and record its raw result.`;
 }
 
 // An operator's typed answer with no key is option (c), when the touch has it.
