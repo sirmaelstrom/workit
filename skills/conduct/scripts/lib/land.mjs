@@ -1019,7 +1019,7 @@ export function gateCheck(state, wp, { exec, now }) {
   if (config.failure) fail(config.failure, 'infra');
   const review = head ? reviewCondition(wp, head, exec, config.patterns ?? DEFAULT_NOT_TRIVIAL.map(globRegex)) : { failure: 'review coverage not read: no head', cause: 'infra' };
   if (review.failure) fail(review.failure, review.cause);
-  const council = councilObligation(wp, exec);
+  const council = councilObligation(state, wp, exec);
   if (council) fail(council, 't2-council');
   const pendingOn = [...(ci.pending ? ['ci'] : []), ...(flight.pending ? ['review'] : [])];
   const ok = failures.length === 0 && pendingOn.length === 0;
@@ -1034,7 +1034,15 @@ export function gateCheck(state, wp, { exec, now }) {
   };
 }
 
-function councilObligation(wp, exec) {
+// A T1 delta with two or more distinct majors escalates the WP to a T2 council
+// round, which the gate then requires. A run without the council adapter has
+// no council to escalate to: the delta's findings are amended at T1 like any
+// others, its review entry says why (`escalation`), and nothing is owed.
+const councilOn = (state) => Boolean(state.adapters?.council?.on);
+const NO_COUNCIL = 'not escalated: no council adapter in this run';
+
+function councilObligation(state, wp, exec) {
+  if (!councilOn(state)) return null;
   const reviews = wp.reviews ?? [];
   const deltas = reviews.filter((review) => review.scope === 'delta' && review.tier === 'T1' && review.majorFindings >= 2);
   if (wp.deltaEscalation && !deltas.some((review) => review.head === wp.deltaEscalation.head)) {
@@ -1057,7 +1065,7 @@ function councilObligation(wp, exec) {
 export function mergeActions(state, wp, head, authority) {
   if (!authority) throw new ConductError(2, 'authority not passed');
   if (mergeRefusal(state, authority) || mergeLockFor(state, wp) !== 'mine') return [];
-  if (councilObligation(wp, null)) return [];
+  if (councilObligation(state, wp, null)) return [];
   // The door again, at the merge itself: a gate record from before the door
   // check (a run resumed across an upgrade) carries none.
   if (wp.id !== 'release' && wp.gate?.door !== 'two-way') return [];
@@ -1180,9 +1188,10 @@ function recordReview(state, wp, action, r) {
       if (delta && read.escalate === 't2-council' && (!Number.isInteger(read.major_findings) || read.major_findings < 2)) {
         return result('held', `posted delta review ${read.last.review_id} signalled council without a readable distinct-defect count`);
       }
+      const crossed = delta && read.escalate === 't2-council' && effectiveTier(wp) === 'T1';
+      const escalation = crossed && councilOn(state);
       const entry = reviewEntry(wp, action.land, { scope: delta ? 'delta' : 'full', reviewId: read.last.review_id ?? null,
-        ...(delta ? { majorFindings: read.major_findings ?? null } : {}) });
-      const escalation = delta && read.escalate === 't2-council' && effectiveTier(wp) === 'T1';
+        ...(delta ? { majorFindings: read.major_findings ?? null } : {}), ...(crossed && !escalation ? { escalation: NO_COUNCIL } : {}) });
       return result('continue', null, { reviews: [...(wp.reviews ?? []), entry],
         ...(escalation ? { tier: 'T2', deltaEscalation: { round: action.land.round, head: action.land.head, reviewId: read.last.review_id, majorFindings: read.major_findings } } : {}) });
     }
@@ -1457,11 +1466,12 @@ function landOutcome(state, wp, action, r, deps, authority) {
       if (action.land.scope === 'delta') {
         const majorFindings = deltaMajorCount(r, action.land.head);
         if (majorFindings === null) return result('block', `delta post for ${action.land.head} returned success without a posted P1/P2 count receipt; check the post outcome and producer version`);
-        const escalation = effectiveTier(wp) === 'T1' && deltaEscalation({ scope: 'delta', majorFindings, review_id: null });
+        const crossed = effectiveTier(wp) === 'T1' && deltaEscalation({ scope: 'delta', majorFindings, review_id: null });
+        const escalation = crossed && councilOn(state);
         const reviewId = postedReviewId(r);
         if (escalation && reviewId === null) return result('block', `delta post for ${action.land.head} crossed the T2 threshold but has no posted review id; check the producer receipt`);
         return result('continue', null, {
-          reviews: [...(wp.reviews ?? []), reviewEntry(wp, action.land, { findings: findingsCount(r), majorFindings, reviewId })],
+          reviews: [...(wp.reviews ?? []), reviewEntry(wp, action.land, { findings: findingsCount(r), majorFindings, reviewId, ...(crossed && !escalation ? { escalation: NO_COUNCIL } : {}) })],
           ...(escalation ? { tier: 'T2', deltaEscalation: { round: action.land.round, head: action.land.head, reviewId, majorFindings } } : {}),
         });
       }
