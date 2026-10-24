@@ -40,6 +40,14 @@ export const EXIT_CODES = Object.freeze({ ok: 0, error: 1, usage: 2, blocked: 3,
 // pr-review.mjs reply reads it (pr-review-guard.mjs LANE_MARKER_ENV).
 export const LANE_MARKER_ENV = 'WORKIT_LANE';
 
+// A claude lane's Stop hook (start --stop-hook): the command runs each time the
+// agent tries to end its turn, and its {"decision":"block"} keeps it working.
+// It rides the same --settings JSON as the marker.
+export const STOP_HOOK_TIMEOUT_S = 300;
+export function stopHookSettings(command) {
+  return { hooks: { Stop: [{ hooks: [{ type: 'command', command, timeout: STOP_HOOK_TIMEOUT_S }] }] } };
+}
+
 export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per invocation, JSON on stdout.
 
   create   --repo <abs> --branch <b> --base <ref> --label <text>
@@ -48,7 +56,8 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
   start    <name> --pane <id> --kind claude|codex --model <slug> --reasoning <lvl>
            [--sandbox <mode>] [--permission-mode <mode>] [--allow-default-mode]
            [--mcp-startup-timeout <sec> --mcp-startup-server <name>]
-           [--min-free-gb <n>] [--force-admit] [-- <native agent args>]
+           [--min-free-gb <n>] [--force-admit] [--stop-hook <command>]
+           [-- <native agent args>]
            Refused (exit 7) below --min-free-gb of free commit memory (or
            LANE_MIN_FREE_GB, default 10) or when the reading fails; --force-admit
            starts anyway and is logged. fallback is exempt: it swaps one agent
@@ -60,6 +69,7 @@ export const USAGE_TEXT = `lane <verb> [options] — one lane lifecycle step per
            --settings env, so a caller --settings is refused; codex: -c
            shell_environment_policy.set). pr-review.mjs reply refuses
            --adjudicator conductor|operator while it is set.
+           --stop-hook (claude only) adds a command Stop hook to that --settings.
            Native args are read in one spelling first: --flag=value is split;
            codex --config, -cK=V and -c=K=V become -c K=V, keys trimmed.
            Short aliases (codex -m/-s/-a) are not mapped.
@@ -437,7 +447,7 @@ function parseArgs(argv) {
     '--repo', '--branch', '--base', '--label', '--pane', '--kind', '--model', '--reasoning', '--sandbox',
     '--permission-mode', '--file', '--timeout', '--expect-file', '--expect-pr', '--expect-report', '--to', '--log',
     '--plan-floor', '--path', '--slug', '--workspace-root', '--lane', '--prompt-regex', '--mcp-startup-timeout', '--mcp-startup-server',
-    '--ruling-receipt', '--quest', '--min-free-gb', '--drain-free-gb',
+    '--ruling-receipt', '--quest', '--min-free-gb', '--drain-free-gb', '--stop-hook',
   ]);
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
@@ -469,6 +479,7 @@ function parseArgs(argv) {
   }
   opts.name = opts.positional[0] ?? null;
   if (opts.positional.length > 1) usage(`unexpected argument: ${opts.positional[1]}`);
+  if (verb !== 'start' && opts.stopHook !== undefined) usage(`--stop-hook belongs to the start verb, not ${verb}`);
   if (verb !== 'prompt' && (opts.amendment || opts.noRuling || opts.rulingReceipt !== undefined || opts.quest !== undefined)) {
     usage(`--amendment, --ruling-receipt, --quest and --no-ruling belong to the prompt verb, not ${verb}`);
   }
@@ -1247,6 +1258,10 @@ async function startLane(opts, deps, state) {
   if (opts.kind !== 'codex' && (hasMcpStartupTimeout || hasMcpStartupServer)) {
     usage('--mcp-startup-timeout/--mcp-startup-server apply to codex lanes only');
   }
+  // Codex runs a hook only once its source path is trusted in config.toml, and
+  // a lane worktree is a new path every time: the hook would be skipped silently.
+  if (opts.stopHook !== undefined && opts.kind !== 'claude') usage('--stop-hook applies to claude lanes only: codex skips an untrusted hook without a word');
+  if (opts.stopHook !== undefined && !String(opts.stopHook).trim()) usage('--stop-hook needs a command');
   if (hasMcpStartupTimeout !== hasMcpStartupServer) {
     usage(`${hasMcpStartupTimeout ? '--mcp-startup-server' : '--mcp-startup-timeout'} is required with the other MCP startup option`);
   }
@@ -1285,7 +1300,7 @@ async function startLane(opts, deps, state) {
     }
     native = [
       '--model', opts.model, '--permission-mode', mode, '--effort', opts.reasoning,
-      '--settings', JSON.stringify({ env: { [LANE_MARKER_ENV]: opts.name } }), ...native,
+      '--settings', JSON.stringify({ env: { [LANE_MARKER_ENV]: opts.name }, ...(opts.stopHook !== undefined ? stopHookSettings(opts.stopHook) : {}) }), ...native,
     ];
   } else {
     // C12 makes codex lanes Windows-only here: the launch depends on the real
