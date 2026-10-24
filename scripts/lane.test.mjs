@@ -269,6 +269,35 @@ test('WP-1: claude start supplies the mandatory mode and restores conductor focu
   assert.deepEqual(after[1].args, ['agent', 'list']);
 });
 
+test('d3adb4ee: start --stop-hook adds a command Stop hook to the claude lane\'s own --settings; codex and other verbs refuse it', async (t) => {
+  const f = fixture(t);
+  f.responses.push(
+    SHELL_READ,
+    { code: 0, stdout: '{"result":{"agent":{"name":"lane-a","state":"idle"}}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"focused":true}}', stderr: '' },
+    { code: 0, stdout: '{"result":{"agents":[{"name":"conductor","pane_id":"w1:p1","focused":true}]}}', stderr: '' },
+  );
+  const hook = 'node /plugin/skills/conduct/scripts/stop-check.mjs --run /runs/demo/run --wp WP-01';
+  const result = await runLane(
+    ['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--stop-hook', hook, '--log', f.log],
+    { exec: f.exec, env: { HERDR_PANE_ID: 'w1:p1' } },
+  );
+  assert.equal(result.exit, 0, JSON.stringify(result.output));
+  const args = agentStartCall(f).args;
+  const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+  assert.deepEqual(settings, { env: { WORKIT_LANE: 'lane-a' }, hooks: { Stop: [{ hooks: [{ type: 'command', command: hook, timeout: 300 }] }] } });
+  assert.equal(args.filter((arg) => arg === '--settings').length, 1);
+
+  const never = { exec: () => { throw new Error('no herdr call may happen before the refusal'); }, env: {} };
+  const codex = await runLane(['start', 'lane-c', '--pane', 'w1:p3', '--kind', 'codex', '--model', 'gpt-5.6-terra', '--reasoning', 'high', '--sandbox', 'danger-full-access',
+    '--stop-hook', hook, '--log', fixture(t).log], never);
+  assert.deepEqual([codex.exit, /claude lanes only/.test(codex.output.error)], [2, true], codex.output.error);
+  const blank = await runLane(['start', 'lane-a', '--pane', 'w1:p2', '--kind', 'claude', '--model', 'opus', '--reasoning', 'high', '--stop-hook', ' ', '--log', fixture(t).log], never);
+  assert.deepEqual([blank.exit, /--stop-hook needs a command/.test(blank.output.error)], [2, true], blank.output.error);
+  const wrongVerb = await runLane(['wait', 'lane-a', '--until', 'done', '--stop-hook', hook, '--log', fixture(t).log], never);
+  assert.deepEqual([wrongVerb.exit, /belongs to the start verb/.test(wrongVerb.output.error)], [2, true], wrongVerb.output.error);
+});
+
 test('herdr agent names: a lane name past 32 characters reaches herdr as a stable, valid alias', async (t) => {
   const long = 'shopfloor-v1-an-original-overhead-worksh-wp-01';
   const sibling = 'shopfloor-v1-an-original-overhead-worksh-wp-02';

@@ -40,7 +40,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   replan --run <dir> --plan <json file>
   upgrade-root --run <dir> --why <text> (invoke from destination root at an author/wait action)
   rotate --run <dir> --why <text> [--model <id> --effort <level>] [--name <successor>]
-  lane <spawn|alive|check|reap> --run <dir> --wp <id> [sub-verb flags]
+  lane <spawn|alive|check|reap|stop-check> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]
   quiet [--samples <n>] [--interval-ms <ms>] [--max-busy <percent>]   (no run: is this host's CPU quiet enough to re-run a gate)
   bootstrap --repo <abs> [--write] [--offline]   (no run: check a repo against the greenfield manifest)`;
@@ -701,7 +701,7 @@ async function quietVerb(tokens, deps) {
 const VERBS = {
   intake, next, record, answer, status, analyze, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
   'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb, rotate: rotateVerb, replan: replanVerb,
-  lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap'], ['spawn']),
+  lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap', 'stop-check'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
   bootstrap: async (tokens, deps) => {
     const { runBootstrapVerb } = await loadModule(deps, 'lib/bootstrap.mjs', 'module');
@@ -736,6 +736,8 @@ export async function runConduct(argv, overrides = {}) {
     lockWaitMs: 2000,
     newRunId: () => randomBytes(4).toString('hex'),
     stdinIsTTY: isatty(0),
+    // Only `lane stop-check` reads it: the Stop hook's input.
+    readStdin: () => readFileSync(0, 'utf8'),
     spawnDetached,
     pidAlive,
     resolveCodex: defaultCodexExe,

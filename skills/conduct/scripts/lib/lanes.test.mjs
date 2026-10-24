@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   allowedMissing, chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
+  STOP_CHECK_BLOCKS, stopHookCommand,
 } from './lanes.mjs';
 import { dispatchable } from './schedule.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
@@ -77,6 +78,9 @@ function lanes(t, { agent = 'claude', herdr = false, backend = 'exec', model = '
 
 const LANE = (f) => join(f.pluginRoot, 'scripts', 'lane.mjs');
 const CONDUCT = (f) => join(f.pluginRoot, 'skills', 'conduct', 'scripts', 'conduct.mjs');
+// The Stop hook command a claude lane carries (no spaces in the fixture's paths).
+const STOP_HOOK = (f, wpId = 'WP-00') => ['node', join(f.pluginRoot, 'skills', 'conduct', 'scripts', 'stop-check.mjs').replace(/\\/g, '/'),
+  '--run', f.runDir.replace(/\\/g, '/'), '--wp', wpId].join(' ');
 const LOG = (f) => join(f.runDir, 'lane-runner.jsonl');
 const BRIEF = (f) => join(f.runDir, 'lane-wp-00.md');
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' });
@@ -755,7 +759,8 @@ test('herdr: each action\'s argv, every one with --log (D17, D19.17)', (t) => {
   const lane = (verb, ...args) => ['node', LANE(f), verb, ...args, '--log', LOG(f)];
   assert.deepEqual(b.admit(f.wp).map((act) => act.command), [lane('admit')]);
   assert.deepEqual(b.create(f.wp)[2].command, lane('create', '--repo', f.repo, '--branch', 'conduct/demo/wp-00', '--base', 'origin/main', '--label', 'demo-wp-00', '--slug', 'demo-wp-00'));
-  assert.deepEqual(b.start(f.wp)[0].command, lane('start', 'demo-wp-00', '--pane', 'w1:p1', '--kind', 'claude', '--model', 'claude-opus-5-5', '--reasoning', 'high'));
+  assert.deepEqual(b.start(f.wp)[0].command, lane('start', 'demo-wp-00', '--pane', 'w1:p1', '--kind', 'claude', '--model', 'claude-opus-5-5', '--reasoning', 'high',
+    '--stop-hook', STOP_HOOK(f)));
   // The WP's Create paths ride as --allow-missing: lane.mjs prompt refuses a
   // brief naming an absent path, and these are the paths the lane creates (ec7b1192).
   assert.deepEqual(b.prompt(f.wp)[0].command, lane('prompt', 'demo-wp-00', '--file', '/run/lane-wp-00.md', '--allow-missing', 'a.mjs'));
@@ -874,7 +879,8 @@ test('exec: spawn runs the agent detached in the lane worktree, logging to the r
   assert.equal(spawn.options.cwd, worktree);
   assert.equal(spawn.options.logPath, join(f.runDir, 'lane-wp-00.log'));
   assert.deepEqual([spawn.program, ...spawn.args], ['claude', '-p', '--permission-mode', 'bypassPermissions', '--model', 'claude-sonnet-5-5', '--effort', 'high',
-    '--output-format', 'json', `Read ${BRIEF(f)} and execute it exactly.`]);
+    '--output-format', 'json', '--settings', JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: STOP_HOOK(f), timeout: 300 }] }] } }),
+    `Read ${BRIEF(f)} and execute it exactly.`]);
   assert.deepEqual([f.saved().wps[0].lane.pid, f.saved().wps[0].lane.startedAt], [4242, new Date(T0).toISOString()]);
   const start = f.backend().start(f.wp)[0];
   assert.deepEqual(start.command, ['node', CONDUCT(f), 'lane', 'spawn', '--run', f.runDir, '--wp', 'WP-00']);
@@ -1156,4 +1162,127 @@ test('lane reap (5c93c8cb): kills what runs from the WP\'s worktree, in process,
   const stuck = await runLaneVerb('reap', { runDir: e.runDir, wpId: 'WP-00', flags: {} }, { ...e.deps, exec: (program, args) => (program === 'kill' ? ok() : exec(program, args)) });
   assert.deepEqual([stuck.code, JSON.parse(stuck.out).state, JSON.parse(stuck.out).survivors.map((row) => row.pid)], [1, 'survivors', [503]]);
   assert.equal((await runLaneVerb('reap', { runDir: e.runDir, wpId: 'WP-00', flags: { x: true } }, e.deps)).code, 2, 'reap takes no flags');
+});
+
+// ---------------------------------------------------------------- stop-check (d3adb4ee)
+
+// A lane whose report, branch and PR all pass the conductor's checks; tests
+// break one piece at a time. `stop(input)` runs the sub-verb as the Stop hook does.
+function stopCheckLane(t, more = {}) {
+  const f = lanes(t, { wpLane: { worktree: '/wt', branch: 'conduct/demo/wp-00' }, ...more });
+  f.table[`git -C /wt rev-list --count ${SHA40}..HEAD`] = ok('1\n');
+  f.table[`git -C /wt diff --no-color --no-ext-diff --no-textconv --full-index --no-renames ${SHA40}...HEAD`] = ok('');
+  f.table['gh pr list --repo o/r --head conduct/demo/wp-00 --state all --json number,headRefOid,state'] = ok(JSON.stringify([{ number: 7, headRefOid: `abcdef1${'0'.repeat(33)}`, state: 'OPEN' }]));
+  const danger = '\n## Merge danger\n\nDoor: two-way\nBlast radius: the demo WP\n';
+  f.table['gh pr view 7 --repo o/r --json headRefName,state,body'] = ok(JSON.stringify({ headRefName: 'conduct/demo/wp-00', state: 'OPEN', body: report() + danger }));
+  f.report(report());
+  const verdictPath = join(f.runDir, 'lane-wp-00-stopcheck.json');
+  const stop = async (input = { session_id: 's1', background_tasks: [] }) => {
+    const result = await runLaneVerb('stop-check', { runDir: f.runDir, wpId: 'WP-00', flags: {} }, { ...f.deps, readStdin: () => (typeof input === 'string' ? input : JSON.stringify(input)) });
+    return { code: result.code, out: JSON.parse(result.out), file: JSON.parse(readFileSync(verdictPath, 'utf8')) };
+  };
+  return { ...f, stop, verdictPath };
+}
+
+test('stop-check: a lane that passes every conductor check may stop, and the verdict file says pass', async (t) => {
+  const f = stopCheckLane(t);
+  const passed = await f.stop();
+  assert.deepEqual([passed.code, passed.out.block, passed.out.verdict, passed.file.verdict, passed.file.sessionId, passed.file.blocks], [0, false, 'pass', 'pass', 's1', 0]);
+  // The conductor's own PR view ran: the hook checks what the conductor checks.
+  assert.ok(f.calls.includes('gh pr view 7 --repo o/r --json headRefName,state,body'));
+  assert.equal(existsSync(join(f.runDir, 'state.json')) && JSON.stringify(f.saved()) === JSON.stringify(f.state), true, 'state.json is never written');
+});
+
+test('stop-check: a failure the conductor would amend blocks the stop with its reason, STOP_CHECK_BLOCKS times, then the lane stops failed', async (t) => {
+  const f = stopCheckLane(t);
+  rmSync(join(f.runDir, 'lane-wp-00-report.md'));
+  for (let n = 1; n <= STOP_CHECK_BLOCKS; n++) {
+    const blocked = await f.stop();
+    assert.deepEqual([blocked.code, blocked.out.block, blocked.out.verdict, blocked.file.blocks], [0, true, 'blocked', n]);
+    assert.match(blocked.out.instruction, new RegExp(`stop-check ${n} of ${STOP_CHECK_BLOCKS}`));
+    assert.match(blocked.out.instruction, /no report at .*lane-wp-00-report\.md/);
+  }
+  const failed = await f.stop();
+  assert.deepEqual([failed.out.block, failed.out.verdict, failed.file.blocks], [false, 'failed', STOP_CHECK_BLOCKS]);
+  assert.match(failed.out.reason, /no report at/);
+  // A new session (a fresh start) or a new amendment round gets a fresh budget.
+  assert.deepEqual([(await f.stop({ session_id: 's2' })).out.blocks], [1]);
+  f.state.wps[0].amendment = { n: 1 };
+  writeFileSync(join(f.runDir, 'state.json'), JSON.stringify(f.state));
+  assert.deepEqual([(await f.stop({ session_id: 's2' })).file.round, (await f.stop({ session_id: 's2' })).file.blocks], [1, 2]);
+});
+
+test('stop-check: each of the conductor\'s amend findings blocks: missing commit, no PR, a PR claim mismatch, a bad PR body', async (t) => {
+  const cases = [
+    [(f) => { f.table[`git -C /wt rev-list --count ${SHA40}..HEAD`] = ok('0\n'); }, /no commit past base/],
+    [(f) => { f.table['gh pr list --repo o/r --head conduct/demo/wp-00 --state all --json number,headRefOid,state'] = ok('[]'); }, /no PR for conduct\/demo\/wp-00/],
+    [(f) => { f.table['gh pr list --repo o/r --head conduct/demo/wp-00 --state all --json number,headRefOid,state'] = ok(JSON.stringify([{ number: 8, headRefOid: 'f'.repeat(40), state: 'OPEN' }])); }, /GitHub has #8/],
+    [(f) => { f.table['gh pr view 7 --repo o/r --json headRefName,state,body'] = ok(JSON.stringify({ headRefName: 'conduct/demo/wp-00', state: 'OPEN', body: report() })); }, /Merge danger is missing/],
+  ];
+  for (const [breakIt, reason] of cases) {
+    const f = stopCheckLane(t);
+    breakIt(f);
+    const blocked = await f.stop();
+    assert.deepEqual([blocked.out.block, blocked.out.verdict], [true, 'blocked'], blocked.out.reason);
+    assert.match(blocked.out.reason, reason);
+  }
+});
+
+test('stop-check: refuted, needs-conductor and infrastructure failures are the conductor\'s to route: the lane stops, released', async (t) => {
+  const refuted = stopCheckLane(t);
+  refuted.report(report({ outcome: 'refuted' }));
+  const r = await refuted.stop();
+  assert.deepEqual([r.out.block, r.out.verdict], [false, 'released']);
+  const asks = stopCheckLane(t);
+  asks.report(report({ outcome: 'stopped: needs conductor', extra: '## Needs conductor\n\n- Q1: which branch? Options: (a) main (b) dev\n' }));
+  const a = await asks.stop();
+  assert.deepEqual([a.out.block, a.out.verdict], [false, 'released'], a.out.reason);
+  const infra = stopCheckLane(t);
+  infra.table['gh pr list --repo o/r --head conduct/demo/wp-00 --state all --json number,headRefOid,state'] = exit(1, 'gh: HTTP 502');
+  const i = await infra.stop();
+  assert.deepEqual([i.out.block, i.out.verdict], [false, 'released']);
+  assert.match(i.out.reason, /HTTP 502/);
+});
+
+test('stop-check: a stop with a running background task is never blocked and runs no check; unreadable input reads as {}', async (t) => {
+  const f = stopCheckLane(t);
+  rmSync(join(f.runDir, 'lane-wp-00-report.md'));
+  const task = { id: 'b1', type: 'shell', status: 'running', description: 'dev server', command: 'npm run dev' };
+  const live = await f.stop({ session_id: 's1', background_tasks: [task, { ...task, id: 'b2', status: 'completed' }] });
+  assert.deepEqual([live.out.block, live.out.verdict, live.file.tasks], [false, 'background-live', [{ id: 'b1', type: 'shell', command: 'npm run dev' }]]);
+  assert.equal(f.calls.some((call) => call.startsWith('git ') || call.startsWith('gh ')), false);
+  const garbled = await f.stop('not json');
+  assert.deepEqual([garbled.out.block, garbled.file.sessionId], [true, null]);
+});
+
+test('stop-check: the herdr wait holds on a fresh background-live verdict for 15 minutes, then checks; exec and herdr exits record the verdict', async (t) => {
+  const f = stopCheckLane(t, { backend: 'herdr', wpLane: { worktree: '/wt', branch: 'conduct/demo/wp-00', paneId: 'w1:p1', startedAt: new Date(T0).toISOString() } });
+  const wait = f.backend('herdr').wait(f.wp)[0];
+  assert.equal(f.record(wait, ok()).outcome, 'continue', 'no verdict file: the wait proceeds as before');
+  f.tick(1000);
+  await f.stop({ session_id: 's1', background_tasks: [{ id: 'b1', type: 'shell', status: 'running', command: 'npm run dev' }] });
+  const held = f.record(wait, ok());
+  assert.deepEqual([held.outcome, held.patch.queue.map((act) => act.kind ?? act.step)], ['wait', ['wait', 'shell']]);
+  assert.match(held.reason, /background task running: npm run dev/);
+  f.tick(15 * 60 * 1000);
+  const after = f.record(wait, ok());
+  assert.deepEqual([after.outcome, after.patch.lane.stopCheck.verdict], ['continue', 'background-live']);
+  // A verdict from before this start is not this lane's latest stop.
+  f.wp.lane.startedAt = new Date(T0 + 60 * 60 * 1000).toISOString();
+  assert.equal(f.record(wait, ok()).patch.lane.stopCheck, undefined);
+
+  const e = stopCheckLane(t, { wpLane: { worktree: '/wt', branch: 'conduct/demo/wp-00', pid: 4242, identity: IDENTITY, logPath: join(tmpdir(), 'none.log') } });
+  await e.stop();
+  const exited = e.record(e.backend().wait(e.wp)[0], exit(1, '', JSON.stringify({ ok: true, alive: false, owner: 'gone' })));
+  assert.deepEqual(exited.patch.lane.stopCheck, { verdict: 'pass', blocks: 0, at: new Date(T0).toISOString() });
+});
+
+test('stop-check: the hook command names stop-check.mjs, the run and the WP, forward-slashed, quoting only a path with a space', (t) => {
+  const f = lanes(t);
+  assert.equal(stopHookCommand(f.state, f.wp, f.deps), STOP_HOOK(f));
+  const spaced = stopHookCommand({ ...f.state, runDir: 'C:\\runs\\my run' }, f.wp, { ...f.deps, pluginRoot: 'C:\\plugin' });
+  assert.equal(spaced, 'node C:/plugin/skills/conduct/scripts/stop-check.mjs --run "C:/runs/my run" --wp WP-00');
+  const codex = lanes(t, { agent: 'codex' });
+  assert.equal(agentArgv(codex.state, codex.wp, { brief: '/b.md' }, codex.deps).includes('--settings'), false, 'codex lanes carry no stop hook');
+  assert.equal(lanes(t, { agent: 'codex', backend: 'herdr', wpLane: { paneId: 'w1:p1' } }).backend('herdr').start(codex.wp)[0].command.includes('--stop-hook'), false);
 });

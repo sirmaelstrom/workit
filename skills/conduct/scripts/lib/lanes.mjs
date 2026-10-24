@@ -42,7 +42,7 @@ import { pinnedConfig } from './repo-config.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, laneBase, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, holdsSlot } from './schedule.mjs';
-import { EXIT_CODES as LANE_EXIT, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems } from '../../../../scripts/lane.mjs';
+import { EXIT_CODES as LANE_EXIT, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems, stopHookSettings } from '../../../../scripts/lane.mjs';
 
 const DEADLINE_MS = 120 * 60 * 1000;
 const POLL_MS = 60000;
@@ -53,6 +53,11 @@ const STOP_WAIT_MS = 10000;
 export const ADMIT_BACKOFF_MS = 5 * 60 * 1000;
 const SHA = /^[0-9a-f]{40}$/;
 const VERDICT = /^Verdict: (exercised|vacuous|not exercised|no runtime surface)$/;
+// The in-lane stop-check: how many of its own failures a claude lane is sent
+// back to repair before the hook lets it stop, per session and amendment round;
+// and how long a stop with a live background task holds a herdr wait.
+export const STOP_CHECK_BLOCKS = 3;
+const BACKGROUND_HOLD_MS = 15 * 60 * 1000;
 
 // Where a WP's lane lives: names and paths every step agrees on.
 export function laneLayout(state, wp) {
@@ -66,7 +71,20 @@ export function laneLayout(state, wp) {
     reportPath: join(state.runDir, `lane-${lower}-report.md`),
     logPath: join(state.runDir, `lane-${lower}.log`),
     runnerLog: join(state.runDir, 'lane-runner.jsonl'),
+    stopCheckPath: join(state.runDir, `lane-${lower}-stopcheck.json`),
   };
+}
+
+// The command a claude lane's Stop hook runs: stop-check.mjs, for this run and WP.
+// Forward slashes, and quotes only around a path with a space: the command
+// rides a JSON argv through herdr and a hook shell.
+export function stopHookCommand(state, wp, deps) {
+  const arg = (path) => {
+    const forward = String(path).replace(/\\/g, '/');
+    return /\s/.test(forward) ? `"${forward}"` : forward;
+  };
+  const script = join(deps.pluginRoot ?? state.pluginRoot, 'skills', 'conduct', 'scripts', 'stop-check.mjs');
+  return ['node', arg(script), '--run', arg(state.runDir), '--wp', wp.id].join(' ');
 }
 
 function shellAction(step, fields) {
@@ -98,7 +116,8 @@ export function agentArgv(state, wp, { brief, sessionId = null }, deps) {
   const model = laneModel(agent, wp.model);
   const prompt = `Read ${brief} and execute it exactly.`;
   if (agent === 'claude') {
-    const options = ['--permission-mode', 'bypassPermissions', '--model', model, '--effort', 'high', '--output-format', 'json'];
+    const options = ['--permission-mode', 'bypassPermissions', '--model', model, '--effort', 'high', '--output-format', 'json',
+      '--settings', JSON.stringify(stopHookSettings(stopHookCommand(state, wp, deps)))];
     return ['claude', '-p', ...(sessionId ? ['--resume', sessionId] : []), ...options, prompt];
   }
   // Options before `resume`: `codex exec resume … --sandbox` is rejected.
@@ -254,6 +273,7 @@ export function laneBackend(state, deps, backend) {
         const agent = state.intent.agent;
         const args = [lane.name, '--pane', wp.lane.paneId, '--kind', agent, '--model', laneModel(agent, wp.model), '--reasoning', 'high'];
         if (agent === 'codex') args.push('--sandbox', 'danger-full-access');
+        if (agent === 'claude') args.push('--stop-hook', stopHookCommand(state, wp, deps));
         return [shellAction('start', { instruction: 'Start the lane agent.', command: laneMjs('start', args, lane.runnerLog) })];
       },
       // Every prompt after the first is an amendment. A spine answer's receipt
@@ -607,7 +627,18 @@ export function recordLaneStep(state, wp, action, result, deps) {
 }
 
 function recordHerdrWait(state, wp, result, deps, backend) {
-  if (result.code === LANE_EXIT.ok) return proceed({ lane: { dialogPolls: 0 } });
+  if (result.code === LANE_EXIT.ok) {
+    // herdr reads a pane idle while the lane's background shell still runs; the
+    // agent wakes when it ends. The stop-check's verdict says so: hold the wait
+    // for BACKGROUND_HOLD_MS from that stop, then check as before.
+    const stopCheck = laneStopCheck(state, wp, deps);
+    const since = Date.parse(stopCheck?.at ?? '');
+    if (stopCheck?.verdict === 'background-live' && deps.now() - since < BACKGROUND_HOLD_MS && !expired(wp, deps)) {
+      const tasks = (stopCheck.tasks ?? []).map((task) => task.command ?? task.id).join('; ');
+      return { outcome: 'wait', reason: `lane stopped with a background task running: ${tasks}`, patch: { lane: { dialogPolls: 0 }, queue: [waitAction(POLL_MS), ...backend.wait(wp)] } };
+    }
+    return proceed({ lane: { dialogPolls: 0, ...(stopCheck ? { stopCheck: stopCheckSummary(stopCheck) } : {}) } });
+  }
   if (result.code === LANE_EXIT.error || result.code === LANE_EXIT.usage) return block(said(result));
   // Every route below recovers; an expired deadline comes first.
   if (expired(wp, deps)) return deadlineBlock(wp, backend);
@@ -652,6 +683,8 @@ function recordExecWait(state, wp, result, deps, backend) {
 // pid not reused); a log with no result keeps the known cost.
 function exitedLane(state, wp, deps, natural) {
   const lane = { exitedAt: iso(deps.now()), stopConfirms: 0 };
+  const stopCheck = laneStopCheck(state, wp, deps);
+  if (stopCheck) lane.stopCheck = stopCheckSummary(stopCheck);
   if (wp.lane?.backend === 'herdr') return lane;
   const log = readLog(deps, wp.lane?.logPath ?? laneLayout(state, wp).logPath);
   const claude = state.intent.agent === 'claude';
@@ -755,7 +788,7 @@ function recordPrLookup(wp, lane, result, deps) {
   return proceed({ pr: found });
 }
 
-const SUB_FLAGS = { spawn: ['amend'], alive: [], check: ['pr', 'runtimeOnly'], reap: [] };
+const SUB_FLAGS = { spawn: ['amend'], alive: [], check: ['pr', 'runtimeOnly'], reap: [], 'stop-check': [] };
 const kebab = (name) => name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
 const reply = (code, out) => ({ code, out: JSON.stringify(out) });
 
@@ -773,6 +806,7 @@ export async function runLaneVerb(sub, { runDir, wpId, flags = {}, state = null 
     return reply(owner === 'running' ? 0 : 1, { ok: true, alive: owner === 'running', pid: wp.lane.pid, owner });
   }
   if (sub === 'spawn') return spawnLane(current, wp, flags, deps);
+  if (sub === 'stop-check') return stopCheckLane(current, wp, hookInput(deps), deps);
   if (sub === 'reap') {
     // lane.mjs's reap, in process: the core path runs no lane.mjs argv.
     const reaped = reapWorktree(wp.lane?.worktree ?? laneLayout(current, wp).worktree, { ...deps, platform: deps.platform ?? process.platform });
@@ -879,3 +913,82 @@ function checkLane(state, wp, flags, deps) {
   }
   return reply(failures.length ? 5 : 0, { ok: !failures.length, outcome, verdict, failures, asks });
 }
+
+// The Stop hook's input (Claude Code writes it on stdin); {} when unreadable.
+function hookInput(deps) {
+  try {
+    const parsed = JSON.parse(deps.readStdin?.() ?? '');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+// The in-lane stop-check, run by a claude lane's Stop hook each time the agent
+// tries to end its turn. It runs the conductor's own report, PR-lookup and PR
+// checks, read-only, and sorts the results with the same recorders. An amend
+// (a failure the conductor would send back as a re-prompt round) blocks the
+// stop with the conductor's reason, at most STOP_CHECK_BLOCKS times per session
+// and amendment round, then the lane stops with verdict `failed`. Refuted,
+// needs-conductor and infrastructure failures are the conductor's to route:
+// the lane stops (`released`). A stop with a background task running is never
+// blocked (`background-live`; the herdr wait holds on it). Every call writes the
+// lane's verdict file; nothing writes state.json.
+function stopCheckLane(state, wp, input, deps) {
+  const lane = laneLayout(state, wp);
+  const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
+  const round = wp.amendment?.n ?? 0;
+  const prior = readStopCheck(deps, lane.stopCheckPath);
+  const blocks = prior && prior.sessionId === sessionId && prior.round === round ? prior.blocks ?? 0 : 0;
+  const settle = (fields, block = false) => {
+    const record = { sessionId, round, blocks, at: deps.timestamp(), ...fields };
+    deps.write(lane.stopCheckPath, `${JSON.stringify(record, null, 2)}\n`);
+    return reply(0, { ok: true, block, ...record });
+  };
+  const tasks = (Array.isArray(input.background_tasks) ? input.background_tasks : []).filter((task) => task?.status === 'running');
+  if (tasks.length) return settle({ verdict: 'background-live', tasks: tasks.map(({ id, type, command }) => ({ id, type, command })) });
+  const finding = stopFinding(state, wp, lane, deps);
+  if (finding.outcome === 'continue') return settle({ verdict: 'pass' });
+  if (finding.outcome !== 'amend') return settle({ verdict: 'released', reason: finding.reason });
+  if (blocks >= STOP_CHECK_BLOCKS) return settle({ verdict: 'failed', reason: finding.reason });
+  const n = blocks + 1;
+  return settle({
+    verdict: 'blocked', blocks: n, reason: finding.reason,
+    instruction: `Not done yet: the conductor's check would send this lane back (stop-check ${n} of ${STOP_CHECK_BLOCKS}). What it found: ${finding.reason}\nFix that, update your report and your PR, then end your turn again.`,
+  }, true);
+}
+
+// The conductor's checks in its order (outcome first), stopping at the first
+// outcome that is not `continue`.
+function stopFinding(state, wp, lane, deps) {
+  const noStop = { stop: () => [] };
+  const asResult = ({ code, out }) => ({ code, stdout: out, stderr: '' });
+  const report = recordCheck(wp, { part: 'report' }, asResult(checkLane(state, wp, {}, deps)), noStop);
+  if (report.outcome !== 'continue') return report;
+  const listed = deps.exec('gh', ['pr', 'list', '--repo', state.intent.repo.remote, '--head', wp.lane?.branch ?? lane.branch, '--state', 'all', '--json', 'number,headRefOid,state']);
+  const lookup = recordPrLookup(wp, lane, listed, deps);
+  if (lookup.outcome !== 'continue') return lookup;
+  return recordCheck(wp, { part: 'pr' }, asResult(checkLane(state, wp, { pr: String(lookup.patch.pr.number) }, deps)), noStop);
+}
+
+function readStopCheck(deps, path) {
+  try {
+    if (!deps.exists(path)) return null;
+    const record = JSON.parse(deps.read(path));
+    return record && typeof record === 'object' ? record : null;
+  } catch {
+    return null;
+  }
+}
+
+// The verdict of the lane's latest stop, or null: none written, or one from an
+// earlier start or amendment round.
+function laneStopCheck(state, wp, deps) {
+  const record = readStopCheck(deps, laneLayout(state, wp).stopCheckPath);
+  if (!record || record.round !== (wp.amendment?.n ?? 0)) return null;
+  const startedAt = Date.parse(wp.lane?.startedAt ?? '');
+  if (Number.isFinite(startedAt) && !(Date.parse(record.at) >= startedAt)) return null;
+  return record;
+}
+
+const stopCheckSummary = ({ verdict, blocks, reason, at }) => ({ verdict, blocks, at, ...(reason ? { reason } : {}) });
