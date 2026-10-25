@@ -536,6 +536,28 @@ export function rebaseActions(state, wp) {
   ];
 }
 
+// A gate amendment for a rebase conflict has the lane rebase by hand. A fix
+// saved before the flag is known by the reason its abort gave.
+const isRebaseFix = (fix) => fix?.rebase === true || /^rebase onto \S+ conflicted:/.test(fix?.reason ?? '');
+
+// The lane check after that amendment maps the head it pushed from the head the
+// amendment started at, as the land rebase maps its own: from git, never the
+// lane's report. `lane-base` reads the base the lane rebased onto, from a
+// default-branch ref `lane-fetch` has just refreshed: a stale ref would measure
+// a resolution that dropped a newer upstream change as patch-identical.
+export function laneRebaseActions(state, wp) {
+  const fix = (wp.gateFixes ?? []).at(-1);
+  const from = fix?.from, to = wp.pr?.head;
+  if (!isRebaseFix(fix) || fix.to || !from || !to || from === to) return [];
+  if ((wp.rebases ?? []).some((rebase) => rebase.from === from && rebase.to === to)) return [];
+  const branch = defaultOf(state);
+  const git = (part, ...args) => shell('rebase', part, ['git', '-C', wp.lane.worktree, ...args], { land: { from, to } });
+  return [
+    git('lane-fetch', 'fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`),
+    git('lane-base', 'merge-base', '--end-of-options', to, `origin/${branch}`),
+  ];
+}
+
 // A whitespace-preserving id of the WP's diff, from output git does not
 // colour or transform. An empty id for a non-empty diff is unreadable (null).
 function patchId(wt, a, b, exec) {
@@ -1379,6 +1401,8 @@ function recordRebaseStep(state, wp, action, r, deps) {
     const conflict = `rebase onto origin/${defaultOf(state)} conflicted: ${first(r.stdout) || first(r.stderr)}`;
     return result('continue', conflict, { queue: [rebaseAbort(wp, conflict)] });
   }
+  // Never measure the lane's rebase against a default-branch ref the fetch did not refresh.
+  if (action.part === 'lane-fetch' && r.code !== 0) return result('block', `the lane's base is unreadable: fetch of origin/${defaultOf(state)} failed (exit ${r.code}): ${first(r.stderr)}`);
   if (r.code !== 0) return result('block', `${action.part} failed (exit ${r.code}): ${first(r.stderr)}`);
   if (action.part === 'abort') return result('amend', action.land.conflict);
   if (action.part === 'pre-head') return result('continue', null, { rebaseFrom: r.stdout.trim() });
@@ -1388,6 +1412,17 @@ function recordRebaseStep(state, wp, action, r, deps) {
     return result('continue', null, { rebases: [...(wp.rebases ?? []), entry] });
   }
   if (action.part === 'push') return result('continue', null, { pr: { ...wp.pr, head: (wp.rebases ?? []).at(-1)?.to ?? wp.pr.head } });
+  if (action.part === 'lane-base') {
+    const { from, to } = action.land;
+    const [newBase] = lines(r.stdout);
+    if (!/^[0-9a-f]{40}$/i.test(newBase ?? '')) return result('block', `the lane's new base is unreadable: ${first(r.stdout)}`);
+    const onLine = ancestor(wp.lane.worktree, from, to, deps.exec);
+    if (onLine === null) return result('block', 'the lane\'s rebase is unreadable: an ancestry check failed');
+    // Commits on top of the amendment's start are its gate-fix tail, not a rebase.
+    if (onLine) return result('continue');
+    const entry = recordRebase(state, wp, { from, to, newBase }, deps);
+    return result('continue', null, { rebases: [...(wp.rebases ?? []), entry] });
+  }
   return result('continue');
 }
 
