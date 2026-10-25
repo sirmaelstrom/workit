@@ -16,6 +16,7 @@ import {
 } from './lib/state.mjs';
 import { ADAPTERS, AGENTS, BACKENDS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
+import { formatJsonKeepingForm, parseJsonKeepingForm } from './lib/json-file.mjs';
 import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, dropRetiredFiling, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
@@ -812,9 +813,7 @@ function rewriteLaneHooks(state, deps) {
     if (!deps.exists(path)) continue;
     try {
       // A BOM and CRLF are read past and written back as they were.
-      const raw = deps.read(path), bom = raw.startsWith('﻿') ? '﻿' : '';
-      const eol = raw.includes('\r\n') ? '\r\n' : '\n';
-      const settings = JSON.parse(raw.slice(bom.length));
+      const { value: settings, ...form } = parseJsonKeepingForm(deps.read(path));
       let changed = false;
       for (const entry of settings?.hooks?.Stop ?? []) {
         for (const hook of entry?.hooks ?? []) {
@@ -824,7 +823,7 @@ function rewriteLaneHooks(state, deps) {
         }
       }
       if (!changed) continue;
-      deps.write(path, `${bom}${JSON.stringify(settings, null, 2).replace(/\n/g, eol)}${eol}`);
+      deps.write(path, formatJsonKeepingForm(settings, form));
       hooksRewritten.push(path);
     } catch (error) {
       hooksFailed.push({ path, error: firstLine(error.message) });
