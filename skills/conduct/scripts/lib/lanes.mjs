@@ -28,6 +28,9 @@
 //   `startedAt` and a fresh `deadline`, clears `exitedAt`, and resets the
 //   dialog, capacity and start-retry counters. Automatic retries (capacity
 //   re-send, dialog re-poll, refused start, plan-low fallback) renew nothing.
+// - `lane.doneWake` (t3) is when `next --woken-by done --wp <id>` named the
+//   lane's done message as the tick's cause; the lane's next read spends it,
+//   a failed one too, and a fresh start or amendment clears it.
 // - `lane.dialogPolls` counts consecutive dialogs (wait or start exit 3): any
 //   other wait result resets it to 0; the second consecutive dialog blocks.
 // - `lane.fallback: 'claude'` records that a codex lane now runs claude in its
@@ -55,6 +58,10 @@ const STOP_WAIT_MS = 10000;
 // One t3_thread_wait: it returns as soon as the lane's run ends, so a longer
 // timeout costs nothing but the conductor's other WPs' turn.
 const T3_WAIT_MS = 120000;
+// A lane's done message is its last act, sent seconds before its turn closes,
+// so the tick it starts can read the run still going: that read waits this
+// long for the run to end before the build yields (lane.doneWake).
+const DONE_SETTLE_MS = 60000;
 const T3_RUNNING = new Set(['preparing','queued', 'starting', 'running', 'waiting']);
 const T3_ENDED = new Set(['completed', 'idle']);
 // The run's heartbeat: a schedule_task bound to the conductor's thread, which
@@ -406,7 +413,7 @@ export function laneBackend(state, deps, backend) {
       const read = `Read ${wp.lane?.briefPath ?? laneLayout(state, wp).briefPath} and execute it exactly.`;
       if (!t3WakeLive(state)) return read;
       const done = { threadId: state.t3Wake.thread, mode: 'queue', clientRequestId: `${sendKey(wp)}-done`,
-        message: `[conduct ${state.slug}] ${wp.id}'s lane ended its turn (round a${wp.amendment?.n ?? 0}); report: ${laneLayout(state, wp).reportPath}. Addressed to the conductor thread ${state.t3Wake.thread}. A wake, not a verdict: run node ${conductScript(state)} next --run ${state.runDir} ${AS_THREAD} and keep looping. If it exits 5, this thread is no longer the run's conductor: end your turn.` };
+        message: `[conduct ${state.slug}] ${wp.id}'s lane ended its turn (round a${wp.amendment?.n ?? 0}); report: ${laneLayout(state, wp).reportPath}. Addressed to the conductor thread ${state.t3Wake.thread}. A wake, not a verdict: run node ${conductScript(state)} next --run ${state.runDir} --woken-by done --wp ${wp.id} ${AS_THREAD} and keep looping. If it exits 5, this thread is no longer the run's conductor: end your turn.` };
       return `${read}\n\nYour last act, once your report is written and before you end your turn (whatever the outcome, early stops included): call the t3-code tool t3_thread_send with ${JSON.stringify(done)}. That message wakes the conductor. If a Stop hook sends you back to work after it, send it again at your next stop with -2, -3, … appended to clientRequestId.`;
     };
     const hookAct = (wp) => (agent === 'claude' ? [shellAction('create', {
@@ -416,11 +423,13 @@ export function laneBackend(state, deps, backend) {
       'Call t3_thread_read with these args and record its raw result.');
     const wakeWait = (wp) => ({ kind: 'wait', step: 'wait', seam: STEP_SEAM.wait, waitMs: T3_HEARTBEAT_MS, wake: true,
       instruction: `${wp.id}'s T3 lane is running; its done message or the run's heartbeat wakes the conductor.` });
+    const settleAct = (wp) => tool('wait', 'settle', 't3_thread_wait', { threadId: wp.lane?.threadId ?? null, timeoutMs: DONE_SETTLE_MS },
+      `${wp.id}'s lane sent its done message but its turn has not closed yet. Call t3_thread_wait with these args and record its raw result.`);
     return {
       acts(wp) {
         const running = { ...wp, lane: { ...wp.lane, exitedAt: null } };
         return actsOf(this, wp, [() => [admitAction(['--require-reading'])], (b) => b.create(wp), (b) => b.start(wp), (b) => b.prompt(wp, { amendment: true }),
-          (b) => b.prompt(wp, { amendment: true, resend: true }), (b) => b.wait(wp), () => [readAct(wp)], (b) => b.check(wp), (b) => b.stop(running), (b) => b.reap(wp),
+          (b) => b.prompt(wp, { amendment: true, resend: true }), (b) => b.wait(wp), () => [readAct(wp)], () => [settleAct(wp)], (b) => b.check(wp), (b) => b.stop(running), (b) => b.reap(wp),
           (b) => b.remove(wp), () => deletes(wp), () => heartbeatActs(state, 'create'), () => heartbeatActs(state, 'wait')]);
       },
       name: 't3',
@@ -430,6 +439,7 @@ export function laneBackend(state, deps, backend) {
       // can name the conductor's thread (schedule_task returns it).
       create: (wp) => [...gitCreate(wp), ...hookAct(wp), ...heartbeatActs(state, 'create')],
       read: readAct,
+      settle: settleAct,
       // The first prompt rides the launch. No idempotency key: a lost response
       // is found by title before launching again.
       start: (wp) => {
@@ -692,10 +702,11 @@ export function laneDeadlineMs(state) {
 }
 
 // A successful start or conductor amendment: a fresh deadline, the exit
-// marker cleared, every retry counter reset.
+// marker and any done wake (a mark on the run before) cleared, every retry
+// counter reset.
 export function freshStart(deps, startedAt = null, deadlineMs = DEADLINE_MS) {
   const at = startedAt ? Date.parse(startedAt) : deps.now();
-  return { startedAt: iso(at), deadline: iso(at + deadlineMs), exitedAt: null, dialogPolls: 0, capacityResent: false, startRearms: 0, stopConfirms: 0 };
+  return { startedAt: iso(at), deadline: iso(at + deadlineMs), exitedAt: null, doneWake: null, dialogPolls: 0, capacityResent: false, startRearms: 0, stopConfirms: 0 };
 }
 
 // A dialog (wait or start exit 3) gets one re-poll after 60 s (it may clear
@@ -856,6 +867,20 @@ const AS_THREAD = '--as-thread <your own T3 thread id> (orchestrator_capabilitie
 // first `next --custody <n> --as-thread <id>` stores it (rotate.mjs
 // bindCustodyThread), and until custody is taken every other thread is
 // refused, the outgoing conductor's before any custody action is returned.
+// `next --woken-by done --wp <id>`: the tick was started by that WP's done
+// message (the message names both flags), so the lane's next read waits on a
+// run it sees still going (DONE_SETTLE_MS). A heartbeat's tick names neither.
+// Only a live T3 lane is marked; true when it was.
+export function markDoneWake(state, wokenBy, wpId, deps) {
+  if (wokenBy === undefined) return false;
+  if (wokenBy !== 'done') throw new ConductError(2, `--woken-by takes done, got ${wokenBy}`);
+  const wp = typeof wpId === 'string' ? state.wps.find((candidate) => candidate.id === wpId) : null;
+  if (!wp) throw new ConductError(2, `--woken-by done needs --wp <one of the run's WPs>${typeof wpId === 'string' ? `; ${wpId} is not one` : ''}`);
+  if (wp.lane?.backend !== 't3' || !wp.lane.threadId || wp.lane.exitedAt) return false;
+  wp.lane = { ...wp.lane, doneWake: iso(deps.now()) };
+  return true;
+}
+
 export function conductorThreadFence(state, asThread) {
   if (asThread === undefined || asThread === null) return;
   if (typeof asThread !== 'string' || !asThread.trim()) throw new ConductError(2, '--as-thread <thread id> needs a value');
@@ -1151,7 +1176,9 @@ function recordT3Step(state, wp, action, result, deps, backend) {
   // confirmation counts as one that saw the run still going.
   if (action.step === 'stop' && action.part === 'interrupt') return proceed();
   if (action.step === 'stop' && t3Failed(result)) return t3StopUnconfirmed(wp, action, rest, backend, `${action.tool} failed: ${t3Said(result)}`);
-  if (t3Failed(result)) return block(`${action.tool}: ${t3Said(result)}`);
+  // A failed read spends the lane's done wake too: the run it named may be
+  // stopped and amended before the lane is read again.
+  if (t3Failed(result)) return block(`${action.tool}: ${t3Said(result)}`, action.part === 'read' && wp.lane?.doneWake ? { lane: { doneWake: null } } : {});
   switch (action.step) {
     case 'start':
       if (typeof result.threadId !== 'string' || !result.threadId) return block(`t3_thread_launch returned no threadId: ${t3Said(result)}`);
@@ -1173,13 +1200,19 @@ function recordT3Step(state, wp, action, result, deps, backend) {
       const run = Array.isArray(result.recentRuns) ? result.recentRuns[0] : null;
       const status = String(run?.status ?? thread.status ?? '');
       const pending = Number(thread.pendingRequestCount ?? 0);
+      // A read spends the lane's done wake, whatever it sees.
+      const doneWoke = action.part === 'read' && Boolean(wp.lane?.doneWake);
+      const spent = (route) => (doneWoke ? { ...route, patch: { ...route.patch, lane: { ...route.patch?.lane, doneWake: null } } } : route);
       if (pending > 0 && !T3_ENDED.has(status)) {
-        if (action.part === 'read') return proceed({ queue: [dialogRead(wp, thread.itemCount)] }, `the lane has ${pending} pending request(s): read which`);
+        if (action.part === 'read') return spent(proceed({ queue: [dialogRead(wp, thread.itemCount)] }, `the lane has ${pending} pending request(s): read which`));
         const dialog = `${waitingOn(result) ?? `${pending} pending request(s) the activity view does not name`} (T3 thread ${wp.lane?.threadId})`;
         return block(`dialog: ${dialog}`, { lane: { dialogPolls: 0 } }, 'dialog', { dialog });
       }
-      return t3RunRoute(state, wp, status, false, result, deps, backend, rest,
-        () => ({ outcome: 'wait', reason: `lane running (${status || 'unread'})`, patch: { queue: [...backend.wait(wp)] } }));
+      // Woken by its done message, a lane read still running is closing its
+      // turn: wait on it briefly. A timeout reads it again, and that read yields.
+      return spent(t3RunRoute(state, wp, status, false, result, deps, backend, rest, () => (doneWoke
+        ? proceed({ queue: [backend.settle(wp)] }, `lane still ${status} after its done message: wait ${DONE_SETTLE_MS / 1000} s for its turn to close`)
+        : { outcome: 'wait', reason: `lane running (${status || 'unread'})`, patch: { queue: [...backend.wait(wp)] } })));
     }
     case 'stop': {
       const status = String(result.status ?? '');

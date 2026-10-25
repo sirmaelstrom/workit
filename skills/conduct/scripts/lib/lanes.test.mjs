@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   allowedMissing, chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
-  STOP_CHECK_BLOCKS, stopHookCommand, laneDeadlineMs, T3_HEARTBEAT_MS, t3WakeLive, heartbeatsToDelete, conductorThreadFence, unresolvedHeartbeats,
+  STOP_CHECK_BLOCKS, stopHookCommand, laneDeadlineMs, T3_HEARTBEAT_MS, t3WakeLive, heartbeatsToDelete, conductorThreadFence, unresolvedHeartbeats, markDoneWake,
 } from './lanes.mjs';
 import { RESET_TARGETS } from './phases/build.mjs';
 import { dispatchable } from './schedule.mjs';
@@ -1470,7 +1470,7 @@ test('t3 heartbeat: the first lane\'s create makes it bound to the conductor; it
   assert.deepEqual({ ...done(launch), message: undefined }, { threadId: CONDUCTOR, mode: 'queue', clientRequestId: 'abcd1234-wp-00-a0-0-done', message: undefined });
   assert.match(done(launch).message, /^\[conduct demo\] WP-00's lane ended its turn \(round a0\); report: \S+lane-wp-00-report\.md\. Addressed to the conductor thread mcp:conductor-1\. A wake, not a verdict/);
   // The recipient names its own thread, so a retired conductor is refused (workit#313 review r1, finding 2).
-  assert.match(done(launch).message, /next --run \S+ --as-thread <your own T3 thread id> \(orchestrator_capabilities' parentThreadId, or t3_thread_configuration's threadId\).*If it exits 5, this thread is no longer the run's conductor: end your turn\.$/);
+  assert.match(done(launch).message, /next --run \S+ --woken-by done --wp WP-00 --as-thread <your own T3 thread id> \(orchestrator_capabilities' parentThreadId, or t3_thread_configuration's threadId\).*If it exits 5, this thread is no longer the run's conductor: end your turn\.$/);
   // An amendment's done id is its send's id plus -done: new for every send.
   Object.assign(f.wp.lane, { threadId: THREAD, startedAt: new Date(T0).toISOString() });
   f.wp.amendment = { n: 2 };
@@ -1515,6 +1515,29 @@ test('t3 wake wait: with the heartbeat live a lane waits on its wake, then one r
   assert.deepEqual([failed.outcome, failed.cause], ['block', 'error']);
   f.tick(3600001);
   assert.equal(f.record(read, t3Read()).cause, 'deadline');
+});
+
+test('t3 done wake: a done-woken lane whose read fails spends the mark; stopped and amended, its next heartbeat read waits on wakes, not a 60 s settle; a mark left on the run before is cleared by the amendment (workit#325 review r1, P3)', (t) => {
+  const f = t3Lanes(t, { wake: 'live', wpLane: { worktree: '/wt', threadId: THREAD, startedAt: new Date(T0).toISOString(), deadline: new Date(T0 + 3600000).toISOString() } });
+  const b = f.backend();
+  assert.equal(markDoneWake(f.state, 'done', 'WP-00', f.deps), true);
+  const failed = f.record(b.read(f.wp), { isError: true, error: 'thread read failed' });
+  assert.deepEqual([failed.outcome, failed.cause], ['block', 'error']);
+  apply(f.wp, failed.patch);
+  assert.equal(f.wp.lane.doneWake, null, 'a failed read spends the done wake');
+  // Cleanup stops the lane, then the conductor amends it.
+  const [interrupt, confirm] = b.stop(f.wp);
+  apply(f.wp, f.record(interrupt, { ok: true }).patch);
+  apply(f.wp, f.record(confirm, { status: 'interrupted', timedOut: false }).patch);
+  assert.ok(f.wp.lane.exitedAt, 'the stop is recorded');
+  // A mark the failed read did not spend still goes with the amendment.
+  f.wp.lane.doneWake = new Date(T0).toISOString();
+  f.wp.amendment = { n: 1 };
+  apply(f.wp, f.record(b.prompt(f.wp, { amendment: true })[0], { threadId: THREAD, runId: 'run-2' }).patch);
+  assert.deepEqual([f.wp.lane.doneWake, f.wp.lane.exitedAt], [null, null], 'the amendment clears the mark');
+  // The heartbeat's read of the new run, running: it waits on wakes.
+  const running = f.record(b.read(f.wp), t3Read());
+  assert.deepEqual([running.outcome, running.patch.queue.map((act) => act.part ?? (act.wake && 'wake'))], ['wait', ['wake', 'read']]);
 });
 
 test('t3 pending request: a read counting one blocks the WP as a dialog at once, named from the latest activity (an approval or a question); one cleared meanwhile waits on', (t) => {
