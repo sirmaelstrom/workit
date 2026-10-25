@@ -526,8 +526,18 @@ export function checkCoverage(coverage, examinedPaths, prFilePaths, source = 'th
  * change to this shape is a change to the measurement log.
  */
 function renderFinding(f) {
-  return `${f.lens ? `**lens:** ${f.lens}\n\n` : ''}${f.scope === 'delta' ? '**scope:** delta\n\n' : ''}**[${f.severity}] ${f.title}**\n\n${f.body}`;
+  return neutralizeMarkers(`${f.lens ? `**lens:** ${f.lens}\n\n` : ''}${f.scope === 'delta' ? '**scope:** delta\n\n' : ''}**[${f.severity}] ${f.title}**\n\n${f.body}`);
 }
+
+/**
+ * Break every HTML comment opener in text the writer did not author: a zero-width
+ * space (U+200B) goes between `<!` and `--`. No marker reader (`workit-*-findings`,
+ * `slim-review`, `workit-dup-of`) can match the result, and GitHub renders it as the
+ * same visible `<!--` instead of hiding the rest as a comment. The writer runs every
+ * piece of reviewer text through this before it reaches a body or comment; only its
+ * own marker and manifest are appended after.
+ */
+export const neutralizeMarkers = (text) => String(text).replaceAll('<!--', '<!\u200B--');
 
 const findingHash = (body) => createHash('sha256').update(String(body).replace(/\r\n?/g, '\n').trimEnd()).digest('hex');
 /**
@@ -576,8 +586,9 @@ export function countDeltaDefects(findings) {
 export const REVIEW_BODY_MAX_CHARS = 65_536;
 
 /**
- * The review footer's first characters. The footer follows the findings
- * manifest, and the manifest reader finds the manifest by it.
+ * The review footer's first characters. A review posted before the manifest
+ * closed the body carries its manifest just above this footer, and the legacy
+ * manifest read finds it by this lead.
  */
 const REVIEW_FOOTER_LEAD = '_Slim review · ';
 
@@ -587,7 +598,7 @@ export function reviewBodyProblem(body) {
   if (chars <= REVIEW_BODY_MAX_CHARS) return null;
   return `the review body is ${chars} characters and GitHub refuses a review body over ${REVIEW_BODY_MAX_CHARS}; shorten the longest findings or the summary (a body-only finding is posted whole in the body) and post again`;
 }
-// Room for the coordinated post's marker, appended after the payload is built.
+// Headroom the guard section leaves below GitHub's limit.
 const REVIEW_BODY_RESERVE = 1_000;
 const GUARD_NOT_LISTED = 'not listed: this review body had no room';
 
@@ -629,13 +640,18 @@ export function buildReviewPayload({
   deltaFindings,
   // A full review's findings, for its manifest; an amendment check passes `deltaFindings`.
   fullFindings,
+  // The coordinated post's `slim-review` marker. It follows the footer and precedes
+  // the manifest, which stays the body's last line.
+  marker,
 }) {
-  const sections = [summary.trim()];
+  // Every section but the marker and the manifest carries reviewer text, so each
+  // is neutralized whole: a manifest or footer quoted there never parses as the writer's.
+  const sections = [neutralizeMarkers(summary.trim())];
 
   if (lensCounts.length > 0) {
-    sections.push(['### Findings by lens', '', ...lensCounts.map((count) =>
+    sections.push(neutralizeMarkers(['### Findings by lens', '', ...lensCounts.map((count) =>
       `- ${count.lens}: ${count.P1} P1 / ${count.P2} P2 / ${count.P3} P3`,
-    )].join('\n'));
+    )].join('\n')));
   }
 
   if (offLine.length > 0 || offDiffChanged.length > 0 || offDiffUnchanged.length > 0) {
@@ -654,7 +670,7 @@ export function buildReviewPayload({
     for (const f of offDiffUnchanged) {
       lines.push(`- \`${f.path}:${f.line}\` — **not a file this PR changes.**`, '', renderFinding(f), '');
     }
-    sections.push(lines.join('\n'));
+    sections.push(neutralizeMarkers(lines.join('\n')));
   }
 
   if (excluded?.length > 0) {
@@ -662,12 +678,13 @@ export function buildReviewPayload({
     for (const f of excluded) {
       lines.push(`- \`${f.path}:${f.line}\` — outside the amendment.`, '', renderFinding({ ...f, scope: undefined }), '');
     }
-    sections.push(lines.join('\n'));
+    sections.push(neutralizeMarkers(lines.join('\n')));
   }
 
   const guardAt = sections.length;
-  if (deltaFindings) sections.push(findingsManifest(deltaFindings, 'delta'));
-  else if (fullFindings) sections.push(findingsManifest(fullFindings, 'full'));
+  // The manifest is the body's last line: `readFindingsManifest` reads only that suffix.
+  const manifest = deltaFindings ? findingsManifest(deltaFindings, 'delta')
+    : fullFindings ? findingsManifest(fullFindings, 'full') : null;
 
   const footer = [
     '',
@@ -681,20 +698,23 @@ export function buildReviewPayload({
   for (const warning of warnings) {
     footer.push('', `> ⚠️ **Warning:** ${warning}`);
   }
-  sections.push(footer.join('\n'));
+  sections.push(neutralizeMarkers(footer.join('\n')));
+  if (marker) sections.push(`\n${marker}`);
 
   // The guard section gets what the rest of the body leaves, up to its own cap. Its
   // heading and notice are fixed text, so with less room than that it shrinks to one
   // line, and with less than that it is left out: it never pushes the body over.
   let guardDelivery = null;
   if (guard?.section) {
-    const room = REVIEW_BODY_MAX_CHARS - REVIEW_BODY_RESERVE - sections.join('\n').length - 1;
-    const shrunk = guard.section.length <= room ? guard.section : guard.render?.(Math.max(room, 0));
+    const room = REVIEW_BODY_MAX_CHARS - REVIEW_BODY_RESERVE - [...sections, ...(manifest ? [manifest] : [])].join('\n').length - 1;
+    const whole = neutralizeMarkers(guard.section);
+    const shrunk = whole.length <= room ? whole : guard.render?.(Math.max(room, 0));
     const line = `\n_Test files whose assertions changed: ${guard.entries.length} file(s), ${GUARD_NOT_LISTED}. Read the PR diff._`;
-    const section = [shrunk, line].find((text) => text != null && text.length <= room);
+    const section = [shrunk == null ? shrunk : neutralizeMarkers(shrunk), line].find((text) => text != null && text.length <= room);
     if (section) sections.splice(guardAt, 0, section);
     guardDelivery = section === undefined ? 'omitted' : section === line ? 'counted' : 'listed';
   }
+  if (manifest) sections.push(manifest);
 
   const payload = {
     event: 'COMMENT',
@@ -2079,21 +2099,33 @@ export function readReviewListing({ repo, pr, cwd, runGh = gh }) {
   return reviews;
 }
 
+// The writer's manifest as the body's last line; only trailing whitespace may follow.
+const SUFFIX_MANIFEST_RE = /(?:^|\n)<!-- workit-(delta|full)-findings: (\[[^\n]*\]) -->\s*$/;
+
 /**
  * A posted review's `delta` or `full` findings manifest, or null when it
- * carries none. The writer puts it on the last line before the review's
- * footer, so only that line is read: a marker anywhere else (a quote in
- * reviewer prose, a code fence) is not the writer's.
+ * carries none. The writer neutralizes every marker in reviewer text and ends
+ * the body with its manifest, so only that suffix is read: a marker anywhere
+ * else is not the writer's. A suffix manifest of the other scope reads as none.
  */
 function readFindingsManifest(body, scope) {
-  const lines = String(body ?? '').split(/\r?\n/);
+  const text = String(body ?? '');
+  const suffix = SUFFIX_MANIFEST_RE.exec(text);
+  if (suffix) return suffix[1] === scope ? parseFindingsManifest(suffix[2], scope) : null;
+  // A review posted before the manifest moved to the end of the body (and before
+  // reviewer text was neutralized) has no suffix manifest. It keeps the old read:
+  // the line before the last footer-shaped line.
+  const lines = text.split(/\r?\n/);
   const footer = lines.findLastIndex((line, i) => line.startsWith(REVIEW_FOOTER_LEAD) && lines[i - 1] === '' && lines[i - 2] === '---');
   if (footer < 0) return null;
   let at = footer - 3;
   while (at >= 0 && lines[at].trim() === '') at -= 1;
   const match = new RegExp(`^<!-- workit-${scope}-findings: (\\[.*\\]) -->$`).exec(lines[at] ?? '');
-  if (!match) return null;
-  const entries = JSON.parse(match[1]);
+  return match ? parseFindingsManifest(match[1], scope) : null;
+}
+
+function parseFindingsManifest(json, scope) {
+  const entries = JSON.parse(json);
   if (!Array.isArray(entries) || !entries.every((f) => /^[0-9a-f]{64}$/.test(f.hash) && ['P1', 'P2', 'P3'].includes(f.severity) && f.scope === scope)) {
     throw new Error(`posted ${scope} findings manifest is malformed`);
   }
@@ -3448,9 +3480,9 @@ async function cmdPostCoordinated(opts, {
     guard,
     deltaFindings: since ? findings : undefined,
     fullFindings: since ? undefined : findings,
+    marker: markerFromRef,
   });
   payload.commit_id = attemptRef.head_sha;
-  payload.body = `${payload.body}\n\n${markerFromRef}`;
   diag(`repo           ${attemptRef.repo}`);
   diag(`pr             #${attemptRef.pr}`);
   diag(`head           ${attemptRef.head_sha.slice(0, 7)} (attempt ${attemptRef.attempt})`);

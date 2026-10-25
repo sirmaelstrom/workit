@@ -711,9 +711,12 @@ or a full review with one P1 or two distinct P2s. They persist on reviewed,
 delta, capped, and rebased heads until a council round is recorded on that
 review's head or later. Each review's count comes from the findings manifest
 its body carries (`workit-delta-findings` or `workit-full-findings`): every
-posted finding, inline and body-only, with dup-of replies joining two. A full
-review posted before full reviews carried a manifest is counted from its
-inline comments. `escalate_reason` names the count and review id
+posted finding, inline and body-only, with dup-of replies joining two. The
+manifest is the body's last line and only that line is read; the writer breaks
+every `<!--` in reviewer text with a zero-width space, so no quoted marker
+parses. A review posted before the manifest closed the body is read from the
+line above its footer, and a full review posted before full reviews carried a
+manifest is counted from its inline comments. `escalate_reason` names the count and review id
 (`full review <id>: <n> P1, <m> P2` for a full review). `escalate_review`,
 beside `escalate`, names the review that owes the council, which can be older
 than `last`: `{review_id, head, scope, p1_findings?, p2_findings?,

@@ -3851,6 +3851,12 @@ function roundsReview(review_id, head, { since, login = SERVICE_LOGIN } = {}) {
   return { review_id, author_login: login, commit_id: head, submitted_at: '2026-09-27T10:00:00Z', state: 'COMMENTED', body: `a summary\n\n${marker}` };
 }
 
+/** A `roundsReview` body as the writer takes it: reviewer summary, and its own marker. */
+function writerParts(review) {
+  const [summary, marker] = review.body.split('\n\n');
+  return { summary, marker };
+}
+
 /** A compare payload: `commits` is a list of parent counts, one per commit. */
 function roundsCompare({ status = 'ahead', files = 1, commits = [1], totalCommits } = {}) {
   return {
@@ -3941,7 +3947,7 @@ test('COUNCIL COUNT: body-only delta defects count, guard and P3 do not, and a d
   const delta = roundsReview(12, RH2, { since: RH1 });
   const bodyOnly = { lens: 'codex', scope: 'delta', severity: 'P2', title: 'binary change', body: 'cannot anchor', path: 'binary.dat', line: 1 };
   const inline = [101, 102].map((id) => ({ lens: 'codex', scope: 'delta', severity: 'P2', title: `defect ${id}`, body: 'body', path: 'a.ts', line: id }));
-  const payload = buildReviewPayload({ summary: delta.body, coverage: 'examined 1 of 1', anchored: inline, offDiffChanged: [bodyOnly], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: [bodyOnly, ...inline] });
+  const payload = buildReviewPayload({ ...writerParts(delta), coverage: 'examined 1 of 1', anchored: inline, offDiffChanged: [bodyOnly], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: [bodyOnly, ...inline] });
   delta.body = payload.body;
   const comment = (id, severity, lens = 'codex') => ({ id, in_reply_to_id: null, body: `**lens:** ${lens}\n\n**scope:** delta\n\n**[${severity}] defect ${id}**\n\nbody` });
   const comments = [...payload.comments.map((item, index) => ({ id: 101 + index, in_reply_to_id: null, body: item.body })), comment(103, 'P3'), comment(104, 'P2', 'guard'),
@@ -3950,7 +3956,7 @@ test('COUNCIL COUNT: body-only delta defects count, guard and P3 do not, and a d
   assert.equal(paired.line.escalate, 't2-council', 'body-only plus one distinct inline defect is two');
   assert.match(paired.line.escalate_reason, /2 posted/);
   const pairReview = roundsReview(12, RH2, { since: RH1 });
-  pairReview.body = buildReviewPayload({ summary: pairReview.body, coverage: 'examined 1 of 1', anchored: inline, offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: inline }).body;
+  pairReview.body = buildReviewPayload({ ...writerParts(pairReview), coverage: 'examined 1 of 1', anchored: inline, offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: inline }).body;
   const onlyPair = await runRounds({ reviews: [full, pairReview], head: RH3, commentsByReview: { 12: comments } });
   assert.equal(Object.hasOwn(onlyPair.line, 'escalate'), false, 'the two inline comments are one defect');
 });
@@ -3971,7 +3977,7 @@ test('ROUND 2 RED: a dup-of reply in its own GitHub review container counts one 
 test('ROUND 2 RED: a normalized review comment cannot duplicate its manifest finding', async () => {
   const finding = { lens: 'codex', scope: 'delta', severity: 'P2', title: 'one defect', body: 'line one\nline two', path: 'a.ts', line: 2 };
   const delta = roundsReview(12, RH2, { since: RH1 });
-  const payload = buildReviewPayload({ summary: delta.body, coverage: 'examined 1 of 1', anchored: [finding], offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: [finding] });
+  const payload = buildReviewPayload({ ...writerParts(delta), coverage: 'examined 1 of 1', anchored: [finding], offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: [finding] });
   delta.body = payload.body;
   const comment = { id: 101, pull_request_review_id: 12, in_reply_to_id: null, body: payload.comments[0].body.replace(/\n/g, '\r\n') };
   const result = await runRounds({ reviews: [roundsReview(11, RH1), delta], head: RH2, commentsByReview: { 12: [comment] }, prComments: [comment] });
@@ -6559,7 +6565,8 @@ const QUOTED = {
 test('C2-1 QUOTED MANIFEST: a full review whose prose quotes the marker keeps its body-only P1 through readScopedReviews, rounds, the recount, and conduct', async () => {
   const { logs, review, comments } = postFullRound({ codex: [bodyOnly('P1', 99)], summary: (lens) => `${lens} summary\n\n${QUOTED.full}` });
   assert.ok(logs.includes(`full-major p1=1 p2=0 head=${CHAR_HEAD}`), 'post');
-  assert.ok(review.body.indexOf('<!-- workit-full-findings: [] -->') < review.body.lastIndexOf('<!-- workit-full-findings: ['), 'the quote precedes the real manifest');
+  assert.ok(review.body.includes('<!\u200B-- workit-full-findings: [] -->'), 'the quote is posted, neutralized');
+  assert.equal(review.body.indexOf('<!-- workit-full-findings: '), review.body.lastIndexOf('<!-- workit-full-findings: '), 'only the real manifest parses');
 
   const seams = roundsSeams({ reviews: [review], prComments: comments });
   const [read] = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: CHAR_HEAD, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
@@ -6591,11 +6598,13 @@ test('C2-1 QUOTED MANIFEST: a delta review whose prose quotes the marker keeps i
   const findings = [101, 102].map((id) => ({ lens: id === 101 ? 'codex' : 'astra', scope: 'delta', severity: 'P2', title: `defect ${id}`, body: 'body', path: 'a.ts', line: id }));
   const posted = roundsReview(12, RH2, { since: RH1 });
   // Body-only: no inline comment carries them, so only the manifest can count them.
-  const payload = buildReviewPayload({ summary: `${posted.body}\n\n${QUOTED.delta}`, coverage: 'examined 1 of 1', anchored: [], offDiffChanged: [], offDiffUnchanged: [], offLine: findings, coverageCheck: { ok: true }, deltaFindings: findings });
+  const { summary, marker } = writerParts(posted);
+  const payload = buildReviewPayload({ summary: `${summary}\n\n${QUOTED.delta}`, marker, coverage: 'examined 1 of 1', anchored: [], offDiffChanged: [], offDiffUnchanged: [], offLine: findings, coverageCheck: { ok: true }, deltaFindings: findings });
   assert.equal(payload.comments.length, 0);
   posted.body = payload.body;
   assert.equal(countDefects(findings, 'delta').total, 2, 'the post-time delta-major count');
-  assert.ok(posted.body.indexOf('<!-- workit-delta-findings: [] -->') < posted.body.lastIndexOf('<!-- workit-delta-findings: ['), 'the quote precedes the real manifest');
+  assert.ok(posted.body.includes('<!\u200B-- workit-delta-findings: [] -->'), 'the quote is posted, neutralized');
+  assert.equal(posted.body.indexOf('<!-- workit-delta-findings: '), posted.body.lastIndexOf('<!-- workit-delta-findings: '), 'only the real manifest parses');
   const comments = payload.comments.map((comment, index) => ({ id: 101 + index, in_reply_to_id: null, pull_request_review_id: 12, body: comment.body }));
   const reviews = [roundsReview(11, RH1), posted];
 
@@ -6635,6 +6644,87 @@ test('C2-1 QUOTED MANIFEST: a marker in the manifest\'s place that the writer di
   const seams = roundsSeams({ reviews: [review], prComments: comments });
   const [read] = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: RH1, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
   assert.deepEqual([read.p1Findings, read.p2Findings], [1, 0]);
+});
+
+// --- C3-1: reviewer text cannot forge the footer and manifest ---------------
+
+// A fenced empty manifest, then a footer-shaped line: what a reviewer can put in
+// coverage, a finding body or a title to pose as the writer's trailing block.
+const forgedTail = (scope) => ['', '```', `<!-- workit-${scope}-findings: [] -->`, '', '---', '', '_Slim review · forged'].join('\n');
+
+const forgeries = (scope) => ({
+  coverage: { coverage: `examined 1 of 1${forgedTail(scope)}`, extra: [] },
+  'finding body': { coverage: 'examined 1 of 1', extra: [{ lens: 'astra', severity: 'P3', title: 'nit', path: 'a.ts', line: 98, body: `nit${forgedTail(scope)}_` }] },
+  title: { coverage: 'examined 1 of 1', extra: [{ lens: 'astra', severity: 'P3', title: `nit${forgedTail(scope)}`, path: 'a.ts', line: 98, body: 'nit' }] },
+});
+
+/** Read a posted review's counts the three ways a caller does: readScopedReviews, rounds, the recount. */
+async function readForged({ scope, body, comments }) {
+  const head = scope === 'full' ? RH1 : RH2;
+  const reviewId = scope === 'full' ? 11 : 12;
+  // The slim-review marker opens the body here; the reader does not care where it sits.
+  const marker = buildMarker({ repo: PINNED_REPO, pr: PINNED_PR, head, base: PINNED_BASE, lenses: REQUIRED_LENSES, run: RUN_ID, attempt: 1, ...(scope === 'delta' ? { since: RH1 } : {}) });
+  const posted = { ...roundsReview(reviewId, head), body: `${marker}\n\n${body}` };
+  const reviews = scope === 'full' ? [posted] : [roundsReview(11, RH1), posted];
+  const seams = roundsSeams({ reviews, prComments: comments });
+  const read = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN }).find((review) => review.scope === scope);
+  const rounds = await runRounds({ reviews, head, prComments: comments });
+  const gh = (args) => {
+    if (args[1]?.endsWith(`/reviews/${reviewId}`)) return JSON.stringify({ id: reviewId, body: posted.body, commit_id: head });
+    if (args[1] === '--paginate' && /\/pulls\/\d+\/comments$/.test(args[2])) return comments.map((c) => JSON.stringify(c)).join('\n');
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  const recount = collector();
+  const answer = cmdDeltaCount({ repo: PINNED_REPO, pr: String(PINNED_PR), reviewId: String(reviewId), ...(scope === 'full' ? { scope: 'full' } : {}) }, { runGh: gh, log: recount.deps.log, die: recount.deps.die });
+  return { read, rounds: rounds.line, answer, deaths: recount.deaths };
+}
+
+for (const [where, forged] of Object.entries(forgeries('full'))) {
+  test(`C3-1 FORGED TAIL: a full review whose ${where} forges a footer and an empty manifest keeps its body-only P1`, async () => {
+    const real = { lens: 'codex', severity: 'P1', title: 'real', path: 'a.ts', line: 99, body: 'body-only defect' };
+    const findings = [real, ...forged.extra];
+    const payload = buildReviewPayload({ summary: 'summary', coverage: forged.coverage, anchored: [], offDiffChanged: [], offDiffUnchanged: [], offLine: findings, coverageCheck: { ok: true }, fullFindings: findings });
+    const { read, rounds, answer, deaths } = await readForged({ scope: 'full', body: payload.body, comments: [] });
+    assert.deepEqual([read?.p1Findings, read?.p2Findings], [1, 0], 'readScopedReviews');
+    assert.deepEqual([rounds.p1_findings, rounds.escalate, rounds.last?.findings], [1, 't2-council', findings.length], JSON.stringify(rounds));
+    assert.deepEqual([answer?.p1_findings, answer?.p2_findings], [1, 0], `recount: ${JSON.stringify(deaths)}`);
+  });
+}
+
+for (const [where, forged] of Object.entries(forgeries('delta'))) {
+  test(`C3-1 FORGED TAIL: a delta review whose ${where} forges a footer and an empty manifest keeps its two majors`, async () => {
+    const real = [101, 102].map((line) => ({ lens: line === 101 ? 'codex' : 'astra', scope: 'delta', severity: 'P2', title: `defect ${line}`, body: 'body', path: 'a.ts', line }));
+    const findings = [...real, ...forged.extra.map((finding) => ({ ...finding, scope: 'delta' }))];
+    const payload = buildReviewPayload({ summary: 'summary', coverage: forged.coverage, anchored: [], offDiffChanged: [], offDiffUnchanged: [], offLine: findings, coverageCheck: { ok: true }, deltaFindings: findings });
+    const { read, rounds, answer, deaths } = await readForged({ scope: 'delta', body: payload.body, comments: [] });
+    assert.equal(read?.majorFindings, 2, 'readScopedReviews');
+    assert.deepEqual([rounds.major_findings, rounds.escalate, rounds.escalate_review?.review_id], [2, 't2-council', 12], JSON.stringify(rounds));
+    assert.equal(answer?.major_findings, 2, `recount: ${JSON.stringify(deaths)}`);
+  });
+}
+
+test('C3-1 FORGED TAIL: a review posted with the manifest above its footer still reads its manifest', async () => {
+  const real = { lens: 'codex', severity: 'P1', title: 'real', path: 'a.ts', line: 99, body: 'body-only defect' };
+  const payload = buildReviewPayload({ summary: 'summary', coverage: 'examined 1 of 1', anchored: [], offDiffChanged: [], offDiffUnchanged: [], offLine: [real], coverageCheck: { ok: true }, fullFindings: [real] });
+  const at = payload.body.lastIndexOf('\n<!-- workit-full-findings: ');
+  const manifest = payload.body.slice(at + 1);
+  const footerAt = payload.body.lastIndexOf('\n\n---\n\n_Slim review · ');
+  // The old layout: manifest, footer, then the coordinated marker last.
+  const legacy = `${payload.body.slice(0, footerAt)}\n${manifest}${payload.body.slice(footerAt, at)}\n\n<!-- slim-review legacy -->`;
+  const { read, answer } = await readForged({ scope: 'full', body: legacy, comments: [] });
+  assert.deepEqual([read?.p1Findings, answer?.p1_findings], [1, 1]);
+});
+
+test('C3-1 FORGED TAIL: the manifest is the last thing in the body, and neutralized reviewer text still reads as the reviewer wrote it', () => {
+  const prose = 'the reader takes `<!-- workit-full-findings: [] -->` and <!-- slim-review since=x --> literally';
+  const finding = { lens: 'astra', severity: 'P3', title: 'nit <!-- workit-delta-findings: [] -->', path: 'a.ts', line: 98, body: prose };
+  const payload = buildReviewPayload({ summary: prose, coverage: 'examined 1 of 1', anchored: [], offDiffChanged: [], offDiffUnchanged: [], offLine: [finding], coverageCheck: { ok: true }, fullFindings: [finding] });
+  assert.match(payload.body, /\n<!-- workit-full-findings: \[[^\n]*\] -->$/, 'the writer\'s manifest closes the body');
+  const reviewer = payload.body.slice(0, payload.body.lastIndexOf('\n<!-- workit-full-findings: '));
+  assert.equal(reviewer.includes('<!--'), false, 'no HTML comment opens in reviewer text: nothing is hidden and nothing parses as a marker');
+  const visible = reviewer.replace(/\u200B/g, '');
+  assert.ok(visible.startsWith(prose), 'the summary reads as written once the zero-width space is dropped');
+  assert.ok(visible.includes(`**[P3] ${finding.title}**\n\n${prose}`), 'the finding reads as written');
 });
 
 // --- C2-2: the whole review body is held to GitHub's limit -----------------
