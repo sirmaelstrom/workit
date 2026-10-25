@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { diffPreimages, gitPatchId, mapRebase, readRebase, readRoundTail, resolveRound, roundsAnswer, REBASE_COMMIT_CAP } from './pr-review-rounds.mjs';
+import { deltaEscalation, diffPreimages, gitPatchId, mapRebase, readRebase, readRoundTail, resolveRound, reviewEscalation, roundsAnswer, REBASE_COMMIT_CAP } from './pr-review-rounds.mjs';
 import { git, gitBackedGh } from './__fixtures__/git-gh.mjs';
 
 const LINES = (tag) => Array.from({ length: 12 }, (_, i) => `${tag} line ${i + 1}`).join('\n') + '\n';
@@ -434,4 +434,37 @@ test('a history past the base that is not one first-parent line, or over the cap
   assert.match(r.answer.rebase.reason, /not one first-parent line/);
   assert.match(r.answer.problem, /contains a merge commit/);
   assert.ok(REBASE_COMMIT_CAP >= 10);
+});
+
+test('R1 ESCALATION: a full review crosses at one P1 or two P2s; one P2 or a council record does not', () => {
+  const at = (p1Findings, p2Findings, over = {}) => reviewEscalation({ ...full('a'.repeat(40)), p1Findings, p2Findings, ...over });
+  assert.deepEqual(at(1, 0), { escalate: 't2-council', escalate_reason: 'full review 11: 1 P1, 0 P2' });
+  assert.deepEqual(at(0, 2), { escalate: 't2-council', escalate_reason: 'full review 11: 0 P1, 2 P2' });
+  assert.equal(at(0, 1), null);
+  assert.equal(at(0, 0), null);
+  assert.equal(at(1, 0, { councilRoundId: 'run/wp-01/2' }), null);
+  assert.equal(at(0, 2, { councilRoundId: 'run/wp-01/2' }), null);
+  assert.equal(reviewEscalation(full('a'.repeat(40))), null, 'a full review with no count read owes nothing');
+  // The delta rule is unchanged, and the old export name is the same function.
+  const owedDelta = { ...delta('b'.repeat(40), 'a'.repeat(40)), majorFindings: 2 };
+  assert.deepEqual(reviewEscalation(owedDelta), { escalate: 't2-council', escalate_reason: '2 posted in-amendment P1/P2 defects on review 12' });
+  assert.equal(reviewEscalation({ ...owedDelta, majorFindings: 1 }), null);
+  assert.equal(reviewEscalation({ ...owedDelta, p1Findings: 1, p2Findings: 0, majorFindings: 1 }), null, 'a delta never crosses on full counts');
+  assert.equal(deltaEscalation, reviewEscalation);
+});
+
+test('R1 ESCALATION: resolveRound carries a crossing full review on reviewed, delta and capped answers', () => {
+  const [h1, h2, h3] = ['1', '2', '3'].map((c) => c.repeat(40));
+  const owed = { ...full(h1), p1Findings: 1, p2Findings: 0 };
+  const reviewed = resolveRound({ reviews: [owed], head: h1, tail: null }).answer;
+  assert.deepEqual([reviewed.round, reviewed.p1_findings, reviewed.p2_findings, reviewed.escalate], ['reviewed', 1, 0, 't2-council'], JSON.stringify(reviewed));
+  assert.match(reviewed.escalate_reason, /full review 11: 1 P1, 0 P2/);
+  const deltaRound = resolveRound({ reviews: [owed], head: h2, tail: null }).answer;
+  assert.deepEqual([deltaRound.round, deltaRound.escalate, deltaRound.p1_findings], ['delta', 't2-council', 1], JSON.stringify(deltaRound));
+  const capped = resolveRound({ reviews: [owed, delta(h2, h1)], head: h3, tail: null }).answer;
+  assert.deepEqual([capped.round, capped.escalate, Object.hasOwn(capped, 'p1_findings')], ['capped', 't2-council', false], JSON.stringify(capped));
+  const quiet = resolveRound({ reviews: [{ ...full(h1), p1Findings: 0, p2Findings: 1 }], head: h1, tail: null }).answer;
+  assert.deepEqual([quiet.p2_findings, Object.hasOwn(quiet, 'escalate')], [1, false], JSON.stringify(quiet));
+  const none = resolveRound({ reviews: [{ ...full(h1), p1Findings: 0, p2Findings: 0 }], head: h1, tail: null }).answer;
+  assert.deepEqual(none, { round: 'reviewed', last: { head: h1, scope: 'full', review_id: 11 }, problem: null }, 'a clean full review adds no field');
 });

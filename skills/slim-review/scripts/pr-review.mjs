@@ -64,7 +64,7 @@ import {
   MANAGED_MODES,
 } from './pr-review-managed.mjs';
 import { emitOutcome, WITHDRAW_REASONS } from './pr-review-outcomes.mjs';
-import { buildMarker, recognise, postedReviewScope } from './pr-review-recognise.mjs';
+import { buildMarker, parseMarker, recognise, postedReviewScope } from './pr-review-recognise.mjs';
 import { amendmentProblem, COMPARE_FILE_CAP, readRoundTail, roundsAnswer } from './pr-review-rounds.mjs';
 import { filesFromDiff, guardReview, GUARD_ADJUDICATORS, GUARD_LENS, LANE_MARKER_ENV } from './pr-review-guard.mjs';
 
@@ -534,9 +534,15 @@ const deltaManifest = (findings) => `<!-- workit-delta-findings: ${JSON.stringif
   hash: findingHash(renderFinding(f)), lens: f.lens, scope: f.scope, severity: f.severity,
 })))} -->`;
 
-/** Count distinct posted delta defects. A dup-of link joins two findings on this review. */
-export function countDeltaDefects(findings) {
-  const eligible = findings.filter((f) => f.scope === 'delta' && (f.severity === 'P1' || f.severity === 'P2') && f.lens !== GUARD_LENS);
+/**
+ * Count distinct posted P1/P2 defects of one scope: `delta` counts the findings
+ * tagged delta, `full` counts the rest. Guard-lens findings and P3s are not
+ * counted. A dup-of link joins two findings on this review into one defect,
+ * which is a P1 when either side is.
+ */
+export function countDefects(findings, scope = 'delta') {
+  const eligible = findings.filter((f) => (scope === 'delta' ? f.scope === 'delta' : f.scope !== 'delta')
+    && (f.severity === 'P1' || f.severity === 'P2') && f.lens !== GUARD_LENS);
   const byId = new Map(eligible.filter((f) => f.id != null).map((f) => [String(f.id), f]));
   const parent = new Map([...byId.keys()].map((id) => [id, id]));
   const root = (id) => {
@@ -549,7 +555,16 @@ export function countDeltaDefects(findings) {
     const duplicate = String(finding.dupOf ?? '');
     if (parent.has(id) && parent.has(duplicate)) parent.set(root(id), root(duplicate));
   }
-  return new Set([...parent.keys()].map(root)).size + eligible.filter((f) => f.id == null).length;
+  const groups = new Map();
+  for (const [id, finding] of byId) groups.set(root(id), groups.get(root(id)) === 'P1' ? 'P1' : finding.severity);
+  const severities = [...groups.values(), ...eligible.filter((f) => f.id == null).map((f) => f.severity)];
+  const p1 = severities.filter((severity) => severity === 'P1').length;
+  return { total: severities.length, p1, p2: severities.length - p1 };
+}
+
+/** Count distinct posted delta defects. A dup-of link joins two findings on this review. */
+export function countDeltaDefects(findings) {
+  return countDefects(findings, 'delta').total;
 }
 
 /** GitHub refuses a review body over this many characters, and the whole POST with it. */
@@ -893,9 +908,13 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   );
   const posted = JSON.parse(res);
   log(`\nposted         ${posted.html_url}`);
-  if (since) log(`posted-review-id ${posted.id}`);
+  if (since || posted.id != null) log(`posted-review-id ${posted.id}`);
   if (since) log(`delta-major ${countDeltaDefects(doc.findings)} head=${reviewedHead}`);
+  else log(fullMajorLine(countDefects(doc.findings, 'full'), reviewedHead));
 }
+
+/** The full post's receipt: its distinct P1 and P2 defects, bound to the head it reviewed. */
+const fullMajorLine = (counts, head) => `full-major p1=${counts.p1} p2=${counts.p2} head=${head}`;
 
 // GitHub's GraphQL connections are paged, and these two page sizes are the ones
 // this query asks for. A full page means there is more behind it.
@@ -2051,15 +2070,29 @@ export function readCouncilMarker(body) {
   } catch { return null; }
 }
 
-export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted }) {
-  const reviewId = posted.review_id ?? posted.id;
+/** The PR's review comments, every page, in one paginated read. */
+function readPrComments({ repo, pr, cwd, runGh }) {
   const raw = runGh(
     ['api', '--paginate', `repos/${repo}/pulls/${pr}/comments`, '--jq', '.[] | {id, body, in_reply_to_id, pull_request_review_id}'],
     { cwd },
   );
-  const comments = String(raw).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  return String(raw).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+}
+
+export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted, comments }) {
+  return readPostedCounts({ posted, comments: comments ?? readPrComments({ repo, pr, cwd, runGh }), scope: 'delta' }).total;
+}
+
+/**
+ * A posted review's distinct P1/P2 defects of one scope, from the PR's review
+ * comments. A delta review with a findings manifest counts the manifest (it
+ * holds the body-only findings too); any other review counts its own inline
+ * comments. A `workit-dup-of` reply joins two of them.
+ */
+export function readPostedCounts({ posted, comments, scope }) {
+  const reviewId = posted.review_id ?? posted.id;
   const originals = comments.filter((comment) => comment.in_reply_to_id == null && String(comment.pull_request_review_id) === String(reviewId));
-  const manifest = readDeltaManifest(posted.body);
+  const manifest = scope === 'delta' ? readDeltaManifest(posted.body) : null;
   const entries = manifest ? manifest.map((finding) => ({ ...finding })) : originals.map((comment) => ({ ...readPostedFinding(comment), id: comment.id }));
   if (manifest) {
     const byHash = new Map();
@@ -2075,19 +2108,27 @@ export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted }) {
     const duplicate = entries.find((entry) => String(entry.id) === String(reply.in_reply_to_id));
     if (duplicate) duplicate.dupOf = match[1];
   }
-  return countDeltaDefects(entries);
+  return countDefects(entries, scope);
 }
 
-/** Scope the posted reviews and count each delta's posted findings. */
+/**
+ * Scope the posted reviews and count each one's posted findings: a delta's
+ * distinct P1/P2 defects as `majorFindings`, a full review's as `p1Findings` /
+ * `p2Findings`. The PR's comments are read once, for all of them. A council
+ * record whose `delta_review_id` names a review clears it as `councilRoundId`.
+ */
 export function readScopedReviews({ repo, pr, head, cwd, runGh = gh, serviceLogin, replacedReviewIds = [] }) {
   const listed = readReviewListing({ repo, pr, cwd, runGh });
   const reviews = listed
     .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
     .filter(Boolean);
+  let comments;
   for (const [index, review] of reviews.entries()) {
-    if (review.scope !== 'delta') continue;
+    if (review.scope !== 'delta' && review.scope !== 'full') continue;
     const posted = listed.find((item) => String(item.review_id) === String(review.review_id));
-    const majorFindings = readPostedDeltaCount({ repo, pr, cwd, runGh, posted });
+    comments ??= readPrComments({ repo, pr, cwd, runGh });
+    const counts = readPostedCounts({ posted, comments, scope: review.scope });
+    const tally = review.scope === 'delta' ? { majorFindings: counts.total } : { p1Findings: counts.p1, p2Findings: counts.p2 };
     let councilRoundId = null;
     for (const candidate of listed) {
       const marker = readCouncilMarker(candidate.body);
@@ -2102,16 +2143,29 @@ export function readScopedReviews({ repo, pr, head, cwd, runGh = gh, serviceLogi
       }
       councilRoundId = marker.id;
     }
-    reviews[index] = { ...review, majorFindings, ...(councilRoundId ? { councilRoundId } : {}) };
+    reviews[index] = { ...review, ...tally, ...(councilRoundId ? { councilRoundId } : {}) };
   }
   return reviews;
 }
 
-/** Recount one posted delta after replies have recorded any dup-of links. */
+/**
+ * Recount one posted delta after replies have recorded any dup-of links. With
+ * `--scope full`, recount one posted full review's P1s and P2s the same way.
+ */
 export function cmdDeltaCount(opts, { runGh = ghOrDie, log = console.log, die = fail } = {}) {
   const repo = resolveRepo(opts.repo, opts.cwd);
   try {
     const posted = JSON.parse(runGh(['api', `repos/${repo}/pulls/${opts.pr}/reviews/${opts.reviewId}`], { cwd: opts.cwd }));
+    if (opts.scope === 'full') {
+      if (String(posted.id) !== String(opts.reviewId) || readDeltaManifest(posted.body) || parseMarker(posted.body)?.since) {
+        die(4, `review ${opts.reviewId} is not a posted full review`);
+        return;
+      }
+      const counts = readPostedCounts({ posted, comments: readPrComments({ repo, pr: opts.pr, cwd: opts.cwd, runGh }), scope: 'full' });
+      const answer = { outcome: 'ok', review_id: posted.id, head: posted.commit_id, scope: 'full', p1_findings: counts.p1, p2_findings: counts.p2 };
+      log(JSON.stringify(answer));
+      return answer;
+    }
     if (String(posted.id) !== String(opts.reviewId) || !readDeltaManifest(posted.body)) {
       die(4, `review ${opts.reviewId} has no posted delta findings manifest`);
       return;
@@ -3444,10 +3498,13 @@ async function cmdPostCoordinated(opts, {
   if (terminal) discardAttemptRefFile(refFile, diag);
   if (classified.outcome === 'posted') diag(`posted         ${classified.html_url ?? `review ${classified.review_id}`}`);
   const majorFindings = since ? countDeltaDefects(findings) : null;
+  const fullCounts = since ? null : countDefects(findings, 'full');
   if (classified.outcome === 'posted' && since) diag(`delta-major ${majorFindings} head=${headNow}`);
+  if (classified.outcome === 'posted' && !since) diag(fullMajorLine(fullCounts, headNow));
   const line = emit({
     outcome: classified.outcome,
     ...(classified.outcome === 'posted' && since ? { major_findings: majorFindings } : {}),
+    ...(classified.outcome === 'posted' && !since ? { p1_findings: fullCounts.p1, p2_findings: fullCounts.p2 } : {}),
     ...(classified.reason === undefined ? {} : { reason: classified.reason }),
     post_generation: postGeneration,
     ...(classified.review_id === undefined ? {} : { review_id: classified.review_id }),
@@ -3643,8 +3700,9 @@ On a managed repository (see below), the coordinated flow replaces steps 2 and 3
            {outcome:"ok", round: full|reviewed|delta|capped, since?, last?,
            rebased_from?, rebase?, problem} or {outcome:"refused", reason};
            a rebased head is mapped onto the reviewed one by patch id
-  delta-count --pr <n> --repo owner/name --review-id <n>
-           read-only: recount posted delta defects after dup-of replies
+  delta-count --pr <n> --repo owner/name --review-id <n> [--scope full]
+           read-only: recount posted delta defects after dup-of replies;
+           --scope full recounts a full review's P1s and P2s
   inflight --pr <n> --repo owner/name --head <full sha>
            read-only: the review attempts on this head that have not ended —
            {outcome:"ok", mode, inflight:[{attempt, origin, state}]}; exit 9 when
@@ -3738,6 +3796,12 @@ export function parseArgs(argv) {
         const v = next();
         if (!/^\d+$/.test(v)) fail(2, '--review-id must be a numeric review id');
         opts.reviewId = v;
+        break;
+      }
+      case '--scope': {
+        const v = next();
+        if (v !== 'full' && v !== 'delta') fail(2, '--scope must be full or delta');
+        opts.scope = v;
         break;
       }
       case '--context-file': opts.contextFile = next(); break;

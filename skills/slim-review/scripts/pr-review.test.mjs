@@ -75,6 +75,9 @@ import {
   AUTHOR_PAIRS,
   AUTHOR_LENS,
   reviewPairFor,
+  countDefects,
+  readScopedReviews,
+  cmdDeltaCount,
 } from './pr-review.mjs';
 import {
   REASONS,
@@ -2066,6 +2069,7 @@ test('characterisation: standalone post prints the receipt exactly and posts one
     '  not-anchor   docs/bin.png:1 — changed by this PR, but not line-anchorable',
     '  off-diff     src/z.ts:1 — not a file this PR changes',
     '\nposted         https://example.test/review/1',
+    `full-major p1=1 p2=1 head=${CHAR_HEAD}`,
   ]);
   assert.equal(posted.length, 1);
   assert.equal(posted[0].body.event, 'COMMENT');
@@ -3925,7 +3929,8 @@ test('rounds escalates only a capped head with two posted P1/P2 comments on its 
   const full = await runRounds({ reviews: [roundsReview(13, RH2)], head: RH3 });
   assert.equal(full.line.round, 'delta');
   assert.equal(Object.hasOwn(full.line, 'escalate'), false);
-  assert.equal(full.calls.some((args) => args.join(' ').includes('/comments')), false);
+  // A full review's P1/P2 count reads the PR's comments: one paginated read, never one per review.
+  assert.equal(full.calls.filter((args) => args.join(' ').includes('/comments')).length, 1);
 });
 
 test('COUNCIL COUNT: body-only delta defects count, guard and P3 do not, and a dup-of pair counts once', async () => {
@@ -6340,4 +6345,116 @@ test('lane marker: a marked lane still records its own verdict on a lens comment
   const empty = replyToGuard({ adjudicator: 'conductor', env: { [LANE_MARKER_ENV]: '' } });
   assert.equal(empty.error, undefined);
   assert.equal(empty.rows[0].adjudicator, 'conductor');
+});
+
+// --- R1 escalation: a full review's distinct P1 / P2 count ------------------
+
+const fullComment = (id, severity, lens = 'codex') => ({ id, in_reply_to_id: null, body: `**lens:** ${lens}\n\n**[${severity}] defect ${id}**\n\nbody` });
+const dupReply = (id, of, dup) => ({ id, in_reply_to_id: of, body: `duplicate\n\n<!-- workit-dup-of: ${dup} -->` });
+
+test('FULL COUNT: P1 codex, P2 astra, its dup-of P2, a P3 and a guard P1 count p1=1 p2=1', () => {
+  const findings = [
+    { id: 1, lens: 'codex', severity: 'P1' },
+    { id: 2, lens: 'astra', severity: 'P2' },
+    { id: 3, lens: 'astra', severity: 'P2', dupOf: 2 },
+    { id: 4, lens: 'astra', severity: 'P3' },
+    { id: 5, lens: 'guard', severity: 'P1' },
+  ];
+  assert.deepEqual(countDefects(findings, 'full'), { total: 2, p1: 1, p2: 1 });
+  assert.equal(countDefects(findings, 'delta').total, 0, 'an untagged finding is never a delta defect');
+  assert.deepEqual(countDefects(findings.map((f) => ({ ...f, scope: 'delta' })), 'delta'), { total: 2, p1: 1, p2: 1 });
+  assert.deepEqual(countDefects([{ id: 1, severity: 'P2' }, { id: 2, severity: 'P1', dupOf: 1 }], 'full'), { total: 1, p1: 1, p2: 0 }, 'a pair with a P1 in it is one P1');
+});
+
+test('FULL POST: the standalone full post prints one full-major line; a delta post prints none', () => {
+  const { logs } = characterisationPost();
+  assert.deepEqual(logs.filter((line) => line.startsWith('full-major')), [`full-major p1=1 p2=1 head=${CHAR_HEAD}`]);
+  const amendment = runDeltaPost({ docs: [deltaDoc('codex'), deltaDoc('astra')] });
+  assert.equal(amendment.error, undefined);
+  assert.equal(amendment.logs.some((line) => line.startsWith('full-major')), false);
+  assert.ok(amendment.logs.includes(`delta-major 2 head=${DELTA_HEAD}`));
+});
+
+test('FULL POST: the coordinated full post prints one full-major diag and carries p1_findings / p2_findings', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothLensesDone({ refFile, home, events, findings: [
+      { severity: 'P1', title: 'one', path: 'skills/slim-review/SKILL.md', line: 290, body: 'evidence' },
+      { severity: 'P3', title: 'nit', path: 'skills/slim-review/SKILL.md', line: 290, body: 'style' },
+    ] });
+    await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin }) => {
+      const out = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events }) });
+      const line = out.line();
+      assert.equal(line.outcome, 'posted', JSON.stringify(out.deaths));
+      // Both lenses returned the same P1: at post time no dup-of link joins them yet.
+      assert.deepEqual([line.p1_findings, line.p2_findings, Object.hasOwn(line, 'major_findings')], [2, 0, false]);
+      assert.deepEqual(out.diagnostics.filter((d) => d.startsWith('full-major')), [`full-major p1=2 p2=0 head=${PINNED_HEAD}`]);
+      assert.equal(out.diagnostics.some((d) => d.startsWith('delta-major')), false);
+    });
+  });
+});
+
+test('FULL POST: a coordinated delta post prints no full-major line and no p1_findings', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothDeltaLensesDone({ refFile, home, events });
+    await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin }) => {
+      const out = await runCoordinatedPost({ refFile, home, origin, seams: amendmentSeams(pinnedSeams({ events }), COORDINATED_AMENDMENT) });
+      const line = out.line();
+      assert.equal(line.major_findings, 2);
+      assert.equal(Object.hasOwn(line, 'p1_findings'), false);
+      assert.equal(out.diagnostics.some((d) => d.startsWith('full-major')), false);
+    });
+  });
+});
+
+test('FULL READ-BACK: readScopedReviews counts a full review from its comments and a dup-of reply, in one comments read', () => {
+  const deltaComment = (id, severity) => ({ id, in_reply_to_id: null, body: `**lens:** codex\n\n**scope:** delta\n\n**[${severity}] defect ${id}**\n\nbody` });
+  const seams = roundsSeams({
+    reviews: [roundsReview(11, RH1), roundsReview(12, RH2, { since: RH1 })],
+    commentsByReview: {
+      11: [fullComment(101, 'P1'), fullComment(102, 'P2', 'astra'), fullComment(103, 'P2', 'astra'), fullComment(104, 'P3'), fullComment(105, 'P1', 'guard'), dupReply(106, 103, 102)],
+      12: [deltaComment(201, 'P2'), deltaComment(202, 'P1')],
+    },
+  });
+  const reviews = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: RH2, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
+  assert.deepEqual(reviews.map((r) => [r.review_id, r.scope, r.p1Findings, r.p2Findings, r.majorFindings]),
+    [[11, 'full', 1, 1, undefined], [12, 'delta', undefined, undefined, 2]]);
+  assert.equal(seams.calls.filter((args) => /\/pulls\/\d+\/comments$/.test(args[2] ?? '')).length, 1, 'one paginated comments read serves both reviews');
+});
+
+test('FULL READ-BACK: rounds escalates a full review with one P1, and a council record naming that review clears it', async () => {
+  const one = await runRounds({ reviews: [roundsReview(11, RH1)], head: RH1, commentsByReview: { 11: [fullComment(101, 'P1')] } });
+  assert.deepEqual([one.line.round, one.line.p1_findings, one.line.p2_findings, one.line.escalate], ['reviewed', 1, 0, 't2-council'], JSON.stringify(one.line));
+  assert.match(one.line.escalate_reason, /full review 11: 1 P1, 0 P2/);
+  const two = await runRounds({ reviews: [roundsReview(11, RH1)], head: RH1, commentsByReview: { 11: [fullComment(101, 'P2'), fullComment(102, 'P2', 'astra')] } });
+  assert.equal(two.line.escalate, 't2-council');
+  const paired = await runRounds({ reviews: [roundsReview(11, RH1)], head: RH1, commentsByReview: { 11: [fullComment(101, 'P2'), fullComment(102, 'P2', 'astra'), dupReply(103, 102, 101)] } });
+  assert.deepEqual([paired.line.p2_findings, Object.hasOwn(paired.line, 'escalate')], [1, false], 'a dup-of pair is one P2');
+  const record = { ...roundsReview(20, RH1, { login: 'conductor' }), body: `**Council review record**: run x, WP-01, round 2.\n\n<!-- workit-council-round: ${JSON.stringify({ id: 'x/wp-01/2', delta_review_id: 11, head: RH1 })} -->` };
+  const cleared = await runRounds({ reviews: [roundsReview(11, RH1), record], head: RH1, commentsByReview: { 11: [fullComment(101, 'P1')] } });
+  assert.equal(Object.hasOwn(cleared.line, 'escalate'), false, JSON.stringify(cleared.line));
+});
+
+test('FULL RECOUNT: delta-count --scope full recounts a full review after dup-of replies; without it a full review is refused', () => {
+  const posted = { ...roundsReview(11, RH1), id: 11 };
+  const runGh = (args) => {
+    if (args[1] === `repos/${PINNED_REPO}/pulls/${PINNED_PR}/reviews/11`) return JSON.stringify(posted);
+    if (args[1] === '--paginate' && /\/pulls\/\d+\/comments$/.test(args[2])) {
+      return [fullComment(101, 'P2'), fullComment(102, 'P2', 'astra'), dupReply(103, 102, 101)].map((c) => JSON.stringify({ pull_request_review_id: 11, ...c })).join('\n');
+    }
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  const out = collector();
+  const answer = cmdDeltaCount({ repo: PINNED_REPO, pr: String(PINNED_PR), reviewId: '11', scope: 'full' }, { runGh, log: out.deps.log, die: out.deps.die });
+  assert.deepEqual(answer, { outcome: 'ok', review_id: 11, head: RH1, scope: 'full', p1_findings: 0, p2_findings: 1 });
+  const refused = collector();
+  cmdDeltaCount({ repo: PINNED_REPO, pr: String(PINNED_PR), reviewId: '11' }, { runGh, log: refused.deps.log, die: refused.deps.die });
+  assert.match(refused.deaths[0]?.message ?? '', /no posted delta findings manifest/);
+  const deltaRefused = collector();
+  const deltaRunGh = (args) => (args[1].endsWith('/reviews/11') ? JSON.stringify({ ...roundsReview(11, RH2, { since: RH1 }), id: 11 }) : runGh(args));
+  cmdDeltaCount({ repo: PINNED_REPO, pr: String(PINNED_PR), reviewId: '11', scope: 'full' }, { runGh: deltaRunGh, log: deltaRefused.deps.log, die: deltaRefused.deps.die });
+  assert.match(deltaRefused.deaths[0]?.message ?? '', /not a posted full review/);
 });

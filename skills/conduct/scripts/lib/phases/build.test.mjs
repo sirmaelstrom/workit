@@ -252,10 +252,16 @@ function shellResult(h, action) {
     case 'pr-lookup': return ok(JSON.stringify([{ number: prNumber(id), headRefOid: h.head(id), state: 'OPEN' }]));
     case 'review/diff': return ok(h.diff?.[id] ?? 'src/a.mjs\n');
     case 'review/managed': return ok(JSON.stringify({ mode: 'standalone' }));
-    case 'review/delta-count': return ok(JSON.stringify({ outcome: 'ok', review_id: action.land.reviewId, head: action.land.head, major_findings: h.deltaAfterDup?.[id]?.shift() ?? 2 }));
+    case 'review/delta-count': {
+      if (action.land.scope !== 'full') return ok(JSON.stringify({ outcome: 'ok', review_id: action.land.reviewId, head: action.land.head, major_findings: h.deltaAfterDup?.[id]?.shift() ?? 2 }));
+      const [p1, p2] = h.fullAfterDup?.[id]?.shift() ?? [1, 0];
+      return ok(JSON.stringify({ outcome: 'ok', review_id: action.land.reviewId, head: action.land.head, scope: 'full', p1_findings: p1, p2_findings: p2 }));
+    }
     case 'post/post': {
       const count = h.findings[id]?.length ? h.findings[id].shift() : 0;
-      const receipt = action.land.scope === 'delta' ? `posted-review-id 7002\ndelta-major ${h.deltaMajor?.[id]?.shift() ?? 0} head=${action.land.head}\n` : '';
+      const [p1, p2] = action.land.scope === 'delta' ? [] : h.fullMajor?.[id]?.shift() ?? [0, 0];
+      const receipt = action.land.scope === 'delta' ? `posted-review-id 7002\ndelta-major ${h.deltaMajor?.[id]?.shift() ?? 0} head=${action.land.head}\n`
+        : `posted-review-id 7001\nfull-major p1=${p1} p2=${p2} head=${action.land.head}\n`;
       return ok(count === null ? `posted\n${receipt}` : `findings ${count}\n${receipt}`);
     }
     case 'review/amend-diff': return ok(h.amendDiff?.[id] ?? 'docs/notes.md\n');
@@ -3158,6 +3164,61 @@ test('a posted delta receipt flows through amendment, checks, council, record, a
   assert.ok(delta >= 0 && amendment > delta && council > amendment && record > council && gate > record, JSON.stringify({ indexes: [delta, amendment, council, record, gate], state: h.wp('WP-02').state, reason: h.wp('WP-02').reason, trace: actions.slice(-25).map((a) => `${a.step}/${a.part ?? a.land?.scope ?? ''}`), reviews: h.wp('WP-02').reviews }));
   assert.equal(h.wp('WP-02').state, 'merged');
   assert.equal(h.wp('WP-02').reviews.some((review) => review.escalatedDeltaReviewId === 7002 && review.record?.url), true);
+});
+
+test('R1 ESCALATION: a T1 full post with one P1 flows through amendment, recount, council, record, and gate', async (t) => {
+  const h = harness(t, { council: true, wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3, 2] };
+  h.fullMajor = { 'WP-02': [[1, 0]] };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md', 'report-amendment-2.md'] };
+  const countAction = await drive(h, { until: (a) => a.wpId === 'WP-02' && a.step === 'review' && a.part === 'delta-count' });
+  assert.ok(countAction, JSON.stringify(h.wp('WP-02')));
+  assert.deepEqual([countAction.land.scope, countAction.command.slice(-2)], ['full', ['--scope', 'full']]);
+  assert.equal(h.wp('WP-02').tier, 'T2');
+  assert.equal(h.wp('WP-02').deltaEscalation?.scope, 'full', JSON.stringify(h.wp('WP-02').deltaEscalation));
+  assert.equal(h.wp('WP-02').deltaEscalation?.reviewId, 7001);
+  await recordPending(h, await perform(h, countAction));
+  assert.equal(await drive(h), null);
+  const actions = of(h, 'WP-02');
+  const full = actions.findIndex((action) => action.step === 'post' && action.land.scope === 'full');
+  const amendment = actions.findIndex((action, index) => index > full && action.step === 'brief' && action.part === 'amendment');
+  const council = actions.findIndex((action) => action.tool === 'council_review' && action.land.scope === 'full');
+  const record = actions.findIndex((action) => action.step === 'reply' && action.part === 'record');
+  const gate = actions.findIndex((action) => action.step === 'gate' && action.part === 'gate');
+  assert.ok(full >= 0 && amendment > full && council > amendment && record > council && gate > record, JSON.stringify({ indexes: [full, amendment, council, record, gate], state: h.wp('WP-02').state, reason: h.wp('WP-02').reason, trace: actions.slice(-25).map((a) => `${a.step}/${a.part ?? a.land?.scope ?? ''}`), reviews: h.wp('WP-02').reviews }));
+  assert.equal(actions.some((action) => action.step === 'post' && action.land.scope === 'delta'), false, 'the council replaces the slim delta');
+  assert.equal(h.wp('WP-02').state, 'merged');
+  assert.equal(h.wp('WP-02').reviews.some((review) => review.escalatedDeltaReviewId === 7001 && review.record?.url), true);
+});
+
+test('R1 ESCALATION: a T1 full post with one P2 stays T1 and runs the slim delta as today', async (t) => {
+  const h = harness(t, { council: true, wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3, 0] };
+  h.fullMajor = { 'WP-02': [[0, 1]] };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+  assert.equal(await drive(h), null);
+  const wp = h.wp('WP-02');
+  const actions = of(h, 'WP-02');
+  assert.equal(wp.state, 'merged', JSON.stringify({ reason: wp.reason, trace: actions.slice(-20).map((a) => `${a.step}/${a.part ?? ''}`) }));
+  assert.deepEqual([wp.tier, wp.deltaEscalation ?? null], ['T1', null]);
+  assert.equal(actions.some((action) => action.tool === 'council_review'), false);
+  assert.equal(actions.some((action) => action.step === 'post' && action.land.scope === 'delta'), true);
+  assert.equal(actions.some((action) => action.part === 'delta-count'), false);
+});
+
+test('R1 ESCALATION: with no council adapter a crossing full post stays T1 and its entry says why', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3, 0] };
+  h.fullMajor = { 'WP-02': [[1, 0]] };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+  assert.equal(await drive(h), null);
+  const wp = h.wp('WP-02');
+  assert.equal(wp.state, 'merged', JSON.stringify({ reason: wp.reason }));
+  assert.equal(wp.tier, 'T1');
+  assert.match(wp.reviews[0].escalation, /not escalated: no council adapter/);
+  assert.equal(of(h, 'WP-02').some((action) => action.tool === 'council_review'), false);
 });
 
 test('ROUND 2 RED: failed council record recovers at gate without a lane amendment', async (t) => {

@@ -11,7 +11,7 @@
  * `pr-review.mjs rounds`: manual T1 (a session running slim-review § 4 by
  * hand), Observatory's pr-review beat, and conduct's `recoverAction`
  * (`land.mjs`). Separately, conduct imports helpers in process: `land.mjs` takes
- * `deltaEscalation`, `patchPlace` and `REBASE_FILE_READ_CAP`, and
+ * `reviewEscalation`, `patchPlace` and `REBASE_FILE_READ_CAP`, and
  * `delta-recovery.mjs` takes `gitPatchId`, `patchPlace` and
  * `REBASE_FILE_READ_CAP`. Nothing in this module talks to the network except
  * `readTail` / `readRoundTail` / `readRebase`, which are handed their `gh`
@@ -487,9 +487,10 @@ export function resolveRound({ reviews, head, tail }) {
   const r = reviewRound(reviews, head);
   if (r.round === 'full') return { answer: { round: 'full', problem: null }, tail: null, from: null };
   const last = { head: r.last.head, scope: r.last.scope, review_id: r.last.review_id };
-  const owed = [...reviews].reverse().find((review) => deltaEscalation(review));
-  const signal = deltaEscalation(owed) ?? {};
-  const count = r.last.scope === 'delta' && r.last.majorFindings > 0 ? { major_findings: r.last.majorFindings } : {};
+  const owed = [...reviews].reverse().find((review) => reviewEscalation(review));
+  const signal = reviewEscalation(owed) ?? {};
+  const count = r.last.scope === 'delta' && r.last.majorFindings > 0 ? { major_findings: r.last.majorFindings }
+    : r.last.scope === 'full' && (r.last.p1Findings > 0 || r.last.p2Findings > 0) ? { p1_findings: r.last.p1Findings, p2_findings: r.last.p2Findings } : {};
   if (r.round === 'reviewed') return { answer: { round: 'reviewed', last, problem: null, ...count, ...signal }, tail: null, from: null };
   const rebase = tail && tail.from === r.last.head && tail.to === head ? tail.rebase : undefined;
   const rebased = rebase ? { rebase: rebaseSummary(rebase, r.last.head) } : {};
@@ -505,10 +506,24 @@ export function resolveRound({ reviews, head, tail }) {
   return { answer: { round: 'capped', last, ...rebased, problem: cappedTailProblem(effective, from, head), ...count, ...signal }, tail: effective, from };
 }
 
-export function deltaEscalation(review) {
-  if (review?.scope !== 'delta' || review.councilRoundId || !Number.isInteger(review.majorFindings) || review.majorFindings < 2) return null;
-  return { escalate: 't2-council', escalate_reason: `${review.majorFindings} posted in-amendment P1/P2 defects on review ${review.review_id}` };
+/**
+ * The T2 council a posted review owes, or null. A delta crosses at two or more
+ * distinct in-amendment P1/P2 defects; a full review crosses at one P1 or two
+ * distinct P2s. A review a council record already covers (`councilRoundId`)
+ * owes nothing.
+ */
+export function reviewEscalation(review) {
+  if (!review || review.councilRoundId) return null;
+  if (review.scope === 'delta') {
+    if (!Number.isInteger(review.majorFindings) || review.majorFindings < 2) return null;
+    return { escalate: 't2-council', escalate_reason: `${review.majorFindings} posted in-amendment P1/P2 defects on review ${review.review_id}` };
+  }
+  if (review.scope !== 'full' || !Number.isInteger(review.p1Findings) || !Number.isInteger(review.p2Findings)) return null;
+  if (review.p1Findings < 1 && review.p2Findings < 2) return null;
+  return { escalate: 't2-council', escalate_reason: `full review ${review.review_id}: ${review.p1Findings} P1, ${review.p2Findings} P2` };
 }
+
+export const deltaEscalation = reviewEscalation;
 
 /**
  * The `rounds` verb's answer for one head, given the scoped reviews and the

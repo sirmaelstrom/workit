@@ -8,18 +8,28 @@
 
 ---
 
-## PR delta escalation
+## PR escalation
 
-For a T1 delta with two distinct new P1/P2 defects, review the amended whole
-PR in a T2 council round. Post a COMMENT review on the council head using the
-same GitHub identity that runs the council. Its body starts with
-`**Council review record**` and includes the finding verdicts and this marker:
+Two T1 reviews escalate to a T2 council round on the amended whole PR:
 
-`<!-- workit-council-round: {"id":"<run>/<wp>/<round>","delta_review_id":<posted delta review id>,"head":"<40-character council head SHA>"} -->`
+- a **full** review that posts at least one P1 or at least two distinct P2s;
+- a **delta** that posts at least two distinct new P1/P2 defects.
+
+The crossing review's findings are amended first. Then post a COMMENT review on
+the council head using the same GitHub identity that runs the council. Its body
+starts with `**Council review record**` and includes the finding verdicts and
+this marker:
+
+`<!-- workit-council-round: {"id":"<run>/<wp>/<round>","delta_review_id":<posted review id>,"head":"<40-character council head SHA>"} -->`
+
+`delta_review_id` is the id of the posted review that triggered the escalation,
+full or delta. The name predates the full trigger and is a wire field, so it is
+kept.
 
 Post with `gh api --method POST repos/<owner>/<repo>/pulls/<pr>/reviews -f event=COMMENT -f commit_id=<head> -F body=@<file>`.
-Use a council head descended from the delta head and on the current PR head's
-lineage. Then rerun `pr-review.mjs rounds`; its escalation field must clear.
+Use a council head descended from the crossing review's head and on the current
+PR head's lineage. Then rerun `pr-review.mjs rounds`; its escalation field must
+clear.
 The marker is a workflow receipt, not a security boundary (burn-down § Per
 item step 3).
 

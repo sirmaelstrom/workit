@@ -17,7 +17,7 @@ end up attached to the line they are about, where review and merge already happe
 
 | Reach for | When | Cost |
 |---|---|---|
-| **this skill** | T1 code-diff PR boundaries. Use `burn-down` § Per item step 3 for T0/T2 triggers and delta escalation. | $0 plan-covered, one spawn, ~4–8 min a full round, less for a delta |
+| **this skill** | T1 code-diff PR boundaries. Use `burn-down` § Per item step 3 for T0/T2 triggers and the full and delta escalations. | $0 plan-covered, one spawn, ~4–8 min a full round, less for a delta |
 | `/review` | You want several perspectives in-session and a convergence read before opening a PR | in-session Opus subagents |
 | `council_review` (review-council MCP) | Complex multi-component PRs and spec surfaces — fan-out, synthesis, adversarial challenge | 4–6 lenses |
 
@@ -250,6 +250,16 @@ The script does the checking you would otherwise have to remember:
 Read the receipt line before moving on. `anchored · off-line · off-diff` plus the
 coverage verdict is the whole quality signal.
 
+A posted review also prints its escalation count, bound to the head it reviewed.
+A full review prints `full-major p1=<n> p2=<m> head=<sha>`: its distinct P1s and
+P2s, guard findings and P3s left out. A delta prints `delta-major <n> head=<sha>`
+instead. The standalone post prints the line on stdout beside
+`posted-review-id <id>`. The coordinated post prints it on stderr and adds
+`p1_findings` / `p2_findings` (full) or `major_findings` (delta) to its JSON
+line. Either count can cross into a T2 council (`burn-down` § Per item step 3).
+After the adjudication replies record any `--dup-of` links, `delta-count
+--review-id <id>` recounts a delta; add `--scope full` to recount a full review.
+
 ### Test-weakening check
 
 `post` also reads the patches for signs that the PR went green by weakening a
@@ -314,7 +324,7 @@ pull request.
 amendment, one delta-only pass per lens. There is no second full-PR review and
 no third round at T1.**
 
-Apply the delta escalation in `burn-down` § Per item step 3 before treating
+Apply the full and delta escalations in `burn-down` § Per item step 3 before treating
 this cap as the merge boundary.
 
 This is the half that caught real defects three times out of three when it was
@@ -678,15 +688,22 @@ its tail: not an ancestor, a merge from the base branch, or an incomplete commit
 list. A tail with no changed files, no merge and a complete commit list is null.
 A non-null `problem` is the conductor's call.
 `major_findings` gives the distinct count when the last review is a delta.
+`p1_findings` and `p2_findings` give the distinct P1 and P2 counts when the
+last review is a full review and either is above zero.
 The additive `escalate: "t2-council"` and `escalate_reason` fields follow
-`burn-down` § Per item step 3. They persist on reviewed, capped, and rebased
-heads until a council round is recorded on that head or later. The count comes
-from distinct P1/P2 defects in that posted delta review's own `**scope:** delta`
-findings, including body-only findings. `escalate_reason` names the count and
-review id. Callers that do not read the new fields still receive `round: "capped"`.
+`burn-down` § Per item step 3: a delta with two or more distinct P1/P2 defects,
+or a full review with one P1 or two distinct P2s. They persist on reviewed,
+delta, capped, and rebased heads until a council round is recorded on that
+review's head or later. A delta's count comes from distinct P1/P2 defects in
+that posted delta review's own `**scope:** delta` findings, including body-only
+findings. A full review's count comes from its own posted inline comments, so a
+body-only full finding is not counted. `escalate_reason` names the count and
+review id (`full review <id>: <n> P1, <m> P2` for a full review). The PR's
+comments are read once per `rounds` call. Callers that do not read the new
+fields still receive the same `round`.
 The marker is a workflow guard, not an authentication boundary; see
 `burn-down` § Per item step 3. For manual completion, use
-`reference/patterns/review-council.md` § PR delta escalation.
+`reference/patterns/review-council.md` § PR escalation.
 
 **A rebase is mapped, not refused.** When the tail from the last reviewed head
 diverged, or is ahead with a merge in it, `rounds` matches the head's commits

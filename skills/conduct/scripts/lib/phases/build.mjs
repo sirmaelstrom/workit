@@ -33,7 +33,7 @@ import { bootstrapBrief } from '../bootstrap.mjs';
 import { gateFailureKind } from '../gate-env.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
-  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions,
+  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, reviewCrosses,
   inspectionProblem, t2Actions, threadReplyActions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
@@ -1407,13 +1407,15 @@ function quietRecord(state, wp, result, deps) {
 // The files an amendment changed since the delta baseline, a commit sha.
 const amendDiff = (wp, since) => shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', '--end-of-options', since, '{pr.head}']);
 
-// A T1 delta review with two or more majors is counted again after adjudication.
+// A T1 delta review with two or more majors, or a T1 full review with a P1 or
+// two P2s, is counted again after adjudication.
 function deltaCountActs(state, wp) {
   const latest = (wp.reviews ?? []).at(-1);
-  if (!(latest?.scope === 'delta' && latest.tier === 'T1' && latest.majorFindings >= 2 && latest.reviewId != null)) return [];
+  if (!(latest?.tier === 'T1' && latest.reviewId != null && reviewCrosses(latest))) return [];
+  const full = latest.scope === 'full';
   return [shell('review', 'delta-count', ['node', join(state.pluginRoot, 'skills', 'slim-review', 'scripts', 'pr-review.mjs'), 'delta-count',
-    '--pr', String(wp.pr.number), '--repo', state.intent.repo.remote, '--review-id', String(latest.reviewId)],
-  { land: { reviewId: latest.reviewId, head: latest.head } })];
+    '--pr', String(wp.pr.number), '--repo', state.intent.repo.remote, '--review-id', String(latest.reviewId), ...(full ? ['--scope', 'full'] : [])],
+  { land: { reviewId: latest.reviewId, head: latest.head, ...(full ? { scope: 'full' } : {}) } })];
 }
 
 function expand(state, wp, deps) {

@@ -129,14 +129,18 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      conduct asks `rounds` too, when a claim is refused as already reviewed
      (`recoverAction`), and imports `pr-review-rounds.mjs` in process
      (slim-review § 4, "Who follows the cap today").
-     If the delta pass finds at least two distinct new P1/P2 defects inside the
-     amendment, review the amended whole PR in a T2 council round. A `--dup-of`
-     pair counts once; guard comments and P3s do not count. The obligation ends
-     when a council round is recorded on the delta head or a later head. The
-     council cap then applies. This marker guards the workflow against honest
-     mistakes. It is not a security boundary against a same-user agent forging
-     a record; that boundary belongs to quest 11c2d46a.
-     With fewer than two, the T1 cap stands.
+     Two findings escalate a T1 PR to a T2 council round on the amended whole
+     PR. The first is a full review (round one, or a forced second full read)
+     that posts at least one P1 or at least two distinct P2s. The second is a
+     delta pass that finds at least two distinct new P1/P2 defects inside the
+     amendment. The crossing review's findings go to the lane as an amendment
+     first. A `--dup-of` pair counts once; guard comments and P3s do not count;
+     every P2 counts, behavior or not. The obligation ends when a council round
+     is recorded on the crossing review's head or a later head. The council cap
+     then applies. This marker guards the workflow against honest mistakes. It
+     is not a security boundary against a same-user agent forging a record;
+     that boundary belongs to quest 11c2d46a.
+     Below both thresholds, the T1 cap stands.
    - **T2 — full council.** Fired when the change **touches a contract or an
      invariant other code or stored data depends on** (an API, a schema, a
      save or replay format, a wire protocol, determinism), or changes a
