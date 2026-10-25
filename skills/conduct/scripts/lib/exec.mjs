@@ -1,7 +1,8 @@
 // The executor primitives. `execute` and `defaultCodexExe` are imported from
 // their owners, never copied: a fix there reaches the conductor too.
-import { spawn } from 'node:child_process';
-import { openSync, closeSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { openSync, closeSync, existsSync } from 'node:fs';
+import { extname, join, win32 } from 'node:path';
 import { execute } from '../../../../scripts/lane.mjs';
 import { defaultCodexExe } from '../../../slim-review/scripts/pr-review.mjs';
 
@@ -20,6 +21,111 @@ export function spawnDetached(program, args, { cwd, logPath, env } = {}) {
   } finally {
     closeSync(fd);
   }
+}
+
+// Kills a process and everything it started. A gate command runs under
+// cmd.exe /c or sh -c, and killing that root alone leaves its children
+// running. win32: taskkill /T; POSIX: the root leads its own process group
+// (runArgv spawns it detached), and the group is killed.
+export function killProcessTree(pid, { platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // Already gone: the kill is best effort.
+  }
+}
+
+// win32: true when a command name positively resolves to an existing .cmd or
+// .bat file (npm, npx), which no shell-free spawn can start; false for
+// anything not found, which spawn reports itself. A path is run as given: a
+// shim only when it names an existing .cmd/.bat. A bare name is looked up in
+// cwd, then PATH: as given when it carries .cmd/.bat, else with each PATHEXT
+// extension, where a .exe or .com anywhere is what spawn finds and runs, so
+// only a name with none of those is a shim.
+export function windowsShim(name, { env = process.env, cwd = process.cwd(), exists = existsSync } = {}) {
+  const ext = extname(name).toLowerCase();
+  const script = ext === '.cmd' || ext === '.bat';
+  if (/[\\/]/.test(name)) return script && exists(win32.isAbsolute(name) ? name : join(cwd, name));
+  if (ext && !script) return false;
+  const lookup = (key) => env[Object.keys(env).find((k) => k.toUpperCase() === key) ?? key];
+  const dirs = [cwd, ...(lookup('PATH') ?? '').split(';')].filter(Boolean);
+  if (script) return dirs.some((dir) => exists(join(dir, name)));
+  const exts = (lookup('PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).map((e) => e.toLowerCase());
+  let shim = false;
+  for (const dir of dirs) {
+    for (const e of exts) {
+      if (!exists(join(dir, `${name}${e}`))) continue;
+      if (e === '.exe' || e === '.com') return false;
+      if (e === '.cmd' || e === '.bat') shim = true;
+    }
+  }
+  return shim;
+}
+
+// A `shell` action's argv as drive runs it (only drive: the hand path runs
+// `execute`): no shell, the action's env added, stdin closed. A spawn failure
+// is `spawnError` (its code) and `spawnMessage`, and no exit code: the program
+// never ran, so there is no result to record. A timeout is `timedOut`, never a
+// result. While the root has not exited, its tree is killed once, best effort
+// (`killAttempted`), and up to killGraceMs is given for its exit
+// (`rootExited`); once the root has exited, its pid is never killed (it may
+// be another process's now). Either way the parent's pipe ends are destroyed
+// and the child unreferenced, so a survivor holding them keeps no caller alive.
+export function runArgv(program, args, { cwd, env, timeout, platform = process.platform, killTree = killProcessTree, killGraceMs = 5000 } = {}) {
+  return new Promise((done) => {
+    const out = [], err = [];
+    const text = () => ({ stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') });
+    let settled = false, exited = false, timedOut = false, killAttempted = false, timer = null, grace = null;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(grace);
+      done(value);
+    };
+    const failed = (error) => {
+      const { stdout, stderr } = text();
+      settle({ code: null, stdout, stderr: `${error.message}\n${stderr}`, spawnError: error.code ?? 'UNKNOWN', spawnMessage: error.message });
+    };
+    const timedOutResult = () => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.unref();
+      settle({ code: null, ...text(), timedOut: true, killAttempted, rootExited: exited, pid: child.pid });
+    };
+    let child;
+    try {
+      child = spawn(program, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: platform !== 'win32' });
+    } catch (error) {
+      failed(error);
+      return;
+    }
+    child.stdout.on('data', (chunk) => out.push(chunk));
+    child.stderr.on('data', (chunk) => err.push(chunk));
+    child.on('error', (error) => { if (child.pid === undefined) failed(error); });
+    child.on('exit', () => {
+      exited = true;
+      if (timedOut) timedOutResult();
+    });
+    child.on('close', (code) => { if (!timedOut) settle({ code: code ?? 1, ...text() }); });
+    if (timeout) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        if (exited) return timedOutResult();
+        killAttempted = true;
+        try {
+          killTree(child.pid, { platform });
+        } catch {
+          // Best effort: the stop reports the attempt, not its outcome.
+        }
+        grace = setTimeout(timedOutResult, killGraceMs);
+      }, timeout);
+    }
+  });
 }
 
 export function pidAlive(pid) {

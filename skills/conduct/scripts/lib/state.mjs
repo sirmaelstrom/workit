@@ -5,9 +5,15 @@ import { join, dirname, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 export const SCHEMA_VERSION = 1;
-// A lock held from another host (whose pid cannot be checked) older than this
-// is stale. Every verb is one-shot and bounded (ASSUMPTION).
+// A state.lock held from another host (whose pid cannot be checked) older
+// than this is stale. Every verb is one-shot and bounded (ASSUMPTION).
 export const LOCK_STALE_MS = 60000;
+// The lock a driver holds for a whole drive. It is a lease, renewed this
+// often while its holder runs, but from another host it is never stale: that
+// host's clock is not this one's, so the age of a renewal proves nothing.
+// Only `conduct.mjs drive --break-lock` removes it.
+export const DRIVE_LOCK = 'drive.lock';
+export const LEASE_RENEW_MS = 20000;
 const LOCK_POLL_MS = 50;
 
 export class ConductError extends Error {
@@ -166,10 +172,28 @@ function readLock(path, deps) {
 }
 
 // Stale only when the holder is shown gone: a dead pid on this host. Age
-// decides only for a holder on another host, whose pid cannot be checked.
-function lockIsStale(holder, deps) {
+// decides only for a state.lock holder on another host, whose pid cannot be
+// checked; another host's drive.lock is never stale.
+function lockIsStale(holder, deps, lock) {
   if (holder.host === deps.hostname) return !deps.pidAlive(holder.pid);
+  if (lock === DRIVE_LOCK) return false;
   return deps.now() - Date.parse(holder.at) > LOCK_STALE_MS;
+}
+
+// How the conductor clears another host's drive.lock, for a refusal to name.
+export function breakLockHint(runDir, lock, holder, deps) {
+  if (lock !== DRIVE_LOCK || !holder || holder.host === deps.hostname) return '';
+  return `; another host's drive.lock is never taken over: if that driver is gone, run conduct.mjs drive --run ${runDir} --break-lock --why "<reason>"`;
+}
+
+// The holder of a lock file that is held: null when the file is absent or
+// its holder is shown gone, { unreadable: true } when it cannot be read.
+export function liveLock(runDir, lock, deps) {
+  const path = join(runDir, lock);
+  if (!deps.exists(path)) return null;
+  const holder = readLock(path, deps);
+  if (!holder) return { unreadable: true, path };
+  return lockIsStale(holder, deps, lock) ? null : holder;
 }
 
 // One writer at a time: every state transaction (load, change, save) runs
@@ -179,13 +203,18 @@ function lockIsStale(holder, deps) {
 // removes the lock only while it still carries this writer's token. Two
 // contenders that both judge one dead holder's lock stale can race on the
 // takeover (accepted for v1: it needs a crash and two contenders; ASSUMPTION).
-export async function withStateLock(runDir, deps, fn) {
-  const path = join(runDir, 'state.lock');
+// `lock` names another lock file under the same rules (drive.lock: one
+// driver). fn gets the holder's token, which a holder can re-stamp the lock with.
+// With `lease`, the lock carries renewedAt, and a timer re-stamps it every
+// LEASE_RENEW_MS while fn runs, async work included.
+export async function withStateLock(runDir, deps, fn, { lock = 'state.lock', lease = false } = {}) {
+  const path = join(runDir, lock);
   const token = randomBytes(8).toString('hex');
   const temp = `${path}.${token}.tmp`;
   const waitMs = deps.lockWaitMs ?? 2000;
   try {
-    deps.write(temp, JSON.stringify({ pid: deps.pid, host: deps.hostname, at: deps.timestamp(), token }));
+    const at = deps.timestamp();
+    deps.write(temp, JSON.stringify({ pid: deps.pid, host: deps.hostname, at, ...(lease ? { renewedAt: at } : {}), token }));
   } catch (error) {
     if (error.code === 'ENOENT') throw new ConductError(2, `no run directory at ${runDir}`);
     throw error;
@@ -198,13 +227,13 @@ export async function withStateLock(runDir, deps, fn) {
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
         const holder = readLock(path, deps);
-        if (holder && lockIsStale(holder, deps)) {
+        if (holder && lockIsStale(holder, deps, lock)) {
           deps.remove(path);
           continue;
         }
         if (attempt * LOCK_POLL_MS >= waitMs) {
           throw new ConductError(2, holder
-            ? `the run is locked by pid ${holder.pid} on ${holder.host} since ${holder.at}; retry`
+            ? `${lock === 'state.lock' ? 'the run is locked' : `${lock} is held`} by pid ${holder.pid} on ${holder.host} since ${holder.at}; retry${breakLockHint(runDir, lock, holder, deps)}`
             : `the run's lock ${path} is unreadable; retry, or remove it if no conductor verb is running`);
         }
         await deps.sleep(LOCK_POLL_MS);
@@ -213,9 +242,23 @@ export async function withStateLock(runDir, deps, fn) {
   } finally {
     deps.remove(temp);
   }
+  const renew = () => {
+    try {
+      const holder = readLock(path, deps);
+      if (holder?.token !== token) return;
+      const stamp = `${path}.${token}.renew.tmp`;
+      deps.write(stamp, JSON.stringify({ ...holder, renewedAt: deps.timestamp() }));
+      deps.rename(stamp, path);
+    } catch {
+      // A missed renewal is retried on the next tick; the lease outlasts several.
+    }
+  };
+  const renewal = lease ? setInterval(renew, deps.leaseRenewMs ?? LEASE_RENEW_MS) : null;
+  renewal?.unref?.();
   try {
-    return await fn();
+    return await fn({ token });
   } finally {
+    clearInterval(renewal);
     if (readLock(path, deps)?.token === token) deps.remove(path);
   }
 }

@@ -3,16 +3,16 @@
 // does one bounded thing, writes state, appends to events.jsonl and exits; the
 // agent running the skill drives the loop: intake → [next → act → record]*.
 // `next` never runs a program: it hands the agent an action to perform.
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendFileSync, readdirSync, rmSync, linkSync, truncateSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendFileSync, readdirSync, rmSync, linkSync, truncateSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { isatty } from 'node:tty';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execute, spawnDetached, pidAlive, defaultCodexExe } from './lib/exec.mjs';
+import { execute, runArgv, windowsShim, spawnDetached, pidAlive, defaultCodexExe } from './lib/exec.mjs';
 import {
   ConductError, SCHEMA_VERSION, STEPS, STEP_SEAM, TERMINAL_PHASES,
-  appendEvent, loadState, refuseRetired, resolveRunDir, saveState, slugify, statePath, withStateLock,
+  appendEvent, breakLockHint, liveLock, loadState, refuseRetired, resolveRunDir, saveState, slugify, statePath, withStateLock,
 } from './lib/state.mjs';
 import { ADAPTERS, AGENTS, BACKENDS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
@@ -33,6 +33,8 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   next --run <dir> [--custody <n>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
+  drive --run <dir> [--max-steps <n>]   (perform shell, wait and template author actions; stop at the first that needs the conductor)
+  drive --run <dir> --break-lock --why <text>   (remove another host's drive.lock, or a dead driver's on this host)
   status --run <dir>
   analyze --run <dir>
   ratify --run <dir> --wp <id> --paths <path,path> --why <text>
@@ -46,12 +48,12 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   quiet [--samples <n>] [--interval-ms <ms>] [--max-busy <percent>]   (no run: is this host's CPU quiet enough to re-run a gate)
   bootstrap --repo <abs> [--write] [--offline]   (no run: check a repo against the greenfield manifest)`;
 
-const BOOLEAN_FLAGS = new Set(['manual', 'write', 'offline']);
+const BOOLEAN_FLAGS = new Set(['manual', 'write', 'offline', 'break-lock']);
 const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'backend', 'backend-why', 't3-project', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan']);
+  'runs-root', 'run', 'resume', 'action', 'max-steps', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -102,14 +104,40 @@ function openRun(flags, deps) {
   return { runDir, state };
 }
 
+// A state.json names the run dir it was made in, and its pending argv and
+// paths point there: a copied run dir still names the original. drive and
+// record act only on the run --run names, so a copy is refused before
+// anything runs or is written. Paths compare by realpath, so a junction, a
+// symlink or a \\?\ path to the run is the run, then case-folded on win32.
+function refuseForeignState(runDir, state, deps) {
+  if (typeof state.runDir !== 'string') return;
+  if (!deps.exists(state.runDir)) throw new ConductError(2, `state.runDir ${state.runDir} does not exist (was this run moved?)`);
+  const fold = (path) => (deps.platform === 'win32' ? deps.realpath(path).toLowerCase() : deps.realpath(path));
+  if (fold(state.runDir) !== fold(runDir)) throw new ConductError(2, `this state belongs to ${state.runDir}; refusing to act on it from ${runDir}`);
+}
+
+// While a live driver holds drive.lock, the verbs that move the pending
+// action or the plan are refused: the driver's next step would act on a run
+// that moved under it. The driver's own in-process calls carry its token. A
+// shell action that is itself a conduct.mjs verb (lane, land, analyze) is
+// not one of these and runs.
+function refuseWhileDriven(runDir, deps, verb) {
+  const holder = liveLock(runDir, 'drive.lock', deps);
+  if (!holder || (deps.driveToken && holder.token === deps.driveToken)) return;
+  if (holder.unreadable) throw new ConductError(5, `${verb}: ${holder.path} is unreadable; remove it if no drive is running, then retry`);
+  throw new ConductError(5, `${verb}: a drive holds this run (pid ${holder.pid} on ${holder.host} since ${holder.at}${holder.action ? `, executing ${holder.action}` : ''}); wait for it to stop, or stop it, then retry${breakLockHint(runDir, 'drive.lock', holder, deps)}`);
+}
+
 // A state transaction: load, change and save under the run's lock. While a
 // rotation is open only custody moves the run: every other writer is refused
 // unless it is one of next, record (custody steps only), answer (the
-// operator's) or rotate (which names the open rotation itself).
-function transact(flags, deps, fn, { duringRotation = false } = {}) {
+// operator's) or rotate (which names the open rotation itself). `driven`
+// names a verb refused while a drive runs.
+function transact(flags, deps, fn, { duringRotation = false, driven = null } = {}) {
   return withStateLock(runDirFlag(flags), deps, () => {
     const { state } = openRun(flags, deps);
     refuseRetired(state);
+    if (driven) refuseWhileDriven(runDirFlag(flags), deps, driven);
     const rotation = duringRotation ? null : openRotation(state);
     if (rotation) throw new ConductError(5, `rotation ${rotation.attempt} is open: custody comes first (next), and nothing else changes the run until it is taken or cancelled`);
     return fn(state);
@@ -378,7 +406,7 @@ async function next(tokens, deps) {
     if (custody !== null) custodyFence(state, custody);
     if (state.pending?.handBack) resumeHandBack(state, deps);
     return { out: { ok: true, action: await emit(state, deps, { custody }) } };
-  }, { duringRotation: true });
+  }, { duringRotation: true, driven: 'next' });
 }
 
 function readResult(flags, deps) {
@@ -464,6 +492,7 @@ function filedBy(state, id) {
 async function record(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
+    refuseForeignState(runDirFlag(flags), state, deps);
     const id = stringFlag(flags, 'action');
     const wantsReplan = flags.replan !== undefined;
     // A replay of the last record changes nothing and re-emits the next action.
@@ -521,7 +550,7 @@ async function record(tokens, deps) {
     const filed = replan ? fileReplan(state, deps, id, replan) : null;
     const next = await emitAfterRecord(state, deps, id);
     return { out: { ok: true, phase: state.phase, action: next, ...(filed ? { replan: filed } : {}) } };
-  }, { duringRotation: true });
+  }, { duringRotation: true, driven: 'record' });
 }
 
 // An operator's answer to a touch: a core touch, or a spine touch filed as
@@ -541,6 +570,82 @@ async function answer(tokens, deps) {
     saveState(state, deps);
     return { out: { ok: true, touch } };
   }, { duringRotation: true });
+}
+
+// drive (lib/drive.mjs) reaches the run only through these verbs, in
+// process: its pending action is next's, minus consuming a hand-back, and
+// refused while a rotation is open; its results go through record. drive.lock
+// keeps a second driver off the run, and the verbs that move the run off it
+// while it runs (refuseWhileDriven); the driver's own calls carry its token.
+// It is a lease, renewed while the drive runs; another host's is never taken
+// over (lib/state.mjs DRIVE_LOCK), only broken by --break-lock.
+// state.lock is taken per verb as always, so a shell action's own conduct.mjs
+// verb can take it. Before each step, claim re-reads state.pending under
+// state.lock and stamps drive.lock with the action id it is about to execute.
+async function driveVerb(tokens, deps) {
+  const flags = parseFlags(tokens);
+  const runDir = runDirFlag(flags);
+  if (flags['break-lock']) return breakDriveLock(runDir, flags, deps);
+  const maxSteps = flags['max-steps'] === undefined ? undefined : Number(flags['max-steps']);
+  if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 0)) throw new ConductError(2, '--max-steps must be a whole number');
+  refuseForeignState(runDir, openRun(flags, deps).state, deps);
+  const { drive, timeoutOverride } = await loadModule(deps, 'lib/drive.mjs', 'module');
+  timeoutOverride(deps.env);
+  const call = async (fn) => {
+    try {
+      const { code = 0, out } = await fn();
+      return { code, out };
+    } catch (error) {
+      if (!(error instanceof ConductError)) throw error;
+      return { code: error.code, out: { ok: false, error: error.message, ...(error.details ?? {}) } };
+    }
+  };
+  const lockPath = join(runDir, 'drive.lock');
+  return withStateLock(runDir, deps, ({ token }) => {
+    const driver = { ...deps, driveToken: token };
+    const claim = (id) => withStateLock(runDir, driver, () => {
+      const found = loadState(runDir, driver).pending?.id ?? null;
+      if (found === id) {
+        const temp = `${lockPath}.${token}.claim.tmp`;
+        driver.write(temp, JSON.stringify({ ...JSON.parse(driver.read(lockPath)), action: id }));
+        driver.rename(temp, lockPath);
+      }
+      return { out: { ok: true, found } };
+    });
+    return drive({ runDir, maxSteps }, {
+      ...driver,
+      pending: () => call(() => transact({ run: runDir }, driver, async (state) => ({ out: { ok: true, action: await emit(state, driver) } }))),
+      claim: (id) => call(() => claim(id)),
+      record: (id, result) => call(() => record(['--run', runDir, '--action', id, '--result', JSON.stringify(result)], driver)),
+    });
+  }, { lock: 'drive.lock', lease: true });
+}
+
+// The conductor's removal of a drive.lock no driver will release: another
+// host's, an unreadable one, or one whose pid on this host is dead. A live
+// holder on this host is refused. The old holder and the why are logged as a
+// drive-lock-broken event before the lock goes.
+function breakDriveLock(runDir, flags, deps) {
+  const why = stringFlag(flags, 'why');
+  return withStateLock(runDir, deps, () => {
+    const { state } = openRun(flags, deps);
+    refuseForeignState(runDir, state, deps);
+    const path = join(runDir, 'drive.lock');
+    if (!deps.exists(path)) throw new ConductError(2, `--break-lock: no drive.lock in ${runDir}`);
+    let holder;
+    try {
+      holder = JSON.parse(deps.read(path));
+    } catch {
+      holder = { unreadable: true };
+    }
+    if (holder.host === deps.hostname && deps.pidAlive(holder.pid)) {
+      throw new ConductError(5, `--break-lock: drive.lock is held by pid ${holder.pid} on ${holder.host}, which is alive; stop that drive instead`);
+    }
+    appendEvent(state, deps, { event: 'drive-lock-broken', source: 'verb', data: { holder, why } });
+    saveState(state, deps);
+    deps.remove(path);
+    return { out: { ok: true, broken: holder, why } };
+  });
 }
 
 async function status(tokens, deps) {
@@ -595,7 +700,7 @@ async function ratifyVerb(tokens, deps) {
     const out = module.ratify(state, { wpId, paths, why }, deps);
     saveState(state, deps);
     return { out: { ok: true, ...out } };
-  });
+  }, { driven: 'ratify' });
 }
 
 // The conductor puts a blocked or held WP back at a stage the build runs
@@ -620,7 +725,7 @@ async function resetWpVerb(tokens, deps) {
     const out = module.resetWp(state, { wpId, to, why, baseline }, deps, { beforeChange });
     saveState(state, deps);
     return { out: { ok: true, ...out, next: `conduct.mjs next --run ${state.runDir}` } };
-  });
+  }, { driven: 'reset-wp' });
 }
 
 // A mid-flight re-plan inside the pre-approval (lib/phases/build.mjs replan):
@@ -643,7 +748,7 @@ async function replanVerb(tokens, deps) {
       ? 'Run next: its first action is applying this re-plan (ratify, reset-wp, a ruling), before any other build work.'
       : `Run next: touch ${out.touch} is open and dispatch halts until the operator answers.`;
     return { out: { ok: true, ...out, next: `conduct.mjs next --run ${state.runDir}`, then } };
-  });
+  }, { driven: 'replan' });
 }
 
 async function ciChecksVerb(tokens, deps) {
@@ -667,6 +772,7 @@ async function upgradeRootVerb(tokens, deps) {
     const state = loadState(runDir, deps);
     // It rewrites the run's paths for a resume, so a run no resume can take is refused, not rewritten.
     refuseRetired(state);
+    refuseWhileDriven(runDir, deps, 'upgrade-root');
     if (openRotation(state)) throw new ConductError(5, 'upgrade-root: a rotation is open; take custody (next) before moving the run');
     if (state.pending && !['author', 'wait'].includes(state.pending.kind)) throw new ConductError(5, `upgrade-root: record pending action ${state.pending.id} first; executable actions cannot be migrated safely (upgrade at an author or wait action)`);
     if (state.pluginRoot === deps.pluginRoot) return { out: { ok: true, unchanged: true, pluginRoot: state.pluginRoot } };
@@ -713,7 +819,7 @@ async function rotateVerb(tokens, deps) {
     const out = rotate(state, { why: text('why'), model: text('model'), effort: text('effort'), name: text('name') }, deps);
     saveState(state, deps);
     return { out: { ok: true, ...out } };
-  }, { duringRotation: true });
+  }, { duringRotation: true, driven: 'rotate' });
 }
 
 // The quiet-host probe a gate retry runs first (lib/gate-env.mjs): exit 0
@@ -736,7 +842,7 @@ async function quietVerb(tokens, deps) {
 }
 
 const VERBS = {
-  intake, next, record, answer, status, analyze, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
+  intake, next, record, answer, drive: driveVerb, status, analyze, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
   'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb, rotate: rotateVerb, replan: replanVerb,
   lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap', 'stop-check', 'hook'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
@@ -752,12 +858,15 @@ const VERBS = {
 export async function runConduct(argv, overrides = {}) {
   const deps = {
     exec: execute,
+    runArgv,
+    windowsShim,
     read: (path) => readFileSync(path, 'utf8'),
     write: (path, value) => writeFileSync(path, value, 'utf8'),
     link: linkSync,
     truncate: truncateSync,
     remove: (path) => rmSync(path, { force: true }),
     exists: existsSync,
+    realpath: (path) => realpathSync.native(path),
     mkdir: (path) => mkdirSync(path, { recursive: true }),
     rename: renameSync,
     append: (path, value) => appendFileSync(path, value, 'utf8'),
