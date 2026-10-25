@@ -563,6 +563,8 @@ async function answer(tokens, deps) {
 // refused while a rotation is open; its results go through record. drive.lock
 // keeps a second driver off the run, and the verbs that move the run off it
 // while it runs (refuseWhileDriven); the driver's own calls carry its token.
+// It is a lease: renewed while the drive runs, so a live driver on another
+// host is not judged stale mid-shell.
 // state.lock is taken per verb as always, so a shell action's own conduct.mjs
 // verb can take it. Before each step, claim re-reads state.pending under
 // state.lock and stamps drive.lock with the action id it is about to execute.
@@ -600,7 +602,7 @@ async function driveVerb(tokens, deps) {
       claim: (id) => call(() => claim(id)),
       record: (id, result) => call(() => record(['--run', runDir, '--action', id, '--result', JSON.stringify(result)], driver)),
     });
-  }, { lock: 'drive.lock' });
+  }, { lock: 'drive.lock', lease: true });
 }
 
 async function status(tokens, deps) {

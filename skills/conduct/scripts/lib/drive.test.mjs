@@ -324,6 +324,48 @@ test('drive: each conductor verb that moves the run is refused while a live driv
   assert.equal((await f.run(['next', '--run', f.runDir])).code, 0);
 });
 
+test('drive: another host\'s driver that started over 60 s ago but renewed its lease recently is live: record and a second drive refuse', async (t) => {
+  const f = fixture(t, [TOOL]);
+  assert.equal((await f.run(['next', '--run', f.runDir])).code, 0);
+  const base = Date.parse('2026-10-25T12:00:00.000Z');
+  const lock = (renewedAt) => writeFileSync(join(f.runDir, 'drive.lock'), JSON.stringify({
+    pid: 4242, host: 'another-host', at: new Date(base - 90000).toISOString(), renewedAt: new Date(renewedAt).toISOString(), token: 'other', action: '1-start',
+  }));
+  lock(base - 5000);
+  const recorded = await f.run(['record', '--run', f.runDir, '--action', '1-start', '--result', '{"ok":true}']);
+  assert.equal(recorded.code, 5, recorded.stdout);
+  assert.match(out(recorded).error, /^record: a drive holds this run \(pid 4242 on another-host/);
+  assert.equal(state(f).lastRecorded, null);
+  const second = await f.drive();
+  assert.equal(second.code, 2, second.stdout);
+  assert.match(out(second).error, /drive\.lock is held by pid 4242 on another-host/);
+  // A lease not renewed for over 120 s is stale: that driver is gone.
+  lock(base - 130000);
+  assert.equal((await f.run(['next', '--run', f.runDir])).code, 0);
+});
+
+test('drive: the driver renews drive.lock\'s lease while a shell runs, keeping the action it is executing', async (t) => {
+  const seen = [];
+  let f;
+  f = fixture(t, [SHELL, TOOL], {
+    shell: async () => {
+      seen.push(JSON.parse(readFileSync(join(f.runDir, 'drive.lock'), 'utf8')));
+      await new Promise((done) => setTimeout(done, 300));
+      seen.push(JSON.parse(readFileSync(join(f.runDir, 'drive.lock'), 'utf8')));
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    },
+  });
+  const result = await f.run(['drive', '--run', f.runDir], { leaseRenewMs: 50 });
+  assert.equal(result.code, 0, result.stdout);
+  const [before, after] = seen;
+  assert.equal(before.renewedAt !== undefined, true, 'a new lease starts renewed');
+  assert.ok(Date.parse(after.renewedAt) > Date.parse(before.renewedAt), `renewed: ${before.renewedAt} -> ${after.renewedAt}`);
+  assert.equal(after.at, before.at, 'the start time stays');
+  assert.equal(after.token, before.token);
+  assert.equal(after.action, '1-gate-cmd', 'renewal keeps the claimed action');
+  assert.equal(existsSync(join(f.runDir, 'drive.lock')), false, 'released after the drive');
+});
+
 test('drive: a driver that finds pending moved under it stops before running anything', async (t) => {
   let f;
   let moved = false;

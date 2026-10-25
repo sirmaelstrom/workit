@@ -8,6 +8,11 @@ export const SCHEMA_VERSION = 1;
 // A lock held from another host (whose pid cannot be checked) older than this
 // is stale. Every verb is one-shot and bounded (ASSUMPTION).
 export const LOCK_STALE_MS = 60000;
+// A leased lock (drive.lock, held for a whole drive) is renewed this often
+// while its holder runs, and from another host is stale only once its
+// renewedAt is older than LEASE_STALE_MS.
+export const LEASE_RENEW_MS = 20000;
+export const LEASE_STALE_MS = 120000;
 const LOCK_POLL_MS = 50;
 
 export class ConductError extends Error {
@@ -166,9 +171,11 @@ function readLock(path, deps) {
 }
 
 // Stale only when the holder is shown gone: a dead pid on this host. Age
-// decides only for a holder on another host, whose pid cannot be checked.
+// decides only for a holder on another host, whose pid cannot be checked:
+// a leased holder's last renewal, any other holder's start.
 function lockIsStale(holder, deps) {
   if (holder.host === deps.hostname) return !deps.pidAlive(holder.pid);
+  if (holder.renewedAt) return deps.now() - Date.parse(holder.renewedAt) > LEASE_STALE_MS;
   return deps.now() - Date.parse(holder.at) > LOCK_STALE_MS;
 }
 
@@ -191,13 +198,16 @@ export function liveLock(runDir, lock, deps) {
 // takeover (accepted for v1: it needs a crash and two contenders; ASSUMPTION).
 // `lock` names another lock file under the same rules (drive.lock: one
 // driver). fn gets the holder's token, which a holder can re-stamp the lock with.
-export async function withStateLock(runDir, deps, fn, { lock = 'state.lock' } = {}) {
+// With `lease`, the lock carries renewedAt, and a timer re-stamps it every
+// LEASE_RENEW_MS while fn runs, async work included.
+export async function withStateLock(runDir, deps, fn, { lock = 'state.lock', lease = false } = {}) {
   const path = join(runDir, lock);
   const token = randomBytes(8).toString('hex');
   const temp = `${path}.${token}.tmp`;
   const waitMs = deps.lockWaitMs ?? 2000;
   try {
-    deps.write(temp, JSON.stringify({ pid: deps.pid, host: deps.hostname, at: deps.timestamp(), token }));
+    const at = deps.timestamp();
+    deps.write(temp, JSON.stringify({ pid: deps.pid, host: deps.hostname, at, ...(lease ? { renewedAt: at } : {}), token }));
   } catch (error) {
     if (error.code === 'ENOENT') throw new ConductError(2, `no run directory at ${runDir}`);
     throw error;
@@ -225,9 +235,23 @@ export async function withStateLock(runDir, deps, fn, { lock = 'state.lock' } = 
   } finally {
     deps.remove(temp);
   }
+  const renew = () => {
+    try {
+      const holder = readLock(path, deps);
+      if (holder?.token !== token) return;
+      const stamp = `${path}.${token}.renew.tmp`;
+      deps.write(stamp, JSON.stringify({ ...holder, renewedAt: deps.timestamp() }));
+      deps.rename(stamp, path);
+    } catch {
+      // A missed renewal is retried on the next tick; the lease outlasts several.
+    }
+  };
+  const renewal = lease ? setInterval(renew, deps.leaseRenewMs ?? LEASE_RENEW_MS) : null;
+  renewal?.unref?.();
   try {
     return await fn({ token });
   } finally {
+    clearInterval(renewal);
     if (readLock(path, deps)?.token === token) deps.remove(path);
   }
 }
