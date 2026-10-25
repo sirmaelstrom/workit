@@ -17,7 +17,7 @@ end up attached to the line they are about, where review and merge already happe
 
 | Reach for | When | Cost |
 |---|---|---|
-| **this skill** | T1 code-diff PR boundaries. Use `burn-down` § Per item step 3 for T0/T2 triggers and delta escalation. | $0 plan-covered, one spawn, ~2–5 min |
+| **this skill** | T1 code-diff PR boundaries. Use `burn-down` § Per item step 3 for T0/T2 triggers and delta escalation. | $0 plan-covered, one spawn, ~4–8 min a full round, less for a delta |
 | `/review` | You want several perspectives in-session and a convergence read before opening a PR | in-session Opus subagents |
 | `council_review` (review-council MCP) | Complex multi-component PRs and spec surfaces — fan-out, synthesis, adversarial challenge | 4–6 lenses |
 
@@ -71,7 +71,8 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens \
 **The loop runs two lenses and posts both** (operator ruling 2026-09-09, quest
 `bcc11983`): invoke the verb once per lens with a distinct `--out`, then hand
 both files to `post`. `--lens` is `codex` (GPT-6 Sol @ high since 2026-09-23;
-GPT-5.6 Terra before), `astra` (GPT-6 Astra @ low), or `opus`; `--reasoning` overrides the per-lens default; `--measure-log`
+GPT-5.6 Terra before), `astra` (GPT-6 Astra @ high on a full round, @ low on a
+`--since` delta round), or `opus`; `--reasoning` overrides the per-lens default; `--measure-log`
 overrides the per-lens JSONL destination; `--dry-run` prints the resolved argv
 and prompt path without running a reviewer. Use `--prompt-out <path>` when you
 need to retain that exact grounded prompt for inspection.
@@ -164,11 +165,10 @@ Non-negotiable flags, each for a measured reason:
   correctness, and Luna returns confident wrong PASSes on those. See
   `codex-delegate`'s verdict-vs-Luna threshold. High is the depth the seat was
   measured at; the CLI's own default for gpt-6-sol is medium.
-- **Astra `--model gpt-6-astra` at low effort.** Low was the CLI's own default
-  under codex-cli 0.153.4 (0.155.1 defaults to medium, so the pin now matters)
-  and lost nothing but a path prefix on the measured arms; the prompt now
-  carries the one-line repo-relative-paths instruction that fixed that. Pin
-  `--reasoning high` only when a low handback shows a coverage or locator gap.
+- **Astra `--model gpt-6-astra` at high effort on a full round, low on a
+  `--since` delta round.** High catches defects low misses on a full PR; delta
+  rounds were not measured at high, so they keep low. The prompt carries the
+  one-line repo-relative-paths instruction that fixed low's dropped path prefix.
 - **`--sandbox danger-full-access`.** `--sandbox read-only` is broken on this
   Windows box — the sandbox runner dies at the first child spawn and the model
   returns a plausible **ungrounded** answer with no surfaced error. The read-only

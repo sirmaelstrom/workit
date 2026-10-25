@@ -242,12 +242,19 @@ const SEVERITIES = new Set(['P1', 'P2', 'P3']);
 // replayed on the same #620 prompt, Sol@high found all three known defects
 // with no false finding, the only arm of the three to do so. The lens NAME
 // stays `codex` — it is the seat, and posted reviews and the measurement log
-// key on it.
+// key on it. Astra reviews a full round at high and an amendment check
+// (`--since`) at low: `deltaReasoning`, where set, is the delta-round effort.
 const LENS_MODELS = {
   codex: { model: 'gpt-6-sol', reasoning: 'high' },
-  astra: { model: 'gpt-6-astra', reasoning: 'low' },
+  astra: { model: 'gpt-6-astra', reasoning: 'high', deltaReasoning: 'low' },
   opus: { model: 'opus', reasoning: 'low' },
 };
+
+/** A lens's default reasoning effort for a full round, or a delta round when `delta` is set. */
+export function lensReasoning(lens, { delta = false } = {}) {
+  const entry = LENS_MODELS[lens];
+  return (delta && entry.deltaReasoning) || entry.reasoning;
+}
 const LENSES = new Set(Object.keys(LENS_MODELS));
 const LENS_LIST = [...LENSES].join('|');
 const isCodexLens = (lens) => lens === 'codex' || lens === 'astra';
@@ -1388,7 +1395,7 @@ function cmdLensStandalone(opts, { run = defaultRun, die = fail, log = console.l
   if (!authorContext.ok) return;
   const cwd = resolve(opts.cwd ?? process.cwd());
   const repo = opts.repo;
-  const reasoning = opts.reasoning ?? LENS_MODELS[opts.lens].reasoning;
+  const reasoning = opts.reasoning ?? lensReasoning(opts.lens, { delta: Boolean(opts.since) });
   const model = LENS_MODELS[opts.lens].model;
   const promptPath = opts.promptOut ? resolve(opts.promptOut) : join(tmpdir(), `slim-review-${opts.lens}-${opts.pr}-prompt.txt`);
   const lensArgv = (tempOut) => isCodexLens(opts.lens)
@@ -2651,8 +2658,8 @@ export function classifyLensFailure(err) {
  * lens reasons, because the caller has to tell the coordinator which of them
  * happened and the coordinator decides whether another start is allowed.
  */
-function runLensModel({ lens, cwd, prompt, prFilePaths, coverageSource, run, findCodexExe, now }) {
-  const reasoning = LENS_MODELS[lens].reasoning;
+function runLensModel({ lens, delta = false, cwd, prompt, prFilePaths, coverageSource, run, findCodexExe, now }) {
+  const reasoning = lensReasoning(lens, { delta });
   const model = LENS_MODELS[lens].model;
   const tempDir = mkdtempSync(join(tmpdir(), 'slim-review-lens-'));
   const tempOut = join(tempDir, 'findings.json');
@@ -3000,7 +3007,7 @@ async function cmdLensCoordinated(opts, {
   let result;
   try {
     checkout = createReviewWorktree({ repo: attemptRef.repo, headSha: attemptRef.head_sha, run, diag });
-    result = runLensModel({ lens: opts.lens, cwd: checkout.cwd, prompt, prFilePaths: input.paths, coverageSource: since ? 'the amendment compare' : undefined, run, findCodexExe, now });
+    result = runLensModel({ lens: opts.lens, delta: Boolean(since), cwd: checkout.cwd, prompt, prFilePaths: input.paths, coverageSource: since ? 'the amendment compare' : undefined, run, findCodexExe, now });
     if (result.ok) {
       try { checkout.assertHead(); }
       catch (err) { result = { ok: false, reason: 'worktree-dirty', message: err.message }; }
@@ -3665,7 +3672,8 @@ Lens safety:
   --lens         codex (GPT-6 Sol), astra (GPT-6 Astra), or opus; run one lens per
                  invocation, never the PR authoring model — the loop runs the
                  author's pair (claim --author) and posts both handbacks
-  --reasoning    defaults to high for codex, low for astra and opus
+  --reasoning    defaults to high for codex, high for astra (low with --since),
+                 low for opus
   --measure-log  overrides the per-lens JSONL log (otherwise a workspace root is required)
   --dry-run      prints the exact reviewer argv and prompt path without running it
   status guard   fails if the reviewer adds any git status --porcelain line
