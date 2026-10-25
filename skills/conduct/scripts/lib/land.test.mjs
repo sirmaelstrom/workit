@@ -448,7 +448,9 @@ test('push filter gate: every case the reader cannot settle keeps the check expe
   assert.deepEqual(filtered(PUSH_MAIN, { runs: [pushRun(11, { path: undefined })] }).verdict, MISSING, 'a run with no path');
   assert.deepEqual(filtered(PUSH_MAIN, { workflows: { [`${BASE_TIP}:${CI_YML}`]: PUSH_MAIN } }).verdict, MISSING, 'git show fails at the head');
   assert.deepEqual(filtered(PUSH_MAIN, { workflows: { [`${HEAD}:${CI_YML}`]: PUSH_MAIN } }).verdict, MISSING, 'git show fails at the base');
-  assert.deepEqual(filtered(`${PUSH_MAIN}  pull_request:\n`, { headYaml: PUSH_MAIN }).verdict, MISSING, 'the head edits its trigger block');
+  assert.deepEqual(filtered(`${PUSH_MAIN}  pull_request:\n`, { headYaml: PUSH_MAIN }).verdict, MISSING, 'the head drops a trigger');
+  // R2: the base alone proves neither side fires; the head's own trigger block is not the base's.
+  assert.deepEqual(filtered(PUSH_MAIN, { headYaml: `${PUSH_MAIN}  pull_request:\n` }).verdict, MISSING, 'the head adds a trigger');
   assert.deepEqual(filtered(PUSH_MAIN, { headRef: { code: 127, stdout: '', stderr: 'unexpected' } }).verdict, MISSING, 'headRefName unreadable');
   assert.deepEqual(filtered(PUSH_MAIN, { headRef: ok('\n') }).verdict, MISSING, 'headRefName empty');
   assert.deepEqual(filtered(PUSH_MAIN, { headRef: ok('someone/else\n') }).verdict, MISSING, 'headRefName is not the WP branch');
