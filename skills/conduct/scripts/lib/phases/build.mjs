@@ -32,7 +32,7 @@ import { briefPaths } from '../../../../../scripts/lane.mjs';
 import { bootstrapBrief } from '../bootstrap.mjs';
 import { gateFailureKind } from '../gate-env.mjs';
 import {
-  PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
+  PRIOR_ADJUDICATION_FILE, councilOn, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
   priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, reviewCrosses,
   inspectionProblem, t2Actions, threadReplyActions, tierDecision, visualReadProblem,
 } from '../land.mjs';
@@ -1408,11 +1408,14 @@ function quietRecord(state, wp, result, deps) {
 const amendDiff = (wp, since) => shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', '--end-of-options', since, '{pr.head}']);
 
 // A T1 delta review with two or more majors, or a T1 full review with a P1 or
-// two P2s, is counted again after adjudication.
+// two P2s, is counted again after adjudication. A full review is recounted
+// only when the count can matter: a council adapter in the run or an
+// escalation outstanding; a failed read then blocks nothing that owes nothing.
 function deltaCountActs(state, wp) {
   const latest = (wp.reviews ?? []).at(-1);
   if (!(latest?.tier === 'T1' && latest.reviewId != null && reviewCrosses(latest))) return [];
   const full = latest.scope === 'full';
+  if (full && !councilOn(state) && !wp.deltaEscalation) return [];
   return [shell('review', 'delta-count', ['node', join(state.pluginRoot, 'skills', 'slim-review', 'scripts', 'pr-review.mjs'), 'delta-count',
     '--pr', String(wp.pr.number), '--repo', state.intent.repo.remote, '--review-id', String(latest.reviewId), ...(full ? ['--scope', 'full'] : [])],
   { land: { reviewId: latest.reviewId, head: latest.head, ...(full ? { scope: 'full' } : {}) } })];

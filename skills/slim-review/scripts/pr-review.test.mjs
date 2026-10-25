@@ -97,6 +97,8 @@ import {
 } from './pr-review-recognise.mjs';
 import { GUARD_ADJUDICATORS, LANE_MARKER_ENV, guardReview } from './pr-review-guard.mjs';
 import { LANE_MARKER_ENV as LANE_MJS_MARKER } from '../../../scripts/lane.mjs';
+import { recordLandStep } from '../../conduct/scripts/lib/land.mjs';
+import { runAuthority } from '../../conduct/scripts/lib/authority.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'pr-review.mjs');
 const SCHEMA = join(dirname(fileURLToPath(import.meta.url)), '..', 'reference', 'findings.schema.json');
@@ -6457,4 +6459,91 @@ test('FULL RECOUNT: delta-count --scope full recounts a full review after dup-of
   const deltaRunGh = (args) => (args[1].endsWith('/reviews/11') ? JSON.stringify({ ...roundsReview(11, RH2, { since: RH1 }), id: 11 }) : runGh(args));
   cmdDeltaCount({ repo: PINNED_REPO, pr: String(PINNED_PR), reviewId: '11', scope: 'full' }, { runGh: deltaRunGh, log: deltaRefused.deps.log, die: deltaRefused.deps.die });
   assert.match(deltaRefused.deaths[0]?.message ?? '', /not a posted full review/);
+});
+
+// --- C1-1: a full review's body-only findings survive read-back -------------
+
+const FULL_REVIEW_ID = 901;
+
+/** The standalone post of one full round, its GitHub payload captured. */
+function postFullRound({ codex = [], astra = [] }) {
+  const dir = mkdtempSync(join(tmpdir(), 'slim-review-full-manifest-'));
+  const logs = [];
+  let payload;
+  const doc = (lens, findings) => {
+    const path = join(dir, `${lens}.json`);
+    writeFileSync(path, JSON.stringify({ summary: `${lens} summary`, coverage: 'examined 3 of 3 changed files', examined_paths: CHAR_PR_FILES, findings, lens }), 'utf8');
+    return path;
+  };
+  const runGh = (args, opts) => {
+    if (args[0] === 'pr' && args[1] === 'view') return `${CHAR_HEAD}\n`;
+    if (args[0] === 'pr' && args[1] === 'diff') return DIFF;
+    if (args[0] === 'api' && args[1] === '--paginate') return `${CHAR_PR_FILES.join('\n')}\n`;
+    if (args[0] === 'api' && args.includes('POST')) {
+      payload = JSON.parse(opts.input);
+      return JSON.stringify({ id: FULL_REVIEW_ID, html_url: 'https://example.test/review/901' });
+    }
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  try {
+    withNoManagedConfig(() => cmdPost({ pr: '42', repo: 'owner/repo', findings: [doc('codex', codex), doc('astra', astra)] },
+      { runGh, die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(line) }));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  // What GitHub would list back: the review, and its inline comments by id.
+  const review = { review_id: FULL_REVIEW_ID, author_login: SERVICE_LOGIN, commit_id: CHAR_HEAD, submitted_at: '2026-10-25T10:00:00Z', state: 'COMMENTED', body: payload.body };
+  const comments = payload.comments.map((comment, index) => ({ id: 9100 + index, in_reply_to_id: null, pull_request_review_id: FULL_REVIEW_ID, body: comment.body }));
+  return { logs, payload, review, comments };
+}
+
+const bodyOnly = (severity, line, title = `body-only ${severity} at ${line}`) => ({ severity, title, path: 'src/a.ts', line, body: 'off the diff' });
+const inline = (severity, title = `inline ${severity}`) => ({ severity, title, path: 'src/a.ts', line: 11, body: 'on the diff' });
+
+for (const [name, findings, expected] of [
+  ['a body-only P1', { codex: [bodyOnly('P1', 99)] }, [1, 0]],
+  ['two body-only P2s', { codex: [bodyOnly('P2', 99)], astra: [bodyOnly('P2', 98)] }, [0, 2]],
+  ['one inline P2 plus one body-only P2', { codex: [inline('P2')], astra: [bodyOnly('P2', 99)] }, [0, 2]],
+]) {
+  test(`C1-1 FULL MANIFEST: ${name} crosses at post and stays crossing through readScopedReviews, rounds, the recount, and conduct`, async () => {
+    const { logs, review, comments } = postFullRound(findings);
+    const [p1, p2] = expected;
+    assert.ok(logs.includes(`full-major p1=${p1} p2=${p2} head=${CHAR_HEAD}`), JSON.stringify(logs));
+
+    const seams = roundsSeams({ reviews: [review], prComments: comments });
+    const [read] = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: CHAR_HEAD, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
+    assert.deepEqual([read.p1Findings, read.p2Findings], expected, 'readScopedReviews');
+
+    const rounds = await runRounds({ reviews: [review], head: CHAR_HEAD, prComments: comments });
+    assert.deepEqual([rounds.line.p1_findings, rounds.line.p2_findings, rounds.line.escalate], [p1, p2, 't2-council'], JSON.stringify(rounds.line));
+
+    const recount = collector();
+    const gh = (args) => {
+      if (args[1]?.endsWith(`/reviews/${FULL_REVIEW_ID}`)) return JSON.stringify({ id: FULL_REVIEW_ID, body: review.body, commit_id: CHAR_HEAD });
+      if (args[1] === '--paginate' && /\/pulls\/\d+\/comments$/.test(args[2])) return comments.map((c) => JSON.stringify(c)).join('\n');
+      throw new Error(`unexpected gh call: ${args.join(' ')}`);
+    };
+    const answer = cmdDeltaCount({ repo: PINNED_REPO, pr: String(PINNED_PR), reviewId: String(FULL_REVIEW_ID), scope: 'full' }, { runGh: gh, log: recount.deps.log, die: recount.deps.die });
+    assert.deepEqual([answer?.p1_findings, answer?.p2_findings], expected, `recount: ${JSON.stringify(recount.deaths)}`);
+
+    // conduct: the recount keeps the escalation, and recovery from `rounds` raises it.
+    const state = { runDir: join(tmpdir(), 'c1-1-run'), pluginRoot: '/plugin', intent: { repo: { remote: PINNED_REPO } }, adapters: { council: { on: true } }, authority: { merge: true, release: false } };
+    const escalation = { scope: 'full', round: 1, head: CHAR_HEAD, reviewId: FULL_REVIEW_ID, p1Findings: p1, p2Findings: p2 };
+    const escalated = { id: 'WP-01', tier: 'T2', reviews: [{ round: 1, scope: 'full', tier: 'T1', head: CHAR_HEAD, reviewId: FULL_REVIEW_ID, p1Findings: p1, p2Findings: p2 }], deltaEscalation: escalation };
+    const kept = recordLandStep(state, escalated, { step: 'review', part: 'delta-count', land: { reviewId: FULL_REVIEW_ID, head: CHAR_HEAD, scope: 'full' } },
+      { code: 0, stdout: JSON.stringify(answer), stderr: '' }, {}, runAuthority(state));
+    assert.deepEqual([kept.outcome, kept.patch.tier, kept.patch.deltaEscalation], ['continue', undefined, undefined], 'the recount must not clear the escalation');
+    const recovered = recordLandStep(state, { id: 'WP-01', tier: 'T1', reviews: [] }, { step: 'review', part: 'recover', land: { round: 1, scope: 'full', since: null, head: CHAR_HEAD, lenses: ['codex', 'astra'] } },
+      { code: 0, stdout: JSON.stringify(rounds.line), stderr: '' }, {}, runAuthority(state));
+    assert.deepEqual([recovered.patch.tier, recovered.patch.deltaEscalation?.reviewId], ['T2', FULL_REVIEW_ID], JSON.stringify(recovered));
+  });
+}
+
+test('C1-1 FULL MANIFEST: a full review posted before the manifest falls back to its inline comments', () => {
+  const { review, comments } = postFullRound({ codex: [inline('P1')], astra: [bodyOnly('P2', 99)] });
+  const legacy = { ...review, body: review.body.replace(/\n?<!-- workit-full-findings: [^\n]* -->/, '') };
+  assert.equal(legacy.body.includes('workit-full-findings'), false);
+  const seams = roundsSeams({ reviews: [legacy], prComments: comments });
+  const [read] = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: CHAR_HEAD, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
+  assert.deepEqual([read.p1Findings, read.p2Findings], [1, 0], 'the inline P1 only: the body-only P2 is not readable without a manifest');
 });

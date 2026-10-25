@@ -254,6 +254,7 @@ function shellResult(h, action) {
     case 'review/managed': return ok(JSON.stringify({ mode: 'standalone' }));
     case 'review/delta-count': {
       if (action.land.scope !== 'full') return ok(JSON.stringify({ outcome: 'ok', review_id: action.land.reviewId, head: action.land.head, major_findings: h.deltaAfterDup?.[id]?.shift() ?? 2 }));
+      if (h.fullCountFails?.[id]) return { code: 4, stdout: '', stderr: 'delta count for review 7001 could not be read: HTTP 502' };
       const [p1, p2] = h.fullAfterDup?.[id]?.shift() ?? [1, 0];
       return ok(JSON.stringify({ outcome: 'ok', review_id: action.land.reviewId, head: action.land.head, scope: 'full', p1_findings: p1, p2_findings: p2 }));
     }
@@ -3219,6 +3220,31 @@ test('R1 ESCALATION: with no council adapter a crossing full post stays T1 and i
   assert.equal(wp.tier, 'T1');
   assert.match(wp.reviews[0].escalation, /not escalated: no council adapter/);
   assert.equal(of(h, 'WP-02').some((action) => action.tool === 'council_review'), false);
+});
+
+test('C1-3 RECOUNT: with no council adapter a crossing full review queues no recount, so a failing recount read cannot block', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3, 0] };
+  h.fullMajor = { 'WP-02': [[1, 0]] };
+  h.fullCountFails = { 'WP-02': true };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md'] };
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+  assert.equal(await drive(h), null);
+  const wp = h.wp('WP-02');
+  assert.equal(wp.state, 'merged', JSON.stringify({ reason: wp.reason, trace: of(h, 'WP-02').slice(-12).map((a) => `${a.step}/${a.part ?? ''}`) }));
+  assert.equal(of(h, 'WP-02').some((action) => action.part === 'delta-count'), false);
+});
+
+test('C1-3 RECOUNT: with the council adapter on, a failing full recount read still blocks', async (t) => {
+  const h = harness(t, { council: true, wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3, 2] };
+  h.fullMajor = { 'WP-02': [[1, 0]] };
+  h.fullCountFails = { 'WP-02': true };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md', 'report-amendment-2.md'] };
+  await drive(h);
+  const wp = h.wp('WP-02');
+  assert.equal(wp.state, 'blocked', JSON.stringify({ state: wp.state, reason: wp.reason }));
+  assert.match(wp.reason ?? '', /no head-bound P1\/P2 count/);
 });
 
 test('ROUND 2 RED: failed council record recovers at gate without a lane amendment', async (t) => {

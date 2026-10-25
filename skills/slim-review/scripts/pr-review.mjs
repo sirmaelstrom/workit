@@ -530,8 +530,13 @@ function renderFinding(f) {
 }
 
 const findingHash = (body) => createHash('sha256').update(String(body).replace(/\r\n?/g, '\n').trimEnd()).digest('hex');
-const deltaManifest = (findings) => `<!-- workit-delta-findings: ${JSON.stringify(findings.map((f) => ({
-  hash: findingHash(renderFinding(f)), lens: f.lens, scope: f.scope, severity: f.severity,
+/**
+ * The posted review's findings manifest: every finding, inline and body-only,
+ * by hash, lens, scope and severity. A reader counts a review from it, since
+ * a body-only finding has no comment to count. `scope` is `delta` or `full`.
+ */
+const findingsManifest = (findings, scope) => `<!-- workit-${scope}-findings: ${JSON.stringify(findings.map((f) => ({
+  hash: findingHash(renderFinding(f)), lens: f.lens, scope, severity: f.severity,
 })))} -->`;
 
 /**
@@ -609,6 +614,8 @@ export function buildReviewPayload({
   // precedes the footer. It adds no inline comment.
   guard,
   deltaFindings,
+  // A full review's findings, for its manifest; an amendment check passes `deltaFindings`.
+  fullFindings,
 }) {
   const sections = [summary.trim()];
 
@@ -646,7 +653,8 @@ export function buildReviewPayload({
   }
 
   const guardAt = sections.length;
-  if (deltaFindings) sections.push(deltaManifest(deltaFindings));
+  if (deltaFindings) sections.push(findingsManifest(deltaFindings, 'delta'));
+  else if (fullFindings) sections.push(findingsManifest(fullFindings, 'full'));
 
   const footer = [
     '',
@@ -859,6 +867,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
     excluded,
     guard,
     deltaFindings: since ? doc.findings : undefined,
+    fullFindings: since ? undefined : doc.findings,
   });
   payload.commit_id = reviewedHead;
 
@@ -2051,15 +2060,18 @@ export function readReviewListing({ repo, pr, cwd, runGh = gh }) {
   return reviews;
 }
 
-function readDeltaManifest(body) {
-  const match = /<!-- workit-delta-findings: (\[[^\n]*\]) -->/.exec(String(body ?? ''));
+/** A posted review's `delta` or `full` findings manifest, or null when it carries none. */
+function readFindingsManifest(body, scope) {
+  const match = new RegExp(`<!-- workit-${scope}-findings: (\\[[^\\n]*\\]) -->`).exec(String(body ?? ''));
   if (!match) return null;
   const entries = JSON.parse(match[1]);
-  if (!Array.isArray(entries) || !entries.every((f) => /^[0-9a-f]{64}$/.test(f.hash) && ['P1', 'P2', 'P3'].includes(f.severity) && f.scope === 'delta')) {
-    throw new Error('posted delta findings manifest is malformed');
+  if (!Array.isArray(entries) || !entries.every((f) => /^[0-9a-f]{64}$/.test(f.hash) && ['P1', 'P2', 'P3'].includes(f.severity) && f.scope === scope)) {
+    throw new Error(`posted ${scope} findings manifest is malformed`);
   }
   return entries;
 }
+
+const readDeltaManifest = (body) => readFindingsManifest(body, 'delta');
 
 export function readCouncilMarker(body) {
   const match = /<!-- workit-council-round: (\{[^\n]*\}) -->/.exec(String(body ?? ''));
@@ -2085,14 +2097,15 @@ export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted, commen
 
 /**
  * A posted review's distinct P1/P2 defects of one scope, from the PR's review
- * comments. A delta review with a findings manifest counts the manifest (it
- * holds the body-only findings too); any other review counts its own inline
- * comments. A `workit-dup-of` reply joins two of them.
+ * comments. A review with a findings manifest of its scope counts the manifest
+ * (it holds the body-only findings too); a review posted before full reviews
+ * carried one counts its own inline comments. A `workit-dup-of` reply joins
+ * two of them.
  */
 export function readPostedCounts({ posted, comments, scope }) {
   const reviewId = posted.review_id ?? posted.id;
   const originals = comments.filter((comment) => comment.in_reply_to_id == null && String(comment.pull_request_review_id) === String(reviewId));
-  const manifest = scope === 'delta' ? readDeltaManifest(posted.body) : null;
+  const manifest = readFindingsManifest(posted.body, scope);
   const entries = manifest ? manifest.map((finding) => ({ ...finding })) : originals.map((comment) => ({ ...readPostedFinding(comment), id: comment.id }));
   if (manifest) {
     const byHash = new Map();
@@ -3395,6 +3408,7 @@ async function cmdPostCoordinated(opts, {
     excluded,
     guard,
     deltaFindings: since ? findings : undefined,
+    fullFindings: since ? undefined : findings,
   });
   payload.commit_id = attemptRef.head_sha;
   payload.body = `${payload.body}\n\n${markerFromRef}`;

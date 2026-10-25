@@ -488,7 +488,7 @@ export function resolveRound({ reviews, head, tail }) {
   if (r.round === 'full') return { answer: { round: 'full', problem: null }, tail: null, from: null };
   const last = { head: r.last.head, scope: r.last.scope, review_id: r.last.review_id };
   const owed = [...reviews].reverse().find((review) => reviewEscalation(review));
-  const signal = reviewEscalation(owed) ?? {};
+  const signal = owed ? { ...reviewEscalation(owed), escalate_review: escalateReview(owed) } : {};
   const count = r.last.scope === 'delta' && r.last.majorFindings > 0 ? { major_findings: r.last.majorFindings }
     : r.last.scope === 'full' && (r.last.p1Findings > 0 || r.last.p2Findings > 0) ? { p1_findings: r.last.p1Findings, p2_findings: r.last.p2Findings } : {};
   if (r.round === 'reviewed') return { answer: { round: 'reviewed', last, problem: null, ...count, ...signal }, tail: null, from: null };
@@ -524,6 +524,16 @@ export function reviewEscalation(review) {
 }
 
 export const deltaEscalation = reviewEscalation;
+
+/**
+ * The review an `escalate` belongs to, on the wire: it can be older than
+ * `last`, so a caller recording the obligation takes its id, head, scope and
+ * counts from here.
+ */
+function escalateReview(review) {
+  const counts = review.scope === 'delta' ? { major_findings: review.majorFindings } : { p1_findings: review.p1Findings, p2_findings: review.p2Findings };
+  return { review_id: review.review_id, head: review.head, scope: review.scope, ...counts };
+}
 
 /**
  * The `rounds` verb's answer for one head, given the scoped reviews and the

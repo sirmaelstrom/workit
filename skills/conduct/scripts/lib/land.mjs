@@ -1051,7 +1051,7 @@ export function gateCheck(state, wp, { exec, now }) {
 // then requires. A run without the council adapter has no council to escalate
 // to: the review's findings are amended at T1 like any others, its review
 // entry says why (`escalation`), and nothing is owed.
-const councilOn = (state) => Boolean(state.adapters?.council?.on);
+export const councilOn = (state) => Boolean(state.adapters?.council?.on);
 const NO_COUNCIL = 'not escalated: no council adapter in this run';
 
 // A recorded review entry as `reviewEscalation` reads a posted review.
@@ -1220,20 +1220,23 @@ function recordReview(state, wp, action, r) {
     const read = parseJson(first(r.stdout));
     if (read?.outcome === 'ok' && read.round === 'reviewed' && read.last?.head === action.land.head) {
       const delta = read.last.scope === 'delta';
-      if (delta && read.escalate === 't2-council' && (!Number.isInteger(read.major_findings) || read.major_findings < 2)) {
-        return result('held', `posted delta review ${read.last.review_id} signalled council without a readable distinct-defect count`);
+      // `escalate` can belong to a review older than `last`: the obligation is
+      // recorded from `escalate_review`, the review that owes the council.
+      const owed = read.escalate === 't2-council' ? read.escalate_review : null;
+      if (read.escalate === 't2-council' && !owed) {
+        return result('held', `posted review ${read.last.review_id} signalled council with no escalate_review naming the review that owes it; check the producer version`);
       }
-      // A full `last` carries its P1/P2 counts only when one is above zero. Its
-      // `escalate` may name an older review, so the full review escalates on
-      // its own counts.
-      const full = delta ? null : { p1Findings: read.p1_findings ?? 0, p2Findings: read.p2_findings ?? 0 };
-      const crossed = read.escalate === 't2-council' && effectiveTier(wp) === 'T1' && (delta || reviewCrosses({ scope: 'full', ...full }));
+      const counts = owed?.scope === 'delta' ? { majorFindings: owed.major_findings } : { p1Findings: owed?.p1_findings, p2Findings: owed?.p2_findings };
+      if (owed && (!['full', 'delta'].includes(owed.scope) || owed.review_id == null || !/^[0-9a-f]{40}$/i.test(String(owed.head)) || !reviewCrosses({ scope: owed.scope, ...counts }))) {
+        return result('held', `posted ${owed.scope ?? 'unscoped'} review ${owed.review_id} signalled council without a readable ${owed.scope === 'delta' ? 'distinct-defect' : 'P1/P2'} count`);
+      }
+      const own = Boolean(owed) && String(owed.review_id) === String(read.last.review_id);
+      const crossed = Boolean(owed) && effectiveTier(wp) === 'T1';
       const escalation = crossed && councilOn(state);
       const entry = reviewEntry(wp, action.land, { scope: delta ? 'delta' : 'full', reviewId: read.last.review_id ?? null,
-        ...(delta ? { majorFindings: read.major_findings ?? null } : {}), ...(full && crossed ? full : {}), ...(crossed && !escalation ? { escalation: NO_COUNCIL } : {}) });
-      const record = delta ? { scope: 'delta', majorFindings: read.major_findings } : { scope: 'full', ...full };
+        ...(delta ? { majorFindings: read.major_findings ?? null } : {}), ...(!delta && own && crossed ? counts : {}), ...(crossed && !escalation ? { escalation: NO_COUNCIL } : {}) });
       return result('continue', null, { reviews: [...(wp.reviews ?? []), entry],
-        ...(escalation ? { tier: 'T2', deltaEscalation: { round: action.land.round, head: action.land.head, reviewId: read.last.review_id, ...record } } : {}) });
+        ...(escalation ? { tier: 'T2', deltaEscalation: { scope: owed.scope, round: own ? action.land.round : null, head: owed.head, reviewId: owed.review_id, ...counts } } : {}) });
     }
     return result('held', `claim refused ${ALREADY_REVIEWED} and no posted review of ${action.land.head} could be verified: ${first(r.stdout) || first(r.stderr)}`);
   }

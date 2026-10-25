@@ -453,6 +453,22 @@ test('R1 ESCALATION: a full review crosses at one P1 or two P2s; one P2 or a cou
   assert.equal(deltaEscalation, reviewEscalation);
 });
 
+test('C1-2 ESCALATE REVIEW: the answer names the review that owes the council, never `last` by default', () => {
+  const [h1, h2, h3] = ['1', '2', '3'].map((c) => c.repeat(40));
+  // (a) an older full review with a P1, a newer clean full review.
+  const a = resolveRound({ reviews: [{ ...full(h1, 77), p1Findings: 1, p2Findings: 0 }, { ...full(h2, 88), p1Findings: 0, p2Findings: 0 }], head: h2, tail: null }).answer;
+  assert.deepEqual(a.escalate_review, { review_id: 77, head: h1, scope: 'full', p1_findings: 1, p2_findings: 0 }, JSON.stringify(a));
+  // (b) an older full review with a P1, a newer delta with one major.
+  const b = resolveRound({ reviews: [{ ...full(h1, 77), p1Findings: 1, p2Findings: 0 }, { ...delta(h2, h1, 88), majorFindings: 1 }], head: h2, tail: null }).answer;
+  assert.deepEqual([b.major_findings, b.escalate_review], [1, { review_id: 77, head: h1, scope: 'full', p1_findings: 1, p2_findings: 0 }], JSON.stringify(b));
+  // (c) an older owed delta, a newer full review a council already covers.
+  const c = resolveRound({ reviews: [{ ...full(h1, 55), p1Findings: 0, p2Findings: 0 }, { ...delta(h2, h1, 66), majorFindings: 2 }, { ...full(h3, 88), p1Findings: 1, p2Findings: 0, councilRoundId: 'run/wp-01/3' }], head: h3, tail: null }).answer;
+  assert.deepEqual(c.escalate_review, { review_id: 66, head: h2, scope: 'delta', major_findings: 2 }, JSON.stringify(c));
+  // Nothing owed: no escalate, no escalate_review.
+  const none = resolveRound({ reviews: [{ ...full(h1, 77), p1Findings: 0, p2Findings: 1 }], head: h1, tail: null }).answer;
+  assert.equal(Object.hasOwn(none, 'escalate_review'), false);
+});
+
 test('R1 ESCALATION: resolveRound carries a crossing full review on reviewed, delta and capped answers', () => {
   const [h1, h2, h3] = ['1', '2', '3'].map((c) => c.repeat(40));
   const owed = { ...full(h1), p1Findings: 1, p2Findings: 0 };

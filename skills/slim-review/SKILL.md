@@ -257,8 +257,11 @@ instead. The standalone post prints the line on stdout beside
 `posted-review-id <id>`. The coordinated post prints it on stderr and adds
 `p1_findings` / `p2_findings` (full) or `major_findings` (delta) to its JSON
 line. Either count can cross into a T2 council (`burn-down` § Per item step 3).
-After the adjudication replies record any `--dup-of` links, `delta-count
---review-id <id>` recounts a delta; add `--scope full` to recount a full review.
+The count covers body-only findings too. The review body carries a findings
+manifest (an HTML comment) listing every finding, so each later reader counts
+the same findings the post did. After the adjudication replies record any
+`--dup-of` links, `delta-count --review-id <id>` recounts a delta; add
+`--scope full` to recount a full review.
 
 ### Test-weakening check
 
@@ -694,13 +697,17 @@ The additive `escalate: "t2-council"` and `escalate_reason` fields follow
 `burn-down` § Per item step 3: a delta with two or more distinct P1/P2 defects,
 or a full review with one P1 or two distinct P2s. They persist on reviewed,
 delta, capped, and rebased heads until a council round is recorded on that
-review's head or later. A delta's count comes from distinct P1/P2 defects in
-that posted delta review's own `**scope:** delta` findings, including body-only
-findings. A full review's count comes from its own posted inline comments, so a
-body-only full finding is not counted. `escalate_reason` names the count and
-review id (`full review <id>: <n> P1, <m> P2` for a full review). The PR's
-comments are read once per `rounds` call. Callers that do not read the new
-fields still receive the same `round`.
+review's head or later. Each review's count comes from the findings manifest
+its body carries (`workit-delta-findings` or `workit-full-findings`): every
+posted finding, inline and body-only, with dup-of replies joining two. A full
+review posted before full reviews carried a manifest is counted from its
+inline comments. `escalate_reason` names the count and review id
+(`full review <id>: <n> P1, <m> P2` for a full review). `escalate_review`,
+beside `escalate`, names the review that owes the council, which can be older
+than `last`: `{review_id, head, scope, p1_findings?, p2_findings?,
+major_findings?}`. A caller recording the obligation takes it from there,
+never from `last`. The PR's comments are read once per `rounds` call. Callers
+that do not read the new fields still receive the same `round`.
 The marker is a workflow guard, not an authentication boundary; see
 `burn-down` § Per item step 3. For manual completion, use
 `reference/patterns/review-council.md` § PR escalation.
