@@ -739,10 +739,12 @@ function readRuns(state, sha, exec) {
 // the base branch's commit, so the head does not carry it. A push run's
 // checks are expected only when its workflow file, read by workflowTriggers at
 // the base and at the head, would run for the PR: a push to the head branch or
-// a pull_request into the default branch. Limits: `paths` filters are not
-// read, so a paths-skipped workflow still waits (L1); a workflow the PR
-// deletes or renames is unreadable at the head and stays expected (L2); no
-// trigger other than push and pull_request is read (L3).
+// a pull_request into the default branch. Limits: `paths` filters and
+// pull_request `types` are not read, so a workflow they skip still waits (L1);
+// a workflow the PR deletes or renames is unreadable at the head and stays
+// expected (L2); no trigger other than push and pull_request is read (L3). A
+// pattern holding `?`, `+`, `[`, `]` or `\`, or starting with `!`, makes its
+// side unknown, so the check stays expected.
 const PR_EVENTS = new Set(['pull_request', 'push']);
 
 const UNKNOWN = 'unknown';

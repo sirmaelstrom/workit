@@ -466,7 +466,9 @@ test('push filter gate: every case the reader cannot settle keeps the check expe
 
 // C1-1 (council round 1): a `\` in a pattern escapes the next character in a
 // workflow filter, but globRegex reads it as a path separator. Each input on
-// branches and on branches-ignore, with the branch that exposes the misread.
+// branches and on branches-ignore. Rows 1, 3 and 5 dropped the check before the
+// fix; rows 2, 4 and 6 kept it then and hold the other filter key. Each test
+// compares every row at once, so a failure names all the rows that broke.
 const ESCAPED = [
   ['branches-ignore', 'conduct\\**', 'conduct/x'], ['branches', 'conduct\\**', 'conduct/a/b'],
   ['branches', 'conduct/\\!x', 'conduct/!x'], ['branches-ignore', 'conduct/\\!x', 'conduct/!x'],
@@ -475,16 +477,16 @@ const ESCAPED = [
 const escapedYaml = (key, pattern) => `on:\n  push:\n    ${key}: [main, '${pattern}']\n`;
 
 test('push filter gate: a backslash pattern keeps the check expected (C1-1)', () => {
-  for (const [key, pattern, branch] of ESCAPED) {
-    assert.deepEqual(filtered(escapedYaml(key, pattern), { branch }).verdict, MISSING, `${key}: ${pattern} on ${branch}`);
-  }
+  const verdicts = ESCAPED.map(([key, pattern, branch]) => [`${key}: ${pattern} on ${branch}`, filtered(escapedYaml(key, pattern), { branch }).verdict]);
+  assert.deepEqual(verdicts, ESCAPED.map(([key, pattern, branch]) => [`${key}: ${pattern} on ${branch}`, MISSING]));
 });
 
 test('expectedChecks: a backslash pattern keeps the name (C1-1)', () => {
-  for (const [key, pattern, branch] of ESCAPED) {
-    const { wp, exec } = filteredSetup(escapedYaml(key, pattern), { branch });
-    assert.deepEqual(expectedChecks(makeState(), WT, exec, wp, HEAD), { names: ['Deploy'] }, `${key}: ${pattern} on ${branch}`);
-  }
+  const names = ESCAPED.map(([key, pattern, branch]) => {
+    const setup = filteredSetup(escapedYaml(key, pattern), { branch });
+    return [`${key}: ${pattern} on ${branch}`, expectedChecks(makeState(), WT, setup.exec, setup.wp, HEAD)];
+  });
+  assert.deepEqual(names, ESCAPED.map(([key, pattern, branch]) => [`${key}: ${pattern} on ${branch}`, { names: ['Deploy'] }]));
   // The same harness drops the name for a filter the rule settles.
   const { wp, exec } = filteredSetup(PUSH_MAIN);
   assert.deepEqual(expectedChecks(makeState(), WT, exec, wp, HEAD), { names: [] });
