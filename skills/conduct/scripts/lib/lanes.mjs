@@ -816,10 +816,40 @@ export function heartbeatActs(state, step) {
   const t3 = (part, name, args, instruction) => ({ kind: 'agent-tool', step, seam: STEP_SEAM[step], part, tool: name, args, expects: { type: 'json' }, instruction });
   const stale = wake?.taskId && !wake.deleted ? [t3('heartbeat-stop', 'delete_scheduled_task', { scheduledTaskId: wake.taskId },
     'Call delete_scheduled_task with these args and record its raw result (an error too): it is the previous conductor\'s heartbeat.')] : [];
+  return [...stale, t3('heartbeat', 'schedule_task', heartbeatArgs(state, n), HEARTBEAT_INSTRUCTION)];
+}
+
+export const HEARTBEAT_INSTRUCTION = 'Call schedule_task with these args from your own (the conductor\'s) thread, and record its raw result, an error too.';
+
+// schedule_task's args for conductor r<n>'s heartbeat. The request id is per
+// conductor, so lanes that each queue it make one task.
+export function heartbeatArgs(state, n) {
   const prompt = `[${heartbeatTitle(state)}] A wake tick for conduct run ${state.runDir}, every ${T3_HEARTBEAT_MS / 60000} minutes while its T3 lanes run. If this thread is that run's conductor r${n}, run node ${conductScript(state)} next --run ${state.runDir} and perform what it prints: a pending wake wait is recorded {} and the loop goes on. If it is not (the run was rotated away, or it has ended), end your turn.`;
-  return [...stale, t3('heartbeat', 'schedule_task', {
-    title: heartbeatTitle(state), prompt, schedule: { type: 'interval', everyMs: T3_HEARTBEAT_MS }, bindToCurrentThread: true, clientRequestId: `${state.runId}-heartbeat-r${n}`,
-  }, 'Call schedule_task with these args from your own (the conductor\'s) thread, and record its raw result, an error too.')];
+  return { title: heartbeatTitle(state), prompt, schedule: { type: 'interval', everyMs: T3_HEARTBEAT_MS }, bindToCurrentThread: true, clientRequestId: `${state.runId}-heartbeat-r${n}` };
+}
+
+// A heartbeat made by conductor r<n> at custody: it replaces whatever the run
+// held. Returns the task ids now owed a delete: the replaced one, and a new
+// one bound to no thread (it would start a fresh thread every tick).
+export function adoptHeartbeat(state, n, result, at) {
+  const wake = state.t3Wake ?? {};
+  const old = [...(wake.old ?? [])];
+  const stops = [];
+  const made = !t3Failed(result) && typeof result.scheduledTaskId === 'string' ? result.scheduledTaskId : null;
+  if (wake.taskId && !wake.deleted && wake.taskId !== made) {
+    old.push({ taskId: wake.taskId, thread: wake.thread ?? null, conductor: wake.conductor ?? null });
+    stops.push(wake.taskId);
+  }
+  if (!made) {
+    state.t3Wake = { taskId: null, thread: null, conductor: n, failed: `schedule_task: ${t3Said(result)}`, old };
+  } else if (typeof result.boundThreadId !== 'string' || !result.boundThreadId) {
+    old.push({ taskId: made });
+    stops.push(made);
+    state.t3Wake = { taskId: null, thread: null, conductor: n, failed: `schedule_task bound no thread: ${t3Said(result)}`, old };
+  } else {
+    state.t3Wake = { taskId: made, thread: result.boundThreadId, conductor: n, at, failed: null, deleted: false, old };
+  }
+  return stops;
 }
 
 // A heartbeat's record. It never blocks the WP: a failure leaves the lanes polling.
@@ -868,7 +898,7 @@ export function recordHeartbeatDelete(state, taskId, result) {
   const wake = state.t3Wake ?? {};
   const outcome = { taskId, deleted, ...(t3Failed(result) ? { error: t3Said(result) } : {}) };
   if (wake.taskId === taskId) state.t3Wake = { ...wake, deleted, deleteResult: outcome };
-  else state.t3Wake = { ...wake, old: [...(wake.old ?? []).filter((entry) => entry.taskId !== taskId), outcome] };
+  else state.t3Wake = { ...wake, old: [...(wake.old ?? []).filter((entry) => entry.taskId !== taskId), { ...(wake.old ?? []).find((entry) => entry.taskId === taskId), ...outcome }] };
 }
 
 // What the latest activity items say a lane waits on: the last waiting

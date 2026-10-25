@@ -91,7 +91,7 @@ A tool call that fails is recorded as its error (`{ "error": "…" }`) and block
 
 T3 shows a lane waiting on a person (an approval, a question) as an ordinary running turn, and counts the request in the thread's `pendingRequestCount`. Every read checks that count, so a lane blocked on a person blocks its WP as `dialog` at once. A second read of the latest activity names the approval or question. Don't answer it yourself; it goes to the operator in the blocked touch. Give lanes a full-access runtime all the same: under `approval-required` a lane stops at its first tool call. Its done send also needs your thread's modes to be no broader than the lane's.
 
-A heartbeat belongs to the conductor that made it. After a rotation the lanes poll until their next wait deletes the old heartbeat and makes one bound to the successor. A lane launched before the rotation still sends its done message to the old thread, so the successor sees it at the next heartbeat. A predecessor woken by that message ends its turn.
+A heartbeat belongs to the conductor that made it. After a rotation the lanes poll until their next wait deletes the old heartbeat and makes one bound to the successor. When the pending action is a wake yield, custody does it first: a `schedule_task` from the successor's thread, then the old heartbeat's delete, then a fresh wait in place of the inherited one. A lane launched before the rotation still sends its done message to the old thread, so the successor sees it at the next heartbeat. A predecessor woken by that message ends its turn.
 
 ## Touches
 
