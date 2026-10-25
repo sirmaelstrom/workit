@@ -736,14 +736,221 @@ function readRuns(state, sha, exec) {
 
 // The events whose workflow runs a PR head gets: its own pull_request runs,
 // and push runs from pushes to its branch. A pull_request_target run checks
-// the base branch's commit, so the head does not carry it. A push workflow
-// filtered to the default branch still reads as expected: the run's event
-// does not show its branch filter.
+// the base branch's commit, so the head does not carry it. A push run's
+// checks are expected only when its workflow file, read by workflowTriggers at
+// the base and at the head, would run for the PR: a push to the head branch or
+// a pull_request into the default branch. Limits: `paths` filters are not
+// read, so a paths-skipped workflow still waits (L1); a workflow the PR
+// deletes or renames is unreadable at the head and stays expected (L2); no
+// trigger other than push and pull_request is read (L3).
 const PR_EVENTS = new Set(['pull_request', 'push']);
 
+const UNKNOWN = 'unknown';
+const indentOf = (line) => line.length - line.trimStart().length;
+// A YAML comment starts at a `#` after whitespace, outside a quoted scalar.
+// null when a quote is left open.
+function stripComment(text) {
+  let quote = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if ((c === '"' || c === '\'') && (i === 0 || /[\s[,{:]/.test(text[i - 1]))) quote = c;
+    else if (c === '#' && (i === 0 || /\s/.test(text[i - 1]))) return text.slice(0, i).trim();
+  }
+  return quote ? null : text.trim();
+}
+
+// A plain or quoted single-line scalar, or null for anything else.
+function scalarOf(text) {
+  const single = /^'((?:[^']|'')*)'$/.exec(text);
+  if (single) return single[1].replaceAll('\'\'', '\'');
+  const double = /^"([^"\\]*)"$/.exec(text);
+  if (double) return double[1];
+  return /^[^\s'"[\]{}#&*!|>%@`,]/.test(text) && !/:(\s|$)|\s#/.test(text) ? text : null;
+}
+
+// A one-line flow list of scalars (`[main, 'x']`), or null.
+function flowList(text) {
+  if (!text.startsWith('[') || !text.endsWith(']')) return null;
+  const inner = text.slice(1, -1).trim();
+  if (!inner || /[#[\]{}]/.test(inner)) return null;
+  const items = inner.split(',').map((item) => scalarOf(item.trim()));
+  return items.some((item) => !item) ? null : items;
+}
+
+const FILTER_KEYS = { branches: 'branches', 'branches-ignore': 'branchesIgnore', tags: 'tags', 'tags-ignore': 'tagsIgnore' };
+const EVENT_KEYS = {
+  push: { read: ['branches', 'branches-ignore', 'tags', 'tags-ignore'], skip: ['paths', 'paths-ignore'] },
+  pull_request: { read: ['branches', 'branches-ignore'], skip: ['types', 'paths', 'paths-ignore'] },
+};
+
+// The filter block under `push:` or `pull_request:`: a Filter, or 'unknown'.
+function filterBlock(body, event) {
+  const { read, skip } = EVENT_KEYS[event];
+  const at = indentOf(body[0]);
+  const entries = [];
+  for (const line of body) {
+    const indent = indentOf(line);
+    const text = line.trim();
+    if (indent < at) return UNKNOWN;
+    // A compact list (`branches:` then `- main` at the key's indent) belongs to the key above.
+    if (indent > at || text.startsWith('-')) {
+      if (!entries.length) return UNKNOWN;
+      entries.at(-1).body.push(line);
+      continue;
+    }
+    const key = /^([A-Za-z_-]+)\s*:(?:\s|$)(.*)$/.exec(text);
+    if (!key || entries.some((entry) => entry.key === key[1])) return UNKNOWN;
+    entries.push({ key: key[1], rest: key[2], body: [] });
+  }
+  const lists = {};
+  for (const { key, rest, body: items } of entries) {
+    if (skip.includes(key)) continue;
+    if (!read.includes(key)) return UNKNOWN;
+    const value = stripComment(rest);
+    let list = null;
+    if (value) list = items.length ? null : flowList(value);
+    else if (items.length) {
+      const indents = new Set(items.map(indentOf));
+      list = indents.size === 1 ? items.map((item) => {
+        const entry = /^-(?:\s+(.*))?$/.exec(item.trim());
+        const scalar = entry?.[1] ? stripComment(entry[1]) : null;
+        return scalar ? scalarOf(scalar) : null;
+      }) : null;
+    }
+    if (!list?.length || list.some((item) => !item)) return UNKNOWN;
+    lists[FILTER_KEYS[key]] = list;
+  }
+  if ((lists.branches && lists.branchesIgnore) || (lists.tags && lists.tagsIgnore)) return UNKNOWN;
+  // A fixed key order, so the base and head readings compare as JSON.
+  return Object.fromEntries(Object.values(FILTER_KEYS).filter((field) => lists[field]).map((field) => [field, lists[field]]));
+}
+
+// One event's value: a Filter, 'unknown' for that side, or 'file' when the
+// whole file reads as unknown.
+function eventValue(rest, body, event) {
+  const value = stripComment(rest);
+  if (value === null) return UNKNOWN;
+  if (value === '') return body.length ? filterBlock(body, event) : {};
+  if (value === '{}') return body.length ? UNKNOWN : {};
+  if (value.startsWith('{')) return 'file';
+  return UNKNOWN;
+}
+
+const eventsOf = (names) => ({ push: names.includes('push') ? {} : false, pullRequest: names.includes('pull_request') ? {} : false });
+
+/**
+ * A workflow file's push and pull_request triggers, read without a YAML
+ * library: 'unknown' for the whole file, or `{ push, pullRequest }`, each side
+ * false (the workflow does not trigger on it), 'unknown', or a Filter
+ * `{ branches?, branchesIgnore?, tags?, tagsIgnore? }` of string lists. It reads
+ * the `on:` key's documented forms and refuses the rest; `paths` and `types`
+ * are skipped, and so is every other trigger under `on:`.
+ */
+export function workflowTriggers(text) {
+  if (typeof text !== 'string') return UNKNOWN;
+  const all = text.split(/\r?\n/);
+  let content = false;
+  let on = -1;
+  for (let i = 0; i < all.length; i += 1) {
+    const line = all[i];
+    if (line.startsWith('\t')) return UNKNOWN;
+    if (!line.trim() || line.trimStart().startsWith('#') || indentOf(line) > 0) continue;
+    if (/^(---|\.\.\.)(\s|$)/.test(line)) {
+      if (content) return UNKNOWN;
+      continue;
+    }
+    content = true;
+    const key = /^("[^"]*"|'[^']*'|[^\s#'"[\]{}&*!|>%@,?:-][^:#]*?)\s*:(\s|$)/.exec(line);
+    if (!key) return UNKNOWN;
+    const name = /^["']/.test(key[1]) ? key[1].slice(1, -1) : key[1];
+    if (/^["']/.test(key[1]) ? false : /^(true|True|TRUE)$/.test(name)) return UNKNOWN;
+    if (name === 'on') {
+      if (on >= 0) return UNKNOWN;
+      on = i;
+    }
+  }
+  if (on < 0) return UNKNOWN;
+  const head = all[on];
+  const block = [];
+  for (let i = on + 1; i < all.length && !(all[i].trim() && !all[i].trimStart().startsWith('#') && indentOf(all[i]) === 0); i += 1) {
+    if (all[i].trim() && !all[i].trimStart().startsWith('#')) block.push(all[i]);
+  }
+  // Anchors, aliases and tabs anywhere in the trigger block.
+  const unquoted = (line) => line.replace(/'[^']*'|"[^"]*"/g, '""');
+  if ([head, ...block].some((line) => /^ *\t/.test(line) || /(^|[\s[{,])[&*][^\s,\]}]/.test(unquoted(line)))) return UNKNOWN;
+  const rest = stripComment(head.slice(head.indexOf(':') + 1));
+  if (rest === null) return UNKNOWN;
+  if (rest) {
+    if (block.length) return UNKNOWN;
+    const names = rest.startsWith('[') ? flowList(rest) : [scalarOf(rest)];
+    return names?.every((name) => /^[a-z_]+$/.test(name ?? '')) ? eventsOf(names) : UNKNOWN;
+  }
+  if (!block.length) return UNKNOWN;
+  const at = indentOf(block[0]);
+  const children = [];
+  for (const line of block) {
+    const indent = indentOf(line);
+    if (indent < at) return UNKNOWN;
+    if (indent > at) {
+      children.at(-1).body.push(line);
+      continue;
+    }
+    // A quoted trigger key is refused, never skipped as an unknown sibling.
+    const child = /^([A-Za-z_][\w-]*)\s*:(?:\s|$)(.*)$/.exec(line.trim());
+    if (!child || children.some((entry) => entry.name === child[1])) return UNKNOWN;
+    children.push({ name: child[1], rest: child[2], body: [] });
+  }
+  const sides = { push: false, pullRequest: false };
+  for (const { name, rest: value, body } of children) {
+    if (name !== 'push' && name !== 'pull_request') continue;
+    const side = eventValue(value, body, name);
+    if (side === 'file') return UNKNOWN;
+    sides[name === 'push' ? 'push' : 'pullRequest'] = side;
+  }
+  return sides;
+}
+
+// Whether one trigger side fires for a branch: true, false or 'unknown'.
+// `push` with only tags filters never fires for a branch push.
+function firesFor(side, branch) {
+  if (side === false) return false;
+  if (side === UNKNOWN || !branch) return UNKNOWN;
+  if (Object.values(side).flat().some((pattern) => /[?+[\]]|^!/.test(pattern))) return UNKNOWN;
+  const match = (patterns) => patterns.some((pattern) => globRegex(pattern).test(branch));
+  if (side.branches) return match(side.branches);
+  if (side.branchesIgnore) return !match(side.branchesIgnore);
+  return !(side.tags || side.tagsIgnore);
+}
+
+// The PR's head branch when it is the WP's own branch, else null (unknown).
+function headBranchOf(state, wp, exec) {
+  const read = exec('gh', ['pr', 'view', String(wp.pr.number), '--repo', repoOf(state), '--json', 'headRefName', '-q', '.headRefName']);
+  const name = read.code === 0 ? String(read.stdout ?? '').trim() : '';
+  return name && name === wp.lane?.branch ? name : null;
+}
+
+// A base push run's workflow is expected at the head unless the reader proves,
+// at the base and the head alike, that neither push nor pull_request fires.
+function pushRunExpected(state, wt, exec, { path, baseSha, head, branch }) {
+  if (!path || !branch) return true;
+  const read = (sha) => {
+    const shown = exec('git', ['-C', wt, 'show', `${sha}:${path}`]);
+    return shown.code === 0 ? workflowTriggers(shown.stdout) : null;
+  };
+  const atBase = read(baseSha);
+  const atHead = atBase === null ? null : read(head);
+  if (atBase === null || atHead === null || atBase === UNKNOWN || JSON.stringify(atBase) !== JSON.stringify(atHead)) return true;
+  // The base run's event is push, so a push side read as false was misread.
+  const push = atBase.push === false ? UNKNOWN : firesFor(atBase.push, branch);
+  return push !== false || firesFor(atBase.pullRequest, defaultOf(state)) !== false;
+}
+
 // What triggered each workflow run at one sha, by check-suite id, every page
-// read and complete. No access to the Actions API (403, 404) reads as no runs,
-// so every check stays expected.
+// read and complete: `{ event, path }`, path null when the run has none. No
+// access to the Actions API (403, 404) reads as no runs, so every check stays
+// expected.
 function readTriggers(state, sha, exec) {
   const read = exec('gh', ['api', `repos/${repoOf(state)}/actions/runs?head_sha=${sha}&per_page=100`, '--paginate']);
   if (read.code !== 0) return /HTTP 40[34]/.test(read.stderr) ? { events: new Map() } : { failure: `workflow runs unreadable: ${first(read.stderr)}` };
@@ -761,14 +968,15 @@ function readTriggers(state, sha, exec) {
   if (runs.length !== pages[0].total_count || new Set(runs.map((run) => run.id)).size !== runs.length) {
     return { failure: `workflow runs incomplete: ${runs.length} distinct runs read of total_count ${pages[0].total_count}` };
   }
-  return { events: new Map(runs.map((run) => [run.check_suite_id, run.event])) };
+  return { events: new Map(runs.map((run) => [run.check_suite_id, { event: run.event, path: typeof run.path === 'string' && run.path ? run.path : null }])) };
 }
 
 // The checks the head must carry: the branch's required status checks (the
 // union of `contexts` and `checks`) when readable, else the names that ran on
 // the base commit from a trigger a PR head also gets. A check-run that no
-// workflow run accounts for (another app, a legacy status) stays expected.
-function expectedChecks(state, wt, exec, wp, head) {
+// workflow run accounts for (another app, a legacy status) stays expected, and
+// a name stays expected when any base check-run of that name is.
+export function expectedChecks(state, wt, exec, wp, head) {
   const def = defaultOf(state);
   const required = exec('gh', ['api', `repos/${repoOf(state)}/branches/${encodeURIComponent(def)}/protection/required_status_checks`]);
   if (required.code === 0) {
@@ -786,15 +994,25 @@ function expectedChecks(state, wt, exec, wp, head) {
   if (wp.ciCheckPolicy?.head === head && wp.ciCheckPolicy.names?.length) return { names: wp.ciCheckPolicy.names };
   const base = exec('git', ['-C', wt, 'rev-parse', `origin/${def}`]);
   if (base.code !== 0) return { failure: `base commit unreadable: ${first(base.stderr)}` };
-  const ran = readRuns(state, base.stdout.trim(), exec);
+  const baseSha = base.stdout.trim();
+  const ran = readRuns(state, baseSha, exec);
   if (ran.failure) return ran;
-  const triggers = readTriggers(state, base.stdout.trim(), exec);
+  const triggers = readTriggers(state, baseSha, exec);
   if (triggers.failure) return triggers;
+  const runs = ran.runs ?? [];
+  const triggerOf = (run) => triggers.events.get(run.check_suite?.id);
+  // The head branch is read once, and only when a push run made a base check.
+  const branch = runs.some((run) => triggerOf(run)?.event === 'push') ? headBranchOf(state, wp, exec) : null;
+  const byPath = new Map();
   const prTriggered = (run) => {
-    const event = triggers.events.get(run.check_suite?.id);
-    return event === undefined || PR_EVENTS.has(event);
+    const trigger = triggerOf(run);
+    if (trigger === undefined) return true;
+    if (!PR_EVENTS.has(trigger.event)) return false;
+    if (trigger.event !== 'push') return true;
+    if (!byPath.has(trigger.path)) byPath.set(trigger.path, pushRunExpected(state, wt, exec, { path: trigger.path, baseSha, head, branch }));
+    return byPath.get(trigger.path);
   };
-  return { names: [...new Set((ran.runs ?? []).filter(prTriggered).map((run) => run.name))] };
+  return { names: [...new Set(runs.filter(prTriggered).map((run) => run.name))] };
 }
 
 function ciCondition(state, wp, head, { exec, now }) {

@@ -8,7 +8,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   tierFor, tierDecision, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, threadReplyActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions as mergeActionsWith, recordLandStep as recordLandStepWith, runLandVerb,
-  parsePages, findingsCount, isTestPath, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord, visualReadProblem,
+  parsePages, findingsCount, isTestPath, workflowTriggers, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord, visualReadProblem,
 } from './land.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
 import { runConduct } from '../conduct.mjs';
@@ -89,7 +89,7 @@ const TWO_WAY = '## Merge danger\n\nDoor: two-way\nBlast radius: the fixture WP\
 function gateExec(o = {}) {
   const { head = HEAD, fetch = 0, ancestor = 0, ci = GREEN, status = STATUS, required = REQUIRED, baseRuns = GREEN, actionRuns = NO_WORKFLOW_RUNS, threads = 0, threadsOut = '', inflight = 0,
     config = null, tailFiles = [], renames = {}, tailLines = 1, ancestry = {}, tailCommits = [], revLists = {}, logs = {}, diffQuiet = 0, patchIds = {}, diffs = {}, pr = {},
-    bootstrap = null, bootStatus = ok('') } = o;
+    bootstrap = null, bootStatus = ok(''), headRef = ok('conduct/fixture/wp-01\n'), workflows = {} } = o;
   const calls = [];
   const exec = (program, args, options = {}) => {
     calls.push({ program, args, input: options.input });
@@ -97,6 +97,8 @@ function gateExec(o = {}) {
     if (program === 'node' && args[1] === 'bootstrap' && bootstrap) return bootstrap;
     if (program === 'git' && args[2] === 'status' && args.includes('--ignored')) return bootStatus;
     if (program === 'git' && args[2] === 'rev-parse') return ok(`${args[3] === 'HEAD' ? head : BASE_TIP}\n`);
+    // The fallback's head-branch read (1e5a59eb).
+    if (program === 'gh' && args[1] === 'view' && args.includes('headRefName')) return headRef;
     if (program === 'gh' && args[1] === 'view') {
       // A WP's view asks for the body (its `## Merge danger`, fca05d92); the release's does not.
       const body = args.at(-1).endsWith(',body') ? { body: TWO_WAY } : {};
@@ -114,6 +116,10 @@ function gateExec(o = {}) {
     if (program === 'node' && args[1] === 'threads') return { code: threads, stdout: threadsOut, stderr: threads ? 'open threads' : '' };
     if (program === 'node' && args[1] === 'inflight') {
       return { code: inflight, stdout: '', stderr: inflight === 9 ? '1 review attempt(s) of 1111111 still in flight (beat #1 lens_running); merge after it posts.' : inflight ? 'coordinator-unreachable' : '' };
+    }
+    // A workflow file by `<sha>:<path>`; one the map does not name does not exist.
+    if (program === 'git' && args[2] === 'show' && !args[3].endsWith(':.workit/conduct.json')) {
+      return Object.hasOwn(workflows, args[3]) ? ok(workflows[args[3]]) : { code: 128, stdout: '', stderr: `fatal: path '${args[3].split(':')[1]}' does not exist in '${args[3].split(':')[0]}'` };
     }
     if (program === 'git' && args[2] === 'show') return config === null ? { code: 128, stdout: '', stderr: 'fatal: path \'.workit/conduct.json\' does not exist in \'origin/main\'' } : ok(config);
     const rows = has('--no-renames') ? tailFiles : tailFiles.filter((file) => !Object.hasOwn(renames, file));
@@ -337,6 +343,146 @@ test('H12 expected checks: an unprotected base expects the checks its push or pu
   const protectedExec = gateExec({ ...observatory, required: REQUIRED });
   gateCheck(makeState(), late, { exec: protectedExec, now: () => NOW });
   assert.ok(!protectedExec.calls.some((call) => /actions\/runs/.test(call.args[1] ?? '')));
+});
+
+// 1e5a59eb: the trigger reader, on text.
+const CI_YML = '.github/workflows/ci.yml';
+const REPO_CI = readFileSync(join(HERE, '..', '..', '..', '..', CI_YML), 'utf8');
+const both = (push, pullRequest) => ({ push, pullRequest });
+
+test('workflowTriggers: the repo\'s ci.yml, scalar and flow-list `on:` forms', () => {
+  assert.deepEqual(workflowTriggers(REPO_CI), both({ branches: ['main'] }, {}));
+  assert.deepEqual(workflowTriggers('on: push\n'), both({}, false));
+  assert.deepEqual(workflowTriggers('on: [push, pull_request]\n'), both({}, {}));
+  assert.deepEqual(workflowTriggers('"on": pull_request # c\n'), both(false, {}));
+  assert.deepEqual(workflowTriggers('\'on\': [push, workflow_dispatch]\n'), both({}, false));
+  assert.deepEqual(workflowTriggers('on: workflow_dispatch\n'), both(false, false));
+});
+
+test('workflowTriggers: block-mapping forms, filter lists, skipped siblings, comments and blank lines', () => {
+  assert.deepEqual(workflowTriggers('on:\n  push:\n  pull_request: {}\n'), both({}, {}));
+  assert.deepEqual(workflowTriggers('# head\non:\n\n  push:   # c\n    branches:\n      - main\n      - \'release/**\' # c\n\n      - "x"\n  pull_request:\n    branches: [main, \'y\', "z"]\n'),
+    both({ branches: ['main', 'release/**', 'x'] }, { branches: ['main', 'y', 'z'] }));
+  assert.deepEqual(workflowTriggers('on:\n  push:\n    branches:\n    - main\n'), both({ branches: ['main'] }, false), 'a compact list at the key\'s indent');
+  assert.deepEqual(workflowTriggers('on:\n  push:\n    branches-ignore: [main]\n    tags: [v*]\n    paths: [src/**]\n    paths-ignore:\n      - docs/**\n'),
+    both({ branchesIgnore: ['main'], tags: ['v*'] }, false));
+  assert.deepEqual(workflowTriggers('on:\n  push:\n    tags-ignore: [v1]\n  pull_request:\n    types: [opened, synchronize]\n    branches-ignore: [old]\n    paths: [a]\n    paths-ignore: [b]\n'),
+    both({ tagsIgnore: ['v1'] }, { branchesIgnore: ['old'] }));
+  const siblings = 'on:\n  workflow_dispatch: {}\n  schedule:\n    - cron: \'0 3 * * *\'\n  pull_request_target:\n    types: [opened]\n  push:\n    branches: [main]\n  workflow_call:\n';
+  assert.deepEqual(workflowTriggers(siblings), both({ branches: ['main'] }, false));
+  assert.deepEqual(workflowTriggers('name: x\non:\n  push:\njobs:\n  a:\n    on: [pull_request]\n'), both({}, false), 'an indented `on:` is not the trigger key');
+});
+
+test('workflowTriggers: whole-file unknown cases', () => {
+  for (const [text, why] of [
+    ['', 'empty'], ['name: x\njobs: {}\n', 'no on: key'], ['{"on": "push"}\n', 'JSON, not a workflow'], ['just some prose\n', 'prose'],
+    ['on:\n  push: &p\n    branches: [main]\n', 'an anchor'], ['on:\n  push: *p\n', 'an alias'], ['on:\n  push:\n    branches: [*b]\n', 'an alias in a list'],
+    ['on: push\n---\non: pull_request\n', 'a second document'], ['on:\n\tpush:\n', 'a tab'], ['on:\n  push:\n  \tpull_request:\n', 'a tab after spaces'],
+    ['true:\n  push:\n', 'an on key spelled true'], ['on: [push,\n  pull_request]\n', 'a multi-line flow list'], ['on: [push, # c\n  pull_request]\n', 'a flow list holding a comment'],
+    ['on:\n  "push":\n    branches: [main]\n', 'a double-quoted child key'], ['on:\n  \'pull_request\':\n', 'a single-quoted child key'],
+    ['on:\n  push: {branches: [main]}\n', 'a flow mapping push value'], ['on:\n  pull_request: {types: [opened]}\n', 'a flow mapping pull_request value'],
+    ['on: {push: {}}\n', 'a flow mapping on value'], ['on:\n  - push\n', 'a block-sequence on value'], ['on:\n', 'an empty on value'],
+    ['on:\n  push:\n  push:\n', 'a duplicate trigger'], [42, 'not text'],
+  ]) assert.equal(workflowTriggers(text), 'unknown', why);
+});
+
+test('workflowTriggers: one-side unknown cases', () => {
+  for (const [text, side, why] of [
+    ['on:\n  push: null\n  pull_request:\n', 'push', 'a null scalar'], ['on:\n  push: ~\n', 'push', 'a tilde'], ['on:\n  push: main\n', 'push', 'a word'],
+    ['on:\n  push:\n    branch: [main]\n', 'push', 'an unrecognized key'], ['on:\n  pull_request:\n    tags: [v1]\n', 'pullRequest', 'tags under pull_request'],
+    ['on:\n  push:\n    branches: [main]\n    branches-ignore: [x]\n', 'push', 'branches with branches-ignore'],
+    ['on:\n  pull_request:\n    branches: [main]\n    branches-ignore: [x]\n', 'pullRequest', 'branches with branches-ignore'],
+    ['on:\n  push:\n    tags: [a]\n    tags-ignore: [b]\n', 'push', 'tags with tags-ignore'],
+    ['on:\n  push:\n    branches: main\n', 'push', 'a scalar filter'], ['on:\n  push:\n    branches: []\n', 'push', 'an empty list'],
+    ['on:\n  push:\n    branches:\n', 'push', 'a null filter'], ['on:\n  push:\n    branches: [main]\n    branches: [x]\n', 'push', 'a duplicate filter key'],
+  ]) {
+    const out = workflowTriggers(text);
+    assert.equal(out[side], 'unknown', why);
+  }
+});
+
+// A base with one push-run check, Deploy, and a head that carries only Other;
+// protection unreadable and the pending clock past NO_CI_MS.
+const page = (key, rows) => ok(JSON.stringify({ total_count: rows.length, [key]: rows }));
+const checkRun = (id, name, suite) => ({ id, name, status: 'completed', conclusion: 'success', check_suite: { id: suite } });
+const pushRun = (suite, over = {}) => ({ id: suite * 10, check_suite_id: suite, event: 'push', path: CI_YML, head_branch: 'main', ...over });
+const PUSH_MAIN = 'on:\n  push:\n    branches: [main]\n';
+function filtered(yaml, o = {}) {
+  const { headYaml = yaml, base = [checkRun(1, 'Deploy', 11)], runs = [pushRun(11)], branch = 'conduct/fixture/wp-01', headRef = ok(`${branch}\n`) } = o;
+  const workflows = o.workflows ?? { [`${BASE_TIP}:${CI_YML}`]: yaml, [`${HEAD}:${CI_YML}`]: headYaml };
+  const wp = makeWp({ lane: { worktree: WT, branch, base: BASE }, gate: { head: HEAD, pendingSince: minutesAgo(11) } });
+  const exec = gateExec({ required: UNPROTECTED, baseRuns: page('check_runs', base), ci: page('check_runs', [checkRun(2, 'Other', 22)]),
+    actionRuns: page('workflow_runs', runs), headRef, workflows, ...o.exec });
+  const out = gateCheck(makeState(), wp, { exec, now: () => NOW });
+  return { verdict: out.ok ? 'passes' : [out.failures, out.causes], exec };
+}
+const MISSING = [['expected check missing at head: Deploy'], ['ci-missing-check']];
+
+test('push filter gate: a push-only workflow filtered to main is not expected at a conduct/ head', () => {
+  const { verdict, exec } = filtered(PUSH_MAIN);
+  assert.equal(verdict, 'passes');
+  assert.deepEqual(exec.calls.filter((c) => c.program === 'git' && c.args[2] === 'show' && c.args[3].endsWith(CI_YML)).map((c) => c.args), [
+    ['-C', WT, 'show', `${BASE_TIP}:${CI_YML}`], ['-C', WT, 'show', `${HEAD}:${CI_YML}`]]);
+  assert.deepEqual(exec.calls.filter((c) => c.args.includes('headRefName')).map((c) => c.args), [['pr', 'view', '7', '--repo', 'sirmaelstrom/workit', '--json', 'headRefName', '-q', '.headRefName']]);
+});
+
+test('push filter gate: the filter cases the rule settles', () => {
+  assert.deepEqual(filtered(`${PUSH_MAIN}  pull_request:\n`).verdict, MISSING, 'pull_request added');
+  assert.deepEqual(filtered('on:\n  push:\n    branches: [\'conduct/**\']\n', { branch: 'conduct/x/wp-01' }).verdict, MISSING, 'conduct/** matches the head');
+  assert.deepEqual(filtered('on:\n  push:\n    branches-ignore: [main]\n').verdict, MISSING, 'branches-ignore misses the head');
+  assert.equal(filtered('on:\n  push:\n    tags: [v*]\n').verdict, 'passes', 'tags only');
+  assert.equal(filtered(`${PUSH_MAIN}  pull_request:\n    branches: [release]\n`).verdict, 'passes', 'pull_request into release only');
+  assert.deepEqual(filtered(`${PUSH_MAIN}  pull_request:\n    branches: [main]\n`).verdict, MISSING, 'pull_request into main');
+  assert.equal(filtered('on:\n  push:\n    branches: [\'release/*\']\n', { branch: 'release/a/b' }).verdict, 'passes', 'release/* stops at a slash');
+  assert.deepEqual(filtered('on:\n  push:\n    branches: [\'release/**\']\n', { branch: 'release/a/b' }).verdict, MISSING, 'release/** crosses slashes');
+});
+
+test('push filter gate: every case the reader cannot settle keeps the check expected', () => {
+  for (const [yaml, why] of [
+    ['on:\n  push: &p\n    branches: [main]\n', 'an anchor'], ['on:\n  push: {branches: [main]}\n', 'a flow mapping'],
+    ['on:\n  push:\n    branches: [\'!main\']\n', 'a ! pattern'], ['on:\n  push:\n    branches: [\'ma?n\']\n', 'a ? pattern'],
+    ['on:\n  "push":\n    branches: [main]\n', 'a quoted push key'],
+  ]) assert.deepEqual(filtered(yaml).verdict, MISSING, why);
+  // The base run's event is push, so a push side read as false is not trusted.
+  assert.deepEqual(filtered('on:\n  workflow_dispatch:\n').verdict, MISSING, 'push read as false');
+  assert.deepEqual(filtered(PUSH_MAIN, { runs: [pushRun(11, { path: undefined })] }).verdict, MISSING, 'a run with no path');
+  assert.deepEqual(filtered(PUSH_MAIN, { workflows: { [`${BASE_TIP}:${CI_YML}`]: PUSH_MAIN } }).verdict, MISSING, 'git show fails at the head');
+  assert.deepEqual(filtered(PUSH_MAIN, { workflows: { [`${HEAD}:${CI_YML}`]: PUSH_MAIN } }).verdict, MISSING, 'git show fails at the base');
+  assert.deepEqual(filtered(`${PUSH_MAIN}  pull_request:\n`, { headYaml: PUSH_MAIN }).verdict, MISSING, 'the head edits its trigger block');
+  assert.deepEqual(filtered(PUSH_MAIN, { headRef: { code: 127, stdout: '', stderr: 'unexpected' } }).verdict, MISSING, 'headRefName unreadable');
+  assert.deepEqual(filtered(PUSH_MAIN, { headRef: ok('\n') }).verdict, MISSING, 'headRefName empty');
+  assert.deepEqual(filtered(PUSH_MAIN, { headRef: ok('someone/else\n') }).verdict, MISSING, 'headRefName is not the WP branch');
+  const pr = filtered(PUSH_MAIN, { runs: [pushRun(11, { event: 'pull_request' })] });
+  assert.deepEqual(pr.verdict, MISSING, 'a pull_request run');
+  assert.ok(!pr.exec.calls.some((c) => c.args.includes('headRefName') || (c.args[2] === 'show' && c.args[3].endsWith(CI_YML))), 'no push run: no head-branch read, no workflow read');
+});
+
+test('push filter gate: a name stays expected when any producer of it is (union over producers)', () => {
+  const DEPLOY_YML = '.github/workflows/deploy.yml';
+  const workflows = { [`${BASE_TIP}:${CI_YML}`]: PUSH_MAIN, [`${HEAD}:${CI_YML}`]: PUSH_MAIN, [`${BASE_TIP}:${DEPLOY_YML}`]: 'on: push\n', [`${HEAD}:${DEPLOY_YML}`]: 'on: push\n' };
+  const twoProducers = { base: [checkRun(1, 'Deploy', 11), checkRun(3, 'Deploy', 33)], runs: [pushRun(11), pushRun(33, { path: DEPLOY_YML })], workflows };
+  const { verdict, exec } = filtered(PUSH_MAIN, twoProducers);
+  assert.deepEqual(verdict, MISSING);
+  assert.equal(exec.calls.filter((c) => c.args.includes('headRefName')).length, 1, 'the head branch is read once');
+  assert.equal(filtered(PUSH_MAIN, { ...twoProducers, workflows: { ...workflows, [`${BASE_TIP}:${DEPLOY_YML}`]: PUSH_MAIN, [`${HEAD}:${DEPLOY_YML}`]: PUSH_MAIN } }).verdict, 'passes');
+});
+
+test('push filter gate: readable protection still requires its names, whatever the workflow filter', () => {
+  const { verdict, exec } = filtered(PUSH_MAIN, { exec: { required: REQUIRED } });
+  assert.deepEqual(verdict, [['expected check missing at head: Tests (node --test), Secret scan (gitleaks)'], ['ci-missing-check']]);
+  assert.ok(!exec.calls.some((c) => c.args.includes('headRefName') || (c.args[2] === 'show' && c.args[3].endsWith(CI_YML))), 'the reader never runs');
+});
+
+test('push filter gate: the captured main workflow runs carry path to the rule (workflow-runs-main.json)', () => {
+  const captured = fixtureJson('workflow-runs-main.json');
+  assert.deepEqual(captured.workflow_runs.map((run) => [run.event, run.path, run.head_branch]), [['push', CI_YML, 'main']]);
+  const green = fixtureJson('check-runs-green.json');
+  assert.ok(green.check_runs.every((run) => run.check_suite.id === captured.workflow_runs[0].check_suite_id), 'the captures join by check_suite id');
+  const real = (yaml) => filtered(yaml, { base: green.check_runs, runs: captured.workflow_runs });
+  // Push-only at both shas: none of the three is expected; that needs the run's path.
+  assert.equal(real(PUSH_MAIN).verdict, 'passes');
+  // The real ci.yml has an unfiltered pull_request, so all three are.
+  assert.deepEqual(real(REPO_CI).verdict, [['expected check missing at head: Tests (node --test, windows), Tests (node --test), Secret scan (gitleaks)'], ['ci-missing-check']]);
 });
 
 test('a 403 CI migration policy is head-bound and cannot hide required or failed checks', () => {
