@@ -830,6 +830,19 @@ test('t3 rotation with a wake yield pending: custody makes a heartbeat bound to 
   assert.match(readFileSync(state.rotations[0].handoff, 'utf8'), /the run's heartbeat is made again from your thread/);
 });
 
+test('t3 heartbeat cleanup: a heartbeat still undeleted after 3 attempts is named in the run analysis\'s audit as unresolved cleanup, with the call that deletes it (workit#313 review r1, finding 3)', async (t) => {
+  const { h } = await wakeYieldPending(t);
+  const s = loadState(h.runDir, h.deps);
+  s.t3Wake = { ...s.t3Wake, deleted: true, old: [{ taskId: 'task-r0', thread: 'mcp:conductor-0', conductor: 1, deleted: false, attempts: 3, error: '{"error":"T3 unreachable"}' }, { taskId: 'task-gone', deleted: true, attempts: 1 }] };
+  saveState(s, h.deps);
+  await analyzeRun(h.runDir, h.deps);
+  const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
+  const audit = analysis.split(/^## /m).find((part) => part.startsWith('Pre-approval audit\n'));
+  const lines = audit.split('\n').filter((line) => line.startsWith('- unresolved cleanup:'));
+  assert.equal(lines.length, 1, audit);
+  assert.match(lines[0], /^- unresolved cleanup: T3 heartbeat task-r0 \(conductor r1, thread mcp:conductor-0\) is not deleted after 3 attempts \(last error: \{"error":"T3 unreachable"\}\); it starts a turn in that thread every 10 minutes until it is\. Call delete_scheduled_task with \{"scheduledTaskId":"task-r0"\}\.$/);
+});
+
 test('t3 conductor fence: after r2 takes custody, r1 woken by a late done message runs next/record --as-thread r1 and is refused with exit 5, changing nothing; r2 passes, and so does a call without --as-thread (workit#313 review r1, finding 2)', async (t) => {
   const { h, yielded } = await wakeYieldPending(t);
   const statePath = join(h.runDir, 'state.json');

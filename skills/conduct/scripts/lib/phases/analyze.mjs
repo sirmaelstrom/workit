@@ -20,7 +20,8 @@ export function next(state) {
 }
 
 export function record(state, action, result) {
-  // A failed delete is recorded and never retried here: the run goes on to its analysis.
+  // A failed delete stays owed and is emitted again, up to HEARTBEAT_DELETE_ATTEMPTS
+  // per task; then the run goes on, and its analysis names what is left.
   if (action?.part === 'heartbeat-stop') return recordHeartbeatDelete(state, action.args.scheduledTaskId, result);
   state.phase = 'showcase';
 }

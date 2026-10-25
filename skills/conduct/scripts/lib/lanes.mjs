@@ -412,8 +412,9 @@ export function laneBackend(state, deps, backend) {
       // With the heartbeat live the conductor ends its turn (the build's wake
       // yield) and reads the lane when it is woken. Without it, a 2-minute
       // t3_thread_wait polls, and a heartbeat owed (a rotated conductor's) is made first.
-      wait: (wp) => (t3WakeLive(state) ? [wakeWait(wp), readAct(wp)] : [...heartbeatActs(state, 'wait'), tool('wait', null, 't3_thread_wait', { threadId: wp.lane?.threadId ?? null, timeoutMs: T3_WAIT_MS },
-        'Call t3_thread_wait with these args and record its raw result.')]),
+      // A replaced heartbeat whose delete failed is retried first (heartbeatRetries).
+      wait: (wp) => [...heartbeatRetries(state, 'wait'), ...(t3WakeLive(state) ? [wakeWait(wp), readAct(wp)] : [...heartbeatActs(state, 'wait'), tool('wait', null, 't3_thread_wait', { threadId: wp.lane?.threadId ?? null, timeoutMs: T3_WAIT_MS },
+        'Call t3_thread_wait with these args and record its raw result.')])],
       check: gitCheck,
       // Interrupt the running turn, then confirm the run is terminal. A lane
       // already exited gets the reap alone.
@@ -881,11 +882,12 @@ function recordHeartbeat(state, wp, action, result, deps) {
   const old = wake?.old ?? [];
   if (action.part === 'heartbeat-stop') {
     const id = action.args.scheduledTaskId;
-    // The entry keeps the thread it was bound to: the conductor fence refuses a retired conductor's thread.
-    const was = wake?.taskId === id ? { thread: wake.thread ?? null, conductor: wake.conductor ?? null } : old.find((entry) => entry.taskId === id);
-    const outcome = { ...was, taskId: id, deleted: !t3Failed(result) || /task_not_found|not found/i.test(t3Said(result)), ...(t3Failed(result) ? { error: t3Said(result) } : {}) };
-    const others = old.filter((entry) => entry.taskId !== id);
-    state.t3Wake = wake?.taskId === id ? { ...wake, taskId: null, thread: null, old: [...others, outcome] } : { ...wake, old: [...others, outcome] };
+    // A replaced live task moves to `old`, keeping the thread it was bound
+    // to: the conductor fence refuses a retired conductor's thread.
+    if (wake?.taskId === id) {
+      state.t3Wake = { ...wake, taskId: null, thread: null, old: [...old.filter((entry) => entry.taskId !== id), { taskId: id, thread: wake.thread ?? null, conductor: wake.conductor ?? null }] };
+    }
+    recordHeartbeatDelete(state, id, result);
     return proceed();
   }
   const conductor = Number(/-heartbeat-r(\d+)$/.exec(action.args.clientRequestId)?.[1] ?? conductorNumber(state));
@@ -910,19 +912,56 @@ function recordHeartbeat(state, wp, action, result, deps) {
 }
 
 // The heartbeats a finished build still owns, for the analyze phase to delete.
-export function heartbeatsToDelete(state) {
+// A heartbeat's delete is owed until it succeeds or has been tried this often.
+export const HEARTBEAT_DELETE_ATTEMPTS = 3;
+
+// Every heartbeat the run made, the live one first:
+// { taskId, thread, conductor, deleted, attempts, error }.
+function heartbeatEntries(state) {
   const wake = state.t3Wake;
   if (!wake) return [];
-  return [...(wake.taskId && !wake.deleted && !wake.deleteResult ? [wake.taskId] : []), ...(wake.old ?? []).filter((entry) => entry.deleted === undefined).map((entry) => entry.taskId)];
+  const live = wake.taskId ? [{ taskId: wake.taskId, thread: wake.thread ?? null, conductor: wake.conductor ?? null, deleted: wake.deleted,
+    attempts: wake.deleteAttempts ?? (wake.deleteResult ? 1 : 0), error: wake.deleteResult?.error }] : [];
+  return [...live, ...(wake.old ?? []).map((entry) => ({ ...entry, attempts: entry.attempts ?? (entry.deleted === undefined ? 0 : 1) }))];
 }
 
-// One delete's outcome: a task already gone counts as deleted. Each task is tried once.
+const owed = (entry) => entry.deleted !== true && entry.attempts < HEARTBEAT_DELETE_ATTEMPTS;
+
+// The heartbeats a finished build still owns, for the analyze phase to delete.
+export function heartbeatsToDelete(state) {
+  return heartbeatEntries(state).filter(owed).map((entry) => entry.taskId);
+}
+
+// The heartbeats left undeleted, for the run analysis to name.
+export function unresolvedHeartbeats(state) {
+  return heartbeatEntries(state).filter((entry) => entry.deleted !== true);
+}
+
+// A replaced heartbeat whose delete failed is retried at each later wait,
+// once per tick: a retry another lane already holds is not queued again.
+function heartbeatRetries(state, step) {
+  const queued = new Set(state.wps.flatMap((wp) => (wp.queue ?? []).filter((act) => act.part === 'heartbeat-stop').map((act) => act.args?.scheduledTaskId)));
+  return heartbeatEntries(state).filter((entry) => entry.taskId !== state.t3Wake.taskId && entry.deleted === false && owed(entry) && !queued.has(entry.taskId))
+    .map((entry) => ({ kind: 'agent-tool', step, seam: STEP_SEAM[step], part: 'heartbeat-stop', tool: 'delete_scheduled_task', args: { scheduledTaskId: entry.taskId }, expects: { type: 'json' },
+      instruction: `Call delete_scheduled_task with these args and record its raw result (an error too): a replaced heartbeat whose delete failed (attempt ${entry.attempts + 1} of ${HEARTBEAT_DELETE_ATTEMPTS}).` }));
+}
+
+// One delete's outcome: a task already gone counts as deleted. A failed one
+// stays owed until HEARTBEAT_DELETE_ATTEMPTS; the run analysis names what is left.
 export function recordHeartbeatDelete(state, taskId, result) {
-  const deleted = !t3Failed(result) || /task_not_found|not found/i.test(t3Said(result));
+  const gone = !t3Failed(result) || /task_not_found|not found/i.test(t3Said(result));
   const wake = state.t3Wake ?? {};
-  const outcome = { taskId, deleted, ...(t3Failed(result) ? { error: t3Said(result) } : {}) };
-  if (wake.taskId === taskId) state.t3Wake = { ...wake, deleted, deleteResult: outcome };
-  else state.t3Wake = { ...wake, old: [...(wake.old ?? []).filter((entry) => entry.taskId !== taskId), { ...(wake.old ?? []).find((entry) => entry.taskId === taskId), ...outcome }] };
+  const was = heartbeatEntries(state).find((entry) => entry.taskId === taskId) ?? { attempts: 0 };
+  const deleted = was.deleted === true || gone;
+  const attempts = was.attempts + 1;
+  const error = deleted ? undefined : t3Said(result);
+  if (wake.taskId === taskId) {
+    state.t3Wake = { ...wake, deleted, deleteAttempts: attempts, deleteResult: { taskId, deleted, ...(error ? { error } : {}) } };
+    return;
+  }
+  const old = wake.old ?? [];
+  const update = ({ error: _stale, ...entry } = {}) => ({ ...entry, taskId, deleted, attempts, ...(error ? { error } : {}) });
+  state.t3Wake = { ...wake, old: old.some((entry) => entry.taskId === taskId) ? old.map((entry) => (entry.taskId === taskId ? update(entry) : entry)) : [...old, update()] };
 }
 
 // What the latest activity items say a lane waits on: the last waiting

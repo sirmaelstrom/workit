@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   allowedMissing, chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
-  STOP_CHECK_BLOCKS, stopHookCommand, laneDeadlineMs, T3_HEARTBEAT_MS, t3WakeLive, heartbeatsToDelete, conductorThreadFence,
+  STOP_CHECK_BLOCKS, stopHookCommand, laneDeadlineMs, T3_HEARTBEAT_MS, t3WakeLive, heartbeatsToDelete, conductorThreadFence, unresolvedHeartbeats,
 } from './lanes.mjs';
 import { RESET_TARGETS } from './phases/build.mjs';
 import { dispatchable } from './schedule.mjs';
@@ -1506,7 +1506,7 @@ test('t3 rotation: r1\'s heartbeat is not live under r2; the next wait deletes i
   const [stop, heartbeat, wait] = b.wait(f.wp);
   assert.deepEqual([stop.tool, stop.args, heartbeat.args.clientRequestId, wait.tool], ['delete_scheduled_task', { scheduledTaskId: TASK }, 'abcd1234-heartbeat-r2', 't3_thread_wait']);
   f.record(stop, { scheduledTaskId: TASK, deleted: true });
-  assert.deepEqual([f.state.t3Wake.taskId, f.state.t3Wake.old], [null, [{ taskId: TASK, thread: CONDUCTOR, conductor: 1, deleted: true }]]);
+  assert.deepEqual([f.state.t3Wake.taskId, f.state.t3Wake.old], [null, [{ taskId: TASK, thread: CONDUCTOR, conductor: 1, deleted: true, attempts: 1 }]]);
   // r1's thread stays known as retired: the conductor fence refuses it before r2 has a heartbeat.
   assert.throws(() => conductorThreadFence(f.state, CONDUCTOR), { code: 5, message: /not this run's conductor \(current: none yet\)/ });
   assert.doesNotThrow(() => conductorThreadFence(f.state, 'mcp:conductor-2'));
@@ -1521,10 +1521,37 @@ test('t3 rotation: r1\'s heartbeat is not live under r2; the next wait deletes i
   assert.doesNotThrow(() => conductorThreadFence(f.state, undefined), 'no --as-thread, no check');
 });
 
-test('t3 analyze: the heartbeats a finished build still owns are deleted, once each, before the analysis runs', async (t) => {
+test('t3 heartbeat delete retry: a delete that failed stays owed and is retried at each later wait, once per tick across lanes, up to 3 attempts (workit#313 review r1, finding 3)', (t) => {
+  const f = t3Lanes(t, { wake: 'live', wpLane: { worktree: '/wt', threadId: THREAD, startedAt: new Date(T0).toISOString(), deadline: new Date(T0 + 3600000).toISOString() } });
+  const b = f.backend();
+  // The run already has a heartbeat; a duplicate T3 did not dedupe is queued for deletion, and that delete fails.
+  const heartbeat = { kind: 'agent-tool', step: 'wait', part: 'heartbeat', tool: 'schedule_task', args: { clientRequestId: 'abcd1234-heartbeat-r1' } };
+  const [dup] = f.record(heartbeat, { scheduledTaskId: 'task-dup', boundThreadId: CONDUCTOR }).patch.queue;
+  assert.deepEqual([dup.part, dup.args], ['heartbeat-stop', { scheduledTaskId: 'task-dup' }]);
+  assert.equal(f.record(dup, { error: 'T3 unreachable' }).outcome, 'continue', 'a failed delete never blocks');
+  const shape = (acts) => acts.map((act) => (act.part === 'heartbeat-stop' ? `stop:${act.args.scheduledTaskId}` : act.wake ? 'wake' : act.part));
+  assert.deepEqual(shape(b.wait(f.wp)), ['stop:task-dup', 'wake', 'read'], 'the next wait retries it');
+  f.record(b.wait(f.wp)[0], { error: 'T3 unreachable' });
+  // Another lane already holds the retry this tick: it is not queued twice.
+  f.state.wps.push({ id: 'WP-09', queue: [b.wait(f.wp)[0]] });
+  assert.deepEqual(shape(b.wait(f.wp)), ['wake', 'read']);
+  f.state.wps.pop();
+  // In poll mode too.
+  const live = f.state.t3Wake;
+  f.state.t3Wake = { ...live, failed: 'x' };
+  assert.deepEqual(shape(b.wait(f.wp)).slice(0, 1), ['stop:task-dup']);
+  f.state.t3Wake = live;
+  f.record(b.wait(f.wp)[0], { error: 'T3 still unreachable' });
+  const entry = f.state.t3Wake.old.find((candidate) => candidate.taskId === 'task-dup');
+  assert.deepEqual([entry.deleted, entry.attempts], [false, 3]);
+  assert.deepEqual(shape(b.wait(f.wp)), ['wake', 'read'], 'after the third failure it is left to the run analysis');
+  assert.deepEqual(heartbeatsToDelete(f.state), [TASK], 'analyze owes only the live one');
+});
+
+test('t3 analyze: the heartbeats a finished build still owns are deleted before the analysis runs; a failed delete stays owed, up to 3 attempts per task (workit#313 review r1, finding 3)', async (t) => {
   const analyze = await import('./phases/analyze.mjs');
   const f = t3Lanes(t, { wake: 'live' });
-  f.state.t3Wake.old = [{ taskId: 'old-1' }, { taskId: 'old-2', deleted: true }];
+  f.state.t3Wake.old = [{ taskId: 'old-1' }, { taskId: 'old-2', deleted: true }, { taskId: 'old-3', deleted: false, attempts: 1, error: 'x' }];
   const first = analyze.next(f.state);
   assert.deepEqual([first.kind, first.step, first.tool, first.args], ['agent-tool', 'analyze', 'delete_scheduled_task', { scheduledTaskId: TASK }]);
   analyze.record(f.state, first, { scheduledTaskId: TASK, deleted: true });
@@ -1532,10 +1559,24 @@ test('t3 analyze: the heartbeats a finished build still owns are deleted, once e
   assert.deepEqual(second.args, { scheduledTaskId: 'old-1' });
   analyze.record(f.state, second, { error: 'T3 unreachable' });
   assert.equal(f.state.phase, 'build', 'a delete never moves the phase');
+  // old-1 failed once: it is tried again, and again, then given up.
+  for (const error of ['T3 unreachable', 'T3 still unreachable']) {
+    const retry = analyze.next(f.state);
+    assert.deepEqual([retry.tool, retry.args], ['delete_scheduled_task', { scheduledTaskId: 'old-1' }], 'a failed delete is retried');
+    analyze.record(f.state, retry, { error });
+  }
+  // old-3 failed once in the build: two attempts are left, and the second deletes it.
+  const third = analyze.next(f.state);
+  assert.deepEqual(third.args, { scheduledTaskId: 'old-3' });
+  analyze.record(f.state, third, { error: 'busy' });
+  analyze.record(f.state, analyze.next(f.state), { scheduledTaskId: 'old-3', deleted: true });
   const run = analyze.next(f.state);
-  assert.deepEqual([run.kind, run.step], ['shell', 'analyze'], 'a failed delete is not retried');
+  assert.deepEqual([run.kind, run.step], ['shell', 'analyze'], 'after 3 attempts the analysis runs');
   assert.deepEqual(heartbeatsToDelete(f.state), []);
-  assert.deepEqual(f.state.t3Wake.old.find((entry) => entry.taskId === 'old-1').deleted, false);
+  const entry = (id) => f.state.t3Wake.old.find((candidate) => candidate.taskId === id);
+  assert.deepEqual([entry('old-1').deleted, entry('old-1').attempts, entry('old-1').error], [false, 3, '{"error":"T3 still unreachable"}']);
+  assert.deepEqual([entry('old-3').deleted, entry('old-3').attempts, entry('old-3').error], [true, 3, undefined]);
+  assert.deepEqual(unresolvedHeartbeats(f.state).map((left) => left.taskId), ['old-1'], 'what the run analysis names');
   analyze.record(f.state, run, { code: 0 });
   assert.equal(f.state.phase, 'showcase');
   assert.equal(analyze.next(t3Lanes(t, { wake: 'none' }).state).kind, 'shell', 'a run with no heartbeat goes straight to its analysis');
