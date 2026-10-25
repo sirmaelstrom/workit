@@ -29,7 +29,8 @@
 //   dialog, capacity and start-retry counters. Automatic retries (capacity
 //   re-send, dialog re-poll, refused start, plan-low fallback) renew nothing.
 // - `lane.doneWake` (t3) is when `next --woken-by done --wp <id>` named the
-//   lane's done message as the tick's cause; the lane's next read spends it.
+//   lane's done message as the tick's cause; the lane's next read spends it,
+//   a failed one too, and a fresh start or amendment clears it.
 // - `lane.dialogPolls` counts consecutive dialogs (wait or start exit 3): any
 //   other wait result resets it to 0; the second consecutive dialog blocks.
 // - `lane.fallback: 'claude'` records that a codex lane now runs claude in its
@@ -701,10 +702,11 @@ export function laneDeadlineMs(state) {
 }
 
 // A successful start or conductor amendment: a fresh deadline, the exit
-// marker cleared, every retry counter reset.
+// marker and any done wake (a mark on the run before) cleared, every retry
+// counter reset.
 export function freshStart(deps, startedAt = null, deadlineMs = DEADLINE_MS) {
   const at = startedAt ? Date.parse(startedAt) : deps.now();
-  return { startedAt: iso(at), deadline: iso(at + deadlineMs), exitedAt: null, dialogPolls: 0, capacityResent: false, startRearms: 0, stopConfirms: 0 };
+  return { startedAt: iso(at), deadline: iso(at + deadlineMs), exitedAt: null, doneWake: null, dialogPolls: 0, capacityResent: false, startRearms: 0, stopConfirms: 0 };
 }
 
 // A dialog (wait or start exit 3) gets one re-poll after 60 s (it may clear
@@ -1174,7 +1176,9 @@ function recordT3Step(state, wp, action, result, deps, backend) {
   // confirmation counts as one that saw the run still going.
   if (action.step === 'stop' && action.part === 'interrupt') return proceed();
   if (action.step === 'stop' && t3Failed(result)) return t3StopUnconfirmed(wp, action, rest, backend, `${action.tool} failed: ${t3Said(result)}`);
-  if (t3Failed(result)) return block(`${action.tool}: ${t3Said(result)}`);
+  // A failed read spends the lane's done wake too: the run it named may be
+  // stopped and amended before the lane is read again.
+  if (t3Failed(result)) return block(`${action.tool}: ${t3Said(result)}`, action.part === 'read' && wp.lane?.doneWake ? { lane: { doneWake: null } } : {});
   switch (action.step) {
     case 'start':
       if (typeof result.threadId !== 'string' || !result.threadId) return block(`t3_thread_launch returned no threadId: ${t3Said(result)}`);
