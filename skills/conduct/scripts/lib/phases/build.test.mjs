@@ -946,6 +946,8 @@ test('t3 resume adoption twice: C2 adopts and loses its heartbeat\'s result; C3\
   assert.deepEqual([state.t3Wake.taskId, state.t3Wake.thread], [null, 'mcp:conductor-3']);
   assert.deepEqual(h.events().filter((event) => event.event === 'heartbeat-misbound').map((event) => event.data), [{ taskId: 'task-a1', boundThreadId: 'mcp:conductor-2', expected: 'mcp:conductor-3' }]);
   assert.equal((await runConduct(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-3'], h.overrides())).code, 0, 'C3 stays current');
+  // C3's adoption retired C2's thread (finding 2).
+  assert.equal((await runConduct(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2'], h.overrides())).code, 5, 'C2 is refused');
 });
 
 test('t3 heartbeat cleanup: a heartbeat still undeleted after 3 attempts is named in the run analysis\'s audit as unresolved cleanup, with the call that deletes it (workit#313 review r1, finding 3)', async (t) => {

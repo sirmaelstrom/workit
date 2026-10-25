@@ -813,7 +813,7 @@ const AS_THREAD = '--as-thread <your own T3 thread id> (orchestrator_capabilitie
 // to the run's conductor thread, every other thread is refused. With none
 // (deleted at analyze, failed, or not made yet) only a retired conductor's
 // thread is refused: one on state.retiredConductorThreads (custody appends
-// the outgoing conductor's) or one a retired conductor's heartbeat was bound
+// the outgoing conductor's, an adoption the thread it replaced) or one a retired conductor's heartbeat was bound
 // to. Without the flag (herdr, exec, by hand) nothing is checked.
 // While a rotation is open, custody is bound to the successor's thread: the
 // first `next --custody <n> --as-thread <id>` stores it (rotate.mjs
@@ -868,7 +868,7 @@ export function retireConductorThreads(state, rotation) {
 
 // `next --resume --as-thread <id>`: a fresh T3 session resuming a run with
 // no live heartbeat (the fence has passed it) adopts its own thread as the
-// conductor thread. A heartbeat record left behind moves to `old`, one still
+// conductor thread, and the thread it replaces is retired. A heartbeat record left behind moves to `old`, one still
 // undeleted owed a delete. With T3 lanes live, a new heartbeat is queued on
 // one of them, and a pending wake yield (whose wakes no heartbeat sends) goes:
 // every lane is read now.
@@ -883,6 +883,9 @@ export function adoptConductorThread(state, asThread, deps) {
     old.push({ taskId: wake.taskId, thread: wake.thread ?? null, conductor: wake.conductor ?? null, deleted: wake.deleted === true,
       attempts: wake.deleteAttempts ?? (wake.deleteResult ? 1 : 0), ...(wake.deleteResult?.error ? { error: wake.deleteResult.error } : {}) });
   }
+  // The replaced thread is retired: woken by a queued lane send, it would
+  // otherwise pass the fence and handle the closeout a second time.
+  if (wake?.thread && wake.thread !== asThread) state.retiredConductorThreads = [...new Set([...(state.retiredConductorThreads ?? []), wake.thread])];
   // A new request id per adoption: T3 would hand an earlier heartbeat of the same conductor back.
   state.t3Adoptions = (state.t3Adoptions ?? 0) + 1;
   state.t3Wake = { taskId: null, thread: asThread, conductor: n, at: iso(deps.now()), failed: null, deleted: false, old };

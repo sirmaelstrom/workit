@@ -570,6 +570,27 @@ test('t3 resume adoption: at the showcase, after analyze deleted the heartbeat, 
   await exit5(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-0'], 'none yet');
 });
 
+test('t3 resume adoption retires the replaced thread: after a fresh session adopts at the showcase, the old conductor thread\'s next and record --as-thread exit 5 and leave state.json unchanged byte for byte (workit#313 review r3, finding 2)', async (t) => {
+  const h = await nonePath(t);
+  const showcase = await drive(h, { until: (a) => a.step === 'showcase' });
+  const path = join(h.runDir, 'state.json');
+  const s = h.state();
+  s.intent.backend = { name: 't3', t3Project: 'proj-1' };
+  s.t3Wake = { taskId: 'task-r1', thread: 'mcp:conductor-1', conductor: 1, at: new Date(T0).toISOString(), failed: null, old: [], deleted: true, deleteAttempts: 1, deleteResult: { taskId: 'task-r1', deleted: true } };
+  writeFileSync(path, `${JSON.stringify(s, null, 2)}\n`);
+  const resumed = await h.run(['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-2']);
+  assert.equal(resumed.code, 0, resumed.stdout + resumed.stderr);
+  assert.deepEqual(h.state().retiredConductorThreads, ['mcp:conductor-1']);
+  for (const argv of [['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], ['record', '--run', h.runDir, '--action', showcase.id, '--result', '{}', '--as-thread', 'mcp:conductor-1']]) {
+    const before = readFileSync(path, 'utf8');
+    const result = await h.run(argv);
+    assert.equal(result.code, 5, `${argv.join(' ')}: ${result.stdout}`);
+    assert.match(out(result).error, /not this run's conductor \(current: none yet\)/);
+    assert.equal(readFileSync(path, 'utf8'), before, 'a refused call changes nothing');
+  }
+  assert.equal((await h.run(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2'])).code, 0, 'the adopter passes');
+});
+
 test('release failures (D20): land gate --wp release code 5, a verify exit 1 and an after exit 1 each end the release failed, unlocked, at analyze; the analysis and the showcase name it', async (t) => {
   const red = JSON.parse(text('land', 'check-runs-green.json'));
   red.check_runs[0].conclusion = 'failure';
