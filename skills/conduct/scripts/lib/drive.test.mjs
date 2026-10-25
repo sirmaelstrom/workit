@@ -254,6 +254,84 @@ test('drive: a second driver on the same run is refused while the first holds dr
   assert.ok(existsSync(join(f.runDir, 'drive.lock')), 'the holder keeps its lock');
 });
 
+test('drive: while a drive runs, a conductor record or next is refused (exit 5, naming the driver); a shell verb still runs', async (t) => {
+  const inner = {};
+  let f;
+  f = fixture(t, [SHELL, TOOL], {
+    shell: async () => {
+      // A conductor in another process: the base deps, without the driver's token.
+      const id = state(f).pending.id;
+      inner.lock = JSON.parse(readFileSync(join(f.runDir, 'drive.lock'), 'utf8'));
+      inner.pendingId = id;
+      inner.record = await f.run(['record', '--run', f.runDir, '--action', id, '--result', '{"code":0,"stdout":"","stderr":""}']);
+      inner.next = await f.run(['next', '--run', f.runDir]);
+      // A shell action's own conduct.mjs verb (the gate's quiet probe) still runs.
+      inner.quiet = await f.run(['quiet', '--samples', '1', '--interval-ms', '100', '--max-busy', '100']);
+      return { code: 0, stdout: 'ok\n', stderr: '' };
+    },
+  });
+  const result = await f.drive();
+  assert.equal(inner.lock.action, inner.pendingId, 'drive.lock names the action it is executing');
+  for (const verb of ['record', 'next']) {
+    assert.equal(inner[verb].code, 5, `${verb}: ${inner[verb].stdout}`);
+    assert.match(out(inner[verb]).error, new RegExp(`pid ${process.pid} on ${hostname()} since \\S+Z.*executing ${inner.pendingId}`));
+  }
+  // Quiet or busy (the host's load decides), but it ran: its samples, not a refusal.
+  assert.ok([0, 1].includes(inner.quiet.code), inner.quiet.stdout);
+  assert.equal(typeof out(inner.quiet).quiet, 'boolean');
+  // The driver's own record went through, once, with the command's result.
+  assert.equal(result.code, 0, result.stdout);
+  assert.equal(out(result).stopped, 'needs-conductor');
+  assert.deepEqual(f.recorded.map(({ result: r }) => r), [{ code: 0, stdout: 'ok\n', stderr: '' }]);
+  assert.equal(f.runs.length, 1);
+});
+
+test('drive: each conductor verb that moves the run is refused while a live driver holds drive.lock, and works once it is gone', async (t) => {
+  const f = fixture(t, [TOOL]);
+  const at = new Date().toISOString();
+  writeFileSync(join(f.runDir, 'drive.lock'), JSON.stringify({ pid: process.pid, host: hostname(), at, token: 'other', action: '1-start' }));
+  const plan = join(f.dir, 'plan.json');
+  writeFileSync(plan, '{}');
+  const verbs = [
+    ['record', '--action', '1-start', '--result', '{}'], ['next'], ['rotate', '--why', 'x'],
+    ['reset-wp', '--wp', 'WP-01', '--to', 'land', '--why', 'x'], ['replan', '--plan', plan],
+    ['ratify', '--wp', 'WP-01', '--paths', 'a', '--why', 'x'], ['upgrade-root', '--why', 'x'],
+  ];
+  for (const [verb, ...rest] of verbs) {
+    const result = await f.run([verb, '--run', f.runDir, ...rest]);
+    assert.equal(result.code, 5, `${verb}: ${result.stdout}`);
+    assert.match(out(result).error, new RegExp(`^${verb}: a drive holds this run \\(pid ${process.pid} on ${hostname()} since ${at.replace(/\./g, '\\.')}, executing 1-start\\)`));
+  }
+  // A dead driver's lock is stale: next works.
+  writeFileSync(join(f.runDir, 'drive.lock'), JSON.stringify({ pid: 999999999, host: hostname(), at, token: 'other' }));
+  assert.equal((await f.run(['next', '--run', f.runDir])).code, 0);
+});
+
+test('drive: a driver that finds pending moved under it stops before running anything', async (t) => {
+  let f;
+  let moved = false;
+  f = fixture(t, [WAIT, SHELL, TOOL], {
+    // After the wait is recorded, a conductor ignoring the lock re-emits the shell under another id.
+    onRecord: (action) => { if (action.kind === 'wait') moved = true; },
+  });
+  const append = (path, value) => {
+    writeFileSync(path, (existsSync(path) ? readFileSync(path, 'utf8') : '') + value);
+    if (moved && path.endsWith('drive.log')) {
+      moved = false;
+      const s = state(f);
+      writeFileSync(join(f.runDir, 'state.json'), JSON.stringify({ ...s, pending: { ...s.pending, id: '9-gate-cmd' } }));
+    }
+  };
+  const result = await f.run(['drive', '--run', f.runDir], { append });
+  assert.equal(result.code, 1, result.stdout);
+  const printed = out(result);
+  assert.equal(printed.stopped, 'pending-moved');
+  assert.equal(printed.action.id, '2-gate-cmd');
+  assert.equal(printed.found, '9-gate-cmd');
+  assert.deepEqual(f.runs, []);
+  assert.equal(printed.steps, 1);
+});
+
 test('drive: a pending hand-back is a stop and is never consumed', async (t) => {
   const handBack = { id: '7-touch', kind: 'touch', step: 'touch', part: 'hand-back', handBack: true, touch: { n: 1 }, phase: 'build' };
   const f = fixture(t, [], { patch: { pending: handBack, seq: 7 } });

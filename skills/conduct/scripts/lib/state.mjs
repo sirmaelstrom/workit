@@ -172,6 +172,16 @@ function lockIsStale(holder, deps) {
   return deps.now() - Date.parse(holder.at) > LOCK_STALE_MS;
 }
 
+// The holder of a lock file that is held: null when the file is absent or
+// its holder is shown gone, { unreadable: true } when it cannot be read.
+export function liveLock(runDir, lock, deps) {
+  const path = join(runDir, lock);
+  if (!deps.exists(path)) return null;
+  const holder = readLock(path, deps);
+  if (!holder) return { unreadable: true, path };
+  return lockIsStale(holder, deps) ? null : holder;
+}
+
 // One writer at a time: every state transaction (load, change, save) runs
 // under a lock file beside state.json. The lock is a hard link to a complete
 // temp file, so it never exists half-written, and `link` fails if a lock is
@@ -179,7 +189,8 @@ function lockIsStale(holder, deps) {
 // removes the lock only while it still carries this writer's token. Two
 // contenders that both judge one dead holder's lock stale can race on the
 // takeover (accepted for v1: it needs a crash and two contenders; ASSUMPTION).
-// `lock` names another lock file under the same rules (drive.lock: one driver).
+// `lock` names another lock file under the same rules (drive.lock: one
+// driver). fn gets the holder's token, which a holder can re-stamp the lock with.
 export async function withStateLock(runDir, deps, fn, { lock = 'state.lock' } = {}) {
   const path = join(runDir, lock);
   const token = randomBytes(8).toString('hex');
@@ -215,7 +226,7 @@ export async function withStateLock(runDir, deps, fn, { lock = 'state.lock' } = 
     deps.remove(temp);
   }
   try {
-    return await fn();
+    return await fn({ token });
   } finally {
     if (readLock(path, deps)?.token === token) deps.remove(path);
   }

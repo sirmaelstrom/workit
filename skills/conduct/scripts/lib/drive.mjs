@@ -3,8 +3,9 @@
 // is slept, and a template `author` is filled; each result is recorded
 // through the record verb. Everything else (agent-tool, skill, touch,
 // inspect, a judgment author, done) is a stop.
-// conduct.mjs injects `pending` and `record` (its own verbs, in process) and
-// `runArgv` (lib/exec.mjs), and holds the run's drive lock around the loop.
+// conduct.mjs injects `pending`, `claim` and `record` (its own verbs, in
+// process) and `runArgv` (lib/exec.mjs), and holds the run's drive lock
+// around the loop.
 // A shell runs once: a started marker is written before it runs and its
 // result after, so a driver that dies between running and recording is
 // recorded from the saved result, or stopped for the conductor, on restart.
@@ -99,6 +100,17 @@ export async function drive({ runDir, maxSteps = DEFAULT_MAX_STEPS }, deps) {
     if (performed.length >= maxSteps) {
       log([deps.timestamp(), action.id, label(action), 'stop=max-steps']);
       return finish(0, { ok: true, stopped: 'max-steps', action });
+    }
+    // The run is still where the driver left it, and drive.lock names this
+    // action: a conductor verb that moved it meanwhile stops the drive here.
+    const claim = await deps.claim(action.id);
+    if (claim.code !== 0) {
+      log([deps.timestamp(), action.id, label(action), `exit=${claim.code}`, 'refused']);
+      return finish(claim.code, { ok: false, stopped: 'refused', action, refusal: claim.out });
+    }
+    if (claim.out.found !== action.id) {
+      log([deps.timestamp(), action.id, label(action), `stop=pending-moved found=${claim.out.found ?? '-'}`]);
+      return finish(1, { ok: false, stopped: 'pending-moved', action, found: claim.out.found });
     }
 
     const startedAt = deps.timestamp();
