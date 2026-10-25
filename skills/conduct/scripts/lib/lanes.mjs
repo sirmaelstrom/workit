@@ -380,9 +380,12 @@ export function laneBackend(state, deps, backend) {
         }, `Call t3_thread_launch with these args and record its raw result. If its response is lost, find the thread with t3_thread_list (titleContains "${title}") and record that thread's row; never launch twice.`)];
       },
       // An amendment is a new turn in the same thread: the lane keeps its context.
+      // The request id is stable across retries of one queued send and new for
+      // each send after it (a reset re-prompt): T3 drops a repeated id. Every
+      // recorded send renews startedAt, so the id carries it.
       prompt: (wp, { amendment = false, resend = false } = {}) => (amendment ? [tool('prompt', resend ? 'resend' : null, 't3_thread_send', {
         threadId: wp.lane?.threadId ?? null, message: message(wp), mode: 'queue',
-        clientRequestId: `${state.runId}-${wp.id.toLowerCase()}-a${wp.amendment?.n ?? 0}${resend ? '-resend' : ''}`,
+        clientRequestId: `${state.runId}-${wp.id.toLowerCase()}-a${wp.amendment?.n ?? 0}-${Date.parse(wp.lane?.startedAt ?? '') || 0}${resend ? '-resend' : ''}`,
       }, 'Call t3_thread_send with these args and record its raw result.')] : []),
       wait: (wp) => [tool('wait', null, 't3_thread_wait', { threadId: wp.lane?.threadId ?? null, timeoutMs: T3_WAIT_MS },
         'Call t3_thread_wait with these args and record its raw result.')],
@@ -766,8 +769,13 @@ const t3Failed = (result) => !result || typeof result !== 'object' || result.isE
 function recordT3Step(state, wp, action, result, deps, backend) {
   // Cleanup never blocks: a thread left unarchived is named on the lane, and the removal after it says what stayed.
   if (action.part === 'archive') return proceed({ lane: { archived: !t3Failed(result), ...(t3Failed(result) ? { archiveError: t3Said(result) } : {}) } });
-  if (t3Failed(result)) return block(`${action.tool}: ${t3Said(result)}`);
   const rest = (wp.queue ?? []).slice(1);
+  // A stop's calls go through the cleanup retries, keeping what is queued
+  // behind them: a failed interrupt is left to the confirmation, and a failed
+  // confirmation counts as one that saw the run still going.
+  if (action.step === 'stop' && action.part === 'interrupt') return proceed();
+  if (action.step === 'stop' && t3Failed(result)) return t3StopUnconfirmed(wp, action, rest, backend, `${action.tool} failed: ${t3Said(result)}`);
+  if (t3Failed(result)) return block(`${action.tool}: ${t3Said(result)}`);
   switch (action.step) {
     case 'start':
       if (typeof result.threadId !== 'string' || !result.threadId) return block(`t3_thread_launch returned no threadId: ${t3Said(result)}`);
@@ -797,20 +805,25 @@ function recordT3Step(state, wp, action, result, deps, backend) {
       return block(`the lane's T3 run ended ${status || 'unreadably'}: ${t3Said(result)}`, { lane: exitedLane(state, wp, deps, false), queue: backend.reap(wp) });
     }
     case 'stop': {
-      if (action.part === 'interrupt') return proceed(); // the confirmation decides
       const status = String(result.status ?? '');
       if (!(result.timedOut === true || T3_RUNNING.has(status))) {
         return done('lane stopped', { lane: exitedLane(state, wp, deps, false), queue: [...backend.reap(wp), ...rest] });
       }
-      const confirms = (wp.lane?.stopConfirms ?? 0) + 1;
-      if (confirms >= STOP_CONFIRMS) {
-        return block(`cleanup unresolved after ${confirms} confirmations: the lane's T3 run is still ${status || 'running'}`, { lane: { stopConfirms: confirms }, queue: [...backend.stop(wp), ...rest] }, 'cleanup-unresolved');
-      }
-      return { outcome: 'wait', reason: `the lane's T3 run is still ${status || 'running'} after the interrupt`, patch: { lane: { stopConfirms: confirms }, queue: [waitAction(STOP_WAIT_MS), action, ...rest] } };
+      return t3StopUnconfirmed(wp, action, rest, backend, `the lane's T3 run is still ${status || 'running'} after the interrupt`);
     }
     default:
       throw new ConductError(2, `recordLaneStep has no T3 route for step ${action.step}`);
   }
+}
+
+// An unconfirmed stop is confirmed again after 10 s, up to STOP_CONFIRMS
+// times; then it blocks as 'cleanup-unresolved' with its stop and the rest still queued.
+function t3StopUnconfirmed(wp, action, rest, backend, why) {
+  const confirms = (wp.lane?.stopConfirms ?? 0) + 1;
+  if (confirms >= STOP_CONFIRMS) {
+    return block(`cleanup unresolved after ${confirms} confirmations: ${why}`, { lane: { stopConfirms: confirms }, queue: [...backend.stop(wp), ...rest] }, 'cleanup-unresolved');
+  }
+  return { outcome: 'wait', reason: why, patch: { lane: { stopConfirms: confirms }, queue: [waitAction(STOP_WAIT_MS), action, ...rest] } };
 }
 
 // The lane's exit is observed. The exec log holds its session id and, for

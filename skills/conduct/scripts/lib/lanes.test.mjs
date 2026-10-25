@@ -1332,8 +1332,8 @@ test('t3 backend: chosen at intake; a git worktree plus the Stop hook, then MCP 
   f.wp.lane.threadId = THREAD;
   f.wp.amendment = { n: 2 };
   const [send] = b.prompt(f.wp, { amendment: true });
-  assert.deepEqual([send.tool, send.args], ['t3_thread_send', { threadId: THREAD, message: `Read ${f.wp.lane.briefPath} and execute it exactly.`, mode: 'queue', clientRequestId: 'abcd1234-wp-00-a2' }]);
-  assert.equal(b.prompt(f.wp, { amendment: true, resend: true })[0].args.clientRequestId, 'abcd1234-wp-00-a2-resend');
+  assert.deepEqual([send.tool, send.args], ['t3_thread_send', { threadId: THREAD, message: `Read ${f.wp.lane.briefPath} and execute it exactly.`, mode: 'queue', clientRequestId: 'abcd1234-wp-00-a2-0' }]);
+  assert.equal(b.prompt(f.wp, { amendment: true, resend: true })[0].args.clientRequestId, 'abcd1234-wp-00-a2-0-resend');
   assert.deepEqual(b.wait(f.wp)[0].args, { threadId: THREAD, timeoutMs: 120000 });
   f.wp.lane.startedAt = new Date(T0).toISOString();
   assert.deepEqual(b.stop(f.wp).map((act) => [act.tool, act.part]), [['t3_thread_interrupt', 'interrupt'], ['t3_thread_wait', 'confirm']]);
@@ -1399,6 +1399,24 @@ test('t3 recorder: an amendment is a new turn that renews the deadline (a re-sen
   f.wp.lane.stopConfirms = 2;
   const stuck = f.record(confirm, { status: 'running', timedOut: true });
   assert.deepEqual([stuck.outcome, stuck.cause], ['block', 'cleanup-unresolved']);
+  // A failed stop call keeps the cleanup queued behind it (review of #306).
+  f.wp.lane.stopConfirms = 0;
+  assert.equal(f.record(interrupt, { error: 'thread busy' }).outcome, 'continue', 'a failed interrupt is left to the confirmation');
+  const failedConfirm = f.record(confirm, { error: 'T3 unreachable' });
+  assert.deepEqual([failedConfirm.outcome, failedConfirm.patch.queue.map((act) => act.part ?? act.step)], ['wait', ['wait', 'confirm', 'remove']]);
+  assert.match(failedConfirm.reason, /t3_thread_wait failed/);
+});
+
+test('t3 amendment ids: stable across retries of one queued send, new for the send a reset queues after a recorded one (review of #306)', (t) => {
+  const f = t3Lanes(t, { wpLane: { worktree: '/wt', threadId: THREAD, startedAt: new Date(T0).toISOString() } });
+  f.wp.amendment = { n: 1 };
+  const b = f.backend();
+  const [first] = b.prompt(f.wp, { amendment: true });
+  assert.deepEqual(b.prompt(f.wp, { amendment: true })[0].args.clientRequestId, first.args.clientRequestId, 'a retry of the same send');
+  f.tick(60000);
+  apply(f.wp, f.record(first, { threadId: THREAD, runId: 'run-2', status: 'starting' }).patch);
+  const [again] = b.prompt(f.wp, { amendment: true });
+  assert.notEqual(again.args.clientRequestId, first.args.clientRequestId, 'reset-wp --to prompt re-sends amendment 1 with a new id');
 });
 
 test('t3 lane hook: writes the Stop hook and the lane marker into the worktree settings, keeps their other keys, and excludes the file once', async (t) => {
