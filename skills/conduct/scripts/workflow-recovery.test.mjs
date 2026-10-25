@@ -33,6 +33,7 @@ test('upgrade-root snapshots and migrates executable queues while old drivers re
   const old = await runConduct(['status', '--run', h.dir], { pluginRoot: h.oldRoot });
   assert.equal(old.code, 2);
   assert.match(old.stderr, /run moved to the plugin root/);
+  assert.equal(JSON.parse(old.stdout).moved, true);
 });
 
 test('upgrade-root refuses pending actions without changing their state', async (t) => {

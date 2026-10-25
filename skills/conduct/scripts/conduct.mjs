@@ -100,7 +100,10 @@ function openRun(flags, deps) {
   const runDir = runDirFlag(flags);
   const state = loadState(runDir, deps);
   if (state.handover && deps.pluginRoot !== state.pluginRoot) {
-    throw new ConductError(2, `this run moved to the plugin root ${state.pluginRoot}; re-run the verb with that root's skills/conduct/scripts/conduct.mjs`);
+    // `moved` is the signal stop-check.mjs hops on; the message is only for people.
+    const moved = new ConductError(2, `this run moved to the plugin root ${state.pluginRoot}; re-run the verb with that root's skills/conduct/scripts/conduct.mjs`);
+    moved.details = { moved: true };
+    throw moved;
   }
   return { runDir, state };
 }
