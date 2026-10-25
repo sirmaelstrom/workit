@@ -93,8 +93,10 @@ const SPINE = ['--adapter', 'spine', '--anchor', ANCHOR];
 // No operator in the session: a touch skips the session ask and is filed on the Spine.
 const UNATTENDED = { WORKIT_UNATTENDED: '1' };
 
+// The lane backend is the conductor's choice at intake; these runs choose exec unless a test says otherwise.
+const withBackend = (extra) => (extra.includes('--backend') ? extra : ['--backend', 'exec', ...extra]);
 function intake(f, extra = [], more = {}, goal = GOAL) {
-  return f.run(['intake', '--goal', goal, '--repo', f.repo, '--runs-root', f.runs, ...extra], more);
+  return f.run(['intake', '--goal', goal, '--repo', f.repo, '--runs-root', f.runs, ...withBackend(extra)], more);
 }
 function record(f, runDir, id, result, more = {}) {
   return f.run(['record', '--run', runDir, '--action', id, '--result', JSON.stringify(result)], more);
@@ -1756,7 +1758,7 @@ test('C22: intake from a subdirectory uses the work-tree root; a refusal never e
   const sub = join(f.repo, 'sub');
   f.table[`git -C ${sub} rev-parse --is-inside-work-tree`] = { code: 0, stdout: 'true\n', stderr: '' };
   f.table[`git -C ${sub} rev-parse --show-toplevel`] = { code: 0, stdout: `${f.repo}\n`, stderr: '' };
-  const first = out(await f.run(['intake', '--goal', GOAL, '--repo', sub, '--runs-root', f.runs]));
+  const first = out(await f.run(['intake', '--goal', GOAL, '--repo', sub, '--runs-root', f.runs, '--backend', 'exec']));
   assert.equal(readState(first.runDir).intent.repo.path, f.repo);
   const g = fixture(t);
   g.table[`git -C ${g.repo} config --get remote.origin.url`] = { code: 0, stdout: 'https://deploy:s3cret-token@gitlab.example.com/a/b.git\n', stderr: '' };
@@ -1771,6 +1773,35 @@ test('C23: workshop paths compare case-insensitively and in Git Bash form on win
   assert.equal(samePath('D:\\Dev\\Goal', 'd:/DEV/goal/', 'win32'), true);
   assert.equal(samePath('D:\\Dev\\Goal', 'C:\\Dev\\Goal', 'win32'), false);
   assert.equal(samePath('/tmp/Goal', '/tmp/goal', 'linux'), false);
+});
+
+test('lane backend (c87c58c4): intake refuses without a chosen backend; t3 needs its project, herdr a reason; a T3 run needs no agent CLI', async (t) => {
+  const refusals = [
+    [[], /refusal 9: choose where the lanes run: --backend t3 --t3-project <id>/],
+    [['--backend', 't3'], /refusal 9: --backend t3 needs --t3-project <id>/],
+    [['--backend', 'herdr'], /refusal 9: --backend herdr needs --backend-why/],
+  ];
+  for (const [flags, error] of refusals) {
+    const f = fixture(t);
+    const refused = await f.run(['intake', '--goal', GOAL, '--repo', f.repo, '--runs-root', f.runs, ...flags]);
+    assert.equal(refused.code, 2, flags.join(' '));
+    assert.match(out(refused).error, error);
+    assert.ok(!existsSync(join(f.runs, 'conduct-x')), 'a refusal writes nothing');
+  }
+  const misplaced = fixture(t);
+  assert.match(out(await intake(misplaced, ['--backend', 'exec', '--t3-project', 'p1'])).error, /--t3-project belongs to --backend t3/);
+  const unknown = fixture(t);
+  assert.match(out(await intake(unknown, ['--backend', 'tmux'])).error, /--backend must be one of t3, herdr, exec/);
+  // No claude or codex on PATH: a T3 run still starts, its lanes claude in T3's provider.
+  const t3 = fixture(t);
+  t3.table['claude --version'] = { code: 1, stdout: '', stderr: 'spawnSync claude ENOENT' };
+  const started = out(await intake(t3, ['--backend', 't3', '--t3-project', 'c684e0c7']));
+  const state = readState(started.runDir);
+  assert.deepEqual([state.intent.backend, state.intent.agent], [{ name: 't3', t3Project: 'c684e0c7' }, 'claude']);
+  assert.deepEqual([state.adapters.herdr.on, state.adapters.herdr.evidence], [false, 'chosen']);
+  assert.ok(!t3.calls.some((call) => call.startsWith('herdr ')), 'herdr is not probed');
+  const { touchOneQuestion } = await import('./lib/phases/preapproval.mjs');
+  assert.match(touchOneQuestion(state, { env: {} }), /Lanes: T3 Code threads you can watch in T3 \(project c684e0c7\)/);
 });
 
 test('C24: --text keeps a value that starts with --; --agent names the missing agent', async (t) => {

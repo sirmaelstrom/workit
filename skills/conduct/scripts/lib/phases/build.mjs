@@ -623,24 +623,27 @@ export const RESET_TARGETS = Object.freeze({
     needs: (state, wp, deps) => firstProblem(() => hasLane(wp),
       () => (wp.lane.briefPath && deps.exists(wp.lane.briefPath) ? null : `${wp.id} has no brief at ${wp.lane.briefPath ?? laneLayout(state, wp).briefPath}`),
       () => (wp.lane.backend === 'herdr' && !wp.lane.paneId ? `${wp.id}'s herdr lane has no pane` : null),
-      () => (wp.lane.backend !== 'herdr' && !laneExited(wp) ? `${wp.id}'s exec lane agent (pid ${wp.lane.pid}) has not been observed to exit; an exec lane is re-prompted by a new spawn, which a running agent refuses` : null),
+      () => (wp.lane.backend === 'exec' && !laneExited(wp) ? `${wp.id}'s exec lane agent (pid ${wp.lane.pid}) has not been observed to exit; an exec lane is re-prompted by a new spawn, which a running agent refuses` : null),
+      () => (wp.lane.backend === 't3' && !laneExited(wp) ? `${wp.id}'s T3 lane thread ${wp.lane.threadId} has not been observed to end its run; stop it first` : null),
       // `lane spawn --amend` reads the session id from the lane, else from its log.
-      () => (wp.lane.backend !== 'herdr' && (wp.amendment || wp.lane.startedAt) && !wp.lane.sessionId && !deps.exists(wp.lane.logPath ?? laneLayout(state, wp).logPath)
+      () => (wp.lane.backend === 'exec' && (wp.amendment || wp.lane.startedAt) && !wp.lane.sessionId && !deps.exists(wp.lane.logPath ?? laneLayout(state, wp).logPath)
         ? `${wp.id}'s exec lane has no session id to resume (none recorded, no lane log)` : null)),
     queue: (state, wp, deps) => {
       const backend = backendOf(state, wp, deps);
       // A lane that ever ran is re-prompted as an amendment: herdr's lane.mjs
-      // treats any later prompt as one (--no-ruling), and an exec lane resumes
-      // its session (spawn --amend) rather than starting a fresh one.
+      // treats any later prompt as one (--no-ruling), an exec lane resumes
+      // its session (spawn --amend) rather than starting a fresh one, and a T3
+      // lane gets a new turn in its thread.
       const again = Boolean(wp.amendment || wp.lane.startedAt);
       if (backend.name === 'exec') return again ? backend.prompt(wp, { amendment: true }) : backend.start(wp);
+      if (backend.name === 't3') return wp.lane.threadId ? backend.prompt(wp, { amendment: true }) : backend.start(wp);
       return [...(laneExited(wp) ? backend.start(wp) : []), ...backend.prompt(wp, { amendment: again })];
     },
   },
   wait: {
     from: ['blocked'], state: laneWork, stage: 'wait',
     // An exec lane is polled by its recorded pid, which a restart outside `lane spawn` does not update.
-    needs: (state, wp) => firstProblem(() => hasLane(wp), () => (wp.lane.backend !== 'herdr' ? `${wp.id} is an exec lane; restart it with --to prompt` : null),
+    needs: (state, wp) => firstProblem(() => hasLane(wp), () => (wp.lane.backend !== 'herdr' ? `${wp.id} is ${wp.lane.backend === 't3' ? 'a T3' : 'an exec'} lane; restart it with --to prompt` : null),
       () => (wp.lane.paneId ? null : `${wp.id}'s herdr lane has no pane`)),
     lane: (deps, state) => freshStart(deps, null, laneDeadlineMs(state)),
   },
@@ -657,9 +660,9 @@ export const RESET_TARGETS = Object.freeze({
   setup: {
     from: ['blocked'], state: () => 'dispatched', stage: 'brief',
     needs: (state, wp, deps) => firstProblem(
-      () => (wp.lane?.backend === 'exec' ? null : `${wp.id} is not an exec lane; only exec lanes run laneSetup`),
+      () => (['exec', 't3'].includes(wp.lane?.backend) ? null : `${wp.id} is a herdr lane; only exec and T3 lanes run laneSetup`),
       () => (wp.lane?.worktree && deps.exists(wp.lane.worktree) ? null : `${wp.id} has no lane worktree to set up`),
-      () => (wp.lane?.pid || wp.lane?.startedAt ? `${wp.id}'s lane agent has started; laneSetup runs only before the first start` : null),
+      () => (wp.lane?.pid || wp.lane?.threadId || wp.lane?.startedAt ? `${wp.id}'s lane agent has started; laneSetup runs only before the first start` : null),
       () => (backendOf(state, wp, deps).setup(wp).length ? null : 'the repo config declares no laneSetup')),
     queue: (state, wp, deps) => backendOf(state, wp, deps).setup(wp),
   },
@@ -1603,7 +1606,7 @@ function deferrals(state, deps) {
 // the WP id): a start (exec `lane spawn` carries the first prompt), a prompt
 // or a fallback. The lane-only lower bound (D16, D19.28). Returns null (go),
 // 'halted' or 'ended'.
-const paid = (action) => action.kind === 'shell' && ['start', 'prompt', 'fallback'].includes(action.step);
+const paid = (action) => ['shell', 'agent-tool'].includes(action.kind) && ['start', 'prompt', 'fallback'].includes(action.step);
 const budgetEnded = (state) => (state.build.halts ?? []).some((entry) => entry.kind === 'budget' && entry.ended);
 
 // What spend does not show yet. A lane books its cost when it closes (in the

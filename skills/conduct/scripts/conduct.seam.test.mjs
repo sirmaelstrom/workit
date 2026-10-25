@@ -93,8 +93,16 @@ function seam(t, opts = {}) {
   return h;
 }
 
+// The lane backend is the conductor's choice at intake. These runs choose
+// herdr where a herdr server answers (the lanes they test), else exec.
+function withBackend(h, extra) {
+  if (extra.includes('--backend')) return extra;
+  const herdr = (h.deps.env.HERDR_ENV === '1' || h.herdrServer) && !extra.join(' ').includes('--no-adapter herdr');
+  return [...(herdr ? ['--backend', 'herdr', '--backend-why', 'the test drives herdr lanes'] : ['--backend', 'exec']), ...extra];
+}
+
 async function start(h, extra = []) {
-  const result = await h.run(['intake', '--goal', GOAL, '--repo', h.repo, '--runs-root', h.runs, ...extra]);
+  const result = await h.run(['intake', '--goal', GOAL, '--repo', h.repo, '--runs-root', h.runs, ...withBackend(h, extra)]);
   assert.equal(result.code, 0, result.stdout + result.stderr);
   h.runDir = out(result).runDir;
   h.pending = out(result).action;
@@ -922,13 +930,19 @@ test('resume (M5): stopped after the release PR merges, `--resume` from the run 
   assert.equal(h.state().phase, 'closed');
 });
 
-test('herdr from outside (T3 Code): with no HERDR_ENV the herdr adapter is on whenever the herdr server answers, and off with no server', async (t) => {
-  for (const [server, on] of [[true, true], [false, false]]) {
-    const outside = seam(t, { h: { herdrServer: server } });
-    await start(outside, []);
-    const herdr = outside.state().adapters.herdr;
-    assert.deepEqual([herdr.on, herdr.detail], [on, `herdr agent list exit ${on ? 0 : 1} (conductor outside herdr)`]);
-  }
+test('lane backend is chosen, never probed (c87c58c4): herdr is asked only when chosen; a server that answers does not pull lanes into herdr', async (t) => {
+  const chosen = seam(t, { h: { herdrServer: true } });
+  await start(chosen, []);
+  assert.deepEqual([chosen.state().adapters.herdr.on, chosen.state().adapters.herdr.detail], [true, 'herdr agent list exit 0 (conductor outside herdr)']);
+  assert.deepEqual(chosen.state().intent.backend, { name: 'herdr', why: 'the test drives herdr lanes' });
+  const exec = seam(t, { h: { herdrServer: true } });
+  await start(exec, ['--backend', 'exec']);
+  assert.deepEqual([exec.state().adapters.herdr.on, exec.state().adapters.herdr.evidence], [false, 'chosen']);
+  assert.ok(!exec.calls.some((call) => call.startsWith('herdr ')), 'herdr is not probed when it is not chosen');
+  const absent = seam(t, { h: { herdrServer: false } });
+  const refused = await absent.run(['intake', '--goal', GOAL, '--repo', absent.repo, '--runs-root', absent.runs, '--backend', 'herdr', '--backend-why', 'x']);
+  assert.equal(refused.code, 2);
+  assert.match(out(refused).error, /refusal 9: --backend herdr, but herdr agent list exit 1/);
 });
 
 test('spine + herdr: spine_author once, a receipt per WP stop, touches filed once, handed back and superseded once answered, lane steps through lane.mjs --log, the runtime-only check; notify env (D20); seams keyed on seam (D19.15)', async (t) => {
