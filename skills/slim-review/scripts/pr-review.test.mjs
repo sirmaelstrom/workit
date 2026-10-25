@@ -1333,7 +1333,7 @@ test('lens codex reads its -o findings file, builds the GPT-6 Sol argv, and send
   assert.equal(out.summary, 'read from codex -o file', 'codex stdout must not replace its -o findings file');
 });
 
-test('lens astra rides the codex harness with the Astra slug at low effort and reads its -o file', () => {
+test('lens astra rides the codex harness with the Astra slug at high effort on a full round and reads its -o file', () => {
   const fromFile = JSON.stringify({ ...VALID, summary: 'read from astra -o file' });
   const { calls, deaths, out, rows } = runLensWithFake({ lens: 'astra', codexOutput: fromFile });
   assert.deepEqual(deaths, []);
@@ -1341,7 +1341,7 @@ test('lens astra rides the codex harness with the Astra slug at low effort and r
   assert.ok(call, 'astra must spawn codex exec, not claude -p');
   assert.equal(call.program, 'C:/codex/vendor/bin/codex.exe');
   assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6-astra');
-  assert.ok(call.args.includes('model_reasoning_effort=low'), 'the CLI default effort; high lost nothing on the measured arms');
+  assert.ok(call.args.includes('model_reasoning_effort=high'), 'a full round reviews at high');
   assert.ok(call.args.includes('danger-full-access'));
   assert.deepEqual(call.args.slice(-1), ['-']);
   assert.match(call.opts.input, /src\/a\.ts/);
@@ -1350,7 +1350,7 @@ test('lens astra rides the codex harness with the Astra slug at low effort and r
   assert.equal(out.summary, 'read from astra -o file');
   assert.equal(out.lens, 'astra');
   assert.equal(out.model, 'gpt-6-astra');
-  assert.equal(out.reasoning, 'low');
+  assert.equal(out.reasoning, 'high');
   assert.ok(out.findings.every((finding) => finding.lens === 'astra'));
   assert.equal(rows.length, 1);
   assert.equal(rows[0].lens, 'astra');
@@ -1361,6 +1361,23 @@ test('validateFindingsShape accepts the astra lens tag and rejects an unknown on
   assert.deepEqual(validateFindingsShape({ ...VALID, lens: 'astra', findings: VALID.findings.map((f) => ({ ...f, lens: 'astra' })) }), []);
   const problems = validateFindingsShape({ ...VALID, lens: 'luna' });
   assert.ok(problems.some((p) => /lens must be one of codex\|astra\|opus/.test(p)), problems.join('\n'));
+});
+
+test('standalone lens: astra reviews a full round at high and a --since delta round at low; codex stays high', () => {
+  const effort = (lens, extra = {}) => {
+    const logs = [];
+    withNoManagedConfig(() => cmdLens(
+      { pr: '42', repo: 'owner/repo', lens, cwd: 'C:/repo', out: 'findings.json', dryRun: true, ...extra },
+      { run: () => { throw new Error('dry-run must not run'); }, findCodexExe: () => 'codex', die: (code, message) => { throw new Error(`unexpected die ${code}: ${message}`); }, log: (line) => logs.push(String(line)) },
+    ));
+    const argv = JSON.parse(logs[0].replace(/^argv: /, ''));
+    return argv[argv.indexOf('-c') + 1];
+  };
+  assert.equal(effort('astra'), 'model_reasoning_effort=high', 'full round');
+  assert.equal(effort('astra', { since: 'abc1234' }), 'model_reasoning_effort=low', 'delta round');
+  assert.equal(effort('codex'), 'model_reasoning_effort=high');
+  assert.equal(effort('codex', { since: 'abc1234' }), 'model_reasoning_effort=high');
+  assert.equal(effort('astra', { since: 'abc1234', reasoning: 'medium' }), 'model_reasoning_effort=medium', '--reasoning still overrides');
 });
 
 test('codex output schema omits unsupported uniqueItems', () => {
@@ -2237,7 +2254,7 @@ test('characterisation: standalone lens --dry-run --prompt-out prints argv and p
     assert.equal(logs.length, 2);
     assert.equal(logs[1], `prompt path: ${resolve(promptOut)}`);
     assert.deepEqual(JSON.parse(logs[0].replace(/^argv: /, '')), [
-      'exec', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort=low',
+      'exec', '--model', 'gpt-6-astra', '-c', 'model_reasoning_effort=high',
       '--sandbox', 'danger-full-access', '--skip-git-repo-check', '-C', resolve(cwd),
       '--output-schema', SCHEMA, '-o', '<temporary findings.json>', '-',
     ]);
@@ -5722,6 +5739,27 @@ test('control (c), coordinated: --since keeps the claim, reviews the amendment, 
     const seams = amendmentSeams(pinnedSeams(), COORDINATED_AMENDMENT);
     const out = await runCoordinatedLens({ refFile, home, seams, opts: { since: SINCE } });
     assert.equal(out.line().reason, 'malformed-output', 'examining the whole manifest fails the amendment\'s coverage');
+  });
+});
+
+test('coordinated lens: astra reviews a full round at high and a --since delta round at low', async () => {
+  const effortOf = (seams) => {
+    const exec = seams.calls.find((args) => args[1] === 'exec');
+    return exec[exec.indexOf('-c') + 1];
+  };
+  await withCoordinatedInstall({ fake: coordinatorFake() }, async ({ home, refFile }) => {
+    const seams = pinnedSeams();
+    const out = await runCoordinatedLens({ refFile, home, lens: 'astra', seams });
+    assert.equal(out.line().outcome, 'ok', JSON.stringify(out.deaths));
+    assert.equal(effortOf(seams), 'model_reasoning_effort=high', 'full round');
+    assert.equal(JSON.parse(readFileSync(join(home, 'astra.json'), 'utf8')).reasoning, 'high');
+  });
+  await withCoordinatedInstall({ fake: coordinatorFake() }, async ({ home, refFile }) => {
+    const seams = amendmentSeams(pinnedSeams({ codex: () => JSON.stringify(modelOutput({ paths: [DELTA_FILE] })) }), COORDINATED_AMENDMENT);
+    const out = await runCoordinatedLens({ refFile, home, lens: 'astra', seams, opts: { since: SINCE } });
+    assert.equal(out.line().outcome, 'ok', JSON.stringify(out.deaths));
+    assert.equal(effortOf(seams), 'model_reasoning_effort=low', 'delta round');
+    assert.equal(JSON.parse(readFileSync(join(home, 'astra.json'), 'utf8')).reasoning, 'low');
   });
 });
 
