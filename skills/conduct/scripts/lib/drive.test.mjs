@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, readdirSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -364,6 +364,34 @@ test('drive: the driver renews drive.lock\'s lease while a shell runs, keeping t
   assert.equal(after.token, before.token);
   assert.equal(after.action, '1-gate-cmd', 'renewal keeps the claimed action');
   assert.equal(existsSync(join(f.runDir, 'drive.lock')), false, 'released after the drive');
+});
+
+test('drive and record refuse a copied run dir whose state names another run: exit 2, nothing run or written', async (t) => {
+  const f = fixture(t, [SHELL, TOOL]);
+  const pendingId = out(await f.run(['next', '--run', f.runDir])).action.id;
+  const copy = join(f.dir, 'copy');
+  cpSync(f.runDir, copy, { recursive: true });
+  const files = (dir) => readdirSync(dir).sort().map((name) => [name, readFileSync(join(dir, name), 'utf8')]);
+  const live = files(f.runDir);
+  const copied = files(copy);
+  const literal = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const refusal = new RegExp(`^this state belongs to ${literal(f.runDir)}; refusing to act on it from ${literal(copy)}$`);
+  const driven = await f.run(['drive', '--run', copy]);
+  assert.equal(driven.code, 2, driven.stdout);
+  assert.match(out(driven).error, refusal);
+  const recorded = await f.run(['record', '--run', copy, '--action', pendingId, '--result', '{"code":0,"stdout":"","stderr":""}']);
+  assert.equal(recorded.code, 2, recorded.stdout);
+  assert.match(out(recorded).error, refusal);
+  assert.deepEqual(f.runs, [], 'nothing ran');
+  assert.deepEqual(f.recorded, []);
+  assert.deepEqual(files(f.runDir), live, 'the live run is untouched');
+  assert.deepEqual(files(copy), copied, 'the copy is untouched');
+  if (process.platform === 'win32') {
+    // The same run named in another case is the same run on win32.
+    const upper = f.runDir.toUpperCase();
+    assert.equal(out(await f.run(['drive', '--run', upper], { platform: 'win32', windowsShim: () => false })).stopped, 'needs-conductor');
+    assert.equal(f.runs.length, 1);
+  }
 });
 
 test('drive: a driver that finds pending moved under it stops before running anything', async (t) => {

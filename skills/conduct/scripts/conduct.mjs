@@ -103,6 +103,16 @@ function openRun(flags, deps) {
   return { runDir, state };
 }
 
+// A state.json names the run dir it was made in, and its pending argv and
+// paths point there: a copied run dir still names the original. drive and
+// record act only on the run --run names, so a copy is refused before
+// anything runs or is written (paths compare case-folded on win32).
+function refuseForeignState(runDir, state, deps) {
+  if (typeof state.runDir !== 'string') return;
+  const fold = (path) => (deps.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path));
+  if (fold(state.runDir) !== fold(runDir)) throw new ConductError(2, `this state belongs to ${state.runDir}; refusing to act on it from ${runDir}`);
+}
+
 // While a live driver holds drive.lock, the verbs that move the pending
 // action or the plan are refused: the driver's next step would act on a run
 // that moved under it. The driver's own in-process calls carry its token. A
@@ -479,6 +489,7 @@ function filedBy(state, id) {
 async function record(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
+    refuseForeignState(runDirFlag(flags), state, deps);
     const id = stringFlag(flags, 'action');
     const wantsReplan = flags.replan !== undefined;
     // A replay of the last record changes nothing and re-emits the next action.
@@ -573,7 +584,7 @@ async function driveVerb(tokens, deps) {
   const runDir = runDirFlag(flags);
   const maxSteps = flags['max-steps'] === undefined ? undefined : Number(flags['max-steps']);
   if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 0)) throw new ConductError(2, '--max-steps must be a whole number');
-  openRun(flags, deps);
+  refuseForeignState(runDir, openRun(flags, deps).state, deps);
   const { drive } = await loadModule(deps, 'lib/drive.mjs', 'module');
   const call = async (fn) => {
     try {
