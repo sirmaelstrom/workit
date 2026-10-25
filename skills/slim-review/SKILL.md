@@ -256,12 +256,22 @@ P2s, guard findings and P3s left out. A delta prints `delta-major <n> head=<sha>
 instead. The standalone post prints the line on stdout beside
 `posted-review-id <id>`. The coordinated post prints it on stderr and adds
 `p1_findings` / `p2_findings` (full) or `major_findings` (delta) to its JSON
-line. Either count can cross into a T2 council (`burn-down` § Per item step 3).
-The count covers body-only findings too. The review body carries a findings
-manifest (an HTML comment) listing every finding, so each later reader counts
-the same findings the post did. After the adjudication replies record any
-`--dup-of` links, `delta-count --review-id <id>` recounts a delta; add
-`--scope full` to recount a full review.
+line. This post-time count is the escalation trigger (`burn-down` § Per item
+step 3). It covers body-only findings too. The review body carries a findings
+manifest (an HTML comment) listing every finding, on the last line before the
+`_Slim review · …_` footer. Readers take only that line, so a marker quoted
+in a summary or a finding is ignored. A read-back never counts fewer
+P1s/P2s than the review's own inline comments carry. Read-back serves
+recovery and the post-adjudication recount: after the adjudication replies
+record any `--dup-of` links, `delta-count --review-id <id>` recounts a delta;
+add `--scope full` to recount a full review. A body-only finding has no
+comment to reply to, so it can't be joined as a duplicate; two body-only
+reports of one defect count twice.
+
+A body over GitHub's 65,536-character limit is refused before posting: exit 5
+standalone, or `{outcome: "refused", reason: "definite-rejection", body_chars,
+limit}` coordinated, with nothing reserved or sent. Nothing is posted, and the
+message names the size and the limit.
 
 ### Test-weakening check
 
@@ -684,7 +694,9 @@ head's round under the cap (§ 4):
 | `delta` | a full review and no delta after it: round two, `lens --since <since>` | `since` (the last **full** review's head, or after a mapped rebase the last commit before the first changed patch), `last`, `rebase?`, `problem` |
 | `capped` | a delta after the last full review: no third T1 review | `last`, `rebase?`, `problem`; possible escalation fields |
 
-`last` is `{head, scope: "full"|"delta", review_id}`. In the delta round
+`last` is `{head, scope: "full"|"delta", review_id, findings?}`, where
+`findings` is the number of findings that review posted, read from its manifest
+(absent when it has none). In the delta round
 `problem` is why `<since>...<head>` is no amendment diff (the rule `lens --since`
 refuses by), or null. In the capped round it is why the head can't converge on
 its tail: not an ancestor, a merge from the base branch, or an incomplete commit

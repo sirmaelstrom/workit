@@ -1222,18 +1222,25 @@ function recordReview(state, wp, action, r) {
       const delta = read.last.scope === 'delta';
       // `escalate` can belong to a review older than `last`: the obligation is
       // recorded from `escalate_review`, the review that owes the council.
-      const owed = read.escalate === 't2-council' ? read.escalate_review : null;
-      if (read.escalate === 't2-council' && !owed) {
+      const signalled = read.escalate === 't2-council';
+      const owed = signalled ? read.escalate_review ?? null : null;
+      // Only a T1 WP in a run with a council can owe one, so only there does
+      // an unreadable signal hold the WP.
+      const obligation = signalled && effectiveTier(wp) === 'T1' && councilOn(state);
+      if (obligation && !owed) {
         return result('held', `posted review ${read.last.review_id} signalled council with no escalate_review naming the review that owes it; check the producer version`);
       }
       const counts = owed?.scope === 'delta' ? { majorFindings: owed.major_findings } : { p1Findings: owed?.p1_findings, p2Findings: owed?.p2_findings };
-      if (owed && (!['full', 'delta'].includes(owed.scope) || owed.review_id == null || !/^[0-9a-f]{40}$/i.test(String(owed.head)) || !reviewCrosses({ scope: owed.scope, ...counts }))) {
+      const readable = Boolean(owed) && ['full', 'delta'].includes(owed.scope) && owed.review_id != null && /^[0-9a-f]{40}$/i.test(String(owed.head)) && reviewCrosses({ scope: owed.scope, ...counts });
+      if (obligation && !readable) {
         return result('held', `posted ${owed.scope ?? 'unscoped'} review ${owed.review_id} signalled council without a readable ${owed.scope === 'delta' ? 'distinct-defect' : 'P1/P2'} count`);
       }
-      const own = Boolean(owed) && String(owed.review_id) === String(read.last.review_id);
-      const crossed = Boolean(owed) && effectiveTier(wp) === 'T1';
-      const escalation = crossed && councilOn(state);
+      const own = readable && String(owed.review_id) === String(read.last.review_id);
+      const crossed = signalled && effectiveTier(wp) === 'T1';
+      const escalation = obligation;
+      // The latest review's own finding count, apart from any older obligation it carries.
       const entry = reviewEntry(wp, action.land, { scope: delta ? 'delta' : 'full', reviewId: read.last.review_id ?? null,
+        findings: Number.isInteger(read.last.findings) ? read.last.findings : null,
         ...(delta ? { majorFindings: read.major_findings ?? null } : {}), ...(!delta && own && crossed ? counts : {}), ...(crossed && !escalation ? { escalation: NO_COUNCIL } : {}) });
       return result('continue', null, { reviews: [...(wp.reviews ?? []), entry],
         ...(escalation ? { tier: 'T2', deltaEscalation: { scope: owed.scope, round: own ? action.land.round : null, head: owed.head, reviewId: owed.review_id, ...counts } } : {}) });

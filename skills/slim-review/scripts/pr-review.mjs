@@ -574,6 +574,19 @@ export function countDeltaDefects(findings) {
 
 /** GitHub refuses a review body over this many characters, and the whole POST with it. */
 export const REVIEW_BODY_MAX_CHARS = 65_536;
+
+/**
+ * The review footer's first characters. The footer follows the findings
+ * manifest, and the manifest reader finds the manifest by it.
+ */
+const REVIEW_FOOTER_LEAD = '_Slim review · ';
+
+/** Why a review body cannot be posted, or null when it fits GitHub's limit. */
+export function reviewBodyProblem(body) {
+  const chars = String(body ?? '').length;
+  if (chars <= REVIEW_BODY_MAX_CHARS) return null;
+  return `the review body is ${chars} characters and GitHub refuses a review body over ${REVIEW_BODY_MAX_CHARS}; shorten the longest findings or the summary (a body-only finding is posted whole in the body) and post again`;
+}
 // Room for the coordinated post's marker, appended after the payload is built.
 const REVIEW_BODY_RESERVE = 1_000;
 const GUARD_NOT_LISTED = 'not listed: this review body had no room';
@@ -660,7 +673,7 @@ export function buildReviewPayload({
     '',
     '---',
     '',
-    `_Slim review · ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff${excluded === undefined ? '' : ` · ${excluded.length} excluded (outside the amendment)`} · ${coverage.trim()}_`,
+    `${REVIEW_FOOTER_LEAD}${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff${excluded === undefined ? '' : ` · ${excluded.length} excluded (outside the amendment)`} · ${coverage.trim()}_`,
   ];
   if (!coverageCheck.ok) {
     footer.push('', `> ⚠️ **Coverage check failed:** ${coverageCheck.reason}`);
@@ -902,6 +915,12 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   if (opts.dryRun) {
     log('\n--dry-run: nothing posted. Payload:\n');
     log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  const tooLarge = reviewBodyProblem(payload.body);
+  if (tooLarge) {
+    die(5, `${tooLarge}. Nothing was posted.`);
     return;
   }
 
@@ -2060,9 +2079,19 @@ export function readReviewListing({ repo, pr, cwd, runGh = gh }) {
   return reviews;
 }
 
-/** A posted review's `delta` or `full` findings manifest, or null when it carries none. */
+/**
+ * A posted review's `delta` or `full` findings manifest, or null when it
+ * carries none. The writer puts it on the last line before the review's
+ * footer, so only that line is read: a marker anywhere else (a quote in
+ * reviewer prose, a code fence) is not the writer's.
+ */
 function readFindingsManifest(body, scope) {
-  const match = new RegExp(`<!-- workit-${scope}-findings: (\\[[^\\n]*\\]) -->`).exec(String(body ?? ''));
+  const lines = String(body ?? '').split(/\r?\n/);
+  const footer = lines.findLastIndex((line, i) => line.startsWith(REVIEW_FOOTER_LEAD) && lines[i - 1] === '' && lines[i - 2] === '---');
+  if (footer < 0) return null;
+  let at = footer - 3;
+  while (at >= 0 && lines[at].trim() === '') at -= 1;
+  const match = new RegExp(`^<!-- workit-${scope}-findings: (\\[.*\\]) -->$`).exec(lines[at] ?? '');
   if (!match) return null;
   const entries = JSON.parse(match[1]);
   if (!Array.isArray(entries) || !entries.every((f) => /^[0-9a-f]{64}$/.test(f.hash) && ['P1', 'P2', 'P3'].includes(f.severity) && f.scope === scope)) {
@@ -2100,28 +2129,37 @@ export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted, commen
  * comments. A review with a findings manifest of its scope counts the manifest
  * (it holds the body-only findings too); a review posted before full reviews
  * carried one counts its own inline comments. A `workit-dup-of` reply joins
- * two of them.
+ * two of them. `findings` is the manifest's length (every posted finding),
+ * or null with no manifest.
+ *
+ * The count never drops below the inline comments' own count: a manifest that
+ * reads lower than what is posted inline is not the writer's, and a read-back
+ * may over-count an escalation but must not lose one.
  */
 export function readPostedCounts({ posted, comments, scope }) {
   const reviewId = posted.review_id ?? posted.id;
   const originals = comments.filter((comment) => comment.in_reply_to_id == null && String(comment.pull_request_review_id) === String(reviewId));
-  const manifest = readFindingsManifest(posted.body, scope);
-  const entries = manifest ? manifest.map((finding) => ({ ...finding })) : originals.map((comment) => ({ ...readPostedFinding(comment), id: comment.id }));
-  if (manifest) {
-    const byHash = new Map();
-    for (const comment of originals) {
-      const hash = findingHash(comment.body);
-      byHash.set(hash, [...(byHash.get(hash) ?? []), comment.id]);
+  const joinDuplicates = (entries) => {
+    for (const reply of comments.filter((comment) => comment.in_reply_to_id != null)) {
+      const match = /<!-- workit-dup-of: (\d+) -->/.exec(String(reply.body ?? ''));
+      if (!match) continue;
+      const duplicate = entries.find((entry) => String(entry.id) === String(reply.in_reply_to_id));
+      if (duplicate) duplicate.dupOf = match[1];
     }
-    for (const entry of entries) entry.id = byHash.get(entry.hash)?.shift();
+    return entries;
+  };
+  const inline = countDefects(joinDuplicates(originals.map((comment) => ({ ...readPostedFinding(comment), id: comment.id }))), scope);
+  const manifest = readFindingsManifest(posted.body, scope);
+  if (!manifest) return { ...inline, findings: null };
+  const entries = manifest.map((finding) => ({ ...finding }));
+  const byHash = new Map();
+  for (const comment of originals) {
+    const hash = findingHash(comment.body);
+    byHash.set(hash, [...(byHash.get(hash) ?? []), comment.id]);
   }
-  for (const reply of comments.filter((comment) => comment.in_reply_to_id != null)) {
-    const match = /<!-- workit-dup-of: (\d+) -->/.exec(String(reply.body ?? ''));
-    if (!match) continue;
-    const duplicate = entries.find((entry) => String(entry.id) === String(reply.in_reply_to_id));
-    if (duplicate) duplicate.dupOf = match[1];
-  }
-  return countDefects(entries, scope);
+  for (const entry of entries) entry.id = byHash.get(entry.hash)?.shift();
+  const listed = countDefects(joinDuplicates(entries), scope);
+  return { total: Math.max(listed.total, inline.total), p1: Math.max(listed.p1, inline.p1), p2: Math.max(listed.p2, inline.p2), findings: manifest.length };
 }
 
 /**
@@ -2141,7 +2179,8 @@ export function readScopedReviews({ repo, pr, head, cwd, runGh = gh, serviceLogi
     const posted = listed.find((item) => String(item.review_id) === String(review.review_id));
     comments ??= readPrComments({ repo, pr, cwd, runGh });
     const counts = readPostedCounts({ posted, comments, scope: review.scope });
-    const tally = review.scope === 'delta' ? { majorFindings: counts.total } : { p1Findings: counts.p1, p2Findings: counts.p2 };
+    const tally = { ...(review.scope === 'delta' ? { majorFindings: counts.total } : { p1Findings: counts.p1, p2Findings: counts.p2 }),
+      ...(Number.isInteger(counts.findings) ? { findings: counts.findings } : {}) };
     let councilRoundId = null;
     for (const candidate of listed) {
       const marker = readCouncilMarker(candidate.body);
@@ -3419,6 +3458,16 @@ async function cmdPostCoordinated(opts, {
   diag(`findings       ${findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff`);
   for (const f of excluded ?? []) diag(`  excluded     ${f.path}:${f.line} — outside the amendment`);
   if (guard.entries.length > 0) diag(guardDiagnostic(guard, payload));
+
+  // GitHub would refuse this body with a 422: refuse it here, before anything
+  // is reserved or sent, with the reason that refusal would carry. The outcome
+  // table has no reason for a body too large, and this one is stop.
+  const tooLarge = reviewBodyProblem(payload.body);
+  if (tooLarge) {
+    emit({ outcome: 'refused', reason: 'definite-rejection', body_chars: payload.body.length, limit: REVIEW_BODY_MAX_CHARS });
+    die(1, `${tooLarge}. Nothing was reserved or sent; the attempt stays live. Withdraw it with \`recover withdraw --attempt-ref <file> --reason "<why>"\`, or re-run the lenses for a shorter review.`);
+    return undefined;
+  }
 
   if (opts.dryRun) {
     diag('--dry-run: nothing posted, nothing reserved.');

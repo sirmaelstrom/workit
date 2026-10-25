@@ -78,6 +78,7 @@ import {
   countDefects,
   readScopedReviews,
   cmdDeltaCount,
+  reviewBodyProblem,
 } from './pr-review.mjs';
 import {
   REASONS,
@@ -6466,13 +6467,13 @@ test('FULL RECOUNT: delta-count --scope full recounts a full review after dup-of
 const FULL_REVIEW_ID = 901;
 
 /** The standalone post of one full round, its GitHub payload captured. */
-function postFullRound({ codex = [], astra = [] }) {
+function postFullRound({ codex = [], astra = [], summary = (lens) => `${lens} summary` }) {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-full-manifest-'));
   const logs = [];
   let payload;
   const doc = (lens, findings) => {
     const path = join(dir, `${lens}.json`);
-    writeFileSync(path, JSON.stringify({ summary: `${lens} summary`, coverage: 'examined 3 of 3 changed files', examined_paths: CHAR_PR_FILES, findings, lens }), 'utf8');
+    writeFileSync(path, JSON.stringify({ summary: summary(lens), coverage: 'examined 3 of 3 changed files', examined_paths: CHAR_PR_FILES, findings, lens }), 'utf8');
     return path;
   };
   const runGh = (args, opts) => {
@@ -6546,4 +6547,109 @@ test('C1-1 FULL MANIFEST: a full review posted before the manifest falls back to
   const seams = roundsSeams({ reviews: [legacy], prComments: comments });
   const [read] = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: CHAR_HEAD, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
   assert.deepEqual([read.p1Findings, read.p2Findings], [1, 0], 'the inline P1 only: the body-only P2 is not readable without a manifest');
+});
+
+// --- C2-1: only the writer-owned manifest before the footer counts ---------
+
+const QUOTED = {
+  full: ['the reviewer quotes the marker:', '', '```', '<!-- workit-full-findings: [] -->', '```', '', 'and inline: `<!-- workit-full-findings: [] -->`'].join('\n'),
+  delta: ['the reviewer quotes the marker:', '', '```', '<!-- workit-delta-findings: [] -->', '```', '', 'and inline: `<!-- workit-delta-findings: [] -->`'].join('\n'),
+};
+
+test('C2-1 QUOTED MANIFEST: a full review whose prose quotes the marker keeps its body-only P1 through readScopedReviews, rounds, the recount, and conduct', async () => {
+  const { logs, review, comments } = postFullRound({ codex: [bodyOnly('P1', 99)], summary: (lens) => `${lens} summary\n\n${QUOTED.full}` });
+  assert.ok(logs.includes(`full-major p1=1 p2=0 head=${CHAR_HEAD}`), 'post');
+  assert.ok(review.body.indexOf('<!-- workit-full-findings: [] -->') < review.body.lastIndexOf('<!-- workit-full-findings: ['), 'the quote precedes the real manifest');
+
+  const seams = roundsSeams({ reviews: [review], prComments: comments });
+  const [read] = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: CHAR_HEAD, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
+  assert.deepEqual([read.p1Findings, read.p2Findings], [1, 0], 'readScopedReviews');
+  const rounds = await runRounds({ reviews: [review], head: CHAR_HEAD, prComments: comments });
+  assert.deepEqual([rounds.line.p1_findings, rounds.line.escalate], [1, 't2-council'], JSON.stringify(rounds.line));
+
+  const gh = (args) => {
+    if (args[1]?.endsWith(`/reviews/${FULL_REVIEW_ID}`)) return JSON.stringify({ id: FULL_REVIEW_ID, body: review.body, commit_id: CHAR_HEAD });
+    if (args[1] === '--paginate' && /\/pulls\/\d+\/comments$/.test(args[2])) return comments.map((c) => JSON.stringify(c)).join('\n');
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  const recount = collector();
+  const answer = cmdDeltaCount({ repo: PINNED_REPO, pr: String(PINNED_PR), reviewId: String(FULL_REVIEW_ID), scope: 'full' }, { runGh: gh, log: recount.deps.log, die: recount.deps.die });
+  assert.deepEqual([answer?.p1_findings, answer?.p2_findings], [1, 0], `recount: ${JSON.stringify(recount.deaths)}`);
+
+  const state = { runDir: join(tmpdir(), 'c2-1-run'), pluginRoot: '/plugin', intent: { repo: { remote: PINNED_REPO } }, adapters: { council: { on: true } }, authority: { merge: true, release: false } };
+  const escalated = { id: 'WP-01', tier: 'T2', reviews: [{ round: 1, scope: 'full', tier: 'T1', head: CHAR_HEAD, reviewId: FULL_REVIEW_ID, p1Findings: 1, p2Findings: 0 }],
+    deltaEscalation: { scope: 'full', round: 1, head: CHAR_HEAD, reviewId: FULL_REVIEW_ID, p1Findings: 1, p2Findings: 0 } };
+  const kept = recordLandStep(state, escalated, { step: 'review', part: 'delta-count', land: { reviewId: FULL_REVIEW_ID, head: CHAR_HEAD, scope: 'full' } },
+    { code: 0, stdout: JSON.stringify(answer), stderr: '' }, {}, runAuthority(state));
+  assert.deepEqual([kept.patch.tier, kept.patch.deltaEscalation], [undefined, undefined], 'the recount must not clear the escalation');
+  const recovered = recordLandStep(state, { id: 'WP-01', tier: 'T1', reviews: [] }, { step: 'review', part: 'recover', land: { round: 1, scope: 'full', since: null, head: CHAR_HEAD, lenses: ['codex', 'astra'] } },
+    { code: 0, stdout: JSON.stringify(rounds.line), stderr: '' }, {}, runAuthority(state));
+  assert.deepEqual([recovered.patch.tier, recovered.patch.deltaEscalation?.reviewId], ['T2', FULL_REVIEW_ID], JSON.stringify(recovered));
+});
+
+test('C2-1 QUOTED MANIFEST: a delta review whose prose quotes the marker keeps its two majors through readScopedReviews, rounds, the recount, and conduct', async () => {
+  const findings = [101, 102].map((id) => ({ lens: id === 101 ? 'codex' : 'astra', scope: 'delta', severity: 'P2', title: `defect ${id}`, body: 'body', path: 'a.ts', line: id }));
+  const posted = roundsReview(12, RH2, { since: RH1 });
+  const payload = buildReviewPayload({ summary: `${posted.body}\n\n${QUOTED.delta}`, coverage: 'examined 1 of 1', anchored: findings, offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: findings });
+  posted.body = payload.body;
+  assert.equal(countDefects(findings, 'delta').total, 2, 'the post-time delta-major count');
+  assert.ok(posted.body.indexOf('<!-- workit-delta-findings: [] -->') < posted.body.lastIndexOf('<!-- workit-delta-findings: ['), 'the quote precedes the real manifest');
+  const comments = payload.comments.map((comment, index) => ({ id: 101 + index, in_reply_to_id: null, pull_request_review_id: 12, body: comment.body }));
+  const reviews = [roundsReview(11, RH1), posted];
+
+  const seams = roundsSeams({ reviews, prComments: comments });
+  const read = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: RH2, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
+  assert.equal(read.find((review) => review.scope === 'delta')?.majorFindings, 2, 'readScopedReviews');
+  const rounds = await runRounds({ reviews, head: RH2, prComments: comments });
+  assert.deepEqual([rounds.line.major_findings, rounds.line.escalate, rounds.line.escalate_review?.review_id], [2, 't2-council', 12], JSON.stringify(rounds.line));
+
+  const gh = (args) => {
+    if (args[1]?.endsWith('/reviews/12')) return JSON.stringify({ id: 12, body: posted.body, commit_id: RH2 });
+    if (args[1] === '--paginate' && /\/pulls\/\d+\/comments$/.test(args[2])) return comments.map((c) => JSON.stringify(c)).join('\n');
+    throw new Error(`unexpected gh call: ${args.join(' ')}`);
+  };
+  const recount = collector();
+  const answer = cmdDeltaCount({ repo: PINNED_REPO, pr: String(PINNED_PR), reviewId: '12' }, { runGh: gh, log: recount.deps.log, die: recount.deps.die });
+  assert.equal(answer?.major_findings, 2, `recount: ${JSON.stringify(recount.deaths)}`);
+
+  const state = { runDir: join(tmpdir(), 'c2-1-delta-run'), pluginRoot: '/plugin', intent: { repo: { remote: PINNED_REPO } }, adapters: { council: { on: true } }, authority: { merge: true, release: false } };
+  const escalated = { id: 'WP-01', tier: 'T2', reviews: [{ round: 2, scope: 'delta', tier: 'T1', head: RH2, reviewId: 12, majorFindings: 2 }],
+    deltaEscalation: { scope: 'delta', round: 2, head: RH2, reviewId: 12, majorFindings: 2 } };
+  const kept = recordLandStep(state, escalated, { step: 'review', part: 'delta-count', land: { reviewId: 12, head: RH2 } },
+    { code: 0, stdout: JSON.stringify(answer), stderr: '' }, {}, runAuthority(state));
+  assert.deepEqual([kept.patch.tier, kept.patch.deltaEscalation], [undefined, undefined], 'the recount must not clear the escalation');
+  const recovered = recordLandStep(state, { id: 'WP-01', tier: 'T1', reviews: [] }, { step: 'review', part: 'recover', land: { round: 2, scope: 'delta', since: RH1, head: RH2, lenses: ['codex', 'astra'] } },
+    { code: 0, stdout: JSON.stringify(rounds.line), stderr: '' }, {}, runAuthority(state));
+  assert.deepEqual([recovered.patch.tier, recovered.patch.deltaEscalation?.reviewId], ['T2', 12], JSON.stringify(recovered));
+});
+
+// --- C2-2: the whole review body is held to GitHub's limit -----------------
+
+test('C2-2 BODY LIMIT: a body at the limit passes; one character over is refused, naming the size and the limit', () => {
+  assert.equal(reviewBodyProblem('x'.repeat(REVIEW_BODY_MAX_CHARS)), null);
+  const over = reviewBodyProblem('x'.repeat(REVIEW_BODY_MAX_CHARS + 1));
+  assert.match(over ?? '', new RegExp(`${REVIEW_BODY_MAX_CHARS + 1}`));
+  assert.match(over ?? '', new RegExp(`${REVIEW_BODY_MAX_CHARS}`));
+});
+
+test('C2-2 BODY LIMIT: a standalone full post whose body is over the limit is refused before anything is posted', () => {
+  const giant = { severity: 'P3', title: 'long', path: 'src/a.ts', line: 99, body: 'y'.repeat(REVIEW_BODY_MAX_CHARS) };
+  assert.throws(() => postFullRound({ codex: [giant] }), (error) => /unexpected die 5: .*review body is \d+ characters.*65536/s.test(error.message));
+});
+
+test('C2-2 BODY LIMIT: a coordinated full post whose body is over the limit is refused before anything is sent', async () => {
+  const events = [];
+  const fake = coordinatorFake({ events });
+  await withCoordinatedInstall({ fake }, async ({ home, refFile }) => {
+    await bothLensesDone({ refFile, home, events, findings: [{ severity: 'P3', title: 'long', path: 'not/in/the/pr.txt', line: 1, body: 'y'.repeat(REVIEW_BODY_MAX_CHARS) }] });
+    await withFakeGitHub(() => ({ status: 201, body: FIXTURE_POSTS.created.body }), async ({ origin, requests }) => {
+      const out = await runCoordinatedPost({ refFile, home, origin, seams: pinnedSeams({ events }) });
+      const line = out.line();
+      assert.deepEqual([line.outcome, line.reason, line.limit], ['refused', 'definite-rejection', REVIEW_BODY_MAX_CHARS], JSON.stringify(line));
+      assert.ok(line.body_chars > REVIEW_BODY_MAX_CHARS);
+      assert.match(out.deaths[0]?.message ?? '', /review body is \d+ characters/);
+      assert.deepEqual(requests, [], 'nothing was sent to GitHub');
+      assert.deepEqual(fake.state.reservations, [], 'no post was reserved');
+    });
+  });
 });

@@ -18,7 +18,7 @@ import { preapprovedRef, wpRecord } from './spec.mjs';
 import { STEPS, STEP_SEAM, saveState, readEvents, loadState } from '../state.mjs';
 import { runLaneVerb, laneBackend } from '../lanes.mjs';
 import { laneOccupied } from '../schedule.mjs';
-import { runLandVerb } from '../land.mjs';
+import { recoverAction, runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
 import { acceptAnswer } from '../touch.mjs';
@@ -252,7 +252,9 @@ function shellResult(h, action) {
     case 'pr-lookup': return ok(JSON.stringify([{ number: prNumber(id), headRefOid: h.head(id), state: 'OPEN' }]));
     case 'review/diff': return ok(h.diff?.[id] ?? 'src/a.mjs\n');
     case 'review/managed': return ok(JSON.stringify({ mode: 'standalone' }));
+    case 'review/recover': return ok(h.recoverRead?.[id] ?? '');
     case 'review/delta-count': {
+      if (action.land.scope !== 'full' && h.deltaCountFails?.[id]) return { code: 4, stdout: '', stderr: 'delta count for review 7002 could not be read: HTTP 502' };
       if (action.land.scope !== 'full') return ok(JSON.stringify({ outcome: 'ok', review_id: action.land.reviewId, head: action.land.head, major_findings: h.deltaAfterDup?.[id]?.shift() ?? 2 }));
       if (h.fullCountFails?.[id]) return { code: 4, stdout: '', stderr: 'delta count for review 7001 could not be read: HTTP 502' };
       const [p1, p2] = h.fullAfterDup?.[id]?.shift() ?? [1, 0];
@@ -3233,6 +3235,45 @@ test('C1-3 RECOUNT: with no council adapter a crossing full review queues no rec
   const wp = h.wp('WP-02');
   assert.equal(wp.state, 'merged', JSON.stringify({ reason: wp.reason, trace: of(h, 'WP-02').slice(-12).map((a) => `${a.step}/${a.part ?? ''}`) }));
   assert.equal(of(h, 'WP-02').some((action) => action.part === 'delta-count'), false);
+});
+
+test('C2-6 RECOUNT: with no council adapter a crossing delta queues no recount, so a failing recount read cannot block', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  h.findings = { 'WP-02': [3, 2] };
+  h.deltaMajor = { 'WP-02': [2] };
+  h.deltaCountFails = { 'WP-02': true };
+  h.reports = { 'WP-02': ['report-built.md', 'report-amendment.md', 'report-amendment-2.md'] };
+  h.amendDiff = { 'WP-02': 'lib/lanes.mjs\n' };
+  assert.equal(await drive(h), null);
+  const wp = h.wp('WP-02');
+  const actions = of(h, 'WP-02');
+  assert.equal(wp.state, 'merged', JSON.stringify({ reason: wp.reason, trace: actions.slice(-12).map((a) => `${a.step}/${a.part ?? ''}`) }));
+  assert.equal(actions.some((action) => action.step === 'post' && action.land.scope === 'delta'), true, 'the delta crossed');
+  assert.match(wp.reviews.find((review) => review.scope === 'delta')?.escalation ?? '', /no council adapter/);
+  assert.equal(actions.some((action) => action.part === 'delta-count'), false);
+});
+
+test('C2-3 RECOVER FINDINGS: a clean newer review recovered with an older obligation goes to the council round, not an amendment', async (t) => {
+  const h = resetFixture(t, { council: true });
+  const wp = h.wp('WP-02');
+  const older = sha('a', 2);
+  const head = sha('c', 2);
+  h.heads['WP-02'] = head;
+  Object.assign(wp, { state: 'review', stage: 'reviewed', tier: 'T1', amendment: null, pr: { number: 102, head }, lane: h.lane({ worktree: join(h.dir, 'repo-wt-demo-wp-02') }),
+    reviews: [{ round: 1, scope: 'full', tier: 'T1', head: older, findings: 1 }] });
+  wp.queue = [recoverAction(h.state, wp, { round: 2, scope: 'full', since: null, head, lenses: ['codex', 'astra'], attemptRef: 'ref-2' })];
+  h.recoverRead = { 'WP-02': JSON.stringify({ outcome: 'ok', retry: 'stop', round: 'reviewed', last: { head, scope: 'full', review_id: 88, findings: 0 }, problem: null,
+    escalate: 't2-council', escalate_reason: 'full review 77: 1 P1, 0 P2', escalate_review: { review_id: 77, head: older, scope: 'full', p1_findings: 1, p2_findings: 0 } }) };
+  h.diff = { 'WP-02': 'lib/x.mjs\n' };
+  const stop = (action) => action.wpId === 'WP-02' && (action.tool === 'council_review' || (action.step === 'brief' && action.part === 'amendment') || action.part === 'meta');
+  let next = await drive(h, { until: stop });
+  if (next?.part === 'meta') {
+    await recordPending(h, await perform(h, next));
+    next = await drive(h, { until: stop });
+  }
+  const after = h.wp('WP-02');
+  assert.equal(next?.tool, 'council_review', JSON.stringify({ next: next && `${next.step}/${next.part ?? next.tool}`, stage: after.stage, state: after.state, reason: after.reason, reviews: after.reviews }));
+  assert.deepEqual([after.tier, after.deltaEscalation?.reviewId, after.reviews.at(-1).reviewId, after.reviews.at(-1).findings], ['T2', 77, 88, 0]);
 });
 
 test('C1-3 RECOUNT: with the council adapter on, a failing full recount read still blocks', async (t) => {

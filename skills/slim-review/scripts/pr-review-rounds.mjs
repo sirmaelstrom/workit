@@ -486,7 +486,8 @@ function rebaseSummary(rebase, from) {
 export function resolveRound({ reviews, head, tail }) {
   const r = reviewRound(reviews, head);
   if (r.round === 'full') return { answer: { round: 'full', problem: null }, tail: null, from: null };
-  const last = { head: r.last.head, scope: r.last.scope, review_id: r.last.review_id };
+  // `findings`: every finding the last review posted, read from its manifest; absent when it has none.
+  const last = { head: r.last.head, scope: r.last.scope, review_id: r.last.review_id, ...(Number.isInteger(r.last.findings) ? { findings: r.last.findings } : {}) };
   const owed = [...reviews].reverse().find((review) => reviewEscalation(review));
   const signal = owed ? { ...reviewEscalation(owed), escalate_review: escalateReview(owed) } : {};
   const count = r.last.scope === 'delta' && r.last.majorFindings > 0 ? { major_findings: r.last.majorFindings }
