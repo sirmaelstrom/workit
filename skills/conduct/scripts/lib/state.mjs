@@ -5,14 +5,15 @@ import { join, dirname, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
 export const SCHEMA_VERSION = 1;
-// A lock held from another host (whose pid cannot be checked) older than this
-// is stale. Every verb is one-shot and bounded (ASSUMPTION).
+// A state.lock held from another host (whose pid cannot be checked) older
+// than this is stale. Every verb is one-shot and bounded (ASSUMPTION).
 export const LOCK_STALE_MS = 60000;
-// A leased lock (drive.lock, held for a whole drive) is renewed this often
-// while its holder runs, and from another host is stale only once its
-// renewedAt is older than LEASE_STALE_MS.
+// The lock a driver holds for a whole drive. It is a lease, renewed this
+// often while its holder runs, but from another host it is never stale: that
+// host's clock is not this one's, so the age of a renewal proves nothing.
+// Only `conduct.mjs drive --break-lock` removes it.
+export const DRIVE_LOCK = 'drive.lock';
 export const LEASE_RENEW_MS = 20000;
-export const LEASE_STALE_MS = 120000;
 const LOCK_POLL_MS = 50;
 
 export class ConductError extends Error {
@@ -171,12 +172,18 @@ function readLock(path, deps) {
 }
 
 // Stale only when the holder is shown gone: a dead pid on this host. Age
-// decides only for a holder on another host, whose pid cannot be checked:
-// a leased holder's last renewal, any other holder's start.
-function lockIsStale(holder, deps) {
+// decides only for a state.lock holder on another host, whose pid cannot be
+// checked; another host's drive.lock is never stale.
+function lockIsStale(holder, deps, lock) {
   if (holder.host === deps.hostname) return !deps.pidAlive(holder.pid);
-  if (holder.renewedAt) return deps.now() - Date.parse(holder.renewedAt) > LEASE_STALE_MS;
+  if (lock === DRIVE_LOCK) return false;
   return deps.now() - Date.parse(holder.at) > LOCK_STALE_MS;
+}
+
+// How the conductor clears another host's drive.lock, for a refusal to name.
+export function breakLockHint(runDir, lock, holder, deps) {
+  if (lock !== DRIVE_LOCK || !holder || holder.host === deps.hostname) return '';
+  return `; another host's drive.lock is never taken over: if that driver is gone, run conduct.mjs drive --run ${runDir} --break-lock --why "<reason>"`;
 }
 
 // The holder of a lock file that is held: null when the file is absent or
@@ -186,7 +193,7 @@ export function liveLock(runDir, lock, deps) {
   if (!deps.exists(path)) return null;
   const holder = readLock(path, deps);
   if (!holder) return { unreadable: true, path };
-  return lockIsStale(holder, deps) ? null : holder;
+  return lockIsStale(holder, deps, lock) ? null : holder;
 }
 
 // One writer at a time: every state transaction (load, change, save) runs
@@ -220,13 +227,13 @@ export async function withStateLock(runDir, deps, fn, { lock = 'state.lock', lea
       } catch (error) {
         if (error.code !== 'EEXIST') throw error;
         const holder = readLock(path, deps);
-        if (holder && lockIsStale(holder, deps)) {
+        if (holder && lockIsStale(holder, deps, lock)) {
           deps.remove(path);
           continue;
         }
         if (attempt * LOCK_POLL_MS >= waitMs) {
           throw new ConductError(2, holder
-            ? `${lock === 'state.lock' ? 'the run is locked' : `${lock} is held`} by pid ${holder.pid} on ${holder.host} since ${holder.at}; retry`
+            ? `${lock === 'state.lock' ? 'the run is locked' : `${lock} is held`} by pid ${holder.pid} on ${holder.host} since ${holder.at}; retry${breakLockHint(runDir, lock, holder, deps)}`
             : `the run's lock ${path} is unreadable; retry, or remove it if no conductor verb is running`);
         }
         await deps.sleep(LOCK_POLL_MS);

@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execute, runArgv, windowsShim, spawnDetached, pidAlive, defaultCodexExe } from './lib/exec.mjs';
 import {
   ConductError, SCHEMA_VERSION, STEPS, STEP_SEAM, TERMINAL_PHASES,
-  appendEvent, liveLock, loadState, refuseRetired, resolveRunDir, saveState, slugify, statePath, withStateLock,
+  appendEvent, breakLockHint, liveLock, loadState, refuseRetired, resolveRunDir, saveState, slugify, statePath, withStateLock,
 } from './lib/state.mjs';
 import { ADAPTERS, AGENTS, BACKENDS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
@@ -34,6 +34,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
   drive --run <dir> [--max-steps <n>]   (perform shell, wait and template author actions; stop at the first that needs the conductor)
+  drive --run <dir> --break-lock --why <text>   (remove another host's drive.lock, or a dead driver's on this host)
   status --run <dir>
   analyze --run <dir>
   ratify --run <dir> --wp <id> --paths <path,path> --why <text>
@@ -47,7 +48,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   quiet [--samples <n>] [--interval-ms <ms>] [--max-busy <percent>]   (no run: is this host's CPU quiet enough to re-run a gate)
   bootstrap --repo <abs> [--write] [--offline]   (no run: check a repo against the greenfield manifest)`;
 
-const BOOLEAN_FLAGS = new Set(['manual', 'write', 'offline']);
+const BOOLEAN_FLAGS = new Set(['manual', 'write', 'offline', 'break-lock']);
 const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
@@ -122,7 +123,7 @@ function refuseWhileDriven(runDir, deps, verb) {
   const holder = liveLock(runDir, 'drive.lock', deps);
   if (!holder || (deps.driveToken && holder.token === deps.driveToken)) return;
   if (holder.unreadable) throw new ConductError(5, `${verb}: ${holder.path} is unreadable; remove it if no drive is running, then retry`);
-  throw new ConductError(5, `${verb}: a drive holds this run (pid ${holder.pid} on ${holder.host} since ${holder.at}${holder.action ? `, executing ${holder.action}` : ''}); wait for it to stop, or stop it, then retry`);
+  throw new ConductError(5, `${verb}: a drive holds this run (pid ${holder.pid} on ${holder.host} since ${holder.at}${holder.action ? `, executing ${holder.action}` : ''}); wait for it to stop, or stop it, then retry${breakLockHint(runDir, 'drive.lock', holder, deps)}`);
 }
 
 // A state transaction: load, change and save under the run's lock. While a
@@ -574,14 +575,15 @@ async function answer(tokens, deps) {
 // refused while a rotation is open; its results go through record. drive.lock
 // keeps a second driver off the run, and the verbs that move the run off it
 // while it runs (refuseWhileDriven); the driver's own calls carry its token.
-// It is a lease: renewed while the drive runs, so a live driver on another
-// host is not judged stale mid-shell.
+// It is a lease, renewed while the drive runs; another host's is never taken
+// over (lib/state.mjs DRIVE_LOCK), only broken by --break-lock.
 // state.lock is taken per verb as always, so a shell action's own conduct.mjs
 // verb can take it. Before each step, claim re-reads state.pending under
 // state.lock and stamps drive.lock with the action id it is about to execute.
 async function driveVerb(tokens, deps) {
   const flags = parseFlags(tokens);
   const runDir = runDirFlag(flags);
+  if (flags['break-lock']) return breakDriveLock(runDir, flags, deps);
   const maxSteps = flags['max-steps'] === undefined ? undefined : Number(flags['max-steps']);
   if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 0)) throw new ConductError(2, '--max-steps must be a whole number');
   refuseForeignState(runDir, openRun(flags, deps).state, deps);
@@ -614,6 +616,33 @@ async function driveVerb(tokens, deps) {
       record: (id, result) => call(() => record(['--run', runDir, '--action', id, '--result', JSON.stringify(result)], driver)),
     });
   }, { lock: 'drive.lock', lease: true });
+}
+
+// The conductor's removal of a drive.lock no driver will release: another
+// host's, an unreadable one, or one whose pid on this host is dead. A live
+// holder on this host is refused. The old holder and the why are logged as a
+// drive-lock-broken event before the lock goes.
+function breakDriveLock(runDir, flags, deps) {
+  const why = stringFlag(flags, 'why');
+  return withStateLock(runDir, deps, () => {
+    const { state } = openRun(flags, deps);
+    refuseForeignState(runDir, state, deps);
+    const path = join(runDir, 'drive.lock');
+    if (!deps.exists(path)) throw new ConductError(2, `--break-lock: no drive.lock in ${runDir}`);
+    let holder;
+    try {
+      holder = JSON.parse(deps.read(path));
+    } catch {
+      holder = { unreadable: true };
+    }
+    if (holder.host === deps.hostname && deps.pidAlive(holder.pid)) {
+      throw new ConductError(5, `--break-lock: drive.lock is held by pid ${holder.pid} on ${holder.host}, which is alive; stop that drive instead`);
+    }
+    appendEvent(state, deps, { event: 'drive-lock-broken', source: 'verb', data: { holder, why } });
+    saveState(state, deps);
+    deps.remove(path);
+    return { out: { ok: true, broken: holder, why } };
+  });
 }
 
 async function status(tokens, deps) {

@@ -324,7 +324,7 @@ test('drive: each conductor verb that moves the run is refused while a live driv
   assert.equal((await f.run(['next', '--run', f.runDir])).code, 0);
 });
 
-test('drive: another host\'s driver that started over 60 s ago but renewed its lease recently is live: record and a second drive refuse', async (t) => {
+test('drive: another host\'s drive.lock is live however old it looks (its clock may be skewed) until --break-lock clears it and logs the holder', async (t) => {
   const f = fixture(t, [TOOL]);
   assert.equal((await f.run(['next', '--run', f.runDir])).code, 0);
   const base = Date.parse('2026-10-25T12:00:00.000Z');
@@ -339,9 +339,49 @@ test('drive: another host\'s driver that started over 60 s ago but renewed its l
   const second = await f.drive();
   assert.equal(second.code, 2, second.stdout);
   assert.match(out(second).error, /drive\.lock is held by pid 4242 on another-host/);
-  // A lease not renewed for over 120 s is stale: that driver is gone.
-  lock(base - 130000);
+  // A lease that looks long unrenewed may be a writer whose clock runs behind
+  // this one: another host's drive.lock is never taken over by its age.
+  lock(base - 3 * 60 * 60 * 1000);
+  const skewed = await f.run(['next', '--run', f.runDir]);
+  assert.equal(skewed.code, 5, skewed.stdout);
+  assert.match(out(skewed).error, /^next: a drive holds this run \(pid 4242 on another-host.*--break-lock/);
+  const again = await f.drive();
+  assert.equal(again.code, 2, again.stdout);
+  assert.match(out(again).error, /drive\.lock is held by pid 4242 on another-host.*--break-lock/);
+  assert.ok(existsSync(join(f.runDir, 'drive.lock')), 'the foreign lock stays');
+  // The conductor breaks it, and the old holder and the why are logged.
+  const broken = await f.drive(['--break-lock', '--why', 'another-host rebooted']);
+  assert.equal(broken.code, 0, broken.stdout);
+  assert.equal(out(broken).broken.host, 'another-host');
+  assert.equal(existsSync(join(f.runDir, 'drive.lock')), false);
+  const events = readFileSync(join(f.runDir, 'events.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+  const logged = events.filter((event) => event.event === 'drive-lock-broken');
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0].data.why, 'another-host rebooted');
+  assert.equal(logged[0].data.holder.pid, 4242);
+  assert.equal(logged[0].data.holder.host, 'another-host');
   assert.equal((await f.run(['next', '--run', f.runDir])).code, 0);
+});
+
+test('drive --break-lock: refuses a live driver on this host, breaks a dead one, and needs --why', async (t) => {
+  const f = fixture(t, [TOOL]);
+  const path = join(f.runDir, 'drive.lock');
+  const at = new Date().toISOString();
+  writeFileSync(path, JSON.stringify({ pid: process.pid, host: hostname(), at, renewedAt: at, token: 'other' }));
+  assert.equal((await f.drive(['--break-lock'])).code, 2, '--why is required');
+  const live = await f.drive(['--break-lock', '--why', 'x']);
+  assert.equal(live.code, 5, live.stdout);
+  assert.match(out(live).error, new RegExp(`pid ${process.pid} on ${hostname()}.*alive`));
+  assert.ok(existsSync(path), 'a live holder keeps its lock');
+  writeFileSync(path, JSON.stringify({ pid: 999999999, host: hostname(), at, renewedAt: at, token: 'other' }));
+  const dead = await f.drive(['--break-lock', '--why', 'crashed']);
+  assert.equal(dead.code, 0, dead.stdout);
+  assert.equal(existsSync(path), false);
+  assert.equal(out(dead).broken.pid, 999999999);
+  assert.deepEqual(f.runs, [], '--break-lock drives nothing');
+  const none = await f.drive(['--break-lock', '--why', 'again']);
+  assert.equal(none.code, 2, none.stdout);
+  assert.match(out(none).error, /no drive\.lock/);
 });
 
 test('drive: the driver renews drive.lock\'s lease while a shell runs, keeping the action it is executing', async (t) => {
