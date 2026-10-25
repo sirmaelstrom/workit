@@ -2280,8 +2280,8 @@ function route(state, wp, action, out, deps) {
       if (action.step === 'fallback' && patch.lane?.fallback) wp.agent = patch.lane.fallback;
       // A land patch that replaces the queue moves the stage with it.
       if (patch.queue?.some((a) => a.step === 'rebase' && a.part === 'fetch')) wp.stage = 'gate';
-      // A full diff's record refits its own round's queued review: the meta is already written.
-      else if (action.step === 'council' && action.part === 'full-diff') wp.stage = 'reviewed';
+      // A diff's record refits its own round's queued review: the meta is already written.
+      else if (action.step === 'council' && (action.part === 'full-diff' || action.part === 'delta-diff')) wp.stage = 'reviewed';
       else if (patch.queue?.some((a) => (a.step === 'review' && a.part !== 'delta-count') || a.step === 'post' || (a.step === 'council' && a.part === 'review'))) {
         wp.queue = withMeta(state, wp, wp.queue);
         wp.stage = 'reviewed';

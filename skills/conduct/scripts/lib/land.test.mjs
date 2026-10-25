@@ -1118,9 +1118,9 @@ test('a missing council seat is retried alone and synthesis cannot hide the cove
 });
 
 // Council input cap (quest b118b800): the full round's artifacts fit under 700,000 characters.
-const fitRound = (changed, sizes, { round = 1, wp = makeWp({ reviews: [], tier: 'T2' }) } = {}) => {
+const fitRound = (changed, sizes, { round = 1, wp = makeWp({ reviews: [], tier: 'T2' }), scope = 'full', since = null } = {}) => {
   const state = makeState({ adapters: { council: { on: true } } });
-  const actions = t2Actions(state, wp, { round, changedPaths: changed.map((path) => join(WT, path)) });
+  const actions = t2Actions(state, wp, { round, changedPaths: changed.map((path) => join(WT, path)), scope, since });
   const read = (path) => {
     if (!Object.hasOwn(sizes, path)) throw new Error(`ENOENT: ${path}`);
     return 'x'.repeat(sizes[path]);
@@ -1136,7 +1136,7 @@ test('a large full council round sends the diff, then the non-test files that fi
   const { actions, out } = fitRound(changed, sizes);
   assert.equal(out.outcome, 'continue');
   const [review, synth, challenge] = out.patch.queue;
-  assert.deepEqual(review.args.artifact_paths, [diff, join(WT, 'lib/pr-review.mjs'), join(WT, 'docs/notes.md')]);
+  assert.deepEqual(review.args.artifact_paths, [diff, join(WT, 'docs/notes.md'), join(WT, 'lib/pr-review.mjs')]);
   assert.equal(review.land.inputChars, 491000);
   assert.ok(review.land.inputChars <= 700000);
   assert.deepEqual(review.land.omitted, ['lib/pr-review.test.mjs', 'lib/phases/build.test.mjs', 'lib/big.mjs', 'lib/__fixtures__/x.json', 'lib/gone.mjs'].map((path) => join(WT, path)));
@@ -1159,6 +1159,50 @@ test('a small full council round still gets its files whole, after the prior adj
   assert.equal(out.outcome, 'continue');
   assert.deepEqual(out.patch.queue[0].args.artifact_paths, [prior, diff, join(WT, 'lib/x.mjs'), join(WT, 'lib/y.mjs')]);
   assert.deepEqual(out.patch.queue[0].land.omitted, []);
+});
+
+test('whole files go smallest first, ties by path: a large file listed first does not crowd out smaller ones', () => {
+  const diff = join(RUN, 'council', 'wp-01', 'full-r1.diff');
+  const sizes = { [diff]: 50000, [join(WT, 'lib/big.mjs')]: 550000, [join(WT, 'lib/b.mjs')]: 100000, [join(WT, 'lib/a.mjs')]: 100000 };
+  const { out } = fitRound(['lib/big.mjs', 'lib/b.mjs', 'lib/a.mjs'], sizes);
+  assert.equal(out.outcome, 'continue');
+  assert.deepEqual(out.patch.queue[0].args.artifact_paths, [diff, join(WT, 'lib/a.mjs'), join(WT, 'lib/b.mjs')]);
+  assert.equal(out.patch.queue[0].land.inputChars, 250000);
+  assert.deepEqual(out.patch.queue[0].land.omitted, [join(WT, 'lib/big.mjs')]);
+});
+
+// Run escalate-a-t1-wp-to-a-t2-council-when-it, WP-00, round 2: the delta round
+// sent every changed file whole (1,423,539 chars). It fits like a full round.
+test('a large delta council round sends the prior adjudication and the delta diff, then the smallest non-test files that fit', () => {
+  const since = sha('f');
+  const prior = join(RUN, 'council', 'wp-01', 'review-1', 'adjudication-for-next-round.md');
+  const diff = join(RUN, 'council', 'wp-01', 'delta-r2.diff');
+  const wp = makeWp({ reviews: [], tier: 'T2', priorAdjudication: { path: prior, round: 1 } });
+  const changed = ['lib/build.mjs', 'lib/land.test.mjs', 'lib/land.mjs', 'SKILL.md', 'lib/pr-review.mjs', 'lib/build.test.mjs'];
+  const sizes = { [prior]: 20000, [diff]: 150000, [join(WT, 'lib/build.mjs')]: 300000, [join(WT, 'lib/land.test.mjs')]: 150000, [join(WT, 'lib/land.mjs')]: 120000,
+    [join(WT, 'SKILL.md')]: 60000, [join(WT, 'lib/pr-review.mjs')]: 190000, [join(WT, 'lib/build.test.mjs')]: 260000 };
+  const { actions, out } = fitRound(changed, sizes, { round: 2, wp, scope: 'delta', since });
+  assert.equal(actions[0].part, 'delta-diff');
+  assert.equal(out.outcome, 'continue');
+  const [review, synth, challenge] = out.patch.queue;
+  assert.equal(review.tool, 'council_review');
+  assert.deepEqual(review.args.artifact_paths, [prior, diff, ...['SKILL.md', 'lib/land.mjs', 'lib/pr-review.mjs'].map((path) => join(WT, path))]);
+  assert.equal(review.land.inputChars, 540000);
+  assert.deepEqual(review.land.omitted, ['lib/build.mjs', 'lib/land.test.mjs', 'lib/build.test.mjs'].map((path) => join(WT, path)));
+  assert.deepEqual([synth, challenge], actions.slice(2), 'only the review is refitted');
+  // The fitted review still records as a delta round.
+  const staged = recordLandStep(makeState({ adapters: { council: { on: true } } }), { ...wp, queue: out.patch.queue }, review, { models: { astra: { status: 'success' } } }, {});
+  assert.equal(staged.patch.councilStage.scope, 'delta');
+});
+
+test('a delta diff plus the prior adjudication over the council input budget blocks with an actionable reason', () => {
+  const prior = join(RUN, 'council', 'wp-01', 'review-1', 'adjudication-for-next-round.md');
+  const diff = join(RUN, 'council', 'wp-01', 'delta-r2.diff');
+  const wp = makeWp({ reviews: [], tier: 'T2', priorAdjudication: { path: prior, round: 1 } });
+  const { out } = fitRound(['lib/x.mjs'], { [prior]: 60000, [diff]: 650000, [join(WT, 'lib/x.mjs')]: 10 }, { round: 2, wp, scope: 'delta', since: sha('f') });
+  assert.equal(out.outcome, 'block');
+  assert.equal(out.reason, 'council input would exceed the Codex 1,048,576-char limit (650,000 chars of diff and 60,000 of prior adjudication); split the WP or review by hand');
+  assert.deepEqual(out.patch.queue, []);
 });
 
 test('a council seat that refused the input as too large blocks at once, naming the size, with no retry', () => {

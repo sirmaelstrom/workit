@@ -313,16 +313,16 @@ export function priorAdjudicationBody(recordBody) {
 }
 
 // A Codex seat refuses a turn over 1,048,576 characters, and the prompt
-// template rides on top of the artifacts. A full round's artifacts stay under
-// the budget: the diff first, then whole non-test files while they fit.
+// template rides on top of the artifacts. A round's artifacts, full or delta,
+// stay under the budget: the diff first, then whole non-test files that fit.
 export const CODEX_INPUT_LIMIT = 1048576;
 export const COUNCIL_INPUT_BUDGET = 700000;
 
 // The council round's scope comes from its dispatch, never the round number.
 // A delta round first writes `git diff <since> <head>` into the run dir and
 // hands that file to the council, so the scope reaches the tool's input. A
-// full round writes the PR's whole diff the same way; its record (councilFit)
-// then sets the review's artifact_paths under COUNCIL_INPUT_BUDGET.
+// full round writes the PR's whole diff the same way. Either diff's record
+// (councilFit) then sets the review's artifact_paths under COUNCIL_INPUT_BUDGET.
 // From round 2 on, the previous round's adjudication (wp.priorAdjudication =
 // { path, round }, set at `resolve`) goes in too, as context only.
 export function t2Actions(state, wp, { round = 1, changedPaths = [], report = null, scope = 'full', since = null } = {}) {
@@ -345,7 +345,7 @@ export function t2Actions(state, wp, { round = 1, changedPaths = [], report = nu
   return [
     ...(deltaDiff ? [shell('council', 'delta-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', `--output=${deltaDiff}`, '--end-of-options', since, wp.pr.head], { land })] : []),
     ...(fullDiff ? [shell('council', 'full-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', '--no-renames', '-U25', `--output=${fullDiff}`, `origin/${defaultOf(state)}...HEAD`], { land })] : []),
-    // A full round's paths are candidates until the full-diff record fits them.
+    // The paths are candidates until the diff's record fits them.
     tool('review', 'council_review', { workshop_path: workshop, output_dir: outDir, surface: 'code', code_root: wp.lane.worktree,
       artifact_paths: [...prior, ...(deltaDiff ? [deltaDiff] : []), ...(fullDiff ? [fullDiff] : []), ...changedPaths], round, profile: CONDUCT_COUNCIL_PROFILE }),
     tool('synthesize', 'council_synthesize', { review_dir: outDir, workshop_path: workshop }, {
@@ -1216,7 +1216,7 @@ function recordReview(state, wp, action, r) {
 // synthesis with a parseable count; the entry is written at that point.
 function recordCouncil(state, wp, action, r, deps = {}) {
   const land = action.land ?? {};
-  if (action.part === 'delta-diff') return r.code === 0 ? result('continue') : result('block', `delta diff for council round ${land.round} failed: ${first(r.stderr)}`);
+  if (action.part === 'delta-diff') return r.code === 0 ? councilFit(wp, action, deps) : result('block', `delta diff for council round ${land.round} failed: ${first(r.stderr)}`);
   if (action.part === 'full-diff') return r.code === 0 ? councilFit(wp, action, deps) : result('block', `full diff for council round ${land.round} failed: ${first(r.stderr)}`);
   if (action.part === 'review') {
     const paths = action.args?.artifact_paths ?? [];
@@ -1270,39 +1270,44 @@ function recordCouncil(state, wp, action, r, deps = {}) {
 const INPUT_TOO_LARGE = /input_too_large|Input exceeds the maximum length/i;
 const chars = (n) => n.toLocaleString('en-US');
 
-// A full round's council input, set once its diff is written: the prior
-// adjudication and the diff, then each changed non-test file whole while the
-// total stays within COUNCIL_INPUT_BUDGET. A test file, a deleted file and one
-// that would overflow reach the council through the diff alone; the seats can
-// still open any of them under code_root. A diff over the budget is refused.
+// A council round's input, full or delta, set once its diff is written: the
+// prior adjudication and the diff, then changed non-test files whole, smallest
+// first (ties by path), while the total stays within COUNCIL_INPUT_BUDGET. A
+// test file, a deleted file and one that would overflow reach the council
+// through the diff alone; the seats can still open any of them under
+// code_root. A diff that with the prior adjudication is over the budget is refused.
 function councilFit(wp, action, deps) {
   const land = action.land;
+  const key = land.scope === 'delta' ? 'deltaDiff' : 'fullDiff';
+  const diff = land[key];
   const size = (path) => {
     try { return String(deps.read(path)).length; } catch { return null; }
   };
-  const diffChars = size(land.fullDiff);
-  if (diffChars === null) return result('block', `full diff for council round ${land.round} was not written to ${land.fullDiff}`);
-  if (diffChars === 0) return result('block', `council review round ${land.round} has an empty full diff: nothing to review`);
+  const diffChars = size(diff);
+  if (diffChars === null) return result('block', `${land.scope} diff for council round ${land.round} was not written to ${diff}`);
+  if (diffChars === 0) return result('block', `council review round ${land.round} has an empty ${land.scope} diff: nothing to review`);
   const priorChars = land.prior ? size(land.prior) ?? 0 : 0;
   if (diffChars + priorChars > COUNCIL_INPUT_BUDGET) {
-    return result('block', `council input would exceed the Codex ${chars(CODEX_INPUT_LIMIT)}-char limit (${chars(diffChars)} chars of diff); split the WP or review by hand`);
+    const of = `${chars(diffChars)} chars of diff${priorChars ? ` and ${chars(priorChars)} of prior adjudication` : ''}`;
+    return result('block', `council input would exceed the Codex ${chars(CODEX_INPUT_LIMIT)}-char limit (${of}); split the WP or review by hand`);
   }
   const queue = rest(wp, action);
-  const at = queue.findIndex((a) => a.step === 'council' && a.part === 'review' && a.land?.fullDiff === land.fullDiff);
-  if (at < 0) return result('block', `council round ${land.round} has no queued review for its full diff`);
+  const at = queue.findIndex((a) => a.step === 'council' && a.part === 'review' && a.land?.[key] === diff);
+  if (at < 0) return result('block', `council round ${land.round} has no queued review for its ${land.scope} diff`);
   const review = queue[at];
+  const candidates = review.args.artifact_paths.filter((p) => p !== land.prior && p !== diff);
+  const files = candidates.map((path) => ({ path, chars: isTestPath(relative(wp.lane.worktree, path)) ? null : size(path) }))
+    .filter((file) => file.chars !== null)
+    .sort((a, b) => a.chars - b.chars || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   let total = diffChars + priorChars;
   const kept = [];
-  const omitted = [];
-  for (const path of review.args.artifact_paths.filter((p) => p !== land.prior && p !== land.fullDiff)) {
-    const fileChars = isTestPath(relative(wp.lane.worktree, path)) ? null : size(path);
-    if (fileChars !== null && total + fileChars <= COUNCIL_INPUT_BUDGET) {
-      kept.push(path);
-      total += fileChars;
-    } else omitted.push(path);
+  for (const file of files) {
+    if (total + file.chars > COUNCIL_INPUT_BUDGET) break;
+    kept.push(file.path);
+    total += file.chars;
   }
-  const fitted = { ...review, args: { ...review.args, artifact_paths: [...(land.prior ? [land.prior] : []), land.fullDiff, ...kept] },
-    land: { ...review.land, inputChars: total, omitted } };
+  const fitted = { ...review, args: { ...review.args, artifact_paths: [...(land.prior ? [land.prior] : []), diff, ...kept] },
+    land: { ...review.land, inputChars: total, omitted: candidates.filter((path) => !kept.includes(path)) } };
   return result('continue', null, { queue: queue.map((a, i) => (i === at ? fitted : a)) });
 }
 

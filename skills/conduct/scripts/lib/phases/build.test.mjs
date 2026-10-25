@@ -244,8 +244,9 @@ function shellResult(h, action) {
   if (command[0] === 'node' && command[1].endsWith('lane.mjs')) return herdrVerb(h, action);
   switch (action.part ? `${action.step}/${action.part}` : action.step) {
     case 'base': return ok(`${BASE}\n`);
-    // A full council round's diff, written as git would (its record reads the size).
+    // A council round's diff, full or delta, written as git would (its record reads the size).
     case 'council/full-diff':
+    case 'council/delta-diff':
       writeFileSync(command.find((arg) => arg.startsWith('--output=')).slice('--output='.length), 'diff --git a/src/a.mjs b/src/a.mjs\n');
       return ok();
     case 'pr-lookup': return ok(JSON.stringify([{ number: prNumber(id), headRefOid: h.head(id), state: 'OPEN' }]));
