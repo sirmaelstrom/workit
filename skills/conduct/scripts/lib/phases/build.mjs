@@ -33,7 +33,7 @@ import { bootstrapBrief } from '../bootstrap.mjs';
 import { gateFailureKind } from '../gate-env.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilOn, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
-  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, reviewCrosses,
+  laneRebaseActions, priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, reviewCrosses,
   inspectionProblem, t2Actions, threadReplyActions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
@@ -1180,12 +1180,13 @@ function checkFailed(state, wp, deps, reason) {
 // and rebase-conflict amendments alike); the next blocks with the last gate
 // cause as its reason. `threads` are the open review threads the land gate
 // listed (first comment ids): the amendment's table answers them from its
-// own ## Amendment section on (gateThreads).
-function gateAmend(state, wp, deps, reason, threads = []) {
+// own ## Amendment section on (gateThreads). A rebase conflict's amendment is
+// flagged: the lane check maps the lane's rebase (land.mjs laneRebaseActions).
+function gateAmend(state, wp, deps, reason, threads = [], { rebase = false } = {}) {
   if ((wp.gateAmends ?? 0) >= GATE_AMENDS) return block(state, wp, deps, `${reason} (after ${GATE_AMENDS} gate amendments)`);
   wp.gateAmends = (wp.gateAmends ?? 0) + 1;
   // The land gate reads this amendment's commits (from..head) as a gate-fix tail, not as unreviewed work.
-  wp.gateFixes = [...(wp.gateFixes ?? []), { from: wp.pr?.head ?? null, reason }];
+  wp.gateFixes = [...(wp.gateFixes ?? []), { from: wp.pr?.head ?? null, reason, ...(rebase ? { rebase: true } : {}) }];
   startAmendment(state, wp, deps, { kind: 'gate', reason, ...(threads.length ? { threads, repo: state.intent.repo.remote } : {}) });
   // The report section whose table answers it: its rows are cite targets.
   wp.gateFixes.at(-1).n = wp.amendment.n;
@@ -1461,12 +1462,14 @@ function expand(state, wp, deps) {
       wp.checkAmends = 0;
       if (wp.state !== 'pr') setState(state, wp, 'pr', null, deps);
       if (findings) return undefined;
+      // A lane's rebase for a gate amendment is recorded before any delta or gate reads across it.
+      const mapped = laneRebaseActions(state, wp);
       if (!wp.reviews?.length) {
         // A full review covers every amendment before it.
         wp.deltaFrom = null;
-        return go([...threads, prDiff(state)], null);
+        return go([...mapped, ...threads, prDiff(state)], null);
       }
-      return go(threads, 'delta');
+      return go([...mapped, ...threads], 'delta');
     }
     case 'reviewed': {
       if ((wp.reviews ?? []).at(-1)?.findings === 0) {
@@ -2331,7 +2334,7 @@ function route(state, wp, action, out, deps) {
       return;
     case 'amend':
       // A land gate's record carries the open threads it listed (patch.gate.threads).
-      return LANE_STEPS.has(action.step) ? checkFailed(state, wp, deps, out.reason) : gateAmend(state, wp, deps, out.reason, patch.gate?.threads ?? []);
+      return LANE_STEPS.has(action.step) ? checkFailed(state, wp, deps, out.reason) : gateAmend(state, wp, deps, out.reason, patch.gate?.threads ?? [], { rebase: action.step === 'rebase' });
     case 'block':
       // A cleanup action's record never changes the WP's state.
       if (cleanup) {
