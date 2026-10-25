@@ -9,7 +9,7 @@ import { ConductError, TERMINAL_PHASES, appendEvent } from './state.mjs';
 import { LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { conductScript, shellLiteral, spineAckFailure } from './touch.mjs';
 import { runAuthority } from './authority.mjs';
-import { HEARTBEAT_INSTRUCTION, adoptHeartbeat, heartbeatArgs, recordHeartbeatDelete } from './lanes.mjs';
+import { HEARTBEAT_INSTRUCTION, adoptHeartbeat, heartbeatArgs, recordHeartbeatDelete, retireConductorThreads } from './lanes.mjs';
 
 export const SESSION_LOG = 'session-chain.jsonl';
 
@@ -279,7 +279,9 @@ export function custodyNext(state, rotation, deps, { custody = null } = {}) {
   }
   rotation.status = 'custody';
   rotation.custodyAt = deps.timestamp();
-  appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-taken', source: 'next', data: { attempt: rotation.attempt, from: rotation.from, to: rotation.to, retire: rotation.retire, receipt: rotation.receipt, pane: rotation.successor.pane } });
+  // The outgoing conductor's thread can never adopt the run back (lanes.mjs conductorThreadFence).
+  const retired = retireConductorThreads(state, rotation);
+  appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-taken', source: 'next', data: { attempt: rotation.attempt, from: rotation.from, to: rotation.to, retire: rotation.retire, receipt: rotation.receipt, pane: rotation.successor.pane, ...(retired ? { retiredThreads: retired } : {}) } });
   if (wakePending(state)) {
     appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'wake-yield-dropped', source: 'next', data: { attempt: rotation.attempt, actionId: state.pending.id, heartbeat: rotation.heartbeat } });
     state.pending = null;

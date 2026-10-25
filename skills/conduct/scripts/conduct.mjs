@@ -20,7 +20,7 @@ import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, dropRetiredFiling, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
 import { bindCustodyThread, custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
-import { conductorThreadFence } from './lib/lanes.mjs';
+import { adoptConductorThread, conductorThreadFence } from './lib/lanes.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -409,6 +409,8 @@ async function next(tokens, deps) {
       custodyFence(state, custody);
       bindCustodyThread(state, flags['as-thread'], deps);
     }
+    // A fresh T3 session resuming a run with no live heartbeat adopts its thread.
+    if (flags.resume !== undefined && adoptConductorThread(state, flags['as-thread'], deps)) saveState(state, deps);
     if (state.pending?.handBack) resumeHandBack(state, deps);
     return { out: { ok: true, action: await emit(state, deps, { custody }) } };
   }, { duringRotation: true, driven: 'next' });
@@ -898,9 +900,10 @@ export async function runConduct(argv, overrides = {}) {
     ...overrides,
   };
   let [verb, ...tokens] = argv;
+  // `conduct.mjs --resume <dir>` is `next --resume <dir>`: a resume (lanes.mjs adoptConductorThread).
   if (verb === '--resume') {
     verb = 'next';
-    tokens = ['--run', ...tokens];
+    tokens = ['--resume', ...tokens];
   }
   if (!Object.hasOwn(VERBS, verb ?? '')) {
     return { code: 2, stdout: '', stderr: `${verb ? `conduct: unknown verb ${verb}\n` : ''}${USAGE}\n` };

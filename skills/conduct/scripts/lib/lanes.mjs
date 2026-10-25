@@ -41,7 +41,7 @@ import { resolveProgram, shellArgv } from './exec.mjs';
 import { pinnedConfig } from './repo-config.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, laneBase, loadState, saveState } from './state.mjs';
-import { GATED_FROM_LANE, holdsSlot } from './schedule.mjs';
+import { GATED_FROM_LANE, LIVE_STATES, holdsSlot, laneOccupied } from './schedule.mjs';
 import { conductorNumber } from './rotate.mjs';
 import { conductScript } from './touch.mjs';
 import { EXIT_CODES as LANE_EXIT, LANE_MARKER_ENV, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems, stopHookSettings } from '../../../../scripts/lane.mjs';
@@ -809,10 +809,12 @@ const heartbeatTitle = (state) => `conduct ${state.slug} heartbeat`;
 const AS_THREAD = '--as-thread <your own T3 thread id> (orchestrator_capabilities\' parentThreadId, or t3_thread_configuration\'s threadId)';
 
 // `--as-thread <id>`: a T3 conductor woken in its own thread (a lane's done
-// message, the heartbeat) names that thread. The run's conductor thread is
-// the live conductor's heartbeat's bound thread; a thread a retired
-// conductor's heartbeat was bound to is refused even before the successor has
-// made its own. Without the flag (herdr, exec, by hand) nothing is checked.
+// message, the heartbeat) names that thread. While a live heartbeat is bound
+// to the run's conductor thread, every other thread is refused. With none
+// (deleted at analyze, failed, or not made yet) only a retired conductor's
+// thread is refused: one on state.retiredConductorThreads (custody appends
+// the outgoing conductor's) or one a retired conductor's heartbeat was bound
+// to. Without the flag (herdr, exec, by hand) nothing is checked.
 // While a rotation is open, custody is bound to the successor's thread: the
 // first `next --custody <n> --as-thread <id>` stores it (rotate.mjs
 // bindCustodyThread), and until custody is taken every other thread is
@@ -827,23 +829,93 @@ export function conductorThreadFence(state, asThread) {
     }
     return;
   }
-  const wake = state.t3Wake;
-  if (!wake) return;
   const n = conductorNumber(state);
-  const current = wake.conductor === n && wake.thread ? wake.thread : null;
-  const retired = [wake, ...(wake.old ?? [])].filter((entry) => entry?.thread && entry.conductor !== n).map((entry) => entry.thread);
-  if (current ? asThread !== current : retired.includes(asThread)) {
-    throw new ConductError(5, `not this run's conductor (current: ${current ?? 'none yet'}); ${asThread} is not r${n}'s thread, so end your turn`);
+  const live = t3WakeLive(state) ? state.t3Wake.thread : null;
+  if (live ? asThread !== live : retiredThreads(state).includes(asThread)) {
+    throw new ConductError(5, `not this run's conductor (current: ${live ?? 'none yet'}); ${asThread} is not r${n}'s thread, so end your turn`);
   }
 }
 
+// Threads no conductor may use again: the list custody appends to, and any
+// heartbeat thread of a conductor before the current one.
+function retiredThreads(state) {
+  const n = conductorNumber(state);
+  const wake = state.t3Wake ?? {};
+  const bound = [wake, ...(wake.old ?? [])].filter((entry) => entry?.thread && entry.conductor !== n).map((entry) => entry.thread);
+  return [...(state.retiredConductorThreads ?? []), ...bound];
+}
+
 // The threads an open rotation's custody refuses before it is bound: the
-// outgoing conductor's (stored when it rotated) and any earlier conductor's
-// heartbeat thread.
+// outgoing conductor's (stored when it rotated), any retired one, and any
+// earlier conductor's heartbeat thread.
 function outgoingThreads(state, rotation) {
   const wake = state.t3Wake ?? {};
   const bound = [wake, ...(wake.old ?? [])].filter((entry) => entry?.thread && entry.conductor !== rotation.to).map((entry) => entry.thread);
-  return [...(rotation.fromThread ? [rotation.fromThread] : []), ...bound];
+  return [...(rotation.fromThread ? [rotation.fromThread] : []), ...(state.retiredConductorThreads ?? []), ...bound];
+}
+
+// Custody taken: the outgoing conductor's threads join the retired list
+// (all but the successor's own). Returns the list, or null when it is empty.
+export function retireConductorThreads(state, rotation) {
+  const wake = state.t3Wake ?? {};
+  const threads = [rotation.fromThread, ...[wake, ...(wake.old ?? [])].filter((entry) => entry?.conductor === rotation.from).map((entry) => entry.thread)];
+  const retired = new Set(state.retiredConductorThreads ?? []);
+  for (const thread of threads) if (thread && thread !== rotation.thread) retired.add(thread);
+  if (!retired.size) return null;
+  state.retiredConductorThreads = [...retired];
+  return state.retiredConductorThreads;
+}
+
+// `next --resume --as-thread <id>`: a fresh T3 session resuming a run with
+// no live heartbeat (the fence has passed it) adopts its own thread as the
+// conductor thread. A heartbeat record left behind moves to `old`, one still
+// undeleted owed a delete. With T3 lanes live, a new heartbeat is queued on
+// one of them, and a pending wake yield (whose wakes no heartbeat sends) goes:
+// every lane is read now.
+export function adoptConductorThread(state, asThread, deps) {
+  if (state.intent?.backend?.name !== 't3' || typeof asThread !== 'string' || !asThread.trim()) return null;
+  if (state.rotations?.at(-1)?.status === 'open' || t3WakeLive(state)) return null;
+  const n = conductorNumber(state);
+  const wake = state.t3Wake ?? null;
+  if (wake?.conductor === n && wake.thread === asThread) return null;
+  const old = [...(wake?.old ?? [])];
+  if (wake?.taskId) {
+    old.push({ taskId: wake.taskId, thread: wake.thread ?? null, conductor: wake.conductor ?? null, deleted: wake.deleted === true,
+      attempts: wake.deleteAttempts ?? (wake.deleteResult ? 1 : 0), ...(wake.deleteResult?.error ? { error: wake.deleteResult.error } : {}) });
+  }
+  // A new request id per adoption: T3 would hand an earlier heartbeat of the same conductor back.
+  state.t3Adoptions = (state.t3Adoptions ?? 0) + 1;
+  state.t3Wake = { taskId: null, thread: asThread, conductor: n, at: iso(deps.now()), failed: null, deleted: false, old };
+  const heartbeat = queueHeartbeat(state, deps);
+  appendEvent(state, deps, { event: 'conductor-adopted', source: 'next', data: { from: wake?.thread ?? null, to: asThread, conductor: n, heartbeat } });
+  return { from: wake?.thread ?? null, to: asThread };
+}
+
+// A heartbeat made by the adopting conductor, queued on a live T3 lane (after
+// its pending action, if any), unless one is queued already. Returns whether one is.
+function queueHeartbeat(state, deps) {
+  if (state.phase !== 'build') return false;
+  const lanes = state.wps.filter((wp) => wp.lane?.backend === 't3' && (LIVE_STATES.includes(wp.state) || laneOccupied(wp)) && wp.queue?.length);
+  if (!lanes.length) return false;
+  releaseWakeYield(state, deps, 'conductor-adopted');
+  if (state.wps.some((wp) => (wp.queue ?? []).some((act) => act.part === 'heartbeat'))) return true;
+  const acts = heartbeatActs(state, 'wait');
+  if (!acts.length) return false;
+  const [wp] = lanes;
+  const at = state.pending?.wpId === wp.id ? Math.min(1, wp.queue.length) : 0;
+  wp.queue.splice(at, 0, ...acts);
+  return true;
+}
+
+// A pending wake yield whose wakes would not reach the conductor is dropped,
+// and each lane's wake wait with it: every live T3 lane is read at once, as a
+// heartbeat tick reads them.
+export function releaseWakeYield(state, deps, why) {
+  if (state.pending?.kind !== 'wait' || state.pending.wake !== true) return false;
+  appendEvent(state, deps, { step: 'wait', kind: 'wait', event: 'wake-yield-dropped', source: 'next', data: { actionId: state.pending.id, why } });
+  state.pending = null;
+  for (const wp of state.wps) if (wp.queue?.[0]?.kind === 'wait' && wp.queue[0].wake) wp.queue.shift();
+  return true;
 }
 
 // The heartbeat a T3 run's conductor owes: none while one is live or this
@@ -867,7 +939,8 @@ export const HEARTBEAT_INSTRUCTION = 'Call schedule_task with these args from yo
 // conductor, so lanes that each queue it make one task.
 export function heartbeatArgs(state, n) {
   const prompt = `[${heartbeatTitle(state)}] A wake tick for conduct run ${state.runDir}, every ${T3_HEARTBEAT_MS / 60000} minutes while its T3 lanes run, addressed to the thread that made it: conductor r${n}'s. Run node ${conductScript(state)} next --run ${state.runDir} ${AS_THREAD} and perform what it prints: a pending wake wait is recorded {} (record --as-thread too) and the loop goes on. If it exits 5, this thread is not the run's conductor (the run was rotated away): end your turn. If the run has ended, end your turn.`;
-  return { title: heartbeatTitle(state), prompt, schedule: { type: 'interval', everyMs: T3_HEARTBEAT_MS }, bindToCurrentThread: true, clientRequestId: `${state.runId}-heartbeat-r${n}` };
+  const adopted = state.t3Adoptions ? `-a${state.t3Adoptions}` : '';
+  return { title: heartbeatTitle(state), prompt, schedule: { type: 'interval', everyMs: T3_HEARTBEAT_MS }, bindToCurrentThread: true, clientRequestId: `${state.runId}-heartbeat-r${n}${adopted}` };
 }
 
 // A heartbeat made by conductor r<n> at custody: it replaces whatever the run
@@ -909,7 +982,7 @@ function recordHeartbeat(state, wp, action, result, deps) {
     recordHeartbeatDelete(state, id, result);
     return proceed();
   }
-  const conductor = Number(/-heartbeat-r(\d+)$/.exec(action.args.clientRequestId)?.[1] ?? conductorNumber(state));
+  const conductor = Number(/-heartbeat-r(\d+)(?:-a\d+)?$/.exec(action.args.clientRequestId)?.[1] ?? conductorNumber(state));
   if (t3Failed(result) || typeof result.scheduledTaskId !== 'string') {
     state.t3Wake = { ...wake, taskId: null, thread: null, conductor, failed: `schedule_task: ${t3Said(result)}`, old };
     return proceed({}, 'no heartbeat: the T3 lanes poll');
