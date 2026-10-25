@@ -9,6 +9,17 @@ The conductor is the context-rich channel. Token-hungry grunt work burns it on w
 
 For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_PLUGIN_ROOT}/scripts/lane.mjs`; the binding behavior is `${CLAUDE_PLUGIN_ROOT}/reference/patterns/lane-supervision.md`.
 
+## In T3: `delegate_task` first
+
+When the session has the `t3-code` MCP tools (`delegate_task` may be deferred: load it with ToolSearch), delegate through T3, not `codex exec`. Without them, use § Outside T3 below as written. Everything else in this skill (routing, the self-containment gate, the handback contract, the prompt template, the standing clauses, asserting the handback) applies to both paths.
+
+1. Read `orchestrator_capabilities` (`search: "gpt"` lists every codex slug). Use the roster below on `providerInstanceId: "codex"`: verdicts `gpt-6-astra` `{reasoningEffort: "low"}`, build `gpt-6-sol` `{reasoningEffort: "high"}`, enumeration `gpt-5.6-luna` `{reasoningEffort: "medium"}`. Pass the options explicitly; they do not inherit across providers. If the catalog lacks the slug, stop. Don't substitute another model.
+2. Call `delegate_task` with `mode: "async"`, `role: "research"` for read-only work or `"implementation"` for an edit, the `target` above, a `title`, and a `clientRequestId` that stays stable across retries. `task` is the prompt § Prompt template builds: absolute paths, READ-ONLY or the write scope, the output path, the standing clauses, the bounded return, and the line *"Finish in one turn: wait on background jobs in the foreground, and never end your turn while your own work is running."* Omit `isolation` for read-only work; absolute paths into any repo are fine there. Leave `runtimeMode` unset: a supervised mode parks the child on approvals this thread cannot grant.
+3. A write task takes this path only when the target is this thread's own repo, because `isolation: "worktree"` branches from this checkout's local HEAD (uncommitted edits stay behind). Its brief names paths relative to the child's worktree, never absolute paths into this checkout. It opens with the STEP-0 identity check from `${CLAUDE_PLUGIN_ROOT}/reference/patterns/worktree-rooting.md`: `git rev-parse --show-toplevel` is the child's cwd, a worktree of this repo, and `git remote get-url origin` matches this repo's remote. It forbids writes outside that worktree. Write work in another repo goes to `t3_thread_launch` with a `workspaceStrategy` of `worktree` or `existing_worktree` in the target project, or to § Outside T3 rooted in the target repo.
+4. Keep every `taskId` and end the turn. The child's completion wakes this thread, but a completion notice is not proof it finished. Before consuming the handback, call `task_status`: `hasPendingChildRuns: true`, or a summary that says the child is waiting, means not done, so re-check on a later wake. A later turn's result is in `latestTerminalSummary`, not `summary`. Don't poll between wakes.
+
+The child shows under this thread's Lineage, and stopping this thread stops it. It starts fresh, with no parent history. A codex child runs as `danger-full-access` with approval `never`, so the prompt's READ-ONLY clause is the only limit, as on the CLI path. It gets the `t3-code` tools and Codex's own built-ins, but none of this session's other MCP servers, so "MCP: assume none" (§ Outside T3) still holds for them.
+
 ## Route by Phase
 
 Pick the execution surface by the **phase** of work, not just its size:
@@ -90,7 +101,7 @@ The conductor never reads the files, so the handback's coverage and locators **a
 
 Do not confuse a registered Observatory/Dogan alias with a subprocess the current host can spawn.
 
-- `codex-astra`, `codex`, and `codex-luna` are actionable from an interactive coding session through `codex exec`.
+- `codex-astra`, `codex`, and `codex-luna` are actionable from an interactive coding session through `codex exec`, and in T3 through `delegate_task` when `orchestrator_capabilities` lists the slug.
 - A registered `grok` alias is **not** a delegation target — see the roster note above. Neither is any other metered runner: if the only reachable surface is metered, do the work in the conductor or narrow it, and do not inline the repository into an API prompt (that erases the token saving *and* bills for it).
 
 ## When to Delegate — Task Shapes
@@ -123,7 +134,7 @@ If the task needs the conductor's working memory, the conductor does it.
 - Forbid dumps: *"Do NOT include file contents, full transcripts, or raw data."*
 - Read back only Codex's final message — never cat its scratch output or session log into the conductor's context.
 
-## Codex-Harness Invocation
+## Outside T3: Codex-Harness Invocation
 
 ```bash
 codex exec --model gpt-6-astra -c model_reasoning_effort=low --sandbox danger-full-access --skip-git-repo-check -C "<absolute target dir>" - <<'EOF'

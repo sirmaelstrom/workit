@@ -8,7 +8,7 @@ description: "Fan out a design or problem space into multiple intentionally diff
 Fan out N intentionally different solutions to a problem, then synthesize into a ranked decision artifact. The key insight: without explicit constraint variation, all branches collapse into the same answer.
 
 **Skill = cognitive layer.** This skill reasons about decomposition, crafts differentiated briefs, and synthesizes results.
-**Script = mechanical layer.** `scripts/launch.mjs` handles process management. No reasoning in the script.
+**Script = mechanical layer.** `scripts/launch.mjs` handles process management outside T3. No reasoning in the script. In T3 the skill dispatches through `delegate_task` instead (§ 5).
 
 ## Process
 
@@ -132,7 +132,17 @@ Create the central run directory **before invoking the launcher**:
 
 Each branch prompt file MUST be named `{branch.id}.md` — i.e., `branch-1.md`, `branch-2.md`, `branch-3.md`, etc. The `branch.id` here is the same identifier the skill uses in section 6's `synthesis.json` `branches[].id` field. `launch.mjs` derives result filenames from prompt filenames via `basename(promptFile, '.md')`, so `branch-1.md` produces `results/branch-1.md`. The renderer's pick-branch prompt template assumes this — deviating produces HTML that points users at non-existent result files.
 
-#### Dispatch
+#### Dispatch in T3
+
+When the session has the `t3-code` MCP tools, each branch is one `delegate_task`, and every branch launches in the same turn:
+
+- `task`: the branch prompt file's text, followed by: *"Read-only: modify no repository. Write your full Required Output to `<absolute run dir>/results/<branch.id>.md`, with `attempt: <attempt-id>` as its first line, and nothing else. Finish in one turn: wait on background jobs in the foreground, and never end your turn while your own work is running. Return only that path and your thesis in one line."* The attempt id is `<branch.id>-a<N>`, starting at `a1`.
+- `mode: "async"`, `role: "design"`, `title: "<run-slug> <branch.id>"`, `clientRequestId: "<run-slug>-<attempt-id>"`.
+- `target`: the cost check's model, with options as `orchestrator_capabilities` names them, for example `{providerInstanceId: "claudeAgent", model: "claude-sonnet-5-5", options: {effort: "high"}}`, or codex `gpt-6-sol` with `{reasoningEffort: "high"}` for a branch from another vendor. Leave `isolation` and `runtimeMode` unset.
+
+Keep every `taskId`, then end the turn. Each completion wakes this thread, but a completion notice is not proof the branch finished. Call `task_status` on it: `hasPendingChildRuns: true`, or a summary that says it is waiting, means not done, so re-check on a later wake. A later turn's result is in `latestTerminalSummary`, not `summary`. A branch is complete only when its task is terminal with no pending runs and the first line of `results/<branch.id>.md` names the current attempt id. A summary that says it wrote the file, or a file from an earlier attempt, is not proof. Tick off complete branches and end the turn again until every branch is complete, then synthesize. Never poll between wakes. A failed branch's summary carries the error. Re-run it with the next attempt id, which also gives it a new `clientRequestId`, or synthesize without it and say so. The children show under this thread's Lineage, and stopping it stops them. Spike mode stays on the launcher: a delegated child works in this checkout or a T3 worktree, never an empty directory outside every repo.
+
+#### Dispatch outside T3
 
 Invoke the launcher against the run directory:
 
