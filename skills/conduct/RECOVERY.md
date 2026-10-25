@@ -64,6 +64,11 @@ invoke the destination plugin's `conduct.mjs upgrade-root --run <dir> --why
 <reason>`. Pending executable actions must be recorded first. The upgrade
 preserves author/wait action IDs, snapshots state and migrates queued command paths. Historical
 receipts retain their provenance. Old plugin entry points refuse the moved run.
+It also points each live lane's Stop hook (its worktree's
+`.claude/settings.local.json`) at the new root and lists those files in
+`hooksRewritten`; a merged lane's is left alone. A hook it missed still works:
+the old root's `stop-check.mjs` hands a moved run to the one under the
+absolute `state.pluginRoot`, once. It never takes that root from an error's text.
 Drivers should invoke `scripts/conduct-run.mjs <verb> --run <dir>`; that wrapper
 reads `state.pluginRoot` on every invocation. It does not pin an installed version.
 

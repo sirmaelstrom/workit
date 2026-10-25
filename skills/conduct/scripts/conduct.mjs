@@ -100,7 +100,10 @@ function openRun(flags, deps) {
   const runDir = runDirFlag(flags);
   const state = loadState(runDir, deps);
   if (state.handover && deps.pluginRoot !== state.pluginRoot) {
-    throw new ConductError(2, `this run moved to the plugin root ${state.pluginRoot}; re-run the verb with that root's skills/conduct/scripts/conduct.mjs`);
+    // `moved` is the signal stop-check.mjs hops on; the message is only for people.
+    const moved = new ConductError(2, `this run moved to the plugin root ${state.pluginRoot}; re-run the verb with that root's skills/conduct/scripts/conduct.mjs`);
+    moved.details = { moved: true };
+    throw moved;
   }
   return { runDir, state };
 }
@@ -789,6 +792,48 @@ async function ciChecksVerb(tokens, deps) {
   });
 }
 
+// A live claude lane's Stop hook (`lane hook`) names the plugin root of its
+// start, forward-slashed and quoted when it holds a space. Each hook command
+// in a live lane worktree's .claude/settings.local.json that names the old
+// root is pointed at the new one; a merged, refuted or dropped lane's is left
+// alone. A file that can't be read or written is named, not fatal.
+function rewriteLaneHooks(state, from, deps) {
+  const forward = (path) => path.replace(/\\/g, '/');
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const roots = [...new Set([forward(from), from])].map(escape).join('|');
+  const token = new RegExp(`"?(?:${roots})((?:[\\\\/][^\\s"]*)?)"?(?=$|\\s)`, deps.platform === 'win32' ? 'gi' : 'g');
+  const migrate = (command) => command.replace(token, (_, rest) => {
+    const path = forward(deps.pluginRoot) + forward(rest);
+    return /\s/.test(path) ? `"${path}"` : path;
+  });
+  const hooksRewritten = [], hooksFailed = [];
+  for (const wp of state.wps) {
+    if (!wp.lane?.worktree || ['merged', 'refuted', 'dropped'].includes(wp.state)) continue;
+    const path = join(wp.lane.worktree, '.claude', 'settings.local.json');
+    if (!deps.exists(path)) continue;
+    try {
+      // A BOM and CRLF are read past and written back as they were.
+      const raw = deps.read(path), bom = raw.startsWith('﻿') ? '﻿' : '';
+      const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+      const settings = JSON.parse(raw.slice(bom.length));
+      let changed = false;
+      for (const entry of settings?.hooks?.Stop ?? []) {
+        for (const hook of entry?.hooks ?? []) {
+          if (typeof hook?.command !== 'string') continue;
+          const command = migrate(hook.command);
+          if (command !== hook.command) [hook.command, changed] = [command, true];
+        }
+      }
+      if (!changed) continue;
+      deps.write(path, `${bom}${JSON.stringify(settings, null, 2).replace(/\n/g, eol)}${eol}`);
+      hooksRewritten.push(path);
+    } catch (error) {
+      hooksFailed.push({ path, error: firstLine(error.message) });
+    }
+  }
+  return { hooksRewritten, ...(hooksFailed.length ? { hooksFailed } : {}) };
+}
+
 async function upgradeRootVerb(tokens, deps) {
   const flags = parseFlags(tokens), why = stringFlag(flags, 'why'), runDir = runDirFlag(flags);
   return withStateLock(runDir, deps, () => {
@@ -826,9 +871,10 @@ async function upgradeRootVerb(tokens, deps) {
     if (state.build?.contract) state.build.contract = migrate(state.build.contract);
     state.pluginRoot = deps.pluginRoot;
     state.handover = { ...(state.handover ?? {}), pluginUpgrade: { from, to: deps.pluginRoot, why, at: deps.timestamp() } };
-    appendEvent(state, deps, { event: 'plugin-upgraded', data: { from, to: deps.pluginRoot, why, snapshot } });
+    const hooks = rewriteLaneHooks(state, from, deps);
+    appendEvent(state, deps, { event: 'plugin-upgraded', data: { from, to: deps.pluginRoot, why, snapshot, ...hooks } });
     saveState(state, deps);
-    return { out: { ok: true, snapshot, pluginRoot: state.pluginRoot, next: `Use ${join(state.pluginRoot, 'skills/conduct/scripts/conduct.mjs')} for every subsequent verb. Drivers must resolve state.pluginRoot on each invocation.` } };
+    return { out: { ok: true, snapshot, pluginRoot: state.pluginRoot, ...hooks, next:`Use ${join(state.pluginRoot, 'skills/conduct/scripts/conduct.mjs')} for every subsequent verb. Drivers must resolve state.pluginRoot on each invocation.` } };
   });
 }
 

@@ -33,6 +33,7 @@ test('upgrade-root snapshots and migrates executable queues while old drivers re
   const old = await runConduct(['status', '--run', h.dir], { pluginRoot: h.oldRoot });
   assert.equal(old.code, 2);
   assert.match(old.stderr, /run moved to the plugin root/);
+  assert.equal(JSON.parse(old.stdout).moved, true);
 });
 
 test('upgrade-root refuses pending actions without changing their state', async (t) => {
@@ -55,6 +56,59 @@ test('upgrade-root migrates an emitted author action without losing its id', asy
   assert.equal(h.read().pending.instruction, `Read ${join(h.pluginRoot, 'template.md')}`);
   assert.equal(h.read().release.queue[0].command[1], join(h.pluginRoot, 'scripts/release.mjs'));
   assert.equal(h.read().wps[0].owed.queue[0].command[1], join(h.pluginRoot, 'scripts/reply.mjs'));
+});
+
+test('upgrade-root rewrites the Stop hook in each live lane worktree that names the old root, leaves a merged lane\'s alone, and lists what it rewrote', async (t) => {
+  const h = fixture(t);
+  const fwd = (path) => path.replace(/\\/g, '/');
+  const hookCommand = (root) => `node ${fwd(join(root, 'skills/conduct/scripts/stop-check.mjs'))} --run ${fwd(h.dir)} --wp WP-02`;
+  const lane = (wpId, state) => {
+    const worktree = join(h.dir, `wt-${wpId.toLowerCase()}`), path = join(worktree, '.claude', 'settings.local.json');
+    mkdirSync(dirname(path), { recursive: true });
+    const settings = { permissions: { allow: ['Bash(ls)'] }, env: { WORKIT_LANE: wpId },
+      hooks: { Stop: [{ hooks: [{ type: 'command', command: hookCommand(h.oldRoot) }] }, { hooks: [{ type: 'command', command: 'echo theirs' }] }] } };
+    writeFileSync(path, JSON.stringify(settings, null, 2));
+    h.state.wps.push({ id: wpId, state, queue: [], lane: { backend: 't3', worktree } });
+    return { path, settings };
+  };
+  const live = lane('WP-02', 'dispatched'), merged = lane('WP-03', 'merged');
+  const before = readFileSync(merged.path, 'utf8');
+  writeFileSync(h.path, JSON.stringify(h.state));
+  const out = await runConduct(['upgrade-root', '--run', h.dir, '--why', 'pick up 1.28.2'], h.deps);
+  assert.equal(out.code, 0, out.stderr);
+  assert.deepEqual(JSON.parse(out.stdout).hooksRewritten, [live.path]);
+  const after = JSON.parse(readFileSync(live.path, 'utf8'));
+  assert.equal(after.hooks.Stop[0].hooks[0].command, hookCommand(h.pluginRoot));
+  assert.deepEqual({ ...after, hooks: null }, { ...live.settings, hooks: null });
+  assert.equal(after.hooks.Stop[1].hooks[0].command, 'echo theirs');
+  assert.equal(readFileSync(merged.path, 'utf8'), before);
+});
+
+test('upgrade-root rewrites a lane\'s settings file that starts with a BOM and uses CRLF, keeps both, and keeps every other key', async (t) => {
+  const h = fixture(t);
+  const fwd = (path) => path.replace(/\\/g, '/');
+  const hookCommand = (root) => `node ${fwd(join(root, 'skills/conduct/scripts/stop-check.mjs'))} --run ${fwd(h.dir)} --wp WP-02`;
+  const worktree = join(h.dir, 'wt-wp-02'), path = join(worktree, '.claude', 'settings.local.json');
+  mkdirSync(dirname(path), { recursive: true });
+  const settings = { env: { WORKIT_LANE: 'WP-02' },
+    hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo pre' }] }],
+      Stop: [{ hooks: [{ type: 'command', command: hookCommand(h.oldRoot) }] }, { hooks: [{ type: 'command', command: 'echo theirs' }] }] } };
+  writeFileSync(path, `﻿${JSON.stringify(settings, null, 2).replace(/\n/g, '\r\n')}\r\n`, 'utf8');
+  h.state.wps.push({ id: 'WP-02', state: 'dispatched', queue: [], lane: { backend: 't3', worktree } });
+  writeFileSync(h.path, JSON.stringify(h.state));
+  const out = await runConduct(['upgrade-root', '--run', h.dir, '--why', 'pick up 1.28.2'], h.deps);
+  assert.equal(out.code, 0, out.stderr);
+  const result = JSON.parse(out.stdout);
+  assert.deepEqual([result.hooksRewritten, result.hooksFailed], [[path], undefined]);
+  const raw = readFileSync(path, 'utf8');
+  assert.ok(raw.startsWith('﻿{'), 'the BOM was dropped');
+  assert.ok(raw.endsWith('}\r\n'), 'the trailing CRLF was dropped');
+  assert.equal(raw.replace(/\r\n/g, '').includes('\n'), false, 'a bare LF was written');
+  const after = JSON.parse(raw.slice(1));
+  assert.equal(after.hooks.Stop[0].hooks[0].command, hookCommand(h.pluginRoot));
+  assert.deepEqual(after.env, settings.env);
+  assert.deepEqual(after.hooks.PreToolUse, settings.hooks.PreToolUse);
+  assert.deepEqual(after.hooks.Stop[1], settings.hooks.Stop[1]);
 });
 
 test('ci-checks records an explicit exact-head policy and rejects stale heads', async (t) => {
