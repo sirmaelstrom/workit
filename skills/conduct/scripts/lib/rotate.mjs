@@ -37,7 +37,7 @@ export function rotatedOut(state, deps) {
 
 // Conductor numbers count rotations that took custody: r1 is the conductor
 // that ran intake.
-const conductorNumber = (state) => 1 + (state.rotations ?? []).filter((rotation) => rotation.status === 'custody').length;
+export const conductorNumber = (state) => 1 + (state.rotations ?? []).filter((rotation) => rotation.status === 'custody').length;
 const sessionScript = (state) => join(state.pluginRoot, 'scripts', 'session.mjs');
 const sessionLog = (state) => join(state.runDir, SESSION_LOG);
 const herdrPane = (deps) => (deps.env?.HERDR_ENV === '1' && deps.env?.HERDR_PANE_ID ? deps.env.HERDR_PANE_ID : null);

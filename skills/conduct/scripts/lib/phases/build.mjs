@@ -24,7 +24,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { ConductError, appendEvent, laneBase } from '../state.mjs';
 import { shellArgv } from '../exec.mjs';
 import { LIVE_STATES, SLOT_WAIT, dispatchable, filesDisjoint, holdsSlot, laneOccupied, normalizePath, slotHolders } from '../schedule.mjs';
-import { allowedMissing, chooseBackend, freshStart, laneBackend, laneDeadlineMs, laneLayout, recordLaneStep } from '../lanes.mjs';
+import { T3_HEARTBEAT_MS, allowedMissing, chooseBackend, freshStart, laneBackend, laneDeadlineMs, laneLayout, recordLaneStep, t3WakeLive } from '../lanes.mjs';
 import { deltaBaseline, verifyDeltaRecovery, discoverDeltaRecovery } from '../delta-recovery.mjs';
 import { LANE_SUITE_HEADING, LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } from '../repo-config.mjs';
 import { isTopListItem, markLines, sectionLines, sectionText } from '../markdown.mjs';
@@ -1834,7 +1834,7 @@ function yielders(state, deps) {
   const out = [];
   for (const wp of state.wps) {
     const head = wp.queue?.[0];
-    if (head?.kind === 'wait') out.push({ ms: leftMs(head.remainingMs ?? head.waitMs ?? 0, head.dueAt, now), wp, step: head.step, note: `${wp.id}: ${head.instruction}` });
+    if (head?.kind === 'wait') out.push({ ms: leftMs(head.remainingMs ?? head.waitMs ?? 0, head.dueAt, now), wp, step: head.step, wake: head.wake === true, note: `${wp.id}: ${head.instruction}` });
     const until = wp.state === 'pending' && wp.notBefore ? Date.parse(wp.notBefore) - now : 0;
     if (until > 0) out.push({ ms: until, step: 'admit', note: `${wp.id} may be dispatched again at ${wp.notBefore}` });
   }
@@ -1850,9 +1850,17 @@ function yielders(state, deps) {
 
 const waitText = (waitMs) => `Wait ${waitMs / 1000} s, then record {}.`;
 
-function yieldWait(waiting) {
+// When the soonest wait is a T3 lane's and the run's heartbeat is live, the
+// conductor ends its turn instead of sleeping: a lane's done message or the
+// heartbeat starts the next one (lanes.mjs t3WakeLive).
+function yieldWait(state, waiting) {
   const least = waiting.reduce((a, b) => (b.ms < a.ms ? b : a));
-  return { kind: 'wait', step: least.step, part: 'yield', yield: true, waitMs: least.ms, instruction: `${waitText(least.ms)} Waiting: ${waiting.map((y) => y.note).join('; ')}` };
+  const notes = `Waiting: ${waiting.map((y) => y.note).join('; ')}`;
+  if (least.wake && t3WakeLive(state)) {
+    return { kind: 'wait', step: least.step, part: 'yield', yield: true, wake: true, waitMs: least.ms,
+      instruction: `End your turn now: don't sleep or poll. A T3 lane's done message or the run's heartbeat (every ${T3_HEARTBEAT_MS / 60000} min) starts your next turn in this thread; then record {} for this action and keep looping. ${notes}` };
+  }
+  return { kind: 'wait', step: least.step, part: 'yield', yield: true, waitMs: least.ms, instruction: `${waitText(least.ms)} ${notes}` };
 }
 
 function release(y) {
@@ -1969,7 +1977,7 @@ function chooseAction(state, deps) {
       due.forEach(release);
       continue;
     }
-    if (waiting.length) return yieldWait(waiting);
+    if (waiting.length) return yieldWait(state, waiting);
     // Nothing left to wait on but a filed spine touch: only the operator can
     // move the build, so it hands back.
     const parked = openBuildTouches(state).find((touch) => touchParked(state, touch, deps.env));
@@ -1988,6 +1996,11 @@ function chooseAction(state, deps) {
 // ---- record ----
 
 function recordYield(state, action) {
+  // A wake: every T3 lane is read now. Other waits keep their wall-clock deadlines.
+  if (action.wake) {
+    for (const wp of state.wps) if (wp.queue?.[0]?.kind === 'wait' && wp.queue[0].wake) wp.queue.shift();
+    return;
+  }
   for (const wp of state.wps) {
     const head = wp.queue?.[0];
     if (head?.kind !== 'wait') continue;

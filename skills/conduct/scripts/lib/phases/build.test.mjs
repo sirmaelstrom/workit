@@ -758,6 +758,34 @@ test('waits yield (D17): a waiting WP-02 does not stop WP-03\'s dispatch; all wa
   assert.equal(after.step, 'wait');
 });
 
+test('t3 wake yield (bf8ed575): when the soonest wait is a T3 lane\'s and the heartbeat is live, the conductor ends its turn; recording the wake releases every lane wake and nothing else', async (t) => {
+  const h = harness(t);
+  h.life = { 'WP-02': 3, 'WP-03': 3 };
+  await drive(h, { until: isWait });
+  h.state.pending = null;
+  h.state.intent.backend = { name: 't3', t3Project: 'proj-1' };
+  h.state.t3Wake = { taskId: 'task-1', thread: 'mcp:conductor', conductor: 1, failed: null, deleted: false, old: [] };
+  const read = { kind: 'agent-tool', step: 'wait', part: 'read', tool: 't3_thread_read', args: { threadId: 'mcp:lane-2' }, expects: { type: 'json' }, instruction: 'read' };
+  const wake = { kind: 'wait', step: 'wait', waitMs: 600000, wake: true, instruction: 'WP-02\'s T3 lane is running' };
+  const later = new Date(T0 + 3600000).toISOString();
+  h.wp('WP-02').queue = [{ ...wake }, read];
+  h.wp('WP-03').queue = [{ kind: 'wait', step: 'wait', waitMs: 900000, dueAt: later, instruction: 'WP-03 waits' }];
+  const yielded = await step(h);
+  assert.deepEqual([yielded.kind, yielded.yield, yielded.wake, yielded.waitMs], ['wait', true, true, 600000]);
+  assert.match(yielded.instruction, /^End your turn now: don't sleep or poll\. A T3 lane's done message or the run's heartbeat \(every 10 min\)/);
+  await recordPending(h, {});
+  assert.deepEqual(h.wp('WP-02').queue.map((a) => a.part ?? a.kind), ['read'], 'the lane is read on the wake');
+  assert.deepEqual([h.wp('WP-03').queue[0].remainingMs, h.wp('WP-03').queue[0].dueAt], [undefined, later], 'another wait keeps its clock');
+  assert.equal((await step(h)).part, 'read');
+  // No live heartbeat (a rotated conductor's, or none made): an ordinary timed wait.
+  h.state.pending = null;
+  h.state.t3Wake.conductor = 0;
+  h.wp('WP-02').queue = [{ ...wake }, read];
+  const slept = await step(h);
+  assert.deepEqual([slept.wake, slept.waitMs], [undefined, 600000]);
+  assert.match(slept.instruction, /^Wait 600 s, then record \{\}/);
+});
+
 test('herdr polls and yields (D19.17): wait exit 4 yields to WP-03\'s dispatch; the next poll repeats the argv; WP-03 is created while WP-02 is live', async (t) => {
   const h = harness(t, { herdr: true });
   h.herdrWait = { 'WP-02': [4, 4, 0], 'WP-03': [4, 0] };

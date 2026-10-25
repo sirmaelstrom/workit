@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   allowedMissing, chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
-  STOP_CHECK_BLOCKS, stopHookCommand, laneDeadlineMs,
+  STOP_CHECK_BLOCKS, stopHookCommand, laneDeadlineMs, T3_HEARTBEAT_MS, t3WakeLive, heartbeatsToDelete,
 } from './lanes.mjs';
 import { RESET_TARGETS } from './phases/build.mjs';
 import { dispatchable } from './schedule.mjs';
@@ -1305,12 +1305,18 @@ test('stop-check: the hook command names stop-check.mjs, the run and the WP, for
 
 // ---------------------------------------------------------------- t3 (c87c58c4)
 
-function t3Lanes(t, opts = {}) {
+// `wake`: 'polling' (r1's heartbeat failed, so lanes poll), 'live' (r1's
+// heartbeat is recorded), or 'none' (no heartbeat tried yet).
+function t3Lanes(t, { wake = 'polling', ...opts } = {}) {
   const f = lanes(t, { backend: 't3', ...opts });
   f.state.intent.backend = { name: 't3', t3Project: 'proj-1' };
+  if (wake === 'polling') f.state.t3Wake = { taskId: null, thread: null, conductor: 1, failed: 'schedule_task: {"error":"no thread"}', old: [] };
+  if (wake === 'live') f.state.t3Wake = { taskId: TASK, thread: CONDUCTOR, conductor: 1, at: new Date(T0).toISOString(), failed: null, deleted: false, old: [] };
   return f;
 }
 const THREAD = 'mcp:thread-1';
+const CONDUCTOR = 'mcp:conductor-1';
+const TASK = 'scheduled-task:hb-1';
 
 test('t3 backend: chosen at intake; a git worktree plus the Stop hook, then MCP calls the conductor makes (launch, send, wait, interrupt)', (t) => {
   const f = t3Lanes(t, { wpLane: { worktree: '/wt', branch: 'conduct/demo/wp-00', briefPath: '/run/lane-wp-00.md' } });
@@ -1367,10 +1373,15 @@ test('t3 recorder: a launch records its thread, a wait polls until the run ends,
   assert.deepEqual([f.record(launch, { status: 'preparing' }).outcome, f.record(launch, { error: 'project not found' }).outcome], ['block', 'block']);
   apply(f.wp, launched.patch);
   const [wait] = b.wait(f.wp);
+  // A wait that times out is followed by a read (87518991); a read of a running lane polls again.
   for (const result of [{ status: 'running', timedOut: true }, { status: 'waiting', timedOut: true }, { status: 'starting', timedOut: false }]) {
     const polled = f.record(wait, result);
-    assert.deepEqual([polled.outcome, polled.patch.queue.map((act) => act.tool)], ['wait', ['t3_thread_wait']], JSON.stringify(result));
+    assert.deepEqual([polled.outcome, polled.patch.queue.map((act) => [act.tool, act.part])], ['continue', [['t3_thread_read', 'read']]], JSON.stringify(result));
   }
+  const read = b.read(f.wp);
+  assert.deepEqual(read.args, { threadId: THREAD, view: 'activity', limit: 1, runLimit: 1 });
+  const again = f.record(read, { thread: { status: 'running', pendingRequestCount: 0, itemCount: 4 }, recentRuns: [{ status: 'running' }] });
+  assert.deepEqual([again.outcome, again.patch.queue.map((act) => act.tool)], ['wait', ['t3_thread_wait']]);
   const ended = f.record(wait, { status: 'completed', timedOut: false });
   assert.deepEqual([ended.outcome, ended.patch.lane.exitedAt, ended.patch.queue.map((act) => act.part)], ['continue', new Date(T0).toISOString(), ['reap']]);
   const failed = f.record(wait, { status: 'failed', timedOut: false });
@@ -1379,6 +1390,146 @@ test('t3 recorder: a launch records its thread, a wait polls until the run ends,
   f.tick(laneDeadlineMs(f.state) + 1);
   const late = f.record(wait, { status: 'running', timedOut: true });
   assert.deepEqual([late.outcome, late.cause, late.patch.queue.map((act) => act.tool)], ['block', 'deadline', ['t3_thread_interrupt', 't3_thread_wait']]);
+  assert.equal(f.record(read, { thread: { status: 'running', pendingRequestCount: 0 }, recentRuns: [{ status: 'running' }] }).cause, 'deadline');
+});
+
+// ---------------------------------------------------------------- t3 wake (bf8ed575) and pending requests (87518991)
+
+// t3_thread_read's shape, as measured on T3 0.1.2 (2026-10-25 probes): the
+// thread's pendingRequestCount, its runs newest first, and activity items
+// paged from the oldest.
+const t3Read = ({ status = 'running', pending = 0, itemCount = 5, items = [] } = {}) => ({
+  thread: { threadId: THREAD, status, pendingRequestCount: pending, itemCount, runCount: 1 },
+  recentRuns: [{ runId: 'run-1', ordinal: 1, status }], items, nextPosition: items.length ? itemCount - 1 : 0, hasMore: !items.length,
+});
+const APPROVAL = { position: 4, type: 'approval_request', status: 'waiting', text: 'Write probe string to probe.txt' };
+const QUESTION = { position: 4, type: 'user_input_request', status: 'waiting', text: '[\n  {\n    "question": "Probe 87518991: proceed?",\n    "options": [{ "label": "yes" }, { "label": "no" }]\n  }\n]' };
+
+test('t3 heartbeat: the first lane\'s create makes it bound to the conductor; its record keeps that thread; the launch and amendment messages end with the done send into it', (t) => {
+  const f = t3Lanes(t, { wake: 'none', wpLane: { worktree: '/wt', briefPath: '/run/lane-wp-00.md' } });
+  const b = f.backend();
+  const heartbeat = b.create(f.wp).at(-1);
+  assert.deepEqual([heartbeat.kind, heartbeat.step, heartbeat.part, heartbeat.tool], ['agent-tool', 'create', 'heartbeat', 'schedule_task']);
+  assert.deepEqual({ ...heartbeat.args, prompt: undefined }, {
+    title: 'conduct demo heartbeat', prompt: undefined, schedule: { type: 'interval', everyMs: T3_HEARTBEAT_MS }, bindToCurrentThread: true, clientRequestId: 'abcd1234-heartbeat-r1',
+  });
+  assert.match(heartbeat.args.prompt, /conductor r1, run node \S+conduct\.mjs next --run /);
+  assert.equal(T3_HEARTBEAT_MS, 600000);
+  // No heartbeat yet: the launch carries no done send.
+  assert.equal(b.start(f.wp)[0].args.message, 'Read /run/lane-wp-00.md and execute it exactly.');
+  // schedule_task's raw result, as measured: boundThreadId is the calling thread.
+  const made = f.record(heartbeat, { scheduledTaskId: TASK, title: 'conduct demo heartbeat', enabled: true, boundThreadId: CONDUCTOR, schedule: { type: 'interval', everyMs: 600000 }, nextRunAt: 'x' });
+  assert.deepEqual([made.outcome, made.patch], ['continue', {}]);
+  assert.deepEqual([f.state.t3Wake.taskId, f.state.t3Wake.thread, f.state.t3Wake.conductor, t3WakeLive(f.state)], [TASK, CONDUCTOR, 1, true]);
+  assert.deepEqual(b.create(f.wp).map((act) => act.part ?? act.step), ['fetch', 'base', 'worktree', 'hook'], 'a live heartbeat makes no other');
+  const done = (message) => JSON.parse(/t3_thread_send with (\{.*\})\. That message/.exec(message)[1]);
+  const launch = b.start(f.wp)[0].args.message;
+  assert.match(launch, /^Read \/run\/lane-wp-00\.md and execute it exactly\.\n\nYour last act, once your report is written/);
+  assert.deepEqual({ ...done(launch), message: undefined }, { threadId: CONDUCTOR, mode: 'queue', clientRequestId: 'abcd1234-wp-00-a0-0-done', message: undefined });
+  assert.match(done(launch).message, /^\[conduct demo\] WP-00's lane ended its turn \(round a0\); report: \S+lane-wp-00-report\.md\. A wake, not a verdict/);
+  // An amendment's done id is its send's id plus -done: new for every send.
+  Object.assign(f.wp.lane, { threadId: THREAD, startedAt: new Date(T0).toISOString() });
+  f.wp.amendment = { n: 2 };
+  const [send] = b.prompt(f.wp, { amendment: true });
+  assert.equal(done(send.args.message).clientRequestId, `${send.args.clientRequestId}-done`);
+  assert.equal(send.args.clientRequestId, `abcd1234-wp-00-a2-${T0}`);
+});
+
+test('t3 heartbeat: a failed or unbound schedule_task leaves the lanes polling, and is never asked again by that conductor; a duplicate task is deleted', (t) => {
+  const f = t3Lanes(t, { wake: 'none', wpLane: { worktree: '/wt', threadId: THREAD, briefPath: '/run/lane-wp-00.md' } });
+  const b = f.backend();
+  const [heartbeat, wait] = b.wait(f.wp);
+  assert.deepEqual([heartbeat.part, heartbeat.step, wait.tool], ['heartbeat', 'wait', 't3_thread_wait'], 'a run with no heartbeat yet makes one at its next wait');
+  const failed = f.record(heartbeat, { error: 'no calling thread' });
+  assert.deepEqual([failed.outcome, t3WakeLive(f.state), f.state.t3Wake.failed], ['continue', false, 'schedule_task: {"error":"no calling thread"}'], 'a heartbeat never blocks the WP');
+  assert.deepEqual(b.wait(f.wp).map((act) => act.tool), ['t3_thread_wait'], 'and is not asked again');
+  assert.equal(b.start(f.wp)[0].args.message, 'Read /run/lane-wp-00.md and execute it exactly.');
+  // A task bound to no thread would start a fresh thread each tick: it is deleted.
+  delete f.state.t3Wake;
+  const unbound = f.record(heartbeat, { scheduledTaskId: 'task-x', boundThreadId: null });
+  assert.deepEqual([t3WakeLive(f.state), unbound.patch.queue.map((act) => [act.tool, act.args.scheduledTaskId])], [false, [['delete_scheduled_task', 'task-x']]]);
+  assert.match(f.state.t3Wake.failed, /bound no thread/);
+  // A second task beside the live one goes; the same task (T3 dedupes the request id, measured) is kept.
+  f.state.t3Wake = { taskId: TASK, thread: CONDUCTOR, conductor: 1, failed: null, deleted: false, old: [] };
+  const second = f.record(heartbeat, { scheduledTaskId: 'task-2', boundThreadId: CONDUCTOR });
+  assert.deepEqual([f.state.t3Wake.taskId, second.patch.queue.map((act) => act.args.scheduledTaskId)], [TASK, ['task-2']]);
+  assert.deepEqual(f.record(heartbeat, { scheduledTaskId: TASK, boundThreadId: CONDUCTOR }).patch, {});
+  assert.equal(f.state.t3Wake.taskId, TASK);
+});
+
+test('t3 wake wait: with the heartbeat live a lane waits on its wake, then one read; running waits again, ended is reaped, past the deadline is stopped', (t) => {
+  const f = t3Lanes(t, { wake: 'live', wpLane: { worktree: '/wt', threadId: THREAD, startedAt: new Date(T0).toISOString(), deadline: new Date(T0 + 3600000).toISOString() } });
+  const b = f.backend();
+  const [wake, read] = b.wait(f.wp);
+  assert.deepEqual([wake.kind, wake.step, wake.wake, wake.waitMs], ['wait', 'wait', true, T3_HEARTBEAT_MS]);
+  assert.deepEqual([read.tool, read.part, read.args], ['t3_thread_read', 'read', { threadId: THREAD, view: 'activity', limit: 1, runLimit: 1 }]);
+  const running = f.record(read, t3Read());
+  assert.deepEqual([running.outcome, running.patch.queue.map((act) => act.tool ?? (act.wake && 'wake'))], ['wait', ['wake', 't3_thread_read']]);
+  const ended = f.record(read, t3Read({ status: 'completed' }));
+  assert.deepEqual([ended.outcome, Boolean(ended.patch.lane.exitedAt), ended.patch.queue.map((act) => act.part)], ['continue', true, ['reap']]);
+  const failed = f.record(read, t3Read({ status: 'interrupted' }));
+  assert.deepEqual([failed.outcome, failed.cause], ['block', 'error']);
+  f.tick(3600001);
+  assert.equal(f.record(read, t3Read()).cause, 'deadline');
+});
+
+test('t3 pending request: a read counting one blocks the WP as a dialog at once, named from the latest activity (an approval or a question); one cleared meanwhile waits on', (t) => {
+  const f = t3Lanes(t, { wake: 'live', wpLane: { worktree: '/wt', threadId: THREAD, startedAt: new Date(T0).toISOString(), deadline: new Date(T0 + 3600000).toISOString() } });
+  const b = f.backend();
+  const read = b.read(f.wp);
+  const counted = f.record(read, t3Read({ pending: 1, itemCount: 5 }));
+  const [dialog] = counted.patch.queue;
+  assert.deepEqual([counted.outcome, dialog.tool, dialog.part, dialog.args], ['continue', 't3_thread_read', 'dialog', { threadId: THREAD, view: 'activity', limit: 5, runLimit: 1, maxCharsPerItem: 600 }]);
+  // Reads page from the oldest item and afterPosition is exclusive: the last five of twelve start after position 6.
+  assert.equal(f.record(read, t3Read({ pending: 1, itemCount: 12 })).patch.queue[0].args.afterPosition, 6);
+  const approval = f.record(dialog, t3Read({ pending: 1, items: [{ position: 3, type: 'command_execution', status: 'running', text: '$ echo probe' }, APPROVAL] }));
+  assert.deepEqual([approval.outcome, approval.cause, approval.patch.queue], ['block', 'dialog', []]);
+  assert.equal(approval.dialog, `an approval: Write probe string to probe.txt (T3 thread ${THREAD})`);
+  const question = f.record(dialog, t3Read({ pending: 1, items: [QUESTION] }));
+  assert.equal(question.dialog, `a question: Probe 87518991: proceed? (yes / no) (T3 thread ${THREAD})`);
+  assert.match(f.record(dialog, t3Read({ pending: 2, items: [] })).dialog, /^2 pending request\(s\) the activity view does not name/);
+  // Granted between the two reads: the lane runs on.
+  assert.equal(f.record(dialog, t3Read({ pending: 0, items: [] })).outcome, 'wait');
+  // A request beats the deadline: the person can still answer it.
+  f.tick(3600001);
+  assert.equal(f.record(dialog, t3Read({ pending: 1, items: [APPROVAL] })).cause, 'dialog');
+});
+
+test('t3 rotation: r1\'s heartbeat is not live under r2; the next wait deletes it and makes r2\'s, and the lanes poll until it is recorded', (t) => {
+  const f = t3Lanes(t, { wake: 'live', wpLane: { worktree: '/wt', threadId: THREAD } });
+  f.state.rotations = [{ attempt: 1, status: 'custody' }];
+  assert.equal(t3WakeLive(f.state), false);
+  const b = f.backend();
+  const [stop, heartbeat, wait] = b.wait(f.wp);
+  assert.deepEqual([stop.tool, stop.args, heartbeat.args.clientRequestId, wait.tool], ['delete_scheduled_task', { scheduledTaskId: TASK }, 'abcd1234-heartbeat-r2', 't3_thread_wait']);
+  f.record(stop, { scheduledTaskId: TASK, deleted: true });
+  assert.deepEqual([f.state.t3Wake.taskId, f.state.t3Wake.old], [null, [{ taskId: TASK, deleted: true }]]);
+  // Another lane's stale delete of the same task finds it gone: still deleted.
+  f.record(stop, { error: '{"_tag":"OrchestratorMcpFailure","code":"task_not_found"}' });
+  assert.deepEqual(f.state.t3Wake.old.map((entry) => entry.deleted), [true]);
+  f.record(heartbeat, { scheduledTaskId: 'task-r2', boundThreadId: 'mcp:conductor-2' });
+  assert.deepEqual([t3WakeLive(f.state), f.state.t3Wake.thread, f.state.t3Wake.conductor], [true, 'mcp:conductor-2', 2]);
+  assert.equal(b.wait(f.wp)[0].wake, true);
+});
+
+test('t3 analyze: the heartbeats a finished build still owns are deleted, once each, before the analysis runs', async (t) => {
+  const analyze = await import('./phases/analyze.mjs');
+  const f = t3Lanes(t, { wake: 'live' });
+  f.state.t3Wake.old = [{ taskId: 'old-1' }, { taskId: 'old-2', deleted: true }];
+  const first = analyze.next(f.state);
+  assert.deepEqual([first.kind, first.step, first.tool, first.args], ['agent-tool', 'analyze', 'delete_scheduled_task', { scheduledTaskId: TASK }]);
+  analyze.record(f.state, first, { scheduledTaskId: TASK, deleted: true });
+  const second = analyze.next(f.state);
+  assert.deepEqual(second.args, { scheduledTaskId: 'old-1' });
+  analyze.record(f.state, second, { error: 'T3 unreachable' });
+  assert.equal(f.state.phase, 'build', 'a delete never moves the phase');
+  const run = analyze.next(f.state);
+  assert.deepEqual([run.kind, run.step], ['shell', 'analyze'], 'a failed delete is not retried');
+  assert.deepEqual(heartbeatsToDelete(f.state), []);
+  assert.deepEqual(f.state.t3Wake.old.find((entry) => entry.taskId === 'old-1').deleted, false);
+  analyze.record(f.state, run, { code: 0 });
+  assert.equal(f.state.phase, 'showcase');
+  assert.equal(analyze.next(t3Lanes(t, { wake: 'none' }).state).kind, 'shell', 'a run with no heartbeat goes straight to its analysis');
 });
 
 test('t3 recorder: an amendment is a new turn that renews the deadline (a re-send renews nothing); a stop is confirmed by a terminal run, else re-confirmed, then cleanup-unresolved', (t) => {

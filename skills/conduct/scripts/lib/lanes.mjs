@@ -42,6 +42,8 @@ import { pinnedConfig } from './repo-config.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, laneBase, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, holdsSlot } from './schedule.mjs';
+import { conductorNumber } from './rotate.mjs';
+import { conductScript } from './touch.mjs';
 import { EXIT_CODES as LANE_EXIT, LANE_MARKER_ENV, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems, stopHookSettings } from '../../../../scripts/lane.mjs';
 
 const DEADLINE_MS = 120 * 60 * 1000;
@@ -55,6 +57,10 @@ const STOP_WAIT_MS = 10000;
 const T3_WAIT_MS = 120000;
 const T3_RUNNING = new Set(['preparing','queued', 'starting', 'running', 'waiting']);
 const T3_ENDED = new Set(['completed', 'idle']);
+// The run's heartbeat: a schedule_task bound to the conductor's thread, which
+// starts a conductor turn this often while lanes run (deadlines, stalls, a
+// lane that ends without its done message).
+export const T3_HEARTBEAT_MS = 10 * 60 * 1000;
 export const ADMIT_BACKOFF_MS = 5 * 60 * 1000;
 const SHA = /^[0-9a-f]{40}$/;
 const VERDICT = /^Verdict: (exercised|vacuous|not exercised|no runtime surface)$/;
@@ -354,20 +360,39 @@ export function laneBackend(state, deps, backend) {
     const tool = (step, part, name, args, instruction) => ({
       kind: 'agent-tool', step, seam: STEP_SEAM[step], ...(part ? { part } : {}), tool: name, args, expects: { type: 'json' }, instruction,
     });
-    const message = (wp) => `Read ${wp.lane?.briefPath ?? laneLayout(state, wp).briefPath} and execute it exactly.`;
+    // A send's request id: stable across retries of one queued send, new for
+    // each send after it (startedAt is renewed by every recorded send).
+    const sendKey = (wp) => `${state.runId}-${wp.id.toLowerCase()}-a${wp.amendment?.n ?? 0}-${Date.parse(wp.lane?.startedAt ?? '') || 0}`;
+    // With the heartbeat live, the lane's last act wakes the conductor's thread
+    // (a queued send into an idle thread starts a turn there).
+    const message = (wp) => {
+      const read = `Read ${wp.lane?.briefPath ?? laneLayout(state, wp).briefPath} and execute it exactly.`;
+      if (!t3WakeLive(state)) return read;
+      const done = { threadId: state.t3Wake.thread, mode: 'queue', clientRequestId: `${sendKey(wp)}-done`,
+        message: `[conduct ${state.slug}] ${wp.id}'s lane ended its turn (round a${wp.amendment?.n ?? 0}); report: ${laneLayout(state, wp).reportPath}. A wake, not a verdict: run node ${conductScript(state)} next --run ${state.runDir} and keep looping.` };
+      return `${read}\n\nYour last act, once your report is written and before you end your turn (whatever the outcome, early stops included): call the t3-code tool t3_thread_send with ${JSON.stringify(done)}. That message wakes the conductor. If a Stop hook sends you back to work after it, send it again at your next stop with -2, -3, … appended to clientRequestId.`;
+    };
     const hookAct = (wp) => (agent === 'claude' ? [shellAction('create', {
       part: 'hook', instruction: 'Install the lane\'s Stop hook in its worktree.', command: conduct('hook', wp),
     })] : []);
+    const readAct = (wp) => tool('wait', 'read', 't3_thread_read', { threadId: wp.lane?.threadId ?? null, view: 'activity', limit: 1, runLimit: 1 },
+      'Call t3_thread_read with these args and record its raw result.');
+    const wakeWait = (wp) => ({ kind: 'wait', step: 'wait', seam: STEP_SEAM.wait, waitMs: T3_HEARTBEAT_MS, wake: true,
+      instruction: `${wp.id}'s T3 lane is running; its done message or the run's heartbeat wakes the conductor.` });
     return {
       acts(wp) {
         const running = { ...wp, lane: { ...wp.lane, exitedAt: null } };
         return actsOf(this, wp, [() => [admitAction(['--require-reading'])], (b) => b.create(wp), (b) => b.start(wp), (b) => b.prompt(wp, { amendment: true }),
-          (b) => b.prompt(wp, { amendment: true, resend: true }), (b) => b.wait(wp), (b) => b.check(wp), (b) => b.stop(running), (b) => b.reap(wp), (b) => b.remove(wp), () => deletes(wp)]);
+          (b) => b.prompt(wp, { amendment: true, resend: true }), (b) => b.wait(wp), () => [readAct(wp)], (b) => b.check(wp), (b) => b.stop(running), (b) => b.reap(wp),
+          (b) => b.remove(wp), () => deletes(wp), () => heartbeatActs(state, 'create'), () => heartbeatActs(state, 'wait')]);
       },
       name: 't3',
       setup: (wp) => setupActs(worktreeOf(wp)),
       admit: gitAdmit,
-      create: (wp) => [...gitCreate(wp), ...hookAct(wp)],
+      // The heartbeat is made before the first launch, so the launch message
+      // can name the conductor's thread (schedule_task returns it).
+      create: (wp) => [...gitCreate(wp), ...hookAct(wp), ...heartbeatActs(state, 'create')],
+      read: readAct,
       // The first prompt rides the launch. No idempotency key: a lost response
       // is found by title before launching again.
       start: (wp) => {
@@ -380,15 +405,15 @@ export function laneBackend(state, deps, backend) {
         }, `Call t3_thread_launch with these args and record its raw result. If its response is lost, find the thread with t3_thread_list (titleContains "${title}") and record that thread's row; never launch twice.`)];
       },
       // An amendment is a new turn in the same thread: the lane keeps its context.
-      // The request id is stable across retries of one queued send and new for
-      // each send after it (a reset re-prompt): T3 drops a repeated id. Every
-      // recorded send renews startedAt, so the id carries it.
+      // T3 drops a repeated request id, so a reset re-prompt gets a new one (sendKey).
       prompt: (wp, { amendment = false, resend = false } = {}) => (amendment ? [tool('prompt', resend ? 'resend' : null, 't3_thread_send', {
-        threadId: wp.lane?.threadId ?? null, message: message(wp), mode: 'queue',
-        clientRequestId: `${state.runId}-${wp.id.toLowerCase()}-a${wp.amendment?.n ?? 0}-${Date.parse(wp.lane?.startedAt ?? '') || 0}${resend ? '-resend' : ''}`,
+        threadId: wp.lane?.threadId ?? null, message: message(wp), mode: 'queue', clientRequestId: `${sendKey(wp)}${resend ? '-resend' : ''}`,
       }, 'Call t3_thread_send with these args and record its raw result.')] : []),
-      wait: (wp) => [tool('wait', null, 't3_thread_wait', { threadId: wp.lane?.threadId ?? null, timeoutMs: T3_WAIT_MS },
-        'Call t3_thread_wait with these args and record its raw result.')],
+      // With the heartbeat live the conductor ends its turn (the build's wake
+      // yield) and reads the lane when it is woken. Without it, a 2-minute
+      // t3_thread_wait polls, and a heartbeat owed (a rotated conductor's) is made first.
+      wait: (wp) => (t3WakeLive(state) ? [wakeWait(wp), readAct(wp)] : [...heartbeatActs(state, 'wait'), tool('wait', null, 't3_thread_wait', { threadId: wp.lane?.threadId ?? null, timeoutMs: T3_WAIT_MS },
+        'Call t3_thread_wait with these args and record its raw result.')]),
       check: gitCheck,
       // Interrupt the running turn, then confirm the run is terminal. A lane
       // already exited gets the reap alone.
@@ -766,9 +791,107 @@ function recordExecWait(state, wp, result, deps, backend) {
 const t3Said = (result) => JSON.stringify(result ?? null).slice(0, 400);
 const t3Failed = (result) => !result || typeof result !== 'object' || result.isError === true || Boolean(result.error) || result.ok === false;
 
+// ---- the T3 wake: state.t3Wake, run-level, written by the heartbeat's record ----
+// { taskId, thread, conductor, at } is the live heartbeat: a schedule_task
+// bound to conductor r<conductor>'s thread, which lanes' done messages target
+// too. `failed` (that conductor's schedule_task failed or bound no thread)
+// keeps its lanes polling. `old` lists replaced heartbeats and whether each
+// was deleted; analyze deletes whatever is left.
+export function t3WakeLive(state) {
+  const wake = state.t3Wake;
+  return Boolean(wake?.taskId && wake.thread && !wake.failed && !wake.deleted && wake.conductor === conductorNumber(state));
+}
+
+const heartbeatTitle = (state) => `conduct ${state.slug} heartbeat`;
+
+// The heartbeat a T3 run's conductor owes: none while one is live or this
+// conductor's failed; otherwise the stale one (a rotated predecessor's) is
+// deleted and a new one bound to the calling conductor. The request id is
+// per conductor, so lanes that each queue it make one task.
+export function heartbeatActs(state, step) {
+  if (state.intent?.backend?.name !== 't3' || t3WakeLive(state)) return [];
+  const n = conductorNumber(state);
+  const wake = state.t3Wake;
+  if (wake?.failed && wake.conductor === n) return [];
+  const t3 = (part, name, args, instruction) => ({ kind: 'agent-tool', step, seam: STEP_SEAM[step], part, tool: name, args, expects: { type: 'json' }, instruction });
+  const stale = wake?.taskId && !wake.deleted ? [t3('heartbeat-stop', 'delete_scheduled_task', { scheduledTaskId: wake.taskId },
+    'Call delete_scheduled_task with these args and record its raw result (an error too): it is the previous conductor\'s heartbeat.')] : [];
+  const prompt = `[${heartbeatTitle(state)}] A wake tick for conduct run ${state.runDir}, every ${T3_HEARTBEAT_MS / 60000} minutes while its T3 lanes run. If this thread is that run's conductor r${n}, run node ${conductScript(state)} next --run ${state.runDir} and perform what it prints: a pending wake wait is recorded {} and the loop goes on. If it is not (the run was rotated away, or it has ended), end your turn.`;
+  return [...stale, t3('heartbeat', 'schedule_task', {
+    title: heartbeatTitle(state), prompt, schedule: { type: 'interval', everyMs: T3_HEARTBEAT_MS }, bindToCurrentThread: true, clientRequestId: `${state.runId}-heartbeat-r${n}`,
+  }, 'Call schedule_task with these args from your own (the conductor\'s) thread, and record its raw result, an error too.')];
+}
+
+// A heartbeat's record. It never blocks the WP: a failure leaves the lanes polling.
+function recordHeartbeat(state, wp, action, result, deps) {
+  const rest = (wp.queue ?? []).slice(1);
+  const wake = state.t3Wake ?? null;
+  const old = wake?.old ?? [];
+  if (action.part === 'heartbeat-stop') {
+    const id = action.args.scheduledTaskId;
+    const outcome = { taskId: id, deleted: !t3Failed(result) || /task_not_found|not found/i.test(t3Said(result)), ...(t3Failed(result) ? { error: t3Said(result) } : {}) };
+    const others = old.filter((entry) => entry.taskId !== id);
+    state.t3Wake = wake?.taskId === id ? { ...wake, taskId: null, thread: null, old: [...others, outcome] } : { ...wake, old: [...others, outcome] };
+    return proceed();
+  }
+  const conductor = Number(/-heartbeat-r(\d+)$/.exec(action.args.clientRequestId)?.[1] ?? conductorNumber(state));
+  if (t3Failed(result) || typeof result.scheduledTaskId !== 'string') {
+    state.t3Wake = { ...wake, taskId: null, thread: null, conductor, failed: `schedule_task: ${t3Said(result)}`, old };
+    return proceed({}, 'no heartbeat: the T3 lanes poll');
+  }
+  const remove = (taskId, why) => ({ kind: 'agent-tool', step: action.step, seam: action.seam, part: 'heartbeat-stop', tool: 'delete_scheduled_task',
+    args: { scheduledTaskId: taskId }, expects: { type: 'json' }, instruction: `Call delete_scheduled_task with these args and record its raw result (an error too): ${why}.` });
+  // A heartbeat bound to no thread would start a fresh thread every tick.
+  if (typeof result.boundThreadId !== 'string' || !result.boundThreadId) {
+    state.t3Wake = { ...wake, taskId: null, thread: null, conductor, failed: `schedule_task bound no thread: ${t3Said(result)}`, old: [...old, { taskId: result.scheduledTaskId }] };
+    return proceed({ queue: [remove(result.scheduledTaskId, 'it is bound to no thread'), ...rest] }, 'no heartbeat: the T3 lanes poll');
+  }
+  // A second task beside the live one (a request T3 did not dedupe): it goes.
+  if (t3WakeLive(state) && wake.taskId !== result.scheduledTaskId) {
+    state.t3Wake = { ...wake, old: [...old, { taskId: result.scheduledTaskId }] };
+    return proceed({ queue: [remove(result.scheduledTaskId, 'the run already has a heartbeat'), ...rest] });
+  }
+  state.t3Wake = { taskId: result.scheduledTaskId, thread: result.boundThreadId, conductor, at: iso(deps.now()), failed: null, deleted: false, old };
+  return proceed();
+}
+
+// The heartbeats a finished build still owns, for the analyze phase to delete.
+export function heartbeatsToDelete(state) {
+  const wake = state.t3Wake;
+  if (!wake) return [];
+  return [...(wake.taskId && !wake.deleted && !wake.deleteResult ? [wake.taskId] : []), ...(wake.old ?? []).filter((entry) => entry.deleted === undefined).map((entry) => entry.taskId)];
+}
+
+// One delete's outcome: a task already gone counts as deleted. Each task is tried once.
+export function recordHeartbeatDelete(state, taskId, result) {
+  const deleted = !t3Failed(result) || /task_not_found|not found/i.test(t3Said(result));
+  const wake = state.t3Wake ?? {};
+  const outcome = { taskId, deleted, ...(t3Failed(result) ? { error: t3Said(result) } : {}) };
+  if (wake.taskId === taskId) state.t3Wake = { ...wake, deleted, deleteResult: outcome };
+  else state.t3Wake = { ...wake, old: [...(wake.old ?? []).filter((entry) => entry.taskId !== taskId), outcome] };
+}
+
+// What the latest activity items say a lane waits on: the last waiting
+// approval or question, by its text.
+function waitingOn(result) {
+  const item = [...(Array.isArray(result.items) ? result.items : [])].reverse().find((entry) => entry?.status === 'waiting' && /request/.test(String(entry.type ?? '')));
+  if (!item) return null;
+  const kind = item.type === 'approval_request' ? 'an approval' : item.type === 'user_input_request' ? 'a question' : item.type;
+  // A question's text is its JSON array of questions, each with its options.
+  let text = String(item.text ?? '');
+  try {
+    const asked = JSON.parse(text);
+    if (Array.isArray(asked) && asked.every((entry) => typeof entry?.question === 'string')) {
+      text = asked.map((entry) => `${entry.question}${Array.isArray(entry.options) ? ` (${entry.options.map((option) => option?.label).filter(Boolean).join(' / ')})` : ''}`).join('; ');
+    }
+  } catch { /* an approval's text is prose */ }
+  return `${kind}: ${text.replace(/\s+/g, ' ').trim().slice(0, 300)}`;
+}
+
 function recordT3Step(state, wp, action, result, deps, backend) {
   // Cleanup never blocks: a thread left unarchived is named on the lane, and the removal after it says what stayed.
   if (action.part === 'archive') return proceed({ lane: { archived: !t3Failed(result), ...(t3Failed(result) ? { archiveError: t3Said(result) } : {}) } });
+  if (action.part === 'heartbeat' || action.part === 'heartbeat-stop') return recordHeartbeat(state, wp, action, result, deps);
   const rest = (wp.queue ?? []).slice(1);
   // A stop's calls go through the cleanup retries, keeping what is queued
   // behind them: a failed interrupt is left to the confirmation, and a failed
@@ -785,24 +908,25 @@ function recordT3Step(state, wp, action, result, deps, backend) {
       if (action.part === 'resend') return proceed();
       return proceed({ lane: { runId: result.runId ?? wp.lane?.runId ?? null, ...freshStart(deps, null, laneDeadlineMs(state)) } });
     case 'wait': {
-      const status = String(result.status ?? '');
-      if (T3_ENDED.has(status)) {
-        // A stop with a background task still running wakes the agent when it
-        // ends, as in herdr: hold the wait on the stop-check's verdict.
-        const stopCheck = laneStopCheck(state, wp, deps);
-        const since = Date.parse(stopCheck?.at ?? '');
-        if (stopCheck?.verdict === 'background-live' && deps.now() - since < BACKGROUND_HOLD_MS && !expired(wp, deps)) {
-          const tasks = (stopCheck.tasks ?? []).map((task) => task.command ?? task.id).join('; ');
-          return { outcome: 'wait', reason: `lane stopped with a background task running: ${tasks}`, patch: { queue: [waitAction(POLL_MS), ...backend.wait(wp)] } };
-        }
-        return proceed({ lane: exitedLane(state, wp, deps, true), queue: [...backend.reap(wp), ...rest] });
+      // A wait that times out is followed by a read, which sees a lane blocked on a person.
+      if (action.part !== 'read' && action.part !== 'dialog') {
+        return t3RunRoute(state, wp, String(result.status ?? ''), result.timedOut === true, result, deps, backend, rest,
+          () => proceed({ queue: [backend.read(wp)] }, 'lane running: read it for a pending request'));
       }
-      if (result.timedOut === true || T3_RUNNING.has(status)) {
-        if (expired(wp, deps)) return deadlineBlock(wp, backend);
-        return { outcome: 'wait', reason: `lane running (${status || 'timed out'})`, patch: { queue: [...backend.wait(wp)] } };
+      // A read: T3 shows a run waiting on an approval or a question as running,
+      // and counts the request in pendingRequestCount. A count blocks the WP at
+      // once; a second read of the latest activity names the request.
+      const thread = result.thread ?? {};
+      const run = Array.isArray(result.recentRuns) ? result.recentRuns[0] : null;
+      const status = String(run?.status ?? thread.status ?? '');
+      const pending = Number(thread.pendingRequestCount ?? 0);
+      if (pending > 0 && !T3_ENDED.has(status)) {
+        if (action.part === 'read') return proceed({ queue: [dialogRead(wp, thread.itemCount)] }, `the lane has ${pending} pending request(s): read which`);
+        const dialog = `${waitingOn(result) ?? `${pending} pending request(s) the activity view does not name`} (T3 thread ${wp.lane?.threadId})`;
+        return block(`dialog: ${dialog}`, { lane: { dialogPolls: 0 } }, 'dialog', { dialog });
       }
-      // interrupted, failed, cancelled, rolled_back: the agent is not running.
-      return block(`the lane's T3 run ended ${status || 'unreadably'}: ${t3Said(result)}`, { lane: exitedLane(state, wp, deps, false), queue: backend.reap(wp) });
+      return t3RunRoute(state, wp, status, false, result, deps, backend, rest,
+        () => ({ outcome: 'wait', reason: `lane running (${status || 'unread'})`, patch: { queue: [...backend.wait(wp)] } }));
     }
     case 'stop': {
       const status = String(result.status ?? '');
@@ -814,6 +938,40 @@ function recordT3Step(state, wp, action, result, deps, backend) {
     default:
       throw new ConductError(2, `recordLaneStep has no T3 route for step ${action.step}`);
   }
+}
+
+// A lane's run status, from a wait or a read. `running` is the route of a
+// run still going, before its deadline.
+function t3RunRoute(state, wp, status, timedOut, result, deps, backend, rest, running) {
+  if (T3_ENDED.has(status)) {
+    // A stop with a background task still running wakes the agent when it
+    // ends, as in herdr: hold the wait on the stop-check's verdict.
+    const stopCheck = laneStopCheck(state, wp, deps);
+    const since = Date.parse(stopCheck?.at ?? '');
+    if (stopCheck?.verdict === 'background-live' && deps.now() - since < BACKGROUND_HOLD_MS && !expired(wp, deps)) {
+      const tasks = (stopCheck.tasks ?? []).map((task) => task.command ?? task.id).join('; ');
+      const again = t3WakeLive(state) ? backend.wait(wp) : [waitAction(POLL_MS), ...backend.wait(wp)];
+      return { outcome: 'wait', reason: `lane stopped with a background task running: ${tasks}`, patch: { queue: again } };
+    }
+    return proceed({ lane: exitedLane(state, wp, deps, true), queue: [...backend.reap(wp), ...rest] });
+  }
+  if (timedOut || T3_RUNNING.has(status)) {
+    if (expired(wp, deps)) return deadlineBlock(wp, backend);
+    return running();
+  }
+  // interrupted, failed, cancelled, rolled_back: the agent is not running.
+  return block(`the lane's T3 run ended ${status || 'unreadably'}: ${t3Said(result)}`, { lane: exitedLane(state, wp, deps, false), queue: backend.reap(wp) });
+}
+
+// The latest activity items, read after a count of pending requests: an
+// activity read pages from the oldest item, and afterPosition is exclusive.
+function dialogRead(wp, itemCount) {
+  const count = Number.isInteger(itemCount) ? itemCount : 0;
+  return {
+    kind: 'agent-tool', step: 'wait', seam: STEP_SEAM.wait, part: 'dialog', tool: 't3_thread_read', expects: { type: 'json' },
+    args: { threadId: wp.lane?.threadId ?? null, view: 'activity', limit: 5, runLimit: 1, maxCharsPerItem: 600, ...(count > 5 ? { afterPosition: count - 6 } : {}) },
+    instruction: 'Call t3_thread_read with these args and record its raw result.',
+  };
 }
 
 // An unconfirmed stop is confirmed again after 10 s, up to STOP_CONFIRMS
