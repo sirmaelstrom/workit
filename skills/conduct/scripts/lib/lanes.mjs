@@ -44,7 +44,7 @@ import { ConductError, STEPS, STEP_SEAM, appendEvent, laneBase, loadState, saveS
 import { GATED_FROM_LANE, LIVE_STATES, holdsSlot, laneOccupied } from './schedule.mjs';
 import { conductorNumber } from './rotate.mjs';
 import { conductScript } from './touch.mjs';
-import { EXIT_CODES as LANE_EXIT, LANE_MARKER_ENV, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems, stopHookSettings } from '../../../../scripts/lane.mjs';
+import { EXIT_CODES as LANE_EXIT, LANE_MARKER_ENV, forkBase, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems, stopHookSettings } from '../../../../scripts/lane.mjs';
 
 const DEADLINE_MS = 120 * 60 * 1000;
 const POLL_MS = 60000;
@@ -1450,15 +1450,19 @@ function checkLane(state, wp, flags, deps) {
   if (problem) failures.push(`runtime exercise ${verdict}: ${problem}`);
   if (!flags.runtimeOnly) {
     failures.push(...reportShapeProblems(text));
-    // From the last land rebase's new base: the lane's own commits, not a sibling's merged ones.
-    const base = laneBase(wp);
-    const ahead = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'rev-list', '--count', `${base}..HEAD`]);
+    // From where HEAD left origin's default branch, measured now: the lane's
+    // own commits, not main's that a rebase (land's or the lane's) brought in.
+    // The recorded base (the last land rebase's, else dispatch's) is the fallback.
+    const worktree = wp.lane?.worktree ?? lane.worktree;
+    const base = forkBase((args) => deps.exec('git', ['-C', worktree, ...args]),
+      { recorded: laneBase(wp), upstream: `origin/${state.intent.repo.defaultBranch ?? 'main'}` });
+    const ahead = deps.exec('git', ['-C', worktree, 'rev-list', '--count', `${base}..HEAD`]);
     if (ahead.code !== 0 || !(Number(ahead.stdout.trim()) >= 1)) failures.push(`the branch has no commit past base ${base} (${ahead.code === 0 ? `${ahead.stdout.trim()} commits` : said(ahead)})`);
     // The lane contract's evidence rules, against the report and the lane's diff.
-    const diff = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', `${base}...HEAD`]);
+    const diff = deps.exec('git', ['-C', worktree, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', `${base}...HEAD`]);
     if (diff.code !== 0) failures.push(`the evidence checks did not run: git diff from base ${base}: ${said(diff)}`);
     failures.push(...reportEvidenceProblems(text, { diff: diff.code === 0 ? diff.stdout : null, reportPath: lane.reportPath, exists: deps.exists,
-      readSource: (_file, blob) => { if (!blob) return null; const source = deps.exec('git', ['-C', wp.lane?.worktree ?? lane.worktree, 'show', blob]); return source.code === 0 ? source.stdout : null; } }));
+      readSource: (_file, blob) => { if (!blob) return null; const source = deps.exec('git', ['-C', worktree, 'show', blob]); return source.code === 0 ? source.stdout : null; } }));
     if (flags.pr !== undefined) {
       if (!/^\d+$/.test(String(flags.pr))) return reply(2, { ok: false, error: `--pr needs a PR number, got ${flags.pr}` });
       const view = deps.exec('gh', ['pr', 'view', String(flags.pr), '--repo', state.intent.repo.remote, '--json', 'headRefName,state,body']);

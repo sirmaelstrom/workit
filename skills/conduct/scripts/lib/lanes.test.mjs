@@ -999,6 +999,47 @@ test('exec: lane check after a land rebase diffs from the rebase\'s new base, no
   assert.deepEqual([result.code, out.failures], [0, []], out.failures.join('; '));
 });
 
+// b118b800: a gate amendment had the lane rebase itself onto origin/main, which
+// had moved on; no land rebase recorded it. Rule 7 counted main's tests from
+// the recorded base as the lane's own. The check measures the fork point from
+// origin/<default> now, so only the branch's own new test is named.
+test('exec: lane check after the lane rebased itself onto a moved origin/main names only the branch\'s own new tests (b118b800)', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'workit-lanes-self-rebased-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const real = (args) => {
+    const r = spawnSync('git', args, { encoding: 'utf8' });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git('init', '-q', '-b', 'main');
+  for (const [key, value] of [['user.name', 't'], ['user.email', 't@t'], ['core.autocrlf', 'false']]) git('config', key, value);
+  const commit = (file, text) => {
+    writeFileSync(join(root, file), text);
+    git('add', file);
+    git('commit', '-q', '-m', file);
+    return git('rev-parse', 'HEAD');
+  };
+  const oldBase = commit('base.txt', 'base\n');
+  git('switch', '-q', '-c', 'conduct/demo/wp-00');
+  commit('own.test.mjs', "test('the lane\\'s own new test', () => {});\n");
+  git('switch', '-q', 'main');
+  commit('drive.test.mjs', "test('main\\'s drive test', () => {});\n");
+  commit('wake.test.mjs', "test('main\\'s wake test', () => {});\n");
+  git('update-ref', 'refs/remotes/origin/main', 'main');
+  git('rebase', '-q', 'origin/main', 'conduct/demo/wp-00');
+  const f = lanes(t, { wpLane: { worktree: root, branch: 'conduct/demo/wp-00', base: oldBase } });
+  writeFileSync(join(f.runDir, 'state.json'), JSON.stringify(f.state));
+  const table = f.deps.exec;
+  f.deps.exec = (program, args) => (program === 'git' ? real(args) : table(program, args));
+  f.report(report());
+  const result = await runLaneVerb('check', { runDir: f.runDir, wpId: 'WP-00', flags: {} }, f.deps);
+  const out = JSON.parse(result.out);
+  const rule7 = out.failures.filter((failure) => /rule 7/.test(failure));
+  assert.equal(rule7.length, 1, out.failures.join('; '));
+  assert.match(rule7[0], /^1 new test\(s\) named in no Negative controls run .*own\.test\.mjs:1 "the lane's own new test"$/);
+  assert.doesNotMatch(rule7[0], /drive\.test|wake\.test/);
+});
+
 test('exec: lane check passes a good report and fails a missing Debrief heading or runtime exercise', async (t) => {
   const f = lanes(t, { wpLane: { worktree: '/wt', branch: 'conduct/demo/wp-00' } });
   f.table[`git -C /wt rev-list --count ${SHA40}..HEAD`] = ok('1\n');

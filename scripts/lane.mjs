@@ -2499,6 +2499,21 @@ export function reportEvidenceProblems(text, { diff = null, reportPath = null, e
   return problems;
 }
 
+// The commit a lane's own changes start from, computed at check time: where
+// its head left the upstream (`git merge-base head upstream`). A lane rebased
+// onto an upstream that moved has the upstream's commits past its recorded
+// base, and they are not the lane's. The recorded base wins when it sits at or
+// past that point (a base off another branch, or an upstream ref not fetched
+// since), and when git cannot name the point (no remote ref, unrelated
+// histories). `git(args)` returns { code, stdout }.
+export function forkBase(git, { recorded, head = 'HEAD', upstream }) {
+  const found = git(['merge-base', head, upstream]);
+  const point = found.code === 0 ? String(found.stdout).trim() : '';
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(point)) return recorded;
+  if (!recorded || recorded === point) return point;
+  return git(['merge-base', '--is-ancestor', point, recorded]).code === 0 ? recorded : point;
+}
+
 // spawnSync reports a missing cwd as ENOENT on the PROGRAM ("spawnSync gh
 // ENOENT"), and git -C a swept path reads as a git failure; both send the
 // operator to PATH. Name the directory before either runs.
@@ -2508,6 +2523,11 @@ function requireLaneDir(opts, lane, deps) {
   }
 }
 
+// The lane's base for its own commits and diff: forkBase against origin's
+// default branch (origin/HEAD), else the recorded base.
+const laneForkBase = (deps, lane) => forkBase((args) => call(deps, 'git', ['-C', lane.path, ...args]),
+  { recorded: lane.base, head: lane.branch ?? 'HEAD', upstream: 'origin/HEAD' });
+
 // The lane's diff from where it forked (three dots: a base ref that moved on
 // since the lane started adds nothing here), for the report's evidence checks.
 // A lane record without a worktree or base (an older sidecar) skips the two
@@ -2516,7 +2536,7 @@ function requireLaneDir(opts, lane, deps) {
 function laneDiff(opts, deps, lane) {
   if (!lane.path || !lane.base) return { diff: null, diffChecks: 'did not run: the lane record has no worktree or base' };
   requireLaneDir(opts, lane, deps);
-  const diff = call(deps, 'git', ['-C', lane.path, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', `${lane.base}...${lane.branch ?? 'HEAD'}`]);
+  const diff = call(deps, 'git', ['-C', lane.path, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', `${laneForkBase(deps, lane)}...${lane.branch ?? 'HEAD'}`]);
   if (diff.code !== 0) throw new LaneError(EXIT.ERROR, `git diff for the report's evidence checks failed: ${diff.stderr.trim()}`);
   return { diff: diff.stdout, diffChecks: 'ran' };
 }
@@ -2533,7 +2553,7 @@ async function checkLane(opts, deps, state) {
   if (opts.expectCommit) {
     if (!lane.path || !lane.base || !lane.branch) usage(`lane ${opts.name} has no worktree/base/branch metadata`);
     requireLaneDir(opts, lane, deps);
-    const count = call(deps, 'git', ['-C', lane.path, 'rev-list', '--count', `${lane.base}..${lane.branch}`]);
+    const count = call(deps, 'git', ['-C', lane.path, 'rev-list', '--count', `${laneForkBase(deps, lane)}..${lane.branch}`]);
     // A git that could not answer is infrastructure, not a verdict about the
     // work — and 4 would have a conductor re-poll this forever. Ordinary
     // triggers: a base that is not a local ref, or a swept worktree.
