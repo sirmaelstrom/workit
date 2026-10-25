@@ -219,6 +219,7 @@ test('custody (merged head): a partial squash, a change then its revert, and a m
   git(merged, 'merge', '-q', '--no-edit', c);
   commit(repo, 'a.txt', 'a\n', 'a on main');
   writeFileSync(join(repo, 'c.txt'), 'c\n');
+  git(repo, 'add', 'c.txt');
   commit(repo, 'd.txt', 'd\n', 'c and d on main');
   git(repo, 'push', '-q', 'origin', 'main');
   for (const worktree of [partial, reverted, merged]) {
@@ -226,6 +227,22 @@ test('custody (merged head): a partial squash, a change then its revert, and a m
     assert.equal(row.state, 'kept', `${worktree}: ${row.reason}`);
     assert.match(row.reason, /is on no ref; removing it would orphan the commit \(checked origin\/main, main\)$/);
   }
+});
+
+test('custody (merged head): a squashed range that holds an --allow-empty commit is kept, though merging it adds nothing', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  const worktree = detach(repo, dir, 'origin/main');
+  commit(worktree, 'a.txt', 'a\n', 'a');
+  git(worktree, 'commit', '-q', '--allow-empty', '-m', 'only a message');
+  commit(worktree, 'b.txt', 'b\n', 'b');
+  writeFileSync(join(repo, 'a.txt'), 'a\n');
+  git(repo, 'add', 'a.txt');
+  commit(repo, 'b.txt', 'b\n', 'S');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const row = closeOrphan(run, repo, worktree);
+  assert.equal(row.state, 'kept', row.reason);
+  assert.match(row.reason, /\(checked origin\/main, main\)$/);
 });
 
 test('custody (merged head): a stale remote-tracking ref keeps the worktree; custody does not fetch', (t) => {
