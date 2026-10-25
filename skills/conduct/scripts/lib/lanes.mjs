@@ -1491,10 +1491,17 @@ function hookLane(state, wp, deps) {
   } catch (error) {
     return reply(1, { ok: false, error: `${path} is not JSON: ${error.message}` });
   }
+  // Every stop-check hook for this run and WP, whatever root it names, gives
+  // way to the one current entry; an entry left with no hooks goes with it.
   const command = stopHookCommand(state, wp, deps);
-  const ours = (entry) => (entry?.hooks ?? []).some((hook) => hook?.command === command);
+  const ours = (hook) => stopCheckHook(hook?.command, { runDir: state.runDir, wpId: wp.id }, deps);
+  const kept = (settings.hooks?.Stop ?? []).flatMap((entry) => {
+    if (!Array.isArray(entry?.hooks) || !entry.hooks.some(ours)) return [entry];
+    const hooks = entry.hooks.filter((hook) => !ours(hook));
+    return hooks.length ? [{ ...entry, hooks }] : [];
+  });
   settings.env = { ...(settings.env ?? {}), [LANE_MARKER_ENV]: laneLayout(state, wp).name };
-  settings.hooks = { ...(settings.hooks ?? {}), Stop: [...(settings.hooks?.Stop ?? []).filter((entry) => !ours(entry)), ...stopHookSettings(command).hooks.Stop] };
+  settings.hooks = { ...(settings.hooks ?? {}), Stop: [...kept, ...stopHookSettings(command).hooks.Stop] };
   deps.mkdir(dirname(path));
   deps.write(path, `${JSON.stringify(settings, null, 2)}\n`);
   const gitPath = deps.exec('git', ['-C', worktree, 'rev-parse', '--git-path', 'info/exclude']);

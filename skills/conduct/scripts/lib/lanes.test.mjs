@@ -1643,6 +1643,29 @@ test('t3 lane hook: writes the Stop hook and the lane marker into the worktree s
   assert.equal((await runLaneVerb('hook', { runDir: missing.runDir, wpId: 'WP-00' }, missing.deps)).code, 1);
 });
 
+test('t3 lane hook: replaces every stop-check hook for this run and WP, whatever root it names, with the one current entry; keeps other hooks; a second run leaves exactly one', async (t) => {
+  const f = t3Lanes(t);
+  const worktree = join(f.dir, 'wt'), path = join(worktree, '.claude', 'settings.local.json');
+  mkdirSync(join(worktree, '.claude'), { recursive: true });
+  const fwd = (p) => p.replace(/\\/g, '/');
+  const hook = (root, run = fwd(f.runDir), wpId = 'WP-00') => ({ type: 'command', command: `node ${fwd(join(f.dir, root, 'skills/conduct/scripts/stop-check.mjs'))} --run ${run} --wp ${wpId}` });
+  const otherWp = { hooks: [hook('plugin-1.28.1', fwd(f.runDir), 'WP-01')] };
+  const otherRun = { hooks: [hook('plugin-1.28.1', fwd(join(f.dir, 'elsewhere')))] };
+  const theirs = { hooks: [{ type: 'command', command: 'echo theirs' }] };
+  writeFileSync(path, JSON.stringify({ hooks: { Stop: [
+    { hooks: [hook('plugin-1.28.1')] }, otherWp, { hooks: [hook('plugin-1.28.2', f.runDir), theirs.hooks[0]] }, otherRun,
+  ] } }));
+  f.table[`git -C ${worktree} rev-parse --git-path info/exclude`] = ok(`${join(f.dir, 'git', 'info', 'exclude')}\n`);
+  f.wp.lane.worktree = worktree;
+  writeFileSync(join(f.runDir, 'state.json'), JSON.stringify(f.state));
+  const current = { hooks: [{ type: 'command', command: STOP_HOOK(f), timeout: 300 }] };
+  for (let i = 0; i < 2; i += 1) {
+    const result = await runLaneVerb('hook', { runDir: f.runDir, wpId: 'WP-00' }, { ...f.deps, mkdir: (p) => mkdirSync(p, { recursive: true }) });
+    assert.equal(result.code, 0, result.out);
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).hooks.Stop, [otherWp, theirs, otherRun, current], `run ${i + 1}: one current entry, others kept`);
+  }
+});
+
 test('t3 reset-wp --to prompt: a lane with a thread gets a new turn in it; one never launched is launched; a running thread is refused', (t) => {
   const f = t3Lanes(t, { wpLane: { worktree: '/wt', threadId: THREAD, startedAt: new Date(T0).toISOString(), exitedAt: new Date(T0).toISOString(), briefPath: join(tmpdir()) } });
   assert.equal(RESET_TARGETS.prompt.needs(f.state, f.wp, f.deps), null);
