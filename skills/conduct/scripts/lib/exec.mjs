@@ -1,6 +1,6 @@
 // The executor primitives. `execute` and `defaultCodexExe` are imported from
 // their owners, never copied: a fix there reaches the conductor too.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { openSync, closeSync } from 'node:fs';
 import { execute } from '../../../../scripts/lane.mjs';
 import { defaultCodexExe } from '../../../slim-review/scripts/pr-review.mjs';
@@ -20,6 +20,17 @@ export function spawnDetached(program, args, { cwd, logPath, env } = {}) {
   } finally {
     closeSync(fd);
   }
+}
+
+// A `shell` action's argv as drive runs it: no shell, the action's env added,
+// stdin closed. A spawn failure is exit 127, as a shell reports a missing
+// program; a timeout is `timedOut`, and its partial output is not a result.
+export function runArgv(program, args, { cwd, env, timeout } = {}) {
+  const run = spawnSync(program, args, { cwd, env, timeout, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, windowsHide: true });
+  const stdout = run.stdout ?? '', stderr = run.stderr ?? '';
+  if (run.error?.code === 'ETIMEDOUT') return { code: null, stdout, stderr, timedOut: true };
+  if (run.error && run.status === null) return { code: 127, stdout, stderr: `${run.error.message}\n${stderr}` };
+  return { code: run.status ?? 1, stdout, stderr };
 }
 
 export function pidAlive(pid) {

@@ -9,7 +9,7 @@ import { homedir, hostname } from 'node:os';
 import { isatty } from 'node:tty';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execute, spawnDetached, pidAlive, defaultCodexExe } from './lib/exec.mjs';
+import { execute, runArgv, spawnDetached, pidAlive, defaultCodexExe } from './lib/exec.mjs';
 import {
   ConductError, SCHEMA_VERSION, STEPS, STEP_SEAM, TERMINAL_PHASES,
   appendEvent, loadState, refuseRetired, resolveRunDir, saveState, slugify, statePath, withStateLock,
@@ -33,6 +33,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   next --run <dir> [--custody <n>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
+  drive --run <dir> [--max-steps <n>]   (perform shell, wait and template author actions; stop at the first that needs the conductor)
   status --run <dir>
   analyze --run <dir>
   ratify --run <dir> --wp <id> --paths <path,path> --why <text>
@@ -51,7 +52,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'backend', 'backend-why', 't3-project', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan']);
+  'runs-root', 'run', 'resume', 'action', 'max-steps', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -543,6 +544,35 @@ async function answer(tokens, deps) {
   }, { duringRotation: true });
 }
 
+// drive (lib/drive.mjs) reaches the run only through these two verbs, in
+// process: its pending action is next's, minus consuming a hand-back, and
+// refused while a rotation is open; its results go through record. drive.lock
+// keeps a second driver off the run; state.lock is taken per verb as always,
+// so a shell action's own conduct.mjs verb can take it.
+async function driveVerb(tokens, deps) {
+  const flags = parseFlags(tokens);
+  const runDir = runDirFlag(flags);
+  const maxSteps = flags['max-steps'] === undefined ? undefined : Number(flags['max-steps']);
+  if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 0)) throw new ConductError(2, '--max-steps must be a whole number');
+  openRun(flags, deps);
+  const { drive } = await loadModule(deps, 'lib/drive.mjs', 'module');
+  const call = async (verb, verbTokens) => {
+    try {
+      const { code = 0, out } = await verb(verbTokens, deps);
+      return { code, out };
+    } catch (error) {
+      if (!(error instanceof ConductError)) throw error;
+      return { code: error.code, out: { ok: false, error: error.message, ...(error.details ?? {}) } };
+    }
+  };
+  const pending = (verbTokens) => transact(parseFlags(verbTokens), deps, async (state) => ({ out: { ok: true, action: await emit(state, deps) } }));
+  return withStateLock(runDir, deps, () => drive({ runDir, maxSteps }, {
+    ...deps,
+    pending: () => call(pending, ['--run', runDir]),
+    record: (id, resultFile) => call(record, ['--run', runDir, '--action', id, '--result-file', resultFile]),
+  }), { lock: 'drive.lock' });
+}
+
 async function status(tokens, deps) {
   const { state } = openRun(parseFlags(tokens), deps);
   const lines = [
@@ -736,7 +766,7 @@ async function quietVerb(tokens, deps) {
 }
 
 const VERBS = {
-  intake, next, record, answer, status, analyze, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
+  intake, next, record, answer, drive: driveVerb, status, analyze, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
   'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb, rotate: rotateVerb, replan: replanVerb,
   lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap', 'stop-check', 'hook'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
@@ -752,6 +782,7 @@ const VERBS = {
 export async function runConduct(argv, overrides = {}) {
   const deps = {
     exec: execute,
+    runArgv,
     read: (path) => readFileSync(path, 'utf8'),
     write: (path, value) => writeFileSync(path, value, 'utf8'),
     link: linkSync,

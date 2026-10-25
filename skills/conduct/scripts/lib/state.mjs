@@ -179,8 +179,9 @@ function lockIsStale(holder, deps) {
 // removes the lock only while it still carries this writer's token. Two
 // contenders that both judge one dead holder's lock stale can race on the
 // takeover (accepted for v1: it needs a crash and two contenders; ASSUMPTION).
-export async function withStateLock(runDir, deps, fn) {
-  const path = join(runDir, 'state.lock');
+// `lock` names another lock file under the same rules (drive.lock: one driver).
+export async function withStateLock(runDir, deps, fn, { lock = 'state.lock' } = {}) {
+  const path = join(runDir, lock);
   const token = randomBytes(8).toString('hex');
   const temp = `${path}.${token}.tmp`;
   const waitMs = deps.lockWaitMs ?? 2000;
@@ -204,7 +205,7 @@ export async function withStateLock(runDir, deps, fn) {
         }
         if (attempt * LOCK_POLL_MS >= waitMs) {
           throw new ConductError(2, holder
-            ? `the run is locked by pid ${holder.pid} on ${holder.host} since ${holder.at}; retry`
+            ? `${lock === 'state.lock' ? 'the run is locked' : `${lock} is held`} by pid ${holder.pid} on ${holder.host} since ${holder.at}; retry`
             : `the run's lock ${path} is unreadable; retry, or remove it if no conductor verb is running`);
         }
         await deps.sleep(LOCK_POLL_MS);
