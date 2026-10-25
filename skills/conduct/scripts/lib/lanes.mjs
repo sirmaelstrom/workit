@@ -90,12 +90,49 @@ export function laneLayout(state, wp) {
 // Forward slashes, and quotes only around a path with a space: the command
 // rides a JSON argv through herdr and a hook shell.
 export function stopHookCommand(state, wp, deps) {
-  const arg = (path) => {
-    const forward = String(path).replace(/\\/g, '/');
-    return /\s/.test(forward) ? `"${forward}"` : forward;
+  const script = join(deps.pluginRoot ?? state.pluginRoot, ...STOP_CHECK_SCRIPT.split('/'));
+  return ['node', hookArg(script), '--run', hookArg(state.runDir), '--wp', wp.id].join(' ');
+}
+
+const STOP_CHECK_SCRIPT = 'skills/conduct/scripts/stop-check.mjs';
+const hookArg = (path) => {
+  const forward = String(path).replace(/\\/g, '/');
+  return /\s/.test(forward) ? `"${forward}"` : forward;
+};
+
+// Two paths are one when their realpaths match, case-folded on Windows; a path
+// that no longer exists compares resolved.
+export function samePath(a, b, deps) {
+  const fold = (path) => {
+    let real;
+    try { real = deps.realpath ? deps.realpath(path) : resolve(path); } catch { real = resolve(path); }
+    real = real.replace(/\\/g, '/').replace(/\/+$/, '');
+    return deps.platform === 'win32' ? real.toLowerCase() : real;
   };
-  const script = join(deps.pluginRoot ?? state.pluginRoot, 'skills', 'conduct', 'scripts', 'stop-check.mjs');
-  return ['node', arg(script), '--run', arg(state.runDir), '--wp', wp.id].join(' ');
+  return fold(a) === fold(b);
+}
+
+// A Stop hook command that runs some plugin root's stop-check.mjs for this
+// run (`--run`, by samePath) and, given wpId, this WP; null for any other.
+// The match carries the root it names and the script token's span, so a
+// caller can point it at another root and keep the rest of the command.
+export function stopCheckHook(command, { runDir, wpId }, deps) {
+  if (typeof command !== 'string') return null;
+  const tokens = [...command.matchAll(/"([^"]*)"|(\S+)/g)].map((m) => ({ text: m[1] ?? m[2], start: m.index, end: m.index + m[0].length }));
+  const script = tokens.find((token) => token.text.replace(/\\/g, '/').endsWith(`/${STOP_CHECK_SCRIPT}`));
+  const value = (flag) => {
+    const at = tokens.findIndex((token) => token.text === flag);
+    return at < 0 ? null : tokens[at + 1]?.text ?? null;
+  };
+  const run = value('--run'), wp = value('--wp');
+  if (!script || !run || !samePath(run, runDir, deps)) return null;
+  if (wpId !== undefined && wp?.toLowerCase() !== String(wpId).toLowerCase()) return null;
+  return { root: script.text.slice(0, -(STOP_CHECK_SCRIPT.length + 1)), run, wp, script };
+}
+
+// The same command with its stop-check.mjs under root.
+export function stopCheckHookAt(command, hook, root) {
+  return command.slice(0, hook.script.start) + hookArg(join(root, ...STOP_CHECK_SCRIPT.split('/'))) + command.slice(hook.script.end);
 }
 
 function shellAction(step, fields) {
@@ -1454,10 +1491,17 @@ function hookLane(state, wp, deps) {
   } catch (error) {
     return reply(1, { ok: false, error: `${path} is not JSON: ${error.message}` });
   }
+  // Every stop-check hook for this run and WP, whatever root it names, gives
+  // way to the one current entry; an entry left with no hooks goes with it.
   const command = stopHookCommand(state, wp, deps);
-  const ours = (entry) => (entry?.hooks ?? []).some((hook) => hook?.command === command);
+  const ours = (hook) => stopCheckHook(hook?.command, { runDir: state.runDir, wpId: wp.id }, deps);
+  const kept = (settings.hooks?.Stop ?? []).flatMap((entry) => {
+    if (!Array.isArray(entry?.hooks) || !entry.hooks.some(ours)) return [entry];
+    const hooks = entry.hooks.filter((hook) => !ours(hook));
+    return hooks.length ? [{ ...entry, hooks }] : [];
+  });
   settings.env = { ...(settings.env ?? {}), [LANE_MARKER_ENV]: laneLayout(state, wp).name };
-  settings.hooks = { ...(settings.hooks ?? {}), Stop: [...(settings.hooks?.Stop ?? []).filter((entry) => !ours(entry)), ...stopHookSettings(command).hooks.Stop] };
+  settings.hooks = { ...(settings.hooks ?? {}), Stop: [...kept, ...stopHookSettings(command).hooks.Stop] };
   deps.mkdir(dirname(path));
   deps.write(path, `${JSON.stringify(settings, null, 2)}\n`);
   const gitPath = deps.exec('git', ['-C', worktree, 'rev-parse', '--git-path', 'info/exclude']);

@@ -20,7 +20,7 @@ import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, dropRetiredFiling, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
 import { bindCustodyThread, custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
-import { adoptConductorThread, conductorThreadFence } from './lib/lanes.mjs';
+import { adoptConductorThread, conductorThreadFence, samePath, stopCheckHook, stopCheckHookAt } from './lib/lanes.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -792,20 +792,18 @@ async function ciChecksVerb(tokens, deps) {
   });
 }
 
-// A live claude lane's Stop hook (`lane hook`) names the plugin root of its
-// start, forward-slashed and quoted when it holds a space. Each hook command
-// in a live lane worktree's .claude/settings.local.json that names the old
-// root is pointed at the new one; a merged, refuted or dropped lane's is left
-// alone. A file that can't be read or written is named, not fatal.
-function rewriteLaneHooks(state, from, deps) {
-  const forward = (path) => path.replace(/\\/g, '/');
-  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const roots = [...new Set([forward(from), from])].map(escape).join('|');
-  const token = new RegExp(`"?(?:${roots})((?:[\\\\/][^\\s"]*)?)"?(?=$|\\s)`, deps.platform === 'win32' ? 'gi' : 'g');
-  const migrate = (command) => command.replace(token, (_, rest) => {
-    const path = forward(deps.pluginRoot) + forward(rest);
-    return /\s/.test(path) ? `"${path}"` : path;
-  });
+// A live claude lane's Stop hook (`lane hook`) runs some plugin root's
+// stop-check.mjs for this run. Each one in a live lane worktree's
+// .claude/settings.local.json is pointed at the new root, whatever root it
+// names: a run moved twice still has hooks naming the root before last. A
+// hook already at the new root, one for another run, and a merged, refuted or
+// dropped lane's are left alone. A file that can't be read or written is
+// named, not fatal.
+function rewriteLaneHooks(state, deps) {
+  const migrate = (command) => {
+    const hook = stopCheckHook(command, { runDir: state.runDir }, deps);
+    return !hook || samePath(hook.root, deps.pluginRoot, deps) ? command : stopCheckHookAt(command, hook, deps.pluginRoot);
+  };
   const hooksRewritten = [], hooksFailed = [];
   for (const wp of state.wps) {
     if (!wp.lane?.worktree || ['merged', 'refuted', 'dropped'].includes(wp.state)) continue;
@@ -871,7 +869,7 @@ async function upgradeRootVerb(tokens, deps) {
     if (state.build?.contract) state.build.contract = migrate(state.build.contract);
     state.pluginRoot = deps.pluginRoot;
     state.handover = { ...(state.handover ?? {}), pluginUpgrade: { from, to: deps.pluginRoot, why, at: deps.timestamp() } };
-    const hooks = rewriteLaneHooks(state, from, deps);
+    const hooks = rewriteLaneHooks(state, deps);
     appendEvent(state, deps, { event: 'plugin-upgraded', data: { from, to: deps.pluginRoot, why, snapshot, ...hooks } });
     saveState(state, deps);
     return { out: { ok: true, snapshot, pluginRoot: state.pluginRoot, ...hooks, next:`Use ${join(state.pluginRoot, 'skills/conduct/scripts/conduct.mjs')} for every subsequent verb. Drivers must resolve state.pluginRoot on each invocation.` } };

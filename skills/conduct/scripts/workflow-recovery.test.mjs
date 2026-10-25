@@ -111,6 +111,36 @@ test('upgrade-root rewrites a lane\'s settings file that starts with a BOM and u
   assert.deepEqual(after.hooks.Stop[1], settings.hooks.Stop[1]);
 });
 
+test('upgrade-root rewrites a live lane\'s stop-check hook for this run whatever root it names (one two versions back included); a hook already at the new root, a hook for another run and a merged lane\'s are left alone', async (t) => {
+  const h = fixture(t);
+  const fwd = (path) => path.replace(/\\/g, '/');
+  const twoBack = join(h.dir, 'plugin-1.28.1'), otherRun = join(h.dir, 'other-run');
+  mkdirSync(otherRun, { recursive: true });
+  const hookCommand = (root, run = fwd(h.dir), wpId = 'WP-02') => `node ${fwd(join(root, 'skills/conduct/scripts/stop-check.mjs'))} --run ${run} --wp ${wpId}`;
+  const lane = (wpId, state, command) => {
+    const worktree = join(h.dir, `wt-${wpId.toLowerCase()}`), path = join(worktree, '.claude', 'settings.local.json');
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command }] }] } }, null, 2));
+    h.state.wps.push({ id: wpId, state, queue: [], lane: { backend: 't3', worktree } });
+    return { path, before: readFileSync(path, 'utf8') };
+  };
+  const stale = lane('WP-02', 'dispatched', hookCommand(twoBack));
+  // The run dir spelled natively (backslashes on Windows) is still this run.
+  const native = lane('WP-06', 'dispatched', hookCommand(twoBack, h.dir, 'WP-06'));
+  const current = lane('WP-03', 'dispatched', hookCommand(h.pluginRoot, fwd(h.dir), 'WP-03'));
+  const foreign = lane('WP-04', 'dispatched', hookCommand(h.oldRoot, fwd(otherRun), 'WP-04'));
+  const merged = lane('WP-05', 'merged', hookCommand(twoBack, fwd(h.dir), 'WP-05'));
+  writeFileSync(h.path, JSON.stringify(h.state));
+  const out = await runConduct(['upgrade-root', '--run', h.dir, '--why', 'pick up 1.28.5'], h.deps);
+  assert.equal(out.code, 0, out.stderr);
+  const result = JSON.parse(out.stdout);
+  assert.deepEqual([result.hooksRewritten, result.hooksFailed], [[stale.path, native.path], undefined]);
+  const command = (lane) => JSON.parse(readFileSync(lane.path, 'utf8')).hooks.Stop[0].hooks[0].command;
+  assert.equal(command(stale), hookCommand(h.pluginRoot));
+  assert.equal(command(native), hookCommand(h.pluginRoot, h.dir, 'WP-06'));
+  for (const untouched of [current, foreign, merged]) assert.equal(readFileSync(untouched.path, 'utf8'), untouched.before);
+});
+
 test('ci-checks records an explicit exact-head policy and rejects stale heads', async (t) => {
   const h = fixture(t);
   h.state.pluginRoot = h.pluginRoot;
