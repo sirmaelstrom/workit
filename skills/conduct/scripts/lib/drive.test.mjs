@@ -91,6 +91,8 @@ test('drive: every conductor-owned kind is a stop, with nothing run and the acti
     [{ kind: 'author', step: 'ruling', part: 'ask', outPath: '/x/rulings/wp-01-1.json', ruling: {} }, 'needs-conductor'],
     [{ kind: 'author', step: 'grant', outPath: '/x/touches/1-grant.json' }, 'needs-conductor'],
     [{ kind: 'wait', step: 'touch', part: 'announce', yield: true, waitMs: 0, instruction: 'Stop and show the operator …' }, 'needs-conductor'],
+    // A wake wait: the conductor ends its turn and is woken by a lane's send or a heartbeat.
+    [{ kind: 'wait', step: 'wait', wake: true, waitMs: 60000, instruction: 'End your turn; a lane or the heartbeat wakes you.' }, 'needs-conductor'],
     [TOOL, 'needs-conductor'],
   ];
   for (const [spec, why] of cases) {

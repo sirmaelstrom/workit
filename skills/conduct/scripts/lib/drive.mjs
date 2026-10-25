@@ -45,8 +45,9 @@ export function stopReason(action) {
   if (!action || action.kind === 'done') return 'done';
   if (action.handBack) return 'hand-back';
   if (action.kind === 'shell') return Array.isArray(action.command) && action.command.length ? null : 'malformed-shell';
-  // An announce wait tells the conductor to stop and show the operator a touch.
-  if (action.kind === 'wait') return action.part === 'announce' ? 'needs-conductor' : null;
+  // An announce wait tells the conductor to stop and show the operator a
+  // touch; a wake wait, to end its turn until a lane's send or a heartbeat.
+  if (action.kind === 'wait') return action.part === 'announce' || action.wake === true ? 'needs-conductor' : null;
   if (mechanicalAuthor(action)) return null;
   return 'needs-conductor';
 }
