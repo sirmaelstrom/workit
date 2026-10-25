@@ -167,11 +167,11 @@ test('no-edit unchecked retry accepts identical snapshots and non-WP evidence', 
   assert.deepEqual(report.fix_check, { checked: 1, failed: 1, unchecked: 0 });
 }));
 
-test('skill states wave-eight unchecked exception, no-edit snapshots, and skipped-review output', () => {
+test('skill states the wave-three unchecked exception, no-edit snapshots, and skipped-review output', () => {
   const text = readFileSync(skill, 'utf8');
-  assert.match(text, /8 waves completed.*unless.*unchecked/i);
+  assert.match(text, /3 waves completed.*unless.*unchecked/i);
   assert.match(text, /no-edit.*before.*after.*snapshot/is);
-  assert.match(text, /unchecked.*wave 8.*do not run Phase 9/is);
+  assert.match(text, /unchecked.*wave 3.*do not run Phase 9/is);
   assert.match(text, /Final fix check:.*not run/i);
   assert.match(text, /two renames.*not atomic.*recover/is);
 });

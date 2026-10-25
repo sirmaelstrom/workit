@@ -411,6 +411,16 @@ function checkShellResult(action, result) {
   }
 }
 
+// A tool's raw result is never `{}` or null: those mean the result was never
+// captured (a result-file write that failed beside its record). Refused, so
+// the action stays pending and is recorded again. A text result (ledger_write
+// answers "Event written …") is a real result and passes.
+function checkToolResult(action, result) {
+  if (result === null || (typeof result === 'object' && !Array.isArray(result) && !Object.keys(result).length)) {
+    throw new ConductError(2, `a tool result is ${action.tool}'s raw JSON object, not ${JSON.stringify(result)} (action ${action.id}): the result was not captured. Nothing was recorded; record the tool's raw result again`);
+  }
+}
+
 // `record --replan <file>`: the re-plan is filed after the record and before
 // anything is emitted, so a WP's final result can drop the WP its record would
 // otherwise dispatch (quest 4e7311a7). The plan's shape, the build phase and
@@ -490,6 +500,7 @@ async function record(tokens, deps) {
     if (!action || action.id !== id) throw new ConductError(5, `action ${id} is not the pending action (${action?.id ?? 'none pending'})`);
     const result = readResult(flags, deps);
     if (action.kind === 'shell') checkShellResult(action, result);
+    if (action.kind === 'agent-tool') checkToolResult(action, result);
     // A core touch the operator has not answered yet, or a spine hand-back,
     // stays pending: recording it does not mint a new action. A session ask
     // is recorded: its result is the operator's answer, or that none is here.

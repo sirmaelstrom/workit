@@ -34,7 +34,7 @@ import { gateFailureKind } from '../gate-env.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
   priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions,
-  t2Actions, threadReplyActions, tierDecision, visualReadProblem,
+  inspectionProblem, t2Actions, threadReplyActions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
   QUESTION_MAX, TOUCH_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, spineAckStop, touchAction, touchParked, writeTouchFiles,
@@ -2351,6 +2351,12 @@ export function record(state, action, result = {}, deps) {
   if (action.kind === 'inspect' && action.part === 'visual') {
     const problem = visualReadProblem(action, result, deps.exists);
     if (problem) throw new ConductError(2, `visual read of ${wp.id}: ${problem}`);
+  }
+  // So is an inspection that names another tail or head: it is the conductor's
+  // recording error (run 400c3ec7 lost 102 min to one), not the WP's block.
+  if (action.kind === 'inspect' && action.part === 'inspect') {
+    const problem = inspectionProblem(action, result);
+    if (problem) throw new ConductError(2, `inspection of ${wp.id}: ${problem}. Nothing was recorded; record the inspection again`);
   }
   const before = wp.state;
   const out = recordStep(state, wp, action, result, deps);

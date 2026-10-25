@@ -58,7 +58,7 @@ For deep specs, parse the `--review` flag. If not specified, auto-select:
 
 | Flag | Behavior | Auto-select when |
 |------|----------|-----------------|
-| `--review=full` | Fresh-eyes loop → council → final wave (default) | ≥3 WPs or multi-project |
+| `--review=full` | Fresh-eyes loop (2–3 waves) → council → amendment check (default) | ≥3 WPs or multi-project |
 | `--review=light` | Self-review only, skip refinement loop | ≤2 WPs, single project, additive-only |
 | `--review=none` | Decompose and stop (no review waves) | User explicitly wants manual review later |
 
@@ -96,7 +96,7 @@ With a verified `--preapproved`:
 - **`--review=none`:** crosses Phase 4 and Present for Review the same way, records the same `gate`, and skips only the `review-gate.json` emission, as it already does without the flag.
 - **Council unavailable:** the Phase 8 and lite council branches continue on the self-review floor and record `"council": "unavailable"` in `meta.json`; they do not stop.
 - **No sub-agent for the fresh-eyes reviewer:** Phase 7a continues on the self-review floor and records `"fresh-eyes": "unavailable"` in `meta.json`; it does not stop.
-- The flag skips no review wave: the fresh-eyes loop, the council and the final wave still run at whatever `--review` level applies. It only answers the gate that waits for a person.
+- The flag skips no review wave: the fresh-eyes loop, the council and the amendment check still run at whatever `--review` level applies. It only answers the gate that waits for a person.
 - `[ASSUMPTION: …]` flags no longer reach a person at the gate. List every one on the `**Assumptions:**` line of the final output (Phase 9 / lite Final Output).
 
 Without these flags, every gate and stop in this skill is unchanged.
@@ -399,7 +399,7 @@ Launch a **separate Sonnet sub-agent** with that assembled prompt (`model: sonne
 node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" complete --findings "{workshop_path}/reviews/refinement-wave-{N}-fixed.json" --verdict "{workshop_path}/reviews/refinement-wave-{N}-fix-check-verdict.json" --after "{workshop_path}/reviews/refinement-wave-{N}-after" --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json" --next-dispositions "{workshop_path}/reviews/refinement-wave-{N+1}-dispositions.json"
 ```
 
-The script requires one `held | failed | partial` verdict per fixed finding and checks each quoted line against the post-fix spec. Quote validation proves the line exists at the stated path and number; Sonnet judges its relevance. A changed line is not required. `failed` and `partial` both count as failed checks. The script writes them as `reopened` entries in **the next wave's** `reviews/refinement-wave-{N+1}-dispositions.json`, with the original id, check status, reason, and evidence. A repeat `complete` reconciles this wave's checker-owned entries by id: a corrected `held` verdict removes its old reopening, and unrelated entries remain. If an existing checker-owned entry was edited by downstream work, the retry fails with a conflict; resolve that edit explicitly before retrying. At that wave, add new fresh-eyes findings and resolve reopened entries explicitly, even if the fresh-eyes reviewer does not repeat them. A `held` finding stays closed. A failed or partial check requires another wave unless the eight-wave force-convergence limit applies; report any still-open finding at that limit. If no fixes were claimed, skip Sonnet and run `node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" empty --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json"` so a subsequent wave records `checked: 0, failed: 0, unchecked: 0`.
+The script requires one `held | failed | partial` verdict per fixed finding and checks each quoted line against the post-fix spec. Quote validation proves the line exists at the stated path and number; Sonnet judges its relevance. A changed line is not required. `failed` and `partial` both count as failed checks. The script writes them as `reopened` entries in **the next wave's** `reviews/refinement-wave-{N+1}-dispositions.json`, with the original id, check status, reason, and evidence. A repeat `complete` reconciles this wave's checker-owned entries by id: a corrected `held` verdict removes its old reopening, and unrelated entries remain. If an existing checker-owned entry was edited by downstream work, the retry fails with a conflict; resolve that edit explicitly before retrying. At that wave, add new fresh-eyes findings and resolve reopened entries explicitly, even if the fresh-eyes reviewer does not repeat them. A `held` finding stays closed. A failed or partial check requires another wave unless the three-wave force-convergence limit applies; report any still-open finding at that limit. If no fixes were claimed, skip Sonnet and run `node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" empty --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json"` so a subsequent wave records `checked: 0, failed: 0, unchecked: 0`.
 
 The report and next-wave dispositions are staged before replacement, but their two renames are not atomic together. After an I/O interruption, compare the report's `next_dispositions` with the next-wave file before using either. If they differ, stop; recover by restoring the prior checker-owned entries from the report while preserving downstream entries, resolve any conflicts, then rerun `complete` or `unchecked` with the saved inputs. Do not use mismatched artifacts for convergence.
 
@@ -409,21 +409,21 @@ If Sonnet is unavailable, its JSON is invalid, or `complete` rejects the verdict
 node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" unchecked --findings "{workshop_path}/reviews/refinement-wave-{N}-fixed.json" --wave {N} --output "{workshop_path}/reviews/refinement-wave-{N}-fix-check.json" --next-dispositions "{workshop_path}/reviews/refinement-wave-{N+1}-dispositions.json"
 ```
 
-This records `fix_check: { checked: 0, failed: 0, unchecked: {fixed_count} }` and reopens every finding in the next wave's dispositions. At the next wave, include each unchecked finding in the `fixed` export under its original id and claimed fix even if no further edit was needed; the checker must return an actual verdict before it can close. An unchecked wave cannot count toward convergence. Run another wave even if fresh-eyes was clean. If unchecked remains at wave 8, stop with an incomplete spec and report the unchecked findings and final check counts; do not run Phase 9 or proceed to council. Missing evidence never becomes `held`.
+This records `fix_check: { checked: 0, failed: 0, unchecked: {fixed_count} }` and reopens every finding in the next wave's dispositions. At the next wave, include each unchecked finding in the `fixed` export under its original id and claimed fix even if no further edit was needed; the checker must return an actual verdict before it can close. An unchecked wave cannot count toward convergence. Run another wave even if fresh-eyes was clean. If unchecked remains at wave 3, stop with an incomplete spec and report the unchecked findings and final check counts; do not run Phase 9 or proceed to council. Missing evidence never becomes `held`.
 
 #### 7d. Convergence Check
 
-After fixing, decide whether to run another wave. A failed or partial fix check takes precedence over a clean/P3-only fresh-eyes verdict. An unchecked check prevents convergence even at wave 8; otherwise the eight-wave limit still force-converges:
+After fixing, decide whether to run another wave. Waves 1 and 2 always run; a third runs only when wave 2 returned a P1 or its fix check failed. The fix check, not another full wave, is what verifies P2 fixes. An unchecked check prevents convergence even at wave 3; otherwise the three-wave limit force-converges:
 
 | Condition | Action |
 |-----------|--------|
-| Wave returned P1s | Fix and run another wave (mandatory) |
-| Wave returned P2s only, fixes applied | Run one more wave to verify fixes |
-| Fix check returned `failed` or `partial` | Reopen each in the next wave's dispositions and run another wave |
-| Fix check is `unchecked` | Reopen every unchecked finding and run another wave; at wave 8 stop incomplete |
+| Wave 1 done | Fix and run wave 2 |
+| Wave 2 returned P1s | Fix and run wave 3 |
+| Wave 2 fix check returned `failed` or `partial` | Reopen each in wave 3's dispositions and run wave 3 |
+| Wave 2 returned P2s only, fix check `held` | **Converged**: the fix check verified the fixes; proceed to council |
+| Fix check is `unchecked` | Reopen every unchecked finding and run another wave; at wave 3 stop incomplete |
 | Wave returned P3s only or was clean | **Converged** — proceed to council |
-| 8 waves completed | **Force converge** and proceed to council unless `fix_check.unchecked > 0`; then stop incomplete and report the unchecked findings |
-
+| 3 waves completed | **Force converge** and proceed to council unless `fix_check.unchecked > 0`; then stop incomplete and report the unchecked findings. Name any P1 or P2 still open in the Phase 9 report |
 Track across waves: if wave N finds the same P2 that wave N-1 found and it was already evaluated and kept, that's not a new finding — it's convergence noise. Suppress it.
 
 #### 7e. Report Progress
@@ -478,16 +478,25 @@ You (the orchestrator, running as opus) are the council's synthesizer — read *
 
 Count amendments applied.
 
-#### 8c. Final Validation Wave
+#### 8c. Amendment Check
 
-Run one more Opus fresh-eyes wave (same prompt and model as 7a) to verify the council amendments didn't introduce new issues. This is the final quality gate.
+Check the council's amendments with the fix check, not a full fresh-eyes wave. The amendments are the only new text since the converged wave, so this reads what a full wave would read for them.
+
+1. Before applying the amendments in 8b, copy the spec artifacts to `{workshop_path}/reviews/council-amendments-before/`; after applying them, to `council-amendments-after/` (as in 7b).
+2. Export each applied amendment as a fixed finding (`{ "id": "C-<n>", "finding": "<the council finding>", "claimed_fix": "<what changed>" }`) to `{workshop_path}/reviews/council-amendments-fixed.json`.
+3. With `{W}` the converged wave plus one, run:
+   ```bash
+   node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" prepare --findings "{workshop_path}/reviews/council-amendments-fixed.json" --before "{workshop_path}/reviews/council-amendments-before" --after "{workshop_path}/reviews/council-amendments-after" --output "{workshop_path}/reviews/council-amendments-fix-check-prompt.md"
+   ```
+   Append one question to that prompt: whether any amendment contradicts another WP or a ruled decision, quoting both lines. Dispatch it to the Sonnet checker as in 7b, save its verdict to `{workshop_path}/reviews/council-amendments-fix-check-verdict.json`, then run `complete` with the same `--findings`, `--verdict` that file, `--after` the after directory, `--wave {W}`, `--output "{workshop_path}/reviews/council-amendments-fix-check.json"` and `--next-dispositions "{workshop_path}/reviews/council-amendments-reopened.json"`.
+4. A `failed` or `partial` amendment, or a contradiction the checker quotes, is fixed once and checked again the same way (new before/after directories, `--wave {W}+1`). If any amendment is still not `held` after that, or the checker is unavailable, the spec is **incomplete**: report the open amendment ids and stop before Phase 9's "ready" line, exactly as an unchecked refinement wave does.
 
 Then run the validator bundled with this skill (what it checks and how to read its report: `${CLAUDE_SKILL_DIR}/reference/validate.md`):
 ```bash
 node "${CLAUDE_SKILL_DIR}/scripts/validate.mjs" "{workshop_path}"
 ```
 
-Report: validation result (errors/warnings/passes) + final wave verdict.
+Report: validation result (errors/warnings/passes) + the amendment check's held / failed counts.
 
 ### Phase 9: Final Output
 
@@ -504,6 +513,7 @@ Present the completed spec summary:
 **Stack attack:** {with `--greenfield` only: D1's `Stack attack:` line, and `Spikes:` when they ran}
 **Review:** {review_level} — {N} fresh-eyes waves, {N} council lenses, {N} amendments applied
 **Final fix check:** {last wave's checked / failed / unchecked counts, including the terminal wave's check; `not run` for light or none}
+**Amendment check:** {the council amendments' held / failed / unchecked counts, from `reviews/council-amendments-fix-check.json`, and any amendment id still open; `not run` without a council}
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 **Cost:** {total $ and tokens, from cost-report}
 

@@ -138,8 +138,11 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
      a record; that boundary belongs to quest 11c2d46a.
      With fewer than two, the T1 cap stands.
    - **T2 — full council.** Fired when the change **touches a contract or an
-     invariant**, **adds tests that claim to prove something**, or changes a
-     hook, guard, or parser that intercepts or gates agent actions. This includes
+     invariant other code or stored data depends on** (an API, a schema, a
+     save or replay format, a wire protocol, determinism), or changes a
+     hook, guard, or parser that intercepts or gates agent actions. A product
+     behavior pinned by the change's own tests is T1, and so is a new test:
+     the slim lenses report a test that cannot fail on its claim. This includes
      PreToolUse, PostToolUse, and permission hooks, deny/allow logic, and shell
      or command classifiers. Size does not matter. T1 asks
      whether the diff is correct; T2 asks whether it was *permitted* — the
