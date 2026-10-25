@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DEBRIEF_HEADINGS, EXIT_CODES, capacityBanner, claudeBackgroundWork, delegateListedPaths, FOLDER_TRUST_PATTERNS, PLAN_REFUSAL_PATTERNS, claudeTuiReady, codexPromptDelivery, folderTrustDialog, codexTuiLoading, codexTuiReady, paneAtPrompt, paneErrorLine, panePromptSignature,
-  USAGE_TEXT, briefPaths, mergeDanger, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath, normalizeAgentArgs,
+  USAGE_TEXT, briefPaths, forkBase, mergeDanger, reportShapeProblems, reportEvidenceProblems, runLane, scrapePlanMeter, findCodexRollout, codexTurnState, herdrAgentName, commandNamesPath, normalizeAgentArgs,
   HERDR_API_DEAD, herdrServerPids, herdrSessionOf,
 } from './lane.mjs';
 // Importing the smoke harness must run nothing: its live path is behind both
@@ -212,6 +212,10 @@ const DEBRIEF_NONE = [
 // A PR body also carries `## Merge danger` (lane contract § Finish; fca05d92).
 const MERGE_DANGER = ['## Merge danger', '', 'Door: two-way', 'Blast radius: the lane fixture', ''].join('\n');
 const PR_BODY = `${DEBRIEF_NONE}\n${MERGE_DANGER}`;
+// `lane check`'s first git call, for --expect-commit and --expect-report, asks
+// where the lane left origin/HEAD (b118b800). This answer has no origin, so the
+// check keeps the recorded base.
+const NO_ORIGIN = { code: 128, stdout: '', stderr: 'fatal: Not a valid object name origin/HEAD' };
 
 test('WP-1: dontAsk is refused before herdr is invoked', async (t) => {
   const f = fixture(t);
@@ -1526,7 +1530,7 @@ test('WP-3 / S7: fallback reuses the same pane and prompt path and records the c
   assert.equal(persisted.branch, 'feat/lane-a');
   assert.equal(persisted.base, 'main');
   assert.equal(persisted.path, f.dir);
-  f.responses.push({ code: 0, stdout: '2\n', stderr: '' });
+  f.responses.push(NO_ORIGIN, { code: 0, stdout: '2\n', stderr: '' });
   const verdict = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], { exec: f.exec });
   assert.equal(verdict.exit, 0, 'lane check must still resolve after a channel switch');
 });
@@ -2497,7 +2501,7 @@ test('A2-1c / U2: the herdr worktree root IS a lane root and sweeps unfiltered',
 test('A2-2 / C1: a git failure in --expect-commit is exit 1, never a timeout', async (t) => {
   const f = fixture(t);
   seedLane(f);
-  f.responses.push({ code: 128, stdout: '', stderr: 'fatal: bad revision main..feat/lane-a' });
+  f.responses.push(NO_ORIGIN, { code: 128, stdout: '', stderr: 'fatal: bad revision main..feat/lane-a' });
   const result = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], { exec: f.exec });
   assert.equal(result.exit, 1, 'a conductor that trusts the table re-polls a 4 forever');
   assert.match(result.output.error, /bad revision/);
@@ -4423,9 +4427,14 @@ test('207dbaf1 / C3: --expect-report exits 5 naming a missing Debrief heading; N
   const green = await runLane(['check', 'lane-a', '--expect-report', clean, '--log', f.log], { exec: f.exec });
   assert.equal(green.exit, 0, JSON.stringify(green.output));
   assert.deepEqual(green.output.evidence.problems, []);
-  // The only call is the lane's diff from its base, for the evidence checks (e4ad108b).
-  // Three dots: a base ref that moved on after the lane started adds nothing (council round 1).
-  assert.deepEqual(f.calls.map((call) => [call.program, ...call.args]), Array(2).fill(['git', '-C', f.dir, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', 'main...feat/lane-a']));
+  // The only calls are the fork point from origin/HEAD (b118b800; unanswered
+  // here, so the recorded base) and the lane's diff from it, for the evidence
+  // checks (e4ad108b). Three dots: a base ref that moved on after the lane
+  // started adds nothing (council round 1).
+  assert.deepEqual(f.calls.map((call) => [call.program, ...call.args]), Array(2).fill([
+    ['git', '-C', f.dir, 'merge-base', 'feat/lane-a', 'origin/HEAD'],
+    ['git', '-C', f.dir, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', '--full-index', '--no-renames', 'main...feat/lane-a'],
+  ]).flat());
   assert.equal(green.output.evidence.diffChecks, 'ran');
 
   // The diff checks' other branches (council round 1): no base on the record skips them and says so;
@@ -4442,7 +4451,7 @@ test('207dbaf1 / C3: --expect-report exits 5 naming a missing Debrief heading; N
   assert.match(gone.output.error, /worktree path does not exist/);
   const broken = fixture(t);
   seedLane(broken);
-  broken.responses.push({ code: 128, stdout: '', stderr: 'fatal: bad revision main...feat/lane-a' });
+  broken.responses.push(NO_ORIGIN, { code: 128, stdout: '', stderr: 'fatal: bad revision main...feat/lane-a' });
   const failed = await runLane(['check', 'lane-a', '--expect-report', reportFile(broken, DEBRIEF_NONE), '--log', broken.log], { exec: broken.exec });
   assert.equal(failed.exit, 1);
   assert.match(failed.output.error, /git diff for the report's evidence checks failed: fatal: bad revision/);
@@ -4665,6 +4674,72 @@ test('e4ad108b council round 1: test declarations, comment syntax, diff headers 
   assert.equal(shot('`lane-wp-03-links.png`').length, 1, "another lane's file");
   assert.equal(shot('`lane-wp-02-.png`').length, 1, 'no claim');
   assert.deepEqual(shot([FENCE, 'saved e2e/artifacts/run.png', FENCE].join('\n')), [], 'runner output is not a citation');
+});
+
+// b118b800: a lane rebased onto an origin/main that moved past its recorded
+// base. Its own commits and diff start where it left origin/HEAD, measured at
+// check time, so main's new tests are not the lane's and main's commits do not
+// count as the lane's work.
+function selfRebasedLane(t, { ownTest = true } = {}) {
+  const f = fixture(t);
+  const git = (...args) => {
+    const r = spawnSync('git', ['-C', f.dir, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  git('init', '-q', '-b', 'main');
+  for (const [key, value] of [['user.name', 't'], ['user.email', 't@t'], ['core.autocrlf', 'false']]) git('config', key, value);
+  const commit = (file, text) => {
+    writeFileSync(join(f.dir, file), text);
+    git('add', file);
+    git('commit', '-q', '-m', file);
+    return git('rev-parse', 'HEAD');
+  };
+  const base = commit('base.txt', 'base\n');
+  git('switch', '-q', '-c', 'feat/lane-a');
+  if (ownTest) commit('own.test.mjs', "test('the lane\\'s own new test', () => {});\n");
+  git('switch', '-q', 'main');
+  commit('drive.test.mjs', "test('main\\'s drive test', () => {});\n");
+  git('update-ref', 'refs/remotes/origin/main', 'main');
+  git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+  git('rebase', '-q', 'origin/main', 'feat/lane-a');
+  seedLane(f, { base });
+  const exec = (program, args) => {
+    const r = spawnSync(program, args, { encoding: 'utf8' });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+  return { f, exec };
+}
+
+test('b118b800: --expect-report after the lane rebased onto a moved origin/main names only the branch\'s own new tests', async (t) => {
+  const { f, exec } = selfRebasedLane(t);
+  const result = await runLane(['check', 'lane-a', '--expect-report', reportFile(f, DEBRIEF_NONE), '--log', f.log], { exec });
+  assert.equal(result.exit, 5, JSON.stringify(result.output));
+  const rule7 = result.output.evidence.problems.filter((problem) => /rule 7/.test(problem));
+  assert.equal(rule7.length, 1, result.output.evidence.problems.join('; '));
+  assert.match(rule7[0], /^1 new test\(s\) named in no Negative controls run .*own\.test\.mjs:1 "the lane's own new test"$/);
+  assert.doesNotMatch(rule7[0], /drive\.test/);
+});
+
+test('b118b800: --expect-commit after a rebase that brought in only main\'s commits is not ahead', async (t) => {
+  const { f, exec } = selfRebasedLane(t, { ownTest: false });
+  const result = await runLane(['check', 'lane-a', '--expect-commit', '--log', f.log], { exec });
+  assert.deepEqual([result.exit, result.output.evidence.commitsAhead], [5, 0], JSON.stringify(result.output));
+});
+
+test('b118b800: forkBase is the merge-base with the upstream, the recorded base when it is at or past that point or git cannot answer', () => {
+  const point = 'a'.repeat(40);
+  const ok = (stdout) => ({ code: 0, stdout, stderr: '' });
+  const answers = (table) => (args) => table[args.join(' ')] ?? { code: 128, stdout: '', stderr: 'unexpected' };
+  // Rebased past the recorded base: the fork point.
+  assert.equal(forkBase(answers({ 'merge-base HEAD origin/main': ok(`${point}\n`), [`merge-base --is-ancestor ${point} old`]: { code: 1, stdout: '' } }), { recorded: 'old', upstream: 'origin/main' }), point);
+  // A recorded base past the fork point (another branch's base, or an origin ref not fetched since): kept.
+  assert.equal(forkBase(answers({ 'merge-base HEAD origin/main': ok(`${point}\n`), [`merge-base --is-ancestor ${point} stacked`]: ok('') }), { recorded: 'stacked', upstream: 'origin/main' }), 'stacked');
+  // No remote ref, or an answer that is not a sha: the recorded base.
+  assert.equal(forkBase(answers({}), { recorded: 'old', upstream: 'origin/main' }), 'old');
+  assert.equal(forkBase(answers({ 'merge-base HEAD origin/main': ok('{"result":{}}') }), { recorded: 'old', upstream: 'origin/main' }), 'old');
+  // No recorded base: the fork point.
+  assert.equal(forkBase(answers({ 'merge-base HEAD origin/main': ok(`${point}\n`) }), { recorded: null, upstream: 'origin/main' }), point);
 });
 
 test('207dbaf1: --expect-report refuses a missing Debrief, an empty body, and a missing file', async (t) => {
