@@ -925,6 +925,29 @@ test('t3 resume adoption with T3 lanes live: next --resume --as-thread <new> ado
   assert.equal(other.code, 5, other.stdout);
 });
 
+test('t3 resume adoption twice: C2 adopts and loses its heartbeat\'s result; C3\'s adoption regenerates the heartbeat with its own request id, and a result bound to C2 is refused: C3 stays current, C2\'s schedule is queued for deletion (workit#313 review r3, finding 1)', async (t) => {
+  const { h } = await wakeYieldPending(t);
+  const s = loadState(h.runDir, h.deps);
+  for (const wp of s.wps.filter((candidate) => ['WP-02', 'WP-03'].includes(candidate.id))) wp.lane.backend = 't3';
+  s.t3Wake = { taskId: null, thread: null, conductor: 1, failed: 'schedule_task: {"error":"T3 unreachable"}', old: [] };
+  saveState(s, h.deps);
+  const c2 = (await conduct(h, ['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-2'])).action;
+  assert.equal(c2.args.clientRequestId, 'abcd1234-heartbeat-r1-a1');
+  // C2 called schedule_task and lost the response: nothing is recorded. C3 adopts.
+  const c3 = (await conduct(h, ['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-3'])).action;
+  assert.deepEqual([c3.part, c3.tool, c3.args.clientRequestId], ['heartbeat', 'schedule_task', 'abcd1234-heartbeat-r1-a2']);
+  const queued = loadState(h.runDir, h.deps).wps.flatMap((wp) => (wp.queue ?? []).filter((act) => act.part === 'heartbeat').map((act) => act.args.clientRequestId));
+  assert.deepEqual(queued, ['abcd1234-heartbeat-r1-a2'], 'C2\'s queued heartbeat is dropped');
+  // T3 hands back C2's schedule anyway: it does not make C2 the conductor.
+  const stray = JSON.stringify({ scheduledTaskId: 'task-a1', boundThreadId: 'mcp:conductor-2' });
+  const stop = (await conduct(h, ['record', '--run', h.runDir, '--action', c3.id, '--as-thread', 'mcp:conductor-3', '--result', stray])).action;
+  assert.deepEqual([stop.part, stop.tool, stop.args], ['heartbeat-stop', 'delete_scheduled_task', { scheduledTaskId: 'task-a1' }]);
+  const state = loadState(h.runDir, h.deps);
+  assert.deepEqual([state.t3Wake.taskId, state.t3Wake.thread], [null, 'mcp:conductor-3']);
+  assert.deepEqual(h.events().filter((event) => event.event === 'heartbeat-misbound').map((event) => event.data), [{ taskId: 'task-a1', boundThreadId: 'mcp:conductor-2', expected: 'mcp:conductor-3' }]);
+  assert.equal((await runConduct(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-3'], h.overrides())).code, 0, 'C3 stays current');
+});
+
 test('t3 heartbeat cleanup: a heartbeat still undeleted after 3 attempts is named in the run analysis\'s audit as unresolved cleanup, with the call that deletes it (workit#313 review r1, finding 3)', async (t) => {
   const { h } = await wakeYieldPending(t);
   const s = loadState(h.runDir, h.deps);

@@ -892,13 +892,16 @@ export function adoptConductorThread(state, asThread, deps) {
 }
 
 // A heartbeat made by the adopting conductor, queued on a live T3 lane (after
-// its pending action, if any), unless one is queued already. Returns whether one is.
+// its pending action, if any). A heartbeat create queued or pending from an
+// earlier adoption goes: its request id would have T3 hand that adopter's
+// schedule back. Returns whether one is queued.
 function queueHeartbeat(state, deps) {
   if (state.phase !== 'build') return false;
   const lanes = state.wps.filter((wp) => wp.lane?.backend === 't3' && (LIVE_STATES.includes(wp.state) || laneOccupied(wp)) && wp.queue?.length);
   if (!lanes.length) return false;
   releaseWakeYield(state, deps, { data: { why: 'conductor-adopted' } });
-  if (state.wps.some((wp) => (wp.queue ?? []).some((act) => act.part === 'heartbeat'))) return true;
+  if (state.pending?.part === 'heartbeat') state.pending = null;
+  for (const wp of state.wps) if (wp.queue?.length) wp.queue = wp.queue.filter((act) => act.part !== 'heartbeat');
   const acts = heartbeatActs(state, 'wait');
   if (!acts.length) return false;
   const [wp] = lanes;
@@ -946,8 +949,9 @@ export function heartbeatArgs(state, n) {
 
 // A heartbeat made by conductor r<n> at custody: it replaces whatever the run
 // held. Returns the task ids now owed a delete: the replaced one, and a new
-// one bound to no thread (it would start a fresh thread every tick).
-export function adoptHeartbeat(state, n, result, at) {
+// one bound to no thread (it would start a fresh thread every tick), and one
+// bound to a thread other than custody's (`expected`, rotation.thread).
+export function adoptHeartbeat(state, n, result, at, expected = null) {
   const wake = state.t3Wake ?? {};
   const old = [...(wake.old ?? [])];
   const stops = [];
@@ -962,10 +966,25 @@ export function adoptHeartbeat(state, n, result, at) {
     old.push({ taskId: made });
     stops.push(made);
     state.t3Wake = { taskId: null, thread: null, conductor: n, failed: `schedule_task bound no thread: ${t3Said(result)}`, old };
+  } else if (expected && result.boundThreadId !== expected) {
+    old.push({ taskId: made, thread: result.boundThreadId, conductor: n });
+    stops.push(made);
+    state.t3Wake = { taskId: null, thread: expected, conductor: n, failed: `schedule_task bound ${result.boundThreadId}, not ${expected}`, old };
   } else {
     state.t3Wake = { taskId: made, thread: result.boundThreadId, conductor: n, at, failed: null, deleted: false, old };
   }
   return stops;
+}
+
+// A heartbeat bound to the wrong thread: owed a delete, logged, and the wake
+// marked failed (a retry with the same request id would get it back). The
+// run's conductor thread stays the expected one. Returns the delete's reason.
+function misboundHeartbeat(state, deps, { taskId, boundThreadId, expected, conductor }, event = {}) {
+  const wake = state.t3Wake ?? {};
+  state.t3Wake = { ...wake, taskId: null, thread: expected, conductor, failed: `schedule_task bound ${boundThreadId}, not ${expected}`,
+    old: [...(wake.old ?? []), { taskId, thread: boundThreadId, conductor }] };
+  appendEvent(state, deps, { step: 'wait', kind: 'agent-tool', ...event, event: 'heartbeat-misbound', source: 'record', data: { taskId, boundThreadId, expected } });
+  return `it is bound to ${boundThreadId}, not the conductor thread ${expected}`;
 }
 
 // A heartbeat's record. It never blocks the WP: a failure leaves the lanes polling.
@@ -994,6 +1013,14 @@ function recordHeartbeat(state, wp, action, result, deps) {
   if (typeof result.boundThreadId !== 'string' || !result.boundThreadId) {
     state.t3Wake = { ...wake, taskId: null, thread: null, conductor, failed: `schedule_task bound no thread: ${t3Said(result)}`, old: [...old, { taskId: result.scheduledTaskId }] };
     return proceed({ queue: [remove(result.scheduledTaskId, 'it is bound to no thread'), ...rest] }, 'no heartbeat: the T3 lanes poll');
+  }
+  // A heartbeat bound to a thread other than the one that adopted the run
+  // (T3 handed back an earlier adopter's schedule) never makes that thread the
+  // conductor: it goes, and the lanes poll.
+  const expected = wake && !wake.taskId && !wake.failed && wake.thread && wake.conductor === conductor ? wake.thread : null;
+  if (expected && result.boundThreadId !== expected) {
+    const misbound = misboundHeartbeat(state, deps, { taskId: result.scheduledTaskId, boundThreadId: result.boundThreadId, expected, conductor }, { actionId: action.id, step: action.step });
+    return proceed({ queue: [remove(result.scheduledTaskId, misbound), ...rest] }, 'no heartbeat: the T3 lanes poll');
   }
   // A second task beside the live one (a request T3 did not dedupe): it goes.
   if (t3WakeLive(state) && wake.taskId !== result.scheduledTaskId) {

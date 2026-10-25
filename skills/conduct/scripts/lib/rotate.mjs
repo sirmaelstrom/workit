@@ -340,8 +340,11 @@ export function recordCustody(state, rotation, action, result, deps) {
     appendEvent(state, deps, { actionId: action.id, step: 'custody', event: failure ? 'custody-receipt-failed' : 'custody-receipt', data: { attempt: rotation.attempt, ...(failure ? { failure } : { receipt: result.id }) } });
   } else if (action.part === 'heartbeat') {
     // A heartbeat that fails never blocks custody: the lanes poll.
-    rotation.heartbeatStops = adoptHeartbeat(state, rotation.to, result, deps.timestamp());
+    rotation.heartbeatStops = adoptHeartbeat(state, rotation.to, result, deps.timestamp(), rotation.thread ?? null);
     rotation.heartbeat = state.t3Wake.failed ? 'failed' : 'made';
+    if (rotation.thread && state.t3Wake.thread === rotation.thread && state.t3Wake.failed) {
+      appendEvent(state, deps, { actionId: action.id, step: 'custody', kind: 'custody', event: 'heartbeat-misbound', source: 'record', data: { taskId: result.scheduledTaskId, boundThreadId: result.boundThreadId, expected: rotation.thread } });
+    }
     appendEvent(state, deps, { actionId: action.id, step: 'custody', event: 'custody-heartbeat', data: { attempt: rotation.attempt, outcome: rotation.heartbeat, taskId: state.t3Wake.taskId, thread: state.t3Wake.thread, stops: rotation.heartbeatStops } });
   } else if (action.part === 'heartbeat-stop') {
     // A failed delete stays owed on the run (lanes.mjs heartbeatsToDelete).

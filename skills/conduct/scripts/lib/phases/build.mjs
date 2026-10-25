@@ -2381,7 +2381,7 @@ export function record(state, action, result = {}, deps) {
 
 function recordStep(state, wp, action, result, deps) {
   if (recordOwn(state, wp, action, result, deps) !== undefined) return undefined;
-  const recorderDeps = { exec: deps.exec, read: deps.read, exists: deps.exists, now: deps.now, platform: deps.platform, env: deps.env, pluginRoot: deps.pluginRoot };
+  const recorderDeps = { exec: deps.exec, read: deps.read, exists: deps.exists, now: deps.now, timestamp: deps.timestamp, platform: deps.platform, env: deps.env, pluginRoot: deps.pluginRoot };
   if (LANE_STEPS.has(action.step)) {
     if (liveness(state, wp, action, result, deps) === 'polling') return undefined;
     return route(state, wp, action, recordLaneStep(state, wp, action, result, recorderDeps), deps);
