@@ -3,12 +3,12 @@
 // a command that exits as the repo's dropper would (0 dropped, 3 occupied).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runCustody, entries, readLedger } from './custody.mjs';
+import { runCustody, entries, readLedger, runArgv } from './custody.mjs';
 
 const node = (code) => JSON.stringify([process.execPath, '-e', code]);
 const exitWith = (n) => node(`process.exit(${n})`);
@@ -93,6 +93,205 @@ test('custody: a clean worktree is removed; a dirty one, one holding an unrecord
   assert.deepEqual(readdirSync(target), ['a.js']);
   assert.equal(state[orphan.worktree].state, 'kept');
   assert.match(state[orphan.worktree].reason, /is on no ref; removing it would orphan the commit/);
+});
+
+// A bare origin seeded with x.txt on main, and a clone of it (origin/HEAD set).
+function originAndClone(dir) {
+  const seed = join(dir, 'seed');
+  mkdirSync(seed);
+  git(seed, 'init', '-q', '-b', 'main');
+  writeFileSync(join(seed, 'x.txt'), 'one\ntwo\nthree\n');
+  git(seed, 'add', '.');
+  git(seed, 'commit', '-q', '-m', 'root');
+  const origin = join(dir, 'origin.git');
+  git(dir, 'clone', '-q', '--bare', seed, origin);
+  return { origin, repo: cloneOf(dir, origin, 'clone') };
+}
+
+function cloneOf(dir, origin, name) {
+  const repo = join(dir, name);
+  git(dir, 'clone', '-q', origin, repo);
+  return repo;
+}
+
+function commit(cwd, file, text, message) {
+  writeFileSync(join(cwd, file), text);
+  git(cwd, 'add', '--', file);
+  git(cwd, 'commit', '-q', '-m', message);
+  return git(cwd, 'rev-parse', 'HEAD').trim();
+}
+
+// Deletes <branch> on origin, locally and as a remote-tracking ref.
+function dropBranch(repo, branch) {
+  git(repo, 'push', '-q', 'origin', '--delete', branch);
+  git(repo, 'branch', '-q', '-D', branch);
+  git(repo, 'update-ref', '-d', `refs/remotes/origin/${branch}`);
+}
+
+const detach = (repo, dir, at, name = 'review') => {
+  const worktree = join(dir, name);
+  git(repo, 'worktree', 'add', '-q', '--detach', worktree, at);
+  return worktree;
+};
+
+// Records the worktree and closes the ledger. No ref holds its HEAD first, so
+// a removal can only come from the merged-head check.
+function closeOrphan(run, repo, worktree) {
+  const head = git(worktree, 'rev-parse', 'HEAD').trim();
+  assert.equal(git(repo, 'for-each-ref', '--contains', head), '', 'the orphan precondition: no ref holds HEAD');
+  assert.equal(run('add', '--kind', 'worktree', '--id', worktree, '--repo', repo).exit, 0);
+  return { ...byId(run('close'))[worktree], gone: !existsSync(worktree) };
+}
+
+// feat's commits a and b squashed onto main as S, feat deleted everywhere,
+// then main advanced with an unrelated file.
+function squashMerged(dir) {
+  const { origin, repo } = originAndClone(dir);
+  git(repo, 'switch', '-q', '-c', 'feat');
+  const a = commit(repo, 'a.txt', 'a\n', 'a');
+  const b = commit(repo, 'b.txt', 'b\n', 'b');
+  git(repo, 'push', '-q', 'origin', 'feat');
+  git(repo, 'switch', '-q', 'main');
+  git(repo, 'merge', '-q', '--squash', 'feat');
+  git(repo, 'commit', '-q', '-m', 'S');
+  git(repo, 'push', '-q', 'origin', 'main');
+  dropBranch(repo, 'feat');
+  commit(repo, 'u.txt', 'u\n', 'unrelated');
+  git(repo, 'push', '-q', 'origin', 'main');
+  return { origin, repo, a, b };
+}
+
+test('custody (merged head): a squash-merged head is removed, since merging it adds nothing', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo, b } = squashMerged(dir);
+  const row = closeOrphan(run, repo, detach(repo, dir, b));
+  assert.equal(row.state, 'disposed', row.reason);
+  assert.equal(row.gone, true);
+  assert.equal(row.reason, `removed: its HEAD ${b.slice(0, 12)} is on no ref, but its changes are already in origin/main (merging it adds nothing)`);
+});
+
+test('custody (merged head): a rebase-merged head whose lines main edited again is removed as patch-identical', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  git(repo, 'switch', '-q', '-c', 'feat');
+  const a = commit(repo, 'x.txt', 'one\nTWO\nthree\n', 'a');
+  git(repo, 'push', '-q', 'origin', 'feat');
+  git(repo, 'switch', '-q', 'main');
+  // An unrelated commit first, so the cherry-pick cannot reproduce a's sha.
+  commit(repo, 'u.txt', 'u\n', 'unrelated');
+  git(repo, 'cherry-pick', a);
+  commit(repo, 'x.txt', 'one\n2\nthree\n', 're-edit');
+  git(repo, 'push', '-q', 'origin', 'main');
+  dropBranch(repo, 'feat');
+  assert.notEqual(spawnSync('git', ['-C', repo, 'merge-tree', '--write-tree', 'origin/main', a]).status, 0, 'merge-tree alone would keep it');
+  const row = closeOrphan(run, repo, detach(repo, dir, a));
+  assert.equal(row.state, 'disposed', row.reason);
+  assert.match(row.reason, /already in origin\/main \(patch-identical\)$/);
+});
+
+test('custody (merged head): an unpushed commit is kept, and the reason names the refs it checked', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  const worktree = detach(repo, dir, 'origin/main');
+  commit(worktree, 'new.txt', 'only here\n', 'unpushed');
+  const row = closeOrphan(run, repo, worktree);
+  assert.equal(row.state, 'kept');
+  assert.equal(row.gone, false);
+  assert.match(row.reason, /is on no ref; removing it would orphan the commit \(checked origin\/main, main\)$/);
+});
+
+test('custody (merged head): a partial squash, a change then its revert, and a merge commit in the range are kept', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  // Partial: main holds a, not b.
+  const partial = detach(repo, dir, 'origin/main', 'partial');
+  commit(partial, 'a.txt', 'a\n', 'a');
+  commit(partial, 'b.txt', 'b\n', 'b');
+  // Revert: a adds a line, b removes it, so the aggregate change is empty.
+  const reverted = detach(repo, dir, 'origin/main', 'reverted');
+  commit(reverted, 'x.txt', 'one\ntwo\nthree\nfour\n', 'add four');
+  commit(reverted, 'x.txt', 'one\ntwo\nthree\n', 'drop four');
+  // Merge: c and d on two sides, merged; main holds both files.
+  const merged = detach(repo, dir, 'origin/main', 'merged');
+  const c = commit(merged, 'c.txt', 'c\n', 'c');
+  git(merged, 'checkout', '-q', '--detach', 'origin/main');
+  commit(merged, 'd.txt', 'd\n', 'd');
+  git(merged, 'merge', '-q', '--no-edit', c);
+  commit(repo, 'a.txt', 'a\n', 'a on main');
+  writeFileSync(join(repo, 'c.txt'), 'c\n');
+  commit(repo, 'd.txt', 'd\n', 'c and d on main');
+  git(repo, 'push', '-q', 'origin', 'main');
+  for (const worktree of [partial, reverted, merged]) {
+    const row = closeOrphan(run, repo, worktree);
+    assert.equal(row.state, 'kept', `${worktree}: ${row.reason}`);
+    assert.match(row.reason, /is on no ref; removing it would orphan the commit \(checked origin\/main, main\)$/);
+  }
+});
+
+test('custody (merged head): a stale remote-tracking ref keeps the worktree; custody does not fetch', (t) => {
+  const { dir, run } = sandbox(t);
+  const { origin, repo } = originAndClone(dir);
+  git(repo, 'switch', '-q', '-c', 'feat');
+  commit(repo, 'a.txt', 'a\n', 'a');
+  const b = commit(repo, 'b.txt', 'b\n', 'b');
+  git(repo, 'push', '-q', 'origin', 'feat');
+  // This clone fetched feat, never the squash.
+  const stale = cloneOf(dir, origin, 'stale');
+  git(repo, 'switch', '-q', 'main');
+  git(repo, 'merge', '-q', '--squash', 'feat');
+  git(repo, 'commit', '-q', '-m', 'S');
+  git(repo, 'push', '-q', 'origin', 'main');
+  dropBranch(repo, 'feat');
+  git(stale, 'update-ref', '-d', 'refs/remotes/origin/feat');
+  const row = closeOrphan(run, stale, detach(stale, dir, b));
+  assert.equal(row.state, 'kept', row.reason);
+  assert.match(row.reason, /\(checked origin\/main, main\)$/);
+});
+
+test('custody (merged head): with no default-branch ref the worktree is kept and the reason says so', (t) => {
+  const { dir, run } = sandbox(t);
+  const repo = join(dir, 'repo');
+  mkdirSync(repo);
+  git(repo, 'init', '-q', '-b', 'trunk');
+  commit(repo, 'x.txt', 'x\n', 'root');
+  const worktree = detach(repo, dir, 'trunk');
+  commit(worktree, 'y.txt', 'y\n', 'only here');
+  const row = closeOrphan(run, repo, worktree);
+  assert.equal(row.state, 'kept');
+  assert.match(row.reason, /is on no ref; removing it would orphan the commit \(no default-branch ref to check against\)$/);
+});
+
+test('custody (merged head): a merge-tree that exits nonzero keeps the worktree, even with a matching tree id', (t) => {
+  const trees = [];
+  const failing = (args) => {
+    const out = runArgv(['git', ...args], { timeout: 60_000 });
+    if (!args.includes('merge-tree')) return out;
+    trees.push(out.stdout.split(/\r?\n/)[0]);
+    return { ...out, code: 1 };
+  };
+  const { dir, run } = sandbox(t, { git: failing });
+  const { repo, b } = squashMerged(dir);
+  const row = closeOrphan(run, repo, detach(repo, dir, b));
+  assert.equal(row.state, 'kept', row.reason);
+  // One merge-tree per candidate (origin/main, main), each with the matching tree id.
+  const tree = git(repo, 'rev-parse', 'origin/main^{tree}').trim();
+  assert.deepEqual(trees, [tree, tree], 'the injected merge-tree carried the matching tree id');
+});
+
+test('custody (merged head): a custom merge driver on a changed path skips the merge check', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  // keepours keeps %A, the candidate's side, and exits 0: a conflict reads as a no-op.
+  git(repo, 'config', 'merge.keepours.driver', 'true');
+  commit(repo, '.gitattributes', 'x.txt merge=keepours\n', 'attributes');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const worktree = detach(repo, dir, 'origin/main');
+  commit(worktree, 'x.txt', 'one\nHEAD\nthree\n', 'head edit');
+  commit(repo, 'x.txt', 'one\nMAIN\nthree\n', 'main edit');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const row = closeOrphan(run, repo, worktree);
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
 });
 
 test('custody: links close before the worktree that holds them, whatever order they were added in', (t) => {

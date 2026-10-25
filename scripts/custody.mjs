@@ -60,8 +60,10 @@ export const USAGE_TEXT = `custody <verb> --ledger <abs> [options] — one ledge
         junction: unlinked without entering it; a path that is not a link is kept.
         worktree: kept when locked, when it holds a link, when it has uncommitted
         changes or ignored files not declared disposable, when its HEAD is on
-        no ref, or when an entry not yet disposed runs from inside it;
-        otherwise removed with workit's junction-safe teardown.
+        no ref and its changes are not already on the default branch's local
+        refs (by patch-id, or by a merge that adds nothing), or when an entry
+        not yet disposed runs from inside it; otherwise removed with workit's
+        junction-safe teardown.
         Others: --dispose after the --live check; exit 0 is disposed, anything
         else is kept with its exit and first stderr line.
         Exit 3 when anything was kept; exit 1 when a link's target came back
@@ -307,9 +309,101 @@ function closeWorktree(entry, deps, held) {
   if (!sha) return { op: 'kept', reason: `git rev-parse HEAD failed: ${firstLine(head.stderr) || head.error}` };
   const refs = deps.git(['-C', entry.repo, 'for-each-ref', '--contains', sha, '--count=1', '--format=%(refname)']);
   if (refs.code !== 0) return { op: 'kept', reason: `git for-each-ref failed: ${firstLine(refs.stderr) || refs.error}` };
-  if (!refs.stdout.trim()) return { op: 'kept', reason: `its HEAD ${sha.slice(0, 12)} is on no ref; removing it would orphan the commit` };
+  let reason = 'removed';
+  if (!refs.stdout.trim()) {
+    const orphan = `its HEAD ${sha.slice(0, 12)} is on no ref`;
+    const candidates = candidateRefs(entry.repo, deps);
+    for (const candidate of candidates) {
+      const check = landedOn(entry.repo, sha, candidate, deps);
+      if (check) {
+        reason = `removed: ${orphan}, but its changes are already in ${candidate.name} (${check})`;
+        break;
+      }
+    }
+    if (reason === 'removed') {
+      const checked = candidates.length ? `(checked ${candidates.map((candidate) => candidate.name).join(', ')})` : '(no default-branch ref to check against)';
+      return { op: 'kept', reason: `${orphan}; removing it would orphan the commit ${checked}` };
+    }
+  }
   const out = deps.removeWorktree(entry.repo, entry.id);
-  return out.removed ? { op: 'disposed', reason: 'removed' } : { op: 'kept', reason: out.reason };
+  return out.removed ? { op: 'disposed', reason } : { op: 'kept', reason: out.reason };
+}
+
+// A HEAD on no ref can still carry nothing a ref lacks: its branch was squash-
+// or rebase-merged, then deleted. Any ref that holds the content keeps it
+// reachable, so the default branch's local refs are the candidates. Custody
+// never fetches: a remote-tracking ref behind the remote reads as "not in it".
+const CANDIDATE_REFS = ['refs/remotes/origin/main', 'refs/remotes/origin/master', 'refs/heads/main', 'refs/heads/master'];
+const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+// `merge` attribute values that name no driver: text and binary are built in.
+const NO_DRIVER = new Set(['unspecified', 'set', 'unset', 'text', 'binary']);
+const nonEmpty = (text) => String(text ?? '').split(/\r?\n/).filter((line) => line.trim());
+
+// The candidates that resolve, in order, deduplicated: { name, id }.
+function candidateRefs(repo, deps) {
+  const origin = deps.git(['-C', repo, 'symbolic-ref', '-q', 'refs/remotes/origin/HEAD']);
+  const target = origin.code === 0 ? origin.stdout.trim() : '';
+  const refs = [...new Set([...(target ? [target] : []), ...CANDIDATE_REFS])];
+  return refs.flatMap((ref) => {
+    const out = deps.git(['-C', repo, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    const id = out.code === 0 ? out.stdout.trim() : '';
+    return OBJECT_ID.test(id) ? [{ name: ref.replace(/^refs\/(?:remotes|heads)\//, ''), id }] : [];
+  });
+}
+
+// `git diff --quiet`: true for a change (exit 1), false for none (exit 0),
+// null for anything else.
+function changes(deps, repo, from, to) {
+  const out = deps.git(['-C', repo, 'diff', '--quiet', '--no-ext-diff', '--no-textconv', from, to]);
+  return out.code === 1 ? true : out.code === 0 ? false : null;
+}
+
+// Which check shows every change <sha> carries is already on the candidate:
+// 'patch-identical', 'merging it adds nothing', or null (not shown). A
+// nonzero exit or a malformed output is not shown, whatever stdout holds.
+function landedOn(repo, sha, candidate, deps) {
+  const git = (...args) => deps.git(['-C', repo, ...args]);
+  // Prerequisites: one merge base, and a non-empty change made of non-empty,
+  // non-merge commits. An --allow-empty orphan carries only its message, which
+  // a merge that "adds nothing" would not preserve.
+  const bases = git('merge-base', '--all', candidate.id, sha);
+  const base = bases.code === 0 ? nonEmpty(bases.stdout) : [];
+  if (base.length !== 1 || !OBJECT_ID.test(base[0].trim())) return null;
+  const from = base[0].trim();
+  const range = git('rev-list', '--parents', `${from}..${sha}`);
+  if (range.code !== 0) return null;
+  const commits = nonEmpty(range.stdout).map((line) => line.trim().split(/\s+/));
+  if (!commits.length || commits.some((ids) => ids.length !== 2 || changes(deps, repo, ids[1], ids[0]) !== true)) return null;
+  if (changes(deps, repo, from, sha) !== true) return null;
+  // (a) each commit is patch-identical to one on the candidate (a rebase merge).
+  const cherry = git('cherry', candidate.id, sha);
+  const picked = cherry.code === 0 ? nonEmpty(cherry.stdout) : [];
+  if (picked.length && picked.every((line) => line.startsWith('-'))) return 'patch-identical';
+  // (b) merging it into the candidate leaves the candidate's tree (a squash
+  // merge). Skipped when a custom merge driver could resolve a conflict to
+  // the candidate's side and fake the no-op.
+  if (mayUseDriver(repo, from, sha, deps)) return null;
+  const merged = git('merge-tree', '--write-tree', candidate.id, sha);
+  const tree = git('rev-parse', '--verify', '--quiet', `${candidate.id}^{tree}`);
+  const result = merged.code === 0 ? (nonEmpty(merged.stdout)[0] ?? '').trim() : '';
+  return OBJECT_ID.test(result) && tree.code === 0 && result === tree.stdout.trim() ? 'merging it adds nothing' : null;
+}
+
+// True when a path changed in from..sha has a `merge` attribute naming a
+// driver, or when the attributes cannot be read.
+function mayUseDriver(repo, from, sha, deps) {
+  const names = deps.git(['-C', repo, 'diff', '--name-only', '--no-renames', '-z', from, sha]);
+  // Paths print from the top level; check-attr reads them from its cwd.
+  const top = deps.git(['-C', repo, 'rev-parse', '--show-cdup']);
+  if (names.code !== 0 || top.code !== 0) return true;
+  const paths = names.stdout.split('\0').filter(Boolean).map((path) => `${top.stdout.trim()}${path}`);
+  if (!paths.length) return true;
+  const attrs = deps.git(['-C', repo, 'check-attr', '-z', 'merge', '--', ...paths]);
+  if (attrs.code !== 0) return true;
+  // -z: path NUL attribute NUL value NUL, once per path.
+  const fields = attrs.stdout.split('\0');
+  if (fields.length !== paths.length * 3 + 1) return true;
+  return paths.some((_, i) => !NO_DRIVER.has(fields[i * 3 + 2]));
 }
 
 function closeByCommand(entry, deps) {
