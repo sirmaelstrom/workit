@@ -12,7 +12,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 // A build phase that emits the given actions in order, then done, and keeps
 // what record handed it. Nothing here runs a real program: runArgv is a fake.
-function fixture(t, specs, { patch = {}, shell = () => ({ code: 0, stdout: 'ok\n', stderr: '' }) } = {}) {
+function fixture(t, specs, { patch = {}, shell = () => ({ code: 0, stdout: 'ok\n', stderr: '' }), onRecord = () => {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'workit-drive-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const runDir = join(dir, 'run');
@@ -24,7 +24,7 @@ function fixture(t, specs, { patch = {}, shell = () => ({ code: 0, stdout: 'ok\n
   }));
   const queue = [...specs];
   const recorded = [];
-  const build = { next: () => queue.shift() ?? { kind: 'done' }, record: (state, action, result) => { recorded.push({ id: action.id, result }); } };
+  const build = { next: () => queue.shift() ?? { kind: 'done' }, record: (state, action, result) => { onRecord(action, result); recorded.push({ id: action.id, result }); } };
   const runs = [];
   const sleeps = [];
   let clock = Date.parse('2026-10-25T12:00:00.000Z');
@@ -148,9 +148,16 @@ test('drive: a refused record exits nonzero, leaves the action pending, and reco
   assert.equal(state(f).pending.kind, 'shell');
   assert.equal(state(f).lastRecorded, null);
   assert.deepEqual(f.recorded, []);
-  // The result was written before the record read it.
-  assert.deepEqual(JSON.parse(readFileSync(join(f.runDir, 'drive-result.json'), 'utf8')), { code: 1, stdout: '', stderr: 'fail' });
-  assert.match(logLines(f).at(-1), / exit=1 \d+\.\ds record=2$/);
+  // The result was saved before the record read it, and stays for the conductor.
+  const saved = JSON.parse(readFileSync(join(f.runDir, 'drive-result.json'), 'utf8'));
+  assert.equal(printed.saved, join(f.runDir, 'drive-result.json'));
+  assert.equal(saved.id, printed.action.id);
+  assert.deepEqual(saved.result, { code: 1, stdout: '', stderr: 'fail' });
+  // A rerun replays the saved result: the command is not run again.
+  assert.equal((await f.drive()).code, 2);
+  assert.equal(f.runs.length, 1);
+  assert.match(logLines(f).at(-2), / exit=1 \d+\.\ds record=2$/);
+  assert.match(logLines(f).at(-1), / exit=1 \d+\.\ds replayed record=2$/);
 });
 
 test('drive: a shell timeout is a stop, not a result: nothing recorded, exit 1', async (t) => {
@@ -160,6 +167,48 @@ test('drive: a shell timeout is a stop, not a result: nothing recorded, exit 1',
   assert.equal(out(result).stopped, 'shell-timeout');
   assert.equal(state(f).pending.kind, 'shell');
   assert.deepEqual(f.recorded, []);
+});
+
+// A driver that dies is a raw (non-ConductError) throw out of drive: nothing
+// after the throw runs, as nothing after a crash would.
+test('drive: a shell that ran but was never recorded is recorded from its saved result on restart, not run again', async (t) => {
+  let crash = true;
+  const f = fixture(t, [SHELL, TOOL], { onRecord: () => { if (crash) throw new Error('driver died'); } });
+  await assert.rejects(f.drive(), /driver died/);
+  assert.equal(f.runs.length, 1);
+  assert.equal(state(f).pending.kind, 'shell', 'the crash left the shell pending');
+  crash = false;
+  const result = await f.drive();
+  assert.equal(result.code, 0, result.stdout);
+  const printed = out(result);
+  assert.equal(printed.stopped, 'needs-conductor');
+  assert.equal(printed.action.kind, 'agent-tool');
+  assert.equal(f.runs.length, 1, 'the completed command is not run again');
+  assert.deepEqual(f.recorded.map(({ result: r }) => r), [{ code: 0, stdout: 'ok\n', stderr: '' }]);
+  assert.equal(printed.performed[0].replayed, true);
+  assert.equal(existsSync(join(f.runDir, 'drive-started.json')), false, 'a recorded step clears its markers');
+  assert.equal(existsSync(join(f.runDir, 'drive-result.json')), false);
+});
+
+test('drive: a shell started with no saved result is a reconcile stop on restart, never run again', async (t) => {
+  let crash = true;
+  const f = fixture(t, [SHELL, TOOL], { shell: () => { if (crash) throw new Error('driver died mid-command'); return { code: 0, stdout: 'ok\n', stderr: '' }; } });
+  await assert.rejects(f.drive(), /driver died mid-command/);
+  crash = false;
+  const pendingId = state(f).pending.id;
+  const result = await f.drive();
+  assert.equal(result.code, 1, result.stdout);
+  const printed = out(result);
+  assert.equal(printed.ok, false);
+  assert.equal(printed.stopped, 'reconcile');
+  assert.equal(printed.action.id, pendingId);
+  assert.equal(printed.marker.path, join(f.runDir, 'drive-started.json'));
+  assert.equal(printed.marker.id, pendingId);
+  assert.match(printed.marker.argvHash, /^[0-9a-f]{16}$/);
+  assert.equal(f.runs.length, 1, 'the half-run command is not run again');
+  assert.deepEqual(f.recorded, []);
+  assert.equal(state(f).pending.id, pendingId);
+  assert.match(logLines(f).at(-1), new RegExp(` ${pendingId} shell/gate-cmd/run stop=reconcile$`));
 });
 
 test('drive: --max-steps stops after n performed steps, the next one still pending', async (t) => {

@@ -569,7 +569,7 @@ async function driveVerb(tokens, deps) {
   return withStateLock(runDir, deps, () => drive({ runDir, maxSteps }, {
     ...deps,
     pending: () => call(pending, ['--run', runDir]),
-    record: (id, resultFile) => call(record, ['--run', runDir, '--action', id, '--result-file', resultFile]),
+    record: (id, result) => call(record, ['--run', runDir, '--action', id, '--result', JSON.stringify(result)]),
   }), { lock: 'drive.lock' });
 }
 
