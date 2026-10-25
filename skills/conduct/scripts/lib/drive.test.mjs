@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runConduct } from '../conduct.mjs';
 import { BACKGROUND_TIMEOUT_MS, SHELL_TIMEOUT_MS, fillTemplate } from './drive.mjs';
-import { runArgv } from './exec.mjs';
+import { runArgv, windowsShim } from './exec.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -332,6 +332,72 @@ test('drive: a driver that finds pending moved under it stops before running any
   assert.equal(printed.steps, 1);
 });
 
+test('windowsShim: a bare name found only as .cmd/.bat on cwd or PATH is a shim; a .exe anywhere, a path, or nothing found is not', () => {
+  const files = new Set([join('C:/bin1', 'npm.cmd'), join('C:/bin1', 'node.cmd'), join('C:/bin2', 'node.exe'), join('C:/repo', 'build.bat')]);
+  const exists = (path) => files.has(path);
+  const env = { Path: 'C:/bin1;C:/bin2', PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+  const shim = (name) => windowsShim(name, { env, cwd: 'C:/repo', exists });
+  assert.equal(shim('npm'), true, 'npm.cmd only');
+  assert.equal(shim('node'), false, 'node.exe later on PATH is what spawn runs');
+  assert.equal(shim('build'), true, 'build.bat in cwd');
+  assert.equal(shim('npm.cmd'), true);
+  assert.equal(shim('tool.BAT'), true);
+  assert.equal(shim('git'), false, 'not found: spawn reports it');
+  assert.equal(shim('C:/bin1/npm'), false, 'a path is run as given');
+  assert.equal(shim('node.exe'), false);
+  // PATHEXT missing: the cmd.exe default list.
+  assert.equal(windowsShim('npm', { env: { PATH: 'C:/bin1' }, cwd: 'C:/none', exists }), true);
+});
+
+const NPM = { ...SHELL, step: 'release', part: 'verify', command: ['npm', 'test'] };
+
+test('drive: on Windows a command that resolves only to a .cmd shim is the conductor\'s: nothing run, nothing recorded', async (t) => {
+  const f = fixture(t, [NPM, TOOL], { shell: () => ({ code: 127, stdout: '', stderr: 'spawn npm ENOENT' }) });
+  const asked = [];
+  const windowsShim = (name, options) => { asked.push({ name, options }); return name === 'npm'; };
+  const result = await f.run(['drive', '--run', f.runDir], { platform: 'win32', windowsShim });
+  assert.equal(result.code, 0, result.stdout);
+  const printed = out(result);
+  assert.equal(printed.stopped, 'needs-conductor');
+  assert.equal(printed.reason, 'windows-shim');
+  assert.deepEqual(printed.action.command, ['npm', 'test']);
+  assert.deepEqual(f.runs, []);
+  assert.deepEqual(f.recorded, []);
+  assert.equal(state(f).pending.id, printed.action.id);
+  assert.equal(existsSync(join(f.runDir, 'drive-started.json')), false);
+  assert.equal(asked[0].name, 'npm');
+  assert.equal(asked[0].options.cwd, '/repo');
+  assert.equal(asked[0].options.env.GATE, 'x');
+  assert.match(logLines(f).at(-1), / stop=needs-conductor reason=windows-shim$/);
+});
+
+test('drive: on Windows a bare name whose spawn fails ENOENT or EINVAL is a windows-shim stop, never a recorded 127', async (t) => {
+  for (const spawnError of ['ENOENT', 'EINVAL']) {
+    const f = fixture(t, [NPM, TOOL], { shell: () => ({ code: null, stdout: '', stderr: `spawn npm ${spawnError}`, spawnError }) });
+    const result = await f.run(['drive', '--run', f.runDir], { platform: 'win32', windowsShim: () => false });
+    assert.equal(result.code, 0, result.stdout);
+    const printed = out(result);
+    assert.equal(printed.stopped, 'needs-conductor', spawnError);
+    assert.equal(printed.reason, 'windows-shim');
+    assert.deepEqual(f.recorded, []);
+    assert.equal(state(f).pending.kind, 'shell');
+    // The command never started, so no marker holds the next drive at reconcile.
+    assert.equal(existsSync(join(f.runDir, 'drive-started.json')), false);
+  }
+});
+
+test('drive: a spawn failure elsewhere is a spawn-failed stop, exit 1, never a recorded 127', async (t) => {
+  const f = fixture(t, [{ ...SHELL, command: ['/opt/missing/tool'] }, TOOL], { shell: () => ({ code: null, stdout: '', stderr: 'spawn ENOENT', spawnError: 'ENOENT' }) });
+  const result = await f.drive();
+  assert.equal(result.code, 1, result.stdout);
+  const printed = out(result);
+  assert.equal(printed.stopped, 'spawn-failed');
+  assert.equal(printed.spawnError, 'ENOENT');
+  assert.deepEqual(f.recorded, []);
+  assert.equal(state(f).pending.kind, 'shell');
+  assert.equal(existsSync(join(f.runDir, 'drive-started.json')), false);
+});
+
 test('drive: a pending hand-back is a stop and is never consumed', async (t) => {
   const handBack = { id: '7-touch', kind: 'touch', step: 'touch', part: 'hand-back', handBack: true, touch: { n: 1 }, phase: 'build' };
   const f = fixture(t, [], { patch: { pending: handBack, seq: 7 } });
@@ -340,10 +406,12 @@ test('drive: a pending hand-back is a stop and is never consumed', async (t) => 
   assert.deepEqual(state(f).pending, handBack);
 });
 
-test('runArgv: env added, exit code kept, a missing program is 127, a timeout is timedOut', async () => {
+test('runArgv: env added, exit code kept, a missing program is a spawnError with no exit code, a timeout is timedOut', async () => {
   const ran = await runArgv(process.execPath, ['-e', 'process.stdout.write(process.env.DRIVE_X); process.stderr.write("e"); process.exit(3)'], { env: { ...process.env, DRIVE_X: 'y' } });
   assert.deepEqual(ran, { code: 3, stdout: 'y', stderr: 'e' });
-  assert.equal((await runArgv('workit-no-such-program', [])).code, 127);
+  const missing = await runArgv('workit-no-such-program', []);
+  assert.equal(missing.spawnError, 'ENOENT');
+  assert.equal(missing.code, null);
   assert.equal((await runArgv(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { timeout: 200 })).timedOut, true);
 });
 

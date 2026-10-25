@@ -133,12 +133,28 @@ export async function drive({ runDir, maxSteps = DEFAULT_MAX_STEPS }, deps) {
         log([startedAt, action.id, label(action), 'stop=reconcile']);
         return finish(1, { ok: false, stopped: 'reconcile', action, marker: { path: startedPath, ...started } });
       } else {
-        writeMarker(deps, startedPath, { id: action.id, argvHash: hash, startedAt, pid: deps.pid ?? null });
         const [program, ...args] = action.command;
+        const env = { ...deps.env, ...(action.env ?? {}) };
+        // A Windows command shim (npm.cmd) cannot start without cmd.exe, and
+        // drive does not guess at cmd.exe quoting: the conductor runs it.
+        const shimStop = () => {
+          log([startedAt, action.id, label(action), 'stop=needs-conductor', 'reason=windows-shim']);
+          return finish(0, { ok: true, stopped: 'needs-conductor', reason: 'windows-shim', action });
+        };
+        if (deps.platform === 'win32' && deps.windowsShim(program, { env, cwd: action.cwd })) return shimStop();
+        writeMarker(deps, startedPath, { id: action.id, argvHash: hash, startedAt, pid: deps.pid ?? null });
         const run = await deps.runArgv(program, args, {
-          cwd: action.cwd, env: { ...deps.env, ...(action.env ?? {}) },
-          timeout: action.background ? BACKGROUND_TIMEOUT_MS : SHELL_TIMEOUT_MS,
+          cwd: action.cwd, env, timeout: action.background ? BACKGROUND_TIMEOUT_MS : SHELL_TIMEOUT_MS,
         });
+        if (run.spawnError) {
+          // It never started: no marker holds the next drive, and no
+          // synthetic exit code is recorded as its result.
+          deps.remove(startedPath);
+          const bare = !/[\\/]/.test(program);
+          if (deps.platform === 'win32' && bare && ['ENOENT', 'EINVAL'].includes(run.spawnError)) return shimStop();
+          log([startedAt, action.id, label(action), `stop=spawn-failed spawnError=${run.spawnError}`]);
+          return finish(1, { ok: false, stopped: 'spawn-failed', action, spawnError: run.spawnError, stderr: run.stderr });
+        }
         if (run.timedOut) {
           // Its process tree was killed; without proof the root is gone, the
           // stop says so. The started marker stays: the next drive reconciles.

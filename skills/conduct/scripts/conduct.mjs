@@ -9,7 +9,7 @@ import { homedir, hostname } from 'node:os';
 import { isatty } from 'node:tty';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execute, runArgv, spawnDetached, pidAlive, defaultCodexExe } from './lib/exec.mjs';
+import { execute, runArgv, windowsShim, spawnDetached, pidAlive, defaultCodexExe } from './lib/exec.mjs';
 import {
   ConductError, SCHEMA_VERSION, STEPS, STEP_SEAM, TERMINAL_PHASES,
   appendEvent, liveLock, loadState, refuseRetired, resolveRunDir, saveState, slugify, statePath, withStateLock,
@@ -814,6 +814,7 @@ export async function runConduct(argv, overrides = {}) {
   const deps = {
     exec: execute,
     runArgv,
+    windowsShim,
     read: (path) => readFileSync(path, 'utf8'),
     write: (path, value) => writeFileSync(path, value, 'utf8'),
     link: linkSync,

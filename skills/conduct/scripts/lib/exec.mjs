@@ -1,7 +1,8 @@
 // The executor primitives. `execute` and `defaultCodexExe` are imported from
 // their owners, never copied: a fix there reaches the conductor too.
 import { spawn, spawnSync } from 'node:child_process';
-import { openSync, closeSync } from 'node:fs';
+import { openSync, closeSync, existsSync } from 'node:fs';
+import { extname, join } from 'node:path';
 import { execute } from '../../../../scripts/lane.mjs';
 import { defaultCodexExe } from '../../../slim-review/scripts/pr-review.mjs';
 
@@ -38,9 +39,33 @@ export function killProcessTree(pid, { platform = process.platform } = {}) {
   }
 }
 
+// win32: true when a command name reaches CreateProcess only as a .cmd or
+// .bat file (npm, npx), which no shell-free spawn can start. A name with an
+// extension is judged by it; a path is run as given. A bare name is looked
+// up in cwd, then PATH, with each PATHEXT extension: a .exe or .com anywhere
+// is what spawn finds and runs, so only a name with none of those is a shim.
+export function windowsShim(name, { env = process.env, cwd = process.cwd(), exists = existsSync } = {}) {
+  const ext = extname(name).toLowerCase();
+  if (ext === '.cmd' || ext === '.bat') return true;
+  if (ext || /[\\/]/.test(name)) return false;
+  const lookup = (key) => env[Object.keys(env).find((k) => k.toUpperCase() === key) ?? key];
+  const exts = (lookup('PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).map((e) => e.toLowerCase());
+  const dirs = [cwd, ...(lookup('PATH') ?? '').split(';')].filter(Boolean);
+  let shim = false;
+  for (const dir of dirs) {
+    for (const e of exts) {
+      if (!exists(join(dir, `${name}${e}`))) continue;
+      if (e === '.exe' || e === '.com') return false;
+      if (e === '.cmd' || e === '.bat') shim = true;
+    }
+  }
+  return shim;
+}
+
 // A `shell` action's argv as drive runs it (only drive: the hand path runs
 // `execute`): no shell, the action's env added, stdin closed. A spawn failure
-// is exit 127, as a shell reports a missing program. A timeout kills the
+// is `spawnError` (its code) and no exit code: the program never ran, so
+// there is no result to record. A timeout kills the
 // process tree and waits up to killGraceMs for the root to exit: `timedOut`,
 // with `killVerified` false when it did not. Its partial output is not a result.
 export function runArgv(program, args, { cwd, env, timeout, platform = process.platform, killTree = killProcessTree, killGraceMs = 5000 } = {}) {
@@ -57,7 +82,7 @@ export function runArgv(program, args, { cwd, env, timeout, platform = process.p
     };
     const failed = (error) => {
       const { stdout, stderr } = text();
-      settle({ code: 127, stdout, stderr: `${error.message}\n${stderr}` });
+      settle({ code: null, stdout, stderr: `${error.message}\n${stderr}`, spawnError: error.code ?? 'UNKNOWN' });
     };
     let child;
     try {
