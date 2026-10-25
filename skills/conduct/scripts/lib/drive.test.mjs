@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, readdirSync, linkSync, symlinkSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -276,6 +276,70 @@ test('drive: an open rotation is refused before anything runs', async (t) => {
   assert.equal(printed.stopped, 'refused');
   assert.match(printed.refusal.error, /rotation 1 is open/);
   assert.deepEqual(f.runs, []);
+});
+
+// A T3 run whose conductor thread is mcp:c1 (workit#313).
+const T3_RUN = (wake = {}) => ({
+  intent: { goal: 'drive fixture', anchor: null, backend: { name: 't3', t3Project: 'proj-1' } },
+  t3Wake: { taskId: 'task-1', thread: 'mcp:c1', conductor: 1, failed: null, deleted: false, old: [], ...wake },
+});
+
+test('drive --as-thread: the conductor fence runs before drive.lock is taken; a thread that is not the conductor\'s exits 5 with nothing run, no lock and state.json unchanged (custody binding and resume adoption included) (workit#313)', async (t) => {
+  const refused = async (f, argv, current) => {
+    const before = readFileSync(join(f.runDir, 'state.json'), 'utf8');
+    const result = await f.run(argv);
+    assert.equal(result.code, 5, result.stdout);
+    assert.match(out(result).error, new RegExp(`not this run's conductor \\(current: ${current}`));
+    assert.deepEqual(f.runs, []);
+    assert.equal(existsSync(join(f.runDir, 'drive.lock')), false, 'drive.lock is never taken');
+    assert.equal(readFileSync(join(f.runDir, 'state.json'), 'utf8'), before);
+  };
+  // A live heartbeat bound to mcp:c1.
+  const live = fixture(t, [SHELL], { patch: T3_RUN() });
+  await refused(live, ['drive', '--run', live.runDir, '--as-thread', 'mcp:c2'], 'mcp:c1');
+  await refused(live, ['drive', '--resume', live.runDir, '--as-thread', 'mcp:c2'], 'mcp:c1');
+  // An open rotation whose custody is bound to mcp:c2: the outgoing mcp:c1 is refused by the fence, not just by the open rotation.
+  const rotation = { attempt: 1, status: 'open', from: 1, to: 2, fromThread: 'mcp:c1', thread: 'mcp:c2', caller: { pane: null }, successor: { pane: null } };
+  const open = fixture(t, [SHELL], { patch: { ...T3_RUN(), rotations: [rotation] } });
+  await refused(open, ['drive', '--run', open.runDir, '--as-thread', 'mcp:c1'], 'mcp:c2');
+  // A retired thread, with no live heartbeat.
+  const gone = fixture(t, [SHELL], { patch: { ...T3_RUN({ deleted: true }), retiredConductorThreads: ['mcp:c0'] } });
+  await refused(gone, ['drive', '--resume', gone.runDir, '--as-thread', 'mcp:c0'], 'none yet');
+  // With the heartbeat gone, drive --resume adopts the new thread, then drives.
+  const adopted = await gone.run(['drive', '--resume', gone.runDir, '--as-thread', 'mcp:c2']);
+  assert.equal(adopted.code, 0, adopted.stdout);
+  assert.deepEqual([state(gone).t3Wake.thread, state(gone).t3Wake.conductor], ['mcp:c2', 1]);
+  assert.equal(gone.recorded.length, 1, 'the shell ran and was recorded');
+  // The conductor's own thread drives.
+  const own = fixture(t, [SHELL], { patch: T3_RUN() });
+  const driven = await own.drive(['--as-thread', 'mcp:c1']);
+  assert.equal(driven.code, 0, driven.stdout);
+  assert.equal(own.recorded.length, 1);
+});
+
+test('drive --as-thread: the id rides every in-process record and next; a conductor thread that changes mid-drive stops the drive with nothing more run or recorded (workit#313)', async (t) => {
+  const retarget = (f) => {
+    const s = state(f);
+    s.t3Wake = { ...s.t3Wake, thread: 'mcp:c9' };
+    writeFileSync(join(f.runDir, 'state.json'), JSON.stringify(s));
+  };
+  // The record: the thread moves while the shell runs, so its record is refused.
+  const f = fixture(t, [SHELL, SHELL], { patch: T3_RUN(), shell: () => { retarget(f); return { code: 0, stdout: 'ok\n', stderr: '' }; } });
+  const atRecord = await f.drive(['--as-thread', 'mcp:c1']);
+  assert.notEqual(atRecord.code, 0, atRecord.stdout);
+  assert.match(atRecord.stdout, /not this run's conductor \(current: mcp:c9\)/);
+  assert.deepEqual([f.recorded.length, state(f).pending?.kind], [0, 'shell'], 'nothing recorded; the shell is still pending');
+  // The next: the thread moves after the pre-lock fence passed, as drive.lock is taken, so its first in-process next is refused.
+  const g = fixture(t, [SHELL], { patch: T3_RUN() });
+  const link = (from, to) => {
+    linkSync(from, to);
+    if (to.endsWith('drive.lock')) retarget(g);
+  };
+  const atNext = await g.run(['drive', '--run', g.runDir, '--as-thread', 'mcp:c1'], { link });
+  assert.equal(atNext.code, 5, atNext.stdout);
+  assert.equal(out(atNext).stopped, 'refused');
+  assert.match(out(atNext).refusal.error, /not this run's conductor \(current: mcp:c9\)/);
+  assert.deepEqual([g.recorded.length, g.runs.length, state(g).pending], [0, 0, null], 'nothing emitted, nothing run');
 });
 
 test('drive: a second driver on the same run is refused while the first holds drive.lock', async (t) => {

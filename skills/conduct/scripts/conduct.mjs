@@ -34,7 +34,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   next --run <dir> [--custody <n>] [--as-thread <T3 thread id>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>] [--as-thread <T3 thread id>]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
-  drive --run <dir> [--max-steps <n>]   (perform shell, wait and template author actions; stop at the first that needs the conductor)
+  drive --run <dir> [--max-steps <n>] [--as-thread <T3 thread id>]   (also: drive --resume <dir>; perform shell, wait and template author actions; stop at the first that needs the conductor)
   drive --run <dir> --break-lock --why <text>   (remove another host's drive.lock, or a dead driver's on this host)
   status --run <dir>
   analyze --run <dir>
@@ -597,6 +597,18 @@ async function driveVerb(tokens, deps) {
   const maxSteps = flags['max-steps'] === undefined ? undefined : Number(flags['max-steps']);
   if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 0)) throw new ConductError(2, '--max-steps must be a whole number');
   refuseForeignState(runDir, openRun(flags, deps).state, deps);
+  // A T3 conductor's drive is fenced as its next and record are, before
+  // drive.lock is taken: custody's bound thread while a rotation is open, and
+  // a resume (`drive --resume <dir> --as-thread <id>`) adopts as next's does.
+  const asThread = flags['as-thread'];
+  if (asThread !== undefined) {
+    await transact(flags, deps, async (state) => {
+      conductorThreadFence(state, asThread);
+      if (flags.resume !== undefined && adoptConductorThread(state, asThread, deps)) saveState(state, deps);
+      return { out: null };
+    }, { duringRotation: true, driven: 'drive' });
+  }
+  const thread = asThread === undefined ? [] : ['--as-thread', asThread];
   const { drive, timeoutOverride } = await loadModule(deps, 'lib/drive.mjs', 'module');
   timeoutOverride(deps.env);
   const call = async (fn) => {
@@ -622,9 +634,12 @@ async function driveVerb(tokens, deps) {
     });
     return drive({ runDir, maxSteps }, {
       ...driver,
-      pending: () => call(() => transact({ run: runDir }, driver, async (state) => ({ out: { ok: true, action: await emit(state, driver) } }))),
+      pending: () => call(() => transact({ run: runDir }, driver, async (state) => {
+        conductorThreadFence(state, asThread);
+        return { out: { ok: true, action: await emit(state, driver) } };
+      })),
       claim: (id) => call(() => claim(id)),
-      record: (id, result) => call(() => record(['--run', runDir, '--action', id, '--result', JSON.stringify(result)], driver)),
+      record: (id, result) => call(() => record(['--run', runDir, '--action', id, '--result', JSON.stringify(result), ...thread], driver)),
     });
   }, { lock: 'drive.lock', lease: true });
 }
