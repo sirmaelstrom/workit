@@ -83,6 +83,23 @@ test('drive: a foreground shell gets the foreground timeout', async (t) => {
   assert.equal(f.runs[0].options.timeout, SHELL_TIMEOUT_MS);
 });
 
+test('drive: WORKIT_DRIVE_TIMEOUT_MS outside 1..2147483647 is refused before anything runs; the bounds themselves are used', async (t) => {
+  for (const bad of ['0', '2147483648', '1e12', '-5', '1.5', 'soon']) {
+    const f = fixture(t, [SHELL, TOOL]);
+    const result = await f.run(['drive', '--run', f.runDir], { env: { WORKIT_DRIVE_TIMEOUT_MS: bad } });
+    assert.equal(result.code, 2, `${bad}: ${result.stdout}`);
+    assert.match(out(result).error, /^WORKIT_DRIVE_TIMEOUT_MS must be a whole number of ms from 1 to 2147483647/);
+    assert.deepEqual(f.runs, [], bad);
+    assert.equal(state(f).pending, null, `${bad}: nothing emitted`);
+  }
+  for (const good of ['1', '2147483647']) {
+    const f = fixture(t, [SHELL, TOOL]);
+    const result = await f.run(['drive', '--run', f.runDir], { env: { WORKIT_DRIVE_TIMEOUT_MS: good } });
+    assert.equal(result.code, 0, `${good}: ${result.stdout}`);
+    assert.equal(f.runs[0].options.timeout, Number(good));
+  }
+});
+
 test('drive: every conductor-owned kind is a stop, with nothing run and the action still pending', async (t) => {
   const cases = [
     [{ kind: 'skill', step: 'spec', skill: 'spec', skillArgv: [] }, 'needs-conductor'],

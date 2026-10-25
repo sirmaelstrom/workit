@@ -589,7 +589,8 @@ async function driveVerb(tokens, deps) {
   const maxSteps = flags['max-steps'] === undefined ? undefined : Number(flags['max-steps']);
   if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 0)) throw new ConductError(2, '--max-steps must be a whole number');
   refuseForeignState(runDir, openRun(flags, deps).state, deps);
-  const { drive } = await loadModule(deps, 'lib/drive.mjs', 'module');
+  const { drive, timeoutOverride } = await loadModule(deps, 'lib/drive.mjs', 'module');
+  timeoutOverride(deps.env);
   const call = async (fn) => {
     try {
       const { code = 0, out } = await fn();

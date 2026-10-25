@@ -11,6 +11,7 @@
 // recorded from the saved result, or stopped for the conductor, on restart.
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
+import { ConductError } from './state.mjs';
 
 export const DRIVE_LOG = 'drive.log';
 export const DRIVE_STARTED = 'drive-started.json';
@@ -20,12 +21,25 @@ export const DEFAULT_MAX_STEPS = 200;
 export const SHELL_TIMEOUT_MS = 30 * 60 * 1000;
 export const BACKGROUND_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 
+// The longest delay a Node timer keeps: a longer one fires after 1 ms.
+export const MAX_TIMEOUT_MS = 2147483647;
+
 // WORKIT_DRIVE_TIMEOUT_MS overrides both: a test of a real drive process
-// cannot wait 30 minutes for its timeout.
+// cannot wait 30 minutes for its timeout. Unset or empty is no override; a
+// value outside 1..MAX_TIMEOUT_MS is refused, and conduct.mjs checks it
+// before the drive starts.
+export function timeoutOverride(env = {}) {
+  const raw = env.WORKIT_DRIVE_TIMEOUT_MS;
+  if (raw === undefined || raw === '') return null;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > MAX_TIMEOUT_MS) {
+    throw new ConductError(2, `WORKIT_DRIVE_TIMEOUT_MS must be a whole number of ms from 1 to ${MAX_TIMEOUT_MS}; got ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
+
 export function shellTimeout(action, env = {}) {
-  const override = Number(env.WORKIT_DRIVE_TIMEOUT_MS);
-  if (Number.isInteger(override) && override > 0) return override;
-  return action.background ? BACKGROUND_TIMEOUT_MS : SHELL_TIMEOUT_MS;
+  return timeoutOverride(env) ?? (action.background ? BACKGROUND_TIMEOUT_MS : SHELL_TIMEOUT_MS);
 }
 
 // A template author is mechanical: its text is fully given by the action.
