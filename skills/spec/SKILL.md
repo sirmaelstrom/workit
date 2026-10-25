@@ -480,7 +480,16 @@ Count amendments applied.
 
 #### 8c. Amendment Check
 
-Check the council's amendments with the fix check, not a full fresh-eyes wave: export each applied amendment as a fixed finding (`{ "id": "C-<n>", "finding": "<the council finding>", "claimed_fix": "<what changed>" }`) to `{workshop_path}/reviews/council-amendments-fixed.json`, snapshot the spec before and after applying them (as in 7b), and run `fix-check.mjs prepare` and `complete` over them with the Sonnet checker (`--wave` the converged wave plus one, `--output reviews/council-amendments-fix-check.json`, `--next-dispositions reviews/council-amendments-reopened.json`). A `failed` or `partial` amendment is fixed once more and checked again. Add one question to the checker's prompt: whether any amendment contradicts another WP or a ruled decision, quoting both lines. The amendments are the only new text since the converged wave, so this reads what a full wave would read for them.
+Check the council's amendments with the fix check, not a full fresh-eyes wave. The amendments are the only new text since the converged wave, so this reads what a full wave would read for them.
+
+1. Before applying the amendments in 8b, copy the spec artifacts to `{workshop_path}/reviews/council-amendments-before/`; after applying them, to `council-amendments-after/` (as in 7b).
+2. Export each applied amendment as a fixed finding (`{ "id": "C-<n>", "finding": "<the council finding>", "claimed_fix": "<what changed>" }`) to `{workshop_path}/reviews/council-amendments-fixed.json`.
+3. With `{W}` the converged wave plus one, run:
+   ```bash
+   node "${CLAUDE_SKILL_DIR}/scripts/fix-check.mjs" prepare --findings "{workshop_path}/reviews/council-amendments-fixed.json" --before "{workshop_path}/reviews/council-amendments-before" --after "{workshop_path}/reviews/council-amendments-after" --output "{workshop_path}/reviews/council-amendments-fix-check-prompt.md"
+   ```
+   Append one question to that prompt: whether any amendment contradicts another WP or a ruled decision, quoting both lines. Dispatch it to the Sonnet checker as in 7b, save its verdict to `{workshop_path}/reviews/council-amendments-fix-check-verdict.json`, then run `complete` with the same `--findings`, `--verdict` that file, `--after` the after directory, `--wave {W}`, `--output "{workshop_path}/reviews/council-amendments-fix-check.json"` and `--next-dispositions "{workshop_path}/reviews/council-amendments-reopened.json"`.
+4. A `failed` or `partial` amendment, or a contradiction the checker quotes, is fixed once and checked again the same way (new before/after directories, `--wave {W}+1`). If any amendment is still not `held` after that, or the checker is unavailable, the spec is **incomplete**: report the open amendment ids and stop before Phase 9's "ready" line, exactly as an unchecked refinement wave does.
 
 Then run the validator bundled with this skill (what it checks and how to read its report: `${CLAUDE_SKILL_DIR}/reference/validate.md`):
 ```bash
@@ -504,6 +513,7 @@ Present the completed spec summary:
 **Stack attack:** {with `--greenfield` only: D1's `Stack attack:` line, and `Spikes:` when they ran}
 **Review:** {review_level} — {N} fresh-eyes waves, {N} council lenses, {N} amendments applied
 **Final fix check:** {last wave's checked / failed / unchecked counts, including the terminal wave's check; `not run` for light or none}
+**Amendment check:** {the council amendments' held / failed / unchecked counts, from `reviews/council-amendments-fix-check.json`, and any amendment id still open; `not run` without a council}
 **Validation:** {pass/fail} — {errors} errors, {warnings} warnings
 **Cost:** {total $ and tokens, from cost-report}
 

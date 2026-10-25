@@ -411,11 +411,12 @@ function checkShellResult(action, result) {
   }
 }
 
-// A tool's raw result is a non-empty object: `{}` or a bare value means the
-// result was never captured (a result-file write that failed beside its
-// record). Refused, so the action stays pending and is recorded again.
+// A tool's raw result is never `{}` or null: those mean the result was never
+// captured (a result-file write that failed beside its record). Refused, so
+// the action stays pending and is recorded again. A text result (ledger_write
+// answers "Event written …") is a real result and passes.
 function checkToolResult(action, result) {
-  if (!result || typeof result !== 'object' || Array.isArray(result) || !Object.keys(result).length) {
+  if (result === null || (typeof result === 'object' && !Array.isArray(result) && !Object.keys(result).length)) {
     throw new ConductError(2, `a tool result is ${action.tool}'s raw JSON object, not ${JSON.stringify(result)} (action ${action.id}): the result was not captured. Nothing was recorded; record the tool's raw result again`);
   }
 }

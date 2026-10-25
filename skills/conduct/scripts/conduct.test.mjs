@@ -1808,13 +1808,16 @@ test('a tool result that was never captured ({}, a bare value) is refused at rec
   const f = fixture(t);
   const first = out(await intake(f, SPINE));
   assert.equal(first.action.kind, 'agent-tool');
-  for (const bad of [{}, null, [], 'ok']) {
+  for (const bad of [{}, null]) {
     const refused = await record(f, first.runDir, first.action.id, bad);
     assert.equal(refused.code, 2, JSON.stringify(bad));
     assert.match(out(refused).error, /the result was not captured\. Nothing was recorded/);
   }
   assert.equal(readState(first.runDir).pending.id, first.action.id);
   assert.equal(readState(first.runDir).lastRecorded, null);
+  // A text result is a real one (ledger_write answers "Event written …"): it reaches the phase, which judges it.
+  const text = await record(f, first.runDir, first.action.id, 'Event written (id: 1)');
+  assert.doesNotMatch(text.stdout + text.stderr, /was not captured/);
 });
 
 test('C24: --text keeps a value that starts with --; --agent names the missing agent', async (t) => {
