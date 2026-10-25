@@ -1270,7 +1270,7 @@ test('post findings count (D20): stdout standalone, stderr coordinated, null whe
   assert.equal(findingsCount({ stdout: '{"outcome":"posted"}', stderr: `repo x\n${line}\n` }), 3);
   assert.equal(findingsCount({ stdout: '{"outcome":"posted"}', stderr: 'repo x\n' }), null);
   const post = reviewActions(makeState(), makeWp({ reviewMode: 'standalone' }), { round: 1 }).at(-1);
-  const recorded = recordLandStep(makeState(), makeWp({ reviews: [] }), post, { code: 0, stdout: '', stderr: '' }, {});
+  const recorded = recordLandStep(makeState(), makeWp({ reviews: [] }), post, { code: 0, stdout: '', stderr: `full-major p1=0 p2=0 head=${post.land.head}\n` }, {});
   assert.equal(recorded.patch.reviews[0].findings, null);
 });
 
@@ -1941,7 +1941,8 @@ test('ROUND 2 RED: repo-scoped agent gates include registered neutral hooks and 
 test('COUNCIL RECOVER: externally posted qualifying delta preserves council obligation', () => {
   const wp = makeWp({ reviews: [{ round: 1, scope: 'full', tier: 'T1', head: BASE, findings: 2 }] });
   const action = { step: 'review', part: 'recover', land: { round: 2, scope: 'delta', since: BASE, head: HEAD, lenses: ['codex', 'astra'] } };
-  const receipt = ok(JSON.stringify({ outcome: 'ok', round: 'reviewed', last: { head: HEAD, scope: 'delta', review_id: 88 }, major_findings: 2, escalate: 't2-council' }));
+  const receipt = ok(JSON.stringify({ outcome: 'ok', round: 'reviewed', last: { head: HEAD, scope: 'delta', review_id: 88 }, major_findings: 2, escalate: 't2-council',
+    escalate_review: { review_id: 88, head: HEAD, scope: 'delta', major_findings: 2 } }));
   const out = recordLandStep(makeState({ adapters: { council: { on: true } } }), wp, action, receipt, {});
   assert.equal(out.outcome, 'continue');
   assert.equal(out.patch.tier, 'T2');
@@ -2008,6 +2009,135 @@ test('post-adjudication dup-of recount keeps one defect at T1 and two at T2', ()
   assert.deepEqual([one.patch.tier, one.patch.deltaEscalation, one.patch.reviews.at(-1).majorFindings], ['T1', null, 1]);
   const two = recordLandStep(makeState(), wp, action, answer(2), {});
   assert.deepEqual([two.patch.tier, two.patch.deltaEscalation, two.patch.reviews.at(-1).majorFindings], [undefined, undefined, 2]);
+});
+
+test('R1 ESCALATION: a T1 full post escalates at one P1 or two P2s; one P2 stays T1; no council adapter says why', () => {
+  const council = makeState({ adapters: { council: { on: true } } });
+  const action = { step: 'post', part: 'post', land: { round: 1, scope: 'full', since: null, head: HEAD, lenses: ['codex', 'astra'] } };
+  const post = (state, p1, p2, id = 'posted-review-id 77\n') => recordLandStep(state, makeWp({ reviews: [] }), action, ok(`findings 3\n${id}full-major p1=${p1} p2=${p2} head=${HEAD}\n`), {});
+  const p1 = post(council, 1, 0);
+  assert.equal(p1.outcome, 'continue');
+  assert.equal(p1.patch.tier, 'T2');
+  assert.deepEqual(p1.patch.deltaEscalation, { scope: 'full', round: 1, head: HEAD, reviewId: 77, p1Findings: 1, p2Findings: 0 });
+  assert.deepEqual([p1.patch.reviews[0].p1Findings, p1.patch.reviews[0].reviewId, p1.patch.reviews[0].tier], [1, 77, 'T1']);
+  assert.equal(post(council, 0, 2).patch.deltaEscalation?.p2Findings, 2);
+  const oneP2 = post(council, 0, 1);
+  assert.deepEqual([oneP2.outcome, oneP2.patch.tier, oneP2.patch.deltaEscalation, oneP2.patch.reviews[0].p2Findings], ['continue', undefined, undefined, 1]);
+  const off = post(makeState(), 1, 0);
+  assert.deepEqual([off.outcome, off.patch.tier, off.patch.deltaEscalation], ['continue', undefined, undefined]);
+  assert.match(off.patch.reviews[0].escalation, /not escalated: no council adapter/);
+  const oldProducer = recordLandStep(council, makeWp({ reviews: [] }), action, ok('findings 3\n'), {});
+  assert.deepEqual([oldProducer.outcome, /full-major/.test(oldProducer.reason), /producer version/.test(oldProducer.reason)], ['block', true, true]);
+  const otherHead = recordLandStep(council, makeWp({ reviews: [] }), action, ok(`findings 3\nfull-major p1=1 p2=0 head=${BASE}\n`), {});
+  assert.equal(otherHead.outcome, 'block', 'a receipt for another head is no receipt');
+  const noId = post(council, 1, 0, '');
+  assert.deepEqual([noId.outcome, /posted review id/.test(noId.reason)], ['block', true]);
+  // A T2 WP's full post is not a T1 review: it owes no receipt.
+  const t2 = recordLandStep(council, makeWp({ tier: 'T2', reviews: [] }), action, ok('findings 3\n'), {});
+  assert.equal(t2.outcome, 'continue');
+});
+
+test('R1 ESCALATION: the gate refuses a crossing full review until a recorded council covers it', () => {
+  const crossing = { round: 1, scope: 'full', tier: 'T1', head: BASE, reviewId: 77, findings: 3, p1Findings: 1, p2Findings: 0 };
+  const owed = makeWp({ tier: 'T2', reviews: [crossing], deltaEscalation: { scope: 'full', round: 1, head: BASE, reviewId: 77, p1Findings: 1, p2Findings: 0 } });
+  const councilRun = makeState({ adapters: { council: { on: true } } });
+  const refused = gateCheck(councilRun, owed, { exec: gateExec(), now: () => NOW });
+  assert.equal(refused.causes.includes('t2-council'), true);
+  assert.match(refused.failures.join('; '), /full review 77 on .* requires a recorded T2 council round/);
+  assert.equal(gateCheck(makeState(), owed, { exec: gateExec(), now: () => NOW }).causes.includes('t2-council'), false, 'no council adapter owes nothing');
+  const council = { round: 2, scope: 'full', tier: 'T2', head: HEAD, reviewId: 'run/council/WP-01/2', escalatedDeltaReviewId: 77, record: { url: 'https://github.com/o/r/pull/7#pullrequestreview-99' }, findings: 0 };
+  const recorded = makeWp({ tier: 'T2', reviews: [crossing, council], deltaEscalation: null });
+  assert.equal(gate(councilRun, recorded).causes.includes('t2-council'), false);
+  assert.equal(gate(councilRun, makeWp({ ...recorded, reviews: [crossing, { ...council, record: null }] })).causes.includes('t2-council'), true);
+  // A full T1 review with one P2 owes nothing.
+  assert.equal(gate(councilRun, makeWp({ reviews: [{ ...crossing, p1Findings: 0, p2Findings: 1 }] })).causes.includes('t2-council'), false);
+});
+
+test('C2-5 RECOVER HOLD: an escalate without escalate_review holds only a T1 WP in a run with a council', () => {
+  const action = { step: 'review', part: 'recover', land: { round: 2, scope: 'full', since: null, head: HEAD, lenses: ['codex', 'astra'] } };
+  const bare = ok(JSON.stringify({ outcome: 'ok', round: 'reviewed', last: { head: HEAD, scope: 'full', review_id: 88 }, problem: null, p1_findings: 1, p2_findings: 0, escalate: 't2-council' }));
+  const thin = ok(JSON.stringify({ outcome: 'ok', round: 'reviewed', last: { head: HEAD, scope: 'full', review_id: 88 }, problem: null, escalate: 't2-council',
+    escalate_review: { review_id: 77, head: sha('7'), scope: 'full', p1_findings: 0, p2_findings: 1 } }));
+  const council = makeState({ adapters: { council: { on: true } } });
+  assert.equal(recordLandStep(council, makeWp({ reviews: [] }), action, bare, {}).outcome, 'held', 'T1 with a council: held');
+  assert.equal(recordLandStep(council, makeWp({ reviews: [] }), action, thin, {}).outcome, 'held', 'T1 with a council, unreadable count: held');
+  for (const read of [bare, thin]) {
+    const off = recordLandStep(makeState(), makeWp({ reviews: [] }), action, read, {});
+    assert.deepEqual([off.outcome, off.patch.tier, off.patch.deltaEscalation], ['continue', undefined, undefined], JSON.stringify(off));
+    assert.match(off.patch.reviews.at(-1).escalation, /not escalated: no council adapter/);
+    const t2 = recordLandStep(council, makeWp({ tier: 'T2', reviews: [] }), action, read, {});
+    assert.deepEqual([t2.outcome, t2.patch.tier, t2.patch.deltaEscalation, t2.patch.reviews.at(-1).escalation], ['continue', undefined, undefined, undefined], JSON.stringify(t2));
+  }
+});
+
+test('C2-3 RECOVER FINDINGS: recovery records the latest review\'s own finding count from rounds, apart from the older obligation', () => {
+  const action = { step: 'review', part: 'recover', land: { round: 2, scope: 'full', since: null, head: HEAD, lenses: ['codex', 'astra'] } };
+  const read = (last) => ok(JSON.stringify({ outcome: 'ok', round: 'reviewed', last: { head: HEAD, scope: 'full', review_id: 88, ...last }, problem: null, escalate: 't2-council',
+    escalate_review: { review_id: 77, head: sha('7'), scope: 'full', p1_findings: 1, p2_findings: 0 } }));
+  const council = makeState({ adapters: { council: { on: true } } });
+  const clean = recordLandStep(council, makeWp({ reviews: [] }), action, read({ findings: 0 }), {});
+  assert.deepEqual([clean.patch.reviews.at(-1).findings, clean.patch.deltaEscalation?.reviewId], [0, 77]);
+  const legacy = recordLandStep(council, makeWp({ reviews: [] }), action, read({}), {});
+  assert.equal(legacy.patch.reviews.at(-1).findings, null, 'a review with no readable count stays unknown');
+});
+
+test('R1 ESCALATION: recover escalates on a full last whose escalate_review is itself', () => {
+  const action = { step: 'review', part: 'recover', land: { round: 1, scope: 'full', since: null, head: HEAD, lenses: ['codex', 'astra'] } };
+  const read = (extra) => ok(JSON.stringify({ outcome: 'ok', round: 'reviewed', last: { head: HEAD, scope: 'full', review_id: 77 }, problem: null, ...extra }));
+  const self = { escalate: 't2-council', escalate_reason: 'full review 77: 1 P1, 0 P2', escalate_review: { review_id: 77, head: HEAD, scope: 'full', p1_findings: 1, p2_findings: 0 } };
+  const council = makeState({ adapters: { council: { on: true } } });
+  const crossing = recordLandStep(council, makeWp({ reviews: [] }), action, read({ p1_findings: 1, p2_findings: 0, ...self }), {});
+  assert.equal(crossing.outcome, 'continue');
+  assert.equal(crossing.patch.tier, 'T2');
+  assert.deepEqual(crossing.patch.deltaEscalation, { scope: 'full', round: 1, head: HEAD, reviewId: 77, p1Findings: 1, p2Findings: 0 });
+  assert.deepEqual([crossing.patch.reviews.at(-1).p1Findings, crossing.patch.reviews.at(-1).reviewId], [1, 77]);
+  const off = recordLandStep(makeState(), makeWp({ reviews: [] }), action, read({ p1_findings: 1, p2_findings: 0, ...self }), {});
+  assert.deepEqual([off.patch.tier, off.patch.deltaEscalation], [undefined, undefined]);
+  assert.match(off.patch.reviews.at(-1).escalation, /not escalated: no council adapter/);
+});
+
+test('C1-2 RECOVER: the escalation binds to escalate_review, never to last', () => {
+  const H77 = sha('7');
+  const H66 = sha('6');
+  const council = makeState({ adapters: { council: { on: true } } });
+  const recover = (scope) => ({ step: 'review', part: 'recover', land: { round: 2, scope, since: scope === 'delta' ? H77 : null, head: HEAD, lenses: ['codex', 'astra'] } });
+  const read = (body) => ok(JSON.stringify({ outcome: 'ok', round: 'reviewed', problem: null, ...body }));
+  const owedFull = { escalate: 't2-council', escalate_reason: 'full review 77: 1 P1, 0 P2', escalate_review: { review_id: 77, head: H77, scope: 'full', p1_findings: 1, p2_findings: 0 } };
+  // (a) older full review 77 with a P1, newer full review 88 clean.
+  const a = recordLandStep(council, makeWp({ reviews: [] }), recover('full'), read({ last: { head: HEAD, scope: 'full', review_id: 88 }, ...owedFull }), {});
+  assert.deepEqual([a.outcome, a.patch.tier], ['continue', 'T2'], JSON.stringify(a));
+  assert.deepEqual(a.patch.deltaEscalation, { scope: 'full', round: null, head: H77, reviewId: 77, p1Findings: 1, p2Findings: 0 });
+  assert.deepEqual([a.patch.reviews.at(-1).reviewId, Object.hasOwn(a.patch.reviews.at(-1), 'p1Findings')], [88, false]);
+  // (b) older full review 77 with a P1, newer delta 88 with one major: the full threshold applies, no hold.
+  const b = recordLandStep(council, makeWp({ reviews: [] }), recover('delta'), read({ last: { head: HEAD, scope: 'delta', review_id: 88 }, major_findings: 1, ...owedFull }), {});
+  assert.deepEqual([b.outcome, b.patch.tier, b.patch.deltaEscalation?.reviewId, b.patch.deltaEscalation?.scope], ['continue', 'T2', 77, 'full'], JSON.stringify(b));
+  assert.equal(b.patch.reviews.at(-1).majorFindings, 1);
+  // (c) an older owed delta 66, a newer full review 88 already council-covered whose own counts cross.
+  const c = recordLandStep(council, makeWp({ reviews: [] }), recover('full'), read({ last: { head: HEAD, scope: 'full', review_id: 88 }, p1_findings: 1, p2_findings: 0,
+    escalate: 't2-council', escalate_reason: '2 posted in-amendment P1/P2 defects on review 66', escalate_review: { review_id: 66, head: H66, scope: 'delta', major_findings: 2 } }), {});
+  assert.deepEqual(c.patch.deltaEscalation, { scope: 'delta', round: null, head: H66, reviewId: 66, majorFindings: 2 }, JSON.stringify(c));
+  assert.equal(Object.hasOwn(c.patch.reviews.at(-1), 'p1Findings'), false, 'the covered review 88 owes nothing itself');
+  // An `escalate` with no escalate_review is an older producer: hold, naming it.
+  const old = recordLandStep(council, makeWp({ reviews: [] }), recover('full'), read({ last: { head: HEAD, scope: 'full', review_id: 77 }, p1_findings: 1, p2_findings: 0, escalate: 't2-council' }), {});
+  assert.equal(old.outcome, 'held');
+  assert.match(old.reason, /escalate_review/);
+  assert.match(old.reason, /producer version/);
+  // An escalate_review whose counts do not cross is unreadable: hold.
+  const thin = recordLandStep(council, makeWp({ reviews: [] }), recover('full'), read({ last: { head: HEAD, scope: 'full', review_id: 88 }, escalate: 't2-council', escalate_review: { review_id: 77, head: H77, scope: 'full', p1_findings: 0, p2_findings: 1 } }), {});
+  assert.equal(thin.outcome, 'held');
+});
+
+test('R1 ESCALATION: the post-adjudication full recount clears one P2 back to T1 and keeps a P1 at T2', () => {
+  const action = { step: 'review', part: 'delta-count', land: { reviewId: 77, head: HEAD, scope: 'full' } };
+  const wp = makeWp({ tier: 'T2', reviews: [{ round: 1, scope: 'full', tier: 'T1', head: HEAD, reviewId: 77, p1Findings: 0, p2Findings: 2 }],
+    deltaEscalation: { scope: 'full', round: 1, head: HEAD, reviewId: 77, p1Findings: 0, p2Findings: 2 } });
+  const answer = (p1, p2) => ok(JSON.stringify({ outcome: 'ok', review_id: 77, head: HEAD, scope: 'full', p1_findings: p1, p2_findings: p2 }));
+  const one = recordLandStep(makeState(), wp, action, answer(0, 1), {});
+  assert.deepEqual([one.patch.tier, one.patch.deltaEscalation, one.patch.reviews.at(-1).p2Findings], ['T1', null, 1]);
+  const kept = recordLandStep(makeState(), wp, action, answer(1, 0), {});
+  assert.deepEqual([kept.patch.tier, kept.patch.deltaEscalation, kept.patch.reviews.at(-1).p1Findings], [undefined, undefined, 1]);
+  const unreadable = recordLandStep(makeState(), wp, action, ok(JSON.stringify({ outcome: 'ok', review_id: 77, head: HEAD, major_findings: 1 })), {});
+  assert.equal(unreadable.outcome, 'block');
 });
 
 test('runLandVerb I/O (D19.21): returns { code, out } and writes nothing to stdout', async (t) => {

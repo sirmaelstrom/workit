@@ -64,7 +64,7 @@ import {
   MANAGED_MODES,
 } from './pr-review-managed.mjs';
 import { emitOutcome, WITHDRAW_REASONS } from './pr-review-outcomes.mjs';
-import { buildMarker, recognise, postedReviewScope } from './pr-review-recognise.mjs';
+import { buildMarker, parseMarker, recognise, postedReviewScope } from './pr-review-recognise.mjs';
 import { amendmentProblem, COMPARE_FILE_CAP, readRoundTail, roundsAnswer } from './pr-review-rounds.mjs';
 import { filesFromDiff, guardReview, GUARD_ADJUDICATORS, GUARD_LENS, LANE_MARKER_ENV } from './pr-review-guard.mjs';
 
@@ -526,17 +526,38 @@ export function checkCoverage(coverage, examinedPaths, prFilePaths, source = 'th
  * change to this shape is a change to the measurement log.
  */
 function renderFinding(f) {
-  return `${f.lens ? `**lens:** ${f.lens}\n\n` : ''}${f.scope === 'delta' ? '**scope:** delta\n\n' : ''}**[${f.severity}] ${f.title}**\n\n${f.body}`;
+  return neutralizeMarkers(`${f.lens ? `**lens:** ${f.lens}\n\n` : ''}${f.scope === 'delta' ? '**scope:** delta\n\n' : ''}**[${f.severity}] ${f.title}**\n\n${f.body}`);
 }
 
+/**
+ * Break every HTML comment opener in text the writer did not author: a zero-width
+ * space (U+200B) goes between `<!` and `--`. No marker reader (`workit-*-findings`,
+ * `slim-review`, `workit-dup-of`) can match the result, and GitHub renders it as the
+ * same visible `<!--` instead of hiding the rest as a comment. The writer runs every
+ * piece of reviewer text through this before it reaches a body or comment; only its
+ * own marker and manifest are appended after.
+ */
+export const neutralizeMarkers = (text) => String(text).replaceAll('<!--', '<!\u200B--');
+
 const findingHash = (body) => createHash('sha256').update(String(body).replace(/\r\n?/g, '\n').trimEnd()).digest('hex');
-const deltaManifest = (findings) => `<!-- workit-delta-findings: ${JSON.stringify(findings.map((f) => ({
-  hash: findingHash(renderFinding(f)), lens: f.lens, scope: f.scope, severity: f.severity,
+/**
+ * The posted review's findings manifest: every finding, inline and body-only,
+ * by hash, lens, scope and severity. A reader counts a review from it, since
+ * a body-only finding has no comment to count. `scope` is `delta` or `full`.
+ */
+const findingsManifest = (findings, scope) => `<!-- workit-${scope}-findings: ${JSON.stringify(findings.map((f) => ({
+  hash: findingHash(renderFinding(f)), lens: f.lens, scope, severity: f.severity,
 })))} -->`;
 
-/** Count distinct posted delta defects. A dup-of link joins two findings on this review. */
-export function countDeltaDefects(findings) {
-  const eligible = findings.filter((f) => f.scope === 'delta' && (f.severity === 'P1' || f.severity === 'P2') && f.lens !== GUARD_LENS);
+/**
+ * Count distinct posted P1/P2 defects of one scope: `delta` counts the findings
+ * tagged delta, `full` counts the rest. Guard-lens findings and P3s are not
+ * counted. A dup-of link joins two findings on this review into one defect,
+ * which is a P1 when either side is.
+ */
+export function countDefects(findings, scope = 'delta') {
+  const eligible = findings.filter((f) => (scope === 'delta' ? f.scope === 'delta' : f.scope !== 'delta')
+    && (f.severity === 'P1' || f.severity === 'P2') && f.lens !== GUARD_LENS);
   const byId = new Map(eligible.filter((f) => f.id != null).map((f) => [String(f.id), f]));
   const parent = new Map([...byId.keys()].map((id) => [id, id]));
   const root = (id) => {
@@ -549,12 +570,35 @@ export function countDeltaDefects(findings) {
     const duplicate = String(finding.dupOf ?? '');
     if (parent.has(id) && parent.has(duplicate)) parent.set(root(id), root(duplicate));
   }
-  return new Set([...parent.keys()].map(root)).size + eligible.filter((f) => f.id == null).length;
+  const groups = new Map();
+  for (const [id, finding] of byId) groups.set(root(id), groups.get(root(id)) === 'P1' ? 'P1' : finding.severity);
+  const severities = [...groups.values(), ...eligible.filter((f) => f.id == null).map((f) => f.severity)];
+  const p1 = severities.filter((severity) => severity === 'P1').length;
+  return { total: severities.length, p1, p2: severities.length - p1 };
+}
+
+/** Count distinct posted delta defects. A dup-of link joins two findings on this review. */
+export function countDeltaDefects(findings) {
+  return countDefects(findings, 'delta').total;
 }
 
 /** GitHub refuses a review body over this many characters, and the whole POST with it. */
 export const REVIEW_BODY_MAX_CHARS = 65_536;
-// Room for the coordinated post's marker, appended after the payload is built.
+
+/**
+ * The review footer's first characters. A review posted before the manifest
+ * closed the body carries its manifest just above this footer, and the legacy
+ * manifest read finds it by this lead.
+ */
+const REVIEW_FOOTER_LEAD = '_Slim review · ';
+
+/** Why a review body cannot be posted, or null when it fits GitHub's limit. */
+export function reviewBodyProblem(body) {
+  const chars = String(body ?? '').length;
+  if (chars <= REVIEW_BODY_MAX_CHARS) return null;
+  return `the review body is ${chars} characters and GitHub refuses a review body over ${REVIEW_BODY_MAX_CHARS}; shorten the longest findings or the summary (a body-only finding is posted whole in the body) and post again`;
+}
+// Headroom the guard section leaves below GitHub's limit.
 const REVIEW_BODY_RESERVE = 1_000;
 const GUARD_NOT_LISTED = 'not listed: this review body had no room';
 
@@ -594,13 +638,20 @@ export function buildReviewPayload({
   // precedes the footer. It adds no inline comment.
   guard,
   deltaFindings,
+  // A full review's findings, for its manifest; an amendment check passes `deltaFindings`.
+  fullFindings,
+  // The coordinated post's `slim-review` marker. It follows the footer and precedes
+  // the manifest, which stays the body's last line.
+  marker,
 }) {
-  const sections = [summary.trim()];
+  // Every section but the marker and the manifest carries reviewer text, so each
+  // is neutralized whole: a manifest or footer quoted there never parses as the writer's.
+  const sections = [neutralizeMarkers(summary.trim())];
 
   if (lensCounts.length > 0) {
-    sections.push(['### Findings by lens', '', ...lensCounts.map((count) =>
+    sections.push(neutralizeMarkers(['### Findings by lens', '', ...lensCounts.map((count) =>
       `- ${count.lens}: ${count.P1} P1 / ${count.P2} P2 / ${count.P3} P3`,
-    )].join('\n'));
+    )].join('\n')));
   }
 
   if (offLine.length > 0 || offDiffChanged.length > 0 || offDiffUnchanged.length > 0) {
@@ -619,7 +670,7 @@ export function buildReviewPayload({
     for (const f of offDiffUnchanged) {
       lines.push(`- \`${f.path}:${f.line}\` — **not a file this PR changes.**`, '', renderFinding(f), '');
     }
-    sections.push(lines.join('\n'));
+    sections.push(neutralizeMarkers(lines.join('\n')));
   }
 
   if (excluded?.length > 0) {
@@ -627,17 +678,19 @@ export function buildReviewPayload({
     for (const f of excluded) {
       lines.push(`- \`${f.path}:${f.line}\` — outside the amendment.`, '', renderFinding({ ...f, scope: undefined }), '');
     }
-    sections.push(lines.join('\n'));
+    sections.push(neutralizeMarkers(lines.join('\n')));
   }
 
   const guardAt = sections.length;
-  if (deltaFindings) sections.push(deltaManifest(deltaFindings));
+  // The manifest is the body's last line: `readFindingsManifest` reads only that suffix.
+  const manifest = deltaFindings ? findingsManifest(deltaFindings, 'delta')
+    : fullFindings ? findingsManifest(fullFindings, 'full') : null;
 
   const footer = [
     '',
     '---',
     '',
-    `_Slim review · ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff${excluded === undefined ? '' : ` · ${excluded.length} excluded (outside the amendment)`} · ${coverage.trim()}_`,
+    `${REVIEW_FOOTER_LEAD}${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff${excluded === undefined ? '' : ` · ${excluded.length} excluded (outside the amendment)`} · ${coverage.trim()}_`,
   ];
   if (!coverageCheck.ok) {
     footer.push('', `> ⚠️ **Coverage check failed:** ${coverageCheck.reason}`);
@@ -645,20 +698,23 @@ export function buildReviewPayload({
   for (const warning of warnings) {
     footer.push('', `> ⚠️ **Warning:** ${warning}`);
   }
-  sections.push(footer.join('\n'));
+  sections.push(neutralizeMarkers(footer.join('\n')));
+  if (marker) sections.push(`\n${marker}`);
 
   // The guard section gets what the rest of the body leaves, up to its own cap. Its
   // heading and notice are fixed text, so with less room than that it shrinks to one
   // line, and with less than that it is left out: it never pushes the body over.
   let guardDelivery = null;
   if (guard?.section) {
-    const room = REVIEW_BODY_MAX_CHARS - REVIEW_BODY_RESERVE - sections.join('\n').length - 1;
-    const shrunk = guard.section.length <= room ? guard.section : guard.render?.(Math.max(room, 0));
+    const room = REVIEW_BODY_MAX_CHARS - REVIEW_BODY_RESERVE - [...sections, ...(manifest ? [manifest] : [])].join('\n').length - 1;
+    const whole = neutralizeMarkers(guard.section);
+    const shrunk = whole.length <= room ? whole : guard.render?.(Math.max(room, 0));
     const line = `\n_Test files whose assertions changed: ${guard.entries.length} file(s), ${GUARD_NOT_LISTED}. Read the PR diff._`;
-    const section = [shrunk, line].find((text) => text != null && text.length <= room);
+    const section = [shrunk == null ? shrunk : neutralizeMarkers(shrunk), line].find((text) => text != null && text.length <= room);
     if (section) sections.splice(guardAt, 0, section);
     guardDelivery = section === undefined ? 'omitted' : section === line ? 'counted' : 'listed';
   }
+  if (manifest) sections.push(manifest);
 
   const payload = {
     event: 'COMMENT',
@@ -844,6 +900,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
     excluded,
     guard,
     deltaFindings: since ? doc.findings : undefined,
+    fullFindings: since ? undefined : doc.findings,
   });
   payload.commit_id = reviewedHead;
 
@@ -881,6 +938,12 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
     return;
   }
 
+  const tooLarge = reviewBodyProblem(payload.body);
+  if (tooLarge) {
+    die(5, `${tooLarge}. Nothing was posted.`);
+    return;
+  }
+
   const headNow = runGh(['pr', 'view', String(opts.pr), '--repo', repo, '--json', 'headRefOid', '-q', '.headRefOid'], { cwd: opts.cwd }).trim();
   if (headNow !== reviewedHead) {
     die(6, `PR head advanced from ${reviewedHead.slice(0,7)} to ${headNow.slice(0,7)} between the diff fetch and the post; the findings were anchored on the old head — re-run the reviewer. Nothing was posted.`);
@@ -893,9 +956,13 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   );
   const posted = JSON.parse(res);
   log(`\nposted         ${posted.html_url}`);
-  if (since) log(`posted-review-id ${posted.id}`);
+  if (since || posted.id != null) log(`posted-review-id ${posted.id}`);
   if (since) log(`delta-major ${countDeltaDefects(doc.findings)} head=${reviewedHead}`);
+  else log(fullMajorLine(countDefects(doc.findings, 'full'), reviewedHead));
 }
+
+/** The full post's receipt: its distinct P1 and P2 defects, bound to the head it reviewed. */
+const fullMajorLine = (counts, head) => `full-major p1=${counts.p1} p2=${counts.p2} head=${head}`;
 
 // GitHub's GraphQL connections are paged, and these two page sizes are the ones
 // this query asks for. A full page means there is more behind it.
@@ -2032,15 +2099,40 @@ export function readReviewListing({ repo, pr, cwd, runGh = gh }) {
   return reviews;
 }
 
-function readDeltaManifest(body) {
-  const match = /<!-- workit-delta-findings: (\[[^\n]*\]) -->/.exec(String(body ?? ''));
-  if (!match) return null;
-  const entries = JSON.parse(match[1]);
-  if (!Array.isArray(entries) || !entries.every((f) => /^[0-9a-f]{64}$/.test(f.hash) && ['P1', 'P2', 'P3'].includes(f.severity) && f.scope === 'delta')) {
-    throw new Error('posted delta findings manifest is malformed');
+// The writer's manifest as the body's last line; only trailing whitespace may follow.
+const SUFFIX_MANIFEST_RE = /(?:^|\n)<!-- workit-(delta|full)-findings: (\[[^\n]*\]) -->\s*$/;
+
+/**
+ * A posted review's `delta` or `full` findings manifest, or null when it
+ * carries none. The writer neutralizes every marker in reviewer text and ends
+ * the body with its manifest, so only that suffix is read: a marker anywhere
+ * else is not the writer's. A suffix manifest of the other scope reads as none.
+ */
+function readFindingsManifest(body, scope) {
+  const text = String(body ?? '');
+  const suffix = SUFFIX_MANIFEST_RE.exec(text);
+  if (suffix) return suffix[1] === scope ? parseFindingsManifest(suffix[2], scope) : null;
+  // A review posted before the manifest moved to the end of the body (and before
+  // reviewer text was neutralized) has no suffix manifest. It keeps the old read:
+  // the line before the last footer-shaped line.
+  const lines = text.split(/\r?\n/);
+  const footer = lines.findLastIndex((line, i) => line.startsWith(REVIEW_FOOTER_LEAD) && lines[i - 1] === '' && lines[i - 2] === '---');
+  if (footer < 0) return null;
+  let at = footer - 3;
+  while (at >= 0 && lines[at].trim() === '') at -= 1;
+  const match = new RegExp(`^<!-- workit-${scope}-findings: (\\[.*\\]) -->$`).exec(lines[at] ?? '');
+  return match ? parseFindingsManifest(match[1], scope) : null;
+}
+
+function parseFindingsManifest(json, scope) {
+  const entries = JSON.parse(json);
+  if (!Array.isArray(entries) || !entries.every((f) => /^[0-9a-f]{64}$/.test(f.hash) && ['P1', 'P2', 'P3'].includes(f.severity) && f.scope === scope)) {
+    throw new Error(`posted ${scope} findings manifest is malformed`);
   }
   return entries;
 }
+
+const readDeltaManifest = (body) => readFindingsManifest(body, 'delta');
 
 export function readCouncilMarker(body) {
   const match = /<!-- workit-council-round: (\{[^\n]*\}) -->/.exec(String(body ?? ''));
@@ -2051,43 +2143,76 @@ export function readCouncilMarker(body) {
   } catch { return null; }
 }
 
-export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted }) {
-  const reviewId = posted.review_id ?? posted.id;
+/** The PR's review comments, every page, in one paginated read. */
+function readPrComments({ repo, pr, cwd, runGh }) {
   const raw = runGh(
     ['api', '--paginate', `repos/${repo}/pulls/${pr}/comments`, '--jq', '.[] | {id, body, in_reply_to_id, pull_request_review_id}'],
     { cwd },
   );
-  const comments = String(raw).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-  const originals = comments.filter((comment) => comment.in_reply_to_id == null && String(comment.pull_request_review_id) === String(reviewId));
-  const manifest = readDeltaManifest(posted.body);
-  const entries = manifest ? manifest.map((finding) => ({ ...finding })) : originals.map((comment) => ({ ...readPostedFinding(comment), id: comment.id }));
-  if (manifest) {
-    const byHash = new Map();
-    for (const comment of originals) {
-      const hash = findingHash(comment.body);
-      byHash.set(hash, [...(byHash.get(hash) ?? []), comment.id]);
-    }
-    for (const entry of entries) entry.id = byHash.get(entry.hash)?.shift();
-  }
-  for (const reply of comments.filter((comment) => comment.in_reply_to_id != null)) {
-    const match = /<!-- workit-dup-of: (\d+) -->/.exec(String(reply.body ?? ''));
-    if (!match) continue;
-    const duplicate = entries.find((entry) => String(entry.id) === String(reply.in_reply_to_id));
-    if (duplicate) duplicate.dupOf = match[1];
-  }
-  return countDeltaDefects(entries);
+  return String(raw).split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
 
-/** Scope the posted reviews and count each delta's posted findings. */
+export function readPostedDeltaCount({ repo, pr, cwd, runGh = gh, posted, comments }) {
+  return readPostedCounts({ posted, comments: comments ?? readPrComments({ repo, pr, cwd, runGh }), scope: 'delta' }).total;
+}
+
+/**
+ * A posted review's distinct P1/P2 defects of one scope, from the PR's review
+ * comments. A review with a findings manifest of its scope counts the manifest
+ * (it holds the body-only findings too); a review posted before full reviews
+ * carried one counts its own inline comments. A `workit-dup-of` reply joins
+ * two of them. `findings` is the manifest's length (every posted finding),
+ * or null with no manifest.
+ *
+ * The count never drops below the inline comments' own count: a manifest that
+ * reads lower than what is posted inline is not the writer's, and a read-back
+ * may over-count an escalation but must not lose one.
+ */
+export function readPostedCounts({ posted, comments, scope }) {
+  const reviewId = posted.review_id ?? posted.id;
+  const originals = comments.filter((comment) => comment.in_reply_to_id == null && String(comment.pull_request_review_id) === String(reviewId));
+  const joinDuplicates = (entries) => {
+    for (const reply of comments.filter((comment) => comment.in_reply_to_id != null)) {
+      const match = /<!-- workit-dup-of: (\d+) -->/.exec(String(reply.body ?? ''));
+      if (!match) continue;
+      const duplicate = entries.find((entry) => String(entry.id) === String(reply.in_reply_to_id));
+      if (duplicate) duplicate.dupOf = match[1];
+    }
+    return entries;
+  };
+  const inline = countDefects(joinDuplicates(originals.map((comment) => ({ ...readPostedFinding(comment), id: comment.id }))), scope);
+  const manifest = readFindingsManifest(posted.body, scope);
+  if (!manifest) return { ...inline, findings: null };
+  const entries = manifest.map((finding) => ({ ...finding }));
+  const byHash = new Map();
+  for (const comment of originals) {
+    const hash = findingHash(comment.body);
+    byHash.set(hash, [...(byHash.get(hash) ?? []), comment.id]);
+  }
+  for (const entry of entries) entry.id = byHash.get(entry.hash)?.shift();
+  const listed = countDefects(joinDuplicates(entries), scope);
+  return { total: Math.max(listed.total, inline.total), p1: Math.max(listed.p1, inline.p1), p2: Math.max(listed.p2, inline.p2), findings: manifest.length };
+}
+
+/**
+ * Scope the posted reviews and count each one's posted findings: a delta's
+ * distinct P1/P2 defects as `majorFindings`, a full review's as `p1Findings` /
+ * `p2Findings`. The PR's comments are read once, for all of them. A council
+ * record whose `delta_review_id` names a review clears it as `councilRoundId`.
+ */
 export function readScopedReviews({ repo, pr, head, cwd, runGh = gh, serviceLogin, replacedReviewIds = [] }) {
   const listed = readReviewListing({ repo, pr, cwd, runGh });
   const reviews = listed
     .map((review) => postedReviewScope(review, { serviceLogin, replacedReviewIds }))
     .filter(Boolean);
+  let comments;
   for (const [index, review] of reviews.entries()) {
-    if (review.scope !== 'delta') continue;
+    if (review.scope !== 'delta' && review.scope !== 'full') continue;
     const posted = listed.find((item) => String(item.review_id) === String(review.review_id));
-    const majorFindings = readPostedDeltaCount({ repo, pr, cwd, runGh, posted });
+    comments ??= readPrComments({ repo, pr, cwd, runGh });
+    const counts = readPostedCounts({ posted, comments, scope: review.scope });
+    const tally = { ...(review.scope === 'delta' ? { majorFindings: counts.total } : { p1Findings: counts.p1, p2Findings: counts.p2 }),
+      ...(Number.isInteger(counts.findings) ? { findings: counts.findings } : {}) };
     let councilRoundId = null;
     for (const candidate of listed) {
       const marker = readCouncilMarker(candidate.body);
@@ -2102,16 +2227,29 @@ export function readScopedReviews({ repo, pr, head, cwd, runGh = gh, serviceLogi
       }
       councilRoundId = marker.id;
     }
-    reviews[index] = { ...review, majorFindings, ...(councilRoundId ? { councilRoundId } : {}) };
+    reviews[index] = { ...review, ...tally, ...(councilRoundId ? { councilRoundId } : {}) };
   }
   return reviews;
 }
 
-/** Recount one posted delta after replies have recorded any dup-of links. */
+/**
+ * Recount one posted delta after replies have recorded any dup-of links. With
+ * `--scope full`, recount one posted full review's P1s and P2s the same way.
+ */
 export function cmdDeltaCount(opts, { runGh = ghOrDie, log = console.log, die = fail } = {}) {
   const repo = resolveRepo(opts.repo, opts.cwd);
   try {
     const posted = JSON.parse(runGh(['api', `repos/${repo}/pulls/${opts.pr}/reviews/${opts.reviewId}`], { cwd: opts.cwd }));
+    if (opts.scope === 'full') {
+      if (String(posted.id) !== String(opts.reviewId) || readDeltaManifest(posted.body) || parseMarker(posted.body)?.since) {
+        die(4, `review ${opts.reviewId} is not a posted full review`);
+        return;
+      }
+      const counts = readPostedCounts({ posted, comments: readPrComments({ repo, pr: opts.pr, cwd: opts.cwd, runGh }), scope: 'full' });
+      const answer = { outcome: 'ok', review_id: posted.id, head: posted.commit_id, scope: 'full', p1_findings: counts.p1, p2_findings: counts.p2 };
+      log(JSON.stringify(answer));
+      return answer;
+    }
     if (String(posted.id) !== String(opts.reviewId) || !readDeltaManifest(posted.body)) {
       die(4, `review ${opts.reviewId} has no posted delta findings manifest`);
       return;
@@ -3341,9 +3479,10 @@ async function cmdPostCoordinated(opts, {
     excluded,
     guard,
     deltaFindings: since ? findings : undefined,
+    fullFindings: since ? undefined : findings,
+    marker: markerFromRef,
   });
   payload.commit_id = attemptRef.head_sha;
-  payload.body = `${payload.body}\n\n${markerFromRef}`;
   diag(`repo           ${attemptRef.repo}`);
   diag(`pr             #${attemptRef.pr}`);
   diag(`head           ${attemptRef.head_sha.slice(0, 7)} (attempt ${attemptRef.attempt})`);
@@ -3351,6 +3490,16 @@ async function cmdPostCoordinated(opts, {
   diag(`findings       ${findings.length} → ${anchored.length} anchored · ${offLine.length} off-line · ${offDiffChanged.length} not-anchorable · ${offDiffUnchanged.length} off-diff`);
   for (const f of excluded ?? []) diag(`  excluded     ${f.path}:${f.line} — outside the amendment`);
   if (guard.entries.length > 0) diag(guardDiagnostic(guard, payload));
+
+  // GitHub would refuse this body with a 422: refuse it here, before anything
+  // is reserved or sent, with the reason that refusal would carry. The outcome
+  // table has no reason for a body too large, and this one is stop.
+  const tooLarge = reviewBodyProblem(payload.body);
+  if (tooLarge) {
+    emit({ outcome: 'refused', reason: 'definite-rejection', body_chars: payload.body.length, limit: REVIEW_BODY_MAX_CHARS });
+    die(1, `${tooLarge}. Nothing was reserved or sent; the attempt stays live. Withdraw it with \`recover withdraw --attempt-ref <file> --reason "<why>"\`, or re-run the lenses for a shorter review.`);
+    return undefined;
+  }
 
   if (opts.dryRun) {
     diag('--dry-run: nothing posted, nothing reserved.');
@@ -3444,10 +3593,13 @@ async function cmdPostCoordinated(opts, {
   if (terminal) discardAttemptRefFile(refFile, diag);
   if (classified.outcome === 'posted') diag(`posted         ${classified.html_url ?? `review ${classified.review_id}`}`);
   const majorFindings = since ? countDeltaDefects(findings) : null;
+  const fullCounts = since ? null : countDefects(findings, 'full');
   if (classified.outcome === 'posted' && since) diag(`delta-major ${majorFindings} head=${headNow}`);
+  if (classified.outcome === 'posted' && !since) diag(fullMajorLine(fullCounts, headNow));
   const line = emit({
     outcome: classified.outcome,
     ...(classified.outcome === 'posted' && since ? { major_findings: majorFindings } : {}),
+    ...(classified.outcome === 'posted' && !since ? { p1_findings: fullCounts.p1, p2_findings: fullCounts.p2 } : {}),
     ...(classified.reason === undefined ? {} : { reason: classified.reason }),
     post_generation: postGeneration,
     ...(classified.review_id === undefined ? {} : { review_id: classified.review_id }),
@@ -3643,8 +3795,9 @@ On a managed repository (see below), the coordinated flow replaces steps 2 and 3
            {outcome:"ok", round: full|reviewed|delta|capped, since?, last?,
            rebased_from?, rebase?, problem} or {outcome:"refused", reason};
            a rebased head is mapped onto the reviewed one by patch id
-  delta-count --pr <n> --repo owner/name --review-id <n>
-           read-only: recount posted delta defects after dup-of replies
+  delta-count --pr <n> --repo owner/name --review-id <n> [--scope full]
+           read-only: recount posted delta defects after dup-of replies;
+           --scope full recounts a full review's P1s and P2s
   inflight --pr <n> --repo owner/name --head <full sha>
            read-only: the review attempts on this head that have not ended —
            {outcome:"ok", mode, inflight:[{attempt, origin, state}]}; exit 9 when
@@ -3738,6 +3891,12 @@ export function parseArgs(argv) {
         const v = next();
         if (!/^\d+$/.test(v)) fail(2, '--review-id must be a numeric review id');
         opts.reviewId = v;
+        break;
+      }
+      case '--scope': {
+        const v = next();
+        if (v !== 'full' && v !== 'delta') fail(2, '--scope must be full or delta');
+        opts.scope = v;
         break;
       }
       case '--context-file': opts.contextFile = next(); break;

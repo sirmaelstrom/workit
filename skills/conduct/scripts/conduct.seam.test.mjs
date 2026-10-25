@@ -159,7 +159,7 @@ const RULES = [
   [/^node \S+pr-review\.mjs managed /, () => ok(JSON.stringify({ mode: 'standalone' }))],
   [/^node \S+pr-review\.mjs post --pr (\d+)/, (h, m) => {
     const id = idOfPr(m[1]);
-    return ok(`findings ${h.findings[id]?.length ? h.findings[id].shift() : 0}\n`);
+    return ok(`findings ${h.findings[id]?.length ? h.findings[id].shift() : 0}\nfull-major p1=0 p2=0 head=${h.head(id)}\n`);
   }],
   [/^node \S+pr-review\.mjs threads /, () => ok()],
   [/^node \S+pr-review\.mjs inflight /, () => ok()],

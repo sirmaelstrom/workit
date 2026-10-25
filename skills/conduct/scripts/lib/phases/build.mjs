@@ -32,8 +32,8 @@ import { briefPaths } from '../../../../../scripts/lane.mjs';
 import { bootstrapBrief } from '../bootstrap.mjs';
 import { gateFailureKind } from '../gate-env.mjs';
 import {
-  PRIOR_ADJUDICATION_FILE, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
-  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions,
+  PRIOR_ADJUDICATION_FILE, councilOn, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
+  priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, reviewCrosses,
   inspectionProblem, t2Actions, threadReplyActions, tierDecision, visualReadProblem,
 } from '../land.mjs';
 import {
@@ -1407,13 +1407,20 @@ function quietRecord(state, wp, result, deps) {
 // The files an amendment changed since the delta baseline, a commit sha.
 const amendDiff = (wp, since) => shell('review', 'amend-diff', ['git', '-C', wp.lane.worktree, 'diff', '--name-only', '--end-of-options', since, '{pr.head}']);
 
-// A T1 delta review with two or more majors is counted again after adjudication.
+// A T1 delta review with two or more majors, or a T1 full review with a P1 or
+// two P2s, is counted again after adjudication. Either is recounted only when
+// the count can matter: a council adapter in the run or an escalation
+// outstanding; a failed read then blocks nothing that owes nothing. Only the
+// latest review is recounted: an older obligation recovery recorded keeps its
+// council (the safe direction).
 function deltaCountActs(state, wp) {
   const latest = (wp.reviews ?? []).at(-1);
-  if (!(latest?.scope === 'delta' && latest.tier === 'T1' && latest.majorFindings >= 2 && latest.reviewId != null)) return [];
+  if (!(latest?.tier === 'T1' && latest.reviewId != null && reviewCrosses(latest))) return [];
+  const full = latest.scope === 'full';
+  if (!councilOn(state) && !wp.deltaEscalation) return [];
   return [shell('review', 'delta-count', ['node', join(state.pluginRoot, 'skills', 'slim-review', 'scripts', 'pr-review.mjs'), 'delta-count',
-    '--pr', String(wp.pr.number), '--repo', state.intent.repo.remote, '--review-id', String(latest.reviewId)],
-  { land: { reviewId: latest.reviewId, head: latest.head } })];
+    '--pr', String(wp.pr.number), '--repo', state.intent.repo.remote, '--review-id', String(latest.reviewId), ...(full ? ['--scope', 'full'] : [])],
+  { land: { reviewId: latest.reviewId, head: latest.head, ...(full ? { scope: 'full' } : {}) } })];
 }
 
 function expand(state, wp, deps) {
@@ -1495,6 +1502,10 @@ function expand(state, wp, deps) {
       const since = recoveryBaseline(state, wp, deps);
       if (wp.state === 'blocked') return undefined;
       if (wp.fullReviewOwed) return go([prDiff(state)], null);
+      // wp.deltaEscalation: the T2 council a T1 review owes, { scope: 'full' | 'delta',
+      // round, head, reviewId, p1Findings / p2Findings or majorFindings }. `round`
+      // is null when recovery recorded an obligation of an older review, whose
+      // round it cannot know; the gate names the obligation by reviewId.
       if (wp.deltaEscalation) return go([prDiff(state)], null);
       if (!since || since === wp.pr?.head || review.scope !== 'full') return go([], 'land');
       if (!SHA.test(since)) return block(state, wp, deps, `the delta baseline ${JSON.stringify(since)} is not a commit sha`);
@@ -2294,8 +2305,11 @@ function route(state, wp, action, out, deps) {
           deps.mkdir(dirname(record.path));
           deps.write(record.path, record.body);
         }
-        wp.queue = record ? [record.action] : [];
-        wp.stage = 'land';
+        // A clean review that recovery recorded with an older obligation:
+        // nothing to amend, so the council round runs next.
+        const owed = !record && wp.deltaEscalation;
+        wp.queue = record ? [record.action] : owed ? [prDiff(state)] : [];
+        wp.stage = owed ? null : 'land';
       }
       return;
     }
