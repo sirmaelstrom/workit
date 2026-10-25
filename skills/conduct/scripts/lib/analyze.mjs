@@ -7,6 +7,7 @@ import { STEP_SEAM, TOUCH_SEAM, loadState, readEvents } from './state.mjs';
 import { firstLine } from './adapters.mjs';
 import { analysisLine as repoConfigLine } from './repo-config.mjs';
 import { runAuthority } from './authority.mjs';
+import { T3_HEARTBEAT_MS, unresolvedHeartbeats } from './lanes.mjs';
 
 const VERDICT_TEXT = { exercised: 'exercised', vacuous: 'vacuous', 'not-exercised': 'not exercised', 'no-surface': 'no runtime surface', missing: 'missing' };
 const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
@@ -244,6 +245,11 @@ function preapproval(state) {
   const failed = records.filter(({ review }) => review.record.failed);
   if (records.length) {
     out.push(`- council review records: ${posted.length} posted${posted.length ? ` (${posted.map(({ wp, review }) => `${wp.id} round ${review.round}: ${review.record.url ?? 'no url returned'}`).join('; ')})` : ''}${failed.length ? `, ${failed.length} not posted (${failed.map(({ wp, review }) => `${wp.id} round ${review.round}: ${review.record.failed}`).join('; ')})` : ''}`);
+  }
+  // A T3 heartbeat the analyze phase could not delete keeps waking its thread.
+  for (const left of unresolvedHeartbeats(state)) {
+    const owner = left.conductor ? ` (conductor r${left.conductor}${left.thread ? `, thread ${left.thread}` : ''})` : '';
+    out.push(`- unresolved cleanup: T3 heartbeat ${left.taskId}${owner} is not deleted after ${left.attempts} attempts${left.error ? ` (last error: ${left.error})` : ''}; it starts a turn in that thread every ${T3_HEARTBEAT_MS / 60000} minutes until it is. Call delete_scheduled_task with ${JSON.stringify({ scheduledTaskId: left.taskId })}.`);
   }
   const lower = state.wps.reduce((sum, wp) => sum + (Number(wp.lane?.costUsd) || 0), 0);
   out.push(`- budget: unmetered; lane-only lower bound ${usd(lower)} (exec claude lanes' total_cost_usd; codex and herdr lanes not counted)`);

@@ -758,6 +758,241 @@ test('waits yield (D17): a waiting WP-02 does not stop WP-03\'s dispatch; all wa
   assert.equal(after.step, 'wait');
 });
 
+test('t3 wake yield (bf8ed575): when the soonest wait is a T3 lane\'s and the heartbeat is live, the conductor ends its turn; recording the wake releases every lane wake and nothing else', async (t) => {
+  const h = harness(t);
+  h.life = { 'WP-02': 3, 'WP-03': 3 };
+  await drive(h, { until: isWait });
+  h.state.pending = null;
+  h.state.intent.backend = { name: 't3', t3Project: 'proj-1' };
+  h.state.t3Wake = { taskId: 'task-1', thread: 'mcp:conductor', conductor: 1, failed: null, deleted: false, old: [] };
+  const read = { kind: 'agent-tool', step: 'wait', part: 'read', tool: 't3_thread_read', args: { threadId: 'mcp:lane-2' }, expects: { type: 'json' }, instruction: 'read' };
+  const wake = { kind: 'wait', step: 'wait', waitMs: 600000, wake: true, instruction: 'WP-02\'s T3 lane is running' };
+  const later = new Date(T0 + 3600000).toISOString();
+  h.wp('WP-02').queue = [{ ...wake }, read];
+  h.wp('WP-03').queue = [{ kind: 'wait', step: 'wait', waitMs: 900000, dueAt: later, instruction: 'WP-03 waits' }];
+  const yielded = await step(h);
+  assert.deepEqual([yielded.kind, yielded.yield, yielded.wake, yielded.waitMs], ['wait', true, true, 600000]);
+  assert.match(yielded.instruction, /^End your turn now: don't sleep or poll\. A T3 lane's done message or the run's heartbeat \(every 10 min\)/);
+  await recordPending(h, {});
+  assert.deepEqual(h.wp('WP-02').queue.map((a) => a.part ?? a.kind), ['read'], 'the lane is read on the wake');
+  assert.deepEqual([h.wp('WP-03').queue[0].remainingMs, h.wp('WP-03').queue[0].dueAt], [undefined, later], 'another wait keeps its clock');
+  assert.equal((await step(h)).part, 'read');
+  // No live heartbeat (a rotated conductor's, or none made): an ordinary timed wait.
+  h.state.pending = null;
+  h.state.t3Wake.conductor = 0;
+  h.wp('WP-02').queue = [{ ...wake }, read];
+  const slept = await step(h);
+  assert.deepEqual([slept.wake, slept.waitMs], [undefined, 600000]);
+  assert.match(slept.instruction, /^Wait 600 s, then record \{\}/);
+});
+
+// A wake yield pending when the conductor rotates: lanes and heartbeat still
+// wake r1, so custody re-binds the heartbeat to r2 before any wait (workit#313 review r1, finding 1).
+async function wakeYieldPending(t) {
+  const h = harness(t);
+  h.life = { 'WP-02': 3, 'WP-03': 3 };
+  await drive(h, { until: isWait });
+  h.state.pending = null;
+  h.state.intent.backend = { name: 't3', t3Project: 'proj-1' };
+  h.state.t3Wake = { taskId: 'task-r1', thread: 'mcp:conductor-1', conductor: 1, at: new Date(T0).toISOString(), failed: null, deleted: false, old: [] };
+  const read = (id) => ({ kind: 'agent-tool', step: 'wait', part: 'read', tool: 't3_thread_read', args: { threadId: `mcp:lane-${id}` }, expects: { type: 'json' }, instruction: 'read' });
+  for (const id of ['WP-02', 'WP-03']) h.wp(id).queue = [{ kind: 'wait', step: 'wait', waitMs: 600000, wake: true, instruction: `${id}'s T3 lane is running` }, read(id)];
+  const yielded = await step(h);
+  assert.equal(yielded.wake, true);
+  h.disk = true;
+  return { h, yielded };
+}
+
+const conduct = async (h, argv) => {
+  const result = await runConduct(argv, h.overrides());
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  return JSON.parse(result.stdout);
+};
+
+test('t3 rotation with a wake yield pending: custody makes a heartbeat bound to the successor, then deletes the old one, then reads its lanes; the old yield is never re-emitted (workit#313 review r1, finding 1)', async (t) => {
+  const { h, yielded } = await wakeYieldPending(t);
+  await conduct(h, ['rotate', '--run', h.runDir, '--why', 'context at 40%']);
+  const confirm = (await conduct(h, ['next', '--run', h.runDir, '--custody', '1'])).action;
+  assert.equal(confirm.part, 'confirm');
+  writeFileSync(confirm.outPath, JSON.stringify({ gone: true, evidence: 'r1 thread idle' }));
+  const create = (await conduct(h, ['record', '--run', h.runDir, '--action', confirm.id, '--result', '{}'])).action;
+  assert.deepEqual([create.step, create.part, create.tool, create.args?.bindToCurrentThread, create.args?.clientRequestId], ['custody', 'heartbeat', 'schedule_task', true, 'abcd1234-heartbeat-r2']);
+  const stop = (await conduct(h, ['record', '--run', h.runDir, '--action', create.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r2', boundThreadId: 'mcp:conductor-2' })])).action;
+  assert.deepEqual([stop.step, stop.part, stop.tool, stop.args], ['custody', 'heartbeat-stop', 'delete_scheduled_task', { scheduledTaskId: 'task-r1' }]);
+  const tick = (await conduct(h, ['record', '--run', h.runDir, '--action', stop.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r1', deleted: true })])).action;
+  // The first tick under r2's heartbeat reads the lanes before any wake yield (r2, finding 3).
+  assert.deepEqual([tick.kind, tick.part, tick.tool], ['agent-tool', 'read', 't3_thread_read']);
+  assert.notEqual(tick.id, yielded.id, 'the inherited yield is not re-emitted as is');
+  const state = loadState(h.runDir, h.deps);
+  assert.deepEqual([state.t3Wake.taskId, state.t3Wake.thread, state.t3Wake.conductor], ['task-r2', 'mcp:conductor-2', 2]);
+  assert.deepEqual(state.t3Wake.old.map((entry) => [entry.taskId, entry.deleted]), [['task-r1', true]]);
+  assert.equal(state.rotations[0].status, 'custody');
+  // The handoff told the successor what custody would do with the yield.
+  assert.match(readFileSync(state.rotations[0].handoff, 'utf8'), /the run's heartbeat is made again from your thread/);
+});
+
+test('t3 custody tick: once custody replaces the heartbeat, its first wait is no wake yield; one immediate tick reads every live T3 lane, then the run yields on wakes (workit#313 review r2, finding 3)', async (t) => {
+  const { h, yielded } = await wakeYieldPending(t);
+  const s = loadState(h.runDir, h.deps);
+  for (const wp of s.wps.filter((candidate) => ['WP-02', 'WP-03'].includes(candidate.id))) Object.assign(wp.lane, { backend: 't3', threadId: `mcp:lane-${wp.id}` });
+  saveState(s, h.deps);
+  const as = ['--as-thread', 'mcp:conductor-2'];
+  await conduct(h, ['rotate', '--run', h.runDir, '--why', 'context at 40%']);
+  const confirm = (await conduct(h, ['next', '--run', h.runDir, '--custody', '1', ...as])).action;
+  writeFileSync(confirm.outPath, JSON.stringify({ gone: true, evidence: 'r1 thread idle' }));
+  const create = (await conduct(h, ['record', '--run', h.runDir, '--action', confirm.id, '--result', '{}', ...as])).action;
+  const stop = (await conduct(h, ['record', '--run', h.runDir, '--action', create.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r2', boundThreadId: 'mcp:conductor-2' }), ...as])).action;
+  let action = (await conduct(h, ['record', '--run', h.runDir, '--action', stop.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r1', deleted: true }), ...as])).action;
+  const dropped = h.events().filter((event) => event.event === 'wake-yield-dropped');
+  assert.deepEqual(dropped.map((event) => [event.step, event.data.actionId, event.data.heartbeat]), [['custody', yielded.id, 'made']]);
+  // Every live lane is read once, as a heartbeat tick reads them.
+  const reads = [];
+  while (action.part === 'read') {
+    reads.push(action.wpId);
+    assert.deepEqual([action.tool, action.args.threadId], ['t3_thread_read', `mcp:lane-${action.wpId}`]);
+    const running = { thread: { threadId: action.args.threadId, status: 'running', pendingRequestCount: 0, itemCount: 3 }, recentRuns: [{ status: 'running' }], items: [] };
+    action = (await conduct(h, ['record', '--run', h.runDir, '--action', action.id, '--result', JSON.stringify(running), ...as])).action;
+  }
+  assert.deepEqual(reads.sort(), ['WP-02', 'WP-03']);
+  // Then the run waits on wakes, which now reach r2's thread.
+  assert.deepEqual([action.kind, action.part, action.wake], ['wait', 'yield', true]);
+});
+
+test('t3 custody binding: the successor\'s first next --custody --as-thread binds custody to its thread; while the heartbeat create is pending, r1\'s next and record --as-thread exit 5 and leave state.json unchanged byte for byte; then the successor completes custody (workit#313 review r2, finding 1)', async (t) => {
+  const { h } = await wakeYieldPending(t);
+  const statePath = join(h.runDir, 'state.json');
+  const refused = async (argv, current) => {
+    const before = readFileSync(statePath, 'utf8');
+    const result = await runConduct(argv, h.overrides());
+    assert.equal(result.code, 5, `${argv.join(' ')}: ${result.stdout}`);
+    assert.match(JSON.parse(result.stdout).error, new RegExp(`not this run's conductor \\(current: ${current}`));
+    assert.equal(readFileSync(statePath, 'utf8'), before, 'a refused call changes nothing');
+  };
+  await conduct(h, ['rotate', '--run', h.runDir, '--why', 'context at 40%']);
+  // Before custody is bound, the outgoing conductor's thread is refused, even naming --custody.
+  await refused(['next', '--run', h.runDir, '--custody', '1', '--as-thread', 'mcp:conductor-1'], 'none yet');
+  const confirm = (await conduct(h, ['next', '--run', h.runDir, '--custody', '1', '--as-thread', 'mcp:conductor-2'])).action;
+  assert.equal(loadState(h.runDir, h.deps).rotations[0].thread, 'mcp:conductor-2');
+  writeFileSync(confirm.outPath, JSON.stringify({ gone: true, evidence: 'r1 thread idle' }));
+  const create = (await conduct(h, ['record', '--run', h.runDir, '--action', confirm.id, '--result', '{}', '--as-thread', 'mcp:conductor-2'])).action;
+  assert.deepEqual([create.part, create.tool], ['heartbeat', 'schedule_task']);
+  // r1, woken late, would otherwise be handed r2's pending heartbeat create and bind it to its own thread.
+  const r1Result = JSON.stringify({ scheduledTaskId: 'task-r1b', boundThreadId: 'mcp:conductor-1' });
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  await refused(['record', '--run', h.runDir, '--action', create.id, '--result', r1Result, '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  await refused(['next', '--run', h.runDir, '--custody', '1', '--as-thread', 'mcp:somebody-else'], 'mcp:conductor-2');
+  // The successor's own calls pass, and it completes custody.
+  assert.equal((await conduct(h, ['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2'])).action.id, create.id);
+  const stop = (await conduct(h, ['record', '--run', h.runDir, '--action', create.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r2', boundThreadId: 'mcp:conductor-2' }), '--as-thread', 'mcp:conductor-2'])).action;
+  assert.equal(stop.part, 'heartbeat-stop');
+  await conduct(h, ['record', '--run', h.runDir, '--action', stop.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r1', deleted: true }), '--as-thread', 'mcp:conductor-2']);
+  const state = loadState(h.runDir, h.deps);
+  assert.deepEqual([state.rotations[0].status, state.t3Wake.thread, state.t3Wake.conductor], ['custody', 'mcp:conductor-2', 2]);
+  // Completed custody retires r1's thread for good: no resume can adopt it back (finding 2).
+  assert.deepEqual(state.retiredConductorThreads, ['mcp:conductor-1']);
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  // The handoff told the successor to bind custody to its thread.
+  assert.match(readFileSync(state.rotations[0].handoff, 'utf8'), /next --run \S+ --custody 1 --as-thread <your own T3 thread id>`\. The id is `orchestrator_capabilities`' `parentThreadId`/);
+});
+
+test('t3 custody binding: a custody call with no --as-thread binds nothing and behaves as before (herdr, exec, by hand) (workit#313 review r2, finding 1)', async (t) => {
+  const { h } = await wakeYieldPending(t);
+  await conduct(h, ['rotate', '--run', h.runDir, '--why', 'context at 40%']);
+  const confirm = (await conduct(h, ['next', '--run', h.runDir, '--custody', '1'])).action;
+  assert.equal(confirm.part, 'confirm');
+  assert.equal(loadState(h.runDir, h.deps).rotations[0].thread, null);
+  assert.equal((await conduct(h, ['next', '--run', h.runDir])).action.id, confirm.id, 'the pending custody action, as today');
+});
+
+test('t3 resume adoption with T3 lanes live: next --resume --as-thread <new> adopts the thread, drops a wake yield no heartbeat would end, and queues a heartbeat made from the new thread (workit#313 review r2, finding 2)', async (t) => {
+  const { h, yielded } = await wakeYieldPending(t);
+  const s = loadState(h.runDir, h.deps);
+  for (const wp of s.wps.filter((candidate) => ['WP-02', 'WP-03'].includes(candidate.id))) wp.lane.backend = 't3';
+  // r1's session is gone and its heartbeat failed: nothing wakes the run.
+  s.t3Wake = { taskId: null, thread: null, conductor: 1, failed: 'schedule_task: {"error":"T3 unreachable"}', old: [] };
+  saveState(s, h.deps);
+  const heartbeat = (await conduct(h, ['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-2'])).action;
+  assert.notEqual(heartbeat.id, yielded.id, 'the wake yield is not emitted again');
+  assert.deepEqual([heartbeat.wpId, heartbeat.part, heartbeat.tool, heartbeat.args.bindToCurrentThread, heartbeat.args.clientRequestId], ['WP-02', 'heartbeat', 'schedule_task', true, 'abcd1234-heartbeat-r1-a1']);
+  const adopted = loadState(h.runDir, h.deps);
+  assert.deepEqual([adopted.t3Wake.thread, adopted.t3Wake.failed, adopted.wps.find((wp) => wp.id === 'WP-03').queue.map((a) => a.part)], ['mcp:conductor-2', null, ['read']], 'every lane is read at once');
+  const read = (await conduct(h, ['record', '--run', h.runDir, '--action', heartbeat.id, '--as-thread', 'mcp:conductor-2', '--result', JSON.stringify({ scheduledTaskId: 'task-a1', boundThreadId: 'mcp:conductor-2' })])).action;
+  assert.equal(read.part, 'read');
+  const live = loadState(h.runDir, h.deps);
+  assert.deepEqual([live.t3Wake.taskId, live.t3Wake.thread, live.t3Wake.conductor], ['task-a1', 'mcp:conductor-2', 1]);
+  // Its heartbeat is live now: another resume from yet another thread is refused.
+  const other = await runConduct(['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-3'], h.overrides());
+  assert.equal(other.code, 5, other.stdout);
+});
+
+test('t3 resume adoption twice: C2 adopts and loses its heartbeat\'s result; C3\'s adoption regenerates the heartbeat with its own request id, and a result bound to C2 is refused: C3 stays current, C2\'s schedule is queued for deletion (workit#313 review r3, finding 1)', async (t) => {
+  const { h } = await wakeYieldPending(t);
+  const s = loadState(h.runDir, h.deps);
+  for (const wp of s.wps.filter((candidate) => ['WP-02', 'WP-03'].includes(candidate.id))) wp.lane.backend = 't3';
+  s.t3Wake = { taskId: null, thread: null, conductor: 1, failed: 'schedule_task: {"error":"T3 unreachable"}', old: [] };
+  saveState(s, h.deps);
+  const c2 = (await conduct(h, ['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-2'])).action;
+  assert.equal(c2.args.clientRequestId, 'abcd1234-heartbeat-r1-a1');
+  // C2 called schedule_task and lost the response: nothing is recorded. C3 adopts.
+  const c3 = (await conduct(h, ['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-3'])).action;
+  assert.deepEqual([c3.part, c3.tool, c3.args.clientRequestId], ['heartbeat', 'schedule_task', 'abcd1234-heartbeat-r1-a2']);
+  const queued = loadState(h.runDir, h.deps).wps.flatMap((wp) => (wp.queue ?? []).filter((act) => act.part === 'heartbeat').map((act) => act.args.clientRequestId));
+  assert.deepEqual(queued, ['abcd1234-heartbeat-r1-a2'], 'C2\'s queued heartbeat is dropped');
+  // T3 hands back C2's schedule anyway: it does not make C2 the conductor.
+  const stray = JSON.stringify({ scheduledTaskId: 'task-a1', boundThreadId: 'mcp:conductor-2' });
+  const stop = (await conduct(h, ['record', '--run', h.runDir, '--action', c3.id, '--as-thread', 'mcp:conductor-3', '--result', stray])).action;
+  assert.deepEqual([stop.part, stop.tool, stop.args], ['heartbeat-stop', 'delete_scheduled_task', { scheduledTaskId: 'task-a1' }]);
+  const state = loadState(h.runDir, h.deps);
+  assert.deepEqual([state.t3Wake.taskId, state.t3Wake.thread], [null, 'mcp:conductor-3']);
+  assert.deepEqual(h.events().filter((event) => event.event === 'heartbeat-misbound').map((event) => event.data), [{ taskId: 'task-a1', boundThreadId: 'mcp:conductor-2', expected: 'mcp:conductor-3' }]);
+  assert.equal((await runConduct(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-3'], h.overrides())).code, 0, 'C3 stays current');
+  // C3's adoption retired C2's thread (finding 2).
+  assert.equal((await runConduct(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2'], h.overrides())).code, 5, 'C2 is refused');
+});
+
+test('t3 heartbeat cleanup: a heartbeat still undeleted after 3 attempts is named in the run analysis\'s audit as unresolved cleanup, with the call that deletes it (workit#313 review r1, finding 3)', async (t) => {
+  const { h } = await wakeYieldPending(t);
+  const s = loadState(h.runDir, h.deps);
+  s.t3Wake = { ...s.t3Wake, deleted: true, old: [{ taskId: 'task-r0', thread: 'mcp:conductor-0', conductor: 1, deleted: false, attempts: 3, error: '{"error":"T3 unreachable"}' }, { taskId: 'task-gone', deleted: true, attempts: 1 }] };
+  saveState(s, h.deps);
+  await analyzeRun(h.runDir, h.deps);
+  const analysis = readFileSync(join(h.runDir, 'run-analysis.md'), 'utf8');
+  const audit = analysis.split(/^## /m).find((part) => part.startsWith('Pre-approval audit\n'));
+  const lines = audit.split('\n').filter((line) => line.startsWith('- unresolved cleanup:'));
+  assert.equal(lines.length, 1, audit);
+  assert.match(lines[0], /^- unresolved cleanup: T3 heartbeat task-r0 \(conductor r1, thread mcp:conductor-0\) is not deleted after 3 attempts \(last error: \{"error":"T3 unreachable"\}\); it starts a turn in that thread every 10 minutes until it is\. Call delete_scheduled_task with \{"scheduledTaskId":"task-r0"\}\.$/);
+});
+
+test('t3 conductor fence: after r2 takes custody, r1 woken by a late done message runs next/record --as-thread r1 and is refused with exit 5, changing nothing; r2 passes, and so does a call without --as-thread (workit#313 review r1, finding 2)', async (t) => {
+  const { h, yielded } = await wakeYieldPending(t);
+  const statePath = join(h.runDir, 'state.json');
+  const run = (argv) => runConduct(argv, h.overrides());
+  const refused = async (argv, current) => {
+    const before = readFileSync(statePath, 'utf8');
+    const result = await run(argv);
+    assert.equal(result.code, 5, `${argv.join(' ')}: ${result.stdout}`);
+    assert.match(JSON.parse(result.stdout).error, new RegExp(`not this run's conductor \\(current: ${current}\\)`));
+    assert.equal(readFileSync(statePath, 'utf8'), before, 'a refused call changes nothing');
+  };
+  const passes = async (argv) => assert.equal((await run(argv)).code, 0, argv.join(' '));
+  // r2 has custody, and its heartbeat is not made yet: r1's thread is known to be retired.
+  const s = loadState(h.runDir, h.deps);
+  s.rotations = [{ attempt: 1, from: 1, to: 2, status: 'custody' }];
+  saveState(s, h.deps);
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], 'none yet');
+  await passes(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2']);
+  // r2's heartbeat is recorded (custody, or its lanes' next wait): its thread is the run's conductor.
+  const made = loadState(h.runDir, h.deps);
+  made.t3Wake = { taskId: 'task-r2', thread: 'mcp:conductor-2', conductor: 2, failed: null, deleted: false, old: [{ taskId: 'task-r1', thread: 'mcp:conductor-1', conductor: 1, deleted: true }] };
+  saveState(made, h.deps);
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  await refused(['record', '--run', h.runDir, '--action', yielded.id, '--result', '{}', '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:somebody-else'], 'mcp:conductor-2');
+  await passes(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2']);
+  await passes(['next', '--run', h.runDir]);
+  await passes(['record', '--run', h.runDir, '--action', yielded.id, '--result', '{}', '--as-thread', 'mcp:conductor-2']);
+});
+
 test('herdr polls and yields (D19.17): wait exit 4 yields to WP-03\'s dispatch; the next poll repeats the argv; WP-03 is created while WP-02 is live', async (t) => {
   const h = harness(t, { herdr: true });
   h.herdrWait = { 'WP-02': [4, 4, 0], 'WP-03': [4, 0] };

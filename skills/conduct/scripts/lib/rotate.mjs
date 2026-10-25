@@ -9,6 +9,7 @@ import { ConductError, TERMINAL_PHASES, appendEvent } from './state.mjs';
 import { LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { conductScript, shellLiteral, spineAckFailure } from './touch.mjs';
 import { runAuthority } from './authority.mjs';
+import { HEARTBEAT_INSTRUCTION, adoptHeartbeat, heartbeatArgs, recordHeartbeatDelete, releaseWakeYield, retireConductorThreads } from './lanes.mjs';
 
 export const SESSION_LOG = 'session-chain.jsonl';
 
@@ -28,6 +29,16 @@ export function custodyFence(state, attempt) {
   if (rotation !== rotations.at(-1)) throw new ConductError(5, `rotation ${attempt} is superseded by rotation ${rotations.at(-1).attempt}; you are not the run's conductor: end your turn`);
 }
 
+// `next --custody <attempt> --as-thread <id>`: the first such call binds the
+// open rotation's custody to that thread (lanes.mjs conductorThreadFence
+// refuses every other until custody is taken). Without --as-thread nothing is bound.
+export function bindCustodyThread(state, asThread, deps) {
+  const rotation = openRotation(state);
+  if (!rotation || rotation.thread || typeof asThread !== 'string' || !asThread.trim()) return;
+  rotation.thread = asThread;
+  appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-thread-bound', source: 'next', data: { attempt: rotation.attempt, thread: asThread, from: rotation.fromThread ?? null } });
+}
+
 // The pane of the conductor that rotated, when it is the caller here.
 export function rotatedOut(state, deps) {
   const rotation = openRotation(state);
@@ -37,7 +48,7 @@ export function rotatedOut(state, deps) {
 
 // Conductor numbers count rotations that took custody: r1 is the conductor
 // that ran intake.
-const conductorNumber = (state) => 1 + (state.rotations ?? []).filter((rotation) => rotation.status === 'custody').length;
+export const conductorNumber = (state) => 1 + (state.rotations ?? []).filter((rotation) => rotation.status === 'custody').length;
 const sessionScript = (state) => join(state.pluginRoot, 'scripts', 'session.mjs');
 const sessionLog = (state) => join(state.runDir, SESSION_LOG);
 const herdrPane = (deps) => (deps.env?.HERDR_ENV === '1' && deps.env?.HERDR_PANE_ID ? deps.env.HERDR_PANE_ID : null);
@@ -67,7 +78,10 @@ export function rotate(state, { why, model = null, effort = null, name = null },
     caller: { pane, model, effort },
     successor: { name: pane ? (name || `${state.slug}-r${from + 1}`) : null, pane: null },
     pendingId: state.pending?.id ?? null,
-    callerSession: null, retire: null, receipt: null, action: null, custodyAt: null,
+    // A T3 run's outgoing conductor thread, refused while custody is open, and
+    // the successor's, bound by its first `next --custody <n> --as-thread <id>`.
+    fromThread: state.t3Wake?.conductor === from ? state.t3Wake.thread ?? null : null, thread: null,
+    callerSession: null, retire: null, receipt: null, heartbeat: null, heartbeatStops: [], action: null, custodyAt: null,
   };
   (state.rotations ??= []).push(rotation);
   deps.write(rotation.handoff, handoffText(state, rotation));
@@ -80,7 +94,7 @@ export function rotate(state, { why, model = null, effort = null, name = null },
   });
   const next = chain
     ? `Run this argv as your LAST tool call and make no tool call after it: ${JSON.stringify(chain)}. If it exits nonzero, read its output: when the successor was briefed (callerRetirement: exit-refused), end your turn with no further conduct.mjs call, since the successor takes custody; otherwise run conduct.mjs next from this pane, which cancels the rotation.`
-    : `Start a fresh conductor session and give it this one line: Read ${rotation.handoff} and execute it exactly. Then end your turn with no further conduct.mjs call. If no successor starts, run conduct.mjs next --run <dir> --custody ${attempt} yourself: its custody step lets you cancel the rotation.`;
+    : `Start a fresh conductor session and give it this one line: Read ${rotation.handoff} and execute it exactly. Then end your turn with no further conduct.mjs call. If no successor starts, run conduct.mjs next --run <dir> --custody ${attempt} yourself, without --as-thread (custody refuses your thread): its custody step lets you cancel the rotation.`;
   return { rotation: attempt, from, to: rotation.to, handoff: rotation.handoff, chain: chain ? { command: chain } : null, next };
 }
 
@@ -117,6 +131,11 @@ export function handoffText(state, rotation) {
   const spend = `lanes booked ${money(bookedUsd)} (the lane-only lower bound)`;
   const touches = (state.touches ?? []).filter((touch) => touch.status !== 'answered');
   const earlier = (state.rotations ?? []).filter((other) => other !== rotation);
+  // A T3 successor binds custody to its own thread: no other thread, the outgoing conductor's included, can then move it.
+  const t3 = state.intent?.backend?.name === 't3';
+  const asThread = t3 ? ' --as-thread <your own T3 thread id>' : '';
+  const t3Custody = t3 ? ` The id is \`orchestrator_capabilities\`' \`parentThreadId\` (or \`t3_thread_configuration\`'s \`threadId\`): it binds custody to your thread, and until custody is taken every \`next\` and \`record\` passes the same \`--as-thread\`.` : '';
+  const loop = t3 ? `\`next\` and \`record\` with \`--as-thread\`` : 'plain `next`';
   return [
     `# conduct ${state.slug}: conductor handoff r${rotation.from} → r${rotation.to}`,
     '',
@@ -127,8 +146,10 @@ export function handoffText(state, rotation) {
     '## First steps',
     '',
     `1. Read \`${join(state.pluginRoot, 'skills', 'conduct', 'SKILL.md')}\` (§ The loop, § Rotating the conductor).`,
-    `2. Run \`node ${shellLiteral(script)} next --run ${shellLiteral(state.runDir)} --custody ${rotation.attempt}\`. If it exits 5, this rotation was cancelled or superseded: you are not the run's conductor, so end your turn. Otherwise its first actions are custody, emitted by the run: ${custody.join('; then ')}. Perform and record each as § The loop says.`,
-    `3. The run then emits its pending action again${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''}, or, when that was a hand-back, asks the touch again as any resume does. r${rotation.from} ran \`rotate\` before performing it, so perform it as given, then keep looping with plain \`next\`.`,
+    `2. Run \`node ${shellLiteral(script)} next --run ${shellLiteral(state.runDir)} --custody ${rotation.attempt}${asThread}\`.${t3Custody} If it exits 5, this rotation was cancelled or superseded: you are not the run's conductor, so end your turn. Otherwise its first actions are custody, emitted by the run: ${custody.join('; then ')}. Perform and record each as § The loop says.`,
+    wakePending(state)
+      ? `3. The pending action${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''} is a wake wait, and its wakes go to r${rotation.from}'s thread: custody goes on, and the run's heartbeat is made again from your thread (\`schedule_task\`), then r${rotation.from}'s is deleted. The run then chooses its wait afresh. Keep looping with ${loop}.`
+      : `3. The run then emits its pending action again${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''}, or, when that was a hand-back, asks the touch again as any resume does. r${rotation.from} ran \`rotate\` before performing it, so perform it as given, then keep looping with ${loop}.`,
     '',
     'Never edit state.json. Never run `rotate` before custody is taken.',
     '',
@@ -207,7 +228,7 @@ function receiptAction(state, rotation) {
     args: {
       questId: state.intent.anchor, outcome: 'paused',
       did: `conduct ${state.slug} (run ${state.runId}): conductor r${rotation.from} rotated to r${rotation.to} (${line(rotation.why).slice(0, 600)}). Handoff: ${rotation.handoff}. r${rotation.from} was ${retired}.${rotation.successor.pane ? ` r${rotation.to} runs in herdr pane ${rotation.successor.pane}.` : ''}`,
-      stoppedAt: `custody of conduct ${state.slug} taken by r${rotation.to}; the run resumes at ${state.pending?.id ? `its pending action ${state.pending.id}` : 'its next action'}`,
+      stoppedAt: `custody of conduct ${state.slug} taken by r${rotation.to}; the run resumes at ${state.pending?.id && !wakePending(state) ? `its pending action ${state.pending.id}` : 'its next action'}`,
     },
   };
 }
@@ -246,10 +267,41 @@ export function custodyNext(state, rotation, deps, { custody = null } = {}) {
     rotation.receipt = 'skipped';
     appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-receipt-skipped', source: 'next', data: { attempt: rotation.attempt, filed: filed.map((touch) => touch.tag) } });
   }
+  // A pending wake yield would have the successor end its turn on wakes that
+  // still go to its predecessor: the heartbeat and the lanes' done messages
+  // both target r<from>'s thread. Custody first makes a heartbeat from the
+  // successor's thread, then deletes the old one; the wait is chosen again
+  // once custody is taken.
+  if (wakePending(state)) {
+    if (!rotation.heartbeat) return heartbeatAction(state, rotation);
+    const [stop] = rotation.heartbeatStops ?? [];
+    if (stop) return heartbeatStopAction(rotation, stop);
+  }
   rotation.status = 'custody';
   rotation.custodyAt = deps.timestamp();
-  appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-taken', source: 'next', data: { attempt: rotation.attempt, from: rotation.from, to: rotation.to, retire: rotation.retire, receipt: rotation.receipt, pane: rotation.successor.pane } });
+  // The outgoing conductor's thread can never adopt the run back (lanes.mjs conductorThreadFence).
+  const retired = retireConductorThreads(state, rotation);
+  appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-taken', source: 'next', data: { attempt: rotation.attempt, from: rotation.from, to: rotation.to, retire: rotation.retire, receipt: rotation.receipt, pane: rotation.successor.pane, ...(retired ? { retiredThreads: retired } : {}) } });
+  // The yield goes, and its lanes' wake waits with it: the first tick under
+  // the new heartbeat reads every live T3 lane at once, then waits on wakes.
+  releaseWakeYield(state, deps, { step: 'custody', kind: 'custody', data: { attempt: rotation.attempt, heartbeat: rotation.heartbeat } });
   return null;
+}
+
+const wakePending = (state) => state.pending?.kind === 'wait' && state.pending.wake === true;
+
+function heartbeatAction(state, rotation) {
+  return {
+    kind: 'agent-tool', step: 'custody', part: 'heartbeat', custody: rotation.attempt, tool: 'schedule_task', expects: { type: 'json' },
+    args: heartbeatArgs(state, rotation.to), instruction: HEARTBEAT_INSTRUCTION,
+  };
+}
+
+function heartbeatStopAction(rotation, taskId) {
+  return {
+    kind: 'agent-tool', step: 'custody', part: 'heartbeat-stop', custody: rotation.attempt, tool: 'delete_scheduled_task', expects: { type: 'json' },
+    args: { scheduledTaskId: taskId }, instruction: `Call delete_scheduled_task with these args and record its raw result (an error too): it is r${rotation.from}'s heartbeat, replaced by yours.`,
+  };
 }
 
 function readConfirm(path, deps) {
@@ -286,6 +338,20 @@ export function recordCustody(state, rotation, action, result, deps) {
     const failure = spineAckFailure(action, result);
     rotation.receipt = failure ? 'failed' : 'filed';
     appendEvent(state, deps, { actionId: action.id, step: 'custody', event: failure ? 'custody-receipt-failed' : 'custody-receipt', data: { attempt: rotation.attempt, ...(failure ? { failure } : { receipt: result.id }) } });
+  } else if (action.part === 'heartbeat') {
+    // A heartbeat that fails never blocks custody: the lanes poll.
+    rotation.heartbeatStops = adoptHeartbeat(state, rotation.to, result, deps.timestamp(), rotation.thread ?? null);
+    rotation.heartbeat = state.t3Wake.failed ? 'failed' : 'made';
+    if (rotation.thread && state.t3Wake.thread === rotation.thread && state.t3Wake.failed) {
+      appendEvent(state, deps, { actionId: action.id, step: 'custody', kind: 'custody', event: 'heartbeat-misbound', source: 'record', data: { taskId: result.scheduledTaskId, boundThreadId: result.boundThreadId, expected: rotation.thread } });
+    }
+    appendEvent(state, deps, { actionId: action.id, step: 'custody', event: 'custody-heartbeat', data: { attempt: rotation.attempt, outcome: rotation.heartbeat, taskId: state.t3Wake.taskId, thread: state.t3Wake.thread, stops: rotation.heartbeatStops } });
+  } else if (action.part === 'heartbeat-stop') {
+    // A failed delete stays owed on the run (lanes.mjs heartbeatsToDelete).
+    const taskId = action.args.scheduledTaskId;
+    recordHeartbeatDelete(state, taskId, result);
+    rotation.heartbeatStops = (rotation.heartbeatStops ?? []).filter((id) => id !== taskId);
+    appendEvent(state, deps, { actionId: action.id, step: 'custody', event: 'custody-heartbeat-stop', data: { attempt: rotation.attempt, taskId } });
   } else {
     throw new ConductError(2, `custody: unknown step ${action.part}`);
   }

@@ -19,7 +19,8 @@ import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, dropRetiredFiling, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
-import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
+import { bindCustodyThread, custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
+import { adoptConductorThread, conductorThreadFence } from './lib/lanes.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -30,10 +31,10 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   intake --goal <text> --repo <abs> --backend t3|herdr|exec [--t3-project <id>] [--backend-why <text>]
          [--anchor <quest id>] [--budget <usd>] [--lanes 1-4] [--agent claude|codex]
          [--adapter <name>]... [--no-adapter <name>]... [--release <json file>] [--runs-root <dir>]
-  next --run <dir> [--custody <n>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
-  record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>]
+  next --run <dir> [--custody <n>] [--as-thread <T3 thread id>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
+  record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>] [--as-thread <T3 thread id>]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
-  drive --run <dir> [--max-steps <n>]   (perform shell, wait and template author actions; stop at the first that needs the conductor)
+  drive --run <dir> [--max-steps <n>] [--as-thread <T3 thread id>]   (also: drive --resume <dir>; perform shell, wait and template author actions; stop at the first that needs the conductor)
   drive --run <dir> --break-lock --why <text>   (remove another host's drive.lock, or a dead driver's on this host)
   status --run <dir>
   analyze --run <dir>
@@ -53,7 +54,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'backend', 'backend-why', 't3-project', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'max-steps', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan']);
+  'runs-root', 'run', 'resume', 'action', 'max-steps', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan', 'as-thread']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -402,8 +403,14 @@ async function intake(tokens, deps) {
 async function next(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
+    conductorThreadFence(state, flags['as-thread']);
     const custody = flags.custody === undefined ? null : String(flags.custody);
-    if (custody !== null) custodyFence(state, custody);
+    if (custody !== null) {
+      custodyFence(state, custody);
+      bindCustodyThread(state, flags['as-thread'], deps);
+    }
+    // A fresh T3 session resuming a run with no live heartbeat adopts its thread.
+    if (flags.resume !== undefined && adoptConductorThread(state, flags['as-thread'], deps)) saveState(state, deps);
     if (state.pending?.handBack) resumeHandBack(state, deps);
     return { out: { ok: true, action: await emit(state, deps, { custody }) } };
   }, { duringRotation: true, driven: 'next' });
@@ -493,6 +500,7 @@ async function record(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
     refuseForeignState(runDirFlag(flags), state, deps);
+    conductorThreadFence(state, flags['as-thread']);
     const id = stringFlag(flags, 'action');
     const wantsReplan = flags.replan !== undefined;
     // A replay of the last record changes nothing and re-emits the next action.
@@ -589,6 +597,18 @@ async function driveVerb(tokens, deps) {
   const maxSteps = flags['max-steps'] === undefined ? undefined : Number(flags['max-steps']);
   if (maxSteps !== undefined && (!Number.isInteger(maxSteps) || maxSteps < 0)) throw new ConductError(2, '--max-steps must be a whole number');
   refuseForeignState(runDir, openRun(flags, deps).state, deps);
+  // A T3 conductor's drive is fenced as its next and record are, before
+  // drive.lock is taken: custody's bound thread while a rotation is open, and
+  // a resume (`drive --resume <dir> --as-thread <id>`) adopts as next's does.
+  const asThread = flags['as-thread'];
+  if (asThread !== undefined) {
+    await transact(flags, deps, async (state) => {
+      conductorThreadFence(state, asThread);
+      if (flags.resume !== undefined && adoptConductorThread(state, asThread, deps)) saveState(state, deps);
+      return { out: null };
+    }, { duringRotation: true, driven: 'drive' });
+  }
+  const thread = asThread === undefined ? [] : ['--as-thread', asThread];
   const { drive, timeoutOverride } = await loadModule(deps, 'lib/drive.mjs', 'module');
   timeoutOverride(deps.env);
   const call = async (fn) => {
@@ -614,9 +634,12 @@ async function driveVerb(tokens, deps) {
     });
     return drive({ runDir, maxSteps }, {
       ...driver,
-      pending: () => call(() => transact({ run: runDir }, driver, async (state) => ({ out: { ok: true, action: await emit(state, driver) } }))),
+      pending: () => call(() => transact({ run: runDir }, driver, async (state) => {
+        conductorThreadFence(state, asThread);
+        return { out: { ok: true, action: await emit(state, driver) } };
+      })),
       claim: (id) => call(() => claim(id)),
-      record: (id, result) => call(() => record(['--run', runDir, '--action', id, '--result', JSON.stringify(result)], driver)),
+      record: (id, result) => call(() => record(['--run', runDir, '--action', id, '--result', JSON.stringify(result), ...thread], driver)),
     });
   }, { lock: 'drive.lock', lease: true });
 }
@@ -892,9 +915,10 @@ export async function runConduct(argv, overrides = {}) {
     ...overrides,
   };
   let [verb, ...tokens] = argv;
+  // `conduct.mjs --resume <dir>` is `next --resume <dir>`: a resume (lanes.mjs adoptConductorThread).
   if (verb === '--resume') {
     verb = 'next';
-    tokens = ['--run', ...tokens];
+    tokens = ['--resume', ...tokens];
   }
   if (!Object.hasOwn(VERBS, verb ?? '')) {
     return { code: 2, stdout: '', stderr: `${verb ? `conduct: unknown verb ${verb}\n` : ''}${USAGE}\n` };

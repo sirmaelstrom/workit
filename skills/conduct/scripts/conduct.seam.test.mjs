@@ -530,6 +530,67 @@ async function nonePath(t, opts = {}, extra = OFF) {
   return h;
 }
 
+test('t3 resume adoption: at the showcase, after analyze deleted the heartbeat, a fresh session\'s next --resume --as-thread <new> adopts its thread; a retired thread is refused; a live heartbeat bound to another thread exits 5 (workit#313 review r2, finding 2)', async (t) => {
+  const h = await nonePath(t);
+  const showcase = await drive(h, { until: (a) => a.step === 'showcase' });
+  const path = join(h.runDir, 'state.json');
+  // The run as a T3 run left it: r1's heartbeat on thread conductor-1 deleted at analyze, conductor-0 retired by an earlier custody.
+  const t3 = (wake) => {
+    const s = h.state();
+    s.intent.backend = { name: 't3', t3Project: 'proj-1' };
+    s.t3Wake = { taskId: 'task-r1', thread: 'mcp:conductor-1', conductor: 1, at: new Date(T0).toISOString(), failed: null, old: [], ...wake };
+    s.retiredConductorThreads = ['mcp:conductor-0'];
+    writeFileSync(path, `${JSON.stringify(s, null, 2)}\n`);
+  };
+  const exit5 = async (argv, current) => {
+    const before = readFileSync(path, 'utf8');
+    const result = await h.run(argv);
+    assert.equal(result.code, 5, `${argv.join(' ')}: ${result.stdout}`);
+    assert.match(out(result).error, new RegExp(`not this run's conductor \\(current: ${current}\\)`));
+    assert.equal(readFileSync(path, 'utf8'), before, 'a refused call changes nothing');
+  };
+  // A live heartbeat bound to conductor-1: another thread's resume is refused.
+  t3({ deleted: false });
+  await exit5(['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-2'], 'mcp:conductor-1');
+  // Deleted at analyze: the new session adopts its own thread and gets the showcase again.
+  t3({ deleted: true, deleteAttempts: 1, deleteResult: { taskId: 'task-r1', deleted: true } });
+  await exit5(['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-0'], 'none yet');
+  const resumed = await h.run(['--resume', h.runDir, '--as-thread', 'mcp:conductor-2']);
+  assert.equal(resumed.code, 0, resumed.stdout + resumed.stderr);
+  assert.equal(out(resumed).action.id, showcase.id);
+  const state = h.state();
+  assert.deepEqual([state.t3Wake.thread, state.t3Wake.conductor, state.t3Wake.taskId], ['mcp:conductor-2', 1, null]);
+  assert.deepEqual(state.t3Wake.old, [{ taskId: 'task-r1', thread: 'mcp:conductor-1', conductor: 1, deleted: true, attempts: 1 }]);
+  const adopted = h.events().filter((event) => event.event === 'conductor-adopted');
+  assert.deepEqual(adopted.map((event) => event.data), [{ from: 'mcp:conductor-1', to: 'mcp:conductor-2', conductor: 1, heartbeat: false }]);
+  // Adopted with no heartbeat: nothing is fenced but a retired thread; a second resume from the same thread adopts nothing.
+  assert.equal((await h.run(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2'])).code, 0);
+  assert.equal((await h.run(['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-2'])).code, 0);
+  assert.equal(h.events().filter((event) => event.event === 'conductor-adopted').length, 1);
+  await exit5(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-0'], 'none yet');
+});
+
+test('t3 resume adoption retires the replaced thread: after a fresh session adopts at the showcase, the old conductor thread\'s next and record --as-thread exit 5 and leave state.json unchanged byte for byte (workit#313 review r3, finding 2)', async (t) => {
+  const h = await nonePath(t);
+  const showcase = await drive(h, { until: (a) => a.step === 'showcase' });
+  const path = join(h.runDir, 'state.json');
+  const s = h.state();
+  s.intent.backend = { name: 't3', t3Project: 'proj-1' };
+  s.t3Wake = { taskId: 'task-r1', thread: 'mcp:conductor-1', conductor: 1, at: new Date(T0).toISOString(), failed: null, old: [], deleted: true, deleteAttempts: 1, deleteResult: { taskId: 'task-r1', deleted: true } };
+  writeFileSync(path, `${JSON.stringify(s, null, 2)}\n`);
+  const resumed = await h.run(['next', '--resume', h.runDir, '--as-thread', 'mcp:conductor-2']);
+  assert.equal(resumed.code, 0, resumed.stdout + resumed.stderr);
+  assert.deepEqual(h.state().retiredConductorThreads, ['mcp:conductor-1']);
+  for (const argv of [['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], ['record', '--run', h.runDir, '--action', showcase.id, '--result', '{}', '--as-thread', 'mcp:conductor-1']]) {
+    const before = readFileSync(path, 'utf8');
+    const result = await h.run(argv);
+    assert.equal(result.code, 5, `${argv.join(' ')}: ${result.stdout}`);
+    assert.match(out(result).error, /not this run's conductor \(current: none yet\)/);
+    assert.equal(readFileSync(path, 'utf8'), before, 'a refused call changes nothing');
+  }
+  assert.equal((await h.run(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2'])).code, 0, 'the adopter passes');
+});
+
 test('release failures (D20): land gate --wp release code 5, a verify exit 1 and an after exit 1 each end the release failed, unlocked, at analyze; the analysis and the showcase name it', async (t) => {
   const red = JSON.parse(text('land', 'check-runs-green.json'));
   red.check_runs[0].conclusion = 'failure';
