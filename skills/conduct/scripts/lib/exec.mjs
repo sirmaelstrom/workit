@@ -22,15 +22,67 @@ export function spawnDetached(program, args, { cwd, logPath, env } = {}) {
   }
 }
 
-// A `shell` action's argv as drive runs it: no shell, the action's env added,
-// stdin closed. A spawn failure is exit 127, as a shell reports a missing
-// program; a timeout is `timedOut`, and its partial output is not a result.
-export function runArgv(program, args, { cwd, env, timeout } = {}) {
-  const run = spawnSync(program, args, { cwd, env, timeout, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, windowsHide: true });
-  const stdout = run.stdout ?? '', stderr = run.stderr ?? '';
-  if (run.error?.code === 'ETIMEDOUT') return { code: null, stdout, stderr, timedOut: true };
-  if (run.error && run.status === null) return { code: 127, stdout, stderr: `${run.error.message}\n${stderr}` };
-  return { code: run.status ?? 1, stdout, stderr };
+// Kills a process and everything it started. A gate command runs under
+// cmd.exe /c or sh -c, and killing that root alone leaves its children
+// running. win32: taskkill /T; POSIX: the root leads its own process group
+// (runArgv spawns it detached), and the group is killed.
+export function killProcessTree(pid, { platform = process.platform } = {}) {
+  if (platform === 'win32') {
+    spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // Already gone; the caller verifies the root.
+  }
+}
+
+// A `shell` action's argv as drive runs it (only drive: the hand path runs
+// `execute`): no shell, the action's env added, stdin closed. A spawn failure
+// is exit 127, as a shell reports a missing program. A timeout kills the
+// process tree and waits up to killGraceMs for the root to exit: `timedOut`,
+// with `killVerified` false when it did not. Its partial output is not a result.
+export function runArgv(program, args, { cwd, env, timeout, platform = process.platform, killTree = killProcessTree, killGraceMs = 5000 } = {}) {
+  return new Promise((done) => {
+    const out = [], err = [];
+    const text = () => ({ stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') });
+    let settled = false, exited = false, timedOut = false, timer = null, grace = null;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(grace);
+      done(value);
+    };
+    const failed = (error) => {
+      const { stdout, stderr } = text();
+      settle({ code: 127, stdout, stderr: `${error.message}\n${stderr}` });
+    };
+    let child;
+    try {
+      child = spawn(program, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: platform !== 'win32' });
+    } catch (error) {
+      failed(error);
+      return;
+    }
+    child.stdout.on('data', (chunk) => out.push(chunk));
+    child.stderr.on('data', (chunk) => err.push(chunk));
+    child.on('error', (error) => { if (child.pid === undefined) failed(error); });
+    child.on('exit', () => {
+      exited = true;
+      if (timedOut) settle({ code: null, ...text(), timedOut: true, killVerified: true, pid: child.pid });
+    });
+    child.on('close', (code) => { if (!timedOut) settle({ code: code ?? 1, ...text() }); });
+    if (timeout) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        killTree(child.pid, { platform });
+        if (exited) settle({ code: null, ...text(), timedOut: true, killVerified: true, pid: child.pid });
+        else grace = setTimeout(() => settle({ code: null, ...text(), timedOut: true, killVerified: false, pid: child.pid }), killGraceMs);
+      }, timeout);
+    }
+  });
 }
 
 export function pidAlive(pid) {

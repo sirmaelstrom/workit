@@ -161,7 +161,7 @@ test('drive: a refused record exits nonzero, leaves the action pending, and reco
 });
 
 test('drive: a shell timeout is a stop, not a result: nothing recorded, exit 1', async (t) => {
-  const f = fixture(t, [SHELL], { shell: () => ({ code: null, stdout: 'partial', stderr: '', timedOut: true }) });
+  const f = fixture(t, [SHELL], { shell: () => ({ code: null, stdout: 'partial', stderr: '', timedOut: true, killVerified: true }) });
   const result = await f.drive();
   assert.equal(result.code, 1);
   assert.equal(out(result).stopped, 'shell-timeout');
@@ -340,9 +340,67 @@ test('drive: a pending hand-back is a stop and is never consumed', async (t) => 
   assert.deepEqual(state(f).pending, handBack);
 });
 
-test('runArgv: env added, exit code kept, a missing program is 127, a timeout is timedOut', () => {
-  const ran = runArgv(process.execPath, ['-e', 'process.stdout.write(process.env.DRIVE_X); process.stderr.write("e"); process.exit(3)'], { env: { ...process.env, DRIVE_X: 'y' } });
+test('runArgv: env added, exit code kept, a missing program is 127, a timeout is timedOut', async () => {
+  const ran = await runArgv(process.execPath, ['-e', 'process.stdout.write(process.env.DRIVE_X); process.stderr.write("e"); process.exit(3)'], { env: { ...process.env, DRIVE_X: 'y' } });
   assert.deepEqual(ran, { code: 3, stdout: 'y', stderr: 'e' });
-  assert.equal(runArgv('workit-no-such-program', []).code, 127);
-  assert.equal(runArgv(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { timeout: 200 }).timedOut, true);
+  assert.equal((await runArgv('workit-no-such-program', [])).code, 127);
+  assert.equal((await runArgv(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { timeout: 200 })).timedOut, true);
+});
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+};
+const until = async (check, ms = 5000) => {
+  for (const end = Date.now() + ms; Date.now() < end; await new Promise((done) => setTimeout(done, 50))) if (check()) return true;
+  return check();
+};
+
+test('runArgv: a timeout kills the process tree, a grandchild sleeper too, and verifies the root is gone', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'workit-tree-'));
+  const pidFile = join(dir, 'grandchild.pid');
+  const sleeper = join(dir, 'sleeper.js');
+  writeFileSync(sleeper, "require('node:fs').writeFileSync(process.argv[2], String(process.pid)); setTimeout(() => {}, 60000);\n");
+  t.after(() => {
+    if (existsSync(pidFile)) try { process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL'); } catch {}
+    rmSync(dir, { recursive: true, force: true });
+  });
+  // A gate command's shape: a shell root whose child sleeps past the timeout.
+  // Killing the root alone leaves the child running (its output goes to the
+  // null device, so the old spawnSync returned rather than waiting on it).
+  const [program, ...args] = process.platform === 'win32'
+    ? ['cmd.exe', '/d', '/c', 'node', sleeper, pidFile, '>NUL', '2>&1']
+    : ['sh', '-c', '"$0" "$1" "$2" >/dev/null 2>&1; :', process.execPath, sleeper, pidFile];
+  const ran = await runArgv(program, args, { timeout: 2000 });
+  assert.equal(ran.timedOut, true);
+  const grandchild = Number(readFileSync(pidFile, 'utf8'));
+  assert.ok(await until(() => !alive(grandchild)), `the grandchild ${grandchild} is gone`);
+  assert.equal(ran.killVerified, true);
+  assert.equal(alive(ran.pid), false, 'the root is gone');
+});
+
+test('runArgv: a root that survives its kill is reported unverified', async (t) => {
+  let pid = null;
+  t.after(() => { if (pid) try { process.kill(pid, 'SIGKILL'); } catch {} });
+  const ran = await runArgv(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { timeout: 200, killTree: () => {}, killGraceMs: 300 });
+  pid = ran.pid;
+  assert.equal(ran.timedOut, true);
+  assert.equal(ran.killVerified, false);
+  assert.equal(alive(pid), true);
+});
+
+test('drive: a timeout whose kill is unverified stops as timeout-unverified, nothing recorded; the next drive reconciles', async (t) => {
+  const f = fixture(t, [SHELL], { shell: () => ({ code: null, stdout: '', stderr: '', timedOut: true, killVerified: false }) });
+  const result = await f.drive();
+  assert.equal(result.code, 1);
+  assert.equal(out(result).stopped, 'timeout-unverified');
+  assert.deepEqual(f.recorded, []);
+  assert.equal(state(f).pending.kind, 'shell');
+  assert.match(logLines(f).at(-1), / exit=timeout \d+\.\ds unverified$/);
+  assert.equal(out(await f.drive()).stopped, 'reconcile');
+  assert.equal(f.runs.length, 1);
 });

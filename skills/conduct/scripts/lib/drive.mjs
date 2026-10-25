@@ -140,9 +140,11 @@ export async function drive({ runDir, maxSteps = DEFAULT_MAX_STEPS }, deps) {
           timeout: action.background ? BACKGROUND_TIMEOUT_MS : SHELL_TIMEOUT_MS,
         });
         if (run.timedOut) {
-          // The started marker stays: the next drive stops at reconcile.
-          log([startedAt, action.id, label(action), 'exit=timeout', `${((deps.now() - t0) / 1000).toFixed(1)}s`]);
-          return finish(1, { ok: false, stopped: 'shell-timeout', action, stdout: run.stdout, stderr: run.stderr });
+          // Its process tree was killed; without proof the root is gone, the
+          // stop says so. The started marker stays: the next drive reconciles.
+          const verified = run.killVerified === true;
+          log([startedAt, action.id, label(action), 'exit=timeout', `${((deps.now() - t0) / 1000).toFixed(1)}s`, ...(verified ? [] : ['unverified'])]);
+          return finish(1, { ok: false, stopped: verified ? 'shell-timeout' : 'timeout-unverified', action, stdout: run.stdout, stderr: run.stderr });
         }
         result = { code: run.code, stdout: run.stdout, stderr: run.stderr };
         code = run.code;
