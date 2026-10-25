@@ -12,8 +12,11 @@ import { gateCheck } from './land.mjs';
 // The lane check after that amendment maps the lane's rebase, so the gate
 // reaches the reviewed head through it. `mode`: 'identical' rebases over an
 // unrelated main commit; 'conflict' resolves an add/add conflict by changing
-// the reviewed hunk; 'on-top' adds a commit with no rebase.
-function laneRebased(t, mode) {
+// the reviewed hunk; 'on-top' adds a commit with no rebase; 'stale' rebases
+// onto a main commit the worktree's origin/main no longer names, and its
+// resolution drops that commit's change. `breakFetch` points origin nowhere
+// once the lane has pushed.
+function laneRebased(t, mode, { breakFetch = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'conduct-lane-rebase-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_EDITOR: 'true' } }).trim();
@@ -38,6 +41,7 @@ function laneRebased(t, mode) {
   execFileSync('git', ['clone', '-q', '-c', 'core.autocrlf=false', origin, seed], { stdio: 'ignore' });
   configure(seed);
   commit(seed, 'base.txt', 'base\n');
+  if (mode === 'stale') commit(seed, 'lib/x.mjs', 'zero\n');
   git(seed, 'push', '-q', 'origin', 'HEAD:main');
   execFileSync('git', ['clone', '-q', '-c', 'core.autocrlf=false', origin, wt], { stdio: 'ignore' });
   configure(wt);
@@ -50,11 +54,12 @@ function laneRebased(t, mode) {
   // main moves; the lane's amendment rebases onto it by hand and force-pushes.
   if (mode === 'identical') commit(seed, 'sibling.txt', 'sibling\n');
   if (mode === 'conflict') commit(seed, 'lib/x.mjs', 'zero\n');
+  if (mode === 'stale') commit(seed, 'lib/x.mjs', 'zero, upstream\n');
   git(seed, 'push', '-q', 'origin', 'HEAD:main');
   if (mode === 'on-top') commit(wt, 'lib/x.mjs', 'one\ntwo\nthree\n', 'gate fix');
   else {
     git(wt, 'fetch', '-q', 'origin');
-    if (mode === 'conflict') {
+    if (mode === 'conflict' || mode === 'stale') {
       assert.notEqual(real(['-C', wt, 'rebase', 'origin/main']).code, 0, 'the fixture rebase conflicts');
       write(wt, 'lib/x.mjs', 'one\n');
       git(wt, 'add', 'lib/x.mjs');
@@ -64,6 +69,9 @@ function laneRebased(t, mode) {
   git(wt, 'push', '-q', '--force', 'origin', branch);
   const after = git(wt, 'rev-parse', 'HEAD');
   const newBase = git(wt, 'rev-parse', 'origin/main');
+  // The worktree's origin/main falls back to the base the lane started from.
+  if (mode === 'stale') git(wt, 'update-ref', 'refs/remotes/origin/main', oldBase);
+  if (breakFetch) git(wt, 'remote', 'set-url', 'origin', join(root, 'missing.git'));
 
   // The lane check passed: the PR lookup recorded the pushed head.
   const wp = {
@@ -104,7 +112,7 @@ function laneRebased(t, mode) {
 test('lane rebase (b118b800): a gate amendment\'s patch-identical rebase is mapped at the lane check, and the gate\'s coverage reaches the reviewed head through it', (t) => {
   const s = laneRebased(t, 'identical');
   assert.equal(s.wp.state, 'gate', s.wp.reason);
-  assert.equal(s.parts[0], 'lane-base', s.parts.join(', '));
+  assert.deepEqual(s.parts.slice(0, 2), ['lane-fetch', 'lane-base'], s.parts.join(', '));
   const [lane, own] = s.wp.rebases;
   assert.deepEqual([lane.from, lane.to, lane.oldBase, lane.newBase, lane.equivalent], [s.reviewed, s.after, s.oldBase, s.newBase, true]);
   assert.equal(lane.images[s.reviewed], s.after);
@@ -117,7 +125,7 @@ test('lane rebase (b118b800): a gate amendment\'s patch-identical rebase is mapp
 
 test('lane rebase (b118b800): a conflict resolution that changed a reviewed hunk is mapped too, and the gate requires a review of the rebased head', (t) => {
   const s = laneRebased(t, 'conflict');
-  assert.equal(s.parts[0], 'lane-base', s.parts.join(', '));
+  assert.deepEqual(s.parts.slice(0, 2), ['lane-fetch', 'lane-base'], s.parts.join(', '));
   const [lane] = s.wp.rebases;
   assert.deepEqual([lane.from, lane.to, lane.newBase, lane.equivalent], [s.reviewed, s.after, s.newBase, false]);
   const out = s.gate();
@@ -127,6 +135,24 @@ test('lane rebase (b118b800): a conflict resolution that changed a reviewed hunk
 
 test('lane rebase (b118b800): a gate amendment that only adds commits on top records no lane rebase', (t) => {
   const s = laneRebased(t, 'on-top');
-  assert.equal(s.parts[0], 'lane-base', s.parts.join(', '));
+  assert.deepEqual(s.parts.slice(0, 2), ['lane-fetch', 'lane-base'], s.parts.join(', '));
   assert.deepEqual(s.wp.rebases.map((rebase) => [rebase.from, rebase.oldBase]), [[s.after, s.oldBase]], 'only conduct\'s own rebase');
+});
+
+test('lane rebase (workit#326 r1): a lane rebased onto a newer main than the worktree\'s stale origin/main, whose resolution dropped the upstream change, is measured against the fetched main, and the gate requires a review', (t) => {
+  const s = laneRebased(t, 'stale');
+  assert.deepEqual(s.parts.slice(0, 2), ['lane-fetch', 'lane-base'], s.parts.join(', '));
+  const [lane] = s.wp.rebases;
+  assert.deepEqual([lane.from, lane.to, lane.newBase, lane.equivalent], [s.reviewed, s.after, s.newBase, false]);
+  const out = s.gate();
+  assert.equal(out.ok, false);
+  assert.deepEqual([out.causes.includes('full-review'), out.needsFullReview], [true, true], out.failures.join('\n'));
+});
+
+test('lane rebase (workit#326 r1): a failed fetch before the lane base is read blocks, and nothing is measured against the stale origin/main', (t) => {
+  const s = laneRebased(t, 'stale', { breakFetch: true });
+  assert.deepEqual(s.parts, ['lane-fetch']);
+  assert.equal(s.wp.state, 'blocked');
+  assert.match(s.wp.reason, /^the lane's base is unreadable: fetch of origin\/main failed/);
+  assert.deepEqual(s.wp.rebases, []);
 });
