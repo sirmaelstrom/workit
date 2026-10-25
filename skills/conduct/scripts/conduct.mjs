@@ -812,7 +812,10 @@ function rewriteLaneHooks(state, from, deps) {
     const path = join(wp.lane.worktree, '.claude', 'settings.local.json');
     if (!deps.exists(path)) continue;
     try {
-      const settings = JSON.parse(deps.read(path));
+      // A BOM and CRLF are read past and written back as they were.
+      const raw = deps.read(path), bom = raw.startsWith('﻿') ? '﻿' : '';
+      const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+      const settings = JSON.parse(raw.slice(bom.length));
       let changed = false;
       for (const entry of settings?.hooks?.Stop ?? []) {
         for (const hook of entry?.hooks ?? []) {
@@ -822,7 +825,7 @@ function rewriteLaneHooks(state, from, deps) {
         }
       }
       if (!changed) continue;
-      deps.write(path, `${JSON.stringify(settings, null, 2)}\n`);
+      deps.write(path, `${bom}${JSON.stringify(settings, null, 2).replace(/\n/g, eol)}${eol}`);
       hooksRewritten.push(path);
     } catch (error) {
       hooksFailed.push({ path, error: firstLine(error.message) });
