@@ -244,6 +244,10 @@ function shellResult(h, action) {
   if (command[0] === 'node' && command[1].endsWith('lane.mjs')) return herdrVerb(h, action);
   switch (action.part ? `${action.step}/${action.part}` : action.step) {
     case 'base': return ok(`${BASE}\n`);
+    // A full council round's diff, written as git would (its record reads the size).
+    case 'council/full-diff':
+      writeFileSync(command.find((arg) => arg.startsWith('--output=')).slice('--output='.length), 'diff --git a/src/a.mjs b/src/a.mjs\n');
+      return ok();
     case 'pr-lookup': return ok(JSON.stringify([{ number: prNumber(id), headRefOid: h.head(id), state: 'OPEN' }]));
     case 'review/diff': return ok(h.diff?.[id] ?? 'src/a.mjs\n');
     case 'review/managed': return ok(JSON.stringify({ mode: 'standalone' }));
@@ -2022,16 +2026,25 @@ test('council meta and args (D20): meta precedes council_review; its args; a mis
   await assert.rejects(recordPending(h, {}), { code: 2, message: /title/ });
   writeFileSync(meta.outPath, JSON.stringify({ title: 'WP-02: name WP-02' }));
   await recordPending(h, {});
+  const wt = h.wp('WP-02').lane.worktree;
+  // A full round writes the PR's diff first; its record keeps the changed files that fit.
+  const fullDiff = await step(h);
+  h.trace.push(fullDiff);
+  assert.equal(fullDiff.part, 'full-diff');
+  const diffFile = join(h.runDir, 'council', 'wp-02', 'full-r1.diff');
+  assert.deepEqual(fullDiff.command, ['git', '-C', wt, 'diff', '--no-color', '--no-renames', '-U25', `--output=${diffFile}`, 'origin/main...HEAD']);
+  mkdirSync(join(wt, 'src'), { recursive: true });
+  writeFileSync(join(wt, 'src/a.mjs'), 'export const a = 1;\n');
+  await recordPending(h, await perform(h, fullDiff));
   const review = await step(h);
   h.trace.push(review);
   assert.equal(review.tool, 'council_review');
-  const wt = h.wp('WP-02').lane.worktree;
   assert.equal(review.args.workshop_path, `${join(h.runDir, 'council', 'wp-02')}${sep}`);
   assert.equal(review.args.output_dir, `${join(h.runDir, 'council', 'wp-02', 'review-1')}${sep}`);
   assert.equal(review.args.code_root, wt);
   assert.equal(review.args.profile, 'conduct-code');
   assert.ok(!('models' in review.args));
-  assert.deepEqual(review.args.artifact_paths, [join(wt, 'src/a.mjs')]);
+  assert.deepEqual(review.args.artifact_paths, [diffFile, join(wt, 'src/a.mjs')]);
   await recordPending(h, await perform(h, review));
   const brief = await drive(h, { until: (a) => a.part === 'amendment' });
   assert.match(brief.instruction, /C1-1, C1-2/);

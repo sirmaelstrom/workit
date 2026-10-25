@@ -31,7 +31,7 @@
 // `land merged` compares the squash tree with the checked head. That holds
 // only while the base does not move between the gate and the merge; a moved
 // base reads as a tree mismatch and halts dispatch, never as a pass.
-import { isAbsolute, join, sep } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ConductError, STEP_SEAM, laneBase, loadState } from './state.mjs';
 import { amendmentSections } from './markdown.mjs';
@@ -312,9 +312,17 @@ export function priorAdjudicationBody(recordBody) {
   ].join('\n');
 }
 
+// A Codex seat refuses a turn over 1,048,576 characters, and the prompt
+// template rides on top of the artifacts. A full round's artifacts stay under
+// the budget: the diff first, then whole non-test files while they fit.
+export const CODEX_INPUT_LIMIT = 1048576;
+export const COUNCIL_INPUT_BUDGET = 700000;
+
 // The council round's scope comes from its dispatch, never the round number.
 // A delta round first writes `git diff <since> <head>` into the run dir and
-// hands that file to the council, so the scope reaches the tool's input.
+// hands that file to the council, so the scope reaches the tool's input. A
+// full round writes the PR's whole diff the same way; its record (councilFit)
+// then sets the review's artifact_paths under COUNCIL_INPUT_BUDGET.
 // From round 2 on, the previous round's adjudication (wp.priorAdjudication =
 // { path, round }, set at `resolve`) goes in too, as context only.
 export function t2Actions(state, wp, { round = 1, changedPaths = [], report = null, scope = 'full', since = null } = {}) {
@@ -324,18 +332,22 @@ export function t2Actions(state, wp, { round = 1, changedPaths = [], report = nu
   const workshop = `${join(state.runDir, 'council', lower(wp))}${sep}`;
   const outDir = `${join(state.runDir, 'council', lower(wp), `review-${round}`)}${sep}`;
   const deltaDiff = scope === 'delta' ? join(state.runDir, 'council', lower(wp), `delta-r${round}.diff`) : null;
+  // Beside the delta diff: git does not create the round's output dir.
+  const fullDiff = scope === 'full' ? join(state.runDir, 'council', lower(wp), `full-r${round}.diff`) : null;
   // Only the immediately preceding round's rulings: a zero-finding round writes
   // no adjudication, so an older file would arrive labelled as the previous
   // round's (council review of #242, codex's three-round reproduction).
   const recorded = wp.priorAdjudication;
   const prior = round > 1 && recorded?.path && recorded.round === round - 1 ? [recorded.path] : [];
-  const land = { round, scope, since, deltaDiff, prior: prior[0] ?? null };
+  const land = { round, scope, since, deltaDiff, ...(fullDiff ? { fullDiff } : {}), prior: prior[0] ?? null };
   const tool = (part, name, args, extra = {}) => ({ kind: 'agent-tool', step: 'council', seam: STEP_SEAM.council, part, tool: name,
     instruction: `Call ${name} with these args and record its result.`, args, expects: { type: 'json' }, land, ...extra });
   return [
     ...(deltaDiff ? [shell('council', 'delta-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', `--output=${deltaDiff}`, '--end-of-options', since, wp.pr.head], { land })] : []),
+    ...(fullDiff ? [shell('council', 'full-diff', ['git', '-C', wp.lane.worktree, 'diff', '--no-color', '--no-renames', '-U25', `--output=${fullDiff}`, `origin/${defaultOf(state)}...HEAD`], { land })] : []),
+    // A full round's paths are candidates until the full-diff record fits them.
     tool('review', 'council_review', { workshop_path: workshop, output_dir: outDir, surface: 'code', code_root: wp.lane.worktree,
-      artifact_paths: [...prior, ...(deltaDiff ? [deltaDiff] : []), ...changedPaths], round, profile: CONDUCT_COUNCIL_PROFILE }),
+      artifact_paths: [...prior, ...(deltaDiff ? [deltaDiff] : []), ...(fullDiff ? [fullDiff] : []), ...changedPaths], round, profile: CONDUCT_COUNCIL_PROFILE }),
     tool('synthesize', 'council_synthesize', { review_dir: outDir, workshop_path: workshop }, {
       head: wp.pr.head, expects: { type: 'json', fields: ['findings', 'seats'] },
       instruction: 'Call council_synthesize, then record { findings: <count>, seats: [<usable seats>] } read from the synthesis. Count each synthesized finding once if any lens rated it Critical, Major or Minor; a finding every lens rated Note is not counted.',
@@ -1202,9 +1214,10 @@ function recordReview(state, wp, action, r) {
 
 // A council round is coverage only after a review with a usable seat and a
 // synthesis with a parseable count; the entry is written at that point.
-function recordCouncil(state, wp, action, r) {
+function recordCouncil(state, wp, action, r, deps = {}) {
   const land = action.land ?? {};
   if (action.part === 'delta-diff') return r.code === 0 ? result('continue') : result('block', `delta diff for council round ${land.round} failed: ${first(r.stderr)}`);
+  if (action.part === 'full-diff') return r.code === 0 ? councilFit(wp, action, deps) : result('block', `full diff for council round ${land.round} failed: ${first(r.stderr)}`);
   if (action.part === 'review') {
     const paths = action.args?.artifact_paths ?? [];
     // The prior round's adjudication is context, not something to review.
@@ -1214,6 +1227,15 @@ function recordCouncil(state, wp, action, r) {
     // An MCP error result carries its text in `content`, not `error`
     // (an unknown profile is refused by name there).
     const error = r.error ?? (r.isError ? (Array.isArray(r.content) ? r.content.map((part) => part?.text).filter(Boolean).join(' ').slice(0, 300) : '') || 'isError' : null);
+    // A seat that refused the input's size would refuse the same input again: no retry.
+    const tooLarge = Object.entries(r.models ?? {}).filter(([, seat]) => seat?.status !== 'success' && INPUT_TOO_LARGE.test(String(seat?.error ?? '')));
+    if (tooLarge.length || INPUT_TOO_LARGE.test(String(error ?? ''))) {
+      const text = String(tooLarge[0]?.[1]?.error ?? error);
+      const actual = text.match(/actual_chars\D{0,4}(\d+)/)?.[1];
+      const max = Number(text.match(/(?:max_chars|maximum length of)\D{0,4}(\d+)/)?.[1] ?? CODEX_INPUT_LIMIT);
+      const who = tooLarge.length ? tooLarge.map(([name]) => name).join(', ') : 'the council';
+      return result('block', `council review round ${land.round}: ${who} refused the input as too large (${actual ? `${chars(Number(actual))} chars` : 'size not reported'}, limit ${chars(max)}); the same input cannot succeed, so it is not retried: split the WP or review by hand`);
+    }
     if ((error || !seats.length) && !previous?.seats?.length) return result('block', `council review round ${land.round} has no usable seat: ${error ?? 'every seat failed'}`);
     // Delta only when the dispatched review carried the delta diff.
     const scope = land.scope === 'delta' && land.deltaDiff && paths.includes(land.deltaDiff) ? 'delta' : 'full';
@@ -1243,6 +1265,45 @@ function recordCouncil(state, wp, action, r) {
   }
   if (r.error || r.success === false || r.challenge_stub) return result('block', `council challenge round ${land.round} failed: ${r.error ?? 'stub or unsuccessful'}`);
   return result('continue');
+}
+
+const INPUT_TOO_LARGE = /input_too_large|Input exceeds the maximum length/i;
+const chars = (n) => n.toLocaleString('en-US');
+
+// A full round's council input, set once its diff is written: the prior
+// adjudication and the diff, then each changed non-test file whole while the
+// total stays within COUNCIL_INPUT_BUDGET. A test file, a deleted file and one
+// that would overflow reach the council through the diff alone; the seats can
+// still open any of them under code_root. A diff over the budget is refused.
+function councilFit(wp, action, deps) {
+  const land = action.land;
+  const size = (path) => {
+    try { return String(deps.read(path)).length; } catch { return null; }
+  };
+  const diffChars = size(land.fullDiff);
+  if (diffChars === null) return result('block', `full diff for council round ${land.round} was not written to ${land.fullDiff}`);
+  if (diffChars === 0) return result('block', `council review round ${land.round} has an empty full diff: nothing to review`);
+  const priorChars = land.prior ? size(land.prior) ?? 0 : 0;
+  if (diffChars + priorChars > COUNCIL_INPUT_BUDGET) {
+    return result('block', `council input would exceed the Codex ${chars(CODEX_INPUT_LIMIT)}-char limit (${chars(diffChars)} chars of diff); split the WP or review by hand`);
+  }
+  const queue = rest(wp, action);
+  const at = queue.findIndex((a) => a.step === 'council' && a.part === 'review' && a.land?.fullDiff === land.fullDiff);
+  if (at < 0) return result('block', `council round ${land.round} has no queued review for its full diff`);
+  const review = queue[at];
+  let total = diffChars + priorChars;
+  const kept = [];
+  const omitted = [];
+  for (const path of review.args.artifact_paths.filter((p) => p !== land.prior && p !== land.fullDiff)) {
+    const fileChars = isTestPath(relative(wp.lane.worktree, path)) ? null : size(path);
+    if (fileChars !== null && total + fileChars <= COUNCIL_INPUT_BUDGET) {
+      kept.push(path);
+      total += fileChars;
+    } else omitted.push(path);
+  }
+  const fitted = { ...review, args: { ...review.args, artifact_paths: [...(land.prior ? [land.prior] : []), land.fullDiff, ...kept] },
+    land: { ...review.land, inputChars: total, omitted } };
+  return result('continue', null, { queue: queue.map((a, i) => (i === at ? fitted : a)) });
 }
 
 function recordThreadIds(state, wp, action, r) {
@@ -1482,7 +1543,7 @@ function landOutcome(state, wp, action, r, deps, authority) {
         });
       }
       return result('continue', null, { reviews: [...(wp.reviews ?? []), reviewEntry(wp, action.land, { findings: findingsCount(r) })] });
-    case 'council': return recordCouncil(state, wp, action, r);
+    case 'council': return recordCouncil(state, wp, action, r, deps);
     case 'reply':
       // An escalated council record is required at the land gate.
       if (action.part === 'record') {

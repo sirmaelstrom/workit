@@ -176,7 +176,11 @@ const RULES = [
   [/^git -C \S+ patch-id --verbatim$/, () => ok(`${'f'.repeat(40)} x\n`)],
   [/^git -C \S+ diff --quiet (?:--no-renames )?(\w+) (\w+)$/, (h, m) => ({ code: h.treeMismatch === m[2] ? 1 : 0, stdout: '', stderr: '' })],
   [/^git -C \S+ diff --name-only --end-of-options \S+ \S+$/, (h) => ok(h.amendDiff ?? 'src/x.mjs\n')],
-  [/^git -C \S+ diff --no-color --output=/, () => ok()],
+  // A council round's diff file, written as git would (a full round's record reads its size).
+  [/^git -C \S+ diff --no-color (?:--no-renames -U25 )?--output=(\S+) /, (h, m) => {
+    writeFileSync(m[1], 'diff --git a/src/x.mjs b/src/x.mjs\n');
+    return ok();
+  }],
   [/^git -C \S+ show origin\/main:\.workit\/conduct\.json$/, () => ({ code: 128, stdout: '', stderr: "fatal: path '.workit/conduct.json' does not exist in 'origin/main'" })],
   [/^gh api repos\/example\/scratch\/commits\/(\w+)\/check-runs\?per_page=100 --paginate$/, (h, m) => (h.checkRuns ? h.checkRuns(m[1]) : ok(text('land', 'check-runs-green.json')))],
   [/^gh api repos\/example\/scratch\/commits\/\w+\/status\?per_page=100 --paginate$/, () => ok(text('land', 'commit-status-green.json'))],

@@ -1010,7 +1010,7 @@ test('C1-4/C2-10 a delta council round writes the delta diff and hands it to the
   assert.throws(() => deltaReviewActions(state, wp, '--output=/elsewhere', { changedPaths: changed }), /needs a commit sha/);
   const full = t2Actions(state, wp, { round: 2, changedPaths: changed });
   assert.deepEqual(delta[1].args.artifact_paths, [diffFile, ...changed]);
-  assert.notDeepEqual(delta[1].args, full[0].args, 'the payloads differ at the tool-input boundary');
+  assert.notDeepEqual(delta[1].args, full[1].args, 'the payloads differ at the tool-input boundary');
   const staged = recordLandStep(state, wp, delta[1], usableModels, {});
   assert.equal(staged.patch.councilStage.scope, 'delta');
   const entry = recordLandStep(state, { ...wp, ...staged.patch }, delta[2], { findings: 1, seats: ['astra'] }, {}).patch.reviews.at(-1);
@@ -1019,7 +1019,7 @@ test('C1-4/C2-10 a delta council round writes the delta diff and hands it to the
   const stripped = { ...delta[1], args: { ...delta[1].args, artifact_paths: changed } };
   const fullStage = recordLandStep(state, wp, stripped, usableModels, {}).patch.councilStage;
   assert.equal(fullStage.scope, 'full');
-  const fullEntry = recordLandStep(state, { ...wp, councilStage: fullStage }, full[1], { findings: 0, seats: ['astra'] }, {}).patch.reviews.at(-1);
+  const fullEntry = recordLandStep(state, { ...wp, councilStage: fullStage }, full[2], { findings: 0, seats: ['astra'] }, {}).patch.reviews.at(-1);
   assert.deepEqual([fullEntry.scope, fullEntry.since], ['full', null]);
   assert.equal(recordLandStep(state, wp, delta[0], { code: 128, stdout: '', stderr: 'fatal' }, {}).outcome, 'block');
 });
@@ -1061,31 +1061,34 @@ test('t2Actions: council off → every available lens but the author\'s; on → 
   const changed = [join(WT, 'lib', 'x.mjs')];
   const on = t2Actions(state, makeWp(), { round: 2, changedPaths: changed });
   assert.deepEqual(on.map((a) => [a.kind, a.step, a.part, a.tool]), [
+    ['shell', 'council', 'full-diff', undefined],
     ['agent-tool', 'council', 'review', 'council_review'], ['agent-tool', 'council', 'synthesize', 'council_synthesize'], ['agent-tool', 'council', 'challenge', 'council_challenge'],
   ]);
   const workshop = join(RUN, 'council', 'wp-01');
-  assert.deepEqual(on[0].args, {
+  const fullDiff = (round) => join(workshop, `full-r${round}.diff`);
+  assert.deepEqual(on[0].command, ['git', '-C', WT, 'diff', '--no-color', '--no-renames', '-U25', `--output=${fullDiff(2)}`, 'origin/main...HEAD']);
+  assert.deepEqual(on[1].args, {
     workshop_path: `${workshop}${sep}`, output_dir: `${join(workshop, 'review-2')}${sep}`,
-    surface: 'code', code_root: WT, artifact_paths: changed, round: 2, profile: 'conduct-code',
+    surface: 'code', code_root: WT, artifact_paths: [fullDiff(2), ...changed], round: 2, profile: 'conduct-code',
   });
-  assert.equal(Object.hasOwn(on[0].args, 'models'), false);
+  assert.equal(Object.hasOwn(on[1].args, 'models'), false);
   // A recorded prior adjudication leads round 2's artifacts; round 1 never carries one.
   const prior = join(RUN, 'council', 'wp-01', 'review-1', 'adjudication-for-next-round.md');
   const recorded = { path: prior, round: 1 };
-  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: recorded }), { round: 2, changedPaths: changed })[0].args.artifact_paths, [prior, ...changed]);
-  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: recorded }), { round: 1, changedPaths: changed })[0].args.artifact_paths, changed);
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: recorded }), { round: 2, changedPaths: changed })[1].args.artifact_paths, [prior, fullDiff(2), ...changed]);
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: recorded }), { round: 1, changedPaths: changed })[1].args.artifact_paths, [fullDiff(1), ...changed]);
   // Council review of #242: round 1 findings, round 2 zero findings (no resolve,
   // no new file), round 3 must not get round 1's rulings as "the previous round".
-  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: recorded }), { round: 3, changedPaths: changed })[0].args.artifact_paths, changed);
-  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: prior }), { round: 2, changedPaths: changed })[0].args.artifact_paths, changed, 'an unbound path is never sent');
-  assert.equal(on[1].head, HEAD);
-  assert.deepEqual(on[1].expects, { type: 'json', fields: ['findings', 'seats'] });
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: recorded }), { round: 3, changedPaths: changed })[1].args.artifact_paths, [fullDiff(3), ...changed]);
+  assert.deepEqual(t2Actions(state, makeWp({ priorAdjudication: prior }), { round: 2, changedPaths: changed })[1].args.artifact_paths, [fullDiff(2), ...changed], 'an unbound path is never sent');
+  assert.equal(on[2].head, HEAD);
+  assert.deepEqual(on[2].expects, { type: 'json', fields: ['findings', 'seats'] });
 });
 
 test('council review is recorded (D20) after its stages succeed, and the gate accepts it like a posted review', () => {
   const state = makeState({ adapters: { council: { on: true } } });
   let wp = makeWp({ reviews: [], tier: 'T2' });
-  const [review, synth] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
+  const [, review, synth] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
   const staged = recordLandStep(state, wp, review, { output_dir: 'x', models: { astra: { status: 'success' } } }, {});
   assert.deepEqual([staged.outcome, staged.patch.councilStage], ['continue', { round: 1, usable: 1, seats: ['astra'], scope: 'full' }]);
   wp = { ...wp, ...staged.patch };
@@ -1098,7 +1101,7 @@ test('council review is recorded (D20) after its stages succeed, and the gate ac
 test('a missing council seat is retried alone and synthesis cannot hide the coverage gap', () => {
   const state = makeState({ adapters: { council: { on: true } } });
   let wp = makeWp({ reviews: [], tier: 'T2' });
-  const [review, synth] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib/x.mjs')] });
+  const [, review, synth] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib/x.mjs')] });
   wp.queue = [review, synth];
   const out = recordLandStep(state, wp, review, { models: { astra: { status: 'success' }, sol: { status: 'timeout' } } }, {});
   assert.deepEqual(out.patch.queue[0].args.models, ['sol']);
@@ -1114,6 +1117,65 @@ test('a missing council seat is retried alone and synthesis cannot hide the cove
   assert.equal(recordLandStep(state, wp, capped, { models: { sol: { status: 'failed' }, astra: { status: 'success' } } }, {}).outcome, 'block');
 });
 
+// Council input cap (quest b118b800): the full round's artifacts fit under 700,000 characters.
+const fitRound = (changed, sizes, { round = 1, wp = makeWp({ reviews: [], tier: 'T2' }) } = {}) => {
+  const state = makeState({ adapters: { council: { on: true } } });
+  const actions = t2Actions(state, wp, { round, changedPaths: changed.map((path) => join(WT, path)) });
+  const read = (path) => {
+    if (!Object.hasOwn(sizes, path)) throw new Error(`ENOENT: ${path}`);
+    return 'x'.repeat(sizes[path]);
+  };
+  return { actions, out: recordLandStep(state, { ...wp, queue: actions }, actions[0], ok(), { read }) };
+};
+
+test('a large full council round sends the diff, then the non-test files that fit; tests reach the council only through the diff', () => {
+  const diff = join(RUN, 'council', 'wp-01', 'full-r1.diff');
+  const changed = ['lib/pr-review.mjs', 'lib/pr-review.test.mjs', 'lib/phases/build.test.mjs', 'lib/big.mjs', 'docs/notes.md', 'lib/__fixtures__/x.json', 'lib/gone.mjs'];
+  const sizes = { [diff]: 300000, [join(WT, 'lib/pr-review.mjs')]: 190000, [join(WT, 'lib/pr-review.test.mjs')]: 325000, [join(WT, 'lib/phases/build.test.mjs')]: 260000,
+    [join(WT, 'lib/big.mjs')]: 250000, [join(WT, 'docs/notes.md')]: 1000, [join(WT, 'lib/__fixtures__/x.json')]: 5000 };
+  const { actions, out } = fitRound(changed, sizes);
+  assert.equal(out.outcome, 'continue');
+  const [review, synth, challenge] = out.patch.queue;
+  assert.deepEqual(review.args.artifact_paths, [diff, join(WT, 'lib/pr-review.mjs'), join(WT, 'docs/notes.md')]);
+  assert.equal(review.land.inputChars, 491000);
+  assert.ok(review.land.inputChars <= 700000);
+  assert.deepEqual(review.land.omitted, ['lib/pr-review.test.mjs', 'lib/phases/build.test.mjs', 'lib/big.mjs', 'lib/__fixtures__/x.json', 'lib/gone.mjs'].map((path) => join(WT, path)));
+  assert.deepEqual([synth, challenge], actions.slice(2), 'only the review is refitted');
+});
+
+test('a full diff over the council input budget blocks with an actionable reason and never reaches the council', () => {
+  const diff = join(RUN, 'council', 'wp-01', 'full-r1.diff');
+  const { out } = fitRound(['lib/x.mjs'], { [diff]: 750000, [join(WT, 'lib/x.mjs')]: 10 });
+  assert.equal(out.outcome, 'block');
+  assert.equal(out.reason, 'council input would exceed the Codex 1,048,576-char limit (750,000 chars of diff); split the WP or review by hand');
+  assert.deepEqual(out.patch.queue, []);
+});
+
+test('a small full council round still gets its files whole, after the prior adjudication and the diff', () => {
+  const diff = join(RUN, 'council', 'wp-01', 'full-r2.diff');
+  const prior = join(RUN, 'council', 'wp-01', 'review-1', 'adjudication-for-next-round.md');
+  const wp = makeWp({ reviews: [], tier: 'T2', priorAdjudication: { path: prior, round: 1 } });
+  const { out } = fitRound(['lib/x.mjs', 'lib/y.mjs'], { [diff]: 400, [prior]: 900, [join(WT, 'lib/x.mjs')]: 2000, [join(WT, 'lib/y.mjs')]: 3000 }, { round: 2, wp });
+  assert.equal(out.outcome, 'continue');
+  assert.deepEqual(out.patch.queue[0].args.artifact_paths, [prior, diff, join(WT, 'lib/x.mjs'), join(WT, 'lib/y.mjs')]);
+  assert.deepEqual(out.patch.queue[0].land.omitted, []);
+});
+
+test('a council seat that refused the input as too large blocks at once, naming the size, with no retry', () => {
+  const state = makeState({ adapters: { council: { on: true } } });
+  const wp = makeWp({ reviews: [], tier: 'T2' });
+  const actions = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib/x.mjs')] });
+  const [review, synth] = ['review', 'synthesize'].map((part) => actions.find((a) => a.part === part));
+  // The seat errors of run escalate-a-t1-wp-to-a-t2-council-when-it, WP-00 (.result-19-council.json).
+  const refused = (name) => ({ status: 'failed', file: `review-lens-${name}.md`, error: 'codex CLI exited with code 1: Error: turn/start: turn/start failed: Input exceeds the maximum length of 1048576 characters. (code -32602), data: {"input_error_code":"input_too_large","max_chars":1048576,"actual_chars":1515805}' });
+  const out = recordLandStep(state, { ...wp, queue: [review, synth] }, review, { success: true, models: { astra: refused('astra'), codex: refused('codex'), opus: { status: 'success' } } }, {});
+  assert.equal(out.outcome, 'block');
+  assert.match(out.reason, /astra, codex refused the input as too large \(1,515,805 chars, limit 1,048,576\)/);
+  assert.match(out.reason, /not retried: split the WP or review by hand/);
+  assert.deepEqual(out.patch.queue, []);
+  assert.equal(out.patch.councilStage, undefined);
+});
+
 test('review A followed by fixes B and an unproved rebase C cannot dispatch delta A..C', () => {
   const wp = makeWp({ reviews: [{ scope: 'full', head: BASE, round: 1 }], rebases: [{ from: sha('c'), to: HEAD, equivalent: false }] });
   assert.throws(() => deltaReviewActions(makeState(), wp, BASE), /full review is owed/);
@@ -1121,7 +1183,7 @@ test('review A followed by fixes B and an unproved rebase C cannot dispatch delt
 
 test('council synthesize counts Minor findings: a Minor-only round is not recorded as zero', () => {
   const state = makeState({ adapters: { council: { on: true } } });
-  const [, synth] = t2Actions(state, makeWp({ reviews: [], tier: 'T2' }), { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
+  const [, , synth] = t2Actions(state, makeWp({ reviews: [], tier: 'T2' }), { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
   assert.match(synth.instruction, /Critical, Major or Minor/);
   assert.match(synth.instruction, /Note is not counted/);
   assert.doesNotMatch(synth.instruction, /Critical \+ Major count/);
@@ -1130,15 +1192,17 @@ test('council synthesize counts Minor findings: a Minor-only round is not record
 test('C1-3/C2-11 a council round is not coverage when a stage failed, a seat failed, or nothing was given to review', () => {
   const state = makeState({ adapters: { council: { on: true } } });
   const wp = makeWp({ reviews: [], tier: 'T2' });
-  const [review, synth, challenge] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
+  const [, review, synth, challenge] = t2Actions(state, wp, { round: 1, changedPaths: [join(WT, 'lib', 'x.mjs')] });
   assert.equal(recordLandStep(state, wp, review, { models: { astra: { status: 'failed' }, codex: { status: 'timeout' } } }, {}).outcome, 'block');
   assert.equal(recordLandStep(state, wp, review, { error: 'All models failed', models: {} }, {}).outcome, 'block');
-  const [emptyReview] = t2Actions(state, wp, { round: 1 });
-  assert.match(recordLandStep(state, wp, emptyReview, usableModels, {}).reason, /no artifact_paths/);
+  // A full round whose diff is empty has nothing to review: it blocks before the council runs.
+  const [emptyDiff, emptyReview] = t2Actions(state, wp, { round: 1 });
+  assert.match(recordLandStep(state, { ...wp, queue: [emptyDiff, emptyReview] }, emptyDiff, ok(), { read: () => '' }).reason, /empty full diff: nothing to review/);
+  assert.match(recordLandStep(state, wp, { ...emptyReview, args: { ...emptyReview.args, artifact_paths: [] } }, usableModels, {}).reason, /no artifact_paths/);
   // The prior round's adjudication alone is context, not a review (council review of #242).
   const prior = join(RUN, 'council', 'wp-01', 'review-1', 'adjudication-for-next-round.md');
-  const [contextOnly] = t2Actions(state, makeWp({ reviews: [], tier: 'T2', priorAdjudication: { path: prior, round: 1 } }), { round: 2 });
-  assert.deepEqual(contextOnly.args.artifact_paths, [prior]);
+  const [, roundTwo] = t2Actions(state, makeWp({ reviews: [], tier: 'T2', priorAdjudication: { path: prior, round: 1 } }), { round: 2 });
+  const contextOnly = { ...roundTwo, args: { ...roundTwo.args, artifact_paths: [prior] } };
   assert.match(recordLandStep(state, wp, contextOnly, usableModels, {}).reason, /no artifact_paths/);
   // An MCP error result names its cause from `content` (the unknown-profile refusal).
   const refused = recordLandStep(state, wp, review, { isError: true, content: [{ type: 'text', text: 'Unknown profile: "conduct-code". Registered profiles: spec, code' }] }, {});
@@ -1575,7 +1639,7 @@ test('C1-20 a full review whose changed files cannot be read blocks', () => {
   const out = recordLandStep(state, makeWp({ tier: 'T2' }), GATE_ACTION, gateResult({ needsFullReview: true, causes: ['full-review'] }), { exec, now: () => NOW });
   assert.deepEqual([out.outcome, out.patch.mergeLock], ['block', null]);
   const unknownTier = recordLandStep(state, makeWp({ tier: 'X' }), GATE_ACTION, gateResult({ causes: ['full-review'] }), { exec: () => ok('lib/x.mjs\n'), now: () => NOW });
-  assert.equal(unknownTier.patch.queue[0].tool, 'council_review');
+  assert.deepEqual(unknownTier.patch.queue.slice(0, 2).map((a) => a.tool ?? a.part), ['full-diff', 'council_review']);
 });
 
 test('rebaseActions: fetch (takes the lock), ready, pre-head, rebase, post-heads, push --force-with-lease, then a wait; post-heads records the rebase', () => {
