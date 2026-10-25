@@ -19,7 +19,7 @@ import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, dropRetiredFiling, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
-import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
+import { bindCustodyThread, custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
 import { conductorThreadFence } from './lib/lanes.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -405,7 +405,10 @@ async function next(tokens, deps) {
   return transact(flags, deps, async (state) => {
     conductorThreadFence(state, flags['as-thread']);
     const custody = flags.custody === undefined ? null : String(flags.custody);
-    if (custody !== null) custodyFence(state, custody);
+    if (custody !== null) {
+      custodyFence(state, custody);
+      bindCustodyThread(state, flags['as-thread'], deps);
+    }
     if (state.pending?.handBack) resumeHandBack(state, deps);
     return { out: { ok: true, action: await emit(state, deps, { custody }) } };
   }, { duringRotation: true, driven: 'next' });

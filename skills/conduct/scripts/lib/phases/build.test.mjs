@@ -830,6 +830,50 @@ test('t3 rotation with a wake yield pending: custody makes a heartbeat bound to 
   assert.match(readFileSync(state.rotations[0].handoff, 'utf8'), /the run's heartbeat is made again from your thread/);
 });
 
+test('t3 custody binding: the successor\'s first next --custody --as-thread binds custody to its thread; while the heartbeat create is pending, r1\'s next and record --as-thread exit 5 and leave state.json unchanged byte for byte; then the successor completes custody (workit#313 review r2, finding 1)', async (t) => {
+  const { h } = await wakeYieldPending(t);
+  const statePath = join(h.runDir, 'state.json');
+  const refused = async (argv, current) => {
+    const before = readFileSync(statePath, 'utf8');
+    const result = await runConduct(argv, h.overrides());
+    assert.equal(result.code, 5, `${argv.join(' ')}: ${result.stdout}`);
+    assert.match(JSON.parse(result.stdout).error, new RegExp(`not this run's conductor \\(current: ${current}`));
+    assert.equal(readFileSync(statePath, 'utf8'), before, 'a refused call changes nothing');
+  };
+  await conduct(h, ['rotate', '--run', h.runDir, '--why', 'context at 40%']);
+  // Before custody is bound, the outgoing conductor's thread is refused, even naming --custody.
+  await refused(['next', '--run', h.runDir, '--custody', '1', '--as-thread', 'mcp:conductor-1'], 'none yet');
+  const confirm = (await conduct(h, ['next', '--run', h.runDir, '--custody', '1', '--as-thread', 'mcp:conductor-2'])).action;
+  assert.equal(loadState(h.runDir, h.deps).rotations[0].thread, 'mcp:conductor-2');
+  writeFileSync(confirm.outPath, JSON.stringify({ gone: true, evidence: 'r1 thread idle' }));
+  const create = (await conduct(h, ['record', '--run', h.runDir, '--action', confirm.id, '--result', '{}', '--as-thread', 'mcp:conductor-2'])).action;
+  assert.deepEqual([create.part, create.tool], ['heartbeat', 'schedule_task']);
+  // r1, woken late, would otherwise be handed r2's pending heartbeat create and bind it to its own thread.
+  const r1Result = JSON.stringify({ scheduledTaskId: 'task-r1b', boundThreadId: 'mcp:conductor-1' });
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  await refused(['record', '--run', h.runDir, '--action', create.id, '--result', r1Result, '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  await refused(['next', '--run', h.runDir, '--custody', '1', '--as-thread', 'mcp:somebody-else'], 'mcp:conductor-2');
+  // The successor's own calls pass, and it completes custody.
+  assert.equal((await conduct(h, ['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2'])).action.id, create.id);
+  const stop = (await conduct(h, ['record', '--run', h.runDir, '--action', create.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r2', boundThreadId: 'mcp:conductor-2' }), '--as-thread', 'mcp:conductor-2'])).action;
+  assert.equal(stop.part, 'heartbeat-stop');
+  await conduct(h, ['record', '--run', h.runDir, '--action', stop.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r1', deleted: true }), '--as-thread', 'mcp:conductor-2']);
+  const state = loadState(h.runDir, h.deps);
+  assert.deepEqual([state.rotations[0].status, state.t3Wake.thread, state.t3Wake.conductor], ['custody', 'mcp:conductor-2', 2]);
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  // The handoff told the successor to bind custody to its thread.
+  assert.match(readFileSync(state.rotations[0].handoff, 'utf8'), /next --run \S+ --custody 1 --as-thread <your own T3 thread id>`\. The id is `orchestrator_capabilities`' `parentThreadId`/);
+});
+
+test('t3 custody binding: a custody call with no --as-thread binds nothing and behaves as before (herdr, exec, by hand) (workit#313 review r2, finding 1)', async (t) => {
+  const { h } = await wakeYieldPending(t);
+  await conduct(h, ['rotate', '--run', h.runDir, '--why', 'context at 40%']);
+  const confirm = (await conduct(h, ['next', '--run', h.runDir, '--custody', '1'])).action;
+  assert.equal(confirm.part, 'confirm');
+  assert.equal(loadState(h.runDir, h.deps).rotations[0].thread, null);
+  assert.equal((await conduct(h, ['next', '--run', h.runDir])).action.id, confirm.id, 'the pending custody action, as today');
+});
+
 test('t3 heartbeat cleanup: a heartbeat still undeleted after 3 attempts is named in the run analysis\'s audit as unresolved cleanup, with the call that deletes it (workit#313 review r1, finding 3)', async (t) => {
   const { h } = await wakeYieldPending(t);
   const s = loadState(h.runDir, h.deps);

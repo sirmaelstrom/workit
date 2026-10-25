@@ -29,6 +29,16 @@ export function custodyFence(state, attempt) {
   if (rotation !== rotations.at(-1)) throw new ConductError(5, `rotation ${attempt} is superseded by rotation ${rotations.at(-1).attempt}; you are not the run's conductor: end your turn`);
 }
 
+// `next --custody <attempt> --as-thread <id>`: the first such call binds the
+// open rotation's custody to that thread (lanes.mjs conductorThreadFence
+// refuses every other until custody is taken). Without --as-thread nothing is bound.
+export function bindCustodyThread(state, asThread, deps) {
+  const rotation = openRotation(state);
+  if (!rotation || rotation.thread || typeof asThread !== 'string' || !asThread.trim()) return;
+  rotation.thread = asThread;
+  appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-thread-bound', source: 'next', data: { attempt: rotation.attempt, thread: asThread, from: rotation.fromThread ?? null } });
+}
+
 // The pane of the conductor that rotated, when it is the caller here.
 export function rotatedOut(state, deps) {
   const rotation = openRotation(state);
@@ -68,6 +78,9 @@ export function rotate(state, { why, model = null, effort = null, name = null },
     caller: { pane, model, effort },
     successor: { name: pane ? (name || `${state.slug}-r${from + 1}`) : null, pane: null },
     pendingId: state.pending?.id ?? null,
+    // A T3 run's outgoing conductor thread, refused while custody is open, and
+    // the successor's, bound by its first `next --custody <n> --as-thread <id>`.
+    fromThread: state.t3Wake?.conductor === from ? state.t3Wake.thread ?? null : null, thread: null,
     callerSession: null, retire: null, receipt: null, heartbeat: null, heartbeatStops: [], action: null, custodyAt: null,
   };
   (state.rotations ??= []).push(rotation);
@@ -81,7 +94,7 @@ export function rotate(state, { why, model = null, effort = null, name = null },
   });
   const next = chain
     ? `Run this argv as your LAST tool call and make no tool call after it: ${JSON.stringify(chain)}. If it exits nonzero, read its output: when the successor was briefed (callerRetirement: exit-refused), end your turn with no further conduct.mjs call, since the successor takes custody; otherwise run conduct.mjs next from this pane, which cancels the rotation.`
-    : `Start a fresh conductor session and give it this one line: Read ${rotation.handoff} and execute it exactly. Then end your turn with no further conduct.mjs call. If no successor starts, run conduct.mjs next --run <dir> --custody ${attempt} yourself: its custody step lets you cancel the rotation.`;
+    : `Start a fresh conductor session and give it this one line: Read ${rotation.handoff} and execute it exactly. Then end your turn with no further conduct.mjs call. If no successor starts, run conduct.mjs next --run <dir> --custody ${attempt} yourself, without --as-thread (custody refuses your thread): its custody step lets you cancel the rotation.`;
   return { rotation: attempt, from, to: rotation.to, handoff: rotation.handoff, chain: chain ? { command: chain } : null, next };
 }
 
@@ -118,6 +131,11 @@ export function handoffText(state, rotation) {
   const spend = `lanes booked ${money(bookedUsd)} (the lane-only lower bound)`;
   const touches = (state.touches ?? []).filter((touch) => touch.status !== 'answered');
   const earlier = (state.rotations ?? []).filter((other) => other !== rotation);
+  // A T3 successor binds custody to its own thread: no other thread, the outgoing conductor's included, can then move it.
+  const t3 = state.intent?.backend?.name === 't3';
+  const asThread = t3 ? ' --as-thread <your own T3 thread id>' : '';
+  const t3Custody = t3 ? ` The id is \`orchestrator_capabilities\`' \`parentThreadId\` (or \`t3_thread_configuration\`'s \`threadId\`): it binds custody to your thread, and until custody is taken every \`next\` and \`record\` passes the same \`--as-thread\`.` : '';
+  const loop = t3 ? `\`next\` and \`record\` with \`--as-thread\`` : 'plain `next`';
   return [
     `# conduct ${state.slug}: conductor handoff r${rotation.from} → r${rotation.to}`,
     '',
@@ -128,10 +146,10 @@ export function handoffText(state, rotation) {
     '## First steps',
     '',
     `1. Read \`${join(state.pluginRoot, 'skills', 'conduct', 'SKILL.md')}\` (§ The loop, § Rotating the conductor).`,
-    `2. Run \`node ${shellLiteral(script)} next --run ${shellLiteral(state.runDir)} --custody ${rotation.attempt}\`. If it exits 5, this rotation was cancelled or superseded: you are not the run's conductor, so end your turn. Otherwise its first actions are custody, emitted by the run: ${custody.join('; then ')}. Perform and record each as § The loop says.`,
+    `2. Run \`node ${shellLiteral(script)} next --run ${shellLiteral(state.runDir)} --custody ${rotation.attempt}${asThread}\`.${t3Custody} If it exits 5, this rotation was cancelled or superseded: you are not the run's conductor, so end your turn. Otherwise its first actions are custody, emitted by the run: ${custody.join('; then ')}. Perform and record each as § The loop says.`,
     wakePending(state)
-      ? `3. The pending action${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''} is a wake wait, and its wakes go to r${rotation.from}'s thread: custody goes on, and the run's heartbeat is made again from your thread (\`schedule_task\`), then r${rotation.from}'s is deleted. The run then chooses its wait afresh. Keep looping with plain \`next\`.`
-      : `3. The run then emits its pending action again${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''}, or, when that was a hand-back, asks the touch again as any resume does. r${rotation.from} ran \`rotate\` before performing it, so perform it as given, then keep looping with plain \`next\`.`,
+      ? `3. The pending action${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''} is a wake wait, and its wakes go to r${rotation.from}'s thread: custody goes on, and the run's heartbeat is made again from your thread (\`schedule_task\`), then r${rotation.from}'s is deleted. The run then chooses its wait afresh. Keep looping with ${loop}.`
+      : `3. The run then emits its pending action again${rotation.pendingId ? ` (\`${rotation.pendingId}\`)` : ''}, or, when that was a hand-back, asks the touch again as any resume does. r${rotation.from} ran \`rotate\` before performing it, so perform it as given, then keep looping with ${loop}.`,
     '',
     'Never edit state.json. Never run `rotate` before custody is taken.',
     '',

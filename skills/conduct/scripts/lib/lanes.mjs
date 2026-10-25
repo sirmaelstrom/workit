@@ -812,19 +812,38 @@ const AS_THREAD = '--as-thread <your own T3 thread id> (orchestrator_capabilitie
 // message, the heartbeat) names that thread. The run's conductor thread is
 // the live conductor's heartbeat's bound thread; a thread a retired
 // conductor's heartbeat was bound to is refused even before the successor has
-// made its own. Without the flag (herdr, exec, by hand) nothing is checked,
-// and while a rotation is open custody's own fence (--custody) decides.
+// made its own. Without the flag (herdr, exec, by hand) nothing is checked.
+// While a rotation is open, custody is bound to the successor's thread: the
+// first `next --custody <n> --as-thread <id>` stores it (rotate.mjs
+// bindCustodyThread), and until custody is taken every other thread is
+// refused, the outgoing conductor's before any custody action is returned.
 export function conductorThreadFence(state, asThread) {
   if (asThread === undefined || asThread === null) return;
   if (typeof asThread !== 'string' || !asThread.trim()) throw new ConductError(2, '--as-thread <thread id> needs a value');
+  const rotation = state.rotations?.at(-1);
+  if (rotation?.status === 'open') {
+    if (rotation.thread ? asThread !== rotation.thread : outgoingThreads(state, rotation).includes(asThread)) {
+      throw new ConductError(5, `not this run's conductor (current: ${rotation.thread ?? `none yet: rotation ${rotation.attempt}'s custody is r${rotation.to}'s`}); ${asThread} is not r${rotation.to}'s thread, so end your turn`);
+    }
+    return;
+  }
   const wake = state.t3Wake;
-  if (!wake || state.rotations?.at(-1)?.status === 'open') return;
+  if (!wake) return;
   const n = conductorNumber(state);
   const current = wake.conductor === n && wake.thread ? wake.thread : null;
   const retired = [wake, ...(wake.old ?? [])].filter((entry) => entry?.thread && entry.conductor !== n).map((entry) => entry.thread);
   if (current ? asThread !== current : retired.includes(asThread)) {
     throw new ConductError(5, `not this run's conductor (current: ${current ?? 'none yet'}); ${asThread} is not r${n}'s thread, so end your turn`);
   }
+}
+
+// The threads an open rotation's custody refuses before it is bound: the
+// outgoing conductor's (stored when it rotated) and any earlier conductor's
+// heartbeat thread.
+function outgoingThreads(state, rotation) {
+  const wake = state.t3Wake ?? {};
+  const bound = [wake, ...(wake.old ?? [])].filter((entry) => entry?.thread && entry.conductor !== rotation.to).map((entry) => entry.thread);
+  return [...(rotation.fromThread ? [rotation.fromThread] : []), ...bound];
 }
 
 // The heartbeat a T3 run's conductor owes: none while one is live or this
