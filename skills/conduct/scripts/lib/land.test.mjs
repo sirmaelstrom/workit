@@ -8,7 +8,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   tierFor, tierDecision, pickReviewers, claimAuthor, reviewActions, deltaReviewActions, t2Actions, parseAmendmentTable, recordAdjudication,
   resolveThreadActions, threadReplyActions, rebaseActions, recordRebase, mergeLockFor, gateCheck, mergeActions as mergeActionsWith, recordLandStep as recordLandStepWith, runLandVerb,
-  parsePages, findingsCount, isTestPath, workflowTriggers, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord, visualReadProblem,
+  parsePages, findingsCount, isTestPath, workflowTriggers, expectedChecks, THREADS_QUERY, RESOLVE_MUTATION, ALREADY_REVIEWED, TREE_MISMATCH, councilRecord, visualReadProblem,
 } from './land.mjs';
 import { STEPS, STEP_SEAM } from './state.mjs';
 import { runConduct } from '../conduct.mjs';
@@ -117,7 +117,8 @@ function gateExec(o = {}) {
     if (program === 'node' && args[1] === 'inflight') {
       return { code: inflight, stdout: '', stderr: inflight === 9 ? '1 review attempt(s) of 1111111 still in flight (beat #1 lens_running); merge after it posts.' : inflight ? 'coordinator-unreachable' : '' };
     }
-    // A workflow file by `<sha>:<path>`; one the map does not name does not exist.
+    // Every `git show <sha>:<path>` except the config read answers from
+    // `workflows`, keyed by that spec; one the map does not name does not exist.
     if (program === 'git' && args[2] === 'show' && !args[3].endsWith(':.workit/conduct.json')) {
       return Object.hasOwn(workflows, args[3]) ? ok(workflows[args[3]]) : { code: 128, stdout: '', stderr: `fatal: path '${args[3].split(':')[1]}' does not exist in '${args[3].split(':')[0]}'` };
     }
@@ -407,12 +408,16 @@ const page = (key, rows) => ok(JSON.stringify({ total_count: rows.length, [key]:
 const checkRun = (id, name, suite) => ({ id, name, status: 'completed', conclusion: 'success', check_suite: { id: suite } });
 const pushRun = (suite, over = {}) => ({ id: suite * 10, check_suite_id: suite, event: 'push', path: CI_YML, head_branch: 'main', ...over });
 const PUSH_MAIN = 'on:\n  push:\n    branches: [main]\n';
-function filtered(yaml, o = {}) {
+function filteredSetup(yaml, o = {}) {
   const { headYaml = yaml, base = [checkRun(1, 'Deploy', 11)], runs = [pushRun(11)], branch = 'conduct/fixture/wp-01', headRef = ok(`${branch}\n`) } = o;
   const workflows = o.workflows ?? { [`${BASE_TIP}:${CI_YML}`]: yaml, [`${HEAD}:${CI_YML}`]: headYaml };
   const wp = makeWp({ lane: { worktree: WT, branch, base: BASE }, gate: { head: HEAD, pendingSince: minutesAgo(11) } });
   const exec = gateExec({ required: UNPROTECTED, baseRuns: page('check_runs', base), ci: page('check_runs', [checkRun(2, 'Other', 22)]),
     actionRuns: page('workflow_runs', runs), headRef, workflows, ...o.exec });
+  return { wp, exec };
+}
+function filtered(yaml, o = {}) {
+  const { wp, exec } = filteredSetup(yaml, o);
   const out = gateCheck(makeState(), wp, { exec, now: () => NOW });
   return { verdict: out.ok ? 'passes' : [out.failures, out.causes], exec };
 }
@@ -457,6 +462,32 @@ test('push filter gate: every case the reader cannot settle keeps the check expe
   const pr = filtered(PUSH_MAIN, { runs: [pushRun(11, { event: 'pull_request' })] });
   assert.deepEqual(pr.verdict, MISSING, 'a pull_request run');
   assert.ok(!pr.exec.calls.some((c) => c.args.includes('headRefName') || (c.args[2] === 'show' && c.args[3].endsWith(CI_YML))), 'no push run: no head-branch read, no workflow read');
+});
+
+// C1-1 (council round 1): a `\` in a pattern escapes the next character in a
+// workflow filter, but globRegex reads it as a path separator. Each input on
+// branches and on branches-ignore, with the branch that exposes the misread.
+const ESCAPED = [
+  ['branches-ignore', 'conduct\\**', 'conduct/x'], ['branches', 'conduct\\**', 'conduct/a/b'],
+  ['branches', 'conduct/\\!x', 'conduct/!x'], ['branches-ignore', 'conduct/\\!x', 'conduct/!x'],
+  ['branches-ignore', 'conduct\\*\\*', 'conduct/a/b'], ['branches', 'conduct\\*\\*', 'conduct/a/b'],
+];
+const escapedYaml = (key, pattern) => `on:\n  push:\n    ${key}: [main, '${pattern}']\n`;
+
+test('push filter gate: a backslash pattern keeps the check expected (C1-1)', () => {
+  for (const [key, pattern, branch] of ESCAPED) {
+    assert.deepEqual(filtered(escapedYaml(key, pattern), { branch }).verdict, MISSING, `${key}: ${pattern} on ${branch}`);
+  }
+});
+
+test('expectedChecks: a backslash pattern keeps the name (C1-1)', () => {
+  for (const [key, pattern, branch] of ESCAPED) {
+    const { wp, exec } = filteredSetup(escapedYaml(key, pattern), { branch });
+    assert.deepEqual(expectedChecks(makeState(), WT, exec, wp, HEAD), { names: ['Deploy'] }, `${key}: ${pattern} on ${branch}`);
+  }
+  // The same harness drops the name for a filter the rule settles.
+  const { wp, exec } = filteredSetup(PUSH_MAIN);
+  assert.deepEqual(expectedChecks(makeState(), WT, exec, wp, HEAD), { names: [] });
 });
 
 test('push filter gate: a name stays expected when any producer of it is (union over producers)', () => {

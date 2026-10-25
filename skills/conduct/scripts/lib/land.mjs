@@ -917,7 +917,8 @@ export function workflowTriggers(text) {
 function firesFor(side, branch) {
   if (side === false) return false;
   if (side === UNKNOWN || !branch) return UNKNOWN;
-  if (Object.values(side).flat().some((pattern) => /[?+[\]]|^!/.test(pattern))) return UNKNOWN;
+  // globRegex reads `\` as a path separator, so an escaped pattern is unknown too.
+  if (Object.values(side).flat().some((pattern) => /[?+[\]\\]|^!/.test(pattern))) return UNKNOWN;
   const match = (patterns) => patterns.some((pattern) => globRegex(pattern).test(branch));
   if (side.branches) return match(side.branches);
   if (side.branchesIgnore) return !match(side.branchesIgnore);
