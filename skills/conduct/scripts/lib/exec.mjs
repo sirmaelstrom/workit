@@ -35,7 +35,7 @@ export function killProcessTree(pid, { platform = process.platform } = {}) {
   try {
     process.kill(-pid, 'SIGKILL');
   } catch {
-    // Already gone; the caller verifies the root.
+    // Already gone: the kill is best effort.
   }
 }
 
@@ -64,15 +64,18 @@ export function windowsShim(name, { env = process.env, cwd = process.cwd(), exis
 
 // A `shell` action's argv as drive runs it (only drive: the hand path runs
 // `execute`): no shell, the action's env added, stdin closed. A spawn failure
-// is `spawnError` (its code) and no exit code: the program never ran, so
-// there is no result to record. A timeout kills the
-// process tree and waits up to killGraceMs for the root to exit: `timedOut`,
-// with `killVerified` false when it did not. Its partial output is not a result.
+// is `spawnError` (its code) and `spawnMessage`, and no exit code: the program
+// never ran, so there is no result to record. A timeout is `timedOut`, never a
+// result. While the root has not exited, its tree is killed once, best effort
+// (`killAttempted`), and up to killGraceMs is given for its exit
+// (`rootExited`); once the root has exited, its pid is never killed (it may
+// be another process's now). Either way the parent's pipe ends are destroyed
+// and the child unreferenced, so a survivor holding them keeps no caller alive.
 export function runArgv(program, args, { cwd, env, timeout, platform = process.platform, killTree = killProcessTree, killGraceMs = 5000 } = {}) {
   return new Promise((done) => {
     const out = [], err = [];
     const text = () => ({ stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') });
-    let settled = false, exited = false, timedOut = false, timer = null, grace = null;
+    let settled = false, exited = false, timedOut = false, killAttempted = false, timer = null, grace = null;
     const settle = (value) => {
       if (settled) return;
       settled = true;
@@ -82,7 +85,13 @@ export function runArgv(program, args, { cwd, env, timeout, platform = process.p
     };
     const failed = (error) => {
       const { stdout, stderr } = text();
-      settle({ code: null, stdout, stderr: `${error.message}\n${stderr}`, spawnError: error.code ?? 'UNKNOWN' });
+      settle({ code: null, stdout, stderr: `${error.message}\n${stderr}`, spawnError: error.code ?? 'UNKNOWN', spawnMessage: error.message });
+    };
+    const timedOutResult = () => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.unref();
+      settle({ code: null, ...text(), timedOut: true, killAttempted, rootExited: exited, pid: child.pid });
     };
     let child;
     try {
@@ -96,15 +105,20 @@ export function runArgv(program, args, { cwd, env, timeout, platform = process.p
     child.on('error', (error) => { if (child.pid === undefined) failed(error); });
     child.on('exit', () => {
       exited = true;
-      if (timedOut) settle({ code: null, ...text(), timedOut: true, killVerified: true, pid: child.pid });
+      if (timedOut) timedOutResult();
     });
     child.on('close', (code) => { if (!timedOut) settle({ code: code ?? 1, ...text() }); });
     if (timeout) {
       timer = setTimeout(() => {
         timedOut = true;
-        killTree(child.pid, { platform });
-        if (exited) settle({ code: null, ...text(), timedOut: true, killVerified: true, pid: child.pid });
-        else grace = setTimeout(() => settle({ code: null, ...text(), timedOut: true, killVerified: false, pid: child.pid }), killGraceMs);
+        if (exited) return timedOutResult();
+        killAttempted = true;
+        try {
+          killTree(child.pid, { platform });
+        } catch {
+          // Best effort: the stop reports the attempt, not its outcome.
+        }
+        grace = setTimeout(timedOutResult, killGraceMs);
       }, timeout);
     }
   });

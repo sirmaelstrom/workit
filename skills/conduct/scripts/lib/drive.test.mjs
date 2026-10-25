@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync
 import { tmpdir, hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawn } from 'node:child_process';
 import { runConduct } from '../conduct.mjs';
 import { BACKGROUND_TIMEOUT_MS, SHELL_TIMEOUT_MS, fillTemplate } from './drive.mjs';
 import { runArgv, windowsShim } from './exec.mjs';
@@ -162,13 +163,27 @@ test('drive: a refused record exits nonzero, leaves the action pending, and reco
   assert.match(logLines(f).at(-1), / exit=1 \d+\.\ds replayed record=2$/);
 });
 
-test('drive: a shell timeout is a stop, not a result: nothing recorded, exit 1', async (t) => {
-  const f = fixture(t, [SHELL], { shell: () => ({ code: null, stdout: 'partial', stderr: '', timedOut: true, killVerified: true }) });
-  const result = await f.drive();
-  assert.equal(result.code, 1);
-  assert.equal(out(result).stopped, 'shell-timeout');
-  assert.equal(state(f).pending.kind, 'shell');
-  assert.deepEqual(f.recorded, []);
+test('drive: a shell timeout is a reconcile stop, not a result: nothing recorded, exit 1, and the next drive reconciles', async (t) => {
+  for (const [killAttempted, rootExited] of [[true, true], [true, false], [false, true]]) {
+    const f = fixture(t, [SHELL], { shell: () => ({ code: null, stdout: 'partial', stderr: '', timedOut: true, killAttempted, rootExited }) });
+    const result = await f.drive();
+    assert.equal(result.code, 1);
+    const printed = out(result);
+    assert.equal(printed.stopped, 'reconcile');
+    assert.equal(printed.reason, 'timeout');
+    assert.equal(printed.killAttempted, killAttempted);
+    assert.equal(printed.rootExited, rootExited);
+    assert.equal(printed.killVerified, undefined, 'no claim the tree is gone');
+    assert.equal(printed.stdout, 'partial');
+    assert.equal(state(f).pending.kind, 'shell');
+    assert.deepEqual(f.recorded, []);
+    assert.match(logLines(f).at(-1), new RegExp(` stop=reconcile reason=timeout \\d+\\.\\ds killAttempted=${killAttempted} rootExited=${rootExited}$`));
+    // The started marker stays: the next drive stops at reconcile without running it.
+    const again = out(await f.drive());
+    assert.equal(again.stopped, 'reconcile');
+    assert.equal(again.reason, undefined);
+    assert.equal(f.runs.length, 1);
+  }
 });
 
 // A driver that dies is a raw (non-ConductError) throw out of drive: nothing
@@ -447,30 +462,89 @@ test('runArgv: a timeout kills the process tree, a grandchild sleeper too, and v
     : ['sh', '-c', '"$0" "$1" "$2" >/dev/null 2>&1; :', process.execPath, sleeper, pidFile];
   const ran = await runArgv(program, args, { timeout: 2000 });
   assert.equal(ran.timedOut, true);
+  assert.equal(ran.killAttempted, true);
   const grandchild = Number(readFileSync(pidFile, 'utf8'));
   assert.ok(await until(() => !alive(grandchild)), `the grandchild ${grandchild} is gone`);
-  assert.equal(ran.killVerified, true);
+  assert.equal(ran.rootExited, true);
   assert.equal(alive(ran.pid), false, 'the root is gone');
 });
 
-test('runArgv: a root that survives its kill is reported unverified', async (t) => {
+test('runArgv: a root that survives its kill is reported as not exited, and the call still returns', async (t) => {
   let pid = null;
   t.after(() => { if (pid) try { process.kill(pid, 'SIGKILL'); } catch {} });
   const ran = await runArgv(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { timeout: 200, killTree: () => {}, killGraceMs: 300 });
   pid = ran.pid;
   assert.equal(ran.timedOut, true);
-  assert.equal(ran.killVerified, false);
+  assert.equal(ran.killAttempted, true);
+  assert.equal(ran.rootExited, false);
   assert.equal(alive(pid), true);
 });
 
-test('drive: a timeout whose kill is unverified stops as timeout-unverified, nothing recorded; the next drive reconciles', async (t) => {
-  const f = fixture(t, [SHELL], { shell: () => ({ code: null, stdout: '', stderr: '', timedOut: true, killVerified: false }) });
-  const result = await f.drive();
-  assert.equal(result.code, 1);
-  assert.equal(out(result).stopped, 'timeout-unverified');
-  assert.deepEqual(f.recorded, []);
-  assert.equal(state(f).pending.kind, 'shell');
-  assert.match(logLines(f).at(-1), / exit=timeout \d+\.\ds unverified$/);
-  assert.equal(out(await f.drive()).stopped, 'reconcile');
-  assert.equal(f.runs.length, 1);
+// A shell root that exits at once and leaves a detached survivor holding its
+// stdout and stderr: the pipes never close, so only the timeout ends the step.
+function survivorScripts(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'workit-survivor-'));
+  const pidFile = join(dir, 'survivor.pid');
+  const survivor = join(dir, 'survivor.js');
+  const root = join(dir, 'root.js');
+  writeFileSync(survivor, "require('node:fs').writeFileSync(process.argv[2], String(process.pid)); setTimeout(() => {}, 60000);\n");
+  writeFileSync(root, "require('node:child_process').spawn(process.execPath, [process.argv[2], process.argv[3]], { detached: true, stdio: 'inherit', windowsHide: true }).unref();\n");
+  const survivorPid = () => (existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8')) : null);
+  // Registered first, so it runs after every later teardown; the test asserts the exit before it.
+  t.after(async () => {
+    const pid = survivorPid();
+    if (pid) try { process.kill(pid, 'SIGKILL'); } catch {}
+    // win32: the survivor's cwd keeps the directory until it is gone.
+    if (pid) await until(() => !alive(pid));
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+  return { dir, command: [process.execPath, root, survivor, pidFile], survivorPid };
+}
+
+test('runArgv: a root that exited before its timeout is never killed by its pid, and its pipes are released', async (t) => {
+  const s = survivorScripts(t);
+  const kills = [];
+  const [program, ...args] = s.command;
+  const started = Date.now();
+  const ran = await runArgv(program, args, { timeout: 1500, killTree: (pid) => kills.push(pid), killGraceMs: 300 });
+  assert.ok(Date.now() - started < 10000, 'the call returns at its timeout, not when the survivor ends');
+  assert.equal(ran.timedOut, true);
+  assert.equal(ran.rootExited, true);
+  assert.equal(ran.killAttempted, false);
+  assert.deepEqual(kills, [], 'no kill by a dead root\'s pid');
+  assert.ok(await until(() => s.survivorPid() !== null), 'the survivor started');
+  assert.equal(alive(s.survivorPid()), true, 'the survivor still runs: only the conductor can say what to do with it');
+});
+
+test('drive: a real drive process whose shell timed out exits while a survivor still holds the shell\'s pipes', async (t) => {
+  const s = survivorScripts(t);
+  const runDir = join(s.dir, 'run');
+  mkdirSync(runDir);
+  const pending = { id: '1-gate-cmd', kind: 'shell', step: 'gate-cmd', part: 'run', command: s.command, cwd: s.dir, expects: { type: 'exit0' }, phase: 'spec' };
+  writeFileSync(join(runDir, 'state.json'), JSON.stringify({
+    schemaVersion: 1, slug: 'seeded', runId: 'abcd1234', rev: 0, runDir, workshopDir: s.dir, pluginRoot: join(HERE, '..', '..', '..', '..'),
+    intent: { goal: 'drive exit', anchor: null }, agents: {}, adapters: { spine: { on: false } }, phase: 'spec',
+    touches: [], wps: [], handover: null, pending, lastRecorded: null, seq: 1,
+  }));
+  const cli = spawn(process.execPath, [join(HERE, '..', 'conduct.mjs'), 'drive', '--run', runDir], {
+    env: { ...process.env, WORKIT_DRIVE_TIMEOUT_MS: '1500' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  });
+  const chunks = [];
+  cli.stdout.on('data', (chunk) => chunks.push(chunk));
+  const exit = await new Promise((done) => {
+    const bound = setTimeout(() => done('still running'), 20000);
+    cli.on('close', (code) => { clearTimeout(bound); done(code); });
+  });
+  if (exit === 'still running') cli.kill();
+  assert.equal(exit, 1, 'the drive process exits, code 1');
+  assert.ok(await until(() => s.survivorPid() !== null), 'the survivor started');
+  assert.equal(alive(s.survivorPid()), true, 'the survivor was still running when the drive exited');
+  const printed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  assert.equal(printed.stopped, 'reconcile');
+  assert.equal(printed.reason, 'timeout');
+  assert.equal(printed.rootExited, true);
+  assert.equal(printed.killAttempted, false);
+  assert.equal(JSON.parse(readFileSync(join(runDir, 'state.json'), 'utf8')).pending.id, '1-gate-cmd', 'nothing recorded');
+  assert.ok(existsSync(join(runDir, 'drive-started.json')), 'the started marker holds the next drive at reconcile');
+  assert.equal(existsSync(join(runDir, 'drive.lock')), false);
 });

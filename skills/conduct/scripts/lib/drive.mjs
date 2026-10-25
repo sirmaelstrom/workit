@@ -20,6 +20,14 @@ export const DEFAULT_MAX_STEPS = 200;
 export const SHELL_TIMEOUT_MS = 30 * 60 * 1000;
 export const BACKGROUND_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 
+// WORKIT_DRIVE_TIMEOUT_MS overrides both: a test of a real drive process
+// cannot wait 30 minutes for its timeout.
+export function shellTimeout(action, env = {}) {
+  const override = Number(env.WORKIT_DRIVE_TIMEOUT_MS);
+  if (Number.isInteger(override) && override > 0) return override;
+  return action.background ? BACKGROUND_TIMEOUT_MS : SHELL_TIMEOUT_MS;
+}
+
 // A template author is mechanical: its text is fully given by the action.
 // The grant, rulings, amendments, the showcase brief and custody carry no
 // template; the lane contract, a lane brief and a release bump do.
@@ -144,9 +152,7 @@ export async function drive({ runDir, maxSteps = DEFAULT_MAX_STEPS }, deps) {
         };
         if (deps.platform === 'win32' && deps.windowsShim(program, { env, cwd: action.cwd })) return shimStop();
         writeMarker(deps, startedPath, { id: action.id, argvHash: hash, startedAt, pid: deps.pid ?? null });
-        const run = await deps.runArgv(program, args, {
-          cwd: action.cwd, env, timeout: action.background ? BACKGROUND_TIMEOUT_MS : SHELL_TIMEOUT_MS,
-        });
+        const run = await deps.runArgv(program, args, { cwd: action.cwd, env, timeout: shellTimeout(action, deps.env) });
         if (run.spawnError) {
           // It never started: no marker holds the next drive, and no
           // synthetic exit code is recorded as its result.
@@ -157,11 +163,12 @@ export async function drive({ runDir, maxSteps = DEFAULT_MAX_STEPS }, deps) {
           return finish(1, { ok: false, stopped: 'spawn-failed', action, spawnError: run.spawnError, stderr: run.stderr });
         }
         if (run.timedOut) {
-          // Its process tree was killed; without proof the root is gone, the
-          // stop says so. The started marker stays: the next drive reconciles.
-          const verified = run.killVerified === true;
-          log([startedAt, action.id, label(action), 'exit=timeout', `${((deps.now() - t0) / 1000).toFixed(1)}s`, ...(verified ? [] : ['unverified'])]);
-          return finish(1, { ok: false, stopped: verified ? 'shell-timeout' : 'timeout-unverified', action, stdout: run.stdout, stderr: run.stderr });
+          // Never a result: what it left running is the conductor's to
+          // check. The started marker stays, so the next drive stops here too.
+          const killAttempted = run.killAttempted === true;
+          const rootExited = run.rootExited === true;
+          log([startedAt, action.id, label(action), 'stop=reconcile', 'reason=timeout', `${((deps.now() - t0) / 1000).toFixed(1)}s`, `killAttempted=${killAttempted}`, `rootExited=${rootExited}`]);
+          return finish(1, { ok: false, stopped: 'reconcile', reason: 'timeout', killAttempted, rootExited, action, stdout: run.stdout, stderr: run.stderr });
         }
         result = { code: run.code, stdout: run.stdout, stderr: run.stderr };
         code = run.code;
