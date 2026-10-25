@@ -809,7 +809,7 @@ const conduct = async (h, argv) => {
   return JSON.parse(result.stdout);
 };
 
-test('t3 rotation with a wake yield pending: custody makes a heartbeat bound to the successor, then deletes the old one, then emits a fresh wait; the old yield is never re-emitted (workit#313 review r1, finding 1)', async (t) => {
+test('t3 rotation with a wake yield pending: custody makes a heartbeat bound to the successor, then deletes the old one, then reads its lanes; the old yield is never re-emitted (workit#313 review r1, finding 1)', async (t) => {
   const { h, yielded } = await wakeYieldPending(t);
   await conduct(h, ['rotate', '--run', h.runDir, '--why', 'context at 40%']);
   const confirm = (await conduct(h, ['next', '--run', h.runDir, '--custody', '1'])).action;
@@ -819,15 +819,43 @@ test('t3 rotation with a wake yield pending: custody makes a heartbeat bound to 
   assert.deepEqual([create.step, create.part, create.tool, create.args?.bindToCurrentThread, create.args?.clientRequestId], ['custody', 'heartbeat', 'schedule_task', true, 'abcd1234-heartbeat-r2']);
   const stop = (await conduct(h, ['record', '--run', h.runDir, '--action', create.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r2', boundThreadId: 'mcp:conductor-2' })])).action;
   assert.deepEqual([stop.step, stop.part, stop.tool, stop.args], ['custody', 'heartbeat-stop', 'delete_scheduled_task', { scheduledTaskId: 'task-r1' }]);
-  const wait = (await conduct(h, ['record', '--run', h.runDir, '--action', stop.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r1', deleted: true })])).action;
-  assert.deepEqual([wait.kind, wait.part, wait.wake], ['wait', 'yield', true], 'a fresh wake wait, bound to r2\'s heartbeat');
-  assert.notEqual(wait.id, yielded.id, 'the inherited yield is not re-emitted as is');
+  const tick = (await conduct(h, ['record', '--run', h.runDir, '--action', stop.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r1', deleted: true })])).action;
+  // The first tick under r2's heartbeat reads the lanes before any wake yield (r2, finding 3).
+  assert.deepEqual([tick.kind, tick.part, tick.tool], ['agent-tool', 'read', 't3_thread_read']);
+  assert.notEqual(tick.id, yielded.id, 'the inherited yield is not re-emitted as is');
   const state = loadState(h.runDir, h.deps);
   assert.deepEqual([state.t3Wake.taskId, state.t3Wake.thread, state.t3Wake.conductor], ['task-r2', 'mcp:conductor-2', 2]);
   assert.deepEqual(state.t3Wake.old.map((entry) => [entry.taskId, entry.deleted]), [['task-r1', true]]);
   assert.equal(state.rotations[0].status, 'custody');
   // The handoff told the successor what custody would do with the yield.
   assert.match(readFileSync(state.rotations[0].handoff, 'utf8'), /the run's heartbeat is made again from your thread/);
+});
+
+test('t3 custody tick: once custody replaces the heartbeat, its first wait is no wake yield; one immediate tick reads every live T3 lane, then the run yields on wakes (workit#313 review r2, finding 3)', async (t) => {
+  const { h, yielded } = await wakeYieldPending(t);
+  const s = loadState(h.runDir, h.deps);
+  for (const wp of s.wps.filter((candidate) => ['WP-02', 'WP-03'].includes(candidate.id))) Object.assign(wp.lane, { backend: 't3', threadId: `mcp:lane-${wp.id}` });
+  saveState(s, h.deps);
+  const as = ['--as-thread', 'mcp:conductor-2'];
+  await conduct(h, ['rotate', '--run', h.runDir, '--why', 'context at 40%']);
+  const confirm = (await conduct(h, ['next', '--run', h.runDir, '--custody', '1', ...as])).action;
+  writeFileSync(confirm.outPath, JSON.stringify({ gone: true, evidence: 'r1 thread idle' }));
+  const create = (await conduct(h, ['record', '--run', h.runDir, '--action', confirm.id, '--result', '{}', ...as])).action;
+  const stop = (await conduct(h, ['record', '--run', h.runDir, '--action', create.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r2', boundThreadId: 'mcp:conductor-2' }), ...as])).action;
+  let action = (await conduct(h, ['record', '--run', h.runDir, '--action', stop.id, '--result', JSON.stringify({ scheduledTaskId: 'task-r1', deleted: true }), ...as])).action;
+  const dropped = h.events().filter((event) => event.event === 'wake-yield-dropped');
+  assert.deepEqual(dropped.map((event) => [event.step, event.data.actionId, event.data.heartbeat]), [['custody', yielded.id, 'made']]);
+  // Every live lane is read once, as a heartbeat tick reads them.
+  const reads = [];
+  while (action.part === 'read') {
+    reads.push(action.wpId);
+    assert.deepEqual([action.tool, action.args.threadId], ['t3_thread_read', `mcp:lane-${action.wpId}`]);
+    const running = { thread: { threadId: action.args.threadId, status: 'running', pendingRequestCount: 0, itemCount: 3 }, recentRuns: [{ status: 'running' }], items: [] };
+    action = (await conduct(h, ['record', '--run', h.runDir, '--action', action.id, '--result', JSON.stringify(running), ...as])).action;
+  }
+  assert.deepEqual(reads.sort(), ['WP-02', 'WP-03']);
+  // Then the run waits on wakes, which now reach r2's thread.
+  assert.deepEqual([action.kind, action.part, action.wake], ['wait', 'yield', true]);
 });
 
 test('t3 custody binding: the successor\'s first next --custody --as-thread binds custody to its thread; while the heartbeat create is pending, r1\'s next and record --as-thread exit 5 and leave state.json unchanged byte for byte; then the successor completes custody (workit#313 review r2, finding 1)', async (t) => {

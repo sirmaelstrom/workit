@@ -9,7 +9,7 @@ import { ConductError, TERMINAL_PHASES, appendEvent } from './state.mjs';
 import { LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { conductScript, shellLiteral, spineAckFailure } from './touch.mjs';
 import { runAuthority } from './authority.mjs';
-import { HEARTBEAT_INSTRUCTION, adoptHeartbeat, heartbeatArgs, recordHeartbeatDelete, retireConductorThreads } from './lanes.mjs';
+import { HEARTBEAT_INSTRUCTION, adoptHeartbeat, heartbeatArgs, recordHeartbeatDelete, releaseWakeYield, retireConductorThreads } from './lanes.mjs';
 
 export const SESSION_LOG = 'session-chain.jsonl';
 
@@ -282,10 +282,9 @@ export function custodyNext(state, rotation, deps, { custody = null } = {}) {
   // The outgoing conductor's thread can never adopt the run back (lanes.mjs conductorThreadFence).
   const retired = retireConductorThreads(state, rotation);
   appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'custody-taken', source: 'next', data: { attempt: rotation.attempt, from: rotation.from, to: rotation.to, retire: rotation.retire, receipt: rotation.receipt, pane: rotation.successor.pane, ...(retired ? { retiredThreads: retired } : {}) } });
-  if (wakePending(state)) {
-    appendEvent(state, deps, { step: 'custody', kind: 'custody', event: 'wake-yield-dropped', source: 'next', data: { attempt: rotation.attempt, actionId: state.pending.id, heartbeat: rotation.heartbeat } });
-    state.pending = null;
-  }
+  // The yield goes, and its lanes' wake waits with it: the first tick under
+  // the new heartbeat reads every live T3 lane at once, then waits on wakes.
+  releaseWakeYield(state, deps, { step: 'custody', kind: 'custody', data: { attempt: rotation.attempt, heartbeat: rotation.heartbeat } });
   return null;
 }
 

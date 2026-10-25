@@ -897,7 +897,7 @@ function queueHeartbeat(state, deps) {
   if (state.phase !== 'build') return false;
   const lanes = state.wps.filter((wp) => wp.lane?.backend === 't3' && (LIVE_STATES.includes(wp.state) || laneOccupied(wp)) && wp.queue?.length);
   if (!lanes.length) return false;
-  releaseWakeYield(state, deps, 'conductor-adopted');
+  releaseWakeYield(state, deps, { data: { why: 'conductor-adopted' } });
   if (state.wps.some((wp) => (wp.queue ?? []).some((act) => act.part === 'heartbeat'))) return true;
   const acts = heartbeatActs(state, 'wait');
   if (!acts.length) return false;
@@ -909,10 +909,11 @@ function queueHeartbeat(state, deps) {
 
 // A pending wake yield whose wakes would not reach the conductor is dropped,
 // and each lane's wake wait with it: every live T3 lane is read at once, as a
-// heartbeat tick reads them.
-export function releaseWakeYield(state, deps, why) {
+// heartbeat tick reads them. Custody does this too, once the heartbeat is
+// bound to the successor: its first wait would otherwise be a wake yield.
+export function releaseWakeYield(state, deps, { step = 'wait', kind = 'wait', data = {} } = {}) {
   if (state.pending?.kind !== 'wait' || state.pending.wake !== true) return false;
-  appendEvent(state, deps, { step: 'wait', kind: 'wait', event: 'wake-yield-dropped', source: 'next', data: { actionId: state.pending.id, why } });
+  appendEvent(state, deps, { step, kind, event: 'wake-yield-dropped', source: 'next', data: { ...data, actionId: state.pending.id } });
   state.pending = null;
   for (const wp of state.wps) if (wp.queue?.[0]?.kind === 'wait' && wp.queue[0].wake) wp.queue.shift();
   return true;
