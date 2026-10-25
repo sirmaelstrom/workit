@@ -74,7 +74,8 @@ function touchOne(state, deps = {}, { bound = false } = {}) {
   // environment at `next`, after intake checked the cap, so it is dropped
   // when it would overrun the cap.
   const why = !bound && !herdr && state.adapters.herdr?.on ? lanes.detail : null;
-  const lanesLine = (detail) => `Lanes: ${herdr ? 'herdr panes you can watch' : detail ? `headless (exec: ${detail}), with nothing to watch while they work` : headless}; agent ${intent.agent}.`;
+  const t3 = lanes.backend === 't3' ? `T3 Code threads you can watch in T3 (project ${intent.backend.t3Project})` : null;
+  const lanesLine = (detail) => `Lanes: ${t3 ?? (herdr ? 'herdr panes you can watch' : detail ? `headless (exec: ${detail}), with nothing to watch while they work` : headless)}; agent ${intent.agent}.`;
   // The briefing comes first, as touch 2's does: what the run will do, with
   // what authority, at what cost, and where its lanes can be watched. The
   // probe details the answer rests on follow, under Details.

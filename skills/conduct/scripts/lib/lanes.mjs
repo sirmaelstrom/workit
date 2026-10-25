@@ -36,13 +36,13 @@
 // - `lane.costComplete: false` marks a cost read from a lane that was killed or
 //   whose pid was reused: a lower bound, not the lane's spend.
 import { basename, dirname, join, resolve } from 'node:path';
-import { LANE_MODELS, laneModel } from './adapters.mjs';
+import { LANE_MODELS, laneModel, t3ModelSelection } from './adapters.mjs';
 import { resolveProgram, shellArgv } from './exec.mjs';
 import { pinnedConfig } from './repo-config.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, laneBase, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, holdsSlot } from './schedule.mjs';
-import { EXIT_CODES as LANE_EXIT, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems, stopHookSettings } from '../../../../scripts/lane.mjs';
+import { EXIT_CODES as LANE_EXIT, LANE_MARKER_ENV, mergeDanger, reapWorktree, reportEvidenceProblems, reportShapeProblems, stopHookSettings } from '../../../../scripts/lane.mjs';
 
 const DEADLINE_MS = 120 * 60 * 1000;
 const POLL_MS = 60000;
@@ -50,6 +50,11 @@ const DIALOG_WAIT_MS = 60000;
 const START_REARMS = 3;
 const STOP_CONFIRMS = 3;
 const STOP_WAIT_MS = 10000;
+// One t3_thread_wait: it returns as soon as the lane's run ends, so a longer
+// timeout costs nothing but the conductor's other WPs' turn.
+const T3_WAIT_MS = 120000;
+const T3_RUNNING = new Set(['preparing','queued', 'starting', 'running', 'waiting']);
+const T3_ENDED = new Set(['completed', 'idle']);
 export const ADMIT_BACKOFF_MS = 5 * 60 * 1000;
 const SHA = /^[0-9a-f]{40}$/;
 const VERDICT = /^Verdict: (exercised|vacuous|not exercised|no runtime surface)$/;
@@ -97,7 +102,13 @@ const waitAction = (waitMs) => ({ kind: 'wait', step: 'wait', seam: STEP_SEAM.wa
 // herdr when the adapter is on and the lane path lane.mjs create derives
 // (<repo>-wt-<slug>, beside the repo) passes its assertUnderProjects rule
 // (scripts/lane.mjs:953-970); exec otherwise.
+// A run that chose its backend at intake (--backend) keeps it; herdr still
+// needs a lane path lane.mjs create accepts. A run from before the choice
+// reads the herdr probe it stored.
 export function chooseBackend(state, deps) {
+  const chosen = state.intent?.backend?.name;
+  if (chosen === 't3') return { backend: 't3', detail: `T3 Code threads in project ${state.intent.backend.t3Project}` };
+  if (chosen === 'exec') return { backend: 'exec', detail: 'chosen at intake (--backend exec)' };
   if (!state.adapters?.herdr?.on) return { backend: 'exec', detail: `herdr adapter off (${state.adapters?.herdr?.detail ?? 'not probed'})` };
   const parent = dirname(resolve(state.intent.repo.path));
   const root = deps.env?.WORKIT_WORKSPACE_ROOT;
@@ -316,6 +327,82 @@ export function laneBackend(state, deps, backend) {
       })],
     };
   }
+  // Exec and t3 lanes share the worktree beside the repo, cut by git; only the
+  // agent differs. The 3rd and 4th lanes are admitted on free commit memory.
+  const gitAdmit = (wp) => (state.wps.filter((other) => other !== wp && holdsSlot(other)).length >= GATED_FROM_LANE - 1 ? [admitAction(['--require-reading'])] : []);
+  const gitCreate = (wp) => {
+    const lane = laneLayout(state, wp);
+    return [...base(), shellAction('create', {
+      part: 'worktree', instruction: 'Add the lane worktree beside the repo.',
+      command: ['git', '-C', repo, 'worktree', 'add', lane.worktree, '-b', lane.branch, `origin/${fallbackBranch}`],
+    }), ...setupActs(lane.worktree)];
+  };
+  const gitRemove = (wp) => [shellAction('stop', {
+    part: 'remove', instruction: 'Remove the merged lane\'s worktree (no --force).', command: ['git', '-C', repo, 'worktree', 'remove', worktreeOf(wp)],
+  })];
+  const gitCheck = (wp) => [
+    reportCheck(wp, []),
+    prLookup(wp),
+    shellAction('check', { part: 'pr', instruction: 'Check the PR.', command: conduct('check', wp, ['--pr', '{pr.number}']) }),
+  ];
+  if (backend === 't3') {
+    // A T3 lane is a T3 Code thread bound to the git worktree (existing_worktree),
+    // driven by MCP calls the conductor makes: launch, send, wait, interrupt.
+    // A claude lane's Stop hook rides the worktree's .claude/settings.local.json
+    // (`lane hook`), which T3's Claude provider loads.
+    const agent = state.intent.agent;
+    const tool = (step, part, name, args, instruction) => ({
+      kind: 'agent-tool', step, seam: STEP_SEAM[step], ...(part ? { part } : {}), tool: name, args, expects: { type: 'json' }, instruction,
+    });
+    const message = (wp) => `Read ${wp.lane?.briefPath ?? laneLayout(state, wp).briefPath} and execute it exactly.`;
+    const hookAct = (wp) => (agent === 'claude' ? [shellAction('create', {
+      part: 'hook', instruction: 'Install the lane\'s Stop hook in its worktree.', command: conduct('hook', wp),
+    })] : []);
+    return {
+      acts(wp) {
+        const running = { ...wp, lane: { ...wp.lane, exitedAt: null } };
+        return actsOf(this, wp, [() => [admitAction(['--require-reading'])], (b) => b.create(wp), (b) => b.start(wp), (b) => b.prompt(wp, { amendment: true }),
+          (b) => b.prompt(wp, { amendment: true, resend: true }), (b) => b.wait(wp), (b) => b.check(wp), (b) => b.stop(running), (b) => b.reap(wp), (b) => b.remove(wp), () => deletes(wp)]);
+      },
+      name: 't3',
+      setup: (wp) => setupActs(worktreeOf(wp)),
+      admit: gitAdmit,
+      create: (wp) => [...gitCreate(wp), ...hookAct(wp)],
+      // The first prompt rides the launch. No idempotency key: a lost response
+      // is found by title before launching again.
+      start: (wp) => {
+        const lane = laneLayout(state, wp);
+        const title = `${state.slug} ${wp.id}: ${wp.name || 'lane'}`.slice(0, 120);
+        return [tool('start', null, 't3_thread_launch', {
+          title, projectId: state.intent.backend?.t3Project ?? null,
+          workspaceStrategy: { type: 'existing_worktree', worktreePath: worktreeOf(wp), branch: wp.lane?.branch ?? lane.branch },
+          modelSelection: t3ModelSelection(agent, wp.model), message: message(wp),
+        }, `Call t3_thread_launch with these args and record its raw result. If its response is lost, find the thread with t3_thread_list (titleContains "${title}") and record that thread's row; never launch twice.`)];
+      },
+      // An amendment is a new turn in the same thread: the lane keeps its context.
+      // The request id is stable across retries of one queued send and new for
+      // each send after it (a reset re-prompt): T3 drops a repeated id. Every
+      // recorded send renews startedAt, so the id carries it.
+      prompt: (wp, { amendment = false, resend = false } = {}) => (amendment ? [tool('prompt', resend ? 'resend' : null, 't3_thread_send', {
+        threadId: wp.lane?.threadId ?? null, message: message(wp), mode: 'queue',
+        clientRequestId: `${state.runId}-${wp.id.toLowerCase()}-a${wp.amendment?.n ?? 0}-${Date.parse(wp.lane?.startedAt ?? '') || 0}${resend ? '-resend' : ''}`,
+      }, 'Call t3_thread_send with these args and record its raw result.')] : []),
+      wait: (wp) => [tool('wait', null, 't3_thread_wait', { threadId: wp.lane?.threadId ?? null, timeoutMs: T3_WAIT_MS },
+        'Call t3_thread_wait with these args and record its raw result.')],
+      check: gitCheck,
+      // Interrupt the running turn, then confirm the run is terminal. A lane
+      // already exited gets the reap alone.
+      stop: (wp) => (!wp.lane?.threadId ? [] : wp.lane?.exitedAt ? execReap(wp) : [
+        tool('stop', 'interrupt', 't3_thread_interrupt', { threadId: wp.lane.threadId, reason: 'conduct stopped this lane' }, 'Call t3_thread_interrupt with these args and record its raw result.'),
+        tool('stop', 'confirm', 't3_thread_wait', { threadId: wp.lane.threadId, timeoutMs: STOP_WAIT_MS }, 'Call t3_thread_wait with these args and record its raw result.'),
+      ]),
+      reap: (wp) => execReap(wp),
+      // T3 holds the thread's worktree open until the thread is archived: git
+      // empties it but cannot delete the folder. The archived thread keeps its history.
+      remove: (wp) => [...(wp.lane?.threadId ? [tool('stop', 'archive', 't3_thread_organize', { action: 'archive', threadId: wp.lane.threadId },
+        'Call t3_thread_organize with these args and record its raw result.')] : []), ...gitRemove(wp)],
+    };
+  }
   return {
     acts(wp) {
       const running = { ...wp, lane: { ...wp.lane, exitedAt: null } };
@@ -328,25 +415,15 @@ export function laneBackend(state, deps, backend) {
     // A 3rd or 4th lane agent is admitted on measured free commit memory: room is
     // the gate's whole point, so a host that cannot measure it does not get one.
     // A landing WP runs no agent and is not counted (holdsSlot).
-    admit: (wp) => (state.wps.filter((other) => other !== wp && holdsSlot(other)).length >= GATED_FROM_LANE - 1 ? [admitAction(['--require-reading'])] : []),
-    create: (wp) => {
-      const lane = laneLayout(state, wp);
-      return [...base(), shellAction('create', {
-        part: 'worktree', instruction: 'Add the lane worktree beside the repo.',
-        command: ['git', '-C', repo, 'worktree', 'add', lane.worktree, '-b', lane.branch, `origin/${fallbackBranch}`],
-      }), ...setupActs(lane.worktree)];
-    },
+    admit: gitAdmit,
+    create: gitCreate,
     // The first prompt rides the spawn; an amendment resumes the session.
     start: (wp) => [shellAction('start', { instruction: 'Start the lane agent, detached.', command: conduct('spawn', wp) })],
     prompt: (wp, { amendment = false } = {}) => (amendment
       ? [shellAction('prompt', { instruction: 'Resume the lane agent on its amended brief.', command: conduct('spawn', wp, ['--amend', wp.lane.briefPath]) })]
       : []),
     wait: (wp) => [shellAction('wait', { instruction: 'Ask whether the lane agent still runs.', command: conduct('alive', wp) })],
-    check: (wp) => [
-      reportCheck(wp, []),
-      prLookup(wp),
-      shellAction('check', { part: 'pr', instruction: 'Check the PR.', command: conduct('check', wp, ['--pr', '{pr.number}']) }),
-    ],
+    check: gitCheck,
     // First probe the pid's identity (`alive`); only a match queues the kill
     // (itself guarded by the same identity) and its confirmation. A mismatch,
     // or no identity, kills nothing and records the lane as exited. Only a
@@ -357,9 +434,7 @@ export function laneBackend(state, deps, backend) {
     reap: (wp) => execReap(wp),
     // A merged WP's worktree is removed; git refuses a dirty tree (no --force),
     // and the refusal is recorded on the lane, never a block.
-    remove: (wp) => [shellAction('stop', {
-      part: 'remove', instruction: 'Remove the merged lane\'s worktree (no --force).', command: ['git', '-C', repo, 'worktree', 'remove', worktreeOf(wp)],
-    })],
+    remove: gitRemove,
     kill: (wp) => [
       shellAction('stop', {
         part: 'kill', instruction: 'Terminate the lane agent if the pid is still its own.', command: guardedKillArgv(wp.lane.pid, wp.lane.identity, deps.platform ?? process.platform),
@@ -578,6 +653,7 @@ export function recordLaneStep(state, wp, action, result, deps) {
   if (action.kind === 'wait') return proceed();
   const lane = laneLayout(state, wp);
   const backend = laneBackend(state, deps, wp.lane?.backend ?? 'exec');
+  if (action.kind === 'agent-tool') return recordT3Step(state, wp, action, result, deps, backend);
   const ok = result.code === 0;
   switch (action.step) {
     case 'admit':
@@ -592,7 +668,7 @@ export function recordLaneStep(state, wp, action, result, deps) {
     }
     case 'create': {
       if (!ok) return block(said(result));
-      if (action.part === 'fetch' || action.part === 'setup') return proceed();
+      if (action.part === 'fetch' || action.part === 'setup' || action.part === 'hook') return proceed();
       if (action.part === 'lane') {
         const created = parseStdout(result);
         if (!created?.paneId || !created?.path) return block(`lane.mjs create printed no paneId/path: ${said(result)}`);
@@ -685,6 +761,71 @@ function recordExecWait(state, wp, result, deps, backend) {
   return proceed({ lane: exitedLane(state, wp, deps, parseStdout(result)?.owner === 'gone'), queue: [...backend.reap(wp), ...(wp.queue ?? []).slice(1)] });
 }
 
+// A T3 tool's raw result. A call the conductor could not make is recorded as
+// its error ({ error } or { isError }), and blocks with it.
+const t3Said = (result) => JSON.stringify(result ?? null).slice(0, 400);
+const t3Failed = (result) => !result || typeof result !== 'object' || result.isError === true || Boolean(result.error) || result.ok === false;
+
+function recordT3Step(state, wp, action, result, deps, backend) {
+  // Cleanup never blocks: a thread left unarchived is named on the lane, and the removal after it says what stayed.
+  if (action.part === 'archive') return proceed({ lane: { archived: !t3Failed(result), ...(t3Failed(result) ? { archiveError: t3Said(result) } : {}) } });
+  const rest = (wp.queue ?? []).slice(1);
+  // A stop's calls go through the cleanup retries, keeping what is queued
+  // behind them: a failed interrupt is left to the confirmation, and a failed
+  // confirmation counts as one that saw the run still going.
+  if (action.step === 'stop' && action.part === 'interrupt') return proceed();
+  if (action.step === 'stop' && t3Failed(result)) return t3StopUnconfirmed(wp, action, rest, backend, `${action.tool} failed: ${t3Said(result)}`);
+  if (t3Failed(result)) return block(`${action.tool}: ${t3Said(result)}`);
+  switch (action.step) {
+    case 'start':
+      if (typeof result.threadId !== 'string' || !result.threadId) return block(`t3_thread_launch returned no threadId: ${t3Said(result)}`);
+      return proceed({ lane: { threadId: result.threadId, runId: result.runId ?? null, ...freshStart(deps, null, laneDeadlineMs(state)) } });
+    case 'prompt':
+      if (typeof result.threadId !== 'string' && typeof result.runId !== 'string') return block(`t3_thread_send returned no run: ${t3Said(result)}`);
+      if (action.part === 'resend') return proceed();
+      return proceed({ lane: { runId: result.runId ?? wp.lane?.runId ?? null, ...freshStart(deps, null, laneDeadlineMs(state)) } });
+    case 'wait': {
+      const status = String(result.status ?? '');
+      if (T3_ENDED.has(status)) {
+        // A stop with a background task still running wakes the agent when it
+        // ends, as in herdr: hold the wait on the stop-check's verdict.
+        const stopCheck = laneStopCheck(state, wp, deps);
+        const since = Date.parse(stopCheck?.at ?? '');
+        if (stopCheck?.verdict === 'background-live' && deps.now() - since < BACKGROUND_HOLD_MS && !expired(wp, deps)) {
+          const tasks = (stopCheck.tasks ?? []).map((task) => task.command ?? task.id).join('; ');
+          return { outcome: 'wait', reason: `lane stopped with a background task running: ${tasks}`, patch: { queue: [waitAction(POLL_MS), ...backend.wait(wp)] } };
+        }
+        return proceed({ lane: exitedLane(state, wp, deps, true), queue: [...backend.reap(wp), ...rest] });
+      }
+      if (result.timedOut === true || T3_RUNNING.has(status)) {
+        if (expired(wp, deps)) return deadlineBlock(wp, backend);
+        return { outcome: 'wait', reason: `lane running (${status || 'timed out'})`, patch: { queue: [...backend.wait(wp)] } };
+      }
+      // interrupted, failed, cancelled, rolled_back: the agent is not running.
+      return block(`the lane's T3 run ended ${status || 'unreadably'}: ${t3Said(result)}`, { lane: exitedLane(state, wp, deps, false), queue: backend.reap(wp) });
+    }
+    case 'stop': {
+      const status = String(result.status ?? '');
+      if (!(result.timedOut === true || T3_RUNNING.has(status))) {
+        return done('lane stopped', { lane: exitedLane(state, wp, deps, false), queue: [...backend.reap(wp), ...rest] });
+      }
+      return t3StopUnconfirmed(wp, action, rest, backend, `the lane's T3 run is still ${status || 'running'} after the interrupt`);
+    }
+    default:
+      throw new ConductError(2, `recordLaneStep has no T3 route for step ${action.step}`);
+  }
+}
+
+// An unconfirmed stop is confirmed again after 10 s, up to STOP_CONFIRMS
+// times; then it blocks as 'cleanup-unresolved' with its stop and the rest still queued.
+function t3StopUnconfirmed(wp, action, rest, backend, why) {
+  const confirms = (wp.lane?.stopConfirms ?? 0) + 1;
+  if (confirms >= STOP_CONFIRMS) {
+    return block(`cleanup unresolved after ${confirms} confirmations: ${why}`, { lane: { stopConfirms: confirms }, queue: [...backend.stop(wp), ...rest] }, 'cleanup-unresolved');
+  }
+  return { outcome: 'wait', reason: why, patch: { lane: { stopConfirms: confirms }, queue: [waitAction(STOP_WAIT_MS), action, ...rest] } };
+}
+
 // The lane's exit is observed. The exec log holds its session id and, for
 // claude, its cost: complete only when the agent ended on its own (not killed,
 // pid not reused); a log with no result keeps the known cost.
@@ -692,7 +833,7 @@ function exitedLane(state, wp, deps, natural) {
   const lane = { exitedAt: iso(deps.now()), stopConfirms: 0 };
   const stopCheck = laneStopCheck(state, wp, deps);
   if (stopCheck) lane.stopCheck = stopCheckSummary(stopCheck);
-  if (wp.lane?.backend === 'herdr') return lane;
+  if (wp.lane?.backend === 'herdr' || wp.lane?.backend === 't3') return lane;
   const log = readLog(deps, wp.lane?.logPath ?? laneLayout(state, wp).logPath);
   const claude = state.intent.agent === 'claude';
   const last = lastWith(log, claude ? 'session_id' : 'thread_id');
@@ -795,7 +936,7 @@ function recordPrLookup(wp, lane, result, deps) {
   return proceed({ pr: found });
 }
 
-const SUB_FLAGS = { spawn: ['amend'], alive: [], check: ['pr', 'runtimeOnly'], reap: [], 'stop-check': [] };
+const SUB_FLAGS = { spawn: ['amend'], alive: [], check: ['pr', 'runtimeOnly'], reap: [], 'stop-check': [], hook: [] };
 const kebab = (name) => name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
 const reply = (code, out) => ({ code, out: JSON.stringify(out) });
 
@@ -814,6 +955,7 @@ export async function runLaneVerb(sub, { runDir, wpId, flags = {}, state = null 
   }
   if (sub === 'spawn') return spawnLane(current, wp, flags, deps);
   if (sub === 'stop-check') return stopCheckLane(current, wp, hookInput(deps), deps);
+  if (sub === 'hook') return hookLane(current, wp, deps);
   if (sub === 'reap') {
     // lane.mjs's reap, in process: the core path runs no lane.mjs argv.
     const reaped = reapWorktree(wp.lane?.worktree ?? laneLayout(current, wp).worktree, { ...deps, platform: deps.platform ?? process.platform });
@@ -919,6 +1061,41 @@ function checkLane(state, wp, flags, deps) {
     }
   }
   return reply(failures.length ? 5 : 0, { ok: !failures.length, outcome, verdict, failures, asks });
+}
+
+// A T3 claude lane's settings: T3 starts the agent, so no --settings flag can
+// carry the Stop hook and the lane marker. They go in the worktree's
+// .claude/settings.local.json, which the agent loads, and that file goes in
+// the repo's info/exclude so no lane commits it and `git worktree remove`
+// still sees a clean tree. An existing file keeps its other keys.
+const LANE_SETTINGS = '.claude/settings.local.json';
+
+function hookLane(state, wp, deps) {
+  const worktree = wp.lane?.worktree ?? laneLayout(state, wp).worktree;
+  if (!deps.exists(worktree)) return reply(1, { ok: false, error: `the lane worktree ${worktree} does not exist` });
+  const path = join(worktree, ...LANE_SETTINGS.split('/'));
+  let settings = {};
+  try {
+    if (deps.exists(path)) settings = JSON.parse(deps.read(path));
+  } catch (error) {
+    return reply(1, { ok: false, error: `${path} is not JSON: ${error.message}` });
+  }
+  const command = stopHookCommand(state, wp, deps);
+  const ours = (entry) => (entry?.hooks ?? []).some((hook) => hook?.command === command);
+  settings.env = { ...(settings.env ?? {}), [LANE_MARKER_ENV]: laneLayout(state, wp).name };
+  settings.hooks = { ...(settings.hooks ?? {}), Stop: [...(settings.hooks?.Stop ?? []).filter((entry) => !ours(entry)), ...stopHookSettings(command).hooks.Stop] };
+  deps.mkdir(dirname(path));
+  deps.write(path, `${JSON.stringify(settings, null, 2)}\n`);
+  const gitPath = deps.exec('git', ['-C', worktree, 'rev-parse', '--git-path', 'info/exclude']);
+  if (gitPath.code !== 0) return reply(1, { ok: false, error: `git rev-parse --git-path info/exclude: ${said(gitPath)}`, path });
+  const exclude = resolve(worktree, gitPath.stdout.trim());
+  const line = `/${LANE_SETTINGS}`;
+  const current = deps.exists(exclude) ? deps.read(exclude) : '';
+  if (!current.split(/\r?\n/).includes(line)) {
+    deps.mkdir(dirname(exclude));
+    deps.write(exclude, `${current}${current && !current.endsWith('\n') ? '\n' : ''}${line}\n`);
+  }
+  return reply(0, { ok: true, path, exclude });
 }
 
 // The Stop hook's input (Claude Code writes it on stdin); {} when unreadable.

@@ -14,7 +14,7 @@ import {
   ConductError, SCHEMA_VERSION, STEPS, STEP_SEAM, TERMINAL_PHASES,
   appendEvent, loadState, refuseRetired, resolveRunDir, saveState, slugify, statePath, withStateLock,
 } from './lib/state.mjs';
-import { ADAPTERS, AGENTS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
+import { ADAPTERS, AGENTS, BACKENDS, DECLARED_ADAPTERS, detectAdapters, firstLine } from './lib/adapters.mjs';
 import { resolveRecipe, validateRecipe } from './lib/recipe.mjs';
 import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
@@ -27,7 +27,8 @@ const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(SCRIPTS_DIR, '../../..');
 
 const USAGE = `usage: conduct.mjs <verb> [flags]
-  intake --goal <text> --repo <abs> [--anchor <quest id>] [--budget <usd>] [--lanes 1-4] [--agent claude|codex]
+  intake --goal <text> --repo <abs> --backend t3|herdr|exec [--t3-project <id>] [--backend-why <text>]
+         [--anchor <quest id>] [--budget <usd>] [--lanes 1-4] [--agent claude|codex]
          [--adapter <name>]... [--no-adapter <name>]... [--release <json file>] [--runs-root <dir>]
   next --run <dir> [--custody <n>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>]
@@ -40,7 +41,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   replan --run <dir> --plan <json file>
   upgrade-root --run <dir> --why <text> (invoke from destination root at an author/wait action)
   rotate --run <dir> --why <text> [--model <id> --effort <level>] [--name <successor>]
-  lane <spawn|alive|check|reap|stop-check> --run <dir> --wp <id> [sub-verb flags]
+  lane <spawn|alive|check|reap|stop-check|hook> --run <dir> --wp <id> [sub-verb flags]
   land <gate|merged> --run <dir> --wp <id|release> [sub-verb flags]
   quiet [--samples <n>] [--interval-ms <ms>] [--max-busy <percent>]   (no run: is this host's CPU quiet enough to re-run a gate)
   bootstrap --repo <abs> [--write] [--offline]   (no run: check a repo against the greenfield manifest)`;
@@ -49,7 +50,7 @@ const BOOLEAN_FLAGS = new Set(['manual', 'write', 'offline']);
 const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
-const VALUE_FLAGS = new Set(['goal', 'repo', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
+const VALUE_FLAGS = new Set(['goal', 'repo', 'backend', 'backend-why', 't3-project', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
   'runs-root', 'run', 'resume', 'action', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan']);
 
 function parseFlags(tokens) {
@@ -237,7 +238,25 @@ function intakeOptions(flags) {
   if (!Number.isInteger(lanesCap) || lanesCap < 1 || lanesCap > MAX_LANES) throw new ConductError(2, `--lanes must be 1 to ${MAX_LANES}`);
   if (flags.agent !== undefined && !AGENTS.includes(flags.agent)) throw new ConductError(2, `--agent must be one of ${AGENTS.join(', ')}`);
   const spine = declared.includes('spine') && !forcedOff.includes('spine');
-  return { goal, forcedOff, declared, budgetUsd, lanesCap, spine };
+  const backend = flags.backend === undefined ? null : flags.backend;
+  if (backend !== null && !BACKENDS.includes(backend)) throw new ConductError(2, `--backend must be one of ${BACKENDS.join(', ')}`);
+  const t3Project = typeof flags['t3-project'] === 'string' ? flags['t3-project'].trim() : null;
+  if (flags['t3-project'] !== undefined && backend !== 't3') throw new ConductError(2, '--t3-project belongs to --backend t3');
+  const backendWhy = typeof flags['backend-why'] === 'string' ? flags['backend-why'].trim() : null;
+  return { goal, forcedOff, declared, budgetUsd, lanesCap, spine, backend, t3Project, backendWhy };
+}
+
+// Where the lanes run is the conductor's choice, stated at intake: nothing is
+// probed into it. t3 (the default for a conductor in T3 Code) needs the T3
+// project whose workspace root is the repo; herdr needs a stated reason.
+function laneBackendChoice(options, refuse) {
+  const { backend, t3Project, backendWhy } = options;
+  if (backend === null) {
+    refuse(9, `choose where the lanes run: --backend t3 --t3-project <id> (T3 Code threads; t3_project_list gives the id of the project rooted at --repo), --backend herdr --backend-why "<the reason T3 won't do>", or --backend exec (headless, nothing to watch)`);
+  }
+  if (backend === 't3' && !t3Project) refuse(9, '--backend t3 needs --t3-project <id>: the T3 project whose workspace root is --repo (t3_project_list)');
+  if (backend === 'herdr' && !backendWhy) refuse(9, '--backend herdr needs --backend-why "<the reason T3 won\'t do>": T3 is the default substrate for lanes');
+  return { name: backend, ...(t3Project ? { t3Project } : {}), ...(backendWhy ? { why: backendWhy } : {}) };
 }
 
 // Refusals 1–3 and 5–7 of D1. Every one exits 2 before anything is written.
@@ -280,12 +299,18 @@ async function intake(tokens, deps) {
   const commits = count?.code === 0 && /^\d+$/.test(count.stdout.trim()) ? Number(count.stdout.trim()) : null;
   const { detectGreenfield } = await loadModule(deps, 'lib/bootstrap.mjs', 'module');
   const greenfield = detectGreenfield({ ciWorkflows, commits });
+  const backend = laneBackendChoice(options, refuse);
+  // herdr is asked only when it was chosen; a chosen herdr that doesn't answer is refused.
   const { adapters, agents } = detectAdapters({
-    env: deps.env, exec: deps.exec, exists: deps.exists, declared: options.declared, forcedOff: options.forcedOff,
+    env: deps.env, exec: deps.exec, exists: deps.exists, declared: options.declared,
+    forcedOff: backend.name === 'herdr' ? options.forcedOff : [...new Set([...options.forcedOff, 'herdr'])],
     platform: deps.platform, resolveCodex: deps.resolveCodex,
   });
-  if (flags.agent !== undefined && !agents[flags.agent].on) refuse(5, `--agent ${flags.agent} is not available: ${agents[flags.agent].detail}`);
-  const agent = flags.agent ?? AGENTS.find((name) => agents[name].on);
+  if (backend.name !== 'herdr' && !options.forcedOff.includes('herdr')) adapters.herdr = { on: false, evidence: 'chosen', detail: `lanes run on ${backend.name} (--backend)` };
+  if (backend.name === 'herdr' && !adapters.herdr.on) refuse(9, `--backend herdr, but ${adapters.herdr.detail}`);
+  // A T3 lane runs in T3's own provider, so no agent CLI need be on PATH.
+  if (backend.name !== 't3' && flags.agent !== undefined && !agents[flags.agent].on) refuse(5, `--agent ${flags.agent} is not available: ${agents[flags.agent].detail}`);
+  const agent = backend.name === 't3' ? flags.agent ?? 'claude' : flags.agent ?? AGENTS.find((name) => agents[name].on);
   if (!agent) refuse(5, `no lane agent CLI on PATH (${AGENTS.map((name) => `${name}: ${agents[name].detail}`).join('; ')})`);
   // The workspace config is read once here and pinned (lib/repo-config.mjs).
   const repoConfig = resolveRepoConfig({ remote, repoPath, env: deps.env, exists: deps.exists, read: deps.read });
@@ -307,7 +332,7 @@ async function intake(tokens, deps) {
       intent: {
         goal: options.goal, repo: { path: repoPath, remote, defaultBranch: repoInfo.defaultBranchRef?.name ?? null },
         anchor: typeof flags.anchor === 'string' ? flags.anchor : null, campaign: null,
-        budgetUsd: options.budgetUsd, lanesCap: options.lanesCap, agent, release: recipe, ciWorkflows, repoConfig, greenfield,
+        budgetUsd: options.budgetUsd, lanesCap: options.lanesCap, agent, backend, release: recipe, ciWorkflows, repoConfig, greenfield,
       },
       agents, adapters,
       phase: options.spine ? 'intake' : 'preapproval',
@@ -702,7 +727,7 @@ async function quietVerb(tokens, deps) {
 const VERBS = {
   intake, next, record, answer, status, analyze, ratify: ratifyVerb, 'reset-wp': resetWpVerb,
   'ci-checks': ciChecksVerb, 'upgrade-root': upgradeRootVerb, rotate: rotateVerb, replan: replanVerb,
-  lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap', 'stop-check'], ['spawn']),
+  lane: subVerb('lib/lanes.mjs', 'runLaneVerb', ['spawn', 'alive', 'check', 'reap', 'stop-check', 'hook'], ['spawn']),
   land: subVerb('lib/land.mjs', 'runLandVerb', ['gate', 'merged']),
   bootstrap: async (tokens, deps) => {
     const { runBootstrapVerb } = await loadModule(deps, 'lib/bootstrap.mjs', 'module');

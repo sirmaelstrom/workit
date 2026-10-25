@@ -1302,3 +1302,152 @@ test('stop-check: the hook command names stop-check.mjs, the run and the WP, for
   assert.equal(agentArgv(codex.state, codex.wp, { brief: '/b.md' }, codex.deps).includes('--settings'), false, 'codex lanes carry no stop hook');
   assert.equal(lanes(t, { agent: 'codex', backend: 'herdr', wpLane: { paneId: 'w1:p1' } }).backend('herdr').start(codex.wp)[0].command.includes('--stop-hook'), false);
 });
+
+// ---------------------------------------------------------------- t3 (c87c58c4)
+
+function t3Lanes(t, opts = {}) {
+  const f = lanes(t, { backend: 't3', ...opts });
+  f.state.intent.backend = { name: 't3', t3Project: 'proj-1' };
+  return f;
+}
+const THREAD = 'mcp:thread-1';
+
+test('t3 backend: chosen at intake; a git worktree plus the Stop hook, then MCP calls the conductor makes (launch, send, wait, interrupt)', (t) => {
+  const f = t3Lanes(t, { wpLane: { worktree: '/wt', branch: 'conduct/demo/wp-00', briefPath: '/run/lane-wp-00.md' } });
+  assert.deepEqual(chooseBackend(f.state, f.deps), { backend: 't3', detail: 'T3 Code threads in project proj-1' });
+  const b = f.backend();
+  assert.equal(b.name, 't3');
+  assert.deepEqual(b.create(f.wp).map((act) => act.part ?? act.step), ['fetch', 'base', 'worktree', 'hook']);
+  assert.deepEqual(b.create(f.wp).at(-1).command, ['node', CONDUCT(f), 'lane', 'hook', '--run', f.runDir, '--wp', 'WP-00']);
+  const [launch] = b.start(f.wp);
+  assert.deepEqual([launch.kind, launch.step, launch.tool], ['agent-tool', 'start', 't3_thread_launch']);
+  assert.deepEqual(launch.args, {
+    title: 'demo WP-00: demo', projectId: 'proj-1',
+    workspaceStrategy: { type: 'existing_worktree', worktreePath: '/wt', branch: 'conduct/demo/wp-00' },
+    modelSelection: { instanceId: 'claudeAgent', model: 'claude-opus-5-5', options: [{ id: 'effort', value: 'high' }] },
+    message: `Read ${f.wp.lane.briefPath} and execute it exactly.`,
+  });
+  assert.match(launch.instruction, /never launch twice/);
+  assert.deepEqual(b.prompt(f.wp), [], 'the first prompt rides the launch');
+  f.wp.lane.threadId = THREAD;
+  f.wp.amendment = { n: 2 };
+  const [send] = b.prompt(f.wp, { amendment: true });
+  assert.deepEqual([send.tool, send.args], ['t3_thread_send', { threadId: THREAD, message: `Read ${f.wp.lane.briefPath} and execute it exactly.`, mode: 'queue', clientRequestId: 'abcd1234-wp-00-a2-0' }]);
+  assert.equal(b.prompt(f.wp, { amendment: true, resend: true })[0].args.clientRequestId, 'abcd1234-wp-00-a2-0-resend');
+  assert.deepEqual(b.wait(f.wp)[0].args, { threadId: THREAD, timeoutMs: 120000 });
+  f.wp.lane.startedAt = new Date(T0).toISOString();
+  assert.deepEqual(b.stop(f.wp).map((act) => [act.tool, act.part]), [['t3_thread_interrupt', 'interrupt'], ['t3_thread_wait', 'confirm']]);
+  f.wp.lane.exitedAt = new Date(T0).toISOString();
+  assert.deepEqual(b.stop(f.wp).map((act) => act.part), ['reap']);
+  // T3 holds a bound worktree's folder until its thread is archived.
+  const [archive, remove] = b.remove(f.wp);
+  assert.deepEqual([archive.tool, archive.args], ['t3_thread_organize', { action: 'archive', threadId: THREAD }]);
+  assert.deepEqual(remove.command, ['git', '-C', resolve(f.repo), 'worktree', 'remove', '/wt']);
+  assert.deepEqual(f.record(archive, { sequence: 1 }).patch, { lane: { archived: true } });
+  const unarchived = f.record(archive, { error: 'thread not found' });
+  assert.deepEqual([unarchived.outcome, unarchived.patch.lane.archived], ['continue', false], 'cleanup never blocks');
+  for (const act of [...b.create(f.wp), launch, send, ...b.wait(f.wp), ...b.check(f.wp)]) {
+    assert.ok(STEPS.includes(act.step), `${act.step} is a STEP`);
+    assert.equal(act.seam, STEP_SEAM[act.step]);
+  }
+  // A codex lane runs in T3's codex provider, with no hook (Codex skips an untrusted one).
+  const codex = t3Lanes(t, { agent: 'codex', wpLane: { worktree: '/wt' } });
+  assert.deepEqual(codex.backend().create(codex.wp).map((act) => act.part ?? act.step), ['fetch', 'base', 'worktree']);
+  assert.deepEqual(codex.backend().start(codex.wp)[0].args.modelSelection, { instanceId: 'codex', model: 'gpt-6.1-sol', options: [{ id: 'reasoningEffort', value: 'high' }] });
+});
+
+test('t3 recorder: a launch records its thread, a wait polls until the run ends, an ended run is reaped, a failed run blocks, and the deadline stops the lane', (t) => {
+  const f = t3Lanes(t, { wpLane: { worktree: '/wt' } });
+  const b = f.backend();
+  const [launch] = b.start(f.wp);
+  const launched = f.record(launch, { threadId: THREAD, runId: 'run-1', status: 'preparing' });
+  assert.equal(launched.outcome, 'continue');
+  assert.deepEqual([launched.patch.lane.threadId, launched.patch.lane.runId, launched.patch.lane.startedAt], [THREAD, 'run-1', new Date(T0).toISOString()]);
+  assert.equal(Date.parse(launched.patch.lane.deadline) - T0, laneDeadlineMs(f.state));
+  assert.deepEqual([f.record(launch, { status: 'preparing' }).outcome, f.record(launch, { error: 'project not found' }).outcome], ['block', 'block']);
+  apply(f.wp, launched.patch);
+  const [wait] = b.wait(f.wp);
+  for (const result of [{ status: 'running', timedOut: true }, { status: 'waiting', timedOut: true }, { status: 'starting', timedOut: false }]) {
+    const polled = f.record(wait, result);
+    assert.deepEqual([polled.outcome, polled.patch.queue.map((act) => act.tool)], ['wait', ['t3_thread_wait']], JSON.stringify(result));
+  }
+  const ended = f.record(wait, { status: 'completed', timedOut: false });
+  assert.deepEqual([ended.outcome, ended.patch.lane.exitedAt, ended.patch.queue.map((act) => act.part)], ['continue', new Date(T0).toISOString(), ['reap']]);
+  const failed = f.record(wait, { status: 'failed', timedOut: false });
+  assert.deepEqual([failed.outcome, Boolean(failed.patch.lane.exitedAt)], ['block', true]);
+  assert.match(failed.reason, /T3 run ended failed/);
+  f.tick(laneDeadlineMs(f.state) + 1);
+  const late = f.record(wait, { status: 'running', timedOut: true });
+  assert.deepEqual([late.outcome, late.cause, late.patch.queue.map((act) => act.tool)], ['block', 'deadline', ['t3_thread_interrupt', 't3_thread_wait']]);
+});
+
+test('t3 recorder: an amendment is a new turn that renews the deadline (a re-send renews nothing); a stop is confirmed by a terminal run, else re-confirmed, then cleanup-unresolved', (t) => {
+  const f = t3Lanes(t, { wpLane: { worktree: '/wt', threadId: THREAD, startedAt: new Date(T0).toISOString() } });
+  const b = f.backend();
+  f.tick(5000);
+  const sent = f.record(b.prompt(f.wp, { amendment: true })[0], { threadId: THREAD, runId: 'run-2', status: 'starting', delivery: 'started' });
+  assert.deepEqual([sent.outcome, sent.patch.lane.runId, sent.patch.lane.startedAt], ['continue', 'run-2', new Date(T0 + 5000).toISOString()]);
+  assert.deepEqual(f.record(b.prompt(f.wp, { amendment: true, resend: true })[0], { threadId: THREAD, runId: 'run-2' }).patch, {});
+  const [interrupt, confirm] = b.stop(f.wp);
+  f.wp.queue = [interrupt, confirm];
+  assert.equal(f.record(interrupt, { threadId: THREAD, status: 'interrupted' }).outcome, 'continue');
+  f.wp.queue = [confirm, { kind: 'shell', step: 'stop', part: 'remove' }];
+  const stopped = f.record(confirm, { status: 'interrupted', timedOut: false });
+  assert.deepEqual([stopped.outcome, Boolean(stopped.patch.lane.exitedAt), stopped.patch.queue.map((act) => act.part)], ['done', true, ['reap', 'remove']]);
+  const still = f.record(confirm, { status: 'running', timedOut: true });
+  assert.deepEqual([still.outcome, still.patch.lane.stopConfirms, still.patch.queue.map((act) => act.part ?? act.step)], ['wait', 1, ['wait', 'confirm', 'remove']]);
+  f.wp.lane.stopConfirms = 2;
+  const stuck = f.record(confirm, { status: 'running', timedOut: true });
+  assert.deepEqual([stuck.outcome, stuck.cause], ['block', 'cleanup-unresolved']);
+  // A failed stop call keeps the cleanup queued behind it (review of #306).
+  f.wp.lane.stopConfirms = 0;
+  assert.equal(f.record(interrupt, { error: 'thread busy' }).outcome, 'continue', 'a failed interrupt is left to the confirmation');
+  const failedConfirm = f.record(confirm, { error: 'T3 unreachable' });
+  assert.deepEqual([failedConfirm.outcome, failedConfirm.patch.queue.map((act) => act.part ?? act.step)], ['wait', ['wait', 'confirm', 'remove']]);
+  assert.match(failedConfirm.reason, /t3_thread_wait failed/);
+});
+
+test('t3 amendment ids: stable across retries of one queued send, new for the send a reset queues after a recorded one (review of #306)', (t) => {
+  const f = t3Lanes(t, { wpLane: { worktree: '/wt', threadId: THREAD, startedAt: new Date(T0).toISOString() } });
+  f.wp.amendment = { n: 1 };
+  const b = f.backend();
+  const [first] = b.prompt(f.wp, { amendment: true });
+  assert.deepEqual(b.prompt(f.wp, { amendment: true })[0].args.clientRequestId, first.args.clientRequestId, 'a retry of the same send');
+  f.tick(60000);
+  apply(f.wp, f.record(first, { threadId: THREAD, runId: 'run-2', status: 'starting' }).patch);
+  const [again] = b.prompt(f.wp, { amendment: true });
+  assert.notEqual(again.args.clientRequestId, first.args.clientRequestId, 'reset-wp --to prompt re-sends amendment 1 with a new id');
+});
+
+test('t3 lane hook: writes the Stop hook and the lane marker into the worktree settings, keeps their other keys, and excludes the file once', async (t) => {
+  const f = t3Lanes(t);
+  const worktree = join(f.dir, 'wt');
+  mkdirSync(join(worktree, '.claude'), { recursive: true });
+  writeFileSync(join(worktree, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(ls)'] } }));
+  const exclude = join(f.dir, 'git', 'info', 'exclude');
+  f.table[`git -C ${worktree} rev-parse --git-path info/exclude`] = ok(`${exclude}\n`);
+  f.wp.lane.worktree = worktree;
+  writeFileSync(join(f.runDir, 'state.json'), JSON.stringify(f.state));
+  for (let i = 0; i < 2; i += 1) {
+    const result = await runLaneVerb('hook', { runDir: f.runDir, wpId: 'WP-00' }, { ...f.deps, mkdir: (path) => mkdirSync(path, { recursive: true }) });
+    assert.equal(result.code, 0, result.out);
+  }
+  const settings = JSON.parse(readFileSync(join(worktree, '.claude', 'settings.local.json'), 'utf8'));
+  assert.deepEqual(settings.permissions, { allow: ['Bash(ls)'] });
+  assert.deepEqual(settings.env, { WORKIT_LANE: 'demo-wp-00' });
+  assert.deepEqual(settings.hooks.Stop, [{ hooks: [{ type: 'command', command: STOP_HOOK(f), timeout: 300 }] }], 'one Stop hook after two runs');
+  assert.equal(readFileSync(exclude, 'utf8'), '/.claude/settings.local.json\n');
+  const missing = t3Lanes(t, { wpLane: { worktree: join(f.dir, 'gone') } });
+  writeFileSync(join(missing.runDir, 'state.json'), JSON.stringify(missing.state));
+  assert.equal((await runLaneVerb('hook', { runDir: missing.runDir, wpId: 'WP-00' }, missing.deps)).code, 1);
+});
+
+test('t3 reset-wp --to prompt: a lane with a thread gets a new turn in it; one never launched is launched; a running thread is refused', (t) => {
+  const f = t3Lanes(t, { wpLane: { worktree: '/wt', threadId: THREAD, startedAt: new Date(T0).toISOString(), exitedAt: new Date(T0).toISOString(), briefPath: join(tmpdir()) } });
+  assert.equal(RESET_TARGETS.prompt.needs(f.state, f.wp, f.deps), null);
+  assert.deepEqual(RESET_TARGETS.prompt.queue(f.state, f.wp, f.deps).map((act) => act.tool), ['t3_thread_send']);
+  f.wp.lane.exitedAt = null;
+  assert.match(RESET_TARGETS.prompt.needs(f.state, f.wp, f.deps), /T3 lane thread mcp:thread-1 has not been observed to end its run/);
+  const fresh = t3Lanes(t, { wpLane: { worktree: '/wt', briefPath: join(tmpdir()) } });
+  assert.deepEqual(RESET_TARGETS.prompt.queue(fresh.state, fresh.wp, fresh.deps).map((act) => act.tool), ['t3_thread_launch']);
+});

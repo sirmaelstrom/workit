@@ -25,6 +25,23 @@ export function laneModel(agent, label) {
   return LANE_MODELS[agent][key];
 }
 
+// Where a run's lanes run, chosen at intake (--backend), never probed: t3 is a
+// T3 Code thread per lane, herdr a pane, exec a headless child process.
+export const BACKENDS = Object.freeze(['t3', 'herdr', 'exec']);
+
+// A T3 lane's provider instance and reasoning option, per lane agent. The
+// instance ids are T3's own (orchestrator_capabilities lists them).
+const T3_PROVIDERS = Object.freeze({
+  claude: Object.freeze({ instanceId: 'claudeAgent', effort: 'effort' }),
+  codex: Object.freeze({ instanceId: 'codex', effort: 'reasoningEffort' }),
+});
+
+export function t3ModelSelection(agent, label) {
+  const provider = T3_PROVIDERS[agent];
+  if (!provider) throw new Error(`unknown lane agent: ${agent}`);
+  return { instanceId: provider.instanceId, model: laneModel(agent, label), options: [{ id: provider.effort, value: 'high' }] };
+}
+
 export function firstLine(text) {
   return String(text ?? '').trim().split(/\r?\n/)[0] ?? '';
 }
