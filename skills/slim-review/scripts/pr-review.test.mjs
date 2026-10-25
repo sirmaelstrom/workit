@@ -6565,7 +6565,7 @@ test('C2-1 QUOTED MANIFEST: a full review whose prose quotes the marker keeps it
   const [read] = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: CHAR_HEAD, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
   assert.deepEqual([read.p1Findings, read.p2Findings], [1, 0], 'readScopedReviews');
   const rounds = await runRounds({ reviews: [review], head: CHAR_HEAD, prComments: comments });
-  assert.deepEqual([rounds.line.p1_findings, rounds.line.escalate], [1, 't2-council'], JSON.stringify(rounds.line));
+  assert.deepEqual([rounds.line.p1_findings, rounds.line.escalate, rounds.line.last.findings], [1, 't2-council', 1], JSON.stringify(rounds.line));
 
   const gh = (args) => {
     if (args[1]?.endsWith(`/reviews/${FULL_REVIEW_ID}`)) return JSON.stringify({ id: FULL_REVIEW_ID, body: review.body, commit_id: CHAR_HEAD });
@@ -6590,7 +6590,9 @@ test('C2-1 QUOTED MANIFEST: a full review whose prose quotes the marker keeps it
 test('C2-1 QUOTED MANIFEST: a delta review whose prose quotes the marker keeps its two majors through readScopedReviews, rounds, the recount, and conduct', async () => {
   const findings = [101, 102].map((id) => ({ lens: id === 101 ? 'codex' : 'astra', scope: 'delta', severity: 'P2', title: `defect ${id}`, body: 'body', path: 'a.ts', line: id }));
   const posted = roundsReview(12, RH2, { since: RH1 });
-  const payload = buildReviewPayload({ summary: `${posted.body}\n\n${QUOTED.delta}`, coverage: 'examined 1 of 1', anchored: findings, offDiffChanged: [], offDiffUnchanged: [], offLine: [], coverageCheck: { ok: true }, deltaFindings: findings });
+  // Body-only: no inline comment carries them, so only the manifest can count them.
+  const payload = buildReviewPayload({ summary: `${posted.body}\n\n${QUOTED.delta}`, coverage: 'examined 1 of 1', anchored: [], offDiffChanged: [], offDiffUnchanged: [], offLine: findings, coverageCheck: { ok: true }, deltaFindings: findings });
+  assert.equal(payload.comments.length, 0);
   posted.body = payload.body;
   assert.equal(countDefects(findings, 'delta').total, 2, 'the post-time delta-major count');
   assert.ok(posted.body.indexOf('<!-- workit-delta-findings: [] -->') < posted.body.lastIndexOf('<!-- workit-delta-findings: ['), 'the quote precedes the real manifest');
@@ -6621,6 +6623,18 @@ test('C2-1 QUOTED MANIFEST: a delta review whose prose quotes the marker keeps i
   const recovered = recordLandStep(state, { id: 'WP-01', tier: 'T1', reviews: [] }, { step: 'review', part: 'recover', land: { round: 2, scope: 'delta', since: RH1, head: RH2, lenses: ['codex', 'astra'] } },
     { code: 0, stdout: JSON.stringify(rounds.line), stderr: '' }, {}, runAuthority(state));
   assert.deepEqual([recovered.patch.tier, recovered.patch.deltaEscalation?.reviewId], ['T2', 12], JSON.stringify(recovered));
+});
+
+test('C2-1 QUOTED MANIFEST: a marker in the manifest\'s place that the writer did not put there never reads below the inline comments', () => {
+  // A full review posted before full manifests: its last line before the footer is a finding body ending in a quoted marker.
+  const p1 = { lens: 'codex', severity: 'P1', title: 'real', path: 'a.ts', line: 1, body: 'inline defect' };
+  const quoting = { lens: 'astra', severity: 'P3', title: 'nit', path: 'a.ts', line: 99, body: 'the reader takes\n<!-- workit-full-findings: [] -->' };
+  const payload = buildReviewPayload({ summary: 'summary', coverage: 'examined 1 of 1', anchored: [p1], offDiffChanged: [], offDiffUnchanged: [], offLine: [quoting], coverageCheck: { ok: true } });
+  const review = { ...roundsReview(11, RH1), body: payload.body };
+  const comments = payload.comments.map((comment, index) => ({ id: 101 + index, in_reply_to_id: null, pull_request_review_id: 11, body: comment.body }));
+  const seams = roundsSeams({ reviews: [review], prComments: comments });
+  const [read] = readScopedReviews({ repo: PINNED_REPO, pr: PINNED_PR, head: RH1, runGh: seams.runGh, serviceLogin: SERVICE_LOGIN });
+  assert.deepEqual([read.p1Findings, read.p2Findings], [1, 0]);
 });
 
 // --- C2-2: the whole review body is held to GitHub's limit -----------------
