@@ -2,7 +2,7 @@
 // their owners, never copied: a fix there reaches the conductor too.
 import { spawn, spawnSync } from 'node:child_process';
 import { openSync, closeSync, existsSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { extname, join, win32 } from 'node:path';
 import { execute } from '../../../../scripts/lane.mjs';
 import { defaultCodexExe } from '../../../slim-review/scripts/pr-review.mjs';
 
@@ -39,18 +39,22 @@ export function killProcessTree(pid, { platform = process.platform } = {}) {
   }
 }
 
-// win32: true when a command name reaches CreateProcess only as a .cmd or
-// .bat file (npm, npx), which no shell-free spawn can start. A name with an
-// extension is judged by it; a path is run as given. A bare name is looked
-// up in cwd, then PATH, with each PATHEXT extension: a .exe or .com anywhere
-// is what spawn finds and runs, so only a name with none of those is a shim.
+// win32: true when a command name positively resolves to an existing .cmd or
+// .bat file (npm, npx), which no shell-free spawn can start; false for
+// anything not found, which spawn reports itself. A path is run as given: a
+// shim only when it names an existing .cmd/.bat. A bare name is looked up in
+// cwd, then PATH: as given when it carries .cmd/.bat, else with each PATHEXT
+// extension, where a .exe or .com anywhere is what spawn finds and runs, so
+// only a name with none of those is a shim.
 export function windowsShim(name, { env = process.env, cwd = process.cwd(), exists = existsSync } = {}) {
   const ext = extname(name).toLowerCase();
-  if (ext === '.cmd' || ext === '.bat') return true;
-  if (ext || /[\\/]/.test(name)) return false;
+  const script = ext === '.cmd' || ext === '.bat';
+  if (/[\\/]/.test(name)) return script && exists(win32.isAbsolute(name) ? name : join(cwd, name));
+  if (ext && !script) return false;
   const lookup = (key) => env[Object.keys(env).find((k) => k.toUpperCase() === key) ?? key];
-  const exts = (lookup('PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).map((e) => e.toLowerCase());
   const dirs = [cwd, ...(lookup('PATH') ?? '').split(';')].filter(Boolean);
+  if (script) return dirs.some((dir) => exists(join(dir, name)));
+  const exts = (lookup('PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean).map((e) => e.toLowerCase());
   let shim = false;
   for (const dir of dirs) {
     for (const e of exts) {

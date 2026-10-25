@@ -391,16 +391,19 @@ test('drive: a driver that finds pending moved under it stops before running any
   assert.equal(printed.steps, 1);
 });
 
-test('windowsShim: a bare name found only as .cmd/.bat on cwd or PATH is a shim; a .exe anywhere, a path, or nothing found is not', () => {
-  const files = new Set([join('C:/bin1', 'npm.cmd'), join('C:/bin1', 'node.cmd'), join('C:/bin2', 'node.exe'), join('C:/repo', 'build.bat')]);
+test('windowsShim: only a name that resolves to an existing .cmd/.bat (cwd, PATH, PATHEXT) is a shim; a .exe anywhere, an extensionless path, or nothing found is not', () => {
+  const files = new Set([join('C:/bin1', 'npm.cmd'), join('C:/bin1', 'node.cmd'), join('C:/bin2', 'node.exe'), join('C:/repo', 'build.bat'), 'C:/tools/x.cmd']);
   const exists = (path) => files.has(path);
   const env = { Path: 'C:/bin1;C:/bin2', PATHEXT: '.COM;.EXE;.BAT;.CMD' };
   const shim = (name) => windowsShim(name, { env, cwd: 'C:/repo', exists });
   assert.equal(shim('npm'), true, 'npm.cmd only');
   assert.equal(shim('node'), false, 'node.exe later on PATH is what spawn runs');
   assert.equal(shim('build'), true, 'build.bat in cwd');
-  assert.equal(shim('npm.cmd'), true);
-  assert.equal(shim('tool.BAT'), true);
+  assert.equal(shim('npm.cmd'), true, 'found on PATH');
+  assert.equal(shim('build.bat'), true, 'found in cwd');
+  assert.equal(shim('tool.BAT'), false, 'a .bat name found nowhere is not a shim: spawn reports it');
+  assert.equal(shim('C:/tools/x.cmd'), true, 'an existing .cmd path');
+  assert.equal(shim('C:/tools/y.cmd'), false, 'a missing .cmd path');
   assert.equal(shim('git'), false, 'not found: spawn reports it');
   assert.equal(shim('C:/bin1/npm'), false, 'a path is run as given');
   assert.equal(shim('node.exe'), false);
@@ -430,14 +433,18 @@ test('drive: on Windows a command that resolves only to a .cmd shim is the condu
   assert.match(logLines(f).at(-1), / stop=needs-conductor reason=windows-shim$/);
 });
 
-test('drive: on Windows a bare name whose spawn fails ENOENT or EINVAL is a windows-shim stop, never a recorded 127', async (t) => {
+test('drive: on Windows a spawn that fails ENOENT or EINVAL for a name not resolved to a shim is spawn-failed with its own code and message, never a recorded 127', async (t) => {
   for (const spawnError of ['ENOENT', 'EINVAL']) {
-    const f = fixture(t, [NPM, TOOL], { shell: () => ({ code: null, stdout: '', stderr: `spawn npm ${spawnError}`, spawnError }) });
+    const message = `spawn npm ${spawnError}`;
+    const f = fixture(t, [NPM, TOOL], { shell: () => ({ code: null, stdout: '', stderr: `${message}\n`, spawnError, spawnMessage: message }) });
     const result = await f.run(['drive', '--run', f.runDir], { platform: 'win32', windowsShim: () => false });
-    assert.equal(result.code, 0, result.stdout);
+    assert.equal(result.code, 1, result.stdout);
     const printed = out(result);
-    assert.equal(printed.stopped, 'needs-conductor', spawnError);
-    assert.equal(printed.reason, 'windows-shim');
+    assert.equal(printed.stopped, 'spawn-failed', spawnError);
+    assert.equal(printed.reason, undefined, 'not labeled a shim');
+    assert.equal(printed.spawnError, spawnError);
+    assert.equal(printed.message, message);
+    assert.equal(f.runs.length, 1);
     assert.deepEqual(f.recorded, []);
     assert.equal(state(f).pending.kind, 'shell');
     // The command never started, so no marker holds the next drive at reconcile.
