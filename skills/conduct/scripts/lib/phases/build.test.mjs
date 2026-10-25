@@ -3393,6 +3393,14 @@ test('recovery paths (C1-9): an inspect action the gate asks for is emitted and 
     return { code: 5, stdout: JSON.stringify({ ok: false, pending: false, blocked: false, head, failures: ['post-cap tail needs an inspection'], causes: ['inspect'],
       inspect: { tail: `${'1'.repeat(7)}..${head.slice(0, 7)}`, head, files: ['lib/lanes.mjs'], review: { round: 1, scope: 'full', since: null }, findingsHash: 'f'.repeat(64), anchor: 'review-1' } }), stderr: '' };
   };
+  // A stale result file (the gate's own shell result, recorded for the inspect
+  // that followed it) is refused at record and the action stays pending, never a block.
+  await drive(h, { until: (a) => a.kind === 'inspect' });
+  const pendingInspect = h.state.pending;
+  assert.throws(() => build.record(h.state, pendingInspect, { code: 5, stdout: '{}', stderr: '' }, h.deps),
+    (error) => error.code === 2 && /inspection of WP-02: the inspection must name .* Nothing was recorded/.test(error.message));
+  assert.equal(h.wp('WP-02').state, 'gate', 'a recording error does not block the WP');
+  assert.equal(h.state.pending, pendingInspect);
   assert.equal(await drive(h), null);
   const inspect = h.trace.find((a) => a.kind === 'inspect');
   assert.equal(inspect.step, 'gate');

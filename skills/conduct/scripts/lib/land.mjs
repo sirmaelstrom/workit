@@ -1361,11 +1361,17 @@ function gateRecord(wp, gate, deps) {
 
 // Failures are classified: infrastructure retries, lock contention re-acquires,
 // limits hold, coverage gaps block, and only what a lane can fix is an amendment.
+// A conductor's inspection record that doesn't name this action's tail and
+// head is a recording error (a stale result file), refused at record, never a block.
+export function inspectionProblem(action, r) {
+  if (INSPECTION.includes(r?.verdict) && r.tail === action.land?.tail && r.head === action.land?.head) return null;
+  return `the inspection must name ${action.land?.tail} at ${action.land?.head} with a verdict of ${INSPECTION.join(' or ')}; got ${JSON.stringify(r ?? null).slice(0, 200)}`;
+}
+
 function recordGate(state, wp, action, r, deps, authority) {
   if (action.part === 'inspect') {
-    if (!INSPECTION.includes(r.verdict) || r.tail !== action.land.tail || r.head !== action.land.head) {
-      return result('block', `the inspection must name ${action.land.tail} at ${action.land.head} with a verdict of ${INSPECTION.join(' or ')}`);
-    }
+    const problem = inspectionProblem(action, r);
+    if (problem) return result('block', problem);
     const { review, findingsHash: hash } = action.land;
     const inspections = [...(wp.inspections ?? []), { verdict: r.verdict, tail: r.tail, head: r.head, review, findingsHash: hash }];
     if (r.verdict !== 'addresses-findings') return result('held', `post-cap tail ${r.tail} does not address the findings`, { inspections });

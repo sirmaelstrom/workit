@@ -1804,6 +1804,19 @@ test('lane backend (c87c58c4): intake refuses without a chosen backend; t3 needs
   assert.match(touchOneQuestion(state, { env: {} }), /Lanes: T3 Code threads you can watch in T3 \(project c684e0c7\)/);
 });
 
+test('a tool result that was never captured ({}, a bare value) is refused at record and the action stays pending (run 400c3ec7: a synthesis recorded as {} blocked WP-03)', async (t) => {
+  const f = fixture(t);
+  const first = out(await intake(f, SPINE));
+  assert.equal(first.action.kind, 'agent-tool');
+  for (const bad of [{}, null, [], 'ok']) {
+    const refused = await record(f, first.runDir, first.action.id, bad);
+    assert.equal(refused.code, 2, JSON.stringify(bad));
+    assert.match(out(refused).error, /the result was not captured\. Nothing was recorded/);
+  }
+  assert.equal(readState(first.runDir).pending.id, first.action.id);
+  assert.equal(readState(first.runDir).lastRecorded, null);
+});
+
 test('C24: --text keeps a value that starts with --; --agent names the missing agent', async (t) => {
   const f = fixture(t);
   const first = out(await intake(f));
