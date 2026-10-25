@@ -830,6 +830,36 @@ test('t3 rotation with a wake yield pending: custody makes a heartbeat bound to 
   assert.match(readFileSync(state.rotations[0].handoff, 'utf8'), /the run's heartbeat is made again from your thread/);
 });
 
+test('t3 conductor fence: after r2 takes custody, r1 woken by a late done message runs next/record --as-thread r1 and is refused with exit 5, changing nothing; r2 passes, and so does a call without --as-thread (workit#313 review r1, finding 2)', async (t) => {
+  const { h, yielded } = await wakeYieldPending(t);
+  const statePath = join(h.runDir, 'state.json');
+  const run = (argv) => runConduct(argv, h.overrides());
+  const refused = async (argv, current) => {
+    const before = readFileSync(statePath, 'utf8');
+    const result = await run(argv);
+    assert.equal(result.code, 5, `${argv.join(' ')}: ${result.stdout}`);
+    assert.match(JSON.parse(result.stdout).error, new RegExp(`not this run's conductor \\(current: ${current}\\)`));
+    assert.equal(readFileSync(statePath, 'utf8'), before, 'a refused call changes nothing');
+  };
+  const passes = async (argv) => assert.equal((await run(argv)).code, 0, argv.join(' '));
+  // r2 has custody, and its heartbeat is not made yet: r1's thread is known to be retired.
+  const s = loadState(h.runDir, h.deps);
+  s.rotations = [{ attempt: 1, from: 1, to: 2, status: 'custody' }];
+  saveState(s, h.deps);
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], 'none yet');
+  await passes(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2']);
+  // r2's heartbeat is recorded (custody, or its lanes' next wait): its thread is the run's conductor.
+  const made = loadState(h.runDir, h.deps);
+  made.t3Wake = { taskId: 'task-r2', thread: 'mcp:conductor-2', conductor: 2, failed: null, deleted: false, old: [{ taskId: 'task-r1', thread: 'mcp:conductor-1', conductor: 1, deleted: true }] };
+  saveState(made, h.deps);
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  await refused(['record', '--run', h.runDir, '--action', yielded.id, '--result', '{}', '--as-thread', 'mcp:conductor-1'], 'mcp:conductor-2');
+  await refused(['next', '--run', h.runDir, '--as-thread', 'mcp:somebody-else'], 'mcp:conductor-2');
+  await passes(['next', '--run', h.runDir, '--as-thread', 'mcp:conductor-2']);
+  await passes(['next', '--run', h.runDir]);
+  await passes(['record', '--run', h.runDir, '--action', yielded.id, '--result', '{}', '--as-thread', 'mcp:conductor-2']);
+});
+
 test('herdr polls and yields (D19.17): wait exit 4 yields to WP-03\'s dispatch; the next poll repeats the argv; WP-03 is created while WP-02 is live', async (t) => {
   const h = harness(t, { herdr: true });
   h.herdrWait = { 'WP-02': [4, 4, 0], 'WP-03': [4, 0] };

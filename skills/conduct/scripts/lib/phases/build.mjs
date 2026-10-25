@@ -1858,7 +1858,7 @@ function yieldWait(state, waiting) {
   const notes = `Waiting: ${waiting.map((y) => y.note).join('; ')}`;
   if (least.wake && t3WakeLive(state)) {
     return { kind: 'wait', step: least.step, part: 'yield', yield: true, wake: true, waitMs: least.ms,
-      instruction: `End your turn now: don't sleep or poll. A T3 lane's done message or the run's heartbeat (every ${T3_HEARTBEAT_MS / 60000} min) starts your next turn in this thread; then record {} for this action and keep looping. ${notes}` };
+      instruction: `End your turn now: don't sleep or poll. A T3 lane's done message or the run's heartbeat (every ${T3_HEARTBEAT_MS / 60000} min) starts your next turn in this thread; then record {} for this action and keep looping, passing --as-thread <this thread's id> to every next and record. ${notes}` };
   }
   return { kind: 'wait', step: least.step, part: 'yield', yield: true, waitMs: least.ms, instruction: `${waitText(least.ms)} ${notes}` };
 }

@@ -369,7 +369,7 @@ export function laneBackend(state, deps, backend) {
       const read = `Read ${wp.lane?.briefPath ?? laneLayout(state, wp).briefPath} and execute it exactly.`;
       if (!t3WakeLive(state)) return read;
       const done = { threadId: state.t3Wake.thread, mode: 'queue', clientRequestId: `${sendKey(wp)}-done`,
-        message: `[conduct ${state.slug}] ${wp.id}'s lane ended its turn (round a${wp.amendment?.n ?? 0}); report: ${laneLayout(state, wp).reportPath}. A wake, not a verdict: run node ${conductScript(state)} next --run ${state.runDir} and keep looping.` };
+        message: `[conduct ${state.slug}] ${wp.id}'s lane ended its turn (round a${wp.amendment?.n ?? 0}); report: ${laneLayout(state, wp).reportPath}. Addressed to the conductor thread ${state.t3Wake.thread}. A wake, not a verdict: run node ${conductScript(state)} next --run ${state.runDir} ${AS_THREAD} and keep looping. If it exits 5, this thread is no longer the run's conductor: end your turn.` };
       return `${read}\n\nYour last act, once your report is written and before you end your turn (whatever the outcome, early stops included): call the t3-code tool t3_thread_send with ${JSON.stringify(done)}. That message wakes the conductor. If a Stop hook sends you back to work after it, send it again at your next stop with -2, -3, … appended to clientRequestId.`;
     };
     const hookAct = (wp) => (agent === 'claude' ? [shellAction('create', {
@@ -804,6 +804,28 @@ export function t3WakeLive(state) {
 
 const heartbeatTitle = (state) => `conduct ${state.slug} heartbeat`;
 
+// How a T3 conductor names itself to `next`/`record --as-thread`.
+const AS_THREAD = '--as-thread <your own T3 thread id> (orchestrator_capabilities\' parentThreadId, or t3_thread_configuration\'s threadId)';
+
+// `--as-thread <id>`: a T3 conductor woken in its own thread (a lane's done
+// message, the heartbeat) names that thread. The run's conductor thread is
+// the live conductor's heartbeat's bound thread; a thread a retired
+// conductor's heartbeat was bound to is refused even before the successor has
+// made its own. Without the flag (herdr, exec, by hand) nothing is checked,
+// and while a rotation is open custody's own fence (--custody) decides.
+export function conductorThreadFence(state, asThread) {
+  if (asThread === undefined || asThread === null) return;
+  if (typeof asThread !== 'string' || !asThread.trim()) throw new ConductError(2, '--as-thread <thread id> needs a value');
+  const wake = state.t3Wake;
+  if (!wake || state.rotations?.at(-1)?.status === 'open') return;
+  const n = conductorNumber(state);
+  const current = wake.conductor === n && wake.thread ? wake.thread : null;
+  const retired = [wake, ...(wake.old ?? [])].filter((entry) => entry?.thread && entry.conductor !== n).map((entry) => entry.thread);
+  if (current ? asThread !== current : retired.includes(asThread)) {
+    throw new ConductError(5, `not this run's conductor (current: ${current ?? 'none yet'}); ${asThread} is not r${n}'s thread, so end your turn`);
+  }
+}
+
 // The heartbeat a T3 run's conductor owes: none while one is live or this
 // conductor's failed; otherwise the stale one (a rotated predecessor's) is
 // deleted and a new one bound to the calling conductor. The request id is
@@ -824,7 +846,7 @@ export const HEARTBEAT_INSTRUCTION = 'Call schedule_task with these args from yo
 // schedule_task's args for conductor r<n>'s heartbeat. The request id is per
 // conductor, so lanes that each queue it make one task.
 export function heartbeatArgs(state, n) {
-  const prompt = `[${heartbeatTitle(state)}] A wake tick for conduct run ${state.runDir}, every ${T3_HEARTBEAT_MS / 60000} minutes while its T3 lanes run. If this thread is that run's conductor r${n}, run node ${conductScript(state)} next --run ${state.runDir} and perform what it prints: a pending wake wait is recorded {} and the loop goes on. If it is not (the run was rotated away, or it has ended), end your turn.`;
+  const prompt = `[${heartbeatTitle(state)}] A wake tick for conduct run ${state.runDir}, every ${T3_HEARTBEAT_MS / 60000} minutes while its T3 lanes run, addressed to the thread that made it: conductor r${n}'s. Run node ${conductScript(state)} next --run ${state.runDir} ${AS_THREAD} and perform what it prints: a pending wake wait is recorded {} (record --as-thread too) and the loop goes on. If it exits 5, this thread is not the run's conductor (the run was rotated away): end your turn. If the run has ended, end your turn.`;
   return { title: heartbeatTitle(state), prompt, schedule: { type: 'interval', everyMs: T3_HEARTBEAT_MS }, bindToCurrentThread: true, clientRequestId: `${state.runId}-heartbeat-r${n}` };
 }
 
@@ -859,7 +881,9 @@ function recordHeartbeat(state, wp, action, result, deps) {
   const old = wake?.old ?? [];
   if (action.part === 'heartbeat-stop') {
     const id = action.args.scheduledTaskId;
-    const outcome = { taskId: id, deleted: !t3Failed(result) || /task_not_found|not found/i.test(t3Said(result)), ...(t3Failed(result) ? { error: t3Said(result) } : {}) };
+    // The entry keeps the thread it was bound to: the conductor fence refuses a retired conductor's thread.
+    const was = wake?.taskId === id ? { thread: wake.thread ?? null, conductor: wake.conductor ?? null } : old.find((entry) => entry.taskId === id);
+    const outcome = { ...was, taskId: id, deleted: !t3Failed(result) || /task_not_found|not found/i.test(t3Said(result)), ...(t3Failed(result) ? { error: t3Said(result) } : {}) };
     const others = old.filter((entry) => entry.taskId !== id);
     state.t3Wake = wake?.taskId === id ? { ...wake, taskId: null, thread: null, old: [...others, outcome] } : { ...wake, old: [...others, outcome] };
     return proceed();

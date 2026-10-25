@@ -20,6 +20,7 @@ import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, dropRetiredFiling, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
 import { custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
+import { conductorThreadFence } from './lib/lanes.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -30,8 +31,8 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   intake --goal <text> --repo <abs> --backend t3|herdr|exec [--t3-project <id>] [--backend-why <text>]
          [--anchor <quest id>] [--budget <usd>] [--lanes 1-4] [--agent claude|codex]
          [--adapter <name>]... [--no-adapter <name>]... [--release <json file>] [--runs-root <dir>]
-  next --run <dir> [--custody <n>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
-  record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>]
+  next --run <dir> [--custody <n>] [--as-thread <T3 thread id>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
+  record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>] [--as-thread <T3 thread id>]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
   drive --run <dir> [--max-steps <n>]   (perform shell, wait and template author actions; stop at the first that needs the conductor)
   drive --run <dir> --break-lock --why <text>   (remove another host's drive.lock, or a dead driver's on this host)
@@ -53,7 +54,7 @@ const REPEATED_FLAGS = new Set(['adapter', 'no-adapter']);
 // These always take the next token as their value, even one that starts with
 // `--` (an operator's `--text "--skip release"`).
 const VALUE_FLAGS = new Set(['goal', 'repo', 'backend', 'backend-why', 't3-project', 'anchor', 'budget', 'lanes', 'agent', 'adapter', 'no-adapter', 'release',
-  'runs-root', 'run', 'resume', 'action', 'max-steps', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan']);
+  'runs-root', 'run', 'resume', 'action', 'max-steps', 'result', 'result-file', 'touch', 'key', 'text', 'wp', 'paths', 'why', 'to', 'baseline', 'head', 'checks', 'model', 'effort', 'name', 'custody', 'plan', 'replan', 'as-thread']);
 
 function parseFlags(tokens) {
   const flags = {};
@@ -402,6 +403,7 @@ async function intake(tokens, deps) {
 async function next(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
+    conductorThreadFence(state, flags['as-thread']);
     const custody = flags.custody === undefined ? null : String(flags.custody);
     if (custody !== null) custodyFence(state, custody);
     if (state.pending?.handBack) resumeHandBack(state, deps);
@@ -493,6 +495,7 @@ async function record(tokens, deps) {
   const flags = parseFlags(tokens);
   return transact(flags, deps, async (state) => {
     refuseForeignState(runDirFlag(flags), state, deps);
+    conductorThreadFence(state, flags['as-thread']);
     const id = stringFlag(flags, 'action');
     const wantsReplan = flags.replan !== undefined;
     // A replay of the last record changes nothing and re-emits the next action.

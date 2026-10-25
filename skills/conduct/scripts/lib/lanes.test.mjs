@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   allowedMissing, chooseBackend, laneBackend, recordLaneStep, runLaneVerb, runtimeExerciseVerdict, parseOutcome, agentArgv, laneCost, ADMIT_BACKOFF_MS, identityArgv, guardedKillArgv,
-  STOP_CHECK_BLOCKS, stopHookCommand, laneDeadlineMs, T3_HEARTBEAT_MS, t3WakeLive, heartbeatsToDelete,
+  STOP_CHECK_BLOCKS, stopHookCommand, laneDeadlineMs, T3_HEARTBEAT_MS, t3WakeLive, heartbeatsToDelete, conductorThreadFence,
 } from './lanes.mjs';
 import { RESET_TARGETS } from './phases/build.mjs';
 import { dispatchable } from './schedule.mjs';
@@ -1413,7 +1413,8 @@ test('t3 heartbeat: the first lane\'s create makes it bound to the conductor; it
   assert.deepEqual({ ...heartbeat.args, prompt: undefined }, {
     title: 'conduct demo heartbeat', prompt: undefined, schedule: { type: 'interval', everyMs: T3_HEARTBEAT_MS }, bindToCurrentThread: true, clientRequestId: 'abcd1234-heartbeat-r1',
   });
-  assert.match(heartbeat.args.prompt, /conductor r1, run node \S+conduct\.mjs next --run /);
+  assert.match(heartbeat.args.prompt, /addressed to the thread that made it: conductor r1's\. Run node \S+conduct\.mjs next --run \S+ --as-thread <your own T3 thread id> \(orchestrator_capabilities' parentThreadId/);
+  assert.match(heartbeat.args.prompt, /If it exits 5, this thread is not the run's conductor/);
   assert.equal(T3_HEARTBEAT_MS, 600000);
   // No heartbeat yet: the launch carries no done send.
   assert.equal(b.start(f.wp)[0].args.message, 'Read /run/lane-wp-00.md and execute it exactly.');
@@ -1426,7 +1427,9 @@ test('t3 heartbeat: the first lane\'s create makes it bound to the conductor; it
   const launch = b.start(f.wp)[0].args.message;
   assert.match(launch, /^Read \/run\/lane-wp-00\.md and execute it exactly\.\n\nYour last act, once your report is written/);
   assert.deepEqual({ ...done(launch), message: undefined }, { threadId: CONDUCTOR, mode: 'queue', clientRequestId: 'abcd1234-wp-00-a0-0-done', message: undefined });
-  assert.match(done(launch).message, /^\[conduct demo\] WP-00's lane ended its turn \(round a0\); report: \S+lane-wp-00-report\.md\. A wake, not a verdict/);
+  assert.match(done(launch).message, /^\[conduct demo\] WP-00's lane ended its turn \(round a0\); report: \S+lane-wp-00-report\.md\. Addressed to the conductor thread mcp:conductor-1\. A wake, not a verdict/);
+  // The recipient names its own thread, so a retired conductor is refused (workit#313 review r1, finding 2).
+  assert.match(done(launch).message, /next --run \S+ --as-thread <your own T3 thread id> \(orchestrator_capabilities' parentThreadId, or t3_thread_configuration's threadId\).*If it exits 5, this thread is no longer the run's conductor: end your turn\.$/);
   // An amendment's done id is its send's id plus -done: new for every send.
   Object.assign(f.wp.lane, { threadId: THREAD, startedAt: new Date(T0).toISOString() });
   f.wp.amendment = { n: 2 };
@@ -1503,13 +1506,19 @@ test('t3 rotation: r1\'s heartbeat is not live under r2; the next wait deletes i
   const [stop, heartbeat, wait] = b.wait(f.wp);
   assert.deepEqual([stop.tool, stop.args, heartbeat.args.clientRequestId, wait.tool], ['delete_scheduled_task', { scheduledTaskId: TASK }, 'abcd1234-heartbeat-r2', 't3_thread_wait']);
   f.record(stop, { scheduledTaskId: TASK, deleted: true });
-  assert.deepEqual([f.state.t3Wake.taskId, f.state.t3Wake.old], [null, [{ taskId: TASK, deleted: true }]]);
+  assert.deepEqual([f.state.t3Wake.taskId, f.state.t3Wake.old], [null, [{ taskId: TASK, thread: CONDUCTOR, conductor: 1, deleted: true }]]);
+  // r1's thread stays known as retired: the conductor fence refuses it before r2 has a heartbeat.
+  assert.throws(() => conductorThreadFence(f.state, CONDUCTOR), { code: 5, message: /not this run's conductor \(current: none yet\)/ });
+  assert.doesNotThrow(() => conductorThreadFence(f.state, 'mcp:conductor-2'));
   // Another lane's stale delete of the same task finds it gone: still deleted.
   f.record(stop, { error: '{"_tag":"OrchestratorMcpFailure","code":"task_not_found"}' });
   assert.deepEqual(f.state.t3Wake.old.map((entry) => entry.deleted), [true]);
   f.record(heartbeat, { scheduledTaskId: 'task-r2', boundThreadId: 'mcp:conductor-2' });
   assert.deepEqual([t3WakeLive(f.state), f.state.t3Wake.thread, f.state.t3Wake.conductor], [true, 'mcp:conductor-2', 2]);
   assert.equal(b.wait(f.wp)[0].wake, true);
+  assert.throws(() => conductorThreadFence(f.state, CONDUCTOR), { code: 5, message: /current: mcp:conductor-2/ });
+  assert.doesNotThrow(() => conductorThreadFence(f.state, 'mcp:conductor-2'));
+  assert.doesNotThrow(() => conductorThreadFence(f.state, undefined), 'no --as-thread, no check');
 });
 
 test('t3 analyze: the heartbeats a finished build still owns are deleted, once each, before the analysis runs', async (t) => {
