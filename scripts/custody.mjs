@@ -246,8 +246,8 @@ const firstLine = (text) => String(text ?? '').trim().split(/\r?\n/)[0] ?? '';
 
 // Launches without a shell. { code, error } where error is set on a launch
 // failure, a timeout or a signal: anything that is not an exit status.
-export function runArgv(argv, { cwd, timeout }) {
-  const out = spawnSync(argv[0], argv.slice(1), { cwd, timeout, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+export function runArgv(argv, { cwd, timeout, input }) {
+  const out = spawnSync(argv[0], argv.slice(1), { cwd, timeout, input, encoding: 'utf8', windowsHide: true, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
   if (out.error) return { code: null, error: out.error.code === 'ETIMEDOUT' ? `timed out after ${timeout} ms` : `could not launch ${argv[0]}: ${out.error.code ?? out.error.message}`, stdout: out.stdout ?? '', stderr: out.stderr ?? '' };
   if (out.status === null) return { code: null, error: `ended by signal ${out.signal}`, stdout: out.stdout ?? '', stderr: out.stderr ?? '' };
   return { code: out.status, error: null, stdout: out.stdout, stderr: out.stderr };
@@ -330,32 +330,55 @@ function closeWorktree(entry, deps, held) {
 }
 
 // A HEAD on no ref can still carry nothing a ref lacks: its branch was squash-
-// or rebase-merged, then deleted. Any ref that holds the content keeps it
-// reachable, so the default branch's local refs are the candidates. Custody
-// never fetches: a remote-tracking ref behind the remote reads as "not in it".
-const CANDIDATE_REFS = ['refs/remotes/origin/main', 'refs/remotes/origin/master', 'refs/heads/main', 'refs/heads/master'];
+// or rebase-merged, then deleted. The candidate is the default branch:
+// origin/HEAD's target when it resolves, since another remote-tracking ref can
+// be pruned upstream; these fallbacks only when it does not. Custody never
+// fetches: a remote-tracking ref behind the remote reads as "not in it".
+const FALLBACK_REFS = ['refs/remotes/origin/main', 'refs/remotes/origin/master', 'refs/heads/main', 'refs/heads/master'];
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 // `merge` attribute values that name no driver: text and binary are built in.
 const NO_DRIVER = new Set(['unspecified', 'set', 'unset', 'text', 'binary']);
 const nonEmpty = (text) => String(text ?? '').split(/\r?\n/).filter((line) => line.trim());
 
-// The candidates that resolve, in order, deduplicated: { name, id }.
+// The candidates that resolve, in order: [{ name, id }]. origin/HEAD's target
+// alone when it resolves; otherwise each fallback that does.
 function candidateRefs(repo, deps) {
-  const origin = deps.git(['-C', repo, 'symbolic-ref', '-q', 'refs/remotes/origin/HEAD']);
-  const target = origin.code === 0 ? origin.stdout.trim() : '';
-  const refs = [...new Set([...(target ? [target] : []), ...CANDIDATE_REFS])];
-  return refs.flatMap((ref) => {
+  const resolved = (ref) => {
     const out = deps.git(['-C', repo, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
     const id = out.code === 0 ? out.stdout.trim() : '';
     return OBJECT_ID.test(id) ? [{ name: ref.replace(/^refs\/(?:remotes|heads)\//, ''), id }] : [];
-  });
+  };
+  const origin = deps.git(['-C', repo, 'symbolic-ref', '-q', 'refs/remotes/origin/HEAD']);
+  const target = origin.code === 0 ? origin.stdout.trim() : '';
+  const head = target ? resolved(target) : [];
+  return head.length ? head : FALLBACK_REFS.flatMap(resolved);
 }
+
+// Every diff the guard reads runs with --no-relative: diff.relative from a
+// --repo below the top level would drop the changes outside it.
+const DIFF_FLAGS = ['--no-relative', '--no-ext-diff', '--no-textconv'];
 
 // `git diff --quiet`: true for a change (exit 1), false for none (exit 0),
 // null for anything else.
 function changes(deps, repo, from, to) {
-  const out = deps.git(['-C', repo, 'diff', '--quiet', '--no-ext-diff', '--no-textconv', from, to]);
+  const out = deps.git(['-C', repo, 'diff', '--quiet', ...DIFF_FLAGS, from, to]);
   return out.code === 1 ? true : out.code === 0 ? false : null;
+}
+
+// git cherry matches each commit on its own, so two commits with one patch-id
+// can both match a single commit on the candidate. True when every commit's
+// patch-id was read and no two are equal.
+function distinctPatches(deps, repo, commits) {
+  const seen = new Set();
+  for (const [commit] of commits) {
+    const patch = deps.git(['-C', repo, 'diff-tree', '-p', ...DIFF_FLAGS, commit]);
+    if (patch.code !== 0) return false;
+    const out = deps.git(['-C', repo, 'patch-id', '--stable'], { input: patch.stdout });
+    const id = out.code === 0 ? (nonEmpty(out.stdout)[0] ?? '').trim().split(/\s+/)[0] : '';
+    if (!OBJECT_ID.test(id) || seen.has(id)) return false;
+    seen.add(id);
+  }
+  return true;
 }
 
 // Which check shows every change <sha> carries is already on the candidate:
@@ -375,10 +398,11 @@ function landedOn(repo, sha, candidate, deps) {
   const commits = nonEmpty(range.stdout).map((line) => line.trim().split(/\s+/));
   if (!commits.length || commits.some((ids) => ids.length !== 2 || changes(deps, repo, ids[1], ids[0]) !== true)) return null;
   if (changes(deps, repo, from, sha) !== true) return null;
-  // (a) each commit is patch-identical to one on the candidate (a rebase merge).
+  // (a) each commit is patch-identical to one on the candidate (a rebase
+  // merge), and no two commits share a patch-id.
   const cherry = git('cherry', candidate.id, sha);
   const picked = cherry.code === 0 ? nonEmpty(cherry.stdout) : [];
-  if (picked.length && picked.every((line) => line.startsWith('-'))) return 'patch-identical';
+  if (picked.length && picked.every((line) => line.startsWith('-')) && distinctPatches(deps, repo, commits)) return 'patch-identical';
   // (b) merging it into the candidate leaves the candidate's tree (a squash
   // merge). Skipped when a custom merge driver could resolve a conflict to
   // the candidate's side and fake the no-op.
@@ -389,10 +413,13 @@ function landedOn(repo, sha, candidate, deps) {
   return OBJECT_ID.test(result) && tree.code === 0 && result === tree.stdout.trim() ? 'merging it adds nothing' : null;
 }
 
-// True when a path changed in from..sha has a `merge` attribute naming a
-// driver, or when the attributes cannot be read.
+// True when merge.default is set (it names the driver for unspecified paths)
+// or cannot be read, when a path changed in from..sha has a `merge`
+// attribute naming a driver, or when the attributes cannot be read.
 function mayUseDriver(repo, from, sha, deps) {
-  const names = deps.git(['-C', repo, 'diff', '--name-only', '--no-renames', '-z', from, sha]);
+  // Exit 1 is unset; 0 is set, to whatever driver.
+  if (deps.git(['-C', repo, 'config', '--get', 'merge.default']).code !== 1) return true;
+  const names = deps.git(['-C', repo, 'diff', '--name-only', '--no-renames', '-z', ...DIFF_FLAGS, from, sha]);
   // Paths print from the top level; check-attr reads them from its cwd.
   const top = deps.git(['-C', repo, 'rev-parse', '--show-cdup']);
   if (names.code !== 0 || top.code !== 0) return true;
@@ -538,7 +565,7 @@ function unlinkOne(path) {
 export function runCustody(argv, overrides = {}) {
   const deps = {
     run: runArgv,
-    git: (args) => runArgv(['git', ...args], { timeout: LIVE_MS }),
+    git: (args, { input } = {}) => runArgv(['git', ...args], { timeout: LIVE_MS, input }),
     read: (path) => readFileSync(path, 'utf8'),
     append: (path, value) => appendFileSync(path, value, 'utf8'),
     writeNew: (path, value) => writeFileSync(path, value, { encoding: 'utf8', flag: 'wx' }),
