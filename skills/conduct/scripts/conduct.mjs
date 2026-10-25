@@ -20,7 +20,7 @@ import { resolveRepoConfig } from './lib/repo-config.mjs';
 import { MAX_LANES } from './lib/schedule.mjs';
 import { QUESTION_MAX, acceptAnswer, dropRetiredFiling, recordSupersede, resumeHandBack, supersedeAction, touchStep, writeTouchFiles } from './lib/touch.mjs';
 import { bindCustodyThread, custodyFence, custodyNext, openRotation, recordCustody, rotate, rotatedOut } from './lib/rotate.mjs';
-import { adoptConductorThread, conductorThreadFence, samePath, stopCheckHook, stopCheckHookAt } from './lib/lanes.mjs';
+import { adoptConductorThread, conductorThreadFence, markDoneWake, samePath, stopCheckHook, stopCheckHookAt } from './lib/lanes.mjs';
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 // The directory holding skills/ and scripts/. Computed here and only here;
@@ -31,7 +31,7 @@ const USAGE = `usage: conduct.mjs <verb> [flags]
   intake --goal <text> --repo <abs> --backend t3|herdr|exec [--t3-project <id>] [--backend-why <text>]
          [--anchor <quest id>] [--budget <usd>] [--lanes 1-4] [--agent claude|codex]
          [--adapter <name>]... [--no-adapter <name>]... [--release <json file>] [--runs-root <dir>]
-  next --run <dir> [--custody <n>] [--as-thread <T3 thread id>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
+  next --run <dir> [--custody <n>] [--as-thread <T3 thread id>] [--woken-by done --wp <id>] (also: next --resume <dir>, or conduct.mjs --resume <dir>)
   record --run <dir> --action <id> (--result <json> | --result-file <path>) [--manual] [--replan <json file>] [--as-thread <T3 thread id>]
   answer --run <dir> --touch <n> --key <a..f> [--text <text>]
   drive --run <dir> [--max-steps <n>] [--as-thread <T3 thread id>]   (also: drive --resume <dir>; perform shell, wait and template author actions; stop at the first that needs the conductor)
@@ -414,6 +414,7 @@ async function next(tokens, deps) {
     }
     // A fresh T3 session resuming a run with no live heartbeat adopts its thread.
     if (flags.resume !== undefined && adoptConductorThread(state, flags['as-thread'], deps)) saveState(state, deps);
+    if (markDoneWake(state, flags['woken-by'], flags.wp, deps)) saveState(state, deps);
     if (state.pending?.handBack) resumeHandBack(state, deps);
     return { out: { ok: true, action: await emit(state, deps, { custody }) } };
   }, { duringRotation: true, driven: 'next' });

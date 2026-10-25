@@ -16,7 +16,7 @@ import * as build from './build.mjs';
 import { RUN_SLOTS } from './build.mjs';
 import { preapprovedRef, wpRecord } from './spec.mjs';
 import { STEPS, STEP_SEAM, saveState, readEvents, loadState } from '../state.mjs';
-import { runLaneVerb } from '../lanes.mjs';
+import { runLaneVerb, laneBackend } from '../lanes.mjs';
 import { laneOccupied } from '../schedule.mjs';
 import { runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
@@ -857,6 +857,75 @@ test('t3 custody tick: once custody replaces the heartbeat, its first wait is no
   assert.deepEqual(reads.sort(), ['WP-02', 'WP-03']);
   // Then the run waits on wakes, which now reach r2's thread.
   assert.deepEqual([action.kind, action.part, action.wake], ['wait', 'yield', true]);
+});
+
+// A lane's done message is its last act, sent seconds before its turn closes:
+// the tick it starts can read the lane still running (quest b118b800).
+async function t3LanesRunning(t) {
+  const { h, yielded } = await wakeYieldPending(t);
+  const s = loadState(h.runDir, h.deps);
+  for (const wp of s.wps.filter((candidate) => ['WP-02', 'WP-03'].includes(candidate.id))) Object.assign(wp.lane, { backend: 't3', threadId: `mcp:lane-${wp.id}` });
+  saveState(s, h.deps);
+  const as = ['--as-thread', 'mcp:conductor-1'];
+  const record = async (action, result) => (await conduct(h, ['record', '--run', h.runDir, '--action', action.id, '--result', JSON.stringify(result), ...as])).action;
+  const running = (action) => ({ thread: { threadId: action.args.threadId, status: 'running', pendingRequestCount: 0, itemCount: 3 }, recentRuns: [{ status: 'running' }], items: [] });
+  return { h, yielded, as, record, running };
+}
+
+test('t3 done wake (b118b800): a tick started by WP-02\'s done message that reads its run still running waits on it with t3_thread_wait (60 s), not the yield; when that wait sees the run end, the lane is reaped and checked; WP-03, not named, gets no such wait', async (t) => {
+  const { h, yielded, as, record, running } = await t3LanesRunning(t);
+  const woken = (await conduct(h, ['next', '--run', h.runDir, '--woken-by', 'done', '--wp', 'WP-02', ...as])).action;
+  assert.equal(woken.id, yielded.id, 'the pending yield, as before');
+  assert.ok(loadState(h.runDir, h.deps).wps.find((wp) => wp.id === 'WP-02').lane.doneWake, 'next marks the done wake on WP-02\'s lane');
+  // Both lanes read running; WP-02's read is followed by its settle wait, which sees the run end.
+  let action = await record(yielded, {});
+  const reads = [];
+  const settles = [];
+  while (action.kind === 'agent-tool' && ['read', 'settle'].includes(action.part)) {
+    if (action.part === 'read') {
+      reads.push(action.wpId);
+      action = await record(action, running(action));
+      continue;
+    }
+    settles.push([action.wpId, action.step, action.tool, action.args]);
+    assert.equal(loadState(h.runDir, h.deps).wps.find((wp) => wp.id === 'WP-02').lane.doneWake, null, 'the done wake is spent on its read');
+    action = await record(action, { status: 'completed', timedOut: false });
+  }
+  assert.ok(reads.includes('WP-02'));
+  assert.deepEqual(settles, [['WP-02', 'wait', 't3_thread_wait', { threadId: 'mcp:lane-WP-02', timeoutMs: 60000 }]], 'one bounded wait, on WP-02 only');
+  assert.deepEqual([action.wpId, action.step, action.part], ['WP-02', 'stop', 'reap']);
+  assert.ok(loadState(h.runDir, h.deps).wps.find((wp) => wp.id === 'WP-02').lane.exitedAt, 'the lane\'s exit is recorded');
+  // The reap, then the check; WP-03's read on the way gets no settle wait (the heartbeat test drives it to its yield).
+  action = await record(action, { code: 0, stdout: '{}', stderr: '' });
+  while (action.wpId === 'WP-03' && action.part === 'read') action = await record(action, running(action));
+  assert.deepEqual([action.wpId, action.step], ['WP-02', 'check']);
+  assert.ok(!loadState(h.runDir, h.deps).wps.find((wp) => wp.id === 'WP-03').queue.some((a) => a.part === 'settle'));
+});
+
+test('t3 done wake (b118b800): a heartbeat tick that reads a lane running still yields; a done wake whose 60 s wait times out reads the lane once more and yields; the done message tells the conductor to pass --woken-by done --wp', async (t) => {
+  const { h, yielded, as, record, running } = await t3LanesRunning(t);
+  // The heartbeat's tick: no --woken-by.
+  assert.equal((await conduct(h, ['next', '--run', h.runDir, ...as])).action.id, yielded.id);
+  let action = await record(yielded, {});
+  while (action.part === 'read') action = await record(action, running(action));
+  assert.deepEqual([action.kind, action.part, action.wake], ['wait', 'yield', true], 'a heartbeat tick yields');
+  // A done wake whose run outlives the 60 s wait: one more read, then the yield.
+  await conduct(h, ['next', '--run', h.runDir, '--woken-by', 'done', '--wp', 'WP-03', ...as]);
+  action = await record(action, {});
+  while (action.part === 'read') action = await record(action, running(action));
+  assert.deepEqual([action.wpId, action.part, action.args.timeoutMs], ['WP-03', 'settle', 60000]);
+  action = await record(action, { status: 'running', timedOut: true });
+  assert.deepEqual([action.wpId, action.part], ['WP-03', 'read']);
+  action = await record(action, running(action));
+  assert.deepEqual([action.kind, action.part, action.wake], ['wait', 'yield', true], 'then it yields as today');
+  // A done wake names a WP of the run.
+  const unknown = await runConduct(['next', '--run', h.runDir, '--woken-by', 'done', '--wp', 'WP-99', ...as], h.overrides());
+  assert.equal(unknown.code, 2, unknown.stdout);
+  // The lane's done message carries the flags.
+  const s = loadState(h.runDir, h.deps);
+  const wp = s.wps.find((candidate) => candidate.id === 'WP-02');
+  const [send] = laneBackend(s, h.deps, 't3').prompt(wp, { amendment: true });
+  assert.match(send.args.message, /next --run \S+ --woken-by done --wp WP-02 --as-thread <your own T3 thread id>/);
 });
 
 test('t3 custody binding: the successor\'s first next --custody --as-thread binds custody to its thread; while the heartbeat create is pending, r1\'s next and record --as-thread exit 5 and leave state.json unchanged byte for byte; then the successor completes custody (workit#313 review r2, finding 1)', async (t) => {

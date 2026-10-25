@@ -1470,7 +1470,7 @@ test('t3 heartbeat: the first lane\'s create makes it bound to the conductor; it
   assert.deepEqual({ ...done(launch), message: undefined }, { threadId: CONDUCTOR, mode: 'queue', clientRequestId: 'abcd1234-wp-00-a0-0-done', message: undefined });
   assert.match(done(launch).message, /^\[conduct demo\] WP-00's lane ended its turn \(round a0\); report: \S+lane-wp-00-report\.md\. Addressed to the conductor thread mcp:conductor-1\. A wake, not a verdict/);
   // The recipient names its own thread, so a retired conductor is refused (workit#313 review r1, finding 2).
-  assert.match(done(launch).message, /next --run \S+ --as-thread <your own T3 thread id> \(orchestrator_capabilities' parentThreadId, or t3_thread_configuration's threadId\).*If it exits 5, this thread is no longer the run's conductor: end your turn\.$/);
+  assert.match(done(launch).message, /next --run \S+ --woken-by done --wp WP-00 --as-thread <your own T3 thread id> \(orchestrator_capabilities' parentThreadId, or t3_thread_configuration's threadId\).*If it exits 5, this thread is no longer the run's conductor: end your turn\.$/);
   // An amendment's done id is its send's id plus -done: new for every send.
   Object.assign(f.wp.lane, { threadId: THREAD, startedAt: new Date(T0).toISOString() });
   f.wp.amendment = { n: 2 };
