@@ -3,7 +3,7 @@
 // does one bounded thing, writes state, appends to events.jsonl and exits; the
 // agent running the skill drives the loop: intake → [next → act → record]*.
 // `next` never runs a program: it hands the agent an action to perform.
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendFileSync, readdirSync, rmSync, linkSync, truncateSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, appendFileSync, readdirSync, rmSync, linkSync, truncateSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { isatty } from 'node:tty';
@@ -107,10 +107,12 @@ function openRun(flags, deps) {
 // A state.json names the run dir it was made in, and its pending argv and
 // paths point there: a copied run dir still names the original. drive and
 // record act only on the run --run names, so a copy is refused before
-// anything runs or is written (paths compare case-folded on win32).
+// anything runs or is written. Paths compare by realpath, so a junction, a
+// symlink or a \\?\ path to the run is the run, then case-folded on win32.
 function refuseForeignState(runDir, state, deps) {
   if (typeof state.runDir !== 'string') return;
-  const fold = (path) => (deps.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path));
+  if (!deps.exists(state.runDir)) throw new ConductError(2, `state.runDir ${state.runDir} does not exist (was this run moved?)`);
+  const fold = (path) => (deps.platform === 'win32' ? deps.realpath(path).toLowerCase() : deps.realpath(path));
   if (fold(state.runDir) !== fold(runDir)) throw new ConductError(2, `this state belongs to ${state.runDir}; refusing to act on it from ${runDir}`);
 }
 
@@ -863,6 +865,7 @@ export async function runConduct(argv, overrides = {}) {
     truncate: truncateSync,
     remove: (path) => rmSync(path, { force: true }),
     exists: existsSync,
+    realpath: (path) => realpathSync.native(path),
     mkdir: (path) => mkdirSync(path, { recursive: true }),
     rename: renameSync,
     append: (path, value) => appendFileSync(path, value, 'utf8'),

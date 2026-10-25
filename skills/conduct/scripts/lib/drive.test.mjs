@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, cpSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -432,6 +432,26 @@ test('drive and record refuse a copied run dir whose state names another run: ex
     assert.equal(out(await f.run(['drive', '--run', upper], { platform: 'win32', windowsShim: () => false })).stopped, 'needs-conductor');
     assert.equal(f.runs.length, 1);
   }
+});
+
+test('drive: the run reached through an alias (a junction or dir symlink, a \\\\?\\ path) is the same run; a moved state.runDir is refused', async (t) => {
+  const f = fixture(t, [WAIT, WAIT, WAIT, TOOL]);
+  const link = join(f.dir, 'alias');
+  symlinkSync(f.runDir, link, process.platform === 'win32' ? 'junction' : 'dir');
+  const viaLink = await f.run(['drive', '--run', link, '--max-steps', '1']);
+  assert.equal(viaLink.code, 0, viaLink.stdout);
+  assert.equal(out(viaLink).stopped, 'max-steps');
+  if (process.platform === 'win32') {
+    const long = await f.run(['drive', '--run', `\\\\?\\${f.runDir}`, '--max-steps', '1']);
+    assert.equal(long.code, 0, long.stdout);
+    assert.equal(out(long).stopped, 'max-steps');
+  }
+  // state.json names a run dir that is gone: the run was moved, not aliased.
+  const moved = join(f.dir, 'gone', 'run');
+  writeFileSync(join(f.runDir, 'state.json'), JSON.stringify({ ...state(f), runDir: moved }));
+  const refused = await f.drive();
+  assert.equal(refused.code, 2, refused.stdout);
+  assert.equal(out(refused).error, `state.runDir ${moved} does not exist (was this run moved?)`);
 });
 
 test('drive: a driver that finds pending moved under it stops before running anything', async (t) => {
