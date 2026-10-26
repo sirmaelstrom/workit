@@ -345,6 +345,38 @@ test('touch 1 (44b4fb49): the filed question\'s first 300 chars name the repo, t
   assert.ok(filedLength(crowded, 1, atNext) <= filedLength(crowded, 1, bound), `next is ${filedLength(crowded, 1, atNext)}, the bound ${filedLength(crowded, 1, bound)}`);
   assert.match(atNext, /Lanes: headless \(exec\), with nothing to watch while they work/);
   assert.ok(touchOneLength(state()) <= 2000, `touch 1 is ${touchOneLength(state())} chars filed, options included`);
+  // 7c728631: the budget line says "lower bound" and names the backend's lanes; the crowded touch still fits the cap.
+  assert.match(atNext, /^Budget: \$25 unmetered: exec claude lanes' logged cost is summed as a lower bound; /m);
+  assert.match(touchOneQuestion(crowded, { env: {} }), /^Budget: \$25 unmetered: herdr lanes log no cost, so the lower bound counts none; /m);
+  assert.match(bound, /^Budget: \$25 unmetered: .*lower bound/m);
+  assert.ok(filedLength(crowded, 1, atNext) <= QUESTION_MAX && filedLength(crowded, 1, touchOneQuestion(crowded, { env: {} })) <= QUESTION_MAX);
+});
+
+test('touch 1 budget line (7c728631): a T3 backend, a configured herdr that resolves to exec, and a legacy state with no intent.backend each name their lanes; none prints an object', async () => {
+  const { touchOneQuestion } = await import('./lib/phases/preapproval.mjs');
+  const { ADAPTERS, AGENTS } = await import('./lib/adapters.mjs');
+  const on = (names) => Object.fromEntries(names.map((name) => [name, { on: true, evidence: 'probed', detail: 'ok' }]));
+  const state = (intent) => ({
+    slug: 'spend-labels', runId: RUN_ID, runDir: join(tmpdir(), 'run'), adapters: on(ADAPTERS), agents: on(AGENTS),
+    intent: { goal: 'Label the spend lines.', agent: 'claude', budgetUsd: 25, ciWorkflows: 2, release: null,
+      repo: { path: join(tmpdir(), 'standalone', 'repo'), remote: 'o/r', defaultBranch: 'main' }, ...intent },
+  });
+  const budgetLine = (question) => question.split('\n').find((line) => line.startsWith('Budget: '));
+  const t3 = touchOneQuestion(state({ backend: { name: 't3', t3Project: 'c684e0c7' } }), {});
+  assert.equal(budgetLine(t3), 'Budget: $25 unmetered: T3 lanes log no cost, so the lower bound counts none; the gate counts each live lane at an estimate (default $15)');
+  // herdr asked for, but the repo is outside a projects tree: dispatch runs exec, and so does the line.
+  const herdr = touchOneQuestion(state({ backend: { name: 'herdr' } }), { env: {} });
+  assert.match(herdr, /Lanes: headless \(exec: lane\.mjs create would refuse/);
+  assert.match(budgetLine(herdr), /^Budget: \$25 unmetered: exec claude lanes' logged cost is summed as a lower bound; /);
+  const legacy = touchOneQuestion(state({}), { env: {} });
+  assert.match(budgetLine(legacy), /^Budget: \$25 unmetered: exec claude lanes' logged cost is summed as a lower bound; /);
+  const codex = touchOneQuestion(state({ agent: 'codex' }), { env: {} });
+  assert.match(budgetLine(codex), /^Budget: \$25 unmetered: codex lanes log no cost, so the lower bound counts none; /);
+  for (const question of [t3, herdr, legacy, codex]) {
+    assert.doesNotMatch(question, /\[object Object\]/);
+    // The summary sentence is unchanged.
+    assert.match(question, /\. Budget \$25, unmetered\.$/m);
+  }
 });
 
 test('showcase (022d6fd9): 30 held WPs are cited by count and where they are listed; the filed question stays under the cap', async () => {
@@ -794,7 +826,7 @@ test('retired kinds (U1, round 2): every touch and halt kind the current code op
     const body = readFileSync(path, 'utf8');
     for (const [, kind] of body.matchAll(/\bkind: '([a-z-]+)'/g)) kinds.add(kind);
     // haltTouch's and buildTouch's kind is an argument: halts.push({ kind: why }) and touch.build = why.
-    for (const [, kind] of body.matchAll(/\bhaltTouch\(state, deps, (?:`[^`]*`|'[^']*'), '([a-z-]+)'/g)) kinds.add(kind);
+    for (const [, kind] of body.matchAll(/\bhaltTouch\(state, deps, (?:`[^`]*`|'[^']*'|[A-Za-z]+), '([a-z-]+)'/g)) kinds.add(kind);
     for (const [, first, second] of body.matchAll(/\bbuildTouch\(state, deps, (?:'([a-z-]+)'|row \? '[a-z-]+' : '([a-z-]+)')/g)) kinds.add(first ?? second);
   }
   for (const kind of ['budget', 'merged', 'replan', 'liveness', 'dialog', 'ask', 'blocked', 'preapproval', 'showcase']) assert.ok(kinds.has(kind), `the scan finds ${kind}`);
@@ -998,13 +1030,13 @@ test('touch 1 budget label (D19.28)', async (t) => {
   const f = fixture(t);
   const off = out(await intake(f));
   assert.match(off.action.touch.question, /unmetered/);
-  assert.match(off.action.touch.question, /lane-only lower bound/);
-  // WORKIT_SPEND_CMD no longer meters a run: the budget stays the lane-only lower bound.
+  assert.match(off.action.touch.question, /lower bound/);
+  // WORKIT_SPEND_CMD no longer meters a run: the budget stays a lower bound.
   const g = fixture(t, { env: { WORKIT_UNATTENDED: '1', WORKIT_SPEND_CMD: 'spend-usd --since' } });
   g.table['sh -c command -v "$1" sh spend-usd'] = { code: 0, stdout: '/usr/local/bin/spend-usd\n', stderr: '' };
   const on = out(await intake(g));
   assert.match(on.action.touch.question, /unmetered/);
-  assert.match(on.action.touch.question, /lane-only lower bound/);
+  assert.match(on.action.touch.question, /lower bound/);
   assert.ok(!g.calls.some((call) => call.includes('spend-usd')), g.calls.join('\n'));
 });
 
