@@ -481,6 +481,96 @@ test('custody (merged head, review 4372983297): diff.relative with a --repo belo
   assert.equal(row.gone, false);
 });
 
+// Final Codex review of the containment ruling: three ways the proof read
+// unlanded work as landed.
+const plumb = (cwd, args, input) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, input, stdio: 'pipe', encoding: 'utf8' }).trim();
+
+// An orphan H that adds new.txt and a.txt, and main M that adds only a.txt:
+// new.txt is unlanded, so the worktree must be kept.
+function unlandedNewFile(dir) {
+  const { repo } = originAndClone(dir);
+  const root = git(repo, 'rev-parse', 'HEAD').trim();
+  const worktree = detach(repo, dir, 'origin/main');
+  writeFileSync(join(worktree, 'new.txt'), 'unlanded\n');
+  git(worktree, 'add', 'new.txt');
+  const head = commit(worktree, 'a.txt', 'a\n', 'new and a');
+  commit(repo, 'a.txt', 'a\n', 'a on main');
+  git(repo, 'push', '-q', 'origin', 'main');
+  return { repo, worktree, root, head };
+}
+
+test('custody (merged head, final Codex review P2-1): a replace ref that gives the merge base HEAD\'s file is ignored, and the worktree is kept', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo, worktree, root } = unlandedNewFile(dir);
+  // R' holds R's files plus new.txt; replacing R with it makes B..H show only a.txt.
+  const blob = plumb(repo, ['hash-object', '-w', '--stdin'], 'unlanded\n');
+  const listing = git(repo, 'ls-tree', root);
+  const tree = plumb(repo, ['mktree'], `${listing}100644 blob ${blob}\tnew.txt\n`);
+  git(repo, 'replace', root, plumb(repo, ['commit-tree', tree, '-m', 'root']));
+  assert.match(git(repo, 'diff', '--name-only', root, git(worktree, 'rev-parse', 'HEAD').trim()), /^a\.txt\s*$/, 'with the replacement, B..H hides new.txt');
+  const row = closeOrphan(run, repo, worktree);
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+  assert.match(row.reason, /\(checked origin\/main\)$/);
+});
+
+test('custody (merged head, final Codex review P2-1): a grafts file that fabricates shared ancestry keeps the worktree', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  // H1 adds new.txt, H2 adds a.txt; main's M adds a.txt. Grafting M onto H1
+  // makes H1 the merge base, so B..H2 shows only a.txt.
+  const worktree = detach(repo, dir, 'origin/main');
+  const h1 = commit(worktree, 'new.txt', 'unlanded\n', 'new');
+  commit(worktree, 'a.txt', 'a\n', 'a');
+  const m = commit(repo, 'a.txt', 'a\n', 'a on main');
+  git(repo, 'push', '-q', 'origin', 'main');
+  git(repo, 'config', 'advice.graftFileDeprecated', 'false');
+  writeFileSync(join(repo, '.git', 'info', 'grafts'), `${m} ${h1}\n`);
+  assert.equal(git(worktree, 'merge-base', 'origin/main', 'HEAD').trim(), h1, 'the graft fabricates H1 as the merge base');
+  const row = closeOrphan(run, repo, worktree);
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+  assert.match(row.reason, /\(a grafts file rewrites its history: .*grafts\)$/);
+});
+
+test('custody (merged head, final Codex review P2-2): a deleted path whose bytes are not UTF-8 keeps the worktree when the default branch still holds it', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  const root = git(repo, 'rev-parse', 'HEAD').trim();
+  const x = git(repo, 'rev-parse', 'HEAD:x.txt').trim();
+  const bad = plumb(repo, ['hash-object', '-w', '--stdin'], 'bad\n');
+  const added = plumb(repo, ['hash-object', '-w', '--stdin'], 'new\n');
+  const tree = (...rows) => plumb(repo, ['mktree', '-z'], Buffer.concat(rows.map(([name, id]) => Buffer.concat([Buffer.from(`100644 blob ${id}\t`), Buffer.isBuffer(name) ? name : Buffer.from(name), Buffer.from([0])]))));
+  const badName = Buffer.from([0x62, 0x61, 0x64, 0xff]);
+  // B holds x.txt and bad\xff; H deletes bad\xff and adds new.txt; C adds new.txt and keeps bad\xff.
+  const base = plumb(repo, ['commit-tree', tree(['x.txt', x], [badName, bad]), '-p', root, '-m', 'B']);
+  const head = plumb(repo, ['commit-tree', tree(['new.txt', added], ['x.txt', x]), '-p', base, '-m', 'H']);
+  const candidate = plumb(repo, ['commit-tree', tree(['new.txt', added], [badName, bad], ['x.txt', x]), '-p', base, '-m', 'C']);
+  git(repo, 'update-ref', 'refs/remotes/origin/main', candidate);
+  const listed = execFileSync('git', ['-C', repo, 'ls-tree', '-z', '--name-only', candidate]);
+  assert.ok(listed.includes(badName), 'the candidate still holds bad\\xff');
+  const row = closeOrphan(run, repo, detach(repo, dir, head));
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+  assert.match(row.reason, /\(checked origin\/main\)$/);
+});
+
+test('custody (merged head, final Codex review P2-3): a default-branch ref that cannot be read keeps the worktree, rather than falling through to another', (t) => {
+  const timedOut = (args) => (args.includes('refs/remotes/origin/master^{commit}')
+    ? { code: null, error: 'timed out after 60000 ms', stdout: '', stderr: '' }
+    : runArgv(['git', ...args], { timeout: 60_000 }));
+  const { dir, run } = sandbox(t, { git: timedOut });
+  const { repo, b } = squashMerged(dir);
+  // origin/HEAD names master; only origin/main holds the squash.
+  git(repo, 'push', '-q', 'origin', `${git(repo, 'rev-list', '--max-parents=0', 'HEAD').trim()}:refs/heads/master`);
+  git(repo, 'fetch', '-q', 'origin');
+  git(repo, 'remote', 'set-head', 'origin', 'master');
+  const row = closeOrphan(run, repo, detach(repo, dir, b));
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+  assert.match(row.reason, /\(default branch unreadable: timed out after 60000 ms\)$/);
+});
+
 test('custody: links close before the worktree that holds them, whatever order they were added in', (t) => {
   const { dir, run } = sandbox(t);
   const wt = repoWithWorktree(dir, 'wt');

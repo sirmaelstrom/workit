@@ -354,7 +354,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    - a locked or dirty worktree, one whose HEAD is on no ref, and one that an
      entry not yet disposed runs from. A HEAD with non-empty changes doesn't
      count as "on no ref" here when every file it changed is identical on
-     the default branch, as last fetched;
+     the default branch, as last fetched, in a repo with no grafts and no
+     shallow history;
    - a path that is not a link;
    - anything whose `--live` check does not exit 1, or whose dropper refuses.
 
