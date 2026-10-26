@@ -43,6 +43,7 @@ import { LANE_MODELS, laneModel, t3ModelSelection } from './adapters.mjs';
 import { resolveProgram, shellArgv } from './exec.mjs';
 import { pinnedConfig } from './repo-config.mjs';
 import { amendmentSections, markLines } from './markdown.mjs';
+import { formatJsonKeepingForm, parseJsonKeepingForm } from './json-file.mjs';
 import { ConductError, STEPS, STEP_SEAM, appendEvent, laneBase, loadState, saveState } from './state.mjs';
 import { GATED_FROM_LANE, LIVE_STATES, holdsSlot, laneOccupied } from './schedule.mjs';
 import { conductorNumber } from './rotate.mjs';
@@ -1522,12 +1523,15 @@ function hookLane(state, wp, deps) {
   const worktree = wp.lane?.worktree ?? laneLayout(state, wp).worktree;
   if (!deps.exists(worktree)) return reply(1, { ok: false, error: `the lane worktree ${worktree} does not exist` });
   const path = join(worktree, ...LANE_SETTINGS.split('/'));
-  let settings = {};
+  // A BOM and CRLF are read past and written back as they were; a missing
+  // file is written with neither.
+  let settings = {}, form = {};
   try {
-    if (deps.exists(path)) settings = JSON.parse(deps.read(path));
+    if (deps.exists(path)) ({ value: settings, ...form } = parseJsonKeepingForm(deps.read(path)));
   } catch (error) {
     return reply(1, { ok: false, error: `${path} is not JSON: ${error.message}` });
   }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return reply(1, { ok: false, error: `${path} is not a JSON object` });
   // Every stop-check hook for this run and WP, whatever root it names, gives
   // way to the one current entry; an entry left with no hooks goes with it.
   const command = stopHookCommand(state, wp, deps);
@@ -1540,7 +1544,7 @@ function hookLane(state, wp, deps) {
   settings.env = { ...(settings.env ?? {}), [LANE_MARKER_ENV]: laneLayout(state, wp).name };
   settings.hooks = { ...(settings.hooks ?? {}), Stop: [...kept, ...stopHookSettings(command).hooks.Stop] };
   deps.mkdir(dirname(path));
-  deps.write(path, `${JSON.stringify(settings, null, 2)}\n`);
+  deps.write(path, formatJsonKeepingForm(settings, form));
   const gitPath = deps.exec('git', ['-C', worktree, 'rev-parse', '--git-path', 'info/exclude']);
   if (gitPath.code !== 0) return reply(1, { ok: false, error: `git rev-parse --git-path info/exclude: ${said(gitPath)}`, path });
   const exclude = resolve(worktree, gitPath.stdout.trim());

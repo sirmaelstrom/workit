@@ -1707,6 +1707,72 @@ test('t3 lane hook: writes the Stop hook and the lane marker into the worktree s
   assert.equal((await runLaneVerb('hook', { runDir: missing.runDir, wpId: 'WP-00' }, missing.deps)).code, 1);
 });
 
+const BOM = String.fromCharCode(0xfeff);
+// A T3 lane whose worktree settings file starts as `raw` (null: no file);
+// hook() runs `lane hook` once and returns the file's bytes after it.
+function laneHookFixture(t, raw) {
+  const f = t3Lanes(t);
+  const worktree = join(f.dir, 'wt'), path = join(worktree, '.claude', 'settings.local.json');
+  mkdirSync(dirname(path), { recursive: true });
+  if (raw !== null) writeFileSync(path, raw, 'utf8');
+  const exclude = join(f.dir, 'git', 'info', 'exclude');
+  f.table[`git -C ${worktree} rev-parse --git-path info/exclude`] = ok(`${exclude}\n`);
+  f.wp.lane.worktree = worktree;
+  writeFileSync(join(f.runDir, 'state.json'), JSON.stringify(f.state));
+  const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
+  const hook = async () => {
+    const result = await runLaneVerb('hook', { runDir: f.runDir, wpId: 'WP-00' }, { ...f.deps, mkdir: (p) => mkdirSync(p, { recursive: true }) });
+    return { result, raw: read(path), exclude: read(exclude) };
+  };
+  return { f, path, exclude, hook };
+}
+
+test('t3 lane hook: a BOM and CRLF settings file is read and written back with one BOM and CRLF only, its other keys and the foreign Stop hook kept; a second run is byte-identical', async (t) => {
+  const theirs = { hooks: [{ type: 'command', command: 'echo theirs' }] };
+  const pre = [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo pre' }] }];
+  const before = { permissions: { allow: ['Bash(ls)'] }, env: { FOO: 'bar' }, hooks: { PreToolUse: pre, Stop: [theirs] } };
+  const { f, hook } = laneHookFixture(t, `${BOM}${JSON.stringify(before, null, 2).replace(/\n/g, '\r\n')}\r\n`);
+  const first = await hook();
+  assert.equal(first.result.code, 0, first.result.out);
+  assert.ok(first.raw.startsWith(`${BOM}{`) && !first.raw.startsWith(`${BOM}${BOM}`), 'exactly one leading BOM');
+  assert.ok(first.raw.endsWith('}\r\n'), 'ends with CRLF');
+  assert.equal(first.raw.replace(/\r\n/g, '').includes('\n'), false, 'a bare LF was written');
+  const after = JSON.parse(first.raw.slice(1));
+  assert.deepEqual(after.permissions, before.permissions);
+  assert.deepEqual(after.env, { FOO: 'bar', WORKIT_LANE: 'demo-wp-00' });
+  assert.deepEqual(after.hooks.PreToolUse, pre);
+  assert.deepEqual(after.hooks.Stop, [theirs, { hooks: [{ type: 'command', command: STOP_HOOK(f), timeout: 300 }] }]);
+  assert.equal(first.exclude, '/.claude/settings.local.json\n');
+  const second = await hook();
+  assert.equal(second.result.code, 0, second.result.out);
+  assert.equal(second.raw, first.raw, 'a second run changes no byte');
+  assert.equal(second.exclude, first.exclude);
+});
+
+test('t3 lane hook: an LF file with no BOM stays that way, and a missing file is created LF with no BOM', async (t) => {
+  for (const raw of [`${JSON.stringify({ permissions: {} }, null, 2)}\n`, null]) {
+    const { hook } = laneHookFixture(t, raw);
+    const { result, raw: after } = await hook();
+    assert.equal(result.code, 0, result.out);
+    assert.ok(after.startsWith('{') && after.endsWith('}\n'), JSON.stringify(after.slice(0, 3)));
+    assert.equal(after.includes('\r'), false, 'a CR was written');
+  }
+});
+
+test('t3 lane hook: a BOM then {, null and [] are refused (is not JSON, is not a JSON object) and neither the settings file nor info/exclude is written', async (t) => {
+  for (const [raw, error] of [[`${BOM}{`,/is not JSON: /], ['null', /is not a JSON object$/], ['[]', /is not a JSON object$/]]) {
+    const { path, exclude, hook } = laneHookFixture(t, raw);
+    mkdirSync(dirname(exclude), { recursive: true });
+    writeFileSync(exclude, '# theirs\n');
+    const { result, raw: after, exclude: excluded } = await hook();
+    assert.equal(result.code, 1, JSON.stringify(raw));
+    assert.match(JSON.parse(result.out).error, error);
+    assert.ok(JSON.parse(result.out).error.startsWith(path));
+    assert.equal(after, raw, 'the settings file was written');
+    assert.equal(excluded, '# theirs\n', 'info/exclude was written');
+  }
+});
+
 test('t3 lane hook: replaces every stop-check hook for this run and WP, whatever root it names, with the one current entry; keeps other hooks; a second run leaves exactly one', async (t) => {
   const f = t3Lanes(t);
   const worktree = join(f.dir, 'wt'), path = join(worktree, '.claude', 'settings.local.json');
