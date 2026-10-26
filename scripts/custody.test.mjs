@@ -7,6 +7,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { runCustody, entries, readLedger, runArgv } from './custody.mjs';
 
@@ -168,7 +169,52 @@ test('custody (merged head): a squash-merged head, with an unrelated file added 
   const row = closeOrphan(run, repo, detach(repo, dir, b));
   assert.equal(row.state, 'disposed', row.reason);
   assert.equal(row.gone, true);
-  assert.equal(row.reason, `removed: its HEAD ${b.slice(0, 12)} is on no ref; every file it changed is identical in origin/main (as last fetched; custody never fetches)`);
+  assert.equal(row.reason, `removed: its HEAD ${b.slice(0, 12)} is on no ref; every file its net change touches is identical in origin/main, with nothing changed inside the range left out of it (as last fetched; custody never fetches)`);
+});
+
+test('custody (merged head, council C4-2): a file added and deleted inside the range keeps the worktree, though the net change landed', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  const worktree = detach(repo, dir, 'origin/main');
+  commit(worktree, 'secret.txt', 'only here\n', 'add secret.txt');
+  git(worktree, 'rm', '-q', 'secret.txt');
+  git(worktree, 'commit', '-q', '-m', 'rm secret.txt');
+  commit(worktree, 'a.txt', 'a\n', 'add a.txt');
+  commit(repo, 'a.txt', 'a\n', 'a on main');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const row = closeOrphan(run, repo, worktree);
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+  assert.match(row.reason, /\(work inside the range never reached the net diff: secret\.txt\)$/);
+});
+
+test('custody (merged head, council C4-1): a grafts file that makes main appear to contain HEAD keeps the worktree', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  const worktree = detach(repo, dir, 'origin/main');
+  const h = commit(worktree, 'new.txt', 'unlanded\n', 'orphan adds new.txt');
+  const m = commit(repo, 'm.txt', 'm\n', 'main moves on');
+  git(repo, 'config', 'advice.graftFileDeprecated', 'false');
+  writeFileSync(join(repo, '.git', 'info', 'grafts'), `${m} ${h}\n`);
+  assert.match(git(repo, 'for-each-ref', '--contains', h), /refs\/heads\/main/, 'the graft fakes main containing HEAD');
+  assert.equal(run('add', '--kind', 'worktree', '--id', worktree, '--repo', repo).exit, 0);
+  const row = byId(run('close'))[worktree];
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(existsSync(worktree), true);
+  assert.match(row.reason, /^its history cannot be trusted \(a grafts file rewrites its history: .*grafts\); custody keeps every worktree in a grafted or shallow repo$/);
+});
+
+test('custody (merged head, council C4-1): a shallow clone keeps a worktree even when its HEAD is on a ref', (t) => {
+  const { dir, run } = sandbox(t);
+  const { origin } = originAndClone(dir);
+  const shallow = join(dir, 'shallow');
+  git(dir, 'clone', '-q', '--depth', '1', pathToFileURL(origin).href, shallow);
+  const worktree = detach(shallow, dir, 'origin/main');
+  assert.match(git(shallow, 'for-each-ref', '--contains', 'HEAD'), /refs\/heads\/main/, 'HEAD is on a ref');
+  assert.equal(run('add', '--kind', 'worktree', '--id', worktree, '--repo', shallow).exit, 0);
+  const row = byId(run('close'))[worktree];
+  assert.equal(row.state, 'kept', row.reason);
+  assert.match(row.reason, /^its history cannot be trusted \(a shallow clone: its history is cut\); custody keeps every worktree in a grafted or shallow repo$/);
 });
 
 test('custody (merged head, council C3): a squash that deletes a file is removed when the default branch lacks it too, and kept when it still has it', (t) => {
@@ -260,10 +306,11 @@ test('custody (merged head): a partial squash, a change then its revert, and a m
   git(repo, 'add', 'c.txt');
   commit(repo, 'd.txt', 'd\n', 'c and d on main');
   git(repo, 'push', '-q', 'origin', 'main');
-  for (const worktree of [partial, reverted, merged]) {
+  // Each kept reason names the guard that kept it.
+  for (const [worktree, why] of [[partial, ''], [reverted, ': no net change'], [merged, ': a merge commit in the range']]) {
     const row = closeOrphan(run, repo, worktree);
     assert.equal(row.state, 'kept', `${worktree}: ${row.reason}`);
-    assert.match(row.reason, /is on no ref; removing it would orphan the commit \(checked origin\/main\)$/);
+    assert.ok(row.reason.endsWith(`is on no ref; removing it would orphan the commit (checked origin/main${why})`), `${worktree}: ${row.reason}`);
   }
 });
 
@@ -280,7 +327,7 @@ test('custody (merged head): a squashed range that holds an --allow-empty commit
   git(repo, 'push', '-q', 'origin', 'main');
   const row = closeOrphan(run, repo, worktree);
   assert.equal(row.state, 'kept', row.reason);
-  assert.match(row.reason, /\(checked origin\/main\)$/);
+  assert.match(row.reason, /\(checked origin\/main: an empty commit in the range: [0-9a-f]{12}\)$/);
 });
 
 test('custody (merged head): a stale remote-tracking ref keeps the worktree; custody does not fetch', (t) => {
@@ -530,7 +577,7 @@ test('custody (merged head, final Codex review P2-1): a grafts file that fabrica
   const row = closeOrphan(run, repo, worktree);
   assert.equal(row.state, 'kept', row.reason);
   assert.equal(row.gone, false);
-  assert.match(row.reason, /\(a grafts file rewrites its history: .*grafts\)$/);
+  assert.match(row.reason, /^its history cannot be trusted \(a grafts file rewrites its history: .*grafts\); custody keeps every worktree in a grafted or shallow repo$/);
 });
 
 test('custody (merged head, final Codex review P2-2): a deleted path whose bytes are not UTF-8 keeps the worktree when the default branch still holds it', (t) => {
@@ -552,7 +599,7 @@ test('custody (merged head, final Codex review P2-2): a deleted path whose bytes
   const row = closeOrphan(run, repo, detach(repo, dir, head));
   assert.equal(row.state, 'kept', row.reason);
   assert.equal(row.gone, false);
-  assert.match(row.reason, /\(checked origin\/main\)$/);
+  assert.match(row.reason, /\(checked origin\/main: its changed paths are unreadable\)$/);
 });
 
 test('custody (merged head, final Codex review P2-3): a default-branch ref that cannot be read keeps the worktree, rather than falling through to another', (t) => {

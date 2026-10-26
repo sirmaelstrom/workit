@@ -351,11 +351,14 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    `--by` at run close. A checkout the run installed and built in is added
    with `--ignored disposable`. Without that flag, ignored files keep a
    worktree. Droppers run first, then links, then worktrees. Close keeps:
-   - a locked or dirty worktree, one whose HEAD is on no ref, and one that an
-     entry not yet disposed runs from. A HEAD with non-empty changes doesn't
-     count as "on no ref" here when every file it changed is identical on
-     the default branch, as last fetched, in a repo with no grafts and no
-     shallow history;
+   - a locked or dirty worktree, one that an entry not yet disposed runs
+     from, and every worktree in a repo with grafts or shallow history;
+   - one whose HEAD is on no ref, unless every file its net change touches
+     is identical on the default branch, as last fetched, with nothing
+     changed inside the range left out of it. That also needs a readable,
+     unambiguous default branch, one merge base, no merge or empty commits,
+     a net change that only adds, modifies or deletes, and git output that
+     is not lossy;
    - a path that is not a link;
    - anything whose `--live` check does not exit 1, or whose dropper refuses.
 
