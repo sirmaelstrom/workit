@@ -352,9 +352,9 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    with `--ignored disposable`. Without that flag, ignored files keep a
    worktree. Droppers run first, then links, then worktrees. Close keeps:
    - a locked or dirty worktree, one whose HEAD is on no ref, and one that an
-     entry not yet disposed runs from. A HEAD whose non-empty changes are
-     already on the default branch, by patch-id or by a merge that adds
-     nothing, doesn't count as "on no ref" here;
+     entry not yet disposed runs from. A HEAD with non-empty changes doesn't
+     count as "on no ref" here when merging it into the default branch, as
+     last fetched, adds nothing;
    - a path that is not a link;
    - anything whose `--live` check does not exit 1, or whose dropper refuses.
 

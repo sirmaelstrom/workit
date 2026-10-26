@@ -168,10 +168,12 @@ test('custody (merged head): a squash-merged head is removed, since merging it a
   const row = closeOrphan(run, repo, detach(repo, dir, b));
   assert.equal(row.state, 'disposed', row.reason);
   assert.equal(row.gone, true);
-  assert.equal(row.reason, `removed: its HEAD ${b.slice(0, 12)} is on no ref, but its changes are already in origin/main (merging it adds nothing)`);
+  assert.equal(row.reason, `removed: its HEAD ${b.slice(0, 12)} is on no ref; merging it into origin/main adds nothing (as last fetched; custody never fetches)`);
 });
 
-test('custody (merged head): a rebase-merged head whose lines main edited again is removed as patch-identical', (t) => {
+// The narrowed claim (council round 2): patch-ids are not proof, so a rebase
+// merge whose lines main changed again is kept and needs a hand close.
+test('custody (merged head): a rebase-merged head whose lines main edited again is kept', (t) => {
   const { dir, run } = sandbox(t);
   const { repo } = originAndClone(dir);
   git(repo, 'switch', '-q', '-c', 'feat');
@@ -184,10 +186,10 @@ test('custody (merged head): a rebase-merged head whose lines main edited again 
   commit(repo, 'x.txt', 'one\n2\nthree\n', 're-edit');
   git(repo, 'push', '-q', 'origin', 'main');
   dropBranch(repo, 'feat');
-  assert.notEqual(spawnSync('git', ['-C', repo, 'merge-tree', '--write-tree', 'origin/main', a]).status, 0, 'merge-tree alone would keep it');
+  assert.notEqual(spawnSync('git', ['-C', repo, 'merge-tree', '--write-tree', 'origin/main', a]).status, 0, 'merging it conflicts');
   const row = closeOrphan(run, repo, detach(repo, dir, a));
-  assert.equal(row.state, 'disposed', row.reason);
-  assert.match(row.reason, /already in origin\/main \(patch-identical\)$/);
+  assert.equal(row.state, 'kept', row.reason);
+  assert.match(row.reason, /\(checked origin\/main\)$/);
 });
 
 test('custody (merged head): an unpushed commit is kept, and the reason names the refs it checked', (t) => {
@@ -281,8 +283,8 @@ test('custody (merged head): with no default-branch ref the worktree is kept and
 
 test('custody (merged head): a merge-tree that exits nonzero keeps the worktree, even with a matching tree id', (t) => {
   const trees = [];
-  const failing = (args, { input } = {}) => {
-    const out = runArgv(['git', ...args], { timeout: 60_000, input });
+  const failing = (args) => {
+    const out = runArgv(['git', ...args], { timeout: 60_000 });
     if (!args.includes('merge-tree')) return out;
     trees.push(out.stdout.split(/\r?\n/)[0]);
     return { ...out, code: 1 };
@@ -338,21 +340,58 @@ test('custody (merged head, review 4372983289/4372983294): a merge.default drive
   assert.equal(row.gone, false);
 });
 
-test('custody (merged head, review 4372983292): two commits with one patch-id do not both clear against one landed commit', (t) => {
+// Council round 2: a patch-id match is not proof. Each case below reads as
+// landed to git cherry, and is kept.
+function patchIdTwin(t, base, orphan, landed) {
   const { dir, run } = sandbox(t);
   const { repo } = originAndClone(dir);
-  // Two identical blocks, far enough apart to be separate hunks with the same context.
-  const block = (line) => `x\nx\nx\n${line}\nx\nx\nx\n`;
-  const filler = 's1\ns2\ns3\ns4\ns5\ns6\ns7\n';
-  commit(repo, 'blocks.txt', block('B') + filler + block('B'), 'blocks');
+  commit(repo, 'f.txt', base, 'base');
   git(repo, 'push', '-q', 'origin', 'main');
   const worktree = detach(repo, dir, 'origin/main');
-  commit(worktree, 'blocks.txt', block('B1') + filler + block('B'), 'first block');
-  commit(worktree, 'blocks.txt', block('B1') + filler + block('B1'), 'second block');
-  // main lands the first edit only, under another message.
-  commit(repo, 'blocks.txt', block('B1') + filler + block('B'), 'first block, landed');
+  commit(worktree, 'f.txt', orphan, 'orphan edit');
+  commit(repo, 'f.txt', landed, 'landed edit');
   git(repo, 'push', '-q', 'origin', 'main');
-  assert.deepEqual(nonEmptyLines(git(repo, 'cherry', 'origin/main', git(worktree, 'rev-parse', 'HEAD').trim())).map((line) => line[0]), ['-', '-'], 'git cherry marks both commits landed');
+  assert.deepEqual(nonEmptyLines(git(repo, 'cherry', 'origin/main', git(worktree, 'rev-parse', 'HEAD').trim())).map((line) => line[0]), ['-'], 'git cherry marks the orphan commit landed');
+  return closeOrphan(run, repo, worktree);
+}
+
+test('custody (merged head, council C2-1): an edit that differs from the landed one only in indentation is kept', (t) => {
+  const row = patchIdTwin(t, 'if x:\n    a()\nb()\n', 'if x:\n    a()\n    c()\nb()\n', 'if x:\n    a()\nc()\nb()\n');
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+});
+
+test('custody (merged head, council C2-1): an edit to the other copy of a repeated block is kept', (t) => {
+  const pad = 'pad\npad\npad\n';
+  const row = patchIdTwin(t, `${pad}X\n${pad}X\n${pad}`, `${pad}Y\n${pad}X\n${pad}`, `${pad}X\n${pad}Y\n${pad}`);
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+});
+
+test('custody (merged head, council C2-2): with no origin/HEAD and both origin/main and origin/master, the default branch is ambiguous and the worktree is kept', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo, b } = squashMerged(dir);
+  git(repo, 'push', '-q', 'origin', `${git(repo, 'rev-list', '--max-parents=0', 'HEAD').trim()}:refs/heads/master`);
+  git(repo, 'fetch', '-q', 'origin');
+  git(repo, 'remote', 'set-head', 'origin', '-d');
+  const row = closeOrphan(run, repo, detach(repo, dir, b));
+  assert.equal(row.state, 'kept', row.reason);
+  assert.match(row.reason, /\(default branch ambiguous: origin\/main, origin\/master\)$/);
+});
+
+test('custody (merged head, council C2-3): a driver routed to a rename\'s destination by .git/info/attributes keeps the worktree', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  const lines = (first, eighth) => `${first}\n2\n3\n4\n5\n6\n7\n${eighth}\n9\n`;
+  commit(repo, 'x.txt', lines('1', '8'), 'eight lines');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const worktree = detach(repo, dir, 'origin/main');
+  commit(worktree, 'x.txt', lines('ONE', '8'), 'orphan edits line 1');
+  git(repo, 'mv', 'x.txt', 'y.txt');
+  commit(repo, 'y.txt', lines('1', 'EIGHT'), 'rename and edit line 8');
+  git(repo, 'push', '-q', 'origin', 'main');
+  writeFileSync(join(repo, '.git', 'info', 'attributes'), 'y.txt merge=keepours\n');
+  git(repo, 'config', 'merge.keepours.driver', 'true');
   const row = closeOrphan(run, repo, worktree);
   assert.equal(row.state, 'kept', row.reason);
   assert.equal(row.gone, false);
