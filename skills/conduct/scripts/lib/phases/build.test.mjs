@@ -1937,13 +1937,15 @@ test('spend labels, budget halt (7c728631): a mixed run\'s halt is a lower bound
   await drive(h, { until: (a) => a.part === 'announce' });
   const [touch] = h.state.touches;
   assert.equal(touch.build, 'budget');
-  // M5: the numbers are today's: $3.2 booked plus the next WP at the mean of the one closed lane.
-  assert.match(touch.question, /Spend is \$6\.4 committed \(\$3\.2 booked \+ \$3\.2 for the next WP; lanes estimated at \$3\.2 each, the mean of 1 closed lane\(s\)\) against the \$5 budget \(unmetered; booked is a lower bound: 1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted\)\./);
+  // M5: the numbers are today's: $3.2 booked plus the next WP at the mean of the one logged lane cost.
+  assert.match(touch.question, /Spend is \$6\.4 committed \(\$3\.2 booked \+ \$3\.2 for the next WP; lanes estimated at \$3\.2 each, the mean of 1 lane\(s\) with a logged cost\) against the \$5 budget \(unmetered; booked is a lower bound: 1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted\)\./);
   assert.equal(touch.spendUsd, 6.4);
   const expect = touch.question.slice(touch.question.indexOf('EXPECT:'));
-  assert.match(expect, /\(a\) answered with the text "budget <USD>" above the current spend raises the ceiling to it, and the committed spend \(the lower bound plus lane estimates\) is checked against it;/);
+  // C1-5: the raise is asked above the committed spend, the figure the refusal compares.
+  assert.match(expect, /\(a\) answered with the text "budget <USD>" above the committed spend \(the lower bound plus lane estimates\) raises the ceiling to it, and the committed spend is checked against it;/);
   assert.doesNotMatch(expect, COUNTED);
-  assert.match(touch.options[0].consequence, /the committed spend \(the lower bound plus lane estimates\) is checked against it\.$/);
+  assert.doesNotMatch(`${touch.question} ${touch.options[0].consequence}`, /current spend/);
+  assert.match(touch.options[0].consequence, /^Type "budget <USD>", above the committed spend \(the lower bound plus lane estimates\); the committed spend is checked against it\.$/);
   assert.doesNotMatch(touch.options[0].consequence, COUNTED);
   await recordPending(h, {});
   answerCore(h, 1, 'a', 'budget 6');
@@ -1977,7 +1979,7 @@ test('spend labels, merge receipt (7c728631): the receipt\'s booked figure is a 
   const projection = h.events().find((e) => e.event === 'spend-projection' && e.data.wpId === 'WP-02').data;
   // M5: the event's numbers: the merged lane's cost, and both T3 lanes projected at its mean.
   assert.deepEqual([money(projection.bookedUsd), projection.wpsLeft, money(projection.perWpUsd), projection.projectedUsd], [money(LANE_COST), 2, money(LANE_COST), money(3 * LANE_COST)]);
-  assert.ok(receipt.args.did.includes(` Spend: $${money(LANE_COST)} booked, a lower bound (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted); ~$${projection.projectedUsd} projected, adding 2 WP estimate(s) at $${money(LANE_COST)} each (the mean of 1 closed lane(s)) for every unfinished WP and every merged lane that logged no cost, against $100.`), receipt.args.did);
+  assert.ok(receipt.args.did.includes(` Spend: $${money(LANE_COST)} booked, a lower bound (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted); ~$${projection.projectedUsd} projected, adding 2 WP estimate(s) at $${money(LANE_COST)} each (the mean of 1 lane(s) with a logged cost) for every unfinished WP and every finished WP (merged, refuted or dropped) whose lane logged no cost, against $100.`), receipt.args.did);
   assert.doesNotMatch(receipt.args.did, /not yet booked/);
 });
 
@@ -1993,6 +1995,8 @@ test('spend labels, receipt with a live costed WP (7c728631, council C-4): an un
   const { did } = h.trace.at(-1).args;
   assert.ok(did.includes(` Spend: $${money(LANE_COST + 3.2)} booked, a lower bound (2 exec claude lanes logged their cost); `), did);
   assert.match(did, /adding 1 WP estimate\(s\) at /);
+  // C1-3: the mean counts the live lane's logged cost, so the basis does not call it closed.
+  assert.match(did, /each \(the mean of 2 lane\(s\) with a logged cost\)/);
   assert.doesNotMatch(did, /not yet booked|log(?:s|ged)? none|cost-less/);
 });
 
@@ -4100,8 +4104,8 @@ test('budget (b) (C2-1, C2-2): no prompt after (b) for a second WP, which blocks
   assert.match(h.state.touches[0].question, /\(b\) no new paid lane work \(no dispatch, lane start, prompt or fallback\); work already at a PR boundary may still be reviewed and landed/);
   assert.equal(h.state.touches[0].options[1].label, 'Stop new paid lane work');
   // M4: the raise names the committed spend (the lower bound plus estimates); nothing says metering goes on.
-  assert.match(h.state.touches[0].question, /raises the ceiling to it, and the committed spend \(the lower bound plus lane estimates\) is checked against it;/);
-  assert.match(h.state.touches[0].options[0].consequence, /the committed spend \(the lower bound plus lane estimates\) is checked against it\.$/);
+  assert.match(h.state.touches[0].question, /above the committed spend \(the lower bound plus lane estimates\) raises the ceiling to it, and the committed spend is checked against it;/);
+  assert.match(h.state.touches[0].options[0].consequence, /above the committed spend \(the lower bound plus lane estimates\); the committed spend is checked against it\.$/);
   assert.doesNotMatch(`${h.state.touches[0].question} ${h.state.touches[0].options.map((o) => o.consequence).join(' ')}`, /metering|meter reading/i);
   await recordPending(h, {});
   answerCore(h, 1, 'b');

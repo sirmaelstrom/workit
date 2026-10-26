@@ -1630,12 +1630,13 @@ const budgetEnded = (state) => (state.build.halts ?? []).some((entry) => entry.k
 
 // What spend does not show yet. A lane books its cost when it closes (in the
 // lane log), so every live lane is counted at the per-WP projection, and a dispatch adds one more for the WP it
-// starts. The projection is the mean cost of the lanes closed so far, else the
+// starts. The projection is the mean of the lanes' logged costs so far (a live
+// lane's included once it has logged one), else the
 // repo config's laneEstimateUsd, else DEFAULT_LANE_ESTIMATE_USD. It over- rather
 // than under-counts: a live lane's earlier sessions may already be booked.
 export function laneProjection(state, deps) {
   const closed = state.wps.map((wp) => Number(wp.lane?.costUsd)).filter((cost) => Number.isFinite(cost) && cost > 0);
-  if (closed.length) return { usd: closed.reduce((a, b) => a + b, 0) / closed.length, basis: `the mean of ${closed.length} closed lane(s)` };
+  if (closed.length) return { usd: closed.reduce((a, b) => a + b, 0) / closed.length, basis: `the mean of ${closed.length} lane(s) with a logged cost` };
   const configured = Number(repoConfig(state, deps).laneEstimateUsd);
   if (Number.isFinite(configured) && configured >= 0) return { usd: configured, basis: 'the repo config laneEstimateUsd' };
   return { usd: DEFAULT_LANE_ESTIMATE_USD, basis: 'the default estimate' };

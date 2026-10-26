@@ -346,7 +346,7 @@ test('touch 1 (44b4fb49): the filed question\'s first 300 chars name the repo, t
   assert.match(atNext, /Lanes: headless \(exec\), with nothing to watch while they work/);
   assert.ok(touchOneLength(state()) <= 2000, `touch 1 is ${touchOneLength(state())} chars filed, options included`);
   // 7c728631: the budget line says "lower bound" and names the backend's lanes; the crowded touch still fits the cap.
-  assert.match(atNext, /^Budget: \$25 unmetered: exec claude lanes' logged cost is summed as a lower bound; /m);
+  assert.match(atNext, /^Budget: \$25 unmetered: exec claude lanes' logged cost sums to a lower bound; /m);
   assert.match(touchOneQuestion(crowded, { env: {} }), /^Budget: \$25 unmetered: herdr lanes log no cost, so the lower bound counts none; /m);
   assert.match(bound, /^Budget: \$25 unmetered: .*lower bound/m);
   assert.ok(filedLength(crowded, 1, atNext) <= QUESTION_MAX && filedLength(crowded, 1, touchOneQuestion(crowded, { env: {} })) <= QUESTION_MAX);
@@ -363,13 +363,17 @@ test('touch 1 budget line (7c728631): a T3 backend, a configured herdr that reso
   });
   const budgetLine = (question) => question.split('\n').find((line) => line.startsWith('Budget: '));
   const t3 = touchOneQuestion(state({ backend: { name: 't3', t3Project: 'c684e0c7' } }), {});
-  assert.equal(budgetLine(t3), 'Budget: $25 unmetered: T3 lanes log no cost, so the lower bound counts none; the gate counts each live lane at an estimate (default $15)');
+  assert.equal(budgetLine(t3), 'Budget: $25 unmetered: T3 lanes log no cost, so the lower bound counts none; the gate adds each live lane at the default estimate $15');
+  // C1-2: a pinned laneEstimateUsd is the estimate the gate uses, so touch 1 names it.
+  const pinnedState = state({ backend: { name: 't3', t3Project: 'c684e0c7' } });
+  pinnedState.intent.repoConfig = { source: 'workspace', path: join(tmpdir(), 'conduct', 'repo.json'), sha256: 'a'.repeat(64), config: { laneEstimateUsd: 30 } };
+  assert.equal(budgetLine(touchOneQuestion(pinnedState, {})), 'Budget: $25 unmetered: T3 lanes log no cost, so the lower bound counts none; the gate adds each live lane at the repo config estimate $30');
   // herdr asked for, but the repo is outside a projects tree: dispatch runs exec, and so does the line.
   const herdr = touchOneQuestion(state({ backend: { name: 'herdr' } }), { env: {} });
   assert.match(herdr, /Lanes: headless \(exec: lane\.mjs create would refuse/);
-  assert.match(budgetLine(herdr), /^Budget: \$25 unmetered: exec claude lanes' logged cost is summed as a lower bound; /);
+  assert.match(budgetLine(herdr), /^Budget: \$25 unmetered: exec claude lanes' logged cost sums to a lower bound; /);
   const legacy = touchOneQuestion(state({}), { env: {} });
-  assert.match(budgetLine(legacy), /^Budget: \$25 unmetered: exec claude lanes' logged cost is summed as a lower bound; /);
+  assert.match(budgetLine(legacy), /^Budget: \$25 unmetered: exec claude lanes' logged cost sums to a lower bound; /);
   const codex = touchOneQuestion(state({ agent: 'codex' }), { env: {} });
   assert.match(budgetLine(codex), /^Budget: \$25 unmetered: codex lanes log no cost, so the lower bound counts none; /);
   for (const question of [t3, herdr, legacy, codex]) {

@@ -5,8 +5,8 @@ import { ConductError } from '../state.mjs';
 import { ADAPTERS, AGENTS, laneModel } from '../adapters.mjs';
 import { QUESTION_MAX, filedLength, openTouch, touchAction, recordTouch } from '../touch.mjs';
 import { chooseBackend } from '../lanes.mjs';
-import { configLine } from '../repo-config.mjs';
-import { touchOneBudgetLine } from '../spend.mjs';
+import { configLine, pinnedConfig } from '../repo-config.mjs';
+import { touchOneBudgetLine, touchOneEstimate } from '../spend.mjs';
 
 const GRANT_KEYS = ['merge', 'release', 'budgetUsd', 'scope'];
 
@@ -70,7 +70,9 @@ function touchOne(state, deps = {}, { bound = false } = {}) {
   const lanes = chooseBackend(state, deps);
   // The budget line names the backend's uncounted lanes. Intake's bound takes
   // the longest wording, since the backend can change between intake and `next`.
-  const budgetLine = (backend) => touchOneBudgetLine({ budgetUsd: intent.budgetUsd, backend, agent: intent.agent });
+  // The estimate is the pinned repo config's, as the budget gate reads it, else the default.
+  const estimate = touchOneEstimate(pinnedConfig(state));
+  const budgetLine = (backend) => touchOneBudgetLine({ budgetUsd: intent.budgetUsd, backend, agent: intent.agent, estimate });
   const budget = bound ? ['t3', 'herdr', 'exec'].map(budgetLine).reduce((a, b) => (b.length > a.length ? b : a)) : budgetLine(lanes.backend);
   const herdr = lanes.backend === 'herdr' && !bound;
   const headless = 'headless (exec), with nothing to watch while they work';
