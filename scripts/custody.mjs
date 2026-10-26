@@ -316,8 +316,11 @@ function closeWorktree(entry, deps, held) {
   const sha = head.code === 0 ? head.stdout.trim() : null;
   if (!sha) return { op: 'kept', reason: `git rev-parse HEAD failed: ${firstLine(head.stderr) || head.error}` };
   // Before the containment check: a grafts file can make a ref appear to
-  // contain HEAD, and a shallow clone's cut history can too. Such a repo keeps
-  // every worktree, even one whose HEAD really is on a ref.
+  // contain HEAD. A shallow clone's cut history only removes parent edges, so
+  // it can hide containment but not invent it; it is refused because, on cut
+  // history, the orphan proof's merge-base --all can return an older common
+  // ancestor than the best one. Such a repo keeps every worktree, even one
+  // whose HEAD really is on a ref.
   const rewritten = historyRewritten(entry.repo, deps);
   if (rewritten) return { op: 'kept', reason: `its history cannot be trusted (${rewritten}); custody keeps every worktree in a grafted or shallow repo` };
   const refs = proofGit(deps, entry.repo, ['for-each-ref', '--contains', sha, '--count=1', '--format=%(refname)']);
@@ -469,6 +472,10 @@ function identicalOn(repo, sha, candidate, deps) {
   // non-merge commits. An --allow-empty orphan carries only its message, which
   // no comparison of files would preserve.
   const bases = git('merge-base', '--all', candidate.id, sha);
+  // Exit 1 with nothing printed is "no common ancestor"; any other failure is
+  // a call that did not answer.
+  const noBase = bases.code === 1 && !bases.error && !String(bases.stdout ?? '').trim();
+  if (bases.code !== 0 && !noBase) return checked(`merge-base unreadable: ${failure(bases)}`);
   const base = bases.code === 0 ? nonEmpty(bases.stdout) : [];
   if (base.length !== 1 || !OBJECT_ID.test(base[0].trim())) return checked('not exactly one merge base');
   const from = base[0].trim();
@@ -481,7 +488,8 @@ function identicalOn(repo, sha, candidate, deps) {
     const changed = changes(deps, repo, parent, commit);
     if (changed !== true) return checked(`${changed === false ? 'an empty' : 'an unreadable'} commit in the range: ${commit.slice(0, 12)}`);
   }
-  if (changes(deps, repo, from, sha) !== true) return checked('no net change');
+  const netChange = changes(deps, repo, from, sha);
+  if (netChange !== true) return checked(netChange === false ? 'no net change' : 'net diff unreadable');
   // -z: status NUL path NUL per path; --no-renames keeps R and C out.
   const status = git('diff', '--name-status', '-z', '--no-renames', ...DIFF_FLAGS, from, sha);
   const fields = status.code === 0 ? nulPaths(status.stdout) : null;
@@ -499,7 +507,7 @@ function identicalOn(repo, sha, candidate, deps) {
     const paths = touched.code === 0 ? nulPaths(touched.stdout) : null;
     if (!paths) return checked(`the paths of ${commit.slice(0, 12)} are unreadable`);
     const lost = paths.find((path) => !net.has(path));
-    if (lost !== undefined) return `work inside the range never reached the net diff: ${lost}`;
+    if (lost !== undefined) return checked(`work inside the range never reached the net diff: ${lost}`);
   }
   const paths = [...net];
   const mine = entriesIn(deps, repo, sha, paths);

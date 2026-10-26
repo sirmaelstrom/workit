@@ -185,7 +185,34 @@ test('custody (merged head, council C4-2): a file added and deleted inside the r
   const row = closeOrphan(run, repo, worktree);
   assert.equal(row.state, 'kept', row.reason);
   assert.equal(row.gone, false);
-  assert.match(row.reason, /\(work inside the range never reached the net diff: secret\.txt\)$/);
+  assert.match(row.reason, /\(checked origin\/main: work inside the range never reached the net diff: secret\.txt\)$/);
+});
+
+test('custody (merged head, council C5-3): a file modified then restored inside the range keeps the worktree, though the net change landed', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  const worktree = detach(repo, dir, 'origin/main');
+  commit(worktree, 'x.txt', 'one\nTWO\nthree\n', 'modify x.txt');
+  commit(worktree, 'x.txt', 'one\ntwo\nthree\n', 'restore x.txt');
+  commit(worktree, 'a.txt', 'a\n', 'add a.txt');
+  commit(repo, 'a.txt', 'a\n', 'a on main');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const row = closeOrphan(run, repo, worktree);
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+  assert.match(row.reason, /\(checked origin\/main: work inside the range never reached the net diff: x\.txt\)$/);
+});
+
+test('custody (merged head, council C5-2): a merge-base call that fails keeps the worktree with a reason naming it unreadable', (t) => {
+  const failing = (args) => {
+    if (args.includes('merge-base')) return { code: 128, error: null, stdout: '', stderr: 'fatal: injected merge-base failure\n' };
+    return runArgv(['git', ...args], { timeout: 60_000 });
+  };
+  const { dir, run } = sandbox(t, { git: failing });
+  const { repo, b } = squashMerged(dir);
+  const row = closeOrphan(run, repo, detach(repo, dir, b));
+  assert.equal(row.state, 'kept', row.reason);
+  assert.match(row.reason, /\(checked origin\/main: merge-base unreadable: fatal: injected merge-base failure\)$/);
 });
 
 test('custody (merged head, council C4-1): a grafts file that makes main appear to contain HEAD keeps the worktree', (t) => {
