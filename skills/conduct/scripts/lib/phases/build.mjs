@@ -178,7 +178,7 @@ function legacyConfig(state, deps) {
   return deps.exists(path) ? readJsonFile(deps, path, 'repo config') : {};
 }
 
-function repoConfig(state, deps) {
+export function repoConfig(state, deps) {
   return pinnedConfig(state) ?? legacyConfig(state, deps);
 }
 
@@ -1630,13 +1630,17 @@ const budgetEnded = (state) => (state.build.halts ?? []).some((entry) => entry.k
 
 // What spend does not show yet. A lane books its cost when it closes (in the
 // lane log), so every live lane is counted at the per-WP projection, and a dispatch adds one more for the WP it
-// starts. The projection is the mean of the lanes' logged costs so far (a live
-// lane's included once it has logged one), else the
-// repo config's laneEstimateUsd, else DEFAULT_LANE_ESTIMATE_USD. It over- rather
-// than under-counts: a live lane's earlier sessions may already be booked.
+// starts. The projection is the mean of the lanes' positive logged costs so far
+// (a live lane's included once it has logged one; a logged $0 is left out),
+// else the repo config's laneEstimateUsd, else DEFAULT_LANE_ESTIMATE_USD. It
+// leans high where a live lane's earlier sessions are already booked, and low
+// where a cost in the mean is partial (`costComplete: false`, a killed lane's
+// lower bound): the basis names the partial ones.
 export function laneProjection(state, deps) {
   const closed = state.wps.map((wp) => Number(wp.lane?.costUsd)).filter((cost) => Number.isFinite(cost) && cost > 0);
-  if (closed.length) return { usd: closed.reduce((a, b) => a + b, 0) / closed.length, basis: `the mean of ${closed.length} lane(s) with a logged cost` };
+  const partial = state.wps.filter((wp) => wp.lane?.costComplete === false && Number(wp.lane?.costUsd) > 0 && Number.isFinite(Number(wp.lane.costUsd))).length;
+  const partialNote = partial ? `, ${partial} of them partial (a lower bound)` : '';
+  if (closed.length) return { usd: closed.reduce((a, b) => a + b, 0) / closed.length, basis: `the mean of ${closed.length} lane(s) with a positive logged cost${partialNote}` };
   const configured = Number(repoConfig(state, deps).laneEstimateUsd);
   if (Number.isFinite(configured) && configured >= 0) return { usd: configured, basis: 'the repo config laneEstimateUsd' };
   return { usd: DEFAULT_LANE_ESTIMATE_USD, basis: 'the default estimate' };

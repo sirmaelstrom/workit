@@ -1938,7 +1938,7 @@ test('spend labels, budget halt (7c728631): a mixed run\'s halt is a lower bound
   const [touch] = h.state.touches;
   assert.equal(touch.build, 'budget');
   // M5: the numbers are today's: $3.2 booked plus the next WP at the mean of the one logged lane cost.
-  assert.match(touch.question, /Spend is \$6\.4 committed \(\$3\.2 booked \+ \$3\.2 for the next WP; lanes estimated at \$3\.2 each, the mean of 1 lane\(s\) with a logged cost\) against the \$5 budget \(unmetered; booked is a lower bound: 1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted\)\./);
+  assert.match(touch.question, /Spend is \$6\.4 committed \(\$3\.2 booked \+ \$3\.2 for the next WP; lanes estimated at \$3\.2 each, the mean of 1 lane\(s\) with a positive logged cost\) against the \$5 budget \(unmetered; booked is a lower bound: 1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted\)\./);
   assert.equal(touch.spendUsd, 6.4);
   const expect = touch.question.slice(touch.question.indexOf('EXPECT:'));
   // C1-5: the raise is asked above the committed spend, the figure the refusal compares.
@@ -1979,7 +1979,7 @@ test('spend labels, merge receipt (7c728631): the receipt\'s booked figure is a 
   const projection = h.events().find((e) => e.event === 'spend-projection' && e.data.wpId === 'WP-02').data;
   // M5: the event's numbers: the merged lane's cost, and both T3 lanes projected at its mean.
   assert.deepEqual([money(projection.bookedUsd), projection.wpsLeft, money(projection.perWpUsd), projection.projectedUsd], [money(LANE_COST), 2, money(LANE_COST), money(3 * LANE_COST)]);
-  assert.ok(receipt.args.did.includes(` Spend: $${money(LANE_COST)} booked, a lower bound (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted); ~$${projection.projectedUsd} projected, adding 2 WP estimate(s) at $${money(LANE_COST)} each (the mean of 1 lane(s) with a logged cost) for every unfinished WP and every finished WP (merged, refuted or dropped) whose lane logged no cost, against $100.`), receipt.args.did);
+  assert.ok(receipt.args.did.includes(` Spend: $${money(LANE_COST)} booked, a lower bound (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted); ~$${projection.projectedUsd} projected, adding 2 WP estimate(s) at $${money(LANE_COST)} each (the mean of 1 lane(s) with a positive logged cost) for every unfinished WP and every finished WP (merged, refuted or dropped) whose lane logged no cost, against $100.`), receipt.args.did);
   assert.doesNotMatch(receipt.args.did, /not yet booked/);
 });
 
@@ -1996,8 +1996,20 @@ test('spend labels, receipt with a live costed WP (7c728631, council C-4): an un
   assert.ok(did.includes(` Spend: $${money(LANE_COST + 3.2)} booked, a lower bound (2 exec claude lanes logged their cost); `), did);
   assert.match(did, /adding 1 WP estimate\(s\) at /);
   // C1-3: the mean counts the live lane's logged cost, so the basis does not call it closed.
-  assert.match(did, /each \(the mean of 2 lane\(s\) with a logged cost\)/);
+  assert.match(did, /each \(the mean of 2 lane\(s\) with a positive logged cost\)/);
   assert.doesNotMatch(did, /not yet booked|log(?:s|ged)? none|cost-less/);
+});
+
+test('laneProjection basis (C2-2, C2-3): a logged $0 is not in the mean and the basis says "positive"; a partial cost in the mean is named; the numbers are unchanged', () => {
+  const deps = { exists: () => false };
+  const at = new Date(T0).toISOString();
+  const state = (lanes) => ({ intent: { repo: { path: '/repo' } }, wps: lanes.map((lane, i) => ({ id: `WP-0${i + 1}`, lane: { backend: 'exec', startedAt: at, exitedAt: at, ...lane } })) });
+  assert.deepEqual(build.laneProjection(state([{ costUsd: 0 }, { costUsd: 10 }]), deps), { usd: 10, basis: 'the mean of 1 lane(s) with a positive logged cost' });
+  assert.deepEqual(build.laneProjection(state([{ costUsd: 0.5, costComplete: false }, { costUsd: 10, costComplete: true }]), deps),
+    { usd: 5.25, basis: 'the mean of 2 lane(s) with a positive logged cost, 1 of them partial (a lower bound)' });
+  // A partial lane with no positive cost is not in the mean, so it is not named.
+  assert.deepEqual(build.laneProjection(state([{ costUsd: 0, costComplete: false }, { costUsd: 4 }]), deps), { usd: 4, basis: 'the mean of 1 lane(s) with a positive logged cost' });
+  assert.deepEqual(build.laneProjection(state([{ costUsd: 0 }]), deps), { usd: 15, basis: 'the default estimate' });
 });
 
 test('registered hook, BOM (re-plan 1, workit#330): a BOM + CRLF settings.local.json\'s Stop hook makes a lane diff touching its script T2 registered-hook', async (t) => {

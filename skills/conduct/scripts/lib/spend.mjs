@@ -114,12 +114,12 @@ export const raiseRefusalText = (state, spend) => `(a) needs the text "budget <U
 // The rotation handoff's spend clause (rotate.mjs).
 export const rotateSpendText = (state, booked) => `lanes booked ${booked}, a lower bound (${basisPhrase(state)})`;
 
-// The per-lane estimate touch 1 can name with no deps: the pinned repo
-// config's laneEstimateUsd (as laneProjection reads it), else the default.
-// `pinned` is repo-config.mjs pinnedConfig(state).
-export function touchOneEstimate(pinned) {
-  const configured = Number(pinned?.laneEstimateUsd);
-  return pinned && Number.isFinite(configured) && configured >= 0
+// The per-lane estimate touch 1 names, from the repo config the caller
+// resolved (build.mjs repoConfig, as the gate reads it): its laneEstimateUsd,
+// checked as laneProjection checks it, else the default. Pure: no reads.
+export function touchOneEstimate(config) {
+  const configured = Number(config?.laneEstimateUsd);
+  return config && Number.isFinite(configured) && configured >= 0
     ? { usd: configured, source: 'repo config' } : { usd: DEFAULT_LANE_ESTIMATE_USD, source: 'default' };
 }
 

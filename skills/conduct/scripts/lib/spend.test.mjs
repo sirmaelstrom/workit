@@ -85,9 +85,9 @@ test('touch 1 estimate (C1-2): the pinned repo config\'s laneEstimateUsd, else t
 // Every builder's text for a state, with the numbers the sites compute.
 const texts = (state) => [
   analysisBudgetLine(state, '$3.20'),
-  receiptSpendLine(state, { booked: '$3.2', projected: '$9.6', wpsLeft: 2, perWp: '$3.2', basis: 'the mean of 1 lane(s) with a logged cost', budget: '$25', crosses: false }),
-  receiptSpendLine(state, { booked: '$3.2', projected: '$3.2', wpsLeft: 0, perWp: '$3.2', basis: 'the mean of 1 lane(s) with a logged cost', budget: '$25', crosses: false }),
-  committedDetail(state, { booked: '$3.2', live: 0, liveUsd: null, nextUsd: '$3.2', perLane: '$3.2', basis: 'the mean of 1 lane(s) with a logged cost' }),
+  receiptSpendLine(state, { booked: '$3.2', projected: '$9.6', wpsLeft: 2, perWp: '$3.2', basis: 'the mean of 1 lane(s) with a positive logged cost', budget: '$25', crosses: false }),
+  receiptSpendLine(state, { booked: '$3.2', projected: '$3.2', wpsLeft: 0, perWp: '$3.2', basis: 'the mean of 1 lane(s) with a positive logged cost', budget: '$25', crosses: false }),
+  committedDetail(state, { booked: '$3.2', live: 0, liveUsd: null, nextUsd: '$3.2', perLane: '$3.2', basis: 'the mean of 1 lane(s) with a positive logged cost' }),
   budgetHaltText(state, { committed: '$6.4', detail: 'detail', budget: '$5' }),
   budgetTouchExpect(state).expect,
   budgetTouchExpect(state).consequence,
@@ -103,9 +103,9 @@ test('each builder (7c728631): a reported figure is a lower bound naming its lan
     assert.match(reported, /1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted/, reported);
   }
   assert.equal(analysis, 'budget: unmetered; lower bound $3.20 (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted)');
-  assert.equal(receipt, ' Spend: $3.2 booked, a lower bound (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted); ~$9.6 projected, adding 2 WP estimate(s) at $3.2 each (the mean of 1 lane(s) with a logged cost) for every unfinished WP and every finished WP (merged, refuted or dropped) whose lane logged no cost, against $25.');
+  assert.equal(receipt, ' Spend: $3.2 booked, a lower bound (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted); ~$9.6 projected, adding 2 WP estimate(s) at $3.2 each (the mean of 1 lane(s) with a positive logged cost) for every unfinished WP and every finished WP (merged, refuted or dropped) whose lane logged no cost, against $25.');
   assert.match(receiptSpendLine(MIXED, { booked: '$3.2', projected: '$30', wpsLeft: 2, perWp: '$13.4', basis: 'b', budget: '$25', crosses: true }), /against \$25: the projection crosses the budget\.$/);
-  assert.equal(detail, '$3.2 booked + $3.2 for the next WP; lanes estimated at $3.2 each, the mean of 1 lane(s) with a logged cost');
+  assert.equal(detail, '$3.2 booked + $3.2 for the next WP; lanes estimated at $3.2 each, the mean of 1 lane(s) with a positive logged cost');
   assert.equal(committedDetail(MIXED, { booked: '$0', live: 2, liveUsd: '$60', nextUsd: null, perLane: '$30', basis: 'b' }), '$0 booked + $60 for 2 live lane(s); lanes estimated at $30 each, b');
   assert.equal(halt, 'Spend is $6.4 committed (detail) against the $5 budget (unmetered; booked is a lower bound: 1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted)');
   assert.equal(rotated, 'lanes booked $3.20, a lower bound (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted)');
