@@ -162,13 +162,48 @@ function squashMerged(dir) {
   return { origin, repo, a, b };
 }
 
-test('custody (merged head): a squash-merged head is removed, since merging it adds nothing', (t) => {
+test('custody (merged head): a squash-merged head, with an unrelated file added on main since, is removed: every file it changed is identical there', (t) => {
   const { dir, run } = sandbox(t);
   const { repo, b } = squashMerged(dir);
   const row = closeOrphan(run, repo, detach(repo, dir, b));
   assert.equal(row.state, 'disposed', row.reason);
   assert.equal(row.gone, true);
-  assert.equal(row.reason, `removed: its HEAD ${b.slice(0, 12)} is on no ref; merging it into origin/main adds nothing (as last fetched; custody never fetches)`);
+  assert.equal(row.reason, `removed: its HEAD ${b.slice(0, 12)} is on no ref; every file it changed is identical in origin/main (as last fetched; custody never fetches)`);
+});
+
+test('custody (merged head, council C3): a squash that deletes a file is removed when the default branch lacks it too, and kept when it still has it', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  const kept = detach(repo, dir, 'origin/main', 'deleted-unlanded');
+  git(kept, 'rm', '-q', 'x.txt');
+  git(kept, 'commit', '-q', '-m', 'delete x, not landed');
+  assert.equal(closeOrphan(run, repo, kept).state, 'kept');
+  git(repo, 'switch', '-q', '-c', 'feat');
+  git(repo, 'rm', '-q', 'x.txt');
+  git(repo, 'commit', '-q', '-m', 'delete x');
+  const head = commit(repo, 'a.txt', 'a\n', 'a');
+  git(repo, 'push', '-q', 'origin', 'feat');
+  git(repo, 'switch', '-q', 'main');
+  git(repo, 'merge', '-q', '--squash', 'feat');
+  git(repo, 'commit', '-q', '-m', 'S');
+  git(repo, 'push', '-q', 'origin', 'main');
+  dropBranch(repo, 'feat');
+  const row = closeOrphan(run, repo, detach(repo, dir, head, 'deleted-landed'));
+  assert.equal(row.state, 'disposed', row.reason);
+  // main now lacks x.txt too, so the same close also disposed the first one.
+  assert.equal(run('list').output.entries.find((entry) => entry.id === kept).state, 'disposed');
+});
+
+// The narrowed claim (council round 3): only exact containment is proof, so
+// a squash whose file main edited again is kept and needs a hand close.
+test('custody (merged head, council C3): a squash-merged head whose file main edited again afterwards is kept', (t) => {
+  const { dir, run } = sandbox(t);
+  const { repo, b } = squashMerged(dir);
+  commit(repo, 'b.txt', 'b, edited on main\n', 'edit b after the squash');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const row = closeOrphan(run, repo, detach(repo, dir, b));
+  assert.equal(row.state, 'kept', row.reason);
+  assert.match(row.reason, /\(checked origin\/main\)$/);
 });
 
 // The narrowed claim (council round 2): patch-ids are not proof, so a rebase
@@ -281,23 +316,22 @@ test('custody (merged head): with no default-branch ref the worktree is kept and
   assert.match(row.reason, /is on no ref; removing it would orphan the commit \(no default-branch ref to check against\)$/);
 });
 
-test('custody (merged head): a merge-tree that exits nonzero keeps the worktree, even with a matching tree id', (t) => {
-  const trees = [];
+test('custody (merged head): an ls-tree that exits nonzero keeps the worktree, even with the matching entries on stdout', (t) => {
+  const listed = [];
   const failing = (args) => {
     const out = runArgv(['git', ...args], { timeout: 60_000 });
-    if (!args.includes('merge-tree')) return out;
-    trees.push(out.stdout.split(/\r?\n/)[0]);
+    if (!args.includes('ls-tree')) return out;
+    listed.push(out.stdout);
     return { ...out, code: 1 };
   };
   const { dir, run } = sandbox(t, { git: failing });
   const { repo, b } = squashMerged(dir);
   const row = closeOrphan(run, repo, detach(repo, dir, b));
   assert.equal(row.state, 'kept', row.reason);
-  // origin/HEAD resolves, so origin/main is the one candidate.
-  assert.deepEqual(trees, [git(repo, 'rev-parse', 'origin/main^{tree}').trim()], 'the injected merge-tree carried the matching tree id');
+  assert.ok(listed.length && listed.every((stdout) => /\ta\.txt\0/.test(stdout)), 'the injected ls-tree printed the real entries');
 });
 
-test('custody (merged head): a custom merge driver on a changed path skips the merge check', (t) => {
+test('custody (merged head): a custom keep-ours driver on a conflicting path is kept', (t) => {
   const { dir, run } = sandbox(t);
   const { repo } = originAndClone(dir);
   // keepours keeps %A, the candidate's side, and exits 0: a conflict reads as a no-op.
@@ -325,7 +359,38 @@ test('custody (merged head, review 4372983285): when origin/HEAD resolves, only 
   assert.match(row.reason, /is on no ref; removing it would orphan the commit \(checked origin\/master\)$/);
 });
 
-test('custody (merged head, review 4372983289/4372983294): a merge.default driver skips the merge check', (t) => {
+// Council round 3: the built-in union driver needs no merge.*.driver entry.
+// base one/two/three/four; the orphan deletes two, main changes it to TWO.
+function unionCase(t, select) {
+  const { dir, run } = sandbox(t);
+  const { repo } = originAndClone(dir);
+  select(repo);
+  commit(repo, 'f.txt', 'one\ntwo\nthree\nfour\n', 'base');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const worktree = detach(repo, dir, 'origin/main');
+  commit(worktree, 'f.txt', 'one\nthree\nfour\n', 'orphan deletes two');
+  commit(repo, 'f.txt', 'one\nTWO\nthree\nfour\n', 'main changes two');
+  git(repo, 'push', '-q', 'origin', 'main');
+  assert.throws(() => git(repo, 'config', '--get-regexp', '^merge\\..+\\.driver$'), 'no merge.*.driver entry is configured');
+  return closeOrphan(run, repo, worktree);
+}
+
+test('custody (merged head, council C3-1): merge=union on the changed path is kept', (t) => {
+  const row = unionCase(t, (repo) => {
+    writeFileSync(join(repo, '.gitattributes'), 'f.txt merge=union\n');
+    git(repo, 'add', '.gitattributes');
+  });
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+});
+
+test('custody (merged head, council C3-1/C3-2): merge.default=union, with no merge.*.driver entry, is kept', (t) => {
+  const row = unionCase(t, (repo) => git(repo, 'config', 'merge.default', 'union'));
+  assert.equal(row.state, 'kept', row.reason);
+  assert.equal(row.gone, false);
+});
+
+test('custody (merged head, review 4372983289/4372983294): merge.default naming a configured keep-ours driver is kept', (t) => {
   const { dir, run } = sandbox(t);
   const { repo } = originAndClone(dir);
   // No .gitattributes entry: merge.default names the driver for unspecified paths.
@@ -397,7 +462,7 @@ test('custody (merged head, council C2-3): a driver routed to a rename\'s destin
   assert.equal(row.gone, false);
 });
 
-test('custody (merged head, review 4372983297): diff.relative with a --repo below the top level still finds the driver on the changed path', (t) => {
+test('custody (merged head, review 4372983297): diff.relative with a --repo below the top level keeps a conflicting change under a keep-ours driver', (t) => {
   const { dir, run } = sandbox(t);
   const { repo } = originAndClone(dir);
   mkdirSync(join(repo, 'sub'));

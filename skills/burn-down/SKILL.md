@@ -353,8 +353,8 @@ For worktree-backed agent execution, the lane lifecycle is encoded in `${CLAUDE_
    worktree. Droppers run first, then links, then worktrees. Close keeps:
    - a locked or dirty worktree, one whose HEAD is on no ref, and one that an
      entry not yet disposed runs from. A HEAD with non-empty changes doesn't
-     count as "on no ref" here when merging it into the default branch, as
-     last fetched, adds nothing;
+     count as "on no ref" here when every file it changed is identical on
+     the default branch, as last fetched;
    - a path that is not a link;
    - anything whose `--live` check does not exit 1, or whose dropper refuses.
 

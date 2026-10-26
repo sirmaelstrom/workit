@@ -60,10 +60,10 @@ export const USAGE_TEXT = `custody <verb> --ledger <abs> [options] — one ledge
         junction: unlinked without entering it; a path that is not a link is kept.
         worktree: kept when locked, when it holds a link, when it has uncommitted
         changes or ignored files not declared disposable, when its HEAD is on
-        no ref unless merging it into the default branch, as last fetched,
-        adds nothing (custody never fetches; any configured merge driver
-        keeps it), or when an entry not yet disposed runs from inside it;
-        otherwise removed with workit's junction-safe teardown.
+        no ref unless every file it changed is identical on the default
+        branch, as last fetched (custody never fetches), or when an entry not
+        yet disposed runs from inside it; otherwise removed with workit's
+        junction-safe teardown.
         Others: --dispose after the --live check; exit 0 is disposed, anything
         else is kept with its exit and first stderr line.
         Exit 3 when anything was kept; exit 1 when a link's target came back
@@ -313,23 +313,24 @@ function closeWorktree(entry, deps, held) {
   if (!refs.stdout.trim()) {
     const orphan = `its HEAD ${sha.slice(0, 12)} is on no ref`;
     const branch = defaultBranch(entry.repo, deps);
-    if (!branch.candidate || !mergeAddsNothing(entry.repo, sha, branch.candidate, deps)) {
+    if (!branch.candidate || !identicalOn(entry.repo, sha, branch.candidate, deps)) {
       const checked = branch.candidate ? `(checked ${branch.candidate.name})`
         : branch.ambiguous ? `(default branch ambiguous: ${branch.ambiguous.join(', ')})` : '(no default-branch ref to check against)';
       return { op: 'kept', reason: `${orphan}; removing it would orphan the commit ${checked}` };
     }
-    reason = `removed: ${orphan}; merging it into ${branch.candidate.name} adds nothing (as last fetched; custody never fetches)`;
+    reason = `removed: ${orphan}; every file it changed is identical in ${branch.candidate.name} (as last fetched; custody never fetches)`;
   }
   const out = deps.removeWorktree(entry.repo, entry.id);
   return out.removed ? { op: 'disposed', reason } : { op: 'kept', reason: out.reason };
 }
 
 // A HEAD on no ref can still carry nothing the default branch lacks: its
-// branch was squash-merged, then deleted. The one proof accepted is that
-// merging HEAD into the default branch's tree, as last fetched, adds nothing.
+// branch was squash-merged, then deleted. The one proof accepted is exact
+// containment: the default branch, as last fetched, holds HEAD's mode and
+// object id for every file HEAD changed. Object ids are compared, never
+// content, so whitespace, attributes, merge drivers and filters play no part.
 // Custody never fetches: a remote-tracking ref behind the remote reads as
-// "not in it". Patch-id matches (git cherry) are not accepted: they ignore
-// whitespace and hunk position.
+// "not in it".
 const FALLBACK_LEVELS = [['refs/remotes/origin/main', 'refs/remotes/origin/master'], ['refs/heads/main', 'refs/heads/master']];
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const nonEmpty = (text) => String(text ?? '').split(/\r?\n/).filter((line) => line.trim());
@@ -358,9 +359,11 @@ function defaultBranch(repo, deps) {
   return {};
 }
 
-// Every diff the guard reads runs with --no-relative: diff.relative from a
-// --repo below the top level would drop the changes outside it.
-const DIFF_FLAGS = ['--no-relative', '--no-ext-diff', '--no-textconv'];
+// Every diff the guard reads runs with these: diff.relative from a --repo
+// below the top level would drop the changes outside it, and
+// diff.ignoreSubmodules would hide a submodule bump.
+const DIFF_FLAGS = ['--no-relative', '--ignore-submodules=none', '--no-ext-diff', '--no-textconv'];
+const PATH_BATCH = 200;
 
 // `git diff --quiet`: true for a change (exit 1), false for none (exit 0),
 // null for anything else.
@@ -369,13 +372,33 @@ function changes(deps, repo, from, to) {
   return out.code === 1 ? true : out.code === 0 ? false : null;
 }
 
-// True when merging <sha> into the candidate leaves the candidate's tree. A
-// nonzero exit or a malformed output is not shown, whatever stdout holds.
-function mergeAddsNothing(repo, sha, candidate, deps) {
+// Each path's { mode, type, id } in <tree>, by its full path: a Map, or null
+// when a call fails or prints a record that does not parse. A path absent
+// from the tree has no key. --full-tree reads paths from the top level,
+// whatever directory --repo names.
+function entriesIn(deps, repo, tree, paths) {
+  const found = new Map();
+  for (let i = 0; i < paths.length; i += PATH_BATCH) {
+    const out = deps.git(['-C', repo, '--literal-pathspecs', 'ls-tree', '-z', '--full-tree', tree, '--', ...paths.slice(i, i + PATH_BATCH)]);
+    if (out.code !== 0) return null;
+    for (const record of out.stdout.split('\0').filter(Boolean)) {
+      const match = /^(\d{6}) ([a-z]+) ([0-9a-f]+)\t(.+)$/s.exec(record);
+      if (!match || !OBJECT_ID.test(match[3])) return null;
+      found.set(match[4], { mode: match[1], type: match[2], id: match[3] });
+    }
+  }
+  return found;
+}
+
+// True when the candidate holds exactly <sha>'s version of every file <sha>
+// changed since its merge base: the same mode and object id for each added
+// or modified path, and no entry for each deleted one. Any other status, a
+// failed call or a malformed output is not shown, whatever stdout holds.
+function identicalOn(repo, sha, candidate, deps) {
   const git = (...args) => deps.git(['-C', repo, ...args]);
   // Prerequisites: one merge base, and a non-empty change made of non-empty,
   // non-merge commits. An --allow-empty orphan carries only its message, which
-  // a merge that "adds nothing" would not preserve.
+  // no comparison of files would preserve.
   const bases = git('merge-base', '--all', candidate.id, sha);
   const base = bases.code === 0 ? nonEmpty(bases.stdout) : [];
   if (base.length !== 1 || !OBJECT_ID.test(base[0].trim())) return false;
@@ -385,16 +408,24 @@ function mergeAddsNothing(repo, sha, candidate, deps) {
   const commits = nonEmpty(range.stdout).map((line) => line.trim().split(/\s+/));
   if (!commits.length || commits.some((ids) => ids.length !== 2 || changes(deps, repo, ids[1], ids[0]) !== true)) return false;
   if (changes(deps, repo, from, sha) !== true) return false;
-  // A custom merge driver can resolve a conflict to the candidate's side and
-  // fake the no-op, and attributes can route one to any path (in-tree, info,
-  // global, a rename's destination, merge.default). A driver runs only when
-  // one is configured, so any configured driver skips the proof. Exit 1 is
-  // no match; anything else is a driver or an unread config.
-  if (git('config', '--get-regexp', '^merge\\..+\\.driver$').code !== 1) return false;
-  const merged = git('-c', 'merge.renormalize=false', 'merge-tree', '--write-tree', candidate.id, sha);
-  const tree = git('rev-parse', '--verify', '--quiet', `${candidate.id}^{tree}`);
-  const result = merged.code === 0 ? (nonEmpty(merged.stdout)[0] ?? '').trim() : '';
-  return OBJECT_ID.test(result) && tree.code === 0 && result === tree.stdout.trim();
+  // -z: status NUL path NUL per path; --no-renames keeps R and C out.
+  const status = git('diff', '--name-status', '-z', '--no-renames', ...DIFF_FLAGS, from, sha);
+  if (status.code !== 0) return false;
+  const fields = status.stdout.split('\0');
+  if (fields.pop() !== '' || !fields.length || fields.length % 2) return false;
+  const changed = [];
+  for (let i = 0; i < fields.length; i += 2) changed.push({ status: fields[i], path: fields[i + 1] });
+  if (changed.some((file) => !['A', 'M', 'D'].includes(file.status) || !file.path)) return false;
+  const paths = changed.map((file) => file.path);
+  const mine = entriesIn(deps, repo, sha, paths);
+  const theirs = entriesIn(deps, repo, candidate.id, paths);
+  if (!mine || !theirs) return false;
+  return changed.every(({ status: kind, path }) => {
+    const at = mine.get(path);
+    const on = theirs.get(path);
+    if (kind === 'D') return !at && !on;
+    return Boolean(at && on) && at.mode === on.mode && at.id === on.id;
+  });
 }
 
 function closeByCommand(entry, deps) {
