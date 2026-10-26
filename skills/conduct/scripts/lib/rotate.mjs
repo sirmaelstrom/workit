@@ -9,6 +9,7 @@ import { ConductError, TERMINAL_PHASES, appendEvent } from './state.mjs';
 import { LIVE_STATES, laneOccupied } from './schedule.mjs';
 import { conductScript, shellLiteral, spineAckFailure } from './touch.mjs';
 import { runAuthority } from './authority.mjs';
+import { rotateSpendText } from './spend.mjs';
 import { HEARTBEAT_INSTRUCTION, adoptHeartbeat, heartbeatArgs, recordHeartbeatDelete, releaseWakeYield, retireConductorThreads } from './lanes.mjs';
 
 export const SESSION_LOG = 'session-chain.jsonl';
@@ -128,7 +129,7 @@ export function handoffText(state, rotation) {
   ];
   const lanes = state.wps.filter((wp) => LIVE_STATES.includes(wp.state) || laneOccupied(wp) || wp.queue?.length);
   const bookedUsd = state.wps.reduce((total, wp) => total + (Number(wp.lane?.costUsd) || 0), 0);
-  const spend = `lanes booked ${money(bookedUsd)} (the lane-only lower bound)`;
+  const spend = rotateSpendText(state, money(bookedUsd));
   const touches = (state.touches ?? []).filter((touch) => touch.status !== 'answered');
   const earlier = (state.rotations ?? []).filter((other) => other !== rotation);
   // A T3 successor binds custody to its own thread: no other thread, the outgoing conductor's included, can then move it.

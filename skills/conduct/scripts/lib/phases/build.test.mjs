@@ -21,7 +21,7 @@ import { laneOccupied } from '../schedule.mjs';
 import { recoverAction, runLandVerb } from '../land.mjs';
 import { analyzeRun } from '../analyze.mjs';
 import { shellArgv } from '../exec.mjs';
-import { acceptAnswer } from '../touch.mjs';
+import { acceptAnswer, touchAction } from '../touch.mjs';
 import { runConduct } from '../../conduct.mjs';
 
 // The section a lane PR body carries (lane contract § Finish; fca05d92).
@@ -1898,7 +1898,7 @@ test('budget, live lanes (8f433d11): two live lanes at $30 plus the next WP agai
   await drive(h, { until: (a) => a.part === 'announce' });
   const [touch] = h.state.touches;
   assert.ok(touch, `a budget touch opened; WP-04 is ${h.wp('WP-04').state}`);
-  assert.match(touch.question, /Spend is \$90 committed \(\$0 booked \+ \$60 for 2 live lane\(s\) \+ \$30 for the next WP; lanes at \$30 each, the repo config laneEstimateUsd\) against the \$80 budget \(unmetered/);
+  assert.match(touch.question, /Spend is \$90 committed \(\$0 booked \+ \$60 for 2 live lane\(s\) \+ \$30 for the next WP; lanes estimated at \$30 each, the repo config laneEstimateUsd\) against the \$80 budget \(unmetered; booked is a lower bound: /);
   assert.equal(h.wp('WP-04').state, 'pending', 'the third lane was never dispatched');
   assert.ok(!h.trace.some((a) => a.wpId === 'WP-04'));
 });
@@ -1918,6 +1918,110 @@ test('budget projection (8f433d11): every merge records booked spend and the pro
   const last = projections.at(-1).data;
   assert.deepEqual([last.wpsLeft, money(last.bookedUsd), last.projectedUsd], [0, money(2 * LANE_COST), money(2 * LANE_COST)]);
   assert.equal(money(last.perWpUsd), money(LANE_COST));
+});
+
+// 7c728631: lanes the run closed before this harness's own (merged WPs): exec
+// claude ones that logged a cost and T3 ones that logged none.
+const closedLane = (backend, extra = {}) => ({ backend, startedAt: new Date(T0).toISOString(), exitedAt: new Date(T0).toISOString(), ...extra });
+function spentHarness(t, lanes, opts = {}) {
+  const ids = lanes.map((_, i) => `WP-${String(5 + i).padStart(2, '0')}`);
+  const h = harness(t, { wps: [TWO[0], ...ids.map((id) => ({ id, files: [`lib/${id}.mjs`], state: 'merged' })), TWO[1], ...(opts.more ?? [])], ...opts });
+  ids.forEach((id, i) => Object.assign(h.wp(id), { agent: 'claude', lane: lanes[i] }));
+  return h;
+}
+const MIXED_LANES = () => [closedLane('exec', { costUsd: 3.2 }), closedLane('t3', { costUsd: null }), closedLane('t3')];
+const COUNTED = /\d+ (exec claude|T3|herdr|codex) lanes?/;
+
+test('spend labels, budget halt (7c728631): a mixed run\'s halt is a lower bound counting 1 exec claude lane and 2 uncounted T3 lanes; the raise and its refusal name the committed spend with no counts', async (t) => {
+  const h = spentHarness(t, MIXED_LANES(), { budget: 5 });
+  await drive(h, { until: (a) => a.part === 'announce' });
+  const [touch] = h.state.touches;
+  assert.equal(touch.build, 'budget');
+  // M5: the numbers are today's: $3.2 booked plus the next WP at the mean of the one logged lane cost.
+  assert.match(touch.question, /Spend is \$6\.4 committed \(\$3\.2 booked \+ \$3\.2 for the next WP; lanes estimated at \$3\.2 each, the mean of 1 lane\(s\) with a positive logged cost\) against the \$5 budget \(unmetered; booked is a lower bound: 1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted\)\./);
+  assert.equal(touch.spendUsd, 6.4);
+  const expect = touch.question.slice(touch.question.indexOf('EXPECT:'));
+  // C1-5: the raise is asked above the committed spend, the figure the refusal compares.
+  assert.match(expect, /\(a\) answered with the text "budget <USD>" above the committed spend \(the lower bound plus lane estimates\) raises the ceiling to it, and the committed spend is checked against it;/);
+  assert.doesNotMatch(expect, COUNTED);
+  assert.doesNotMatch(`${touch.question} ${touch.options[0].consequence}`, /current spend/);
+  assert.match(touch.options[0].consequence, /^Type "budget <USD>", above the committed spend \(the lower bound plus lane estimates\); the committed spend is checked against it\.$/);
+  assert.doesNotMatch(touch.options[0].consequence, COUNTED);
+  await recordPending(h, {});
+  answerCore(h, 1, 'a', 'budget 6');
+  h.trace.push(await step(h));
+  assert.equal(h.state.touches[0].refusal, '(a) needs the text "budget <USD>" above the committed spend of $6.4 (the lower bound plus lane estimates)');
+  assert.equal(h.state.authority.budgetUsd, 5);
+  // An exec claude run that logged $3.20 counts it and names no other lane.
+  const exec = spentHarness(t, [closedLane('exec', { costUsd: 3.2 })], { budget: 5 });
+  await drive(exec, { until: (a) => a.part === 'announce' });
+  assert.match(exec.state.touches[0].question, /against the \$5 budget \(unmetered; booked is a lower bound: 1 exec claude lane logged its cost\)\./);
+});
+
+test('spend labels, halt truncation (7c728631): a budget halt with a long reason, cut to the cap, still says "lower bound" and lists (a) and (b)', async (t) => {
+  const h = spentHarness(t, MIXED_LANES(), { budget: 5 });
+  await drive(h, { until: (a) => a.part === 'announce' });
+  const [touch] = h.state.touches;
+  const long = { ...touch, status: 'open', channel: 'unattended', filings: 0, question: touch.question.replace('not counted).', `not counted${' and so on'.repeat(250)}).`) };
+  const state = { ...h.state, touches: [long], adapters: { ...h.state.adapters, spine: { on: true } }, intent: { ...h.state.intent, anchor: ANCHOR } };
+  const filed = touchAction(state, long, { env: { WORKIT_UNATTENDED: '1' } }).args.question;
+  assert.ok(long.question.length > 2000 && filed.length <= 2000, `${long.question.length} → ${filed.length}`);
+  assert.match(filed, /booked is a lower bound: 1 exec claude lane logged its cost/);
+  assert.match(filed, /\(a\) Raise the budget/);
+  assert.match(filed, /\(b\) Stop new paid lane work/);
+});
+
+test('spend labels, merge receipt (7c728631): the receipt\'s booked figure is a lower bound counting 1 exec claude lane and 2 uncounted T3 lanes; the estimate covers merged lanes that logged no cost', async (t) => {
+  const h = spentHarness(t, [closedLane('t3', { costUsd: null }), closedLane('t3')], { spine: true, budget: 100 });
+  assert.equal(await drive(h), null);
+  const receipt = h.trace.find((a) => a.tool === 'spine_receipt' && a.args.questId === QUEST('WP-02') && a.args.outcome === 'completed');
+  const money = (usd) => Math.round(usd * 100) / 100;
+  const projection = h.events().find((e) => e.event === 'spend-projection' && e.data.wpId === 'WP-02').data;
+  // M5: the event's numbers: the merged lane's cost, and both T3 lanes projected at its mean.
+  assert.deepEqual([money(projection.bookedUsd), projection.wpsLeft, money(projection.perWpUsd), projection.projectedUsd], [money(LANE_COST), 2, money(LANE_COST), money(3 * LANE_COST)]);
+  assert.ok(receipt.args.did.includes(` Spend: $${money(LANE_COST)} booked, a lower bound (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted); ~$${projection.projectedUsd} projected, adding 2 WP estimate(s) at $${money(LANE_COST)} each (the mean of 1 lane(s) with a positive logged cost) for every unfinished WP and every finished WP (merged, refuted or dropped) whose lane logged no cost, against $100.`), receipt.args.did);
+  assert.doesNotMatch(receipt.args.did, /not yet booked/);
+});
+
+test('spend labels, receipt with a live costed WP (7c728631, council C-4): an unfinished WP whose live exec claude lane logged $3.20 is in booked and in N, and is not called cost-less', async (t) => {
+  const h = harness(t, { spine: true, budget: 100 });
+  h.life = { 'WP-03': 40 };
+  await drive(h, { until: (a) => a.step === 'merge' && a.wpId === 'WP-02' });
+  assert.ok(LIVE.includes(h.wp('WP-03').state) && laneOccupied(h.wp('WP-03')), `WP-03 is ${h.wp('WP-03').state}`);
+  // An amended live lane carries its earlier sessions' cost.
+  h.wp('WP-03').lane.costUsd = 3.2;
+  await drive(h, { until: (a) => a.tool === 'spine_receipt' && a.args.questId === QUEST('WP-02') });
+  const money = (usd) => Math.round(usd * 100) / 100;
+  const { did } = h.trace.at(-1).args;
+  assert.ok(did.includes(` Spend: $${money(LANE_COST + 3.2)} booked, a lower bound (2 exec claude lanes logged their cost); `), did);
+  assert.match(did, /adding 1 WP estimate\(s\) at /);
+  // C1-3: the mean counts the live lane's logged cost, so the basis does not call it closed.
+  assert.match(did, /each \(the mean of 2 lane\(s\) with a positive logged cost\)/);
+  assert.doesNotMatch(did, /not yet booked|log(?:s|ged)? none|cost-less/);
+});
+
+test('laneProjection basis (C2-2, C2-3): a logged $0 is not in the mean and the basis says "positive"; a partial cost in the mean is named; the numbers are unchanged', () => {
+  const deps = { exists: () => false };
+  const at = new Date(T0).toISOString();
+  const state = (lanes) => ({ intent: { repo: { path: '/repo' } }, wps: lanes.map((lane, i) => ({ id: `WP-0${i + 1}`, lane: { backend: 'exec', startedAt: at, exitedAt: at, ...lane } })) });
+  assert.deepEqual(build.laneProjection(state([{ costUsd: 0 }, { costUsd: 10 }]), deps), { usd: 10, basis: 'the mean of 1 lane(s) with a positive logged cost' });
+  assert.deepEqual(build.laneProjection(state([{ costUsd: 0.5, costComplete: false }, { costUsd: 10, costComplete: true }]), deps),
+    { usd: 5.25, basis: 'the mean of 2 lane(s) with a positive logged cost, 1 of them partial (a lower bound)' });
+  // A partial lane with no positive cost is not in the mean, so it is not named.
+  assert.deepEqual(build.laneProjection(state([{ costUsd: 0, costComplete: false }, { costUsd: 4 }]), deps), { usd: 4, basis: 'the mean of 1 lane(s) with a positive logged cost' });
+  assert.deepEqual(build.laneProjection(state([{ costUsd: 0 }]), deps), { usd: 15, basis: 'the default estimate' });
+});
+
+test('registered hook, BOM (re-plan 1, workit#330): a BOM + CRLF settings.local.json\'s Stop hook makes a lane diff touching its script T2 registered-hook', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  await drive(h, { until: (a) => a.step === 'start' && a.wpId === 'WP-02' });
+  const { worktree } = h.wp('WP-02').lane;
+  mkdirSync(join(worktree, '.claude'), { recursive: true });
+  const settings = { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node scripts/custom-stop.mjs' }] }] } };
+  writeFileSync(join(worktree, '.claude', 'settings.local.json'), `﻿${JSON.stringify(settings, null, 2).replace(/\n/g, '\r\n')}\r\n`);
+  h.diff = { 'WP-02': 'scripts/custom-stop.mjs\n' };
+  await drive(h, { until: () => Boolean(h.wp('WP-02').tierDecision) });
+  assert.deepEqual(h.wp('WP-02').tierDecision, { tier: 'T2', rule: 'registered-hook', path: 'scripts/custom-stop.mjs' });
 });
 
 test('lane deadline: an injected clock past lane.deadline blocks that WP ("lane deadline") while the other WP merges', async (t) => {
@@ -2621,7 +2725,7 @@ test('authority only (D19.1): authority.budgetUsd below the lane-only sum halts 
   assert.equal(h.wp('WP-03').state, 'pending');
   assert.ok(h.state.dispatchHalt);
   const cost = Math.round(LANE_COST * 100) / 100;
-  assert.match(h.state.touches[0].question, new RegExp(`committed \\(\\$${cost} booked \\+ .*\\) against the \\$0\\.5 budget \\(unmetered: booked is the lane-only lower bound\\)`));
+  assert.match(h.state.touches[0].question, new RegExp(`committed \\(\\$${cost} booked \\+ .*\\) against the \\$0\\.5 budget \\(unmetered; booked is a lower bound: 1 exec claude lane logged its cost\\)`));
 });
 
 function pendingRuns(h, id, count) {
@@ -3705,10 +3809,10 @@ test('budget before amendment prompts (C1-2, C1-5): an over-budget amendment is 
   assert.ok(!of(h, 'WP-02').slice(of(h, 'WP-02').indexOf(brief)).some((a) => a.step === 'prompt'), 'not prompted while over budget');
   const spend = h.state.touches[0].spendUsd;
   assert.ok(spend >= 1.5, String(spend));
-  assert.match(h.state.touches[0].question, /committed \(.*\) against the \$1\.5 budget \(unmetered: booked is the lane-only lower bound\)/);
+  assert.match(h.state.touches[0].question, /committed \(.*\) against the \$1\.5 budget \(unmetered; booked is a lower bound: /);
   assert.equal(h.state.touches[0].allowFreeText, true);
   assert.match(h.state.touches[0].question, /\(b\) no new paid lane work \(no dispatch, lane start, prompt or fallback\); work already at a PR boundary may still be reviewed and landed/);
-  const refusals = [[null, /needs the text "budget <USD>"/], ['budget 1', new RegExp(`above the current spend of \\$${String(spend).replace('.', '\\.')}`)], ['budget 1.5k', /needs the text "budget <USD>"/], ['budget 1,50', /needs the text/]];
+  const refusals = [[null, /needs the text "budget <USD>"/], ['budget 1', new RegExp(`above the committed spend of \\$${String(spend).replace('.', '\\.')} \\(the lower bound plus lane estimates\\)`)], ['budget 1.5k', /needs the text "budget <USD>"/], ['budget 1,50', /needs the text/]];
   for (const [text, refused] of refusals) {
     await recordPending(h, {});
     answerCore(h, 1, 'a', text);
@@ -3735,7 +3839,7 @@ test('budget in session (spine): an (a) without "budget <USD>" is refused and as
   const again = await drive(h, { until: (a) => a.part === 'ask' && Boolean(h.state.touches[0]?.refusal) });
   assert.equal(h.state.touches[0].build, 'budget');
   assert.equal(h.state.touches[0].answer, null);
-  assert.match(again.instruction, /Their last answer could not be used \(\(a\) needs the text "budget <USD>" above the current spend/);
+  assert.match(again.instruction, /Their last answer could not be used \(\(a\) needs the text "budget <USD>" above the committed spend of \$[\d.]+ \(the lower bound plus lane estimates\)/);
   assert.equal(h.state.authority.budgetUsd, 1.5);
   text = 'budget 25';
   assert.equal(await drive(h), null);
@@ -4011,9 +4115,9 @@ test('budget (b) (C2-1, C2-2): no prompt after (b) for a second WP, which blocks
   await drive(h, { until: (a) => a.part === 'announce' });
   assert.match(h.state.touches[0].question, /\(b\) no new paid lane work \(no dispatch, lane start, prompt or fallback\); work already at a PR boundary may still be reviewed and landed/);
   assert.equal(h.state.touches[0].options[1].label, 'Stop new paid lane work');
-  // M4: the raise names the lane-only lower bound; nothing says metering goes on.
-  assert.match(h.state.touches[0].question, /raises the ceiling to it, and the lane-only lower bound is checked against it;/);
-  assert.match(h.state.touches[0].options[0].consequence, /booked lane cost is checked against it\.$/);
+  // M4: the raise names the committed spend (the lower bound plus estimates); nothing says metering goes on.
+  assert.match(h.state.touches[0].question, /above the committed spend \(the lower bound plus lane estimates\) raises the ceiling to it, and the committed spend is checked against it;/);
+  assert.match(h.state.touches[0].options[0].consequence, /above the committed spend \(the lower bound plus lane estimates\); the committed spend is checked against it\.$/);
   assert.doesNotMatch(`${h.state.touches[0].question} ${h.state.touches[0].options.map((o) => o.consequence).join(' ')}`, /metering|meter reading/i);
   await recordPending(h, {});
   answerCore(h, 1, 'b');

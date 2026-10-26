@@ -57,7 +57,22 @@ test('rotate (d3ce5461): refused at the showcase and in a terminal phase; the ha
   const text = handoffText(s, s.rotations[0]);
   assert.match(text, /^- Approved scope \(binding; it can be narrower than the goal\): only WP-01 and WP-02 \(grant `.+1-grant\.json`\); operator notes: no release$/m);
   assert.match(text, /next --run .+ --custody 1`/);
-  assert.match(text, /^- Authority: merge true, release false, budget \$50\.00 \(unmetered\); lanes booked \$0\.00 \(the lane-only lower bound\)$/m);
+  assert.match(text, /^- Authority: merge true, release false, budget \$50\.00 \(unmetered\); lanes booked \$0\.00, a lower bound \(no lane has started\)$/m);
+});
+
+test('rotate spend (7c728631): the handoff\'s booked figure is a lower bound naming the lanes it counted and the T3 lanes it did not', () => {
+  const at = '2026-10-16T02:00:00.000Z';
+  const done = (id, backend, extra = {}) => ({ id, state: 'merged', agent: 'claude', queue: [], lane: { backend, startedAt: at, exitedAt: at, ...extra } });
+  const authority = (s) => {
+    rotate(s, { why: 'context' }, deps());
+    return handoffText(s, s.rotations[0]).split('\n').find((row) => row.startsWith('- Authority:'));
+  };
+  const mixed = state({ wps: [done('WP-01', 'exec', { costUsd: 3.2 }), done('WP-02', 't3', { costUsd: null }), done('WP-03', 't3')] });
+  assert.equal(authority(mixed), '- Authority: merge true, release false, budget $50.00 (unmetered); lanes booked $3.20, a lower bound (1 exec claude lane logged its cost; 2 T3 lanes log none and are not counted)');
+  const t3 = state({ wps: [done('WP-00', 't3')] });
+  t3.intent.backend = { name: 't3', t3Project: 'p' };
+  assert.match(authority(t3), /lanes booked \$0\.00, a lower bound \(1 T3 lane logs none and is not counted\)$/);
+  assert.match(authority(state({ wps: [done('WP-01', 'exec', { costUsd: 3.2 })] })), /lanes booked \$3\.20, a lower bound \(1 exec claude lane logged its cost\)$/);
 });
 
 test('custody retire (d3ce5461): with no chain row naming r1\'s session for this handoff and pane, custody asks for confirmation instead of retiring a bare pane id; with one, the retire carries --expect-session', () => {

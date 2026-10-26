@@ -964,7 +964,7 @@ test('the analysis: headings in order; seam rows; runtime exercise from an amend
   // C1-3: the runtime row cites the checks that stored each verdict.
   const checks = h.state().wps.map((wp) => wp.runtimeVerdictBy.actionId);
   assert.equal(row(analysis, 'runtime-exercise'), `- runtime-exercise: owned (${checks.join(', ')})`);
-  assert.match(section(analysis, 'Pre-approval audit'), /^- budget: unmetered; lane-only lower bound \$0\.75 /m);
+  assert.match(section(analysis, 'Pre-approval audit'), /^- budget: unmetered; lower bound \$0\.75 \(3 exec claude lanes logged their cost\)$/m);
   assert.match(section(analysis, 'Pre-approval audit'), /^- merges: 4$/m);
   for (const seamRow of ['spec-depth', 'workshop-scaffold', 'spec-review']) assert.match(row(analysis, seamRow), /^- \S+: owned \(\d+-spec\)$/);
 });

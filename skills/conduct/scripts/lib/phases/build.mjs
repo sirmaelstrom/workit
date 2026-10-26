@@ -40,6 +40,8 @@ import {
   QUESTION_MAX, TOUCH_WAIT_MS, answerCommand, conductScript, filedLength, handBackAction, openTouch, recordTouch, spineAckFailure, spineAckStop, touchAction, touchParked, writeTouchFiles,
 } from '../touch.mjs';
 import { budgetAmount, runAuthority } from '../authority.mjs';
+import { DEFAULT_LANE_ESTIMATE_USD, budgetHaltText, budgetTouchExpect, committedDetail, raiseRefusalText, receiptSpendLine } from '../spend.mjs';
+import { parseJsonKeepingForm } from '../json-file.mjs';
 import { preapprovedRef } from './spec.mjs';
 
 // The lane-contract template's run-level slot prefixes (D17). `<repo A` also
@@ -132,7 +134,8 @@ function registeredHookCommands(wp, deps) {
   for (const path of ['settings.json', '.claude/settings.json', '.claude/settings.local.json', '.codex/settings.json', '.agents/settings.json']) {
     const text = readText(deps, join(wp.lane.worktree, path));
     if (!text) continue;
-    try { walk(JSON.parse(text).hooks); } catch { /* a changed settings file is T2 by path */ }
+    // A BOM-led file parses past its BOM, so its hooks are not skipped.
+    try { walk(parseJsonKeepingForm(text).value.hooks); } catch { /* a changed settings file is T2 by path */ }
   }
   return commands;
 }
@@ -175,7 +178,7 @@ function legacyConfig(state, deps) {
   return deps.exists(path) ? readJsonFile(deps, path, 'repo config') : {};
 }
 
-function repoConfig(state, deps) {
+export function repoConfig(state, deps) {
   return pinnedConfig(state) ?? legacyConfig(state, deps);
 }
 
@@ -858,13 +861,14 @@ function haltTouch(state, deps, reason, why, spendUsd = null) {
   const halts = (state.build.halts ??= []);
   if (why === 'budget' && halts.some((halt) => halt.kind === 'budget')) return;
   const budget = why === 'budget';
+  const raise = budgetTouchExpect(state);
   const options = budget
-    ? [option('a', 'Raise the budget', 'Type "budget <USD>", above the current spend; booked lane cost is checked against it.'),
+    ? [option('a', 'Raise the budget', raise.consequence),
       option('b', 'Stop new paid lane work', 'No dispatch, start, prompt or fallback; PRs already up may still land.')]
     : [option('a', 'Resume dispatch', 'This halt is cleared.'), option('b', 'End the build', 'Live lanes finish; nothing new is dispatched.')];
   const touch = buildTouch(state, deps, why, {
     question: budget
-      ? `DO: decide whether conduct ${state.slug} spends more. ${reason}. EXPECT: (a) answered with the text "budget <USD>" above the current spend raises the ceiling to it, and the lane-only lower bound is checked against it; (b) no new paid lane work (no dispatch, lane start, prompt or fallback); work already at a PR boundary may still be reviewed and landed, and the build ends.`
+      ? `DO: decide whether conduct ${state.slug} spends more. ${reason}. EXPECT: ${raise.expect}; (b) no new paid lane work (no dispatch, lane start, prompt or fallback); work already at a PR boundary may still be reviewed and landed, and the build ends.`
       : `DO: decide whether conduct ${state.slug} dispatches more lanes. ${reason}. EXPECT: (a) this halt is cleared; dispatch resumes once no other halt is open; (b) no new lane starts, the live ones finish, and the build ends.`,
     options,
     allowFreeText: budget,
@@ -1073,7 +1077,7 @@ function answerRunTouch(state, touch, deps) {
   }
   if (touch.build === 'budget') {
     const usd = budgetAmount(text);
-    if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, `(a) needs the text "budget <USD>" above the current spend of $${touch.spendUsd ?? 'unknown'}`, deps);
+    if (!(usd > (touch.spendUsd ?? 0))) return refuse(state, touch, raiseRefusalText(state, `$${touch.spendUsd ?? 'unknown'}`), deps);
     state.authority.budgetUsd = usd;
     state.authority.budgetSource = { touch: touch.n, by: touch.answer.by, answeredAt: touch.answer.answeredAt, text };
   }
@@ -1254,7 +1258,8 @@ function mergedAfter(state, wp, deps, spend) {
   if (spineOn(state) && wp.questId) {
     const money = (usd) => Math.round(usd * 100) / 100;
     const { bookedUsd, projectedUsd, wpsLeft, perWpUsd, basis, budgetUsd } = spend;
-    const spendLine = ` Spend: $${money(bookedUsd)} booked; ~$${projectedUsd} projected with ${wpsLeft} WP(s) not yet booked at $${money(perWpUsd)} each (${basis}), against $${budgetUsd}${projectedUsd >= budgetUsd ? ': the projection crosses the budget' : ''}.`;
+    const spendLine = receiptSpendLine(state, { booked: `$${money(bookedUsd)}`, projected: `$${projectedUsd}`, wpsLeft, perWp: `$${money(perWpUsd)}`, basis,
+      budget: `$${budgetUsd}`, crosses: projectedUsd >= budgetUsd });
     const tool = (part, name, args) => ({ kind: 'agent-tool', step: 'receipt', part, tool: name, args, expects: { type: 'json' }, instruction: `Call ${name} with these args and record its raw result.` });
     after.push(tool('completed', 'spine_receipt', { questId: wp.questId, outcome: 'completed', did: `${wp.id} (${wp.name}) merged as PR #${number} at ${sha}.${spendLine}`,
       stoppedAt: `merged by conduct ${state.slug}`, producedArtifacts: [{ type: 'pr', locator: `https://github.com/${state.intent.repo.remote}/pull/${number}`, rel: 'remedy' }] }));
@@ -1618,20 +1623,24 @@ function deferrals(state, deps) {
 
 // Before each dispatch and each paid lane action (`purpose` is 'dispatch' or
 // the WP id): a start (exec `lane spawn` carries the first prompt), a prompt
-// or a fallback. The lane-only lower bound (D16, D19.28). Returns null (go),
+// or a fallback. The committed spend: the lower bound plus lane estimates (D16, D19.28). Returns null (go),
 // 'halted' or 'ended'.
 const paid = (action) => ['shell', 'agent-tool'].includes(action.kind) && ['start', 'prompt', 'fallback'].includes(action.step);
 const budgetEnded = (state) => (state.build.halts ?? []).some((entry) => entry.kind === 'budget' && entry.ended);
 
 // What spend does not show yet. A lane books its cost when it closes (in the
 // lane log), so every live lane is counted at the per-WP projection, and a dispatch adds one more for the WP it
-// starts. The projection is the mean cost of the lanes closed so far, else the
-// repo config's laneEstimateUsd, else DEFAULT_LANE_ESTIMATE_USD. It over- rather
-// than under-counts: a live lane's earlier sessions may already be booked.
-const DEFAULT_LANE_ESTIMATE_USD = 15;
-function laneProjection(state, deps) {
+// starts. The projection is the mean of the lanes' positive logged costs so far
+// (a live lane's included once it has logged one; a logged $0 is left out),
+// else the repo config's laneEstimateUsd, else DEFAULT_LANE_ESTIMATE_USD. It
+// leans high where a live lane's earlier sessions are already booked, and low
+// where a cost in the mean is partial (`costComplete: false`, a killed lane's
+// lower bound): the basis names the partial ones.
+export function laneProjection(state, deps) {
   const closed = state.wps.map((wp) => Number(wp.lane?.costUsd)).filter((cost) => Number.isFinite(cost) && cost > 0);
-  if (closed.length) return { usd: closed.reduce((a, b) => a + b, 0) / closed.length, basis: `the mean of ${closed.length} closed lane(s)` };
+  const partial = state.wps.filter((wp) => wp.lane?.costComplete === false && Number(wp.lane?.costUsd) > 0 && Number.isFinite(Number(wp.lane.costUsd))).length;
+  const partialNote = partial ? `, ${partial} of them partial (a lower bound)` : '';
+  if (closed.length) return { usd: closed.reduce((a, b) => a + b, 0) / closed.length, basis: `the mean of ${closed.length} lane(s) with a positive logged cost${partialNote}` };
   const configured = Number(repoConfig(state, deps).laneEstimateUsd);
   if (Number.isFinite(configured) && configured >= 0) return { usd: configured, basis: 'the repo config laneEstimateUsd' };
   return { usd: DEFAULT_LANE_ESTIMATE_USD, basis: 'the default estimate' };
@@ -1643,8 +1652,8 @@ function committed(state, deps, purpose, bookedUsd) {
   const next = purpose === 'dispatch' ? 1 : 0;
   const money = (usd) => Math.round(usd * 100) / 100;
   const usd = money(bookedUsd + (live + next) * projection.usd);
-  const parts = [`$${money(bookedUsd)} booked`, ...(live ? [`$${money(live * projection.usd)} for ${live} live lane(s)`] : []), ...(next ? [`$${money(projection.usd)} for the next WP`] : [])];
-  return { usd, detail: `${parts.join(' + ')}; lanes at $${money(projection.usd)} each, ${projection.basis}` };
+  return { usd, detail: committedDetail(state, { booked: `$${money(bookedUsd)}`, live, liveUsd: live ? `$${money(live * projection.usd)}` : null,
+    nextUsd: next ? `$${money(projection.usd)}` : null, perLane: `$${money(projection.usd)}`, basis: projection.basis }) };
 }
 
 function budgetGate(state, deps, purpose) {
@@ -1654,7 +1663,8 @@ function budgetGate(state, deps, purpose) {
   const sum = state.wps.reduce((total, wp) => total + (Number(wp.lane?.costUsd) || 0), 0);
   const spend = committed(state, deps, purpose, sum);
   if (spend.usd < budget) return null;
-  haltTouch(state, deps, `Spend is $${spend.usd} committed (${spend.detail}) against the $${budget} budget (unmetered: booked is the lane-only lower bound)`, 'budget', spend.usd);
+  const reason = budgetHaltText(state, { committed: `$${spend.usd}`, detail: spend.detail, budget: `$${budget}` });
+  haltTouch(state, deps, reason, 'budget', spend.usd);
   return 'halted';
 }
 

@@ -5,7 +5,9 @@ import { ConductError } from '../state.mjs';
 import { ADAPTERS, AGENTS, laneModel } from '../adapters.mjs';
 import { QUESTION_MAX, filedLength, openTouch, touchAction, recordTouch } from '../touch.mjs';
 import { chooseBackend } from '../lanes.mjs';
-import { configLine } from '../repo-config.mjs';
+import { configLine, pinnedConfig } from '../repo-config.mjs';
+import { touchOneBudgetLine, touchOneEstimate } from '../spend.mjs';
+import { repoConfig } from './build.mjs';
 
 const GRANT_KEYS = ['merge', 'release', 'budgetUsd', 'scope'];
 
@@ -65,9 +67,16 @@ function touchOne(state, deps = {}, { bound = false } = {}) {
   const ci = intent.ciWorkflows ?? 0;
   const noCi = ci === 0;
   const release = intent.release !== null;
-  const budget = `Budget: $${intent.budgetUsd} unmetered: exec claude lanes' total_cost_usd is summed as a lane-only lower bound and enforced as one.`;
   // The backend dispatch will pick: a herdr server that answers runs headless lanes for a repo outside a projects tree.
   const lanes = chooseBackend(state, deps);
+  // The budget line names the backend's uncounted lanes. Intake's bound takes
+  // the longest wording, since the backend can change between intake and `next`.
+  // The estimate is the one the budget gate starts from: build.mjs repoConfig
+  // (the pinned config, else the legacy repo file), else the default. With no
+  // file reader in deps (a projection in tests), the pinned config alone.
+  const estimate = touchOneEstimate(typeof deps.exists === 'function' ? repoConfig(state, deps) : pinnedConfig(state));
+  const budgetLine = (backend) => touchOneBudgetLine({ budgetUsd: intent.budgetUsd, backend, agent: intent.agent, estimate });
+  const budget = bound ? ['t3', 'herdr', 'exec'].map(budgetLine).reduce((a, b) => (b.length > a.length ? b : a)) : budgetLine(lanes.backend);
   const herdr = lanes.backend === 'herdr' && !bound;
   const headless = 'headless (exec), with nothing to watch while they work';
   // Why a herdr server that answers still runs headless lanes. It reads the

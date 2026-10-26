@@ -8,6 +8,7 @@ import { firstLine } from './adapters.mjs';
 import { analysisLine as repoConfigLine } from './repo-config.mjs';
 import { runAuthority } from './authority.mjs';
 import { T3_HEARTBEAT_MS, unresolvedHeartbeats } from './lanes.mjs';
+import { analysisBudgetLine } from './spend.mjs';
 
 const VERDICT_TEXT = { exercised: 'exercised', vacuous: 'vacuous', 'not-exercised': 'not exercised', 'no-surface': 'no runtime surface', missing: 'missing' };
 const SPEC_ROWS = ['spec-depth', 'workshop-scaffold', 'spec-review'];
@@ -251,9 +252,14 @@ function preapproval(state) {
     const owner = left.conductor ? ` (conductor r${left.conductor}${left.thread ? `, thread ${left.thread}` : ''})` : '';
     out.push(`- unresolved cleanup: T3 heartbeat ${left.taskId}${owner} is not deleted after ${left.attempts} attempts${left.error ? ` (last error: ${left.error})` : ''}; it starts a turn in that thread every ${T3_HEARTBEAT_MS / 60000} minutes until it is. Call delete_scheduled_task with ${JSON.stringify({ scheduledTaskId: left.taskId })}.`);
   }
-  const lower = state.wps.reduce((sum, wp) => sum + (Number(wp.lane?.costUsd) || 0), 0);
-  out.push(`- budget: unmetered; lane-only lower bound ${usd(lower)} (exec claude lanes' total_cost_usd; codex and herdr lanes not counted)`);
+  out.push(`- ${budgetAuditLine(state)}`);
   return out;
+}
+
+// The audit's budget line: the lanes' logged cost, a lower bound, with what it counted.
+export function budgetAuditLine(state) {
+  const lower = state.wps.reduce((sum, wp) => sum + (Number(wp.lane?.costUsd) || 0), 0);
+  return analysisBudgetLine(state, usd(lower));
 }
 
 export async function analyzeRun(runDir, deps) {
