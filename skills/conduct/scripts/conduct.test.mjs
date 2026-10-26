@@ -2013,7 +2013,10 @@ test('fixture paths: no private-path, host-name or LAN-URL shapes under __fixtur
 
 test('spawnDetached + pidAlive', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'workit-conduct-spawn-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // The detached child ran with this dir as its cwd. On Windows the dir can
+  // stay locked for a moment after pidAlive reads the child gone, so under a
+  // loaded full suite a bare rmSync fails EPERM: retry, as Node's rm allows.
+  t.after(() => rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));
   const logPath = join(dir, 'lane.log');
   const { pid } = spawnDetached(process.execPath, ['-e', 'setTimeout(()=>{},1500)'], { cwd: dir, logPath, env: process.env });
   assert.ok(Number.isInteger(pid) && pid > 0);
