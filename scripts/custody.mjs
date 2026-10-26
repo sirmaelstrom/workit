@@ -59,9 +59,19 @@ export const USAGE_TEXT = `custody <verb> --ledger <abs> [options] — one ledge
         --by), in the order ${KINDS.join(' → ')}.
         junction: unlinked without entering it; a path that is not a link is kept.
         worktree: kept when locked, when it holds a link, when it has uncommitted
-        changes or ignored files not declared disposable, when its HEAD is on
-        no ref, or when an entry not yet disposed runs from inside it;
-        otherwise removed with workit's junction-safe teardown.
+        changes or ignored files not declared disposable, when an entry not
+        yet disposed runs from inside it, and in a repo with grafts or shallow
+        history (every worktree there, even one whose HEAD is on a ref). A
+        HEAD on no ref is kept unless all of these hold: the default branch
+        is readable and unambiguous (origin/HEAD's target, else exactly one of
+        origin/main and origin/master, else of main and master), as last
+        fetched (custody never fetches); HEAD has exactly one merge base with
+        it; the range holds no merge or empty commit; its net change is
+        non-empty and only adds, modifies or deletes; no path a commit in the
+        range touched is missing from the net change; git's output is not
+        lossy; and every file the net change touches is identical there (same
+        mode and object id; a deleted file absent). Otherwise removed with
+        workit's junction-safe teardown.
         Others: --dispose after the --live check; exit 0 is disposed, anything
         else is kept with its exit and first stderr line.
         Exit 3 when anything was kept; exit 1 when a link's target came back
@@ -302,14 +312,214 @@ function closeWorktree(entry, deps, held) {
   if (changed.length) return { op: 'kept', reason: `uncommitted changes: ${changed[0]}` };
   const ignored = lines.filter((line) => line.startsWith('!! '));
   if (ignored.length && entry.ignored !== 'disposable') return { op: 'kept', reason: `ignored files the run did not declare disposable (add --ignored disposable): ${ignored[0].slice(3)}` };
-  const head = deps.git(['-C', entry.id, 'rev-parse', 'HEAD']);
+  const head = proofGit(deps, entry.id, ['rev-parse', 'HEAD']);
   const sha = head.code === 0 ? head.stdout.trim() : null;
   if (!sha) return { op: 'kept', reason: `git rev-parse HEAD failed: ${firstLine(head.stderr) || head.error}` };
-  const refs = deps.git(['-C', entry.repo, 'for-each-ref', '--contains', sha, '--count=1', '--format=%(refname)']);
+  // Before the containment check: a grafts file can make a ref appear to
+  // contain HEAD. A shallow clone's cut history only removes parent edges, so
+  // it can hide containment but not invent it; it is refused because, on cut
+  // history, the orphan proof's merge-base --all can return an older common
+  // ancestor than the best one. Such a repo keeps every worktree, even one
+  // whose HEAD really is on a ref.
+  const rewritten = historyRewritten(entry.repo, deps);
+  if (rewritten) return { op: 'kept', reason: `its history cannot be trusted (${rewritten}); custody keeps every worktree in a grafted or shallow repo` };
+  const refs = proofGit(deps, entry.repo, ['for-each-ref', '--contains', sha, '--count=1', '--format=%(refname)']);
   if (refs.code !== 0) return { op: 'kept', reason: `git for-each-ref failed: ${firstLine(refs.stderr) || refs.error}` };
-  if (!refs.stdout.trim()) return { op: 'kept', reason: `its HEAD ${sha.slice(0, 12)} is on no ref; removing it would orphan the commit` };
+  let reason = 'removed';
+  if (!refs.stdout.trim()) {
+    const orphan = `its HEAD ${sha.slice(0, 12)} is on no ref`;
+    const kept = (checked) => ({ op: 'kept', reason: `${orphan}; removing it would orphan the commit (${checked})` });
+    const branch = defaultBranch(entry.repo, deps);
+    if (branch.unreadable) return kept(`default branch unreadable: ${branch.unreadable}`);
+    if (branch.ambiguous) return kept(`default branch ambiguous: ${branch.ambiguous.join(', ')}`);
+    if (!branch.candidate) return kept('no default-branch ref to check against');
+    const unproven = identicalOn(entry.repo, sha, branch.candidate, deps);
+    if (unproven) return kept(unproven);
+    reason = `removed: ${orphan}; every file its net change touches is identical in ${branch.candidate.name}, with nothing changed inside the range left out of it (as last fetched; custody never fetches)`;
+  }
   const out = deps.removeWorktree(entry.repo, entry.id);
-  return out.removed ? { op: 'disposed', reason: 'removed' } : { op: 'kept', reason: out.reason };
+  return out.removed ? { op: 'disposed', reason } : { op: 'kept', reason: out.reason };
+}
+
+// A HEAD on no ref can still carry nothing the default branch lacks: its
+// branch was squash-merged, then deleted. The one proof accepted is exact
+// containment: the default branch, as last fetched, holds HEAD's mode and
+// object id for every file HEAD changed. Object ids are compared, never
+// content, so whitespace, attributes, merge drivers and filters play no part.
+// Custody never fetches: a remote-tracking ref behind the remote reads as
+// "not in it".
+const FALLBACK_LEVELS = [['refs/remotes/origin/main', 'refs/remotes/origin/master'], ['refs/heads/main', 'refs/heads/master']];
+const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const nonEmpty = (text) => String(text ?? '').split(/\r?\n/).filter((line) => line.trim());
+const shortName = (ref) => ref.replace(/^refs\/(?:remotes|heads)\//, '');
+const failure = (out) => firstLine(out.stderr) || out.error || `git exited ${out.code}`;
+// Lossless: Node decodes every ill-formed UTF-8 sequence to U+FFFD, so output
+// without one round-trips to the bytes git printed. A path with one (a raw
+// "bad\xff") would be looked up as other bytes, and read as absent.
+const lossy = (text) => String(text ?? '').includes('\u{FFFD}');
+
+// Every git call the merged-head proof makes reads history as written:
+// --no-replace-objects ignores refs/replace/*, which can swap a commit or a
+// tree so the merge base already holds HEAD's files.
+const proofGit = (deps, repo, args) => deps.git(['-C', repo, '--no-replace-objects', ...args]);
+
+// Grafts rewrite parents whatever --no-replace-objects says, and a shallow
+// clone's history is cut: either is a reason to keep, returned as text. null
+// when neither applies; a check that cannot be read keeps too.
+function historyRewritten(repo, deps) {
+  const shallow = proofGit(deps, repo, ['rev-parse', '--is-shallow-repository']);
+  const answer = shallow.code === 0 ? shallow.stdout.trim() : '';
+  if (answer === 'true') return 'a shallow clone: its history is cut';
+  if (answer !== 'false') return `history unreadable: ${failure(shallow)}`;
+  const path = proofGit(deps, repo, ['rev-parse', '--git-path', 'info/grafts']);
+  const file = path.code === 0 ? path.stdout.replace(/\r?\n$/, '') : '';
+  if (!file) return `history unreadable: ${failure(path)}`;
+  try {
+    if (deps.read(resolve(repo, file))) return `a grafts file rewrites its history: ${file}`;
+  } catch (error) {
+    if (error.code !== 'ENOENT') return `history unreadable: ${error.message}`;
+  }
+  return null;
+}
+
+// The default branch: { candidate: { name, id } }, { ambiguous: [names] },
+// { unreadable: why }, or {} when none exists. origin/HEAD's target when it
+// resolves, since another remote-tracking ref can be pruned upstream. An
+// origin/HEAD naming a ref that does not exist falls back like a missing one.
+// Otherwise origin/main or origin/master when exactly one exists; with
+// neither, main or master when exactly one exists. Both names at one level is
+// ambiguous, and keeps. A ref is absent only when git says so (exit 1, nothing
+// printed): a timeout, a launch failure or any other exit is unreadable, and
+// keeps, since reading it as absent would fall through to another branch.
+function defaultBranch(repo, deps) {
+  const absent = (out) => out.code === 1 && !out.error && !String(out.stdout ?? '').trim();
+  const unreadable = (out) => Object.assign(new Error(failure(out)), { unreadable: failure(out) });
+  const resolved = (ref) => {
+    const out = proofGit(deps, repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+    const id = out.code === 0 ? out.stdout.trim() : '';
+    if (OBJECT_ID.test(id)) return [{ name: shortName(ref), id }];
+    if (absent(out)) return [];
+    throw unreadable(out);
+  };
+  try {
+    const origin = proofGit(deps, repo, ['symbolic-ref', '-q', 'refs/remotes/origin/HEAD']);
+    const target = origin.code === 0 ? origin.stdout.trim() : '';
+    if (!target && !absent(origin)) throw unreadable(origin);
+    const [head] = target ? resolved(target) : [];
+    if (head) return { candidate: head };
+    for (const level of FALLBACK_LEVELS) {
+      const found = level.flatMap(resolved);
+      if (found.length === 1) return { candidate: found[0] };
+      if (found.length > 1) return { ambiguous: found.map((ref) => ref.name) };
+    }
+    return {};
+  } catch (error) {
+    if (error.unreadable) return { unreadable: error.unreadable };
+    throw error;
+  }
+}
+
+// Every diff the guard reads runs with these: diff.relative from a --repo
+// below the top level would drop the changes outside it, and
+// diff.ignoreSubmodules would hide a submodule bump.
+const DIFF_FLAGS = ['--no-relative', '--ignore-submodules=none', '--no-ext-diff', '--no-textconv'];
+const PATH_BATCH = 200;
+
+// `git diff --quiet`: true for a change (exit 1), false for none (exit 0),
+// null for anything else.
+function changes(deps, repo, from, to) {
+  const out = proofGit(deps, repo, ['diff', '--quiet', ...DIFF_FLAGS, from, to]);
+  return out.code === 1 ? true : out.code === 0 ? false : null;
+}
+
+// Each path's { mode, type, id } in <tree>, by its full path: a Map, or null
+// when a call fails or prints a record that does not parse. A path absent
+// from the tree has no key. --full-tree reads paths from the top level,
+// whatever directory --repo names.
+function entriesIn(deps, repo, tree, paths) {
+  const found = new Map();
+  for (let i = 0; i < paths.length; i += PATH_BATCH) {
+    const out = proofGit(deps, repo, ['--literal-pathspecs', 'ls-tree', '-z', '--full-tree', tree, '--', ...paths.slice(i, i + PATH_BATCH)]);
+    if (out.code !== 0 || lossy(out.stdout)) return null;
+    for (const record of out.stdout.split('\0').filter(Boolean)) {
+      const match = /^(\d{6}) ([a-z]+) ([0-9a-f]+)\t(.+)$/s.exec(record);
+      if (!match || !OBJECT_ID.test(match[3])) return null;
+      found.set(match[4], { mode: match[1], type: match[2], id: match[3] });
+    }
+  }
+  return found;
+}
+
+// The paths a -z NUL-separated listing names, or null when it is lossy or
+// does not end in NUL.
+function nulPaths(text) {
+  if (lossy(text)) return null;
+  const fields = String(text ?? '').split('\0');
+  if (fields.pop() !== '') return null;
+  return fields;
+}
+
+// null when the candidate holds exactly <sha>'s version of every file <sha>'s
+// net change touches since its merge base: the same mode and object id for
+// each added or modified path, and no entry for each deleted one. Otherwise
+// the reason it is not shown, naming the prerequisite that failed. Any other
+// status, a failed call or a malformed output is not shown, whatever stdout
+// holds.
+function identicalOn(repo, sha, candidate, deps) {
+  const git = (...args) => proofGit(deps, repo, args);
+  const checked = (why) => `checked ${candidate.name}${why ? `: ${why}` : ''}`;
+  // Prerequisites: one merge base, and a non-empty change made of non-empty,
+  // non-merge commits. An --allow-empty orphan carries only its message, which
+  // no comparison of files would preserve.
+  const bases = git('merge-base', '--all', candidate.id, sha);
+  // Exit 1 with nothing printed is "no common ancestor"; any other failure is
+  // a call that did not answer.
+  const noBase = bases.code === 1 && !bases.error && !String(bases.stdout ?? '').trim();
+  if (bases.code !== 0 && !noBase) return checked(`merge-base unreadable: ${failure(bases)}`);
+  const base = bases.code === 0 ? nonEmpty(bases.stdout) : [];
+  if (base.length !== 1 || !OBJECT_ID.test(base[0].trim())) return checked('not exactly one merge base');
+  const from = base[0].trim();
+  const range = git('rev-list', '--parents', `${from}..${sha}`);
+  if (range.code !== 0) return checked(`the range is unreadable: ${failure(range)}`);
+  const commits = nonEmpty(range.stdout).map((line) => line.trim().split(/\s+/));
+  if (!commits.length) return checked('the range is empty');
+  if (commits.some((ids) => ids.length !== 2)) return checked('a merge commit in the range');
+  for (const [commit, parent] of commits) {
+    const changed = changes(deps, repo, parent, commit);
+    if (changed !== true) return checked(`${changed === false ? 'an empty' : 'an unreadable'} commit in the range: ${commit.slice(0, 12)}`);
+  }
+  const netChange = changes(deps, repo, from, sha);
+  if (netChange !== true) return checked(netChange === false ? 'no net change' : 'net diff unreadable');
+  // -z: status NUL path NUL per path; --no-renames keeps R and C out.
+  const status = git('diff', '--name-status', '-z', '--no-renames', ...DIFF_FLAGS, from, sha);
+  const fields = status.code === 0 ? nulPaths(status.stdout) : null;
+  if (!fields || !fields.length || fields.length % 2) return checked('its changed paths are unreadable');
+  const changed = [];
+  for (let i = 0; i < fields.length; i += 2) changed.push({ status: fields[i], path: fields[i + 1] });
+  const other = changed.find((file) => !['A', 'M', 'D'].includes(file.status) || !file.path);
+  if (other) return checked(`a change other than add, modify or delete: ${other.status} ${other.path}`);
+  // Net changes are what the proof preserves: a path some commit in the range
+  // touched that the net diff omits (added, then deleted) is work no
+  // comparison of the end state can see, so it keeps.
+  const net = new Set(changed.map((file) => file.path));
+  for (const [commit] of commits) {
+    const touched = git('diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--no-renames', ...DIFF_FLAGS, commit);
+    const paths = touched.code === 0 ? nulPaths(touched.stdout) : null;
+    if (!paths) return checked(`the paths of ${commit.slice(0, 12)} are unreadable`);
+    const lost = paths.find((path) => !net.has(path));
+    if (lost !== undefined) return checked(`work inside the range never reached the net diff: ${lost}`);
+  }
+  const paths = [...net];
+  const mine = entriesIn(deps, repo, sha, paths);
+  const theirs = entriesIn(deps, repo, candidate.id, paths);
+  if (!mine || !theirs) return checked('its tree entries are unreadable');
+  const same = changed.every(({ status: kind, path }) => {
+    const at = mine.get(path);
+    const on = theirs.get(path);
+    if (kind === 'D') return !at && !on;
+    return Boolean(at && on) && at.mode === on.mode && at.id === on.id;
+  });
+  return same ? null : checked();
 }
 
 function closeByCommand(entry, deps) {
