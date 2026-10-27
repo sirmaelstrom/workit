@@ -1019,21 +1019,25 @@ test('pickReviewers availability matrix (D19.12)', () => {
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, false) }), 'claude'),
     { lenses: ['opus'], singleLens: 'no codex CLI: opus is the only available lens', sameFamily: true });
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'claude').lenses, ['codex', 'astra']);
-  assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex').lenses, ['astra', 'opus']);
-  // 2aadf72f: no claude CLI on a Sol-authored standalone PR is astra alone —
-  // the codex lens is Sol, the author. Terra's pair is codex + astra.
-  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex'),
-    { lenses: ['astra'], singleLens: 'sol-authored PR with no claude CLI: astra is the only available lens that is not the author' });
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex').lenses, ['codex', 'astra']);
+  // 2aadf72f: the codex lens is GPT-6.1 Terra, so a Sol-authored PR keeps both
+  // codex-harness lenses even with no claude CLI, and a Terra-authored one gets
+  // astra alone, since codex would be the author.
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex'), { lenses: ['codex', 'astra'] });
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { author: 'terra' }),
+    { lenses: ['astra'], singleLens: 'terra-authored PR with no claude CLI: astra is the only available lens that is not the author' });
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { author: 'terra' }).lenses, ['astra', 'opus']);
   assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { author: 'astra' }).lenses, ['codex']);
-  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { author: 'terra' }), { lenses: ['codex', 'astra'] });
   assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'claude'), { lenses: ['codex', 'astra'] });
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'claude', { mode: 'managed' }).lenses, ['codex', 'astra']);
-  // 2aadf72f: the writer's claim seats the Sol author's pair, so a managed
-  // codex-authored PR is reviewed by astra + opus when both CLIs are on.
-  assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { mode: 'managed' }), { lenses: ['astra', 'opus'] });
-  const managedCodex = pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { mode: 'managed' });
-  assert.deepEqual(managedCodex.lenses, ['astra']);
-  assert.match(managedCodex.singleLens, /sol-authored PR on a managed repo with no claude CLI/);
+  // 2aadf72f: the writer's claim seats the author's pair: a managed Sol-authored
+  // PR is reviewed by codex + astra, a managed Terra-authored PR by astra + opus.
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { mode: 'managed' }), { lenses: ['codex', 'astra'] });
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { mode: 'managed' }), { lenses: ['codex', 'astra'] });
+  assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { mode: 'managed', author: 'terra' }), { lenses: ['astra', 'opus'] });
+  const managedTerra = pickReviewers(makeState({ agents: agents(false, true) }), 'codex', { mode: 'managed', author: 'terra' });
+  assert.deepEqual(managedTerra.lenses, ['astra']);
+  assert.match(managedTerra.singleLens, /terra-authored PR on a managed repo with no claude CLI/);
   // An Astra-pinned codex lane is reviewed by codex + opus, never astra.
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { mode: 'managed', author: 'astra' }).lenses, ['codex', 'opus']);
   assert.deepEqual(pickReviewers(makeState({ agents: agents(true, true) }), 'codex', { author: 'astra' }).lenses, ['codex', 'opus']);
@@ -1046,7 +1050,7 @@ test('pickReviewers availability matrix (D19.12)', () => {
 
 test('C1-21 the review author is the WP\'s effective lane agent, not the run\'s', () => {
   const { queue } = expanded(makeState(), 'managed-workit.json', { round: 1 }, { agent: 'codex' });
-  assert.deepEqual(queue.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]), ['astra', 'opus']);
+  assert.deepEqual(queue.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]), ['codex', 'astra']);
 });
 
 test('C1-22 no lens that can run is ConductError 5 from the emitters, never an empty array', () => {
@@ -1108,16 +1112,24 @@ test('reviewActions: no codex CLI on a claude-authored standalone PR → one opu
   assert.deepEqual(queue.at(-1).command.slice(-2), ['--single-lens', 'no codex CLI: opus is the only available lens']);
 });
 
-test('2aadf72f: a codex-authored PR on observatory claims --author sol and runs astra then opus on one attempt-ref', () => {
+test('2aadf72f: a codex-authored PR on observatory claims --author sol and runs codex then astra on one attempt-ref', () => {
   const state = OBS({ intent: { ...OBS().intent, agent: 'codex' } });
   const { queue } = expanded(state, 'managed-observatory.json');
   const ref = join(REVIEWS, 'attempt-ref-r1.json');
   assert.deepEqual(queue.map((a) => a.command.slice(2)), [
     ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'sol'],
+    ['lens', '--attempt-ref', ref, '--lens', 'codex'],
     ['lens', '--attempt-ref', ref, '--lens', 'astra'],
-    ['lens', '--attempt-ref', ref, '--lens', 'opus'],
     ['post', '--attempt-ref', ref],
   ]);
+});
+
+test('2aadf72f: a Terra-pinned codex lane claims --author terra and is reviewed by astra + opus', () => {
+  const state = OBS({ intent: { ...OBS().intent, agent: 'codex' } });
+  const { queue } = expanded(state, 'managed-observatory.json', { round: 1 }, { model: 'gpt-6.1-terra' });
+  const claim = queue.find((a) => a.part === 'claim').command;
+  assert.equal(claim[claim.indexOf('--author') + 1], 'terra');
+  assert.deepEqual(queue.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]), ['astra', 'opus']);
 });
 
 test('2aadf72f: an Astra-pinned codex lane claims --author astra and is reviewed by codex + opus', () => {
@@ -1132,13 +1144,14 @@ test('2aadf72f: an Astra-pinned codex lane claims --author astra and is reviewed
   assert.equal(claimAuthor('claude', 'sonnet'), 'claude');
 });
 
-test('managed single-lens: a codex-authored PR with no claude CLI claims with --single-lens --lens astra; post never takes it', () => {
+test('managed single-lens: a Terra-authored PR with no claude CLI claims with --single-lens --lens astra; post never takes it', () => {
   const state = OBS({ intent: { ...OBS().intent, agent: 'codex' }, agents: agents(false, true) });
-  const { queue } = expanded(state, 'managed-observatory.json');
+  const { queue } = expanded(state, 'managed-observatory.json', { round: 1 }, { model: 'gpt-6.1-terra' });
   const ref = join(REVIEWS, 'attempt-ref-r1.json');
-  const reason = pickReviewers(state, 'codex', { mode: 'managed' }).singleLens;
+  const reason = pickReviewers(state, 'codex', { mode: 'managed', author: 'terra' }).singleLens;
+  assert.ok(reason, 'the Terra author has a single-lens reason');
   assert.deepEqual(queue.map((a) => a.command.slice(2)), [
-    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'sol', '--single-lens', reason, '--lens', 'astra'],
+    ['claim', '--pr', '7', '--repo', 'heathdev-me/observatory', '--attempt-ref-out', ref, '--author', 'terra', '--single-lens', reason, '--lens', 'astra'],
     ['lens', '--attempt-ref', ref, '--lens', 'astra'],
     ['post', '--attempt-ref', ref],
   ]);
@@ -1232,10 +1245,11 @@ test('an explicit delta reset may use its verified ancestor; a proof for another
 
 test('t2Actions: council off → every available lens but the author\'s; on → council_review, synthesize, challenge', () => {
   const lensesOf = (actions) => actions.filter((a) => a.part === 'lens').map((a) => a.command[a.command.indexOf('--lens') + 1]);
-  // 2aadf72f (workit#240 review): opus is the Claude author's own model, codex the Sol author's.
+  // 2aadf72f (workit#240 review): opus is the Claude author's own model, codex the Terra author's.
   assert.equal(makeState().intent.agent, 'claude');
   assert.deepEqual(lensesOf(t2Actions(makeState(), makeWp({ reviewMode: 'standalone' }), { round: 1 })), ['codex', 'astra']);
-  assert.deepEqual(lensesOf(t2Actions(makeState(), makeWp({ reviewMode: 'standalone', agent: 'codex' }), { round: 1 })), ['astra', 'opus']);
+  assert.deepEqual(lensesOf(t2Actions(makeState(), makeWp({ reviewMode: 'standalone', agent: 'codex' }), { round: 1 })), ['codex', 'astra', 'opus']);
+  assert.deepEqual(lensesOf(t2Actions(makeState(), makeWp({ reviewMode: 'standalone', agent: 'codex', model: 'gpt-6.1-terra' }), { round: 1 })), ['astra', 'opus']);
   // Only the author's own lens available: T1's same-family single lens stands, never an empty review.
   assert.deepEqual(lensesOf(t2Actions(makeState({ agents: agents(true, false) }), makeWp({ reviewMode: 'standalone' }), { round: 1 })), ['opus']);
   const state = makeState({ adapters: { council: { on: true } } });
