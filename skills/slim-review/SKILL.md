@@ -1,12 +1,12 @@
 ---
 name: slim-review
-description: "Run the slim PR-review loop — two external reviewers (GPT-6 Sol and Astra, plan-covered) at a PR boundary, findings posted as line-anchored GitHub review comments, then confirm or refute each and reply. Trigger on '/slim-review', 'slim review', 'review this PR before merge', or at any PR boundary in a burn-down. The LIGHT tier: two lenses, no synthesis. NOT for in-session multi-reviewer passes ('/review') or complex PRs (review-council)."
+description: "Run the slim PR-review loop — two external reviewers (GPT-6.1 Terra and Astra, plan-covered) at a PR boundary, findings posted as line-anchored GitHub review comments, then confirm or refute each and reply. Trigger on '/slim-review', 'slim review', 'review this PR before merge', or at any PR boundary in a burn-down. The LIGHT tier: two lenses, no synthesis. NOT for in-session multi-reviewer passes ('/review') or complex PRs (review-council)."
 ---
 
 # Slim PR Review — two external lenses, on the PR, adjudicated
 
 A PR-boundary review that is cheap enough to run **every time**. Two external
-reviewers (GPT-6 Sol and Astra, one invocation each) look at the diff, their findings land on the pull request as real review
+reviewers (GPT-6.1 Terra and Astra, one invocation each) look at the diff, their findings land on the pull request as real review
 comments, and you then confirm or refute each one in public and reply on the
 thread.
 
@@ -70,8 +70,8 @@ node "${CLAUDE_SKILL_DIR}/scripts/pr-review.mjs" lens \
 
 **The loop runs two lenses and posts both** (operator ruling 2026-09-09, quest
 `bcc11983`): invoke the verb once per lens with a distinct `--out`, then hand
-both files to `post`. `--lens` is `codex` (GPT-6 Sol @ high since 2026-09-23;
-GPT-5.6 Terra before), `astra` (GPT-6 Astra @ high on a full round, @ low on a
+both files to `post`. `--lens` is `codex` (GPT-6.1 Terra @ high since 2026-10-27;
+GPT-6 Sol from 2026-09-23, GPT-5.6 Terra before), `astra` (GPT-6 Astra @ high on a full round, @ low on a
 `--since` delta round), or `opus`; `--reasoning` overrides the per-lens default; `--measure-log`
 overrides the per-lens JSONL destination; `--dry-run` prints the resolved argv
 and prompt path without running a reviewer. Use `--prompt-out <path>` when you
@@ -85,8 +85,12 @@ output and a third of the wall clock. Both arms together did not move the plan
 meter one integer point (`astra-diff-review-measurement.md`). The `codex` seat
 then moved to GPT-6 Sol (2026-09-23, quest `458d87c9`): replayed on the same
 prompt it found all three known defects with no false finding, the only arm of
-the three to do so (`gpt6-sol-role-mapping/measurement.md`). Two lenses is the
-ceiling; three is a council.
+the three to do so (`gpt6-sol-role-mapping/measurement.md`). It moved again to
+GPT-6.1 Terra (2026-10-27, quest `2a9ae5ac`): on the same two prompts Terra
+found three known defects to GPT-6 Sol's one, with no false finding from
+either, at about a quarter of the API-dollar cost
+(`gpt61-terra-role-mapping/measurement.md`). Two lenses is the ceiling; three
+is a council.
 
 ### The author's uncertainty goes to both reviewers
 
@@ -122,9 +126,10 @@ command-line cap.
 
 The pair is chosen so neither lens is the PR's authoring model: a PR authored by
 a Claude session takes `codex` + `astra`; a PR authored by a GPT-6 Sol lane
-(the build default since 2026-09-23) takes `astra` + `opus`; a PR authored by
-an Astra lane takes `codex` + `opus`; an older PR authored by a Terra lane can
-take `codex` + `astra`, since the `codex` lens is no longer Terra. Read
+(the build default since 2026-09-23) takes `codex` + `astra`, since the `codex`
+lens is no longer Sol; a PR authored by an Astra lane takes `codex` + `opus`;
+a PR authored by a GPT-6.1 Terra lane takes `astra` + `opus`. An older PR from
+a GPT-5.6 Terra lane also passes `terra` and takes `astra` + `opus`. Read
 the author from the PR's commits or the lane record; never assume. On a managed
 repository `claim --author claude|sol|astra|terra` turns the author into this
 pair, and refuses (exit 2) without it.
@@ -161,10 +166,10 @@ defect.
 
 Non-negotiable flags, each for a measured reason:
 
-- **Codex `--model gpt-6-sol` at high effort.** A review is a verdict about
+- **Codex `--model gpt-6.1-terra` at high effort.** A review is a verdict about
   correctness, and Luna returns confident wrong PASSes on those. See
   `codex-delegate`'s verdict-vs-Luna threshold. High is the depth the seat was
-  measured at; the CLI's own default for gpt-6-sol is medium.
+  measured at; the CLI's own default for gpt-6.1-terra is low.
 - **Astra `--model gpt-6-astra` at high effort on a full round, low on a
   `--since` delta round.** High catches defects low misses on a full PR; delta
   rounds were not measured at high, so they keep low. The prompt carries the
@@ -196,8 +201,8 @@ Every run is the shadow arm now: two lenses, both posted, both adjudicated with
 catches on every PR instead of on the ones someone remembered to name. Post the
 two handbacks with repeated flags, one per lens of the author's pair (Reviewer ≠
 author, above): `post --findings codex.json --findings astra.json` for a
-Claude-authored PR, `--findings astra.json --findings opus.json` for a
-Sol-authored one. Where both lenses anchor the same defect on the same line, post
+Claude- or Sol-authored PR, `--findings astra.json --findings opus.json` for a
+Terra-authored one. Where both lenses anchor the same defect on the same line, post
 both — the duplicate is the agreement signal — and **reply to each comment**
 with its own `--verdict`: `reply` posts to one comment id and records one
 measurement row attributed to that comment's lens, so a single reply would
