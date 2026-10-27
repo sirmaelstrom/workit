@@ -363,11 +363,11 @@ test('touch 1 budget line (7c728631): a T3 backend, a configured herdr that reso
   });
   const budgetLine = (question) => question.split('\n').find((line) => line.startsWith('Budget: '));
   const t3 = touchOneQuestion(state({ backend: { name: 't3', t3Project: 'c684e0c7' } }), {});
-  assert.equal(budgetLine(t3), 'Budget: $25 unmetered: T3 lanes log no cost, so the lower bound counts none; the gate adds each live lane at the default estimate $15');
+  assert.equal(budgetLine(t3), 'Budget: $25 for recorded cash costs; plan-covered T3 lane estimates do not trigger a budget stop');
   // C1-2: a pinned laneEstimateUsd is the estimate the gate uses, so touch 1 names it.
   const pinnedState = state({ backend: { name: 't3', t3Project: 'c684e0c7' } });
   pinnedState.intent.repoConfig = { source: 'workspace', path: join(tmpdir(), 'conduct', 'repo.json'), sha256: 'a'.repeat(64), config: { laneEstimateUsd: 30 } };
-  assert.equal(budgetLine(touchOneQuestion(pinnedState, {})), 'Budget: $25 unmetered: T3 lanes log no cost, so the lower bound counts none; the gate adds each live lane at the repo config estimate $30');
+  assert.equal(budgetLine(touchOneQuestion(pinnedState, {})), 'Budget: $25 for recorded cash costs; plan-covered T3 lane estimates do not trigger a budget stop');
   // C2-1: with no workspace pin, the gate reads the legacy repo file; touch 1 names the same estimate.
   const { laneProjection } = await import('./lib/phases/build.mjs');
   const legacyState = state({ backend: { name: 't3', t3Project: 'c684e0c7' } });
@@ -375,7 +375,7 @@ test('touch 1 budget line (7c728631): a T3 backend, a configured herdr that reso
   const legacyPath = join(legacyState.intent.repo.path, '.workit', 'conduct.json');
   const legacyDeps = { env: {}, exists: (path) => path === legacyPath, read: (path) => (path === legacyPath ? JSON.stringify({ laneEstimateUsd: 37 }) : null) };
   assert.deepEqual(laneProjection({ ...legacyState, wps: [] }, legacyDeps), { usd: 37, basis: 'the repo config laneEstimateUsd' });
-  assert.equal(budgetLine(touchOneQuestion(legacyState, legacyDeps)), 'Budget: $25 unmetered: T3 lanes log no cost, so the lower bound counts none; the gate adds each live lane at the repo config estimate $37');
+  assert.equal(budgetLine(touchOneQuestion(legacyState, legacyDeps)), 'Budget: $25 for recorded cash costs; plan-covered T3 lane estimates do not trigger a budget stop');
   // herdr asked for, but the repo is outside a projects tree: dispatch runs exec, and so does the line.
   const herdr = touchOneQuestion(state({ backend: { name: 'herdr' } }), { env: {} });
   assert.match(herdr, /Lanes: headless \(exec: lane\.mjs create would refuse/);

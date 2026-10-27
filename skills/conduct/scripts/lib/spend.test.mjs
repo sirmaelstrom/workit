@@ -117,14 +117,15 @@ test('each builder (7c728631): a reported figure is a lower bound naming its lan
   // An all-T3 receipt promises no later booking: it says the estimate covers merged lanes that logged no cost.
   const t3 = receiptSpendLine(ALL_T3, { booked: '$0', projected: '$15', wpsLeft: 1, perWp: '$15', basis: 'the default estimate', budget: '$25', crosses: false });
   assert.match(t3, /\$0 booked, a lower bound \(1 T3 lane logs none and is not counted\)/);
-  assert.match(t3, /every finished WP \(merged, refuted or dropped\) whose lane logged no cost/);
+  assert.match(t3, /planning estimate, not a cash charge/);
+  assert.match(t3, /T3 lane estimates do not consume the \$25 cash budget; recorded costs still do/);
   assert.doesNotMatch(t3, /not yet booked|books? at close|will book/);
   assert.match(analysisBudgetLine(EXEC_CLAUDE, '$3.20'), /^budget: unmetered; lower bound \$3\.20 \(1 exec claude lane logged its cost\)$/);
 });
 
 test('touchOneBudgetLine (7c728631): a lower bound naming the backend\'s uncounted lanes, no counts, at most 150 chars at a 4-digit budget', () => {
   assert.equal(touchOneBudgetLine({ budgetUsd: 25, backend: 't3', agent: 'claude' }),
-    `Budget: $25 unmetered: T3 lanes log no cost, so the lower bound counts none; the gate adds each live lane at the default estimate $${DEFAULT_LANE_ESTIMATE_USD}`);
+    'Budget: $25 for recorded cash costs; plan-covered T3 lane estimates do not trigger a budget stop');
   assert.match(touchOneBudgetLine({ budgetUsd: 25, backend: 'herdr', agent: 'claude' }), /^Budget: \$25 unmetered: herdr lanes log no cost, so the lower bound counts none;/);
   assert.match(touchOneBudgetLine({ budgetUsd: 25, backend: 'exec', agent: 'codex' }), /^Budget: \$25 unmetered: codex lanes log no cost, so the lower bound counts none;/);
   assert.match(touchOneBudgetLine({ budgetUsd: 25, backend: 'exec', agent: 'claude' }), /^Budget: \$25 unmetered: exec claude lanes' logged cost sums to a lower bound; the gate adds each live lane at the default estimate \$15$/);

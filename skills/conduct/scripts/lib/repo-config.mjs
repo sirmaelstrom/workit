@@ -20,7 +20,7 @@ import { ConductError, workspaceAncestor } from './state.mjs';
 import { sectionText } from './markdown.mjs';
 import { validateRecipe } from './recipe.mjs';
 
-export const WORKSPACE_KEYS = Object.freeze(['release', 'contractPaths', 'trivialExclude', 'gateEnv', 'gateBackground', 'laneEstimateUsd', 'laneSetup', 'laneDeadlineMinutes']);
+export const WORKSPACE_KEYS = Object.freeze(['release', 'contractPaths', 'trivialExclude', 'gateEnv', 'gateEnvSuffixMax', 'gateBackground', 'laneEstimateUsd', 'laneSetup', 'laneDeadlineMinutes']);
 // A lane deadline past this is a lane nobody is watching.
 export const LANE_DEADLINE_MAX_MINUTES = 12 * 60;
 export const LEGACY_RELPATH = '.workit/conduct.json';
@@ -68,6 +68,10 @@ export function workspaceConfigProblems(config) {
   const env = config.gateEnv;
   if (Object.hasOwn(config, 'gateEnv') && (!env || typeof env !== 'object' || Array.isArray(env) || Object.values(env).some((value) => typeof value !== 'string'))) {
     problems.push('gateEnv must be an object of string values');
+  }
+  const reserve = config.gateEnvSuffixMax;
+  if (Object.hasOwn(config, 'gateEnvSuffixMax') && (!Number.isInteger(reserve) || reserve < 0 || reserve >= 63)) {
+    problems.push('gateEnvSuffixMax must be an integer from 0 to 62 (UTF-8 bytes)');
   }
   if (Object.hasOwn(config, 'gateBackground') && typeof config.gateBackground !== 'boolean') problems.push('gateBackground must be true or false');
   if (Object.hasOwn(config, 'laneSetup') && (typeof config.laneSetup !== 'string' || !config.laneSetup.trim() || config.laneSetup.includes('"'))) {

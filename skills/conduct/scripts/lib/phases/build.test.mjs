@@ -140,7 +140,7 @@ const BASE_RULES = [
     const id = `WP-${String(Number(m[1]) - 100).padStart(2, '0')}`;
     // The lane's PR body: its report plus the `## Merge danger` section (fca05d92).
     const body = `${readFileSync(join(h.runDir, `lane-${id.toLowerCase()}-report.md`), 'utf8')}\n${h.mergeDanger ?? MERGE_DANGER}`;
-    return ok(JSON.stringify({ headRefName: `conduct/demo/${id.toLowerCase()}`, state: 'OPEN', body }));
+    return ok(JSON.stringify({ headRefName: `conduct/${h.state.slug}/${id.toLowerCase()}`, state: 'OPEN', body }));
   }],
   [/^git -C (\S+) rev-parse HEAD$/, (h, m) => ok(`${h.head(idOfWorktree(m[1]))}\n`)],
   // The gate reads a WP PR's body for its door (fca05d92); the release PR's view has no body.
@@ -1890,6 +1890,41 @@ test('lanes 3-4 (190c9a18): a WP landing is not counted toward the 3rd lane, so 
   assert.deepEqual(h.state.wps.map((wp) => wp.state), ['merged', 'merged', 'merged', 'merged']);
 });
 
+for (const budget of [25, 0]) test(`plan-covered T3 estimates do not halt four WPs at cash budget ${budget}`, async (t) => {
+  const h = harness(t, { budget, wps: Array.from({ length: 4 }, (_, i) => ({ id: `WP-0${i + 1}`, files: [`lib/${i}.mjs`] })), config: '{}' });
+  h.state.intent.agent = 'codex';
+  h.state.intent.backend = { name: 't3', t3Project: 'proj-1' };
+  h.answer = (a) => {
+    if (a.step === 'create' && a.command?.includes('worktree')) {
+      mkdirSync(a.command[a.command.indexOf('add') + 1], { recursive: true });
+      return ok();
+    }
+    if (a.tool === 'schedule_task') return { scheduledTaskId: 'heartbeat', boundThreadId: 'conductor' };
+    if (a.tool === 'delete_scheduled_task') return { deleted: true };
+    if (a.tool === 't3_thread_organize') return {};
+    if (a.tool === 't3_thread_launch') {
+      writeReport(h, a.wpId, false);
+      return { threadId: `thread-${a.wpId}`, runId: `run-${a.wpId}` };
+    }
+    if (a.tool === 't3_thread_read') return { thread: { status: 'completed' } };
+    if (a.tool === 't3_thread_wait') return { status: 'completed' };
+  };
+  assert.equal(await drive(h), null);
+  assert.ok(h.state.wps.every((wp) => wp.state === 'merged'), JSON.stringify(h.state.wps.map((wp) => wp.reason)));
+  assert.equal(h.state.touches.filter((touch) => touch.build === 'budget').length, 0);
+  assert.equal(h.trace.filter((a) => a.tool === 't3_thread_launch').length, 4);
+});
+
+test('T3 dispatch still halts on recorded cash spend from a metered lane', async (t) => {
+  const h = harness(t);
+  h.state.intent.backend = { name: 't3', t3Project: 'proj-1' };
+  h.wp('WP-01').lane = { backend: 'exec', costUsd: 26, startedAt: 't', exitedAt: 't' };
+  await drive(h, { until: (a) => a.part === 'announce' });
+  assert.equal(h.state.touches[0].build, 'budget');
+  assert.equal(h.state.touches[0].spendUsd, 26);
+  assert.ok(!h.trace.some((a) => a.tool === 't3_thread_launch'));
+});
+
 test('budget, live lanes (8f433d11): two live lanes at $30 plus the next WP against an $80 cap halts the third dispatch, unmetered', async (t) => {
   const THREE = [TWO[0], TWO[1], TWO[2], { id: 'WP-04', files: ['lib/schedule.mjs'], dependsOn: ['WP-01'] }];
   const config = JSON.stringify({ ...JSON.parse(fixture('build', 'conduct.json')), laneEstimateUsd: 30 });
@@ -2831,6 +2866,26 @@ test('repo config gateEnv and gateBackground: the gate command carries the expan
 
 // Deploy-truth probation H9: `{run}` for that run's slug made a 74-char
 // database name, past Postgres's 63, and 115 suites failed.
+test('gateEnv reserves consumer suffix bytes before emitting a gate command', async (t) => {
+  const config = { gateEnv: { OBSERVATORY_TEST_DB: 'heathdev_observatory_test_conduct_{run}' }, gateEnvSuffixMax: 10 };
+  const h = harness(t, { config: JSON.stringify(config), wps: [TWO[0], TWO[1]] });
+  h.state.slug = 'deploy-claims-in-heathdev-observatory';
+  await drive(h, { until: (a) => a.step === 'gate-cmd' || a.part === 'announce' });
+  assert.match(h.wp('WP-02').reason, /10-byte suffix reserve/);
+  assert.ok(!h.trace.some((a) => a.step === 'gate-cmd'));
+  config.gateEnv.OBSERVATORY_TEST_DB = 'heathdev_observatory_test_c_{run}';
+  const env = build.gateEnvFor(h.state, h.wp('WP-02'), config);
+  for (const suffix of ['_mig_init', '_mig_drift', '_mig_v6dep', '_fresh', '_dropprobe']) {
+    assert.ok(Buffer.byteLength(env.OBSERVATORY_TEST_DB + suffix) <= 63);
+  }
+  const atLimit = { gateEnv: { DB: 'x'.repeat(48) + '{run}' }, gateEnvSuffixMax: 10 };
+  assert.equal(build.gateEnvFor({ slug: '12345' }, { id: 'WP-01' }, atLimit).DB.length, 53);
+  assert.throws(() => build.gateEnvFor({ slug: '123456' }, { id: 'WP-01' }, atLimit), /10-byte suffix reserve/);
+  for (const bad of [-1, 63, 1.5, '10', null]) {
+    assert.throws(() => build.gateEnvFor(h.state, h.wp('WP-02'), { ...config, gateEnvSuffixMax: bad }), /gateEnvSuffixMax/);
+  }
+});
+
 test('gateEnv (H9): {run} is at most 24 characters, the same in every key; a long run keeps its head and a hash, a short one is unchanged', () => {
   const config = { gateEnv: {
     OBSERVATORY_TEST_DB: 'heathdev_observatory_test_conduct_{run}', LANE: '{wp}', PGDATABASE: 'app_test_{run}',
@@ -3075,6 +3130,29 @@ test('non-equivalent rebase (D13): differing patch-ids → a full review (round 
   assert.equal(await drive(same), null);
   assert.equal(of(same, 'WP-02').filter((a) => a.step === 'post').length, 1);
   assert.equal(same.wp('WP-02').rebases[0].equivalent, true);
+});
+
+test('failed gate retains both streams and quotes the failing test in its amendment', async (t) => {
+  const h = harness(t, { wps: [TWO[0], TWO[1]] });
+  const stdout = '✔ passing first test (1ms)\nℹ fail 1\nℹ cancelled 0\n✖ failing tests:\n\ntest at test.mjs:1:1\n✖ actual broken contract (2ms)\n  AssertionError: sentinel\n';
+  const stderr = 'an unrelated warning on stderr\n';
+  h.gateCmdCode = { 'WP-02': [1, 1] };
+  h.gateCmdOut = { 'WP-02': [{ stdout, stderr }, { stdout: stdout.replace('sentinel', 'second failure'), stderr }] };
+  await drive(h, { until: (a) => a.part === 'amendment' });
+  const first = h.wp('WP-02').gateCmd.outputLog;
+  assert.ok(first, 'failed gate output has a durable locator');
+  const log = readFileSync(first, 'utf8');
+  assert.ok(log.includes(stdout));
+  assert.ok(log.includes(stderr));
+  assert.match(h.trace.at(-1).instruction, /✖ actual broken contract/);
+  assert.ok(h.trace.at(-1).instruction.includes(first));
+  assert.doesNotMatch(h.wp('WP-02').reason, /passing first test|unrelated warning/);
+  await recordPending(h, await perform(h, h.state.pending));
+  await drive(h, { until: (a) => a.part === 'amendment' });
+  const second = h.wp('WP-02').gateCmd.outputLog;
+  assert.notEqual(first, second);
+  assert.equal(readFileSync(first, 'utf8'), log, 'a later attempt preserves the first failure');
+  assert.match(readFileSync(second, 'utf8'), /second failure/);
 });
 
 test('gate command: exit 1 at the rebased head → an amendment and no merge action before it', async (t) => {
@@ -3613,7 +3691,7 @@ test('gate cap (C1-2): the third gate-driven amendment blocks the WP with the la
   assert.equal(await drive(h), null);
   assert.equal(of(h, 'WP-02').filter((a) => a.part === 'amendment').length, 2);
   assert.equal(h.wp('WP-02').state, 'blocked');
-  assert.match(h.wp('WP-02').reason, /^the gate command exited 1 at the rebased head: gate output \(after 2 gate amendments\)$/);
+  assert.match(h.wp('WP-02').reason, /^the gate command exited 1 at the rebased head: failure not identified; read the retained output; output: .+\.log \(after 2 gate amendments\)$/);
 });
 
 // ---- deploy-truth probation H12 and H17 (quests 8710f724, 6f3a6194) ----
@@ -3761,7 +3839,7 @@ test('H17 (6f3a6194): a WP blocked at its gate holds the build on a recover touc
   assert.deepEqual([h.state.phase, h.wp('WP-02').state, h.wp('WP-03').state], ['build', 'blocked', 'deferred']);
   const touch = h.state.touches.at(-1);
   assert.deepEqual([touch.wpId, touch.build], ['WP-02', 'recover']);
-  assert.match(touch.question, /WP-02 is blocked at its gate: the gate command exited 1 at the rebased head: gate output \(after 2 gate amendments\)/);
+  assert.match(touch.question, /WP-02 is blocked at its gate: the gate command exited 1 at the rebased head: failure not identified; read the retained output; output: .+\.log \(after 2 gate amendments\)/);
   assert.match(touch.question, /WP-03 waits on it/);
   h.state.pending = null;
   answerCore(h, touch.n, 'a');

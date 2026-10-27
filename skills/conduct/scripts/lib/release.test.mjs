@@ -6,6 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { bumpPlan, selfHosted, resolvePluginRoot, releaseEligible } from './release.mjs';
 import { validateRecipe } from './recipe.mjs';
 
+test('Workit release refreshes its marketplace before updating the installed plugin', () => {
+  const config = JSON.parse(readFileSync(new URL('../../../../.workit/conduct.json', import.meta.url), 'utf8'));
+  assert.deepEqual(config.release.after, ['claude plugin marketplace update workit', 'claude plugin update workit@workit']);
+});
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = join(HERE, '..', '..', '..', '..');
 const FIXTURES = join(HERE, '..', '__fixtures__', 'land');
