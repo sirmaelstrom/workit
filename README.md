@@ -8,6 +8,8 @@ A personal [Claude Code](https://docs.claude.com/en/docs/claude-code) plugin —
 
 It's published openly so it can be referenced, forked, or installed directly. It's opinionated toward how I work; treat it as a worked example as much as a drop-in tool.
 
+> **Status:** my day-to-day profile no longer loads this plugin. A smaller kit in my private config replaced it: one front-door skill, playbooks, and verification against the running app. The repo stays maintained for two reasons: Observatory's review council reads `reference/templates/review-council/`, and the skills and patterns remain a reference.
+
 ## What's inside
 
 Two layers:
