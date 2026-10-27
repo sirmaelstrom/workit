@@ -3,13 +3,21 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gateFailureKind, quietProbe } from './gate-env.mjs';
+import { gateFailureKind, gateFailureSummary, quietProbe } from './gate-env.mjs';
 import { runConduct } from '../conduct.mjs';
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), '..', '__fixtures__', 'gate-env');
 const read = (name) => (existsSync(join(FIXTURES, name)) ? readFileSync(join(FIXTURES, name), 'utf8') : '');
 const output = (name) => [read(`${name}.out`), read(`${name}.err`)];
 const kind = (name) => gateFailureKind(...output(name));
+
+test('failure summary names a failed test across reporters and never quotes a passing first line', () => {
+  assert.equal(gateFailureSummary('✔ pass\n✖ failing tests:\n\ntest at a:1\n✖ broken test (2ms)', 'warning'), '✖ broken test (2ms)');
+  assert.equal(gateFailureSummary('PASS a\n', ' FAIL  a.test.ts > broken'), 'FAIL  a.test.ts > broken');
+  assert.equal(gateFailureSummary('ok 1 - pass\nnot ok 2 - broken', ''), 'not ok 2 - broken');
+  assert.equal(gateFailureSummary('pass', 'Error: compiler failed'), 'Error: compiler failed');
+  assert.equal(gateFailureSummary('✔ pass', 'warning'), 'failure not identified; read the retained output');
+});
 
 test('gate-env (6f3a6194): a run whose every failure is a timeout is all-timeout, under node:test and vitest', () => {
   assert.deepEqual(kind('vitest-timeouts'), { runner: 'vitest', failures: 2, timeouts: 2, other: 0, allTimeout: true });

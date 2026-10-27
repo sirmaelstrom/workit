@@ -54,6 +54,12 @@ test('resolveRepoConfig: an invalid workspace file is a ConductError(2) naming e
   assert.throws(() => resolveRepoConfig({ remote: 'o/r', repoPath: REPO, env: {}, ...disk({ [WS_FILE]: '[]' }) }), /must be a JSON object/);
 });
 
+test('workspace config pins a suffix reserve and refuses invalid byte counts at intake', () => {
+  const resolveConfig = (reserve) => resolveRepoConfig({ remote: 'o/r', repoPath: REPO, env: {}, ...disk({ [WS_FILE]: JSON.stringify({ gateEnvSuffixMax: reserve }) }) });
+  assert.equal(resolveConfig(10).config.gateEnvSuffixMax, 10);
+  for (const bad of [-1, 63, 1.5, '10', null]) assert.throws(() => resolveConfig(bad), /gateEnvSuffixMax must be an integer/);
+});
+
 test('fd50a09c (1): laneDeadlineMinutes is a whole number of minutes from 1 to 720', () => {
   const read = (value) => () => resolveRepoConfig({ remote: 'o/r', repoPath: REPO, env: {}, ...disk({ [WS_FILE]: JSON.stringify({ laneDeadlineMinutes: value }) }) });
   for (const good of [1, 240, 720]) assert.equal(read(good)().config.laneDeadlineMinutes, good);

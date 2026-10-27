@@ -6,7 +6,7 @@
     ],
     "level": "patch",
     "pr": true,
-    "after": ["claude plugin update workit@workit"],
+    "after": ["claude plugin marketplace update workit", "claude plugin update workit@workit"],
     "verify": ["node --test"]
   },
   "contractPaths": [

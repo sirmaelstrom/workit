@@ -29,6 +29,16 @@ const VITEST_UNHANDLED = /^⎯+ Unhandled (?:Errors?|Rejections?) ⎯+$|^\s*Erro
 
 const textLines = (text) => String(text ?? '').replace(ANSI, '').split(/\r?\n/);
 
+// Prefer the runner's failure listing over progress output or stderr warnings.
+// Unknown output gets no invented test name; the full log remains the evidence.
+export function gateFailureSummary(stdout, stderr) {
+  const all = [...textLines(stdout), ...textLines(stderr)];
+  const listing = all.findIndex((line) => line.trim() === NODE_LISTING);
+  const failed = (listing >= 0 ? all.slice(listing + 1) : all).find((line) => /^\s*(?:✖ (?!failing tests:)|FAIL\s|not ok\s)/.test(line));
+  const error = all.find((line) => /^\s*(?:[A-Za-z]*Error:|Error \[|error:|fatal:)/.test(line));
+  return (failed ?? error)?.trim().slice(0, 600) ?? 'failure not identified; read the retained output';
+}
+
 function nodeListing(all) {
   const start = all.findIndex((line) => line.trim() === NODE_LISTING);
   if (start < 0) return null;

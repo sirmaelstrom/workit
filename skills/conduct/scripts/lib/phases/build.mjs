@@ -30,7 +30,7 @@ import { LANE_SUITE_HEADING, LEGACY_LANE_FROM, laneSuiteFrom, pinnedConfig } fro
 import { isTopListItem, markLines, sectionLines, sectionText } from '../markdown.mjs';
 import { briefPaths } from '../../../../../scripts/lane.mjs';
 import { bootstrapBrief } from '../bootstrap.mjs';
-import { gateFailureKind } from '../gate-env.mjs';
+import { gateFailureKind, gateFailureSummary } from '../gate-env.mjs';
 import {
   PRIOR_ADJUDICATION_FILE, councilOn, councilRecord, deltaReviewActions, effectiveTier, isTestPath, mergeActions, mergeLockFor, parseAmendmentTable,
   laneRebaseActions, priorAdjudicationBody, rebaseActions, recordAdjudication, recordLandStep, resolveThreadActions, reviewActions, reviewCrosses,
@@ -217,6 +217,10 @@ const gateCommandFor = (state, wp, deps) => gateCommands(state, deps).get(state.
 // identifiers, so a repo can give the conductor's suite its own test database:
 // the gate runs under the merge lock, so one per run never runs twice at once.
 export function gateEnvFor(state, wp, config) {
+  const reserve = config.gateEnvSuffixMax === undefined ? 0 : config.gateEnvSuffixMax;
+  if (!Number.isInteger(reserve) || reserve < 0 || reserve >= IDENT_MAX_BYTES) {
+    throw new ConductError(2, 'gateEnvSuffixMax must be an integer from 0 to 62 (UTF-8 bytes)');
+  }
   const env = config.gateEnv;
   if (env === undefined) return {};
   if (!env || typeof env !== 'object' || Array.isArray(env) || Object.values(env).some((value) => typeof value !== 'string')) {
@@ -229,8 +233,8 @@ export function gateEnvFor(state, wp, config) {
     // An identifier-shaped value (no path or URL separator) past 63 bytes would
     // be cut by Postgres, hash tail first: refused, so the WP blocks at its gate.
     const templated = value !== expanded;
-    if (templated && !/[/\\]/.test(expanded) && Buffer.byteLength(expanded, 'utf8') > IDENT_MAX_BYTES) {
-      throw new ConductError(2, `gateEnv ${key} expands to ${Buffer.byteLength(expanded, 'utf8')} bytes, past Postgres's ${IDENT_MAX_BYTES}-byte identifier limit; shorten its fixed part to ${IDENT_MAX_BYTES - RUN_IDENT_MAX} ASCII characters or fewer`);
+    if (templated && !/[/\\]/.test(expanded) && Buffer.byteLength(expanded, 'utf8') > IDENT_MAX_BYTES - reserve) {
+      throw new ConductError(2, `gateEnv ${key} expands to ${Buffer.byteLength(expanded, 'utf8')} bytes, past Postgres's ${IDENT_MAX_BYTES}-byte identifier limit${reserve ? ` with a ${reserve}-byte suffix reserve` : ''}; shorten its fixed part to ${IDENT_MAX_BYTES - reserve - RUN_IDENT_MAX} ASCII characters or fewer`);
     }
     return [key, expanded];
   }));
@@ -1648,8 +1652,11 @@ export function laneProjection(state, deps) {
 
 function committed(state, deps, purpose, bookedUsd) {
   const projection = laneProjection(state, deps);
-  const live = state.wps.filter((wp) => LIVE_STATES.includes(wp.state) || laneOccupied(wp)).length;
-  const next = purpose === 'dispatch' ? 1 : 0;
+  // T3 lanes are plan-covered: their planning estimates are not cash spend.
+  // Keep recorded costs (including earlier metered lanes) in bookedUsd.
+  const chosen = chooseBackend(state, deps).backend;
+  const live = state.wps.filter((wp) => (wp.lane?.backend ?? chosen) !== 't3' && (LIVE_STATES.includes(wp.state) || laneOccupied(wp))).length;
+  const next = purpose === 'dispatch' && chosen !== 't3' ? 1 : 0;
   const money = (usd) => Math.round(usd * 100) / 100;
   const usd = money(bookedUsd + (live + next) * projection.usd);
   return { usd, detail: committedDetail(state, { booked: `$${money(bookedUsd)}`, live, liveUsd: live ? `$${money(live * projection.usd)}` : null,
@@ -1662,7 +1669,7 @@ function budgetGate(state, deps, purpose) {
   const budget = runAuthority(state).budgetUsd;
   const sum = state.wps.reduce((total, wp) => total + (Number(wp.lane?.costUsd) || 0), 0);
   const spend = committed(state, deps, purpose, sum);
-  if (spend.usd < budget) return null;
+  if (spend.usd < budget || (spend.usd === 0 && chooseBackend(state, deps).backend === 't3')) return null;
   const reason = budgetHaltText(state, { committed: `$${spend.usd}`, detail: spend.detail, budget: `$${budget}` });
   haltTouch(state, deps, reason, 'budget', spend.usd);
   return 'halted';
@@ -2169,9 +2176,13 @@ function recordOwn(state, wp, action, result, deps) {
       }
       if (mergeLockFor(state, wp) === 'mine') state.mergeLock = null;
       wp.queue = [];
+      const logPath = join(state.runDir, `gate-${wp.id}-${action.id.replace(/[^a-z0-9-]/gi, '_')}.log`);
+      deps.write(logPath, `exit: ${result.code}\nhead: ${action.gateHead ?? 'unknown'}\n--- stdout ---\n${result.stdout ?? ''}\n--- stderr ---\n${result.stderr ?? ''}`);
+      wp.gateCmd = { ...wp.gateCmd, outputLog: logPath };
+      appendEvent(state, deps, { step: 'gate-cmd', event: 'gate-cmd-failed', data: { wpId: wp.id, head: action.gateHead ?? null, code: result.code, outputLog: logPath } });
       const env = envRetry(state, wp, action, result, deps);
       if (env === true) return true;
-      const reason = `the gate command exited ${result.code} at the rebased head: ${lines(result.stderr || result.stdout)[0] ?? ''}`;
+      const reason = `the gate command exited ${result.code} at the rebased head: ${gateFailureSummary(result.stdout, result.stderr)}; output: ${logPath}`;
       return gateAmend(state, wp, deps, env ? `${reason} (${env})` : reason) ?? true;
     }
     case 'review/diff':

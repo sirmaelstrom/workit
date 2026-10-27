@@ -87,6 +87,9 @@ export const analysisBudgetLine = (state, lower) => `budget: unmetered; lower bo
 // space. The estimates cover what merged()'s `unbooked` counts; with none, the
 // clause is left out.
 export function receiptSpendLine(state, { booked, projected, wpsLeft, perWp, basis, budget, crosses }) {
+  if (state.intent?.backend?.name === 't3') {
+    return ` Spend: ${booked} booked, a lower bound (${basisPhrase(state)}); ~${projected} projected total (recorded costs plus planning estimates). T3 lane estimates do not consume the ${budget} cash budget; recorded costs still do.`;
+  }
   const adding = wpsLeft ? `, adding ${wpsLeft} WP estimate(s) at ${perWp} each (${basis}) for every unfinished WP and every finished WP (merged, refuted or dropped) whose lane logged no cost` : '';
   return ` Spend: ${booked} booked, a lower bound (${basisPhrase(state)}); ~${projected} projected${adding}, against ${budget}${crosses ? ': the projection crosses the budget' : ''}.`;
 }
@@ -127,6 +130,7 @@ export function touchOneEstimate(config) {
 // chooseBackend string (t3, herdr or exec); `estimate` is touchOneEstimate's;
 // no deps, no counts.
 export function touchOneBudgetLine({ budgetUsd, backend, agent, estimate = touchOneEstimate(null) }) {
+  if (backend === 't3') return `Budget: $${budgetUsd} for recorded cash costs; plan-covered T3 lane estimates do not trigger a budget stop`;
   const gate = `the gate adds each live lane at the ${estimate.source} estimate $${Math.round(estimate.usd * 100) / 100}`;
   if (backend === 'exec' && agent === 'claude') return `Budget: $${budgetUsd} unmetered: exec claude lanes' logged cost sums to a lower bound; ${gate}`;
   const label = backend === 't3' || backend === 'herdr' ? LABEL[backend] : agent ?? 'exec';
