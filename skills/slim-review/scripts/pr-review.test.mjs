@@ -1316,13 +1316,13 @@ function runLensWithFake({ lens = 'codex', result = JSON.stringify(VALID), codex
 
 class DieSentinel extends Error {}
 
-test('lens codex reads its -o findings file, builds the GPT-6 Sol argv, and sends every authoritative path on stdin', () => {
+test('lens codex reads its -o findings file, builds the GPT-6.1 Terra argv, and sends every authoritative path on stdin', () => {
   const fromFile = JSON.stringify({ ...VALID, summary: 'read from codex -o file' });
   const { calls, deaths, out } = runLensWithFake({ codexOutput: fromFile });
   assert.deepEqual(deaths, []);
   const call = calls.find(({ args }) => args[0] === 'exec');
   assert.ok(call);
-  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6-sol');
+  assert.equal(call.args[call.args.indexOf('--model') + 1], 'gpt-6.1-terra');
   assert.ok(call.args.includes('model_reasoning_effort=high'));
   assert.ok(call.args.includes('--sandbox'));
   assert.ok(call.args.includes('danger-full-access'));
@@ -1525,7 +1525,7 @@ test('lens stamps document/findings and appends one per-lens measurement row', (
   const { deaths, out, rows } = runLensWithFake({ result: JSON.stringify({ ...VALID, findings: [finding({ severity: 'P2' })] }) });
   assert.deepEqual(deaths, []);
   assert.equal(out.lens, 'codex');
-  assert.equal(out.model, 'gpt-6-sol');
+  assert.equal(out.model, 'gpt-6.1-terra');
   assert.equal(out.reasoning, 'high');
   assert.equal(out.wall_ms, 25);
   assert.equal(out.findings[0].lens, 'codex');
@@ -2222,14 +2222,14 @@ test('characterisation: standalone lens writes the stamped document and one meas
       ...VALID,
       findings: VALID.findings.map((f) => ({ ...f, lens: 'codex' })),
       lens: 'codex',
-      model: 'gpt-6-sol',
+      model: 'gpt-6.1-terra',
       reasoning: 'high',
       wall_ms: 25,
     });
     const rows = readFileSync(measureLog, 'utf8').trim().split(/\r?\n/).map(JSON.parse);
     assert.equal(rows.length, 1);
     assert.equal(rows[0].lens, 'codex');
-    assert.equal(rows[0].model, 'gpt-6-sol');
+    assert.equal(rows[0].model, 'gpt-6.1-terra');
     assert.equal(rows[0].coverage, VALID.coverage);
     assertNoOutcomeLine(logs);
   } finally {
@@ -4394,9 +4394,9 @@ test('claim refuses identity-unset, and a mismatched credential, before any mani
 test('2aadf72f: the author table never seats the author\'s own model, and matches SKILL.md', () => {
   assert.deepEqual(AUTHOR_PAIRS, {
     claude: ['codex', 'astra'],
-    sol: ['astra', 'opus'],
+    sol: ['codex', 'astra'],
     astra: ['codex', 'opus'],
-    terra: ['codex', 'astra'],
+    terra: ['astra', 'opus'],
   });
   for (const [author, pair] of Object.entries(AUTHOR_PAIRS)) {
     assert.equal(pair.length, 2, `${author}: a pair`);
@@ -4408,11 +4408,12 @@ test('2aadf72f: the author table never seats the author\'s own model, and matche
   // The skill's prose carries the same table: a change to one is a change to both.
   const skill = readFileSync(join(dirname(SCRIPT), '..', 'SKILL.md'), 'utf8').replace(/\s+/g, ' ');
   assert.match(skill, /authored by a Claude session takes `codex` \+ `astra`/);
-  assert.match(skill, /authored by a GPT-6 Sol lane \(the build default since 2026-09-23\) takes `astra` \+ `opus`/);
+  assert.match(skill, /authored by a GPT-6 Sol lane \(the build default since 2026-09-23\) takes `codex` \+ `astra`/);
+  assert.match(skill, /authored by a GPT-6\.1 Terra lane takes `astra` \+ `opus`/);
   assert.match(skill, /authored by an Astra lane takes `codex` \+ `opus`/);
 });
 
-test('2aadf72f: claim asks the coordinator for the author\'s pair — a Sol-authored PR is reviewed by astra + opus', async () => {
+test('2aadf72f: claim asks the coordinator for the author\'s pair — a Terra-authored PR is reviewed by astra + opus', async () => {
   for (const [author, pair] of Object.entries(AUTHOR_PAIRS)) {
     const fake = coordinatorFake({ requiredLenses: [...pair] });
     await withCoordinatedInstall({ fake }, async ({ home }) => {
@@ -4449,7 +4450,7 @@ test('2aadf72f: a single-lens claim never seats the author, and defaults to the 
   await withProfile({}, async (home) => {
     const out = collector();
     await cmdClaim(
-      { repo: PINNED_REPO, pr: String(PINNED_PR), author: 'sol', singleLens: 'astra only tonight', lens: 'codex' },
+      { repo: PINNED_REPO, pr: String(PINNED_PR), author: 'terra', singleLens: 'astra only tonight', lens: 'codex' },
       { ...out.deps, runGh: pinnedSeams().runGh, env: {}, homeDir: home, makeClient: () => { throw new Error('no client may be built'); } },
     );
     assert.equal(out.deaths[0]?.code, 2);
@@ -4459,10 +4460,10 @@ test('2aadf72f: a single-lens claim never seats the author, and defaults to the 
   await withCoordinatedInstall({ fake }, async ({ home }) => {
     const out = collector();
     await cmdClaim(
-      { repo: PINNED_REPO, pr: String(PINNED_PR), author: 'sol', singleLens: 'one seat tonight', attemptRefOut: join(home, 'attempts', 'single.json') },
+      { repo: PINNED_REPO, pr: String(PINNED_PR), author: 'terra', singleLens: 'one seat tonight', attemptRefOut: join(home, 'attempts', 'single.json') },
       { ...out.deps, runGh: pinnedSeams({ reviewPages: [[]] }).runGh, env: {}, homeDir: home },
     );
-    assert.deepEqual(fake.state.claims[0].required_lenses, ['astra'], 'not the old codex default: codex is the Sol author');
+    assert.deepEqual(fake.state.claims[0].required_lenses, ['astra'], 'not the old codex default: codex is the Terra author');
   });
 });
 

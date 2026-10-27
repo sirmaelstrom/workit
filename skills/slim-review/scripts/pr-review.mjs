@@ -238,14 +238,14 @@ const SEVERITIES = new Set(['P1', 'P2', 'P3']);
 // and Astra@low each found a real defect the other missed, neither produced a
 // false finding, and Astra was better calibrated on severity at half the input
 // — so the loop runs both and posts the union. The `codex` lens moved from
-// GPT-5.6 Terra to GPT-6 Sol on 2026-09-23 (operator ruling, quest 458d87c9):
-// replayed on the same #620 prompt, Sol@high found all three known defects
-// with no false finding, the only arm of the three to do so. The lens NAME
+// GPT-5.6 Terra to GPT-6 Sol on 2026-09-23 (quest 458d87c9), then to GPT-6.1
+// Terra on 2026-10-27 (quest 2a9ae5ac). Each move followed a paired arm on the
+// same prompts; the commit carries the numbers. The lens NAME
 // stays `codex` — it is the seat, and posted reviews and the measurement log
 // key on it. Astra reviews a full round at high and an amendment check
 // (`--since`) at low: `deltaReasoning`, where set, is the delta-round effort.
 const LENS_MODELS = {
-  codex: { model: 'gpt-6-sol', reasoning: 'high' },
+  codex: { model: 'gpt-6.1-terra', reasoning: 'high' },
   astra: { model: 'gpt-6-astra', reasoning: 'high', deltaReasoning: 'low' },
   opus: { model: 'opus', reasoning: 'low' },
 };
@@ -261,20 +261,20 @@ const isCodexLens = (lens) => lens === 'codex' || lens === 'astra';
 
 /**
  * Reviewer ≠ author (SKILL.md "Reviewer ≠ author", quest 2aadf72f): the PR's
- * authoring model → the two lenses that review it. `codex` is GPT-6 Sol, so a
- * Sol-authored PR takes astra + opus; a Claude-authored PR takes codex + astra;
- * an Astra-authored PR takes codex + opus; a Terra-authored PR keeps codex +
- * astra, since the codex seat is no longer Terra. The order is the lens order
- * a caller runs them in. A claim takes its pair from here and nowhere else.
+ * authoring model → the two lenses that review it. `codex` is GPT-6.1 Terra,
+ * so a Terra-authored PR takes astra + opus; a Claude-authored PR takes codex +
+ * astra; an Astra-authored PR takes codex + opus; a Sol-authored PR takes
+ * codex + astra, since the codex seat is no longer Sol. The order is the lens
+ * order a caller runs them in. A claim takes its pair from here and nowhere else.
  */
 export const AUTHOR_PAIRS = Object.freeze({
   claude: Object.freeze(['codex', 'astra']),
-  sol: Object.freeze(['astra', 'opus']),
+  sol: Object.freeze(['codex', 'astra']),
   astra: Object.freeze(['codex', 'opus']),
-  terra: Object.freeze(['codex', 'astra']),
+  terra: Object.freeze(['astra', 'opus']),
 });
-/** The lens that IS the author's model, or null when no lens is (Terra). */
-export const AUTHOR_LENS = Object.freeze({ claude: 'opus', sol: 'codex', astra: 'astra', terra: null });
+/** The lens that IS the author's model, or null when no lens is (Sol). */
+export const AUTHOR_LENS = Object.freeze({ claude: 'opus', sol: null, astra: 'astra', terra: 'codex' });
 export const AUTHOR_LIST = Object.keys(AUTHOR_PAIRS).join('|');
 
 /** The review pair for an author, or null for an author the table does not name. */
@@ -764,7 +764,7 @@ function cmdPostStandalone(opts, { runGh = ghOrDie, die = fail, log = console.lo
   const lensesPresent = [...new Set(docs.map((item) => item.lens).filter(Boolean))];
   if (lensesPresent.length < 2 && !opts.singleLens) {
     const carried = lensesPresent.length === 1 ? `only the \`${lensesPresent[0]}\` lens` : 'no lens tag';
-    die(7, `the slim-review loop posts two lenses (the author's pair: codex + astra for a Claude-authored PR, astra + opus for a Sol-authored one); this post carries ${carried}. Run the second lens and pass both --findings files, or pass --single-lens "<why the pair could not run>" to post one and stamp the reason into the review body. Nothing was posted.`);
+    die(7, `the slim-review loop posts two lenses (the author's pair: codex + astra for a Claude- or Sol-authored PR, astra + opus for a Terra-authored one); this post carries ${carried}. Run the second lens and pass both --findings files, or pass --single-lens "<why the pair could not run>" to post one and stamp the reason into the review body. Nothing was posted.`);
     return;
   }
   // One review is one scope. A full handback and an amendment check (or two
@@ -3822,7 +3822,7 @@ Common:
   --cwd    directory to run gh from (default: process cwd)
 
 Lens safety:
-  --lens         codex (GPT-6 Sol), astra (GPT-6 Astra), or opus; run one lens per
+  --lens         codex (GPT-6.1 Terra), astra (GPT-6 Astra), or opus; run one lens per
                  invocation, never the PR authoring model — the loop runs the
                  author's pair (claim --author) and posts both handbacks
   --reasoning    defaults to high for codex, high for astra (low with --since),
