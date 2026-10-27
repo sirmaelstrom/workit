@@ -2878,6 +2878,8 @@ test('gateEnv reserves consumer suffix bytes before emitting a gate command', as
   for (const suffix of ['_mig_init', '_mig_drift', '_mig_v6dep', '_fresh', '_dropprobe']) {
     assert.ok(Buffer.byteLength(env.OBSERVATORY_TEST_DB + suffix) <= 63);
   }
+  const token = 'x'.repeat(64);
+  assert.equal(build.gateEnvFor(h.state, h.wp('WP-02'), { ...config, gateEnv: { ...config.gateEnv, API_KEY: token } }).API_KEY, token, 'a literal environment value is not a generated database identifier');
   const atLimit = { gateEnv: { DB: 'x'.repeat(48) + '{run}' }, gateEnvSuffixMax: 10 };
   assert.equal(build.gateEnvFor({ slug: '12345' }, { id: 'WP-01' }, atLimit).DB.length, 53);
   assert.throws(() => build.gateEnvFor({ slug: '123456' }, { id: 'WP-01' }, atLimit), /10-byte suffix reserve/);

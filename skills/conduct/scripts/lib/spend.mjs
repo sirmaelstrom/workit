@@ -88,7 +88,7 @@ export const analysisBudgetLine = (state, lower) => `budget: unmetered; lower bo
 // clause is left out.
 export function receiptSpendLine(state, { booked, projected, wpsLeft, perWp, basis, budget, crosses }) {
   if (state.intent?.backend?.name === 't3') {
-    return ` Spend: ${booked} booked, a lower bound (${basisPhrase(state)}); ~${projected} planning estimate, not a cash charge. T3 lane estimates do not consume the ${budget} cash budget; recorded costs still do.`;
+    return ` Spend: ${booked} booked, a lower bound (${basisPhrase(state)}); ~${projected} projected total (recorded costs plus planning estimates). T3 lane estimates do not consume the ${budget} cash budget; recorded costs still do.`;
   }
   const adding = wpsLeft ? `, adding ${wpsLeft} WP estimate(s) at ${perWp} each (${basis}) for every unfinished WP and every finished WP (merged, refuted or dropped) whose lane logged no cost` : '';
   return ` Spend: ${booked} booked, a lower bound (${basisPhrase(state)}); ~${projected} projected${adding}, against ${budget}${crosses ? ': the projection crosses the budget' : ''}.`;

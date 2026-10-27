@@ -233,7 +233,7 @@ export function gateEnvFor(state, wp, config) {
     // An identifier-shaped value (no path or URL separator) past 63 bytes would
     // be cut by Postgres, hash tail first: refused, so the WP blocks at its gate.
     const templated = value !== expanded;
-    if ((templated || reserve > 0) && !/[/\\]/.test(expanded) && Buffer.byteLength(expanded, 'utf8') > IDENT_MAX_BYTES - reserve) {
+    if (templated && !/[/\\]/.test(expanded) && Buffer.byteLength(expanded, 'utf8') > IDENT_MAX_BYTES - reserve) {
       throw new ConductError(2, `gateEnv ${key} expands to ${Buffer.byteLength(expanded, 'utf8')} bytes, past Postgres's ${IDENT_MAX_BYTES}-byte identifier limit${reserve ? ` with a ${reserve}-byte suffix reserve` : ''}; shorten its fixed part to ${IDENT_MAX_BYTES - reserve - RUN_IDENT_MAX} ASCII characters or fewer`);
     }
     return [key, expanded];
