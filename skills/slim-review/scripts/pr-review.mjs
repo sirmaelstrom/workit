@@ -3777,8 +3777,8 @@ On a managed repository (see below), the coordinated flow replaces steps 2 and 3
            [--attempt-ref-out <path>]
            allocates one attempt for the current head and writes the attempt-ref
            file (owner-only) whose path it prints. --author is the PR's authoring
-           model and picks the pair: claude → codex+astra, sol → astra+opus,
-           astra → codex+opus, terra → codex+astra. Exit 2 without it, or when
+           model and picks the pair (AUTHOR_PAIRS):
+           ${Object.entries(AUTHOR_PAIRS).map(([author, pair]) => `${author} → ${pair.join('+')}`).join(', ')}. Exit 2 without it, or when
            --single-lens names the author's own lens
   lens     --attempt-ref <file> --lens codex|astra|opus [--out <findings.json>]
            [--prompt-out <path>] [--dry-run] [--context-file <file>] [--since <sha>]

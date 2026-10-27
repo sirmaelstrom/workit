@@ -1773,6 +1773,15 @@ test('bare --help prints usage without requiring a PR', () => {
   assert.equal(r.stderr, '');
 });
 
+test('2aadf72f: --help names every author\'s pair exactly as AUTHOR_PAIRS resolves it', () => {
+  const r = runCli(['--help']);
+  assert.equal(r.code, 0);
+  for (const [author, pair] of Object.entries(AUTHOR_PAIRS)) {
+    assert.ok(r.stdout.includes(`${author} → ${pair.join('+')}`), `${author}: help shows ${pair.join('+')}`);
+  }
+  assert.ok(r.stdout.includes('terra → astra+opus'), 'the Terra author is reviewed by astra + opus');
+});
+
 test('a missing findings file exits 3 — "did not run", never a clean review', () => {
   const dir = mkdtempSync(join(tmpdir(), 'slim-review-'));
   try {
