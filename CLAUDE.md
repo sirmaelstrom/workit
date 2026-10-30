@@ -6,6 +6,8 @@
 
 **workit** is a spec-and-skill toolkit for Claude Code: a plugin bundling the `skills/` tree (spec/plan → execute → review/repair → skill meta-tooling) plus a `reference/` library of patterns, heuristics, templates, and examples. It's the live successor to the retired `heathdev-workshop-plugin` (methodology/skills) and `heathdev-patterns` (pattern library) — both were deleted from disk and GitHub-archived **2026-07-01**; their content was bundled here (see `reference/README.md` § Origin).
 
+A **lane** is one agent session building one work package in its own git worktree; `conduct` runs 1–4 at once per repo (`scripts/lane.mjs`), and a host's `fleet (max N lanes)` caps them. It is not a Spine horizon lane, and not the tools and access a session has.
+
 ## Load-bearing consumer (don't break this)
 
 workit is **not** a purely personal toolkit anymore — it's a multi-consumer dependency:
