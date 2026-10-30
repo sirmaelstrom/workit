@@ -4,6 +4,8 @@ description: "Retro on one to three sessions: read the real transcript and propo
 disable-model-invocation: true
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Retro — change the environment, not the code
 
 The operator has asked for a retrospective. Read what the agent actually did in a session and propose changes to its **environment** so the next run does not repeat it. Ported from Matt Pocock's `retro` skill (mattpocock/skills v1.3.1, MIT — license note at the bottom). House deltas: transcript locations, the remedy ladder and the carriers remedies land on, the relation to `failure-audit`, the measurement rule, and the reflect pass (§ The reflect pass), which absorbed the former `/reflect` command.

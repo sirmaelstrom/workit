@@ -3,6 +3,8 @@ name: improve-architecture
 description: "Use when the user says 'review architecture', 'find code smells', 'what should I refactor', 'improve structure', or wants to make a codebase more agent-friendly and testable."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Improve Architecture — Codebase Friction Analysis
 
 Explore a codebase organically, surface architectural friction, and propose module-deepening refactors. A **deep module** (Ousterhout) has a small interface hiding significant complexity. Deep modules are more testable, more agent-navigable, and more maintainable.

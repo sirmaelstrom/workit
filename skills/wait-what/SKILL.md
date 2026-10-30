@@ -3,6 +3,8 @@ name: wait-what
 description: "Restate the last explanation in short declarative sentences grounded in the project's own vocabulary. Trigger: 'wait, what?', 'I don't follow', 'what do you mean', 'explain that again', 'come again', or any signal the operator lost the thread."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Wait, What? — Restate in House Language
 
 When the operator signals confusion, restate what you just said under two rules:

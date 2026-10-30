@@ -3,6 +3,8 @@ name: commit-msg
 description: "Use when composing a git commit message with shell-active characters — backticks, markdown links, embedded quotes, multi-line code blocks — anything a HEREDOC could re-parse. Invoked by '/commit-msg', or whenever the drafted message contains any of these. Writes the message to a file and commits via 'git commit -F' so the shell never sees the body."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # commit-msg — File-based git commit
 
 The HEREDOC pattern `git commit -m "$(cat <<'EOF' ... EOF)"` works for plain text but breaks on shell-active content in the body: backticks trigger command substitution under the outer `$(...)`, embedded quotes can break the wrapping, and escape sequences get re-interpreted. File-based commits via `git commit -F <file>` bypass shell parsing of the message entirely.

@@ -3,6 +3,8 @@ name: diagnose
 description: "Diagnose a failing behavior by forcing environmental, process, config, and code-path hypotheses into an explicit verification flow before making changes. Use when something is broken, crashing, not working as expected, behaving strangely, or when the user says 'diagnose', 'debug this', 'why is this broken', 'figure out what's wrong'. Also trigger proactively when investigation starts drifting toward code edits without evidence."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Diagnose — Forced Anti-Thrash Investigation
 
 Stop this pattern: symptom appears → agent assumes code bug → edits accumulate → root cause turns out to be stale process, wrong config, old binary, cache, missing secret, or bad assumption.

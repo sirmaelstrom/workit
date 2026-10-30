@@ -3,6 +3,8 @@ name: codex-delegate
 description: "Use when offloading a bounded audit, broad search, extraction, or mechanical edit to a plan-covered CLI agent. Trigger on 'delegate' or 'offload'. Not for PR review (use slim-review), work needing this session's decisions, or a repo you are mid-editing."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Model-Aware Delegate — Route Leaf Work Off the Expensive Channel
 
 The conductor is the context-rich channel. Token-hungry grunt work burns it on work a cheaper model can do just as well. Delegate the leaf work; keep orchestration, architecture, and integration judgment in the conductor.

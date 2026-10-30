@@ -4,7 +4,9 @@
 
 ## What This Is
 
-**workit** is a spec-and-skill toolkit for Claude Code: a plugin bundling the `skills/` tree (spec/plan → execute → review/repair → skill meta-tooling) plus a `reference/` library of patterns, heuristics, templates, and examples. It's the live successor to the retired `heathdev-workshop-plugin` (methodology/skills) and `heathdev-patterns` (pattern library) — both were deleted from disk and GitHub-archived **2026-07-01**; their content was bundled here (see `reference/README.md` § Origin).
+**workit** is a spec-and-skill toolkit for Claude Code: a plugin bundling the `skills/` tree (spec/plan → execute → review/repair → skill meta-tooling) plus a `reference/` library of patterns, heuristics, templates, and examples. It's the successor to the retired `heathdev-workshop-plugin` (methodology/skills) and `heathdev-patterns` (pattern library) — both were deleted from disk and GitHub-archived **2026-07-01**; their content was bundled here (see `reference/README.md` § Origin).
+
+**Reference only.** Justin's daily setup doesn't load this plugin: a smaller kit in his private config does the work (`/work` and its playbooks). No skill here runs in his sessions, so don't design around one as a live workflow. The repo stays maintained because of the consumer below, and every `SKILL.md` opens with a banner saying so (`skills/_shared/not-loaded-banner.test.mjs` fails without it).
 
 A **lane** is one agent session building one work package in its own git worktree; `conduct` runs 1–4 at once per repo (`scripts/lane.mjs`), and a host's `fleet (max N lanes)` caps them. It is not a Spine horizon lane, and not the tools and access a session has.
 

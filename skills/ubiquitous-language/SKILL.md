@@ -3,6 +3,8 @@ name: ubiquitous-language
 description: "Extract domain terminology into a glossary. Trigger: 'domain language', 'glossary', 'terminology', or when ambiguous terms cause confusion in a project."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Ubiquitous Language — Domain Glossary Extraction
 
 Extract domain-relevant terminology from the current conversation and/or codebase into a consistent, opinionated glossary. From Domain-Driven Design: shared language eliminates a class of bugs that no amount of testing catches.

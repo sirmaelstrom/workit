@@ -3,6 +3,8 @@ name: prototype
 description: "Build a throwaway prototype to answer a specific design or logic question before committing. Trigger: 'prototype this', 'spike this', 'try a quick implementation', 'build a quick prototype', or when grilling/spec hits a question that can only be answered by running code. Branches into LOGIC or UI."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Prototype — Throwaway Code That Answers a Question
 
 A prototype is **throwaway code that answers a specific question.** The question decides the shape.

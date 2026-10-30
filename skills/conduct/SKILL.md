@@ -3,6 +3,8 @@ name: conduct
 description: "Take a goal end to end: spec, parallel lanes, review, merge, analysis, two touches; or run one spec work package by hand ('execute WP-01'). Trigger: /conduct. Not for one quest (pickup) or a queue (burn-down)."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Conduct — take a stated goal end to end
 
 `/conduct "<goal>" --repo <abs path to a git checkout>` runs a goal from intent to a merged, analyzed result: it specs the goal, splits it into work packages (WPs), builds each in its own lane, reviews and merges each PR, runs the release recipe if the repo declares one, and writes a run analysis. The operator is asked twice: **touch 1** before `/spec` runs (what authority the run has) and **touch 2** at the showcase (accept, accept with notes, or send back). A third touch, the blocked stop, opens only when a fork can't be settled from evidence.
