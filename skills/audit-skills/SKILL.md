@@ -3,6 +3,8 @@ name: audit-skills
 description: "Score skills against the evaluation rubric and write results to skills.db. Use when the user says 'audit skills', 'score my skills', 'skill health check', 'rate skills', 'how are my skills', or wants to assess skill quality across plugins. Also trigger when a significant skill change just shipped and needs reassessment. NOT for running skills against test cases to improve them (that's eval-loop) or grading spec quality (that's spec)."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Audit Skills — Structural Assessment Against Rubric
 
 Score every skill in a plugin's `skills.db` against the 7-dimension evaluation rubric. Produces a ranked inventory with improvement priorities. This is Layer 1 — reading and judging skill definitions, not running them.

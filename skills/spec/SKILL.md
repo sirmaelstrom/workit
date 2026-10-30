@@ -3,6 +3,8 @@ name: spec
 description: "Generate or validate a specification. Trigger: '/spec', 'spec this', 'write a spec for', 'auto-spec', 'validate spec'. READ THE FULL SKILL before executing — depth selection, pipeline stages, and review gates are defined below."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Spec — Autonomous Specification Pipeline
 
 Generate a complete, execution-ready specification from a short intent description. The spec is **a tool you reach for, not a gate you pass through.** Three depths are available — choose based on the problem, not habit.

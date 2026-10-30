@@ -4,6 +4,8 @@ description: "Audit newly archived agent-session transcripts for delta failure m
 disable-model-invocation: true
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Failure audit — delta-run cadence over archived transcripts
 
 Measure **enacted** failure modes in real agent sessions: what the fleet actually

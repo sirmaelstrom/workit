@@ -3,6 +3,8 @@ name: unslop
 description: "Cut AI tells from prose — puffery, filler, hedging, chatbot phrases, weak verbs, metaphor jargon — and put a human voice back in. Trigger: 'unslop', 'deslop', 'make this read human', or before publishing docs, README prose, PR bodies, briefs. Not for code or quoted material; domain terms defined in UBIQUITOUS_LANGUAGE.md are exempt from the jargon cut."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Unslop — Cut AI Tells From Prose
 
 Edit text to remove AI patterns and add human voice. Ported from Lauren "potato" Tan's `unslop` skill (cursor/plugins → pstack, MIT — license note at the bottom). House deltas from upstream: rule 13 softened (em dashes are house style), rules 17–18 annotated to house conventions, rule 26 gated on the project glossary.

@@ -3,6 +3,8 @@ name: slim-review
 description: "Run the slim PR-review loop — two external reviewers (GPT-6.1 Terra and Astra, plan-covered) at a PR boundary, findings posted as line-anchored GitHub review comments, then confirm or refute each and reply. Trigger on '/slim-review', 'slim review', 'review this PR before merge', or at any PR boundary in a burn-down. The LIGHT tier: two lenses, no synthesis. NOT for in-session multi-reviewer passes ('/review') or complex PRs (review-council)."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Slim PR Review — two external lenses, on the PR, adjudicated
 
 A PR-boundary review that is cheap enough to run **every time**. Two external

@@ -3,6 +3,8 @@ name: session-chain
 description: "Use when a long-running Claude session needs a durable successor in herdr. Trigger on '/session-chain', 'rotate this session', 'chain to a fresh session', or 'spawn a Claude session in herdr'. NOT for in-turn delegation (Agent tool) or codex lanes (codex-delegate / lane.mjs)."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Session Chain
 
 Long burn-downs should not pay a hand-built rotation tax. This skill points at one carrier that records the lifecycle as a sidecar receipt: spawn a successor, brief it from a file, observe it, then retire the caller only after the successor is ready.

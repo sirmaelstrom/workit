@@ -3,6 +3,8 @@ name: pickup
 description: "Resume the current project's top roadmap quest from the Spine — read its resume note + cartridge artifacts, claim the quest on the board, and continue the work. Trigger on '/pickup', 'pick up where I left off', 'continue the quest', 'resume the roadmap work'. Optional arg: a quest short-id or project name to pick up something other than the default."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Pickup — one-command quest re-entry
 
 Close the handoff-loading gap: instead of the operator hand-typing "read X and

@@ -3,6 +3,8 @@ name: grill-me
 description: "Stress-test a plan or idea. Trigger: 'grill me', 'poke holes', 'what am I missing', or wanting to pressure-test before committing to a spec."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Grill Me — Stress-Test an Idea
 
 Interview me relentlessly about every aspect of this plan until we reach a shared understanding.

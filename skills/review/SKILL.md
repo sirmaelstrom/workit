@@ -5,6 +5,8 @@ model: opus
 disable-model-invocation: true
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Adaptive Multi-Target Review
 
 Review a target with complexity-driven depth and dynamic reviewer composition. Targets supported: GitHub PR, local branch (pre-PR), working tree (uncommitted), file or directory, plan/spec document.

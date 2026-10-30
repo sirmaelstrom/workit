@@ -3,6 +3,8 @@ name: parallel-explore
 description: "Fan out a design or problem space into multiple intentionally different agent runs, then synthesize into a ranked decision. Use when the user says 'explore alternatives', 'parallel explore', 'design it twice', 'what are my options', wants to compare approaches, or needs to make an architectural decision between competing designs. Do not use for reviewing an existing implementation, or when the open question can only be settled by running code."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Parallel Explore — Forced-Divergence Design Exploration
 
 Fan out N intentionally different solutions to a problem, then synthesize into a ranked decision artifact. The key insight: without explicit constraint variation, all branches collapse into the same answer.

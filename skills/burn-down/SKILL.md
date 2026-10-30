@@ -3,6 +3,8 @@ name: burn-down
 description: "Run an ordered queue of roadmap quests to landed in one or more sittings, holding the disciplines that keep the board honest — pickup flip, receipt per stop, ripple closeout, side-thread harvest, owed-step receipts. Trigger on '/burn-down', 'burn down the queue', 'work the queue', 'run the burn-down', 'clear the frontier', 'work these quests to landed'. For resuming a SINGLE quest use pickup instead; this is the multi-item runner that calls it."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Burn-down — work an ordered queue to landed
 
 A **scheduler over primitives that already exist.** It decides *which item is

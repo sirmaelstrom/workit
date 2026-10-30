@@ -3,6 +3,8 @@ name: eval-loop
 description: "Run an autonomous Karpathy-style eval loop to improve a skill's quality through measured iteration. Use when the user says 'eval loop', 'karpathy loop', 'improve this skill', 'optimize skill', 'run evals', 'self-improve', or wants to iteratively improve a skill's output quality using automated scoring. Requires the skill to be marked karpathy_eligible in skills.db."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Eval Loop — Autonomous Skill Improvement via Measured Iteration
 
 Run a time-budgeted loop that mutates a skill definition, evaluates outputs against binary assertions, and keeps only improvements. This is Layer 2 — running the skill and measuring results, not reading its definition.

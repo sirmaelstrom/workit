@@ -4,6 +4,8 @@ description: "Map a long-running effort as a decision tree on disk — a destina
 disable-model-invocation: true
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Chart — decision mapping across sessions
 
 `/chart` keeps one effort's open questions on disk so a later session can pick up

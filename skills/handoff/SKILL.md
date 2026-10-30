@@ -3,6 +3,8 @@ name: handoff
 description: "Compact the current conversation into a handoff document so a fresh agent can pick up the work without losing intent. Trigger: 'hand off', 'handoff to a fresh agent', 'pass this to a new window', 'compact context', or when the context window is heavy mid-task and you need to continue in a fresh session. Also use the DIY sub-agent pattern: handoff out, work in another window, hand back."
 ---
 
+> **Reference only.** The owner's daily setup no longer loads this plugin, so this skill doesn't run in their sessions. Read it as reference; don't design around it as a live workflow.
+
 # Handoff — Compact Conversation for a Fresh Agent
 
 Write a handoff document summarizing the current conversation so a fresh agent can continue the work in a new context window. The document is **not a permanent artifact** — it's a transfer cartridge between two agents.
